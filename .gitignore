@@ -1,0 +1,38 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+bin/
+vendor/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local agent / speckit state (per-developer, not tracked)
+.claude/
+.specify/
+specs/
+design/
+
+# Build artifacts
+__debug_bin*
+/hugen
+
+# Runtime data (local DuckDB + WAL)
+.data/
+data/
