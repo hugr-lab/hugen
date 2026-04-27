@@ -29,7 +29,7 @@ Both can point at the same local server (e.g. LM Studio with an LLM and an embed
 
 ## Repository layout (planned)
 
-```
+```text
 .specify/        spec-kit config, templates, designs, specs
 .claude/skills/  spec-kit skills (specify, plan, tasks, design, …)
 cmd/             entry points

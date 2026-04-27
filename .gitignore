@@ -23,9 +23,11 @@ vendor/
 .DS_Store
 Thumbs.db
 
-# Local agent / speckit state (per-developer, not tracked)
-.claude/
-.specify/
+# Claude Code per-user state (skills themselves are tracked)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Spec-kit per-feature outputs (designs/specs are per-developer until promoted)
 specs/
 design/
 
