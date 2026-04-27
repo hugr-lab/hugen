@@ -1,12 +1,22 @@
-.PHONY: build test vet lint check tidy clean
+.PHONY: build run run-console run-webui test vet lint check tidy clean
 
-TAGS := duckdb_arrow
+BINARY := bin/hugen
+TAGS   := duckdb_arrow
 
 # Debug-friendly CGO flags (DuckDB symbols visible in delve / stack traces).
 CGO_DEBUG_FLAGS := -O1 -g
 
 build:
-	go build -tags=$(TAGS) ./...
+	go build -tags=$(TAGS) -o $(BINARY) ./cmd/hugen
+
+run:
+	go run -tags=$(TAGS) ./cmd/hugen
+
+run-console:
+	go run -tags=$(TAGS) ./cmd/hugen console
+
+run-webui:
+	go run -tags=$(TAGS) ./cmd/hugen webui
 
 test:
 	CGO_CFLAGS="$(CGO_DEBUG_FLAGS)" go test -tags=$(TAGS) -race -count=1 ./...

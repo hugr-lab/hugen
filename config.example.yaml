@@ -1,0 +1,45 @@
+# hugen configuration example.
+# Copy to config.yaml and adjust to your environment.
+# Secrets live in .env (referenced via ${VAR} below).
+
+# ── Agent identity ──────────────────────────────────────────
+agent:
+  id: agt_ag01           # full agent ID (used in logs, events, IDs)
+  short_id: ag01         # 4-char alias embedded in synthetic entity IDs
+  name: hugen
+  type: hugen-default
+
+# ── Listener bindings ───────────────────────────────────────
+# Port + base URL for the A2A endpoint (agent card + /invoke + OIDC
+# callback). Must be reachable from A2A clients.
+a2a:
+  port: 10000
+  base_url: http://localhost:10000
+
+# Loopback-only developer UI (webui mode).
+devui:
+  port: 10001
+  base_url: http://localhost:10001
+
+# ── LLM ─────────────────────────────────────────────────────
+# Hugr data source name + per-call defaults. The Hugr instance pointed
+# at by HUGR_URL is responsible for routing this name to a real provider.
+llm:
+  model: gemma4-26b
+  max_tokens: 8192
+  temperature: 0.4
+
+# ── Auth providers ──────────────────────────────────────────
+# The hugr connection uses the .env-driven primary source by default.
+# Add more named entries here only when you wire additional providers
+# (e.g. external MCP servers). Primary hugr auth is configured via .env.
+#
+# auth:
+#   - name: hugr
+#     type: hugr
+#     access_token: ${HUGR_ACCESS_TOKEN}
+#     token_url: ${HUGR_TOKEN_URL}
+#   - name: keycloak
+#     type: oidc
+#     issuer: ${HUGR_OIDC_ISSUER}
+#     client_id: ${HUGR_OIDC_CLIENT_ID}
