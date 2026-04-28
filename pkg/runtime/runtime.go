@@ -30,7 +30,7 @@ type Adapter interface {
 // AdapterHost is the runtime side of the Adapter contract. Adapters
 // open/resume sessions and submit/subscribe to Frames through this.
 type AdapterHost interface {
-	OpenSession(ctx context.Context, req OpenRequest) (*Session, error)
+	OpenSession(ctx context.Context, req OpenRequest) (*Session, time.Time, error)
 	ResumeSession(ctx context.Context, id string) (*Session, error)
 	Submit(ctx context.Context, frame protocol.Frame) error
 	Subscribe(ctx context.Context, sessionID string) (<-chan protocol.Frame, error)
@@ -132,13 +132,13 @@ type adapterHost struct {
 	ctx context.Context
 }
 
-func (h *adapterHost) OpenSession(ctx context.Context, req OpenRequest) (*Session, error) {
-	s, err := h.rt.manager.Open(ctx, req)
+func (h *adapterHost) OpenSession(ctx context.Context, req OpenRequest) (*Session, time.Time, error) {
+	s, openedAt, err := h.rt.manager.Open(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	h.rt.startSessionPump(s)
-	return s, nil
+	return s, openedAt, nil
 }
 
 func (h *adapterHost) ResumeSession(ctx context.Context, id string) (*Session, error) {
@@ -184,7 +184,12 @@ func (h *adapterHost) Subscribe(ctx context.Context, sessionID string) (<-chan p
 		<-ctx.Done()
 		h.rt.subMu.Lock()
 		defer h.rt.subMu.Unlock()
-		// Drop our channel from the subscriber list.
+		// Drop our channel from the subscriber list. The runtime
+		// keeps ownership of the channel close (Runtime.Shutdown
+		// closes everything in the map at process exit); the
+		// adapter must NOT range over c expecting it to close on
+		// its own ctx — it should select on its own ctx.Done()
+		// alongside the channel.
 		subs := h.rt.subscribers[sessionID]
 		out := subs[:0]
 		for _, sub := range subs {

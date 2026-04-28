@@ -64,24 +64,25 @@ func newFakeHost() *fakeHost {
 // Logger satisfies runtime.AdapterHost.
 func (f *fakeHost) Logger() *slog.Logger { return f.logger }
 
-func (f *fakeHost) OpenSession(_ context.Context, req runtime.OpenRequest) (*runtime.Session, error) {
+func (f *fakeHost) OpenSession(_ context.Context, req runtime.OpenRequest) (*runtime.Session, time.Time, error) {
 	if f.openErr != nil {
-		return nil, f.openErr
+		return nil, time.Time{}, f.openErr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	id := "ses-test-" + nextSessionSuffix()
+	now := time.Now().UTC()
 	f.sessions[id] = &runtime.SessionRow{
 		ID:        id,
 		Status:    runtime.StatusActive,
 		Metadata:  req.Metadata,
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	// fakeHost returns a non-nil *runtime.Session so handlers can
 	// call Session.ID(). The session goroutine isn't running; only
 	// the public id surface is read by handlers.
-	return runtime.NewSession(id, f.agent, nil, nil, nil, nil, f.logger), nil
+	return runtime.NewSession(id, f.agent, nil, nil, nil, nil, f.logger), now, nil
 }
 
 func (f *fakeHost) ResumeSession(_ context.Context, id string) (*runtime.Session, error) {

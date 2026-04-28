@@ -61,7 +61,7 @@ func (a *Adapter) handleOpenSession(host runtime.AdapterHost) stdhttp.HandlerFun
 			writeError(w, stdhttp.StatusBadRequest, "invalid_metadata", "metadata exceeds 32 entries")
 			return
 		}
-		s, err := host.OpenSession(r.Context(), runtime.OpenRequest{Metadata: req.Metadata})
+		s, openedAt, err := host.OpenSession(r.Context(), runtime.OpenRequest{Metadata: req.Metadata})
 		if err != nil {
 			a.routeError(w, err)
 			return
@@ -69,7 +69,7 @@ func (a *Adapter) handleOpenSession(host runtime.AdapterHost) stdhttp.HandlerFun
 		writeJSON(w, stdhttp.StatusCreated, OpenSessionResponse{
 			SessionID: s.ID(),
 			Status:    runtime.StatusActive,
-			OpenedAt:  time.Now().UTC(),
+			OpenedAt:  openedAt,
 		})
 	}
 }
@@ -210,11 +210,8 @@ func (a *Adapter) handleCloseSession(host runtime.AdapterHost) stdhttp.HandlerFu
 			return
 		}
 		var body CloseSessionRequest
-		if r.Body != nil && r.ContentLength != 0 {
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				writeError(w, stdhttp.StatusBadRequest, "invalid_envelope", err.Error())
-				return
-			}
+		if !a.decodeBody(w, r, &body) {
+			return
 		}
 		reason := body.Reason
 		if reason == "" {
@@ -266,7 +263,7 @@ func (a *Adapter) handleStream(host runtime.AdapterHost) stdhttp.HandlerFunc {
 		// bus when the last connection drops.
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
-		sub, cleanup, err := a.attachSubscriber(ctx, host, sessionID)
+		sub, cleanup, err := a.attachSubscriber(host, sessionID)
 		if err != nil {
 			a.routeError(w, err)
 			return

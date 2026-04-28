@@ -120,7 +120,7 @@ func TestSessionManager_ResumeNotFound(t *testing.T) {
 func TestSessionManager_OpenAndList(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	s, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
+	s, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

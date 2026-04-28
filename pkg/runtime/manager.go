@@ -87,8 +87,10 @@ func NewSessionManager(
 }
 
 // Open creates a fresh session row, builds an in-memory *Session,
-// starts its goroutine, and emits a session_opened frame.
-func (m *SessionManager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
+// starts its goroutine, and emits a session_opened frame. Returns
+// the session and the row's CreatedAt timestamp so callers can
+// echo the persisted opened_at without an extra LoadSession.
+func (m *SessionManager) Open(ctx context.Context, req OpenRequest) (*Session, time.Time, error) {
 	id := newSessionID()
 	now := time.Now().UTC()
 	row := SessionRow{
@@ -102,7 +104,7 @@ func (m *SessionManager) Open(ctx context.Context, req OpenRequest) (*Session, e
 		UpdatedAt:   now,
 	}
 	if err := m.store.OpenSession(ctx, row); err != nil {
-		return nil, fmt.Errorf("manager: open session: %w", err)
+		return nil, time.Time{}, fmt.Errorf("manager: open session: %w", err)
 	}
 	s := m.spawn(ctx, id)
 	// Mark the new session as "materialised already" — there's no
@@ -117,7 +119,7 @@ func (m *SessionManager) Open(ctx context.Context, req OpenRequest) (*Session, e
 	if err := s.emit(ctx, opened); err != nil {
 		m.logger.Error("manager: emit session_opened", "session", id, "err", err)
 	}
-	return s, nil
+	return s, now, nil
 }
 
 // Resume reattaches to an existing session row. Materialisation is

@@ -17,6 +17,7 @@ import (
 	stdhttp "net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/runtime"
@@ -88,8 +89,8 @@ type Adapter struct {
 	maxBytes    int64
 	corsOrigins map[string]struct{}
 	mountMu     sync.Mutex
-	mounted     bool
 	mountedCh   chan struct{} // closed once mount() has run; tests can wait on it.
+	ready       atomic.Bool   // false until MarkReady; gates /api/v1/* with 503 runtime_starting.
 
 	// buses is the per-session fan-out for SSE writers. The adapter
 	// owns the slow-consumer drop policy so backpressure is local
@@ -176,8 +177,14 @@ func (a *Adapter) Name() string { return "http" }
 
 // Mounted returns a channel that closes once the adapter has
 // registered its routes on the shared mux. Tests block on it
-// instead of busy-polling the (unsynchronised) mounted bool.
+// instead of busy-polling.
 func (a *Adapter) Mounted() <-chan struct{} { return a.mountedCh }
+
+// MarkReady flips the readiness gate so /api/v1/* requests stop
+// returning 503 runtime_starting and start dispatching to handlers.
+// cmd/hugen calls this once buildRuntimeCore has produced every
+// dependency the API depends on.
+func (a *Adapter) MarkReady() { a.ready.Store(true) }
 
 // Run mounts handlers (idempotent) and blocks until ctx is done.
 // Returns the ctx error so the runtime errgroup can distinguish
@@ -193,16 +200,18 @@ func (a *Adapter) Run(ctx context.Context, host runtime.AdapterHost) error {
 
 // mount registers the /api/v1/* routes. Mux is shared with the auth
 // service, so calling mount twice would panic — mountMu makes this
-// idempotent for tests that construct multiple Run loops. Tests
-// can synchronise on Mounted() (returns the channel that closes
-// after the first mount completes).
+// idempotent for tests that construct multiple Run loops. The
+// guard against double-mount is the closed mountedCh: a closed
+// channel select returns immediately, so a second mount is a
+// no-op. Tests synchronise on Mounted().
 func (a *Adapter) mount(host runtime.AdapterHost) {
 	a.mountMu.Lock()
 	defer a.mountMu.Unlock()
-	if a.mounted {
-		return
+	select {
+	case <-a.mountedCh:
+		return // already mounted
+	default:
 	}
-	a.mounted = true
 	defer close(a.mountedCh)
 
 	a.mux.Handle("POST /api/v1/sessions", a.cors(a.guard(a.handleOpenSession(host))))
@@ -225,17 +234,21 @@ func (a *Adapter) mount(host runtime.AdapterHost) {
 // webui adapter binds 127.0.0.1:HUGEN_WEBUI_PORT, so cmd/hugen
 // passes exactly that origin; a drive-by request from any other
 // loopback port gets no CORS, browser blocks it.
+//
+// `Vary: Origin` is set on every response, allowed or not, so a
+// shared cache can't serve a CORS-permissive response to a
+// request whose Origin was rejected (RFC 7234 §4.1).
 func (a *Adapter) cors(next stdhttp.Handler) stdhttp.Handler {
 	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+		h := w.Header()
+		h.Add("Vary", "Origin")
 		origin := r.Header.Get("Origin")
 		if origin != "" {
 			if _, ok := a.corsOrigins[strings.TrimRight(origin, "/")]; ok {
-				h := w.Header()
 				h.Set("Access-Control-Allow-Origin", origin)
 				h.Set("Access-Control-Allow-Credentials", "true")
 				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID")
 				h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-				h.Set("Vary", "Origin")
 			}
 		}
 		next.ServeHTTP(w, r)
@@ -243,9 +256,16 @@ func (a *Adapter) cors(next stdhttp.Handler) stdhttp.Handler {
 }
 
 // guard wraps an HTTP handler with the bearer-token check. Missing
-// token, malformed scheme, or rejected token all map to 401.
+// token, malformed scheme, or rejected token all map to 401. A
+// request that arrives before MarkReady is rejected with 503
+// runtime_starting per http-api.md (FR-015 still gates after).
 func (a *Adapter) guard(next stdhttp.HandlerFunc) stdhttp.Handler {
 	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+		if !a.ready.Load() {
+			writeError(w, stdhttp.StatusServiceUnavailable, "runtime_starting",
+				"agent is still starting; retry shortly")
+			return
+		}
 		tok := requestToken(r)
 		if err := a.auth.Verify(tok); err != nil {
 			writeError(w, stdhttp.StatusUnauthorized, "unauthenticated", "missing or invalid bearer token")

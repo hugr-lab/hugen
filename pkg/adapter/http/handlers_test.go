@@ -35,6 +35,7 @@ func newTestServer(t *testing.T, auth Authenticator) (*fakeHost, *httptest.Serve
 	t.Cleanup(cancel)
 	go func() { _ = a.Run(runCtx, host) }()
 	<-a.Mounted()
+	a.MarkReady()
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return host, srv
@@ -214,8 +215,8 @@ func TestHandlers_ListSessions_Filter(t *testing.T) {
 
 	// Create one active and one closed session directly through the
 	// fake host so we don't depend on the close handler.
-	active, _ := host.OpenSession(context.Background(), runtime.OpenRequest{})
-	closed, _ := host.OpenSession(context.Background(), runtime.OpenRequest{})
+	active, _, _ := host.OpenSession(context.Background(), runtime.OpenRequest{})
+	closed, _, _ := host.OpenSession(context.Background(), runtime.OpenRequest{})
 	_, _ = host.CloseSession(context.Background(), closed.ID(), "test")
 
 	resp := doJSON(t, srv, "GET", "/api/v1/sessions?status=active", "tok", nil)
@@ -286,6 +287,7 @@ func TestHandlers_PostFrame_PayloadTooLarge(t *testing.T) {
 	t.Cleanup(cancel)
 	go func() { _ = a.Run(runCtx, host) }()
 	<-a.Mounted()
+	a.MarkReady()
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 

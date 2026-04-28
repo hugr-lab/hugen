@@ -21,12 +21,25 @@ import (
 // runtime — owns the backpressure policy. Per-connection drops
 // don't affect persistence (the frame is in session_events) or
 // other connections (they have their own buffered channels).
+//
+// Lifecycle:
+//   - First connection on a session creates the bus, starts the
+//     fan-out goroutine, and Subscribe-s upstream.
+//   - Subsequent connections refcount in.
+//   - When the last connection drops, refCount→0 triggers
+//     bus.cancel(); busCtx fires; bus.run exits via the
+//     ctx.Done() arm of its select; the runtime drops the
+//     channel from its subscriber list. The channel itself is
+//     not closed here — Runtime.Shutdown owns that on process
+//     exit so we don't double-close.
 type sessionBus struct {
 	sessionID string
 	upstream  <-chan protocol.Frame
+	ctx       context.Context
 	cancel    context.CancelFunc
 	logger    *slog.Logger
 	grace     time.Duration
+	parent    *Adapter // back-ref so shutdown can deregister
 
 	mu       sync.Mutex
 	subs     []*subscriber
@@ -47,21 +60,48 @@ func newSubscriber() *subscriber {
 }
 
 // run reads upstream frames and fans them out to every active
-// subscriber. Exits when upstream closes (the runtime cancelled
-// the subscription).
+// subscriber. Exits via either (a) the bus context being cancelled
+// (refCount→0 teardown) or (b) the upstream channel closing
+// (Runtime.Shutdown). Both paths converge on closing the
+// per-connection channels so writers observe end-of-stream.
 func (b *sessionBus) run() {
-	for f := range b.upstream {
-		b.mu.Lock()
-		subs := append([]*subscriber(nil), b.subs...)
-		b.mu.Unlock()
-		for _, s := range subs {
-			b.deliver(s, f)
+	defer b.shutdown()
+	for {
+		select {
+		case <-b.ctx.Done():
+			return
+		case f, ok := <-b.upstream:
+			if !ok {
+				return
+			}
+			b.mu.Lock()
+			subs := append([]*subscriber(nil), b.subs...)
+			b.mu.Unlock()
+			for _, s := range subs {
+				b.deliver(s, f)
+			}
 		}
 	}
-	// Upstream closed — drain remaining live channels so writers
-	// observe close and exit cleanly.
+}
+
+// shutdown closes every per-connection channel, removes the bus
+// from the parent's buses map, and marks the bus closed so a late
+// addSubscriber can short-circuit. Idempotent via b.closed.
+//
+// Lock order: parent.busesMu → b.mu (matches attachSubscriber's
+// order so the two paths can't deadlock).
+func (b *sessionBus) shutdown() {
+	b.parent.busesMu.Lock()
+	if existing, ok := b.parent.buses[b.sessionID]; ok && existing == b {
+		delete(b.parent.buses, b.sessionID)
+	}
+	b.parent.busesMu.Unlock()
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
 	b.closed = true
 	for _, s := range b.subs {
 		close(s.out)
@@ -69,18 +109,43 @@ func (b *sessionBus) run() {
 	b.subs = nil
 }
 
-// deliver pushes one frame to one subscriber with the 50ms grace
-// drop policy. Dropped frames are logged and recoverable through
+// graceTimerPool reuses *time.Timer instances across deliver calls
+// so a burst of frames doesn't allocate one timer per (sub, frame).
+// Reset semantics: take from pool, Reset(grace), use, Stop+drain
+// before returning.
+var graceTimerPool = sync.Pool{
+	New: func() any {
+		// New(time.Hour) starts the timer in a stopped-ish state;
+		// Reset before use replaces the deadline.
+		t := time.NewTimer(time.Hour)
+		if !t.Stop() {
+			<-t.C
+		}
+		return t
+	},
+}
+
+// deliver pushes one frame to one subscriber with the slow-consumer
+// drop grace. Dropped frames are logged and recoverable through
 // Last-Event-ID replay (R-Plan-18).
 func (b *sessionBus) deliver(s *subscriber, f protocol.Frame) {
-	timer := time.NewTimer(b.grace)
-	defer timer.Stop()
+	timer := graceTimerPool.Get().(*time.Timer)
+	timer.Reset(b.grace)
 	select {
 	case s.out <- f:
+		// Send won — stop the timer and drain its channel if it
+		// fired between our select and Stop.
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
 	case <-timer.C:
 		b.logger.Warn("slow consumer; dropping frame",
 			"session", b.sessionID, "kind", f.Kind(), "seq", f.Seq())
 	}
+	graceTimerPool.Put(timer)
 }
 
 // addSubscriber registers a new connection on the bus. Returns the
@@ -123,16 +188,23 @@ func (b *sessionBus) removeSubscriber(s *subscriber) {
 //
 // The bus is started lazily: the first connection on a session
 // performs the upstream Subscribe and spawns the run goroutine.
-// When the last connection drops, the bus is torn down (cancels
-// upstream, run exits, channel closes).
-func (a *Adapter) attachSubscriber(parent context.Context, host runtime.AdapterHost, sessionID string) (*subscriber, func(), error) {
+// When the last connection drops, refCount→0 cancels busCtx and
+// the run goroutine deregisters the bus from a.buses.
+//
+// Atomicity: addSubscriber and refCount mutation both happen under
+// busesMu so a concurrent bus.shutdown (which also acquires
+// busesMu) cannot race with attach. A bus that is shutting down
+// has already deleted itself from a.buses, so the lookup at the
+// top creates a fresh bus rather than handing out a dead one.
+func (a *Adapter) attachSubscriber(host runtime.AdapterHost, sessionID string) (*subscriber, func(), error) {
 	a.busesMu.Lock()
 	bus, ok := a.buses[sessionID]
 	if !ok {
 		// Build a context decoupled from any single connection so
 		// the bus survives across reconnects within the same
-		// session-active window. Cancellation comes from
-		// removeSubscriber when refCount drops to zero.
+		// session-active window. Cancellation comes from cleanup
+		// when refCount drops to zero, or from Runtime.Shutdown
+		// closing the upstream channel.
 		busCtx, cancel := context.WithCancel(context.Background())
 		live, err := host.Subscribe(busCtx, sessionID)
 		if err != nil {
@@ -143,36 +215,41 @@ func (a *Adapter) attachSubscriber(parent context.Context, host runtime.AdapterH
 		bus = &sessionBus{
 			sessionID: sessionID,
 			upstream:  live,
+			ctx:       busCtx,
 			cancel:    cancel,
 			logger:    a.logger,
 			grace:     a.sseCfg.slowConsumerGrace,
+			parent:    a,
 		}
 		a.buses[sessionID] = bus
 		go bus.run()
 	}
 	bus.refCount++
+	sub := bus.addSubscriber()
 	a.busesMu.Unlock()
 
-	sub := bus.addSubscriber()
 	cleanup := func() {
 		bus.removeSubscriber(sub)
 		a.busesMu.Lock()
 		bus.refCount--
 		teardown := bus.refCount == 0
 		if teardown {
-			delete(a.buses, sessionID)
+			// Deregister BEFORE bus.cancel so a concurrent
+			// attachSubscriber can't find this bus while
+			// bus.run is still tearing it down. shutdown's own
+			// deregister becomes a no-op then.
+			if existing, ok := a.buses[sessionID]; ok && existing == bus {
+				delete(a.buses, sessionID)
+			}
 		}
 		a.busesMu.Unlock()
 		if teardown {
-			// Cancel upstream → runtime drops our subscription →
-			// upstream channel closes → bus.run exits → out chans
-			// are closed.
+			// Cancel busCtx → bus.run exits via ctx.Done →
+			// shutdown() runs, closes per-connection channels.
+			// Idempotent with Runtime.Shutdown's path that
+			// closes the upstream first.
 			bus.cancel()
 		}
-		// Honour parent cancellation independent of refcount: if
-		// the request context dies, releasing the subscriber must
-		// not block on bus teardown.
-		_ = parent
 	}
 	return sub, cleanup, nil
 }

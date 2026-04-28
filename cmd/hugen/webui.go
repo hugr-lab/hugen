@@ -48,6 +48,13 @@ func runWebUI(ctx context.Context, core *RuntimeCore) int {
 		core.Logger.Error("build http adapter", "err", err)
 		return 1
 	}
+	// buildRuntimeCore has already produced every dep the API
+	// needs by this point — flip the gate so /api/v1/* stops
+	// returning 503 runtime_starting. (Phase 2 mounts the http
+	// adapter after boot completes; the gate exists so a future
+	// boot-time mount path doesn't silently expose half-built
+	// state.)
+	httpAd.MarkReady()
 
 	apiBase := core.Boot.BaseURI
 	if apiBase == "" {

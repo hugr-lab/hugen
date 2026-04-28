@@ -38,6 +38,7 @@ func newTestServerOpts(t *testing.T, opts Options) (*fakeHost, *httptest.Server)
 	t.Cleanup(cancel)
 	go func() { _ = a.Run(runCtx, host) }()
 	<-a.Mounted()
+	a.MarkReady()
 	srv := httptest.NewServer(opts.Mux)
 	t.Cleanup(srv.Close)
 	return host, srv
