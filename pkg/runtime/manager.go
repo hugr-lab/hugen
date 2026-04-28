@@ -19,7 +19,9 @@ import (
 type SessionSummary struct {
 	ID        string
 	Status    string
+	OpenedAt  time.Time
 	UpdatedAt time.Time
+	Metadata  map[string]any
 }
 
 // OpenRequest carries the parameters for SessionManager.Open.
@@ -210,7 +212,13 @@ func (m *SessionManager) List(ctx context.Context, status string) ([]SessionSumm
 	}
 	out := make([]SessionSummary, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, SessionSummary{ID: r.ID, Status: r.Status, UpdatedAt: r.UpdatedAt})
+		out = append(out, SessionSummary{
+			ID:        r.ID,
+			Status:    r.Status,
+			OpenedAt:  r.CreatedAt,
+			UpdatedAt: r.UpdatedAt,
+			Metadata:  r.Metadata,
+		})
 	}
 	return out, nil
 }

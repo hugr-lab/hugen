@@ -53,15 +53,13 @@ func run(args []string, errOut io.Writer) int {
 	case "a2a":
 		fmt.Fprintln(errOut, "the a2a mode is not yet available in this build; planned for phase 10")
 		return exitUsage
-	case "webui":
-		fmt.Fprintln(errOut, "the webui mode is not yet available in this build; pending US1+US2 of phase 2")
-		return exitUsage
-	case "", "console":
+	case "", "console", "webui":
 		// OK — fall through to bootstrap.
 	default:
 		fmt.Fprintf(errOut, "unknown subcommand %q\n\n", sub)
-		fmt.Fprintln(errOut, "usage: hugen [console]")
-		fmt.Fprintln(errOut, "  console  start the console adapter (the only mode in phase 1; webui pending US1+US2)")
+		fmt.Fprintln(errOut, "usage: hugen [console|webui]")
+		fmt.Fprintln(errOut, "  console  start the console adapter")
+		fmt.Fprintln(errOut, "  webui    start the HTTP API + loopback web UI")
 		return exitUsage
 	}
 
@@ -76,11 +74,29 @@ func run(args []string, errOut io.Writer) int {
 		core.Shutdown(sCtx)
 	}()
 
-	return runConsole(ctx, core)
+	switch sub {
+	case "webui":
+		return runWebUI(ctx, core)
+	default:
+		return runConsole(ctx, core)
+	}
 }
 
-// chooseStore prefers the local querier when the embedded engine is
-// available; falls back to remote.
+// chooseStore picks the querier the runtime store talks to. The
+// agent runs in exactly one of two modes:
+//
+//   - local mode (BootstrapConfig.IsLocalMode + LocalDBEnabled):
+//     localQ is the embedded DuckDB. All sessions, events, notes,
+//     and memory live inside the agent process.
+//   - remote mode: remoteQ is the upstream hugr GraphQL endpoint;
+//     localQ is nil. Sessions/memory/artifacts persist in the
+//     shared hub DB and the agent identifies itself by the bearer
+//     token its identity source supplies. The schema is the same —
+//     runtime.NewRuntimeStoreLocal is mode-agnostic; the "local"
+//     in its name refers to the Go-side facade, not the DB.
+//
+// Mixing the two queriers would split state across stores and is
+// not supported.
 func chooseStore(localQ, remoteQ types.Querier, embedderEnabled bool) runtime.RuntimeStore {
 	if localQ != nil {
 		return runtime.NewRuntimeStoreLocal(localQ, embedderEnabled)

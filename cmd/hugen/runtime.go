@@ -52,6 +52,12 @@ type RuntimeCore struct {
 	LocalQuerier  types.Querier
 	RemoteQuerier *client.Client
 
+	// Store is the persistence facade backing the SessionManager.
+	// Held on the core so adapters that need replay (the http
+	// adapter for Last-Event-ID resume) can reach it without
+	// reaching into the manager.
+	Store runtime.RuntimeStore
+
 	shutdownOnce sync.Once
 }
 
@@ -117,6 +123,13 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 		core.LocalQuerier = eng
 	}
 
+	embedderEnabled := cfg.Embedding.Mode != "" && cfg.Embedding.Model != ""
+	store := chooseStore(core.LocalQuerier, core.RemoteQuerier, embedderEnabled)
+	if store == nil {
+		return nil, failed("store", fmt.Errorf("no querier available (need local engine or remote hub)"))
+	}
+	core.Store = store
+
 	modelService := models.New(ctx, core.LocalQuerier, core.RemoteQuerier, cfg.Models, models.WithLogger(core.Logger))
 	modelMap := models.BuildModelMap(modelService)
 	modelDefaults := models.IntentDefaults(modelService)
@@ -128,12 +141,6 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	core.Logger.Info("model router ready",
 		"default", modelDefaults[model.IntentDefault].String(),
 		"cheap", modelDefaults[model.IntentCheap].String())
-
-	embedderEnabled := cfg.Embedding.Mode != "" && cfg.Embedding.Model != ""
-	store := chooseStore(core.LocalQuerier, core.RemoteQuerier, embedderEnabled)
-	if store == nil {
-		return nil, failed("store", fmt.Errorf("no querier available (need local engine or remote hub)"))
-	}
 
 	agentInfo, err := core.Identity.Agent(ctx)
 	if err != nil {
@@ -152,7 +159,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	core.Commands = cmds
 
 	core.Codec = protocol.NewCodec()
-	core.Manager = runtime.NewSessionManager(store, agent, router, cmds, core.Codec, core.Logger)
+	core.Manager = runtime.NewSessionManager(core.Store, agent, router, cmds, core.Codec, core.Logger)
 
 	return core, nil
 }

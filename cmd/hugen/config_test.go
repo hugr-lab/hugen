@@ -73,7 +73,6 @@ func TestRun_RefusesDeferredSubcommands(t *testing.T) {
 		wantOut  string
 	}{
 		{"a2a refused", []string{"a2a"}, exitUsage, "phase 10"},
-		{"webui refused", []string{"webui"}, exitUsage, "phase 2"},
 		{"unknown sub refused", []string{"wat"}, exitUsage, "unknown subcommand"},
 	}
 	for _, tc := range cases {

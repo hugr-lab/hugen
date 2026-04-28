@@ -1,2 +1,25 @@
 <!doctype html>
-<html><head><title>hugen webui</title></head><body><!-- placeholder --></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>hugen — agent chat</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <header>
+    <span class="title">hugen</span>
+    <span id="session" class="session"></span>
+    <button id="newSession" type="button">new</button>
+  </header>
+  <main>
+    <div id="log" aria-live="polite"></div>
+  </main>
+  <footer>
+    <textarea id="input" placeholder="message — leading /cmd sends a slash command" rows="2"></textarea>
+    <button id="send" type="button">send</button>
+  </footer>
+  <p class="hint">drives <code>/api/v1</code>; reload-safe via <code>Last-Event-ID</code>.</p>
+  <script src="app.js"></script>
+</body>
+</html>

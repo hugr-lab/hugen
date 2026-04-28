@@ -33,6 +33,8 @@ type AdapterHost interface {
 	ResumeSession(ctx context.Context, id string) (*Session, error)
 	Submit(ctx context.Context, frame protocol.Frame) error
 	Subscribe(ctx context.Context, sessionID string) (<-chan protocol.Frame, error)
+	CloseSession(ctx context.Context, id, reason string) error
+	ListSessions(ctx context.Context, status string) ([]SessionSummary, error)
 	Logger() *slog.Logger
 }
 
@@ -183,6 +185,14 @@ func (h *adapterHost) Subscribe(ctx context.Context, sessionID string) (<-chan p
 		h.rt.subscribers[sessionID] = out
 	}()
 	return c, nil
+}
+
+func (h *adapterHost) CloseSession(ctx context.Context, id, reason string) error {
+	return h.rt.manager.Close(ctx, id, reason)
+}
+
+func (h *adapterHost) ListSessions(ctx context.Context, status string) ([]SessionSummary, error) {
+	return h.rt.manager.List(ctx, status)
 }
 
 func (h *adapterHost) Logger() *slog.Logger { return h.rt.logger }
