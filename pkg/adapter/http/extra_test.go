@@ -351,6 +351,154 @@ func TestHandlers_PostToClosed_Returns409(t *testing.T) {
 	}
 }
 
+// TestAPILifecycle_OpenSubscribePostListClose threads SC-002 as one
+// connected story: an automation script using a generic HTTP client
+// can complete the full lifecycle. The individual handler tests
+// cover each shape; this test asserts they compose correctly.
+func TestAPILifecycle_OpenSubscribePostListClose(t *testing.T) {
+	host, srv := newTestServer(t, allowAllAuth{})
+
+	// 1. Open
+	resp := doJSON(t, srv, "POST", "/api/v1/sessions", "tok",
+		map[string]any{"metadata": map[string]any{"label": "lifecycle"}})
+	var open OpenSessionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&open); err != nil {
+		t.Fatalf("decode open: %v", err)
+	}
+	resp.Body.Close()
+	if open.SessionID == "" || open.Status != runtime.StatusActive {
+		t.Fatalf("open response = %+v", open)
+	}
+
+	// 2. Subscribe
+	streamResp := openStream(t, srv, open.SessionID, "tok", "")
+	defer streamResp.Body.Close()
+	r := bufio.NewReader(streamResp.Body)
+
+	// 3. Post a user message
+	postResp := doJSON(t, srv, "POST", "/api/v1/sessions/"+open.SessionID+"/post", "tok",
+		map[string]any{
+			"kind":    "user_message",
+			"author":  map[string]any{"id": "alice", "kind": "user"},
+			"payload": map[string]any{"text": "hello"},
+		})
+	var post PostFrameResponse
+	_ = json.NewDecoder(postResp.Body).Decode(&post)
+	postResp.Body.Close()
+	if post.FrameID == "" || post.SessionID != open.SessionID {
+		t.Fatalf("post response = %+v", post)
+	}
+
+	// 4. Push a server-side reply through the bus and observe it
+	// on the SSE stream. Drain whatever Submit-side echo arrived
+	// first (the fakeHost.Submit fans the user_message back to
+	// subscribers; a real runtime would too via the session pump).
+	author := protocol.ParticipantInfo{ID: "agent-test", Kind: protocol.ParticipantAgent}
+	live := protocol.NewAgentMessage(open.SessionID, author, "hi back", 0, true)
+	live.SetSeq(1)
+	host.publish(open.SessionID, live)
+	gotAgent := false
+	for !gotAgent {
+		ev, err := readSSEEvent(r)
+		if err != nil {
+			t.Fatalf("read sse: %v", err)
+		}
+		if ev.event == "agent_message" {
+			gotAgent = true
+		}
+	}
+
+	// 5. List
+	listResp := doJSON(t, srv, "GET", "/api/v1/sessions?status=active", "tok", nil)
+	var list ListSessionsResponse
+	_ = json.NewDecoder(listResp.Body).Decode(&list)
+	listResp.Body.Close()
+	found := false
+	for _, s := range list.Sessions {
+		if s.SessionID == open.SessionID {
+			found = true
+			if s.Metadata["label"] != "lifecycle" {
+				t.Errorf("metadata roundtrip lost: %v", s.Metadata)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("listed sessions does not include %q", open.SessionID)
+	}
+
+	// 6. Close (idempotent)
+	closeResp := doJSON(t, srv, "POST", "/api/v1/sessions/"+open.SessionID+"/close", "tok",
+		map[string]any{"reason": "test_done"})
+	var closed CloseSessionResponse
+	_ = json.NewDecoder(closeResp.Body).Decode(&closed)
+	closeResp.Body.Close()
+	if closed.Status != runtime.StatusClosed || closed.ClosedAt.IsZero() {
+		t.Errorf("close response = %+v", closed)
+	}
+}
+
+// TestSlowConsumer_RecoversViaReconnect locks the second half of
+// SC-007: a consumer that fell behind enough to trigger the bus's
+// slow-consumer drop policy can recover the missed frames by
+// reconnecting with Last-Event-ID. The persistence layer keeps a
+// drop-resistant copy; the wire is just transport.
+//
+// Setup: persist N frames into the store (so they're replayable)
+// AND publish them through the bus. Consumer A stalls and drops
+// some frames in flight. A reconnects with Last-Event-ID=0, the
+// replay path serves the entire persisted log.
+func TestSlowConsumer_RecoversViaReconnect(t *testing.T) {
+	host, srv := newTestServerOpts(t, Options{SlowConsumerGrace: 1})
+	openResp := doJSON(t, srv, "POST", "/api/v1/sessions", "tok", nil)
+	var open OpenSessionResponse
+	_ = json.NewDecoder(openResp.Body).Decode(&open)
+	openResp.Body.Close()
+
+	// Connection A — never reads; its bus channel will fill, drops
+	// will fire once we burst frames at it.
+	respA := openStream(t, srv, open.SessionID, "tok", "")
+	t.Cleanup(func() { respA.Body.Close() })
+
+	// Burst 200 frames, both persisted and published. The
+	// persisted log holds everything; the live channel for A
+	// drops some.
+	author := protocol.ParticipantInfo{ID: "agent-test", Kind: protocol.ParticipantAgent}
+	const N = 200
+	for i := 1; i <= N; i++ {
+		f := protocol.NewAgentMessage(open.SessionID, author, "msg", i, false)
+		f.SetSeq(i)
+		row, _, _ := runtime.FrameToEventRow(f, "agent-test")
+		row.Seq = i
+		host.store.appendEvent(open.SessionID, row)
+		host.publish(open.SessionID, f)
+	}
+
+	// Drop A's connection — its missed frames stay missed for that
+	// connection forever. The session still has them in the store.
+	respA.Body.Close()
+
+	// Reconnect A with Last-Event-ID=0 → full replay.
+	resp := openStream(t, srv, open.SessionID, "tok", "0")
+	defer resp.Body.Close()
+	r := bufio.NewReader(resp.Body)
+
+	seen := map[string]bool{}
+	for len(seen) < N {
+		ev, err := readSSEEvent(r)
+		if err != nil {
+			t.Fatalf("read after %d events: %v", len(seen), err)
+		}
+		if ev.event == "agent_message" && ev.id != "" {
+			seen[ev.id] = true
+		}
+	}
+	for i := 1; i <= N; i++ {
+		if !seen[strconv.Itoa(i)] {
+			t.Errorf("seq %d not recovered via reconnect", i)
+		}
+	}
+}
+
 // TestHandlers_RuntimeNotReady_Returns503 — until MarkReady fires,
 // every /api/v1/* request must return 503 runtime_starting.
 func TestHandlers_RuntimeNotReady_Returns503(t *testing.T) {
