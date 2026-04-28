@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -45,6 +46,11 @@ type sessionBus struct {
 	subs     []*subscriber
 	closed   bool
 	refCount int
+
+	// drops counts how many frames the slow-consumer policy dropped
+	// across all subscribers. Tests assert this is non-zero so the
+	// policy is exercised, not just the liveness of fast consumers.
+	drops atomic.Int64
 }
 
 // subscriber is one SSE connection on a session.
@@ -64,8 +70,13 @@ func newSubscriber() *subscriber {
 // (refCount→0 teardown) or (b) the upstream channel closing
 // (Runtime.Shutdown). Both paths converge on closing the
 // per-connection channels so writers observe end-of-stream.
+//
+// `defer b.cancel()` ensures the upstream-close path also tears
+// down busCtx; otherwise the context.WithCancel propagator
+// goroutine lingers until the bus is GC'd.
 func (b *sessionBus) run() {
 	defer b.shutdown()
+	defer b.cancel()
 	for {
 		select {
 		case <-b.ctx.Done():
@@ -142,21 +153,43 @@ func (b *sessionBus) deliver(s *subscriber, f protocol.Frame) {
 			}
 		}
 	case <-timer.C:
+		b.drops.Add(1)
 		b.logger.Warn("slow consumer; dropping frame",
 			"session", b.sessionID, "kind", f.Kind(), "seq", f.Seq())
 	}
 	graceTimerPool.Put(timer)
 }
 
+// dropCount returns the cumulative number of frames the bus has
+// dropped to slow consumers. Tests use it to assert the drop policy
+// actually fires; production callers don't read it (use the slog
+// warning instead).
+func (b *sessionBus) dropCount() int64 { return b.drops.Load() }
+
+// busDrops returns the drop count for a session's bus, or 0 when
+// no bus exists. Test-only accessor on the adapter; production code
+// has no reason to peek here.
+func (a *Adapter) busDrops(sessionID string) int64 {
+	a.busesMu.Lock()
+	defer a.busesMu.Unlock()
+	if b, ok := a.buses[sessionID]; ok {
+		return b.dropCount()
+	}
+	return 0
+}
+
 // addSubscriber registers a new connection on the bus. Returns the
-// per-connection out channel.
+// per-connection out channel. If the bus is shutting down (busCtx
+// already cancelled — covers both the upstream-closed and the
+// refCount→0 paths), addSubscriber returns a closed channel so the
+// caller's select returns immediately. Checking ctx.Err() instead
+// of a separate `closed` bool keeps the two states from drifting
+// (cancel may fire moments before shutdown sets b.closed=true).
 func (b *sessionBus) addSubscriber() *subscriber {
 	s := newSubscriber()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.closed {
-		// Upstream already gone — return a closed channel so the
-		// caller's select returns immediately.
+	if b.ctx.Err() != nil || b.closed {
 		close(s.out)
 		return s
 	}

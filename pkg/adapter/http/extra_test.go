@@ -397,15 +397,32 @@ func TestAPILifecycle_OpenSubscribePostListClose(t *testing.T) {
 	live := protocol.NewAgentMessage(open.SessionID, author, "hi back", 0, true)
 	live.SetSeq(1)
 	host.publish(open.SessionID, live)
-	gotAgent := false
-	for !gotAgent {
-		ev, err := readSSEEvent(r)
-		if err != nil {
-			t.Fatalf("read sse: %v", err)
+	// Bounded read: a regression where agent_message never lands
+	// would otherwise hang the test until Go's 10-minute timeout.
+	type evResult struct {
+		ev  sseEvent
+		err error
+	}
+	evCh := make(chan evResult, 1)
+	go func() {
+		for {
+			ev, err := readSSEEvent(r)
+			if err != nil || ev.event == "agent_message" {
+				evCh <- evResult{ev: ev, err: err}
+				return
+			}
 		}
-		if ev.event == "agent_message" {
-			gotAgent = true
+	}()
+	select {
+	case res := <-evCh:
+		if res.err != nil {
+			t.Fatalf("read sse: %v", res.err)
 		}
+		if res.ev.event != "agent_message" {
+			t.Fatalf("got %q, want agent_message", res.ev.event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("agent_message not received within 2s — regression?")
 	}
 
 	// 5. List
@@ -448,7 +465,7 @@ func TestAPILifecycle_OpenSubscribePostListClose(t *testing.T) {
 // some frames in flight. A reconnects with Last-Event-ID=0, the
 // replay path serves the entire persisted log.
 func TestSlowConsumer_RecoversViaReconnect(t *testing.T) {
-	host, srv := newTestServerOpts(t, Options{SlowConsumerGrace: 1})
+	host, srv, _ := newTestServerOpts(t, Options{SlowConsumerGrace: 1})
 	openResp := doJSON(t, srv, "POST", "/api/v1/sessions", "tok", nil)
 	var open OpenSessionResponse
 	_ = json.NewDecoder(openResp.Body).Decode(&open)
@@ -475,6 +492,12 @@ func TestSlowConsumer_RecoversViaReconnect(t *testing.T) {
 
 	// Drop A's connection — its missed frames stay missed for that
 	// connection forever. The session still has them in the store.
+	//
+	// Note: closing respA.Body races with the server's cleanup
+	// (refCount-- → bus teardown). The reconnect below may
+	// transiently refcount onto the bus before that cleanup runs.
+	// Harmless for this test because the assertion is on replay
+	// content, not bus identity.
 	respA.Body.Close()
 
 	// Reconnect A with Last-Event-ID=0 → full replay.

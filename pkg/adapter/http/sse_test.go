@@ -15,7 +15,7 @@ import (
 
 // newTestServerOpts wires up an Adapter with custom Options on a
 // fresh httptest.Server. Used by SSE tests to tune heartbeat cadence.
-func newTestServerOpts(t *testing.T, opts Options) (*fakeHost, *httptest.Server) {
+func newTestServerOpts(t *testing.T, opts Options) (*fakeHost, *httptest.Server, *Adapter) {
 	t.Helper()
 	host := newFakeHost()
 	if opts.Mux == nil {
@@ -41,7 +41,7 @@ func newTestServerOpts(t *testing.T, opts Options) (*fakeHost, *httptest.Server)
 	a.MarkReady()
 	srv := httptest.NewServer(opts.Mux)
 	t.Cleanup(srv.Close)
-	return host, srv
+	return host, srv, a
 }
 
 // openStream issues an authenticated GET on the SSE endpoint with
@@ -164,7 +164,7 @@ func TestSSE_FrameSerialisation(t *testing.T) {
 }
 
 func TestSSE_HeartbeatComment(t *testing.T) {
-	host, srv := newTestServerOpts(t, Options{HeartbeatInterval: 1}) // 1 second
+	host, srv, _ := newTestServerOpts(t, Options{HeartbeatInterval: 1}) // 1 second
 	openResp := doJSON(t, srv, "POST", "/api/v1/sessions", "tok", nil)
 	var open OpenSessionResponse
 	_ = json.NewDecoder(openResp.Body).Decode(&open)
@@ -211,7 +211,7 @@ func TestSSE_HeartbeatComment(t *testing.T) {
 func TestSSE_SlowConsumer_DropsFramesNotBlocks(t *testing.T) {
 	// Tighter grace so the test doesn't take forever; the contract
 	// pins 50ms in production but the option is the seam for tests.
-	host, srv := newTestServerOpts(t, Options{SlowConsumerGrace: 5})
+	host, srv, _ := newTestServerOpts(t, Options{SlowConsumerGrace: 5})
 	openResp := doJSON(t, srv, "POST", "/api/v1/sessions", "tok", nil)
 	var open OpenSessionResponse
 	_ = json.NewDecoder(openResp.Body).Decode(&open)
@@ -252,10 +252,19 @@ func TestSSE_SlowConsumer_DropsFramesNotBlocks(t *testing.T) {
 	if got != N {
 		t.Errorf("consumer B got %d events, want %d", got, N)
 	}
+	// Note: this test exercises the "doesn't block peers" half of
+	// SC-007. It does NOT reliably trigger the bus's drop policy
+	// because A's stalled HTTP body still drains via the kernel
+	// TCP buffer — the writeSSE goroutine keeps pulling from
+	// sub.out until that buffer fills (~64KB, well past 200
+	// frames at this size). The drop counter is exercised
+	// deterministically by TestBus_SlowConsumerDrops at the
+	// sessionBus layer, where the consumer is a real un-drained
+	// chan.
 }
 
 func TestSSE_HeartbeatResetsOnFrame(t *testing.T) {
-	host, srv := newTestServerOpts(t, Options{HeartbeatInterval: 1})
+	host, srv, _ := newTestServerOpts(t, Options{HeartbeatInterval: 1})
 	openResp := doJSON(t, srv, "POST", "/api/v1/sessions", "tok", nil)
 	var open OpenSessionResponse
 	_ = json.NewDecoder(openResp.Body).Decode(&open)
