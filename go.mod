@@ -11,6 +11,7 @@ require (
 	github.com/hugr-lab/query-engine/client v0.3.33
 	github.com/hugr-lab/query-engine/types v0.3.33
 	github.com/jackc/pgx/v5 v5.9.2
+	github.com/oasdiff/yaml v0.0.9
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sync v0.20.0
@@ -74,7 +75,6 @@ require (
 	github.com/mark3labs/mcp-go v0.49.0 // indirect
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/oasdiff/yaml v0.0.9 // indirect
 	github.com/oasdiff/yaml3 v0.0.12 // indirect
 	github.com/paulmach/orb v0.13.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.3.0 // indirect

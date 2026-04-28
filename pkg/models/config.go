@@ -27,7 +27,26 @@ type Config struct {
 	Model          string            `mapstructure:"model"`
 	MaxTokens      int               `mapstructure:"max_tokens"`
 	Temperature    float32           `mapstructure:"temperature"`
-	Routes         map[string]string `mapstructure:"routes"`
 	ContextWindows map[string]int    `mapstructure:"context_windows"`
 	DefaultBudget  int               `mapstructure:"default_budget"`
+	Mode           string            `mapstructure:"mode"`
+	Routes         map[string]Config `mapstructure:"routes"`
+}
+
+const (
+	LocalMode  = "local"
+	RemoteMode = "remote"
+)
+
+// Shared model options: attach MaxTokens / Temperature from cfg in
+// addition to the caller-supplied ones.
+func (cfg Config) BuildOpts() []Option {
+	var out []Option
+	if cfg.MaxTokens > 0 {
+		out = append(out, WithMaxTokens(cfg.MaxTokens))
+	}
+	if cfg.Temperature > 0 {
+		out = append(out, WithTemperature(cfg.Temperature))
+	}
+	return out
 }
