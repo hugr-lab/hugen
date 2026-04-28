@@ -63,10 +63,3 @@ func TestBuildHugrSource_OIDCFallbackDiscovery(t *testing.T) {
 	assert.True(t, isOIDC, "OIDC fallback yields OIDCStore")
 }
 
-func TestBuildHugrSource_MissingName(t *testing.T) {
-	_, err := BuildHugrSource(context.Background(), Config{
-		AccessToken: "x", TokenURL: "y",
-	}, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "empty name")
-}

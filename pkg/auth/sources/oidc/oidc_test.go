@@ -27,16 +27,13 @@ func TestOIDCStore_StatePrefixAndLoginCallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	//reg := auth.NewService(nil)
-	//require.NoError(t, reg.Add(store))
-	mux := http.NewServeMux()
-	//reg.Mount(mux)
-
-	// Step 1: hit /auth/login/hugr — should redirect to /authorize
-	// with state prefixed by the source name.
+	// Step 1: drive HandleLogin directly — should redirect to /authorize
+	// with state prefixed by the source name. The shared mux + Service
+	// dispatcher are tested at the auth package level; here we exercise
+	// the Source in isolation to avoid an import cycle.
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/auth/login/hugr", nil)
-	mux.ServeHTTP(w, r)
+	store.HandleLogin(w, r)
 	require.Equal(t, http.StatusFound, w.Code)
 
 	authorizeURL, err := url.Parse(w.Header().Get("Location"))
@@ -67,10 +64,11 @@ func TestOIDCStore_StatePrefixAndLoginCallback(t *testing.T) {
 	require.NotEmpty(t, code)
 	require.NotEmpty(t, state)
 
-	// Hand-fire the /auth/callback through the shared mux.
+	// Hand-fire the callback directly into the Source. The Service-
+	// level dispatcher routing by state prefix is covered separately.
 	cw := httptest.NewRecorder()
 	cr := httptest.NewRequest(http.MethodGet, "/auth/callback?code="+code+"&state="+state, nil)
-	mux.ServeHTTP(cw, cr)
+	store.HandleCallback(cw, cr)
 	require.Equalf(t, http.StatusOK, cw.Code, "callback body: %s", cw.Body.String())
 	assert.Contains(t, cw.Body.String(), "Login successful")
 
