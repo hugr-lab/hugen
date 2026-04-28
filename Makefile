@@ -27,7 +27,13 @@ vet:
 lint:
 	golangci-lint run --build-tags=$(TAGS) ./...
 
-check: vet test
+check: vet build test
+	@echo "verifying ADK is quarantined to pkg/models..."
+	@if go list -tags=$(TAGS) -deps ./pkg/protocol ./pkg/model ./pkg/runtime ./pkg/adapter/... 2>/dev/null | grep -E '^google\.golang\.org/(adk|genai)' | sort -u | grep .; then \
+		echo "FAIL: ADK or genai imported below pkg/models (excluding cmd/hugen which legitimately uses pkg/models)"; exit 1; \
+	else \
+		echo "OK: no ADK below pkg/models"; \
+	fi
 
 tidy:
 	go mod tidy
