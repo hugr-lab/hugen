@@ -487,6 +487,7 @@ func EventRowToFrame(row EventRow) (protocol.Frame, error) {
 			Kind: deriveAuthorKind(row.Author, row.AgentID),
 		},
 		At: row.CreatedAt,
+		S:  row.Seq,
 	}
 	codec := protocol.NewCodec()
 	var payload []byte

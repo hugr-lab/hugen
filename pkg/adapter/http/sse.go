@@ -50,6 +50,14 @@ func sseConfigFromOptions(opts Options) sseConfig {
 // comment line `: heartbeat\n\n` (which is NOT persisted —
 // R-Plan-17).
 //
+// Frames in the live channel are deduped against maxReplayedSeq:
+// any frame with seq <= maxReplayedSeq has already been written
+// to the consumer during replay (the agent emitted it after
+// Subscribe registered but before the replay query finished —
+// the registration-before-replay ordering captures it on `live`,
+// and persistence puts it in the replay rows; the dedupe step
+// resolves the overlap).
+//
 // The function returns when ctx is cancelled, the live channel is
 // closed by the runtime, or a write error indicates the consumer
 // disconnected.
@@ -62,6 +70,7 @@ func (a *Adapter) writeSSE(
 	live <-chan protocol.Frame,
 ) {
 	// Replay first: deterministic ordering, no heartbeats interleaved.
+	maxReplayedSeq := 0
 	for _, row := range replay {
 		f, err := runtime.EventRowToFrame(row)
 		if err != nil {
@@ -69,8 +78,11 @@ func (a *Adapter) writeSSE(
 				"session", sessionID, "seq", row.Seq, "err", err)
 			continue
 		}
-		if err := a.writeFrameEvent(w, flusher, row.Seq, f); err != nil {
+		if err := a.writeFrameEvent(w, flusher, f); err != nil {
 			return
+		}
+		if row.Seq > maxReplayedSeq {
+			maxReplayedSeq = row.Seq
 		}
 	}
 
@@ -86,8 +98,13 @@ func (a *Adapter) writeSSE(
 			if !ok {
 				return
 			}
-			seq := frameSeq(f)
-			if err := a.writeFrameEvent(w, flusher, seq, f); err != nil {
+			// Dedupe: a frame emitted between Subscribe and replay
+			// completion appears in both. The replay path wrote it
+			// already; drop it here.
+			if maxReplayedSeq > 0 && f.Seq() > 0 && f.Seq() <= maxReplayedSeq {
+				continue
+			}
+			if err := a.writeFrameEvent(w, flusher, f); err != nil {
 				return
 			}
 			// Reset heartbeat — next idle interval starts now.
@@ -100,44 +117,27 @@ func (a *Adapter) writeSSE(
 	}
 }
 
-// frameSeq pulls the per-session seq from a Frame. Live frames
-// flowing through the runtime fan-out do not carry an explicit seq
-// today; we approximate by 0 and let downstream consumers ignore it
-// (the SSE wire still emits an id, derived from the persisted row's
-// seq when available — see writeFrameEvent for the fallback).
-//
-// TODO(phase-3): persist seq on the Frame at fan-out time so live
-// events carry an authoritative cursor. Phase 2 ships this seq
-// hole as a known limitation; the reconnection invariant still
-// holds because replay reads from the persistent log.
-func frameSeq(f protocol.Frame) int {
-	_ = f
-	return 0
-}
-
 // writeFrameEvent writes one SSE event for a Frame:
 //
 //	id: <seq>
 //	event: <kind>
 //	data: <json envelope>
 //
-// followed by a blank line. Flushes after the terminator. If seq
-// is zero (live frame) the id line is omitted — clients ignore
-// missing ids and the next reconnection cursor falls back to the
-// last persisted id seen during replay.
-func (a *Adapter) writeFrameEvent(w stdhttp.ResponseWriter, flusher stdhttp.Flusher, seq int, f protocol.Frame) error {
+// followed by a blank line. Flushes after the terminator. The id
+// line is always emitted when the frame carries a non-zero seq
+// (Session.emit assigns one before push to the outbox, and
+// EventRowToFrame propagates the persisted seq on replay). A zero
+// seq means the frame was constructed but never persisted —
+// shouldn't occur on the SSE wire; we still emit it without an id
+// so a defensive caller doesn't crash.
+func (a *Adapter) writeFrameEvent(w stdhttp.ResponseWriter, flusher stdhttp.Flusher, f protocol.Frame) error {
 	data, err := a.codec.EncodeFrame(f)
 	if err != nil {
 		a.logger.Warn("sse: encode frame", "kind", f.Kind(), "err", err)
 		return err
 	}
-	// SSE forbids embedded newlines on a `data:` line; the codec
-	// produces compact JSON but defensively guard anyway.
-	if bytes.IndexByte(data, '\n') >= 0 {
-		data = bytes.ReplaceAll(data, []byte{'\n'}, []byte(" "))
-	}
 	var buf bytes.Buffer
-	if seq > 0 {
+	if seq := f.Seq(); seq > 0 {
 		buf.WriteString("id: ")
 		buf.WriteString(strconv.Itoa(seq))
 		buf.WriteByte('\n')

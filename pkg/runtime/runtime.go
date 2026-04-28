@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -33,7 +34,7 @@ type AdapterHost interface {
 	ResumeSession(ctx context.Context, id string) (*Session, error)
 	Submit(ctx context.Context, frame protocol.Frame) error
 	Subscribe(ctx context.Context, sessionID string) (<-chan protocol.Frame, error)
-	CloseSession(ctx context.Context, id, reason string) error
+	CloseSession(ctx context.Context, id, reason string) (time.Time, error)
 	ListSessions(ctx context.Context, status string) ([]SessionSummary, error)
 	Logger() *slog.Logger
 }
@@ -155,7 +156,16 @@ func (h *adapterHost) Submit(ctx context.Context, f protocol.Frame) error {
 	}
 	s, ok := h.rt.manager.Get(f.SessionID())
 	if !ok {
-		return fmt.Errorf("runtime: no live session %q", f.SessionID())
+		// No live session means the manager doesn't know it. Either
+		// it never existed (404 territory; the post handler resumes
+		// before Submit so this shouldn't fire for unknown ids) or
+		// it just transitioned out of live state (Close raced our
+		// post). Both surface as ErrSessionClosed for the adapter
+		// layer; the post handler routes that to 409.
+		return ErrSessionClosed
+	}
+	if s.IsClosed() {
+		return ErrSessionClosed
 	}
 	select {
 	case s.Inbox() <- f:
@@ -187,7 +197,7 @@ func (h *adapterHost) Subscribe(ctx context.Context, sessionID string) (<-chan p
 	return c, nil
 }
 
-func (h *adapterHost) CloseSession(ctx context.Context, id, reason string) error {
+func (h *adapterHost) CloseSession(ctx context.Context, id, reason string) (time.Time, error) {
 	return h.rt.manager.Close(ctx, id, reason)
 }
 

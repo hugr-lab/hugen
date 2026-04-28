@@ -4,13 +4,17 @@
 package webui
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"errors"
 	"fmt"
+	"html/template"
+	"io"
 	"io/fs"
 	"log/slog"
 	stdhttp "net/http"
+	"strings"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/runtime"
@@ -38,25 +42,74 @@ func StaticFS() fs.FS {
 type Adapter struct {
 	host    string
 	port    int
+	apiBase string
 	logger  *slog.Logger
-	handler stdhttp.Handler
+
+	indexTpl *template.Template
+	indexBuf []byte // pre-rendered, written on every GET / for cheap reuse
+	assets   stdhttp.Handler
 
 	srv *stdhttp.Server
 }
 
 // NewAdapter builds the adapter. host defaults to 127.0.0.1 when
 // empty — the constitution forbids exposing the dev UI on a public
-// interface.
-func NewAdapter(host string, port int, logger *slog.Logger) *Adapter {
+// interface. apiBase is the API origin the SPA's fetch/EventSource
+// calls target (e.g. http://127.0.0.1:10000); it is injected into
+// index.html via a <meta name="hugen-api"> tag so the JS does not
+// hardcode a port.
+func NewAdapter(host string, port int, apiBase string, logger *slog.Logger) *Adapter {
 	if host == "" {
 		host = "127.0.0.1"
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	a := &Adapter{host: host, port: port, logger: logger}
-	a.handler = stdhttp.FileServer(stdhttp.FS(StaticFS()))
+	a := &Adapter{
+		host:    host,
+		port:    port,
+		apiBase: strings.TrimRight(apiBase, "/"),
+		logger:  logger,
+		assets:  stdhttp.FileServer(stdhttp.FS(StaticFS())),
+	}
+	if err := a.loadIndex(); err != nil {
+		// embed.FS files are required at build time; missing one
+		// is a packaging defect, not a runtime mistake.
+		panic(fmt.Sprintf("webui: load index.html: %v", err))
+	}
 	return a
+}
+
+// loadIndex parses the embedded index.html as a template and
+// pre-renders the meta tag with the API base URL.
+func (a *Adapter) loadIndex() error {
+	raw, err := fs.ReadFile(StaticFS(), "index.html")
+	if err != nil {
+		return err
+	}
+	tpl, err := template.New("index.html").Parse(string(raw))
+	if err != nil {
+		return err
+	}
+	a.indexTpl = tpl
+	var buf bytes.Buffer
+	if err := tpl.Execute(&buf, map[string]string{"APIBase": a.apiBase}); err != nil {
+		return err
+	}
+	a.indexBuf = buf.Bytes()
+	return nil
+}
+
+// serve handles the loopback HTTP request. GET / and /index.html
+// return the pre-rendered template; everything else is delegated
+// to the embed.FS file server.
+func (a *Adapter) serve(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+	if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.Copy(w, bytes.NewReader(a.indexBuf))
+		return
+	}
+	a.assets.ServeHTTP(w, r)
 }
 
 // Name implements runtime.Adapter.
@@ -71,7 +124,7 @@ func (a *Adapter) Name() string { return "webui" }
 func (a *Adapter) Run(ctx context.Context, _ runtime.AdapterHost) error {
 	a.srv = &stdhttp.Server{
 		Addr:    fmt.Sprintf("%s:%d", a.host, a.port),
-		Handler: a.handler,
+		Handler: stdhttp.HandlerFunc(a.serve),
 	}
 	a.logger.Info("webui listening", "addr", a.srv.Addr)
 

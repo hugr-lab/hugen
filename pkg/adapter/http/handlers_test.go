@@ -29,15 +29,12 @@ func newTestServer(t *testing.T, auth Authenticator) (*fakeHost, *httptest.Serve
 		t.Fatalf("NewAdapter: %v", err)
 	}
 	// Drive Run on a background context so handlers are mounted.
+	// Block on Mounted() so the test never reads routes before
+	// Run has had a chance to register them.
 	runCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() { _ = a.Run(runCtx, host) }()
-	// mount happens at the start of Run; wait for it to register
-	// by polling. In practice mount is synchronous and happens
-	// before <-ctx.Done(); a single yield suffices.
-	for i := 0; i < 100 && !a.mounted; i++ {
-		// best-effort spin; a.mountMu serialises with mount.
-	}
+	<-a.Mounted()
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return host, srv
@@ -219,7 +216,7 @@ func TestHandlers_ListSessions_Filter(t *testing.T) {
 	// fake host so we don't depend on the close handler.
 	active, _ := host.OpenSession(context.Background(), runtime.OpenRequest{})
 	closed, _ := host.OpenSession(context.Background(), runtime.OpenRequest{})
-	_ = host.CloseSession(context.Background(), closed.ID(), "test")
+	_, _ = host.CloseSession(context.Background(), closed.ID(), "test")
 
 	resp := doJSON(t, srv, "GET", "/api/v1/sessions?status=active", "tok", nil)
 	defer resp.Body.Close()
@@ -235,6 +232,77 @@ func TestHandlers_ListSessions_Filter(t *testing.T) {
 	}
 	if body.Sessions[0].SessionID != active.ID() {
 		t.Errorf("returned %q, want active %q", body.Sessions[0].SessionID, active.ID())
+	}
+}
+
+func TestHandlers_CloseUnknownReturns404(t *testing.T) {
+	_, srv := newTestServer(t, allowAllAuth{})
+	resp := doJSON(t, srv, "POST", "/api/v1/sessions/ses-does-not-exist/close", "tok",
+		map[string]any{"reason": "test"})
+	defer resp.Body.Close()
+	if resp.StatusCode != stdhttp.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	var env ErrorEnvelope
+	_ = json.NewDecoder(resp.Body).Decode(&env)
+	if env.Error.Code != "session_not_found" {
+		t.Errorf("code = %q, want session_not_found", env.Error.Code)
+	}
+}
+
+func TestHandlers_PostMetadata_RoundTrip(t *testing.T) {
+	host, srv := newTestServer(t, allowAllAuth{})
+	resp := doJSON(t, srv, "POST", "/api/v1/sessions", "tok", map[string]any{
+		"metadata": map[string]any{"label": "investigation"},
+	})
+	defer resp.Body.Close()
+	var open OpenSessionResponse
+	_ = json.NewDecoder(resp.Body).Decode(&open)
+	row, ok := host.sessions[open.SessionID]
+	if !ok {
+		t.Fatalf("session %q not stored", open.SessionID)
+	}
+	if got, _ := row.Metadata["label"]; got != "investigation" {
+		t.Errorf("metadata.label = %v, want %q", got, "investigation")
+	}
+}
+
+func TestHandlers_PostFrame_PayloadTooLarge(t *testing.T) {
+	// Tiny limit so a single big string trips the gate. The
+	// production default is 64 KiB.
+	host := newFakeHost()
+	mux := stdhttp.NewServeMux()
+	a, err := NewAdapter(Options{
+		Mux:             mux,
+		Auth:            allowAllAuth{},
+		Codec:           protocol.NewCodec(),
+		Replay:          host.store,
+		MaxRequestBytes: 64,
+	})
+	if err != nil {
+		t.Fatalf("NewAdapter: %v", err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = a.Run(runCtx, host) }()
+	<-a.Mounted()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	openResp := doJSON(t, srv, "POST", "/api/v1/sessions", "tok", nil)
+	var open OpenSessionResponse
+	_ = json.NewDecoder(openResp.Body).Decode(&open)
+	openResp.Body.Close()
+
+	big := strings.Repeat("x", 1024)
+	resp := doJSON(t, srv, "POST", "/api/v1/sessions/"+open.SessionID+"/post", "tok", map[string]any{
+		"kind":    "user_message",
+		"author":  map[string]any{"id": "alice", "kind": "user"},
+		"payload": map[string]any{"text": big},
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != stdhttp.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
 	}
 }
 

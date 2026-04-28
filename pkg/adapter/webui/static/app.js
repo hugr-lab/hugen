@@ -13,21 +13,14 @@
   "use strict";
 
   const apiOrigin = (() => {
-    // The webui listener is loopback-only; the API listener may be
-    // on a different port. We look up the running API base from a
-    // <meta name="hugen-api"> tag if present, else assume same-host
-    // on port HUGEN_PORT exposed via the dev-token endpoint.
-    const meta = document.querySelector('meta[name="hugen-api"]');
-    if (meta && meta.content) return meta.content.replace(/\/+$/, "");
-    // Default: same hostname, port = location.port - 1 is brittle;
-    // require the operator to set <meta> in production. For loopback
-    // dev convenience, allow the URL ?api=... override.
+    // The webui adapter renders <meta name="hugen-api"> from
+    // BootstrapConfig.BaseURI at template time; the JS just reads
+    // it. ?api=... query override stays for ad-hoc dev poking.
     const params = new URLSearchParams(location.search);
     if (params.get("api")) return params.get("api").replace(/\/+$/, "");
-    // Fallback: assume the API is exposed on the standard hugen port
-    // (HUGEN_PORT) at 127.0.0.1. Operators with non-default port
-    // layouts must pass ?api=...
-    return "http://127.0.0.1:10000";
+    const meta = document.querySelector('meta[name="hugen-api"]');
+    if (meta && meta.content) return meta.content.replace(/\/+$/, "");
+    throw new Error("hugen-api origin not configured: webui adapter is misconfigured");
   })();
 
   const $log = document.getElementById("log");
@@ -136,6 +129,10 @@
     if (es) { es.close(); es = null; }
     const lastID = localStorage.getItem(lastEventKey(id));
     const url = new URL(apiOrigin + "/api/v1/sessions/" + id + "/stream");
+    // EventSource auto-attaches Last-Event-ID only on auto-reconnect
+    // after onerror; on a fresh page load we pass the cursor as a
+    // query param the server accepts as a fallback. After the first
+    // reconnect, EventSource takes over with the header.
     if (lastID) url.searchParams.set("last_event_id", lastID);
     // EventSource cannot set headers; the auth gate falls back to the
     // hugen_dev_token cookie set by /api/auth/dev-token. Cross-origin
@@ -145,22 +142,27 @@
       // EventSource auto-reconnects with the original Last-Event-ID
       // header; our manual store keeps it across full reloads.
     };
+    const handle = (kind) => (ev) => {
+      try {
+        const frame = JSON.parse(ev.data);
+        renderFrame(kind || frame.kind || "unknown", frame);
+        if (ev.lastEventId) localStorage.setItem(lastEventKey(id), ev.lastEventId);
+      } catch (e) {
+        console.error("frame parse failed", e, ev.data);
+      }
+    };
     const variants = [
       "user_message", "agent_message", "reasoning", "slash_command",
       "cancel", "session_opened", "session_closed", "session_suspended",
       "error", "system_marker", "tool_call", "tool_result"
     ];
     for (const k of variants) {
-      es.addEventListener(k, (ev) => {
-        try {
-          const frame = JSON.parse(ev.data);
-          renderFrame(k, frame);
-          if (ev.lastEventId) localStorage.setItem(lastEventKey(id), ev.lastEventId);
-        } catch (e) {
-          console.error("frame parse failed", e, ev.data);
-        }
-      });
+      es.addEventListener(k, handle(k));
     }
+    // Catch-all for opaque/deferred kinds (sub_agent_*, approval_*,
+    // clarification_*, etc.) so FR-024/SC-016 forward-compat
+    // round-trip is observable on the page.
+    es.onmessage = handle(null);
   }
 
   async function sendInput() {

@@ -22,15 +22,38 @@ var allowedKinds = map[protocol.Kind]struct{}{
 	protocol.KindCancel:       {},
 }
 
+// decodeBody decodes the request body into v after wrapping it with
+// http.MaxBytesReader. Returns (decoded, ok); when ok is false the
+// caller should not write any further response.
+//
+//   - Body absent / Content-Length 0 → ok=true, no decode (caller
+//     handles defaults).
+//   - Oversized body → 413 payload_too_large.
+//   - Malformed JSON → 400 invalid_envelope.
+func (a *Adapter) decodeBody(w stdhttp.ResponseWriter, r *stdhttp.Request, v any) bool {
+	if r.Body == nil || r.ContentLength == 0 {
+		return true
+	}
+	r.Body = stdhttp.MaxBytesReader(w, r.Body, a.maxBytes)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var maxErr *stdhttp.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, stdhttp.StatusRequestEntityTooLarge, "payload_too_large",
+				"request body exceeds the configured limit")
+			return false
+		}
+		writeError(w, stdhttp.StatusBadRequest, "invalid_envelope", err.Error())
+		return false
+	}
+	return true
+}
+
 // handleOpenSession serves POST /api/v1/sessions.
 func (a *Adapter) handleOpenSession(host runtime.AdapterHost) stdhttp.HandlerFunc {
 	return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		var req OpenSessionRequest
-		if r.Body != nil && r.ContentLength != 0 {
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				writeError(w, stdhttp.StatusBadRequest, "invalid_envelope", err.Error())
-				return
-			}
+		if !a.decodeBody(w, r, &req) {
+			return
 		}
 		// metadata size budget: keep it modest (FR-015 scope is
 		// loopback; no need for elaborate quotas in phase 2).
@@ -38,7 +61,7 @@ func (a *Adapter) handleOpenSession(host runtime.AdapterHost) stdhttp.HandlerFun
 			writeError(w, stdhttp.StatusBadRequest, "invalid_metadata", "metadata exceeds 32 entries")
 			return
 		}
-		s, err := host.OpenSession(r.Context(), runtime.OpenRequest{})
+		s, err := host.OpenSession(r.Context(), runtime.OpenRequest{Metadata: req.Metadata})
 		if err != nil {
 			a.routeError(w, err)
 			return
@@ -91,9 +114,12 @@ func (a *Adapter) handleListSessions(host runtime.AdapterHost) stdhttp.HandlerFu
 
 // handlePostFrame serves POST /api/v1/sessions/{id}/post.
 //
-// The handler decodes the body into a generic map first so it can
+// The handler reads the body once into a generic map so it can
 // reject client-set envelope fields (frame_id, session_id,
-// occurred_at) with a precise error code before any state mutation.
+// occurred_at) with a precise error code before any state
+// mutation, then decodes the same bytes into the typed
+// PostFrameRequest. MaxBytesReader caps the body size; oversize
+// → 413 payload_too_large.
 func (a *Adapter) handlePostFrame(host runtime.AdapterHost) stdhttp.HandlerFunc {
 	return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		sessionID := r.PathValue("id")
@@ -101,9 +127,8 @@ func (a *Adapter) handlePostFrame(host runtime.AdapterHost) stdhttp.HandlerFunc 
 			writeError(w, stdhttp.StatusBadRequest, "invalid_envelope", "missing session id in path")
 			return
 		}
-		raw := map[string]json.RawMessage{}
-		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-			writeError(w, stdhttp.StatusBadRequest, "invalid_envelope", err.Error())
+		var raw map[string]json.RawMessage
+		if !a.decodeBody(w, r, &raw) {
 			return
 		}
 		for _, field := range []string{"frame_id", "session_id", "occurred_at"} {
@@ -114,11 +139,19 @@ func (a *Adapter) handlePostFrame(host runtime.AdapterHost) stdhttp.HandlerFunc 
 			}
 		}
 		var req PostFrameRequest
-		if rawBytes, _ := json.Marshal(raw); rawBytes != nil {
-			if err := json.Unmarshal(rawBytes, &req); err != nil {
-				writeError(w, stdhttp.StatusBadRequest, "invalid_envelope", err.Error())
+		// We already have the parsed map; pull the typed fields
+		// from it without round-tripping through json.Marshal.
+		if v, ok := raw["kind"]; ok {
+			_ = json.Unmarshal(v, &req.Kind)
+		}
+		if v, ok := raw["author"]; ok {
+			if err := json.Unmarshal(v, &req.Author); err != nil {
+				writeError(w, stdhttp.StatusBadRequest, "invalid_envelope", "author: "+err.Error())
 				return
 			}
+		}
+		if v, ok := raw["payload"]; ok {
+			req.Payload = v
 		}
 		if req.Kind == "" {
 			writeError(w, stdhttp.StatusBadRequest, "invalid_envelope", "kind is required")
@@ -187,8 +220,8 @@ func (a *Adapter) handleCloseSession(host runtime.AdapterHost) stdhttp.HandlerFu
 		if reason == "" {
 			reason = "api_close"
 		}
-		closedAt := time.Now().UTC()
-		if err := host.CloseSession(r.Context(), sessionID, reason); err != nil {
+		closedAt, err := host.CloseSession(r.Context(), sessionID, reason)
+		if err != nil {
 			a.routeError(w, err)
 			return
 		}
@@ -227,21 +260,30 @@ func (a *Adapter) handleStream(host runtime.AdapterHost) stdhttp.HandlerFunc {
 			return
 		}
 
-		// Step 1: register subscriber on the fan-out. ctx carries the
-		// connection lifetime; when the consumer disconnects, the
-		// runtime's Subscribe goroutine drops the channel.
+		// Step 1: register subscriber on the per-session bus. The
+		// bus owns the upstream Subscribe and applies the 50ms
+		// slow-consumer grace per consumer; cleanup tears down the
+		// bus when the last connection drops.
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
-		live, err := host.Subscribe(ctx, sessionID)
+		sub, cleanup, err := a.attachSubscriber(ctx, host, sessionID)
 		if err != nil {
 			a.routeError(w, err)
 			return
 		}
+		defer cleanup()
 
 		// Step 2: load replay AFTER registration so any live frame
-		// produced during the replay query lands on `live` rather
-		// than being missed.
-		minSeq, _ := parseLastEventID(r.Header.Get("Last-Event-ID"))
+		// produced during the replay query lands on the subscriber
+		// channel rather than being missed. The dedupe in
+		// writeSSE drops live frames that overlap the replay tail.
+		lastEventID := r.Header.Get("Last-Event-ID")
+		if lastEventID == "" {
+			// Browser EventSource cannot set headers; the SPA
+			// passes the cursor as a query param on initial open.
+			lastEventID = r.URL.Query().Get("last_event_id")
+		}
+		minSeq, _ := parseLastEventID(lastEventID)
 		replay, err := loadReplay(ctx, a.replay, sessionID, minSeq)
 		if err != nil {
 			a.routeError(w, err)
@@ -254,7 +296,7 @@ func (a *Adapter) handleStream(host runtime.AdapterHost) stdhttp.HandlerFunc {
 		w.WriteHeader(stdhttp.StatusOK)
 		flusher.Flush()
 
-		a.writeSSE(ctx, w, flusher, sessionID, replay, live)
+		a.writeSSE(ctx, w, flusher, sessionID, replay, sub.out)
 	}
 }
 

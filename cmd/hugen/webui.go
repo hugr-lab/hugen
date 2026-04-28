@@ -21,7 +21,11 @@ import (
 //   - webui.Adapter binds a separate loopback listener and serves
 //     embedded static assets.
 func runWebUI(ctx context.Context, core *RuntimeCore) int {
-	devToken := httpadapter.NewDevTokenStore()
+	devToken, err := httpadapter.NewDevTokenStore()
+	if err != nil {
+		core.Logger.Error("dev-token mint failed", "err", err)
+		return 1
+	}
 	core.Logger.Info("dev token issued (loopback only)", "endpoint", "/api/auth/dev-token")
 
 	replay, ok := core.Store.(httpadapter.ReplaySource)
@@ -30,20 +34,26 @@ func runWebUI(ctx context.Context, core *RuntimeCore) int {
 		return 1
 	}
 
+	webuiOrigin := fmt.Sprintf("http://127.0.0.1:%d", core.Boot.WebUIPort)
 	httpAd, err := httpadapter.NewAdapter(httpadapter.Options{
-		Mux:      core.Mux,
-		Auth:     devToken,
-		Codec:    core.Codec,
-		Replay:   replay,
-		Logger:   core.Logger.With("adapter", "http"),
-		DevToken: devToken,
+		Mux:                core.Mux,
+		Auth:               devToken,
+		Codec:              core.Codec,
+		Replay:             replay,
+		Logger:             core.Logger.With("adapter", "http"),
+		DevToken:           devToken,
+		CORSAllowedOrigins: []string{webuiOrigin},
 	})
 	if err != nil {
 		core.Logger.Error("build http adapter", "err", err)
 		return 1
 	}
 
-	webuiAd := webui.NewAdapter("127.0.0.1", core.Boot.WebUIPort,
+	apiBase := core.Boot.BaseURI
+	if apiBase == "" {
+		apiBase = fmt.Sprintf("http://127.0.0.1:%d", core.Boot.Port)
+	}
+	webuiAd := webui.NewAdapter("127.0.0.1", core.Boot.WebUIPort, apiBase,
 		core.Logger.With("adapter", "webui"))
 
 	rt := runtime.NewRuntime(core.Manager,

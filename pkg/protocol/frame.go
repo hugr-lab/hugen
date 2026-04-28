@@ -50,25 +50,51 @@ const (
 
 // Frame is the closed tagged union. Every concrete variant embeds
 // BaseFrame and reports its discriminator via Kind().
+//
+// Seq() reports the per-session strictly-monotonic sequence number
+// the runtime assigned when persisting the frame. Live frames flowing
+// through Session.emit carry their assigned seq from the moment of
+// AppendEvent; frames materialised from the store (replay) carry
+// their persisted seq. A non-zero seq means the frame has been
+// committed to the event log; zero means the frame has not been
+// persisted yet (constructed by a new<Variant> call but not yet
+// emitted). The HTTP adapter uses Seq() for the SSE `id:` line and
+// for replay/live dedupe (R-Plan-16).
 type Frame interface {
 	FrameID() string
 	SessionID() string
 	Kind() Kind
 	Author() ParticipantInfo
 	OccurredAt() time.Time
+	Seq() int
 
 	// payload returns the variant payload as a JSON-encodable value.
 	// The codec uses this to produce the wire payload object.
 	payload() any
 }
 
+// SeqSetter is implemented by Frame variants whose seq is filled in
+// after construction (every variant that embeds BaseFrame). The
+// runtime calls SetSeq once, after AppendEvent assigns the cursor.
+// Adapters never call SetSeq.
+type SeqSetter interface {
+	SetSeq(int)
+}
+
 // BaseFrame holds envelope fields shared by every variant.
+//
+// S is the per-session sequence number — zero until the runtime
+// persists the frame, at which point Session.emit calls SetSeq via
+// the SeqSetter interface. The field is private-ish (lowercase
+// JSON tag, no JSON serialisation) because the wire envelope uses
+// the SSE `id:` line, not the JSON payload, to carry seq.
 type BaseFrame struct {
 	ID      string          `json:"frame_id"`
 	Session string          `json:"session_id"`
 	K       Kind            `json:"kind"`
 	Auth    ParticipantInfo `json:"author"`
 	At      time.Time       `json:"occurred_at"`
+	S       int             `json:"-"`
 }
 
 func (b BaseFrame) FrameID() string         { return b.ID }
@@ -76,6 +102,14 @@ func (b BaseFrame) SessionID() string       { return b.Session }
 func (b BaseFrame) Kind() Kind              { return b.K }
 func (b BaseFrame) Author() ParticipantInfo { return b.Auth }
 func (b BaseFrame) OccurredAt() time.Time   { return b.At }
+func (b BaseFrame) Seq() int                { return b.S }
+
+// SetSeq sets the per-session sequence number. The runtime calls it
+// once, after AppendEvent assigns the cursor; adapters never call
+// it. Pointer receiver so the method propagates to every concrete
+// variant pointer (every constructor returns a pointer). Variants
+// satisfy SeqSetter automatically through embedding.
+func (b *BaseFrame) SetSeq(s int) { b.S = s }
 
 // Variant payloads.
 

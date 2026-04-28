@@ -37,8 +37,7 @@ func newTestServerOpts(t *testing.T, opts Options) (*fakeHost, *httptest.Server)
 	runCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go func() { _ = a.Run(runCtx, host) }()
-	for i := 0; i < 100 && !a.mounted; i++ {
-	}
+	<-a.Mounted()
 	srv := httptest.NewServer(opts.Mux)
 	t.Cleanup(srv.Close)
 	return host, srv
@@ -198,6 +197,59 @@ func TestSSE_HeartbeatComment(t *testing.T) {
 	// Heartbeats must not be persisted as session_events.
 	if got := host.store.events[open.SessionID]; len(got) != 0 {
 		t.Errorf("heartbeat persisted to event store: %v", got)
+	}
+}
+
+// TestSSE_SlowConsumer_DropsFramesNotBlocks — two SSE consumers on
+// the same session; consumer A stops reading from its socket so its
+// per-connection channel fills up; consumer B keeps draining; assert
+// B receives every frame, A's bus drops at the 50ms grace.
+//
+// This exercises sessionBus.deliver: per-connection drop policy
+// means a stalled consumer cannot stall its peers (FR-026 / SC-007).
+func TestSSE_SlowConsumer_DropsFramesNotBlocks(t *testing.T) {
+	// Tighter grace so the test doesn't take forever; the contract
+	// pins 50ms in production but the option is the seam for tests.
+	host, srv := newTestServerOpts(t, Options{SlowConsumerGrace: 5})
+	openResp := doJSON(t, srv, "POST", "/api/v1/sessions", "tok", nil)
+	var open OpenSessionResponse
+	_ = json.NewDecoder(openResp.Body).Decode(&open)
+	openResp.Body.Close()
+
+	// Consumer A — never reads; we just hold the connection open
+	// and let its bus channel back up. The handshake completes
+	// (status 200 + headers) after attachSubscriber registers, so
+	// once openStream returns the subscriber is on the bus.
+	respA := openStream(t, srv, open.SessionID, "tok", "")
+	defer respA.Body.Close()
+
+	// Consumer B — reads frames as they arrive.
+	respB := openStream(t, srv, open.SessionID, "tok", "")
+	defer respB.Body.Close()
+	rB := bufio.NewReader(respB.Body)
+
+	author := protocol.ParticipantInfo{ID: "agent-test", Kind: protocol.ParticipantAgent}
+	const N = 200
+	for i := 0; i < N; i++ {
+		f := protocol.NewAgentMessage(open.SessionID, author, "msg", i, false)
+		f.SetSeq(i + 1) // unique id per frame
+		host.publish(open.SessionID, f)
+	}
+
+	// Consumer B should receive every frame; if A blocked the
+	// bus, B's read would deadlock and the test would time out.
+	got := 0
+	for got < N {
+		ev, err := readSSEEvent(rB)
+		if err != nil {
+			t.Fatalf("consumer B read after %d events: %v", got, err)
+		}
+		if ev.event == "agent_message" {
+			got++
+		}
+	}
+	if got != N {
+		t.Errorf("consumer B got %d events, want %d", got, N)
 	}
 }
 

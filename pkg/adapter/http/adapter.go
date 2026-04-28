@@ -9,9 +9,11 @@ package http
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"net"
 	stdhttp "net/http"
 	"strings"
 	"sync"
@@ -19,20 +21,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/runtime"
 )
-
-// Host is the consumer-side view of runtime.AdapterHost the http
-// adapter actually depends on. Declared here per constitution
-// principle III (interface lives at the consumer); *runtime.Runtime's
-// adapterHost satisfies it structurally via runtime.AdapterHost.
-type Host interface {
-	OpenSession(ctx context.Context, req runtime.OpenRequest) (*runtime.Session, error)
-	ResumeSession(ctx context.Context, id string) (*runtime.Session, error)
-	Submit(ctx context.Context, frame protocol.Frame) error
-	Subscribe(ctx context.Context, sessionID string) (<-chan protocol.Frame, error)
-	CloseSession(ctx context.Context, id, reason string) error
-	ListSessions(ctx context.Context, status string) ([]runtime.SessionSummary, error)
-	Logger() *slog.Logger
-}
 
 // Authenticator validates a bearer token for /api/v1/* endpoints.
 // Implementations are expected to be O(1) — every request goes
@@ -54,25 +42,26 @@ type DevTokenStore struct {
 // NewDevTokenStore mints a fresh random token. The same store
 // instance must be used by both the API auth gate and the
 // dev-token issuance endpoint, so the page can read the token its
-// gate will accept.
-func NewDevTokenStore() *DevTokenStore {
+// gate will accept. crypto/rand failure is treated as fatal — a
+// deterministic token would silently weaken the gate.
+func NewDevTokenStore() (*DevTokenStore, error) {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand failure is exceptional; fall back to a
-		// deterministic value so the daemon still boots and an
-		// operator can investigate. The token is not ergonomic
-		// fallback material — the failure mode logs above.
-		return &DevTokenStore{token: "fallback-dev-token"}
+		return nil, err
 	}
-	return &DevTokenStore{token: hex.EncodeToString(b[:])}
+	return &DevTokenStore{token: hex.EncodeToString(b[:])}, nil
 }
 
 // Token returns the current dev token. Non-empty by construction.
 func (d *DevTokenStore) Token() string { return d.token }
 
-// Verify implements Authenticator.
+// Verify implements Authenticator. Constant-time comparison so the
+// dev token doesn't leak length/prefix information through timing.
 func (d *DevTokenStore) Verify(token string) error {
-	if token == "" || token != d.token {
+	if token == "" {
+		return ErrUnauthenticated
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(d.token)) != 1 {
 		return ErrUnauthenticated
 	}
 	return nil
@@ -89,15 +78,24 @@ var ErrUnauthenticated = errors.New("http: unauthenticated")
 // the ctx error. Run does not own a *http.Server; the listener is
 // owned by cmd/hugen via RuntimeCore.HTTPSrv.
 type Adapter struct {
-	mux     *stdhttp.ServeMux
-	auth    Authenticator
-	codec   *protocol.Codec
-	replay  ReplaySource
-	logger  *slog.Logger
-	devTok  *DevTokenStore // optional: when set, /api/auth/dev-token is mounted
-	sseCfg  sseConfig
-	mountMu sync.Mutex
-	mounted bool
+	mux         *stdhttp.ServeMux
+	auth        Authenticator
+	codec       *protocol.Codec
+	replay      ReplaySource
+	logger      *slog.Logger
+	devTok      *DevTokenStore // optional: when set, /api/auth/dev-token is mounted
+	sseCfg      sseConfig
+	maxBytes    int64
+	corsOrigins map[string]struct{}
+	mountMu     sync.Mutex
+	mounted     bool
+	mountedCh   chan struct{} // closed once mount() has run; tests can wait on it.
+
+	// buses is the per-session fan-out for SSE writers. The adapter
+	// owns the slow-consumer drop policy so backpressure is local
+	// and per-connection — see bus.go.
+	busesMu sync.Mutex
+	buses   map[string]*sessionBus
 }
 
 // Options bundles Adapter construction parameters; keeps the
@@ -121,6 +119,14 @@ type Options struct {
 	// SlowConsumerGrace overrides the default 50ms send-grace before
 	// dropping a frame to a slow subscriber. Zero = default 50ms.
 	SlowConsumerGrace int // milliseconds; 0 = default 50ms
+	// MaxRequestBytes caps the size of a request body the handlers
+	// will read. Zero falls through to a 64 KiB default. Bodies
+	// exceeding this are rejected with 413 payload_too_large.
+	MaxRequestBytes int64
+	// CORSAllowedOrigins is the exact set of origins the API will
+	// echo back on credentialed requests. Empty disables CORS.
+	// Origins are matched case-sensitively (per RFC 6454).
+	CORSAllowedOrigins []string
 }
 
 // NewAdapter constructs the adapter. Returns an error when a required
@@ -142,19 +148,36 @@ func NewAdapter(opts Options) (*Adapter, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	maxBytes := opts.MaxRequestBytes
+	if maxBytes <= 0 {
+		maxBytes = 64 << 10 // 64 KiB; the API surface is small JSON.
+	}
+	cors := make(map[string]struct{}, len(opts.CORSAllowedOrigins))
+	for _, o := range opts.CORSAllowedOrigins {
+		cors[strings.TrimRight(o, "/")] = struct{}{}
+	}
 	return &Adapter{
-		mux:    opts.Mux,
-		auth:   opts.Auth,
-		codec:  opts.Codec,
-		replay: opts.Replay,
-		logger: logger,
-		devTok: opts.DevToken,
-		sseCfg: sseConfigFromOptions(opts),
+		mux:         opts.Mux,
+		auth:        opts.Auth,
+		codec:       opts.Codec,
+		replay:      opts.Replay,
+		logger:      logger,
+		devTok:      opts.DevToken,
+		sseCfg:      sseConfigFromOptions(opts),
+		maxBytes:    maxBytes,
+		corsOrigins: cors,
+		mountedCh:   make(chan struct{}),
+		buses:       make(map[string]*sessionBus),
 	}, nil
 }
 
 // Name reports the adapter name for runtime logging.
 func (a *Adapter) Name() string { return "http" }
+
+// Mounted returns a channel that closes once the adapter has
+// registered its routes on the shared mux. Tests block on it
+// instead of busy-polling the (unsynchronised) mounted bool.
+func (a *Adapter) Mounted() <-chan struct{} { return a.mountedCh }
 
 // Run mounts handlers (idempotent) and blocks until ctx is done.
 // Returns the ctx error so the runtime errgroup can distinguish
@@ -170,7 +193,9 @@ func (a *Adapter) Run(ctx context.Context, host runtime.AdapterHost) error {
 
 // mount registers the /api/v1/* routes. Mux is shared with the auth
 // service, so calling mount twice would panic — mountMu makes this
-// idempotent for tests that construct multiple Run loops.
+// idempotent for tests that construct multiple Run loops. Tests
+// can synchronise on Mounted() (returns the channel that closes
+// after the first mount completes).
 func (a *Adapter) mount(host runtime.AdapterHost) {
 	a.mountMu.Lock()
 	defer a.mountMu.Unlock()
@@ -178,6 +203,7 @@ func (a *Adapter) mount(host runtime.AdapterHost) {
 		return
 	}
 	a.mounted = true
+	defer close(a.mountedCh)
 
 	a.mux.Handle("POST /api/v1/sessions", a.cors(a.guard(a.handleOpenSession(host))))
 	a.mux.Handle("GET /api/v1/sessions", a.cors(a.guard(a.handleListSessions(host))))
@@ -194,40 +220,26 @@ func (a *Adapter) mount(host runtime.AdapterHost) {
 	}
 }
 
-// cors applies a permissive CORS policy for loopback origins (the
-// webui adapter on 127.0.0.1:HUGEN_WEBUI_PORT). Non-loopback origins
-// receive no CORS headers and the browser blocks the request.
+// cors echoes Access-Control-Allow-* headers iff the request Origin
+// is in the explicit allowlist (Options.CORSAllowedOrigins). The
+// webui adapter binds 127.0.0.1:HUGEN_WEBUI_PORT, so cmd/hugen
+// passes exactly that origin; a drive-by request from any other
+// loopback port gets no CORS, browser blocks it.
 func (a *Adapter) cors(next stdhttp.Handler) stdhttp.Handler {
 	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		origin := r.Header.Get("Origin")
-		if origin != "" && isLoopbackOrigin(origin) {
-			h := w.Header()
-			h.Set("Access-Control-Allow-Origin", origin)
-			h.Set("Access-Control-Allow-Credentials", "true")
-			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID")
-			h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			h.Set("Vary", "Origin")
+		if origin != "" {
+			if _, ok := a.corsOrigins[strings.TrimRight(origin, "/")]; ok {
+				h := w.Header()
+				h.Set("Access-Control-Allow-Origin", origin)
+				h.Set("Access-Control-Allow-Credentials", "true")
+				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID")
+				h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+				h.Set("Vary", "Origin")
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func isLoopbackOrigin(origin string) bool {
-	// Strip scheme.
-	idx := strings.Index(origin, "://")
-	if idx < 0 {
-		return false
-	}
-	hostPort := origin[idx+3:]
-	if i := strings.LastIndexByte(hostPort, ':'); i > 0 {
-		hostPort = hostPort[:i]
-	}
-	hostPort = strings.TrimPrefix(hostPort, "[")
-	hostPort = strings.TrimSuffix(hostPort, "]")
-	if hostPort == "::1" || hostPort == "localhost" {
-		return true
-	}
-	return strings.HasPrefix(hostPort, "127.")
 }
 
 // guard wraps an HTTP handler with the bearer-token check. Missing
@@ -286,16 +298,13 @@ func (a *Adapter) handleDevToken(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 }
 
 func isLoopback(remoteAddr string) bool {
-	// RemoteAddr is "host:port"; strip the port. We accept literal
-	// 127/8 or ::1 — anything else is rejected.
-	host := remoteAddr
-	if i := strings.LastIndexByte(host, ':'); i > 0 {
-		host = host[:i]
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
 	}
-	host = strings.TrimPrefix(host, "[")
-	host = strings.TrimSuffix(host, "]")
-	if host == "::1" || host == "localhost" {
+	if host == "localhost" {
 		return true
 	}
-	return strings.HasPrefix(host, "127.")
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

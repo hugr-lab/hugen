@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"strconv"
+	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/runtime"
 )
@@ -34,6 +35,7 @@ type ReplaySource interface {
 // caller that gets (n, true) but finds zero matching rows still
 // degrades to live tail without an error.
 func parseLastEventID(header string) (int, bool) {
+	header = strings.TrimSpace(header)
 	if header == "" {
 		return 0, false
 	}

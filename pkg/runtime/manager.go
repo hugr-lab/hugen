@@ -28,6 +28,10 @@ type SessionSummary struct {
 type OpenRequest struct {
 	OwnerID      string
 	Participants []protocol.ParticipantInfo
+	// Metadata is persisted verbatim on the session row. Adapters
+	// validate size/shape before passing it through; the manager
+	// stores it as-is.
+	Metadata map[string]any
 }
 
 // SessionManager owns the live *Session map and brokers
@@ -93,6 +97,7 @@ func (m *SessionManager) Open(ctx context.Context, req OpenRequest) (*Session, e
 		OwnerID:     req.OwnerID,
 		SessionType: "root",
 		Status:      StatusActive,
+		Metadata:    req.Metadata,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -159,28 +164,48 @@ func (m *SessionManager) Resume(ctx context.Context, id string) (*Session, error
 }
 
 // Close transitions the session to "closed" and tears down its
-// goroutine. Idempotent on already-closed sessions.
-func (m *SessionManager) Close(ctx context.Context, id, reason string) error {
+// goroutine. Idempotent on already-closed sessions: returns the
+// original closed_at timestamp. Returns ErrSessionNotFound if the
+// session does not exist on the store at all — the HTTP adapter
+// maps that to 404.
+func (m *SessionManager) Close(ctx context.Context, id, reason string) (time.Time, error) {
 	m.mu.Lock()
-	s, ok := m.live[id]
-	if ok {
+	s, live := m.live[id]
+	if live {
 		delete(m.live, id)
 	}
 	m.mu.Unlock()
-	if ok && !s.closed.Load() {
+
+	// If not in m.live, the session is either suspended (still in
+	// the store) or has never existed. LoadSession distinguishes
+	// and also reveals the existing closed_at when applicable.
+	var existing SessionRow
+	var existsInStore bool
+	if !live {
+		row, err := m.store.LoadSession(ctx, id)
+		if err != nil {
+			return time.Time{}, err
+		}
+		existing = row
+		existsInStore = true
+	}
+
+	if live && !s.closed.Load() {
 		closed := protocol.NewSessionClosed(id, m.agent.Participant(), reason)
 		if err := s.emit(ctx, closed); err != nil {
 			m.logger.Warn("manager: emit session_closed", "session", id, "err", err)
 		}
 		close(s.in)
 	}
-	if err := m.store.UpdateSessionStatus(ctx, id, StatusClosed); err != nil {
-		if errors.Is(err, ErrSessionNotFound) {
-			return nil
-		}
-		return err
+
+	// Already closed in store → preserve the original timestamp.
+	if existsInStore && existing.Status == StatusClosed {
+		return existing.UpdatedAt, nil
 	}
-	return nil
+	if err := m.store.UpdateSessionStatus(ctx, id, StatusClosed); err != nil {
+		return time.Time{}, err
+	}
+	return time.Now().UTC(), nil
 }
 
 // Suspend updates the row to suspended without ending the goroutine.

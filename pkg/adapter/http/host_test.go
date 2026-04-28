@@ -64,7 +64,7 @@ func newFakeHost() *fakeHost {
 // Logger satisfies runtime.AdapterHost.
 func (f *fakeHost) Logger() *slog.Logger { return f.logger }
 
-func (f *fakeHost) OpenSession(_ context.Context, _ runtime.OpenRequest) (*runtime.Session, error) {
+func (f *fakeHost) OpenSession(_ context.Context, req runtime.OpenRequest) (*runtime.Session, error) {
 	if f.openErr != nil {
 		return nil, f.openErr
 	}
@@ -74,6 +74,7 @@ func (f *fakeHost) OpenSession(_ context.Context, _ runtime.OpenRequest) (*runti
 	f.sessions[id] = &runtime.SessionRow{
 		ID:        id,
 		Status:    runtime.StatusActive,
+		Metadata:  req.Metadata,
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
@@ -131,18 +132,22 @@ func (f *fakeHost) Subscribe(ctx context.Context, sessionID string) (<-chan prot
 	return c, nil
 }
 
-func (f *fakeHost) CloseSession(_ context.Context, id, _ string) error {
+func (f *fakeHost) CloseSession(_ context.Context, id, _ string) (time.Time, error) {
 	if f.closeErr != nil {
-		return f.closeErr
+		return time.Time{}, f.closeErr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if row, ok := f.sessions[id]; ok {
-		row.Status = runtime.StatusClosed
-		row.UpdatedAt = time.Now().UTC()
-		return nil
+	row, ok := f.sessions[id]
+	if !ok {
+		return time.Time{}, runtime.ErrSessionNotFound
 	}
-	return runtime.ErrSessionNotFound
+	if row.Status == runtime.StatusClosed {
+		return row.UpdatedAt, nil
+	}
+	row.Status = runtime.StatusClosed
+	row.UpdatedAt = time.Now().UTC()
+	return row.UpdatedAt, nil
 }
 
 func (f *fakeHost) ListSessions(_ context.Context, status string) ([]runtime.SessionSummary, error) {
