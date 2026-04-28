@@ -115,6 +115,10 @@ func (m *SessionManager) Open(ctx context.Context, req OpenRequest) (*Session, e
 
 // Resume reattaches to an existing session row. Materialisation is
 // deferred to the first inbound Frame after resume.
+//
+// Concurrent calls for the same id will share the same *Session —
+// the spawn-side double-check guarantees no orphan goroutine. Only
+// the first caller observes the session_resumed marker.
 func (m *SessionManager) Resume(ctx context.Context, id string) (*Session, error) {
 	row, err := m.store.LoadSession(ctx, id)
 	if err != nil {
@@ -137,11 +141,17 @@ func (m *SessionManager) Resume(ctx context.Context, id string) (*Session, error
 		}
 	}
 	s := m.spawn(ctx, id)
-	// Emit a system_marker so the transcript records the restart.
-	marker := protocol.NewSystemMarker(id, m.agent.Participant(), "session_resumed",
-		map[string]any{"prior_status": row.Status})
-	if err := s.emit(ctx, marker); err != nil {
-		m.logger.Warn("manager: emit session_resumed marker", "session", id, "err", err)
+	// Only emit the resume marker if spawn actually created a fresh
+	// goroutine (i.e. we won the race). Compare by pointer identity.
+	m.mu.RLock()
+	current := m.live[id]
+	m.mu.RUnlock()
+	if current == s {
+		marker := protocol.NewSystemMarker(id, m.agent.Participant(), "session_resumed",
+			map[string]any{"prior_status": row.Status})
+		if err := s.emit(ctx, marker); err != nil {
+			m.logger.Warn("manager: emit session_resumed marker", "session", id, "err", err)
+		}
 	}
 	return s, nil
 }
@@ -240,9 +250,16 @@ func (m *SessionManager) ShutdownAll(ctx context.Context) {
 // spawn registers a new live Session and starts its goroutine.
 // The session goroutine runs against m.rootCtx so it survives the
 // caller's context (typically an adapter's errgroup context).
+//
+// Re-checks live[id] under the write lock so concurrent Open/Resume
+// callers can't double-spawn an orphan goroutine.
 func (m *SessionManager) spawn(_ context.Context, id string) *Session {
 	s := NewSession(id, m.agent, m.store, m.models, m.commands, m.codec, m.logger)
 	m.mu.Lock()
+	if existing, ok := m.live[id]; ok {
+		m.mu.Unlock()
+		return existing
+	}
 	m.live[id] = s
 	m.mu.Unlock()
 	go func() {

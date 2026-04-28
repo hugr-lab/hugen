@@ -197,22 +197,11 @@ func (s *Session) handle(ctx context.Context, f protocol.Frame) error {
 	case *protocol.UserMessage:
 		return s.handleUserMessage(ctx, v)
 	case *protocol.SessionClosed:
-		// Persist + emit, then mark closed and exit the Run loop.
-		if err := s.emit(ctx, v); err != nil {
-			return err
-		}
-		s.closed.Store(true)
-		// Persist the status flip too.
-		_ = s.store.UpdateSessionStatus(ctx, s.id, StatusClosed)
-		// Closing the inbox unblocks Run's range and lets it return
-		// cleanly; any in-flight Send to Inbox will see channel-closed.
-		// We close it from inside the goroutine to avoid races with
-		// concurrent Submit calls.
-		go func() {
-			defer func() { _ = recover() }()
-			close(s.in)
-		}()
-		return nil
+		// SessionClosed never arrives inbound in phase 1 — the agent
+		// emits it itself via the /end handler, where it's caught
+		// inside handleSlashCommand. If it ever does, treat it as a
+		// passive frame: persist + fan out, no lifecycle effect.
+		return s.emit(ctx, v)
 	default:
 		// Other Frame kinds: persist and fan out unchanged.
 		return s.emit(ctx, v)
@@ -252,10 +241,27 @@ func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashComma
 		errFrame := protocol.NewError(s.id, s.agent.Participant(), "command_error", err.Error(), true)
 		return s.emit(ctx, errFrame)
 	}
+	var sawClose bool
 	for _, out := range frames {
+		if _, ok := out.(*protocol.SessionClosed); ok {
+			sawClose = true
+		}
 		if err := s.emit(ctx, out); err != nil {
 			return err
 		}
+	}
+	// If a handler emitted SessionClosed, persist status=closed and
+	// stop the loop. We close s.in from a side goroutine to avoid
+	// racing concurrent Submit calls; the recover guards against a
+	// double close from ShutdownAll.
+	if sawClose {
+		if err := s.MarkClosed(ctx); err != nil {
+			s.logger.Warn("session: MarkClosed", "session", s.id, "err", err)
+		}
+		go func() {
+			defer func() { _ = recover() }()
+			close(s.in)
+		}()
 	}
 	return nil
 }
@@ -402,11 +408,13 @@ func (s *Session) emitPendingSwitch(ctx context.Context) error {
 	return s.emit(ctx, marker)
 }
 
-// markClosed is called by the /end command after emitting
-// session_closed. Updates the row status.
-func (s *Session) markClosed(ctx context.Context) error {
+// MarkClosed flips the session status to closed and sets the
+// in-memory closed flag. Called by the built-in /end handler.
+// Idempotent: a second call is a no-op once the row is already
+// closed (status update is idempotent at the store level too).
+func (s *Session) MarkClosed(ctx context.Context) error {
 	if err := s.store.UpdateSessionStatus(ctx, s.id, StatusClosed); err != nil {
-		return err
+		return fmt.Errorf("session %s: mark closed: %w", s.id, err)
 	}
 	s.closed.Store(true)
 	return nil

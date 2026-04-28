@@ -7,13 +7,19 @@ import (
 	"github.com/hugr-lab/query-engine/types"
 )
 
+// buildIdentity selects the identity source for the configured mode:
+//
+//   - remote (personal-assistant): the agent acts as a hub user, so
+//     identity flows from the remote hub through hub.New.
+//   - local  (autonomous-agent):   the agent has no hub; identity is
+//     read from the local config.yaml.
+//
+// The previous "local-with-hub" hybrid branch was unreachable —
+// remoteQuerier is only constructed when boot.IsRemoteMode() — and
+// has been removed.
 func buildIdentity(boot *BootstrapConfig, remote types.Querier) identity.Source {
-	switch {
-	case boot.IsRemoteMode():
+	if boot.IsRemoteMode() {
 		return hub.New(remote)
-	case boot.IsLocalMode() && remote == nil:
-		return local.New(boot.ConfigPath)
-	default:
-		return local.NewWithHub(hub.New(remote), boot.ConfigPath)
 	}
+	return local.New(boot.ConfigPath)
 }

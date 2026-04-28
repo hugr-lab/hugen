@@ -92,6 +92,9 @@ func endHandler() runtime.CommandHandler {
 		if len(args) > 0 {
 			reason = joinArgs(args)
 		}
+		// The dispatcher in session.handleSlashCommand recognises a
+		// returned SessionClosed and runs MarkClosed after emitting
+		// it. The handler stays pure.
 		closed := protocol.NewSessionClosed(env.Session.ID(), env.AgentAuthor, reason)
 		return []protocol.Frame{closed}, nil
 	}

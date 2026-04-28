@@ -83,12 +83,15 @@ func runConsole(ctx context.Context) int {
 	logger.Info("starting hugen", "info", boot.Info())
 
 	// 1. Auth http server (handles OIDC callbacks even though phase 1
-	//    is mostly stdin-driven).
-	_, mux, err := startHTTPServer(ctx, boot, logger)
+	//    is mostly stdin-driven). Deferred shutdown covers every
+	//    early-return path below; on the happy path it also runs and
+	//    is a cheap no-op against the already-drained server.
+	httpSrv, mux, err := startHTTPServer(ctx, boot, logger)
 	if err != nil {
 		log.Printf("auth http: %v", err)
 		return 1
 	}
+	defer shutdownHTTPServer(httpSrv, logger)
 
 	authSvc, err := buildAuthService(ctx, boot, mux, logger)
 	if err != nil {
