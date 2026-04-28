@@ -388,6 +388,11 @@ func Validate(f Frame) error {
 		if v.Payload.Name == "" {
 			return fmt.Errorf("protocol: empty slash command name")
 		}
+	case *OpaqueFrame:
+		// OpaqueFrame round-trips deferred kinds the binary doesn't
+		// recognise. The BaseFrame checks above already enforce a
+		// non-empty kind / session / author / timestamp; the payload
+		// is opaque by design and not validated.
 	}
 	return nil
 }

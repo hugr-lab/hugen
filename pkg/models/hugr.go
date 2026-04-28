@@ -11,6 +11,7 @@ package models
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -290,7 +291,7 @@ func sendItem(ctx context.Context, out chan<- streamItem, it streamItem) error {
 }
 
 func isCanceled(err error) bool {
-	return err == context.Canceled || strings.Contains(err.Error(), context.Canceled.Error())
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // streamItem carries either a chunk or an error from the pump
@@ -301,6 +302,15 @@ type streamItem struct {
 }
 
 // hugrStream implements model.Stream over a Hugr GraphQL subscription.
+//
+// Lifecycle contract: callers MUST call Close() exactly once when
+// they are done with the stream — including the error case where
+// Next() returns a non-nil err. Close cancels the subscription's
+// context and drains the pump goroutine. Without it the pump can
+// remain blocked on its outbound channel until the upstream
+// subscription closes naturally (which, for a chat completion that
+// is mid-token, may never happen if the caller's parent context
+// stays alive).
 type hugrStream struct {
 	ch     chan streamItem
 	sub    *types.Subscription

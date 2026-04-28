@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	hugr "github.com/hugr-lab/query-engine"
+	"github.com/hugr-lab/query-engine/client"
 	"github.com/hugr-lab/query-engine/types"
 
 	"github.com/hugr-lab/hugen/pkg/auth"
@@ -43,8 +45,12 @@ type RuntimeCore struct {
 	Mux     *stdhttp.ServeMux
 
 	// Stored so cmd-level helpers and adapters can reuse them.
+	// LocalEngine is the typed handle owning the embedded DuckDB
+	// connection — held alongside LocalQuerier so Shutdown can call
+	// LocalEngine.Close() without an io.Closer round-trip.
+	LocalEngine   *hugr.Service
 	LocalQuerier  types.Querier
-	RemoteQuerier types.Querier
+	RemoteQuerier *client.Client
 
 	shutdownOnce sync.Once
 }
@@ -60,6 +66,15 @@ type RuntimeCore struct {
 // boot. On success the caller MUST defer Shutdown(ctx).
 func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	core := &RuntimeCore{}
+
+	// failed wraps an in-flight error and runs the cleanup that
+	// reverses every step of the build that has run so far. Used as
+	// `return nil, failed("step", err)` from the partial-failure
+	// branches below; keeps the per-step boilerplate to one line.
+	failed := func(step string, err error) error {
+		core.cleanupPartial()
+		return fmt.Errorf("buildRuntimeCore: %s: %w", step, err)
+	}
 
 	boot, err := loadBootstrapConfig(".env")
 	if err != nil {
@@ -78,8 +93,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 
 	authSvc, err := buildAuthService(ctx, boot, mux, core.Logger)
 	if err != nil {
-		shutdownHTTPServer(httpSrv, core.Logger)
-		return nil, fmt.Errorf("buildRuntimeCore: auth: %w", err)
+		return nil, failed("auth", err)
 	}
 	core.Auth = authSvc
 
@@ -90,17 +104,17 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 
 	cfg, err := buildRuntimeConfig(ctx, boot, core.Identity)
 	if err != nil {
-		shutdownHTTPServer(httpSrv, core.Logger)
-		return nil, fmt.Errorf("buildRuntimeCore: runtime_config: %w", err)
+		return nil, failed("runtime_config", err)
 	}
 	core.Cfg = cfg
 
 	if cfg.LocalDBEnabled() {
-		core.LocalQuerier, err = buildLocalEngine(ctx, cfg, core.Identity, core.Logger)
+		eng, err := buildLocalEngine(ctx, cfg, core.Identity, core.Logger)
 		if err != nil {
-			shutdownHTTPServer(httpSrv, core.Logger)
-			return nil, fmt.Errorf("buildRuntimeCore: local_engine: %w", err)
+			return nil, failed("local_engine", err)
 		}
+		core.LocalEngine = eng
+		core.LocalQuerier = eng
 	}
 
 	modelService := models.New(ctx, core.LocalQuerier, core.RemoteQuerier, cfg.Models, models.WithLogger(core.Logger))
@@ -108,8 +122,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	modelDefaults := models.IntentDefaults(modelService)
 	router, err := model.NewModelRouter(modelDefaults, modelMap)
 	if err != nil {
-		shutdownHTTPServer(httpSrv, core.Logger)
-		return nil, fmt.Errorf("buildRuntimeCore: models: %w", err)
+		return nil, failed("models", err)
 	}
 	core.Models = router
 	core.Logger.Info("model router ready",
@@ -119,26 +132,22 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	embedderEnabled := cfg.Embedding.Mode != "" && cfg.Embedding.Model != ""
 	store := chooseStore(core.LocalQuerier, core.RemoteQuerier, embedderEnabled)
 	if store == nil {
-		shutdownHTTPServer(httpSrv, core.Logger)
-		return nil, fmt.Errorf("buildRuntimeCore: store: no querier available (need local engine or remote hub)")
+		return nil, failed("store", fmt.Errorf("no querier available (need local engine or remote hub)"))
 	}
 
 	agentInfo, err := core.Identity.Agent(ctx)
 	if err != nil {
-		shutdownHTTPServer(httpSrv, core.Logger)
-		return nil, fmt.Errorf("buildRuntimeCore: identity: %w", err)
+		return nil, failed("identity", err)
 	}
 	agent, err := runtime.NewAgent(agentInfo.ID, agentInfo.Name, core.Identity)
 	if err != nil {
-		shutdownHTTPServer(httpSrv, core.Logger)
-		return nil, fmt.Errorf("buildRuntimeCore: agent: %w", err)
+		return nil, failed("agent", err)
 	}
 	core.Agent = agent
 
 	cmds := runtime.NewCommandRegistry()
 	if err := registerBuiltinCommands(cmds, core.Logger); err != nil {
-		shutdownHTTPServer(httpSrv, core.Logger)
-		return nil, fmt.Errorf("buildRuntimeCore: commands: %w", err)
+		return nil, failed("commands", err)
 	}
 	core.Commands = cmds
 
@@ -148,13 +157,36 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	return core, nil
 }
 
+// cleanupPartial closes every resource the build had opened so far.
+// Called from the partial-failure paths in buildRuntimeCore; mirrors
+// the cleanup Shutdown does on the success path. Idempotent — uses
+// the same per-resource nil checks Shutdown uses.
+func (c *RuntimeCore) cleanupPartial() {
+	if c.HTTPSrv != nil {
+		shutdownHTTPServer(c.HTTPSrv, c.Logger)
+	}
+	if c.LocalEngine != nil {
+		if err := c.LocalEngine.Close(); err != nil {
+			c.Logger.Warn("cleanup: close local engine", "err", err)
+		}
+	}
+	if c.RemoteQuerier != nil {
+		c.RemoteQuerier.CloseSubscriptions()
+	}
+}
+
 // Shutdown closes every resource RuntimeCore owns. Safe to call
 // multiple times; subsequent calls are no-ops.
 //
-// Order: stop accepting new HTTP traffic → suspend live sessions.
-// Per contracts/runtime-core.md §"Shutdown ordering rationale": new
-// requests can spawn new sessions, so listener-stop precedes
-// session-suspend.
+// Order, per contracts/runtime-core.md §"Shutdown ordering rationale":
+//
+//  1. Stop accepting new HTTP traffic. http.Server.Shutdown blocks
+//     until in-flight handlers (including SSE writers in slice B)
+//     complete or the deadline passes.
+//  2. Suspend live sessions — persists each session's status before
+//     the embedded engine closes underneath it.
+//  3. Close the local engine (DuckDB file handles + WAL flush).
+//  4. Drain in-flight remote subscriptions on the upstream client.
 func (c *RuntimeCore) Shutdown(ctx context.Context) {
 	c.shutdownOnce.Do(func() {
 		if c.HTTPSrv != nil {
@@ -164,9 +196,17 @@ func (c *RuntimeCore) Shutdown(ctx context.Context) {
 		if c.Manager != nil {
 			c.Logger.Info("shutdown: suspending sessions")
 			sCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
 			c.Manager.ShutdownAll(sCtx)
+			cancel()
 			c.Logger.Info("shutdown: sessions persisted")
+		}
+		if c.LocalEngine != nil {
+			if err := c.LocalEngine.Close(); err != nil {
+				c.Logger.Warn("shutdown: close local engine", "err", err)
+			}
+		}
+		if c.RemoteQuerier != nil {
+			c.RemoteQuerier.CloseSubscriptions()
 		}
 		c.Logger.Info("shutdown: complete")
 	})
