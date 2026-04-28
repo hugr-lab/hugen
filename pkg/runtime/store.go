@@ -72,6 +72,20 @@ type NoteRow struct {
 	CreatedAt       time.Time `json:"created_at"`
 }
 
+// ListEventsOpts is the parameter bundle for RuntimeStore.ListEvents.
+//
+//   - MinSeq=0 returns events from the start of the session (phase-1
+//     default; matches the previous int-only signature).
+//   - MinSeq>0 returns events with seq strictly greater than MinSeq;
+//     this is the reconnection-replay cursor consumed by
+//     pkg/adapter/http (Last-Event-ID header). See R-Plan-20.
+//   - Limit=0 means "use the implementation default" (1000 for the
+//     local store).
+type ListEventsOpts struct {
+	MinSeq int
+	Limit  int
+}
+
 // RuntimeStore is the persistence facade consumed by Session and
 // SessionManager. Declared at the consumer per constitution principle
 // III; *RuntimeStoreLocal below is the phase-1 implementation.
@@ -80,7 +94,7 @@ type RuntimeStore interface {
 	LoadSession(ctx context.Context, id string) (SessionRow, error)
 	UpdateSessionStatus(ctx context.Context, id, status string) error
 	AppendEvent(ctx context.Context, ev EventRow, summary string) error
-	ListEvents(ctx context.Context, sessionID string, limit int) ([]EventRow, error)
+	ListEvents(ctx context.Context, sessionID string, opts ListEventsOpts) ([]EventRow, error)
 	NextSeq(ctx context.Context, sessionID string) (int, error)
 	AppendNote(ctx context.Context, note NoteRow) error
 	ListNotes(ctx context.Context, sessionID string, limit int) ([]NoteRow, error)
@@ -275,15 +289,19 @@ func (s *RuntimeStoreLocal) AppendEvent(ctx context.Context, ev EventRow, summar
 	)
 }
 
-func (s *RuntimeStoreLocal) ListEvents(ctx context.Context, sessionID string, limit int) ([]EventRow, error) {
-	if limit <= 0 {
-		limit = 1000
+func (s *RuntimeStoreLocal) ListEvents(ctx context.Context, sessionID string, opts ListEventsOpts) ([]EventRow, error) {
+	if opts.Limit <= 0 {
+		opts.Limit = 1000
+	}
+	filter := map[string]any{"session_id": map[string]any{"eq": sessionID}}
+	if opts.MinSeq > 0 {
+		filter["seq"] = map[string]any{"gt": opts.MinSeq}
 	}
 	rows, err := queries.RunQuery[[]EventRow](ctx, s.querier,
-		`query ($sid: String!, $limit: Int) {
+		`query ($filter: hub_db_session_events_filter, $limit: Int) {
 			hub { db { agent {
 				session_events(
-					filter: {session_id: {eq: $sid}},
+					filter: $filter,
 					order_by: [{field: "seq", direction: ASC}],
 					limit: $limit
 				) {
@@ -292,7 +310,7 @@ func (s *RuntimeStoreLocal) ListEvents(ctx context.Context, sessionID string, li
 				}
 			}}}
 		}`,
-		map[string]any{"sid": sessionID, "limit": limit},
+		map[string]any{"filter": filter, "limit": opts.Limit},
 		"hub.db.agent.session_events",
 	)
 	if err != nil {

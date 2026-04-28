@@ -2,83 +2,111 @@ package models
 
 import (
 	"context"
-	"iter"
 	"sync"
 
 	"github.com/hugr-lab/query-engine/types"
-	"google.golang.org/adk/model"
+
+	"github.com/hugr-lab/hugen/pkg/model"
 )
 
 // Intent classifies the current LLM task for model routing.
 type Intent string
 
 const (
-	// IntentDefault is for general reasoning and user interaction.
-	IntentDefault Intent = "default"
-
-	// IntentToolCalling is for tool selection and execution (cheap model for sub-agents).
-	IntentToolCalling Intent = "tool_calling"
-
-	// IntentSummarization is for context compaction and summaries (cheap model).
-	IntentSummarization Intent = "summarization"
-
-	// IntentClassification is for intent/category detection (cheap model).
+	IntentDefault        Intent = "default"
+	IntentToolCalling    Intent = "tool_calling"
+	IntentSummarization  Intent = "summarization"
 	IntentClassification Intent = "classification"
 )
 
+// Service is the per-process registry of *HugrModel instances keyed
+// by intent name. Phase 2 (R-Plan-23) keyed it on pkg/model.Model
+// instead of the previous ADK adkmodel.LLM type. The shape of
+// New / ModelFor / BuildModelMap / IntentDefaults is unchanged.
 type Service struct {
 	config Config
 
 	local, remote types.Querier
 
 	mu           sync.RWMutex
-	defaultModel model.LLM
-	routes       map[Intent]model.LLM
+	defaultModel model.Model
+	routes       map[Intent]model.Model
 }
 
-func New(ctx context.Context, local, remote types.Querier, config Config, opts ...Option) *Service {
-
-	routes := make(map[Intent]model.LLM)
-	for intentStr, cfg := range config.Routes {
-		intent := Intent(intentStr)
-		if cfg.Mode == LocalMode {
-			routes[intent] = NewHugr(local, cfg.Model, append(opts, cfg.BuildOpts()...)...)
-		} else {
-			routes[intent] = NewHugr(remote, cfg.Model, append(opts, cfg.BuildOpts()...)...)
-		}
+func New(ctx context.Context, local, remote types.Querier, cfg Config, opts ...Option) *Service {
+	_ = ctx // reserved for future async config refresh
+	routes := make(map[Intent]model.Model, len(cfg.Routes))
+	for intentStr, route := range cfg.Routes {
+		routes[Intent(intentStr)] = newRouteModel(local, remote, route, opts)
 	}
-	var defaultModel model.LLM
-	if config.Mode == LocalMode {
-		defaultModel = NewHugr(local, config.Model, opts...)
-	} else {
-		defaultModel = NewHugr(remote, config.Model, opts...)
-	}
-
 	return &Service{
-		config:       config,
+		config:       cfg,
 		local:        local,
 		remote:       remote,
 		routes:       routes,
-		defaultModel: defaultModel,
+		defaultModel: newRouteModel(local, remote, cfg, opts),
 	}
 }
 
-// model.LLM interface — delegates via ModelFor(IntentDefault).
-func (r *Service) Name() string {
-	return r.ModelFor(IntentDefault).Name()
+func newRouteModel(local, remote types.Querier, cfg Config, opts []Option) model.Model {
+	if cfg.Mode == LocalMode {
+		return NewHugr(local, cfg.Model, append(opts, cfg.BuildOpts()...)...)
+	}
+	return NewHugr(remote, cfg.Model, append(opts, cfg.BuildOpts()...)...)
 }
 
-func (r *Service) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
-	return r.ModelFor(IntentDefault).GenerateContent(ctx, req, stream)
-}
-
-// ModelFor returns the model mapped to the given intent, falling back
-// to the default model when no explicit route is set.
-func (r *Service) ModelFor(intent Intent) model.LLM {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if m, ok := r.routes[intent]; ok {
+// ModelFor returns the model registered for the given intent,
+// falling back to the default model.
+func (s *Service) ModelFor(intent Intent) model.Model {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if m, ok := s.routes[intent]; ok {
 		return m
 	}
-	return r.defaultModel
+	return s.defaultModel
+}
+
+// BuildModelMap projects a Service's routes onto a {ModelSpec → Model}
+// registry, suitable for handing to model.NewModelRouter.
+func BuildModelMap(svc *Service) map[model.ModelSpec]model.Model {
+	out := make(map[model.ModelSpec]model.Model)
+	if svc == nil {
+		return out
+	}
+	if svc.defaultModel != nil {
+		out[svc.defaultModel.Spec()] = svc.defaultModel
+	}
+	for _, m := range svc.routes {
+		if m == nil {
+			continue
+		}
+		out[m.Spec()] = m
+	}
+	return out
+}
+
+// IntentDefaults projects a Service's routes onto an intent → spec
+// map. The default model becomes IntentDefault. If the operator
+// hasn't configured "cheap", it mirrors the default (phase-1 router
+// requires both intents to be present).
+func IntentDefaults(svc *Service) map[model.Intent]model.ModelSpec {
+	out := make(map[model.Intent]model.ModelSpec)
+	if svc == nil {
+		return out
+	}
+	if svc.defaultModel != nil {
+		out[model.IntentDefault] = svc.defaultModel.Spec()
+	}
+	for intentStr, m := range svc.routes {
+		if m == nil {
+			continue
+		}
+		out[model.Intent(intentStr)] = m.Spec()
+	}
+	if _, ok := out[model.IntentCheap]; !ok {
+		if def, defOk := out[model.IntentDefault]; defOk {
+			out[model.IntentCheap] = def
+		}
+	}
+	return out
 }

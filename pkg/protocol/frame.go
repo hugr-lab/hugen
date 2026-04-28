@@ -9,6 +9,7 @@ package protocol
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -208,6 +209,23 @@ type SystemMarker struct {
 	Payload SystemMarkerPayload
 }
 
+// OpaqueFrame represents a Frame variant the codec does not know.
+// Phase 2 introduces opaque round-trip so future-phase variants
+// (sub_agent_*, approval_*, clarification_*, ...) survive an
+// encode→decode→encode trip even when the running binary doesn't
+// act on them.
+//
+// Only the codec materialises *OpaqueFrame (via newOpaqueFrame);
+// runtime / adapter code never branches on it. The closed union for
+// consumers stays closed. See
+// specs/002-agent-runtime-phase-2/contracts/sse-wire-format.md
+// §"Variants on the wire".
+type OpaqueFrame struct {
+	BaseFrame
+	KindRaw    string
+	RawPayload json.RawMessage
+}
+
 func (f UserMessage) payload() any      { return f.Payload }
 func (f AgentMessage) payload() any     { return f.Payload }
 func (f Reasoning) payload() any        { return f.Payload }
@@ -221,6 +239,16 @@ func (f SessionSuspended) payload() any { return f.Payload }
 func (f Heartbeat) payload() any        { return f.Payload }
 func (f Error) payload() any            { return f.Payload }
 func (f SystemMarker) payload() any     { return f.Payload }
+func (f OpaqueFrame) payload() any      { return f.RawPayload }
+
+// newOpaqueFrame is package-private so only the codec materialises
+// opaque frames. base.K MUST equal kindRaw at the call site.
+func newOpaqueFrame(base BaseFrame, kindRaw string, rawPayload json.RawMessage) *OpaqueFrame {
+	if len(rawPayload) == 0 {
+		rawPayload = json.RawMessage("{}")
+	}
+	return &OpaqueFrame{BaseFrame: base, KindRaw: kindRaw, RawPayload: rawPayload}
+}
 
 // Constructors fill defaults so callers can pass partial structs.
 
