@@ -1,0 +1,35 @@
+:root {
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --fg: #222;
+  --muted: #666;
+  --bg: #fff;
+  --accent: #2a6df4;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --fg: #e8e8e8; --muted: #999; --bg: #1a1a1a; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--fg); }
+body { display: flex; flex-direction: column; }
+header {
+  display: flex; align-items: center; gap: 0.75rem;
+  padding: 0.5rem 1rem; border-bottom: 1px solid #ccc4;
+}
+header .title { font-weight: 600; }
+header .session { color: var(--muted); font-family: ui-monospace, monospace; font-size: 0.85em; }
+header button { margin-left: auto; }
+main { flex: 1; overflow-y: auto; padding: 1rem; }
+#log { display: flex; flex-direction: column; gap: 0.75rem; max-width: 48rem; margin: 0 auto; }
+.section { white-space: pre-wrap; word-wrap: break-word; line-height: 1.45; }
+.section.user-message { padding-left: 0.75rem; border-left: 3px solid var(--accent); }
+.section.agent-message { padding-left: 0.75rem; border-left: 3px solid #88c08a; }
+.section.reasoning { color: var(--muted); font-style: italic; padding-left: 0.75rem; border-left: 3px solid #aaa6; }
+.section.system { color: var(--muted); font-size: 0.9em; }
+.section.error { color: #c93a3a; }
+footer { display: flex; gap: 0.5rem; padding: 0.5rem 1rem; border-top: 1px solid #ccc4; }
+footer textarea {
+  flex: 1; resize: none; font: inherit; padding: 0.5rem; min-height: 2.5rem;
+  background: var(--bg); color: var(--fg); border: 1px solid #aaa6; border-radius: 4px;
+}
+.hint { color: var(--muted); font-size: 0.75em; padding: 0 1rem 0.5rem; margin: 0; }

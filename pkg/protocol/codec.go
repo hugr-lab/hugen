@@ -160,7 +160,14 @@ func (c *Codec) materialise(base BaseFrame, payload []byte) (Frame, error) {
 		}
 		return &SystemMarker{BaseFrame: base, Payload: p}, nil
 	}
-	return nil, fmt.Errorf("%w: %q", ErrUnknownKind, base.K)
+	// Phase 2 (R-Plan-26 / FR-024): non-empty unknown kinds round-trip
+	// as *OpaqueFrame so future-phase variants survive the wire even
+	// when the running binary doesn't act on them. An empty kind is
+	// still treated as a malformed envelope.
+	if base.K == "" {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownKind, base.K)
+	}
+	return newOpaqueFrame(base, string(base.K), append(json.RawMessage(nil), payload...)), nil
 }
 
 func unmarshalPayload(raw []byte, into any) error {

@@ -97,7 +97,7 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 			return fmt.Errorf("console: resume %s: %w", a.resume, err)
 		}
 	} else {
-		session, err = host.OpenSession(ctx, adapter.OpenRequest{
+		session, _, err = host.OpenSession(ctx, adapter.OpenRequest{
 			OwnerID:      a.user.ID,
 			Participants: []protocol.ParticipantInfo{a.user},
 		})

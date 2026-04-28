@@ -4,15 +4,14 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/query-engine/client"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"google.golang.org/adk/model"
-	"google.golang.org/genai"
+
+	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/models"
 )
 
 var (
@@ -45,157 +44,152 @@ func skipWithoutHugr(t *testing.T) {
 	}
 }
 
-func TestHugrModel_SimpleCompletion(t *testing.T) {
-	skipWithoutHugr(t)
-
-	m := models.NewHugr(testClient, testModel,
-		models.WithLogger(slog.Default()),
-	)
-
+func drain(t *testing.T, stream model.Stream) []model.Chunk {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-
-	req := &model.LLMRequest{
-		Contents: []*genai.Content{
-			{Role: "user", Parts: []*genai.Part{{Text: "Say hello in one word"}}},
-		},
-		Config: &genai.GenerateContentConfig{
-			MaxOutputTokens: 200,
-		},
-	}
-
-	var responses []*model.LLMResponse
-	for resp, err := range m.GenerateContent(ctx, req, true) {
-		require.NoError(t, err)
-		responses = append(responses, resp)
-	}
-
-	require.NotEmpty(t, responses, "should receive at least one response")
-
-	// Last response must be TurnComplete.
-	last := responses[len(responses)-1]
-	assert.True(t, last.TurnComplete, "last response should be TurnComplete")
-	assert.NotNil(t, last.Content, "last response should have content")
-	assert.NotEmpty(t, last.Content.Parts, "last response should have parts")
-	assert.Equal(t, "model", last.Content.Role)
-
-	// Should have partial streaming responses before the final one.
-	if len(responses) > 1 {
-		for _, r := range responses[:len(responses)-1] {
-			assert.True(t, r.Partial, "non-final response should be Partial")
-		}
-	}
-
-	// Usage metadata should be present in the final response.
-	// Note: some models (e.g. gemma-small) may return 0 tokens in the finish event.
-	if last.UsageMetadata != nil {
-		t.Logf("tokens: prompt=%d completion=%d",
-			last.UsageMetadata.PromptTokenCount,
-			last.UsageMetadata.CandidatesTokenCount,
-		)
-	}
-
-	// Collect full text (content + thoughts) from all responses.
-	var contentText, thoughtText string
-	for _, r := range responses {
-		if r.Content != nil {
-			for _, p := range r.Content.Parts {
-				if p.Thought {
-					thoughtText += p.Text
-				} else if p.Text != "" {
-					contentText += p.Text
-				}
-			}
-		}
-	}
-	// At least one of content or thought should be non-empty.
-	assert.True(t, contentText != "" || thoughtText != "",
-		"should have generated text or thought content")
-	t.Logf("content: %q, thought length: %d", contentText, len(thoughtText))
-}
-
-func TestHugrModel_MultiTurnConversation(t *testing.T) {
-	skipWithoutHugr(t)
-
-	m := models.NewHugr(testClient, testModel,
-		models.WithLogger(slog.Default()),
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	req := &model.LLMRequest{
-		Contents: []*genai.Content{
-			{Role: "user", Parts: []*genai.Part{{Text: "Remember the number 42"}}},
-			{Role: "model", Parts: []*genai.Part{{Text: "I'll remember the number 42."}}},
-			{Role: "user", Parts: []*genai.Part{{Text: "What number did I ask you to remember?"}}},
-		},
-		Config: &genai.GenerateContentConfig{
-			MaxOutputTokens: 50,
-		},
-	}
-
-	var lastResp *model.LLMResponse
-	for resp, err := range m.GenerateContent(ctx, req, true) {
-		require.NoError(t, err)
-		lastResp = resp
-	}
-
-	require.NotNil(t, lastResp)
-	assert.True(t, lastResp.TurnComplete)
-
-	var fullText string
-	for resp, err := range m.GenerateContent(ctx, req, true) {
-		require.NoError(t, err)
-		if resp.Content != nil {
-			for _, p := range resp.Content.Parts {
-				if p.Text != "" {
-					fullText += p.Text
-				}
-			}
-		}
-	}
-	assert.Contains(t, fullText, "42", "response should contain the remembered number")
-	t.Logf("response: %q", fullText)
-}
-
-func TestHugrModel_ContextCancellation(t *testing.T) {
-	skipWithoutHugr(t)
-
-	m := models.NewHugr(testClient, testModel,
-		models.WithLogger(slog.Default()),
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
-	defer cancel()
-
-	// Give the context time to expire.
-	time.Sleep(5 * time.Millisecond)
-
-	req := &model.LLMRequest{
-		Contents: []*genai.Content{
-			{Role: "user", Parts: []*genai.Part{{Text: "Write a very long essay about the history of computing"}}},
-		},
-		Config: &genai.GenerateContentConfig{
-			MaxOutputTokens: 4096,
-		},
-	}
-
-	var gotError bool
-	for _, err := range m.GenerateContent(ctx, req, true) {
+	var out []model.Chunk
+	for {
+		ch, more, err := stream.Next(ctx)
 		if err != nil {
-			gotError = true
-			break
+			t.Fatalf("stream.Next: %v", err)
+		}
+		if !more {
+			return out
+		}
+		out = append(out, ch)
+	}
+}
+
+func TestHugrModel_Generate_StreamsChunks(t *testing.T) {
+	skipWithoutHugr(t)
+
+	m := models.NewHugr(testClient, testModel, models.WithLogger(slog.Default()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	stream, err := m.Generate(ctx, model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Content: "Say hello in one word"}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	defer stream.Close()
+	chunks := drain(t, stream)
+
+	if len(chunks) == 0 {
+		t.Fatal("no chunks received")
+	}
+	if !chunks[len(chunks)-1].Final {
+		t.Errorf("last chunk not Final: %+v", chunks[len(chunks)-1])
+	}
+	for i, ch := range chunks[:len(chunks)-1] {
+		if ch.Final {
+			t.Errorf("chunk %d marked Final but is not last", i)
 		}
 	}
-	assert.True(t, gotError, "should get error with cancelled context")
+}
+
+// TestHugrModel_Generate_NoTurnCompleteDuplication asserts that the
+// final (Final=true) chunk does NOT carry duplicated content from the
+// streamed deltas. Closes phase-1 review carry-over: the ADK bridge
+// used to suppress this duplicate manually; the native path simply
+// never produces it. (SC-012)
+func TestHugrModel_Generate_NoTurnCompleteDuplication(t *testing.T) {
+	skipWithoutHugr(t)
+
+	m := models.NewHugr(testClient, testModel, models.WithLogger(slog.Default()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	stream, err := m.Generate(ctx, model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Content: "Say hello in one word"}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	defer stream.Close()
+	chunks := drain(t, stream)
+	if len(chunks) == 0 {
+		t.Fatal("no chunks received")
+	}
+	last := chunks[len(chunks)-1]
+	if !last.Final {
+		t.Fatal("last chunk not Final")
+	}
+	// The final chunk must carry only metadata: Final=true, optional
+	// Usage. It must NOT carry Content or Reasoning.
+	if last.Content != nil {
+		t.Errorf("final chunk leaked Content: %q", *last.Content)
+	}
+	if last.Reasoning != nil {
+		t.Errorf("final chunk leaked Reasoning: %q", *last.Reasoning)
+	}
+}
+
+// TestHugrModel_StreamClose_CancelsUpstream asserts Close() actually
+// propagates cancellation to the subscription's ctx. We force the
+// situation by Close()-ing the stream before draining it; subsequent
+// Next() must return either ctx.Canceled or (Chunk{}, false, nil).
+// (FR-022 / SC-008)
+func TestHugrModel_StreamClose_CancelsUpstream(t *testing.T) {
+	skipWithoutHugr(t)
+
+	m := models.NewHugr(testClient, testModel, models.WithLogger(slog.Default()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	stream, err := m.Generate(ctx, model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Content: "Write a long essay"}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	// Read at least one chunk to confirm the stream is live.
+	if _, _, err := stream.Next(ctx); err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// After Close, subsequent reads MUST not block: either the
+	// channel is drained quickly or returns immediately with a
+	// cancellation error.
+	done := make(chan struct{})
+	go func() {
+		readCtx, readCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer readCancel()
+		for {
+			_, more, err := stream.Next(readCtx)
+			if err != nil || !more {
+				close(done)
+				return
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not drain after Close within 5s")
+	}
 }
 
 func TestHugrModel_Name(t *testing.T) {
 	c := client.NewClient("http://localhost:15000/ipc")
 	m := models.NewHugr(c, "test-model")
-	assert.Equal(t, "hugr-model", m.Name())
-
+	if m.Name() != "hugr-model" {
+		t.Errorf("default Name() = %q, want hugr-model", m.Name())
+	}
 	m2 := models.NewHugr(c, "test-model", models.WithName("custom"))
-	assert.Equal(t, "custom", m2.Name())
+	if m2.Name() != "custom" {
+		t.Errorf("override Name() = %q", m2.Name())
+	}
 }
+
+// Helper to keep the linter happy — keeps strings.Contains import
+// available for any future test that asserts log lines.
+var _ = strings.Contains

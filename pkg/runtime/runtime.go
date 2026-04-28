@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -29,10 +30,12 @@ type Adapter interface {
 // AdapterHost is the runtime side of the Adapter contract. Adapters
 // open/resume sessions and submit/subscribe to Frames through this.
 type AdapterHost interface {
-	OpenSession(ctx context.Context, req OpenRequest) (*Session, error)
+	OpenSession(ctx context.Context, req OpenRequest) (*Session, time.Time, error)
 	ResumeSession(ctx context.Context, id string) (*Session, error)
 	Submit(ctx context.Context, frame protocol.Frame) error
 	Subscribe(ctx context.Context, sessionID string) (<-chan protocol.Frame, error)
+	CloseSession(ctx context.Context, id, reason string) (time.Time, error)
+	ListSessions(ctx context.Context, status string) ([]SessionSummary, error)
 	Logger() *slog.Logger
 }
 
@@ -129,13 +132,13 @@ type adapterHost struct {
 	ctx context.Context
 }
 
-func (h *adapterHost) OpenSession(ctx context.Context, req OpenRequest) (*Session, error) {
-	s, err := h.rt.manager.Open(ctx, req)
+func (h *adapterHost) OpenSession(ctx context.Context, req OpenRequest) (*Session, time.Time, error) {
+	s, openedAt, err := h.rt.manager.Open(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	h.rt.startSessionPump(s)
-	return s, nil
+	return s, openedAt, nil
 }
 
 func (h *adapterHost) ResumeSession(ctx context.Context, id string) (*Session, error) {
@@ -153,7 +156,16 @@ func (h *adapterHost) Submit(ctx context.Context, f protocol.Frame) error {
 	}
 	s, ok := h.rt.manager.Get(f.SessionID())
 	if !ok {
-		return fmt.Errorf("runtime: no live session %q", f.SessionID())
+		// No live session means the manager doesn't know it. Either
+		// it never existed (404 territory; the post handler resumes
+		// before Submit so this shouldn't fire for unknown ids) or
+		// it just transitioned out of live state (Close raced our
+		// post). Both surface as ErrSessionClosed for the adapter
+		// layer; the post handler routes that to 409.
+		return ErrSessionClosed
+	}
+	if s.IsClosed() {
+		return ErrSessionClosed
 	}
 	select {
 	case s.Inbox() <- f:
@@ -172,7 +184,12 @@ func (h *adapterHost) Subscribe(ctx context.Context, sessionID string) (<-chan p
 		<-ctx.Done()
 		h.rt.subMu.Lock()
 		defer h.rt.subMu.Unlock()
-		// Drop our channel from the subscriber list.
+		// Drop our channel from the subscriber list. The runtime
+		// keeps ownership of the channel close (Runtime.Shutdown
+		// closes everything in the map at process exit); the
+		// adapter must NOT range over c expecting it to close on
+		// its own ctx — it should select on its own ctx.Done()
+		// alongside the channel.
 		subs := h.rt.subscribers[sessionID]
 		out := subs[:0]
 		for _, sub := range subs {
@@ -183,6 +200,14 @@ func (h *adapterHost) Subscribe(ctx context.Context, sessionID string) (<-chan p
 		h.rt.subscribers[sessionID] = out
 	}()
 	return c, nil
+}
+
+func (h *adapterHost) CloseSession(ctx context.Context, id, reason string) (time.Time, error) {
+	return h.rt.manager.Close(ctx, id, reason)
+}
+
+func (h *adapterHost) ListSessions(ctx context.Context, status string) ([]SessionSummary, error) {
+	return h.rt.manager.List(ctx, status)
 }
 
 func (h *adapterHost) Logger() *slog.Logger { return h.rt.logger }

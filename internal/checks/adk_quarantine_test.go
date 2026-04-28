@@ -13,17 +13,21 @@ import (
 
 // TestADKQuarantine enforces the constitutional rule:
 //
-//	"`google.golang.org/adk` and its transitive `genai` are
-//	 quarantined to `pkg/models` only."
+//	"No `google.golang.org/adk` and no `google.golang.org/genai`
+//	 anywhere in the binary."
 //
-// The test fails if any package below the listed leaves transitively
-// imports adk or genai. cmd/hugen and pkg/models are intentionally
-// excluded — they are the legitimate consumers of pkg/models's
-// ADK-bridging surface.
+// Phase 1 quarantined ADK below pkg/models. Phase 2 (R-Plan-23 /
+// R-Plan-24) finished the eviction: pkg/models, cmd/hugen, and the
+// rest of the binary have zero adk/genai deps. The orphaned legacy
+// pkg/a2a still has the deps; it is intentionally excluded — it is
+// not in the binary, and phase 10 retires it. Adding pkg/a2a back
+// to the binary requires fixing its deps first or this test fails.
 func TestADKQuarantine(t *testing.T) {
 	leaves := []string{
+		"github.com/hugr-lab/hugen/cmd/hugen/...",
 		"github.com/hugr-lab/hugen/pkg/protocol/...",
 		"github.com/hugr-lab/hugen/pkg/model/...",
+		"github.com/hugr-lab/hugen/pkg/models/...",
 		"github.com/hugr-lab/hugen/pkg/runtime/...",
 		"github.com/hugr-lab/hugen/pkg/adapter/...",
 	}
@@ -41,10 +45,11 @@ func TestADKQuarantine(t *testing.T) {
 	}
 	if len(leaks) > 0 {
 		t.Fatalf(
-			"ADK / genai imported below pkg/models — constitution violation.\n"+
+			"ADK / genai imported in the hugen binary — constitution violation.\n"+
 				"Leaks (sorted):\n  %s\n\n"+
-				"Remediation: keep ADK + genai as private internals of pkg/models. "+
-				"Runtime-side callers must consume pkg/model.Model and friends.",
+				"Remediation: ADK was fully evicted in phase 2. Runtime-side "+
+				"callers must consume pkg/model.Model directly. The orphaned "+
+				"pkg/a2a package keeps ADK deps until phase 10 retires it.",
 			strings.Join(leaks, "\n  "),
 		)
 	}

@@ -1,232 +1,197 @@
 package models
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/hugr-lab/query-engine/types"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"google.golang.org/genai"
+
+	"github.com/hugr-lab/hugen/pkg/model"
 )
 
-func TestAdkToHugrMessages(t *testing.T) {
-	tests := []struct {
-		name     string
-		contents []*genai.Content
-		wantLen  int
-		wantErr  bool
+func TestMessagesToHugrJSON_RoleMapping(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantRole string
 	}{
-		{
-			name: "single user text message",
-			contents: []*genai.Content{
-				{Role: "user", Parts: []*genai.Part{{Text: "hello"}}},
-			},
-			wantLen: 1,
-		},
-		{
-			name: "multi-turn conversation",
-			contents: []*genai.Content{
-				{Role: "user", Parts: []*genai.Part{{Text: "what is 2+2?"}}},
-				{Role: "model", Parts: []*genai.Part{{Text: "4"}}},
-				{Role: "user", Parts: []*genai.Part{{Text: "thanks"}}},
-			},
-			wantLen: 3,
-		},
-		{
-			name: "model with function call",
-			contents: []*genai.Content{
-				{Role: "model", Parts: []*genai.Part{{
-					FunctionCall: &genai.FunctionCall{
-						ID:   "call_1",
-						Name: "search",
-						Args: map[string]any{"query": "test"},
-					},
-				}}},
-			},
-			wantLen: 1,
-		},
-		{
-			name: "function response",
-			contents: []*genai.Content{
-				{Role: "function", Parts: []*genai.Part{{
-					FunctionResponse: &genai.FunctionResponse{
-						ID:       "call_1",
-						Name:     "search",
-						Response: map[string]any{"result": "found"},
-					},
-				}}},
-			},
-			wantLen: 1,
-		},
-		{
-			name:     "empty contents",
-			contents: nil,
-			wantLen:  0,
-		},
+		{model.RoleUser, "user"},
+		{model.RoleAssistant, "assistant"},
+		{"model", "assistant"},
+		{model.RoleSystem, "system"},
+		{model.RoleTool, "tool"},
+		{"function", "tool"},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			msgs, err := adkToHugrMessages(tt.contents)
-			if tt.wantErr {
-				require.Error(t, err)
-				return
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			out, err := messagesToHugrJSON([]model.Message{{Role: c.in, Content: "hi"}})
+			if err != nil {
+				t.Fatalf("err: %v", err)
 			}
-			require.NoError(t, err)
-			assert.Len(t, msgs, tt.wantLen)
-		})
-	}
-}
-
-func TestAdkToHugrMessages_RoleMapping(t *testing.T) {
-	contents := []*genai.Content{
-		{Role: "user", Parts: []*genai.Part{{Text: "hi"}}},
-		{Role: "model", Parts: []*genai.Part{{Text: "hello"}}},
-	}
-
-	msgs, err := adkToHugrMessages(contents)
-	require.NoError(t, err)
-	require.Len(t, msgs, 2)
-
-	assert.Contains(t, msgs[0], `"role":"user"`)
-	assert.Contains(t, msgs[1], `"role":"assistant"`)
-}
-
-func TestAdkToHugrTools(t *testing.T) {
-	tests := []struct {
-		name    string
-		tools   []*genai.Tool
-		wantLen int
-	}{
-		{
-			name:    "nil tools",
-			tools:   nil,
-			wantLen: 0,
-		},
-		{
-			name:    "empty slice",
-			tools:   []*genai.Tool{},
-			wantLen: 0,
-		},
-		{
-			name: "single tool declaration",
-			tools: []*genai.Tool{{
-				FunctionDeclarations: []*genai.FunctionDeclaration{{
-					Name:        "search",
-					Description: "Search for data",
-				}},
-			}},
-			wantLen: 1,
-		},
-		{
-			name: "multiple declarations in one tool",
-			tools: []*genai.Tool{{
-				FunctionDeclarations: []*genai.FunctionDeclaration{
-					{Name: "tool1"},
-					{Name: "tool2"},
-					{Name: "tool3"},
-				},
-			}},
-			wantLen: 3,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, err := adkToHugrTools(tt.tools)
-			require.NoError(t, err)
-			assert.Len(t, result, tt.wantLen)
-		})
-	}
-}
-
-func TestHugrResultToADKContent(t *testing.T) {
-	tests := []struct {
-		name          string
-		result        types.LLMResult
-		wantPartsLen  int
-		wantText      string
-		wantFuncCalls int
-	}{
-		{
-			name: "text only response",
-			result: types.LLMResult{
-				Content: "Hello, world!",
-			},
-			wantPartsLen:  1,
-			wantText:      "Hello, world!",
-			wantFuncCalls: 0,
-		},
-		{
-			name: "tool call response",
-			result: types.LLMResult{
-				Content: "",
-				ToolCalls: []types.LLMToolCall{
-					{ID: "call_1", Name: "search", Arguments: map[string]any{"q": "test"}},
-				},
-			},
-			wantPartsLen:  1,
-			wantFuncCalls: 1,
-		},
-		{
-			name: "text plus tool call",
-			result: types.LLMResult{
-				Content: "Let me search for that.",
-				ToolCalls: []types.LLMToolCall{
-					{ID: "call_1", Name: "search", Arguments: map[string]any{"q": "data"}},
-				},
-			},
-			wantPartsLen:  2,
-			wantText:      "Let me search for that.",
-			wantFuncCalls: 1,
-		},
-		{
-			name:          "empty response",
-			result:        types.LLMResult{},
-			wantPartsLen:  1,
-			wantText:      "",
-			wantFuncCalls: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			content := hugrResultToADKContent(tt.result)
-			require.NotNil(t, content)
-			assert.Equal(t, "model", content.Role)
-			assert.Len(t, content.Parts, tt.wantPartsLen)
-
-			var funcCalls int
-			for _, p := range content.Parts {
-				if p.FunctionCall != nil {
-					funcCalls++
-				}
-				if tt.wantText != "" && p.Text != "" {
-					assert.Equal(t, tt.wantText, p.Text)
-				}
+			if len(out) != 1 {
+				t.Fatalf("len=%d, want 1", len(out))
 			}
-			assert.Equal(t, tt.wantFuncCalls, funcCalls)
+			var m map[string]any
+			if err := json.Unmarshal([]byte(out[0]), &m); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if m["role"] != c.wantRole {
+				t.Errorf("role=%v, want %s", m["role"], c.wantRole)
+			}
+			if m["content"] != "hi" {
+				t.Errorf("content=%v, want %q", m["content"], "hi")
+			}
 		})
 	}
 }
 
-func TestMapFinishReason(t *testing.T) {
-	tests := []struct {
-		hugr string
-		want genai.FinishReason
-	}{
-		{"stop", genai.FinishReasonStop},
-		{"length", genai.FinishReasonMaxTokens},
-		{"max_tokens", genai.FinishReasonMaxTokens},
-		{"tool_use", genai.FinishReasonStop},
-		{"unknown", genai.FinishReasonOther},
-		{"", genai.FinishReasonOther},
+func TestMessagesToHugrJSON_RejectsEmptyRole(t *testing.T) {
+	if _, err := messagesToHugrJSON([]model.Message{{Content: "x"}}); err == nil {
+		t.Fatal("expected error for empty role")
 	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.hugr, func(t *testing.T) {
-			got := mapFinishReason(tt.hugr)
-			assert.Equal(t, tt.want, got)
-		})
+func TestMessagesToHugrJSON_PreservesToolCallID(t *testing.T) {
+	out, err := messagesToHugrJSON([]model.Message{
+		{Role: model.RoleTool, Content: "ok", ToolCallID: "call_42"},
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
 	}
+	if len(out) != 1 {
+		t.Fatalf("len=%d, want 1", len(out))
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(out[0]), &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["tool_call_id"] != "call_42" {
+		t.Errorf("tool_call_id=%v, want call_42", m["tool_call_id"])
+	}
+}
+
+func TestMessagesToHugrJSON_MultiTurn(t *testing.T) {
+	out, err := messagesToHugrJSON([]model.Message{
+		{Role: model.RoleUser, Content: "what is 2+2?"},
+		{Role: model.RoleAssistant, Content: "4"},
+		{Role: model.RoleUser, Content: "thanks"},
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("len=%d, want 3", len(out))
+	}
+	wantRoles := []string{"user", "assistant", "user"}
+	for i, want := range wantRoles {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(out[i]), &m); err != nil {
+			t.Fatalf("unmarshal %d: %v", i, err)
+		}
+		if m["role"] != want {
+			t.Errorf("[%d] role=%v, want %s", i, m["role"], want)
+		}
+	}
+}
+
+func TestToolsToHugrJSON_DefaultsParameters(t *testing.T) {
+	out, err := toolsToHugrJSON([]model.Tool{
+		{Name: "search", Description: "Search the web"},
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("len=%d, want 1", len(out))
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(out[0]), &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["name"] != "search" {
+		t.Errorf("name=%v", m["name"])
+	}
+	params, ok := m["parameters"].(map[string]any)
+	if !ok {
+		t.Fatalf("parameters not an object: %T", m["parameters"])
+	}
+	if params["type"] != "object" {
+		t.Errorf("default schema missing type=object, got %v", params)
+	}
+}
+
+func TestToolsToHugrJSON_PreservesSchema(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"q": map[string]any{"type": "string"},
+		},
+		"required": []any{"q"},
+	}
+	out, err := toolsToHugrJSON([]model.Tool{
+		{Name: "search", Schema: schema},
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(out[0]), &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got, _ := json.Marshal(m["parameters"])
+	want, _ := json.Marshal(schema)
+	if string(got) != string(want) {
+		t.Errorf("schema drift:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestStreamEventToChunk asserts the Hugr-event → Chunk mapping the
+// pump goroutine relies on. (Phase 2 / R-Plan-23 / SC-012 — no
+// duplicate content at end-of-turn.)
+func TestStreamEventToChunk_ContentDelta(t *testing.T) {
+	ch, ok := streamEventToChunk(streamEvent("content_delta", "Hello"))
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if ch.Content == nil || *ch.Content != "Hello" {
+		t.Errorf("Content=%v, want Hello", ch.Content)
+	}
+	if ch.Reasoning != nil {
+		t.Errorf("Reasoning leaked: %v", *ch.Reasoning)
+	}
+	if ch.Final {
+		t.Errorf("Final must be false on a delta")
+	}
+}
+
+func TestStreamEventToChunk_Reasoning(t *testing.T) {
+	ch, ok := streamEventToChunk(streamEvent("reasoning", "thinking..."))
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if ch.Reasoning == nil || *ch.Reasoning != "thinking..." {
+		t.Errorf("Reasoning=%v", ch.Reasoning)
+	}
+	if ch.Content != nil {
+		t.Errorf("Content leaked")
+	}
+}
+
+func TestStreamEventToChunk_EmptyContentSkipped(t *testing.T) {
+	if _, ok := streamEventToChunk(streamEvent("content_delta", "")); ok {
+		t.Error("empty content_delta must be skipped")
+	}
+	if _, ok := streamEventToChunk(streamEvent("reasoning", "")); ok {
+		t.Error("empty reasoning must be skipped")
+	}
+}
+
+func TestStreamEventToChunk_UnknownEventSkipped(t *testing.T) {
+	if _, ok := streamEventToChunk(streamEvent("totally_new", "x")); ok {
+		t.Error("unknown event must be skipped silently")
+	}
+}
+
+// streamEvent is a tiny builder for types.LLMStreamEvent.
+func streamEvent(typ, content string) types.LLMStreamEvent {
+	return types.LLMStreamEvent{Type: typ, Content: content}
 }

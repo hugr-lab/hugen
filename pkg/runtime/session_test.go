@@ -54,12 +54,18 @@ func (s *fakeStore) AppendEvent(_ context.Context, ev EventRow, _ string) error 
 	return nil
 }
 
-func (s *fakeStore) ListEvents(_ context.Context, _ string, limit int) ([]EventRow, error) {
+func (s *fakeStore) ListEvents(_ context.Context, _ string, opts ListEventsOpts) ([]EventRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := append([]EventRow(nil), s.events...)
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
+	out := make([]EventRow, 0, len(s.events))
+	for _, ev := range s.events {
+		if opts.MinSeq > 0 && ev.Seq <= opts.MinSeq {
+			continue
+		}
+		out = append(out, ev)
+	}
+	if opts.Limit > 0 && len(out) > opts.Limit {
+		out = out[:opts.Limit]
 	}
 	return out, nil
 }

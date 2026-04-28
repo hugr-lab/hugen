@@ -146,6 +146,20 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 	if perr != nil {
 		return fmt.Errorf("session %s: project frame: %w", s.id, perr)
 	}
+	// Allocate the seq cursor BEFORE AppendEvent so the in-memory
+	// Frame can be tagged with its seq atomically with persistence.
+	// Session.Run is a single goroutine per session, so NextSeq +
+	// AppendEvent + outbox push has no within-session race; the
+	// per-session seq column has a uniqueness invariant the store
+	// upholds across sessions.
+	nextSeq, perr := s.store.NextSeq(ctx, s.id)
+	if perr != nil {
+		return fmt.Errorf("session %s: next seq: %w", s.id, perr)
+	}
+	row.Seq = nextSeq
+	if setter, ok := f.(protocol.SeqSetter); ok {
+		setter.SetSeq(nextSeq)
+	}
 	if perr := s.store.AppendEvent(ctx, row, summary); perr != nil {
 		return fmt.Errorf("session %s: persist frame: %w", s.id, perr)
 	}

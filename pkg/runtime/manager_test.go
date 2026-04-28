@@ -18,9 +18,9 @@ type instrumentedStore struct {
 	listEventsCalls atomic.Int32
 }
 
-func (s *instrumentedStore) ListEvents(ctx context.Context, sid string, limit int) ([]EventRow, error) {
+func (s *instrumentedStore) ListEvents(ctx context.Context, sid string, opts ListEventsOpts) ([]EventRow, error) {
 	s.listEventsCalls.Add(1)
-	return s.fakeStore.ListEvents(ctx, sid, limit)
+	return s.fakeStore.ListEvents(ctx, sid, opts)
 }
 
 func newTestManager(t *testing.T, store RuntimeStore) *SessionManager {
@@ -120,7 +120,7 @@ func TestSessionManager_ResumeNotFound(t *testing.T) {
 func TestSessionManager_OpenAndList(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	s, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
+	s, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

@@ -23,7 +23,7 @@ func (s *Session) materialise(ctx context.Context) error {
 	}
 	var firstErr error
 	s.matOnce.Do(func() {
-		rows, err := s.store.ListEvents(ctx, s.id, 0)
+		rows, err := s.store.ListEvents(ctx, s.id, ListEventsOpts{})
 		if err != nil {
 			firstErr = fmt.Errorf("session %s: list events: %w", s.id, err)
 			return
