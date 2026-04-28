@@ -112,11 +112,17 @@ func (nullModel) Generate(_ context.Context, _ model.Request) (model.Stream, err
 }
 
 // TestIntegration_LifecyclePersistsThroughLocalStore opens, lists,
-// and closes a session via the HTTP API; asserts each step is
-// reflected in hub.db on disk via direct GraphQL query — closing
-// SC-002 ("automation script can complete the full lifecycle
-// against the running agent") and SC-010 ("API list ↔ DB direct
-// inspection always agree").
+// and closes a session via the HTTP API and asserts each step is
+// reflected in hub.db on disk via direct GraphQL query.
+//
+// Scope: Open / List / Close — the persistence-and-state-agreement
+// half of SC-002 and SC-010. Streaming and POST are NOT exercised
+// here: integrationHost.Subscribe returns a fresh local channel
+// (not the runtime's fan-out) and integrationHost.Submit is wired
+// to ErrSessionClosed. A future test that posts user_messages and
+// observes the real session pump's replay/live ordering still
+// needs to be written; this one covers SC-002's
+// API-vs-DB-agreement half.
 //
 // Skipped from `go test ./...` by the integration build tag.
 func TestIntegration_LifecyclePersistsThroughLocalStore(t *testing.T) {
@@ -222,9 +228,10 @@ func TestIntegration_LifecyclePersistsThroughLocalStore(t *testing.T) {
 	closeResp.Body.Close()
 	require.Equal(t, "closed", closed.Status)
 
-	// Give the close mutation a beat to land before the verify.
-	time.Sleep(50 * time.Millisecond)
-
+	// manager.Close is fully synchronous (s.emit + UpdateSessionStatus
+	// both block before the handler writes its response), so by the
+	// time closeResp returned the row's status is already "closed".
+	// Verify directly.
 	verifyRows, err := queries.RunQuery[[]map[string]any](context.Background(), engine,
 		`query ($id: String!) {
 			hub { db { agent {
