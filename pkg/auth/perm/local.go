@@ -88,6 +88,15 @@ type identityFacts struct {
 	AgentID, UserID, Role string
 }
 
+// AgentID returns the cached agent id resolved from the bound
+// identity.Source. Returns the empty string if the source has not
+// yet been consulted (i.e. before any Resolve call) or if the
+// source declined to answer.
+func (l *LocalPermissions) AgentID() string {
+	l.resolveIdentity(context.Background())
+	return l.agentID
+}
+
 // resolveIdentity lazily resolves the cached identity facts.
 // Failures are swallowed — substitution returns empty strings,
 // which surface as a clear (empty) value rather than failing

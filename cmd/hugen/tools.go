@@ -79,10 +79,18 @@ func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillMa
 	tm := tool.NewToolManager(perms, skills, core.Config.ToolProviders(),
 		authResolverFor(core.Auth), core.Logger, opts...)
 
+	var policies *tool.Policies
+	if core.LocalQuerier != nil {
+		policies = tool.NewPolicies(core.LocalQuerier)
+		tm.SetPolicies(policies)
+	}
+
 	sys := tool.NewSystemProvider(tool.SystemDeps{
-		AgentID: core.Agent.ID(),
-		Notepad: newNotepadFunc(core.Store),
-		Skills:  skills,
+		AgentID:  core.Agent.ID(),
+		Notepad:  newNotepadFunc(core.Store),
+		Skills:   skills,
+		Policies: policies,
+		Perms:    perms,
 	})
 	if err := tm.AddProvider(sys); err != nil {
 		return nil, fmt.Errorf("buildToolStack: register system provider: %w", err)

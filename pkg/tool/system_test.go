@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -24,8 +25,8 @@ func TestSystemProvider_NameAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(tools) != 9 {
-		t.Errorf("len(tools) = %d, want 9", len(tools))
+	if len(tools) != 11 {
+		t.Errorf("len(tools) = %d, want 11", len(tools))
 	}
 	for _, tt := range tools {
 		if tt.Provider != "system" {
@@ -284,5 +285,122 @@ func TestSystemProvider_UnknownTool(t *testing.T) {
 	_, err := p.Call(context.Background(), "ghost", json.RawMessage(`{}`))
 	if !errors.Is(err, ErrUnknownTool) {
 		t.Errorf("err = %v, want ErrUnknownTool", err)
+	}
+}
+
+func TestSystemProvider_PolicySave_HappyPath(t *testing.T) {
+	store := newFakePolicyStore()
+	policies := NewPolicies(newFakePolicyQuerier(store))
+	sp := NewSystemProvider(SystemDeps{
+		AgentID:  "ag01",
+		Policies: policies,
+	})
+	out, err := sp.Call(context.Background(), "policy_save",
+		json.RawMessage(`{"tool_name":"bash-mcp:read_file","decision":"allow"}`))
+	if err != nil {
+		t.Fatalf("policy_save: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["tool_name"] != "bash-mcp:read_file" {
+		t.Errorf("tool_name = %q", got["tool_name"])
+	}
+	if got["decision"] != "always_allowed" {
+		t.Errorf("decision = %q", got["decision"])
+	}
+	if !strings.HasPrefix(got["id"], "ag01|") {
+		t.Errorf("id missing agent prefix: %q", got["id"])
+	}
+	if len(store.rows) != 1 {
+		t.Errorf("store rows = %d", len(store.rows))
+	}
+}
+
+func TestSystemProvider_PolicySave_NotConfigured(t *testing.T) {
+	sp := NewSystemProvider(SystemDeps{AgentID: "ag01"})
+	_, err := sp.Call(context.Background(), "policy_save",
+		json.RawMessage(`{"tool_name":"bash-mcp:read_file","decision":"allow"}`))
+	if !errors.Is(err, ErrSystemUnavailable) {
+		t.Errorf("err = %v, want ErrSystemUnavailable", err)
+	}
+}
+
+func TestSystemProvider_PolicySave_GateDenied(t *testing.T) {
+	store := newFakePolicyStore()
+	policies := NewPolicies(newFakePolicyQuerier(store))
+	perms := &fakePerms{rules: map[string]perm.Permission{
+		"hugen:policy:persist:bash-mcp:write_file": {Disabled: true, FromConfig: true},
+	}}
+	sp := NewSystemProvider(SystemDeps{
+		AgentID:  "ag01",
+		Policies: policies,
+		Perms:    perms,
+	})
+	_, err := sp.Call(context.Background(), "policy_save",
+		json.RawMessage(`{"tool_name":"bash-mcp:write_file","decision":"allow"}`))
+	if !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("err = %v, want ErrPermissionDenied", err)
+	}
+	if len(store.rows) != 0 {
+		t.Errorf("store rows after denied save = %d, want 0", len(store.rows))
+	}
+}
+
+func TestSystemProvider_PolicySave_BadDecision(t *testing.T) {
+	store := newFakePolicyStore()
+	sp := NewSystemProvider(SystemDeps{
+		AgentID:  "ag01",
+		Policies: NewPolicies(newFakePolicyQuerier(store)),
+	})
+	_, err := sp.Call(context.Background(), "policy_save",
+		json.RawMessage(`{"tool_name":"bash-mcp:read_file","decision":"banana"}`))
+	if !errors.Is(err, ErrArgValidation) {
+		t.Errorf("err = %v, want ErrArgValidation", err)
+	}
+}
+
+func TestSystemProvider_PolicyRevoke_RoundTrip(t *testing.T) {
+	store := newFakePolicyStore()
+	policies := NewPolicies(newFakePolicyQuerier(store))
+	sp := NewSystemProvider(SystemDeps{
+		AgentID:  "ag01",
+		Policies: policies,
+	})
+	saveOut, err := sp.Call(context.Background(), "policy_save",
+		json.RawMessage(`{"tool_name":"bash-mcp:read_file","decision":"allow"}`))
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	var saved map[string]string
+	if err := json.Unmarshal(saveOut, &saved); err != nil {
+		t.Fatal(err)
+	}
+	revokeOut, err := sp.Call(context.Background(), "policy_revoke",
+		json.RawMessage(`{"id":`+strconv.Quote(saved["id"])+`}`))
+	if err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(revokeOut, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["revoked"] != saved["id"] {
+		t.Errorf("revoked = %q, want %q", got["revoked"], saved["id"])
+	}
+	if len(store.rows) != 0 {
+		t.Errorf("rows after revoke = %d, want 0", len(store.rows))
+	}
+}
+
+func TestSystemProvider_PolicyRevoke_MissingID(t *testing.T) {
+	sp := NewSystemProvider(SystemDeps{
+		AgentID:  "ag01",
+		Policies: NewPolicies(newFakePolicyQuerier(newFakePolicyStore())),
+	})
+	_, err := sp.Call(context.Background(), "policy_revoke", json.RawMessage(`{}`))
+	if !errors.Is(err, ErrArgValidation) {
+		t.Errorf("err = %v, want ErrArgValidation", err)
 	}
 }

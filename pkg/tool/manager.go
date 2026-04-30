@@ -32,15 +32,16 @@ import (
 //     a global "bash-mcp" with its own); for Snapshot they are
 //     merged by name (session wins on collision).
 type ToolManager struct {
-	perms  perm.Service
-	skills *skill.SkillManager
-	log    *slog.Logger
+	perms    perm.Service
+	policies *Policies // Tier-3; nil disables Tier-3 consultation
+	skills   *skill.SkillManager
+	log      *slog.Logger
 
 	providersView  config.ToolProvidersView
 	authResolver   AuthResolver
 	connectTimeout time.Duration
 
-	builders         map[string]ProviderBuilder
+	builders map[string]ProviderBuilder
 
 	mu               sync.RWMutex
 	providers        map[string]ToolProvider
@@ -129,6 +130,18 @@ func NewToolManager(
 // freshly-built ToolManager. Variadic at the end of NewToolManager
 // keeps the common case (no options) at the existing arity.
 type ToolManagerOption func(*ToolManager)
+
+// SetPolicies wires the Tier-3 store. Pass nil to disable Tier-3
+// consultation (no-Hugr / no-local-DB deployments). Bumps the
+// policy generation so the next Snapshot rebuild picks up the
+// change. Safe to call any time — typical wiring is right after
+// NewToolManager and before Init.
+func (m *ToolManager) SetPolicies(p *Policies) {
+	m.mu.Lock()
+	m.policies = p
+	m.mu.Unlock()
+	m.BumpPolicyGen()
+}
 
 // WithProviderBuilder registers a builder for a non-MCP provider
 // type. Init dispatches each tool_providers entry by `type` to its
@@ -476,12 +489,21 @@ func allowedFromBindings(ctx context.Context, skills *skill.SkillManager, sessio
 }
 
 // Resolve gates a single tool call. Returns the merged
-// Permission (after Tier-1 + Tier-2 — Tier-3 hook lands in T058)
-// plus the effective args payload with template substitutions
-// applied. Returns ErrPermissionDenied wrapped with the deciding
-// tier on denial. Per-call session facts (SessionID,
-// SessionMetadata) flow through ctx via perm.WithSession; the
-// agent identity is captured at perm.Service construction.
+// Permission (after Tier-1 + Tier-2 + Tier-3) plus the effective
+// args payload with template substitutions applied. Returns
+// ErrPermissionDenied wrapped with the deciding tier on denial.
+// Per-call session facts (SessionID, SessionMetadata) flow
+// through ctx via perm.WithSession; the agent identity is
+// captured at perm.Service construction.
+//
+// Tier order:
+//   - Tier 1 (operator config) and Tier 2 (Hugr role) merge inside
+//     perm.Service.Resolve. A Disabled outcome there is final —
+//     Tier 3 cannot relax the floor.
+//   - Tier 3 (personal tool_policies) consults the Policies store
+//     for the calling agent. PolicyAllow → run; PolicyDeny → block
+//     with FromUser=true; PolicyAsk (or no row) → fall through to
+//     the upstream decision.
 func (m *ToolManager) Resolve(ctx context.Context, t Tool, args json.RawMessage) (perm.Permission, json.RawMessage, error) {
 	p, err := m.perms.Resolve(ctx, t.PermissionObject, toolField(t.Name))
 	if err != nil {
@@ -491,6 +513,27 @@ func (m *ToolManager) Resolve(ctx context.Context, t Tool, args json.RawMessage)
 		return p, nil, fmt.Errorf("%w: tier=%s",
 			ErrPermissionDenied, deniedTier(p))
 	}
+	// Tier 3 — consult personal tool_policies. The agent id used
+	// here is the policy owner (one row per (agent_id, tool_name,
+	// scope)); LocalPermissions already cached it from
+	// identity.Source on first Resolve. Until US4 ships
+	// RemotePermissions with its own AgentID accessor we read
+	// identity off the SessionContext for tests and fall back to
+	// the perm.Service when available.
+	if m.policies.IsConfigured() {
+		agentID, scope := tier3LookupKey(ctx, m.perms)
+		dec, derr := m.policies.Decide(ctx, agentID, t.Name, scope)
+		if derr != nil {
+			return p, nil, derr
+		}
+		switch dec.Outcome {
+		case PolicyDeny:
+			p.FromUser = true
+			return p, nil, fmt.Errorf("%w: tier=user", ErrPermissionDenied)
+		case PolicyAllow:
+			p.FromUser = true
+		}
+	}
 	// Effective args = raw args merged with p.Data via shallow
 	// JSON object merge (rule's Data wins on scalar conflict —
 	// the LLM cannot override an operator-pinned arg).
@@ -499,6 +542,32 @@ func (m *ToolManager) Resolve(ctx context.Context, t Tool, args json.RawMessage)
 		return p, nil, err
 	}
 	return p, effective, nil
+}
+
+// tier3LookupKey extracts (agentID, scope) for the Tier-3
+// lookup. AgentID comes from the perm.Service when it advertises
+// the AgentID accessor (LocalPermissions and RemotePermissions
+// both will, after US4); otherwise it falls back to the agent id
+// pinned on the SessionContext metadata under the conventional
+// "agent_id" key, and finally to the empty string. Scope is left
+// at PolicyScopeGlobal in phase-3; skill/role scoping is a
+// later refinement.
+func tier3LookupKey(ctx context.Context, perms perm.Service) (string, string) {
+	agentID := ""
+	type agentIDer interface {
+		AgentID() string
+	}
+	if a, ok := perms.(agentIDer); ok {
+		agentID = a.AgentID()
+	}
+	if agentID == "" {
+		if sc, ok := perm.SessionFromContext(ctx); ok {
+			if sc.SessionMetadata != nil {
+				agentID = sc.SessionMetadata["agent_id"]
+			}
+		}
+	}
+	return agentID, PolicyScopeGlobal
 }
 
 // Dispatch executes a tool call. Args MUST be the substituted

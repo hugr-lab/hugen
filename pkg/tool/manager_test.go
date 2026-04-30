@@ -379,3 +379,144 @@ func TestToolManager_CloseSession_TearsDownProviders(t *testing.T) {
 		t.Errorf("tools after close = %d, want 0", len(snap.Tools))
 	}
 }
+
+// fakePermsWithAgent is a fakePerms that also satisfies the
+// AgentID accessor ToolManager.Resolve looks for to feed Tier 3.
+type fakePermsWithAgent struct {
+	fakePerms
+	agentID string
+}
+
+func (f *fakePermsWithAgent) AgentID() string { return f.agentID }
+
+func newPoliciesForTest(t *testing.T) (*Policies, *fakePolicyStore) {
+	t.Helper()
+	store := newFakePolicyStore()
+	return NewPolicies(newFakePolicyQuerier(store)), store
+}
+
+func TestToolManager_Resolve_Tier3DenyBlocks(t *testing.T) {
+	pol, _ := newPoliciesForTest(t)
+	if _, err := pol.Save(context.Background(), PolicyInput{
+		AgentID:  "ag01",
+		ToolName: "bash-mcp:read_file",
+		Decision: PolicyDeny,
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	perms := &fakePermsWithAgent{agentID: "ag01"}
+	m := NewToolManager(perms, nil, nil, nil, nil)
+	m.SetPolicies(pol)
+
+	tl := Tool{
+		Name:             "bash-mcp:read_file",
+		Provider:         "bash-mcp",
+		PermissionObject: "hugen:tool:bash-mcp",
+	}
+	got, _, err := m.Resolve(context.Background(), tl, json.RawMessage(`{}`))
+	if !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("err = %v, want ErrPermissionDenied", err)
+	}
+	if !got.FromUser {
+		t.Errorf("FromUser = false, want true (Tier 3 decided)")
+	}
+}
+
+func TestToolManager_Resolve_Tier3AllowMarksFromUser(t *testing.T) {
+	pol, _ := newPoliciesForTest(t)
+	if _, err := pol.Save(context.Background(), PolicyInput{
+		AgentID:  "ag01",
+		ToolName: "bash-mcp:read_file",
+		Decision: PolicyAllow,
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	perms := &fakePermsWithAgent{agentID: "ag01"}
+	m := NewToolManager(perms, nil, nil, nil, nil)
+	m.SetPolicies(pol)
+
+	tl := Tool{
+		Name:             "bash-mcp:read_file",
+		Provider:         "bash-mcp",
+		PermissionObject: "hugen:tool:bash-mcp",
+	}
+	got, _, err := m.Resolve(context.Background(), tl, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !got.FromUser {
+		t.Errorf("FromUser = false, want true on allow")
+	}
+}
+
+func TestToolManager_Resolve_Tier1FloorBeatsTier3Allow(t *testing.T) {
+	pol, _ := newPoliciesForTest(t)
+	if _, err := pol.Save(context.Background(), PolicyInput{
+		AgentID:  "ag01",
+		ToolName: "bash-mcp:write_file",
+		Decision: PolicyAllow,
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	perms := &fakePermsWithAgent{
+		fakePerms: fakePerms{rules: map[string]perm.Permission{
+			"hugen:tool:bash-mcp:*": {Disabled: true, FromConfig: true},
+		}},
+		agentID: "ag01",
+	}
+	m := NewToolManager(perms, nil, nil, nil, nil)
+	m.SetPolicies(pol)
+
+	tl := Tool{
+		Name:             "bash-mcp:write_file",
+		Provider:         "bash-mcp",
+		PermissionObject: "hugen:tool:bash-mcp",
+	}
+	got, _, err := m.Resolve(context.Background(), tl, json.RawMessage(`{}`))
+	if !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("err = %v, want ErrPermissionDenied", err)
+	}
+	if got.FromUser {
+		t.Errorf("FromUser = true; floor must win without consulting Tier 3")
+	}
+	if !got.FromConfig {
+		t.Errorf("FromConfig = false; floor not recorded")
+	}
+}
+
+func TestToolManager_Resolve_NoPoliciesSkipsTier3(t *testing.T) {
+	perms := &fakePermsWithAgent{agentID: "ag01"}
+	m := NewToolManager(perms, nil, nil, nil, nil) // no SetPolicies
+	tl := Tool{
+		Name:             "bash-mcp:read_file",
+		Provider:         "bash-mcp",
+		PermissionObject: "hugen:tool:bash-mcp",
+	}
+	got, _, err := m.Resolve(context.Background(), tl, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.FromUser {
+		t.Errorf("FromUser = true with no Policies")
+	}
+}
+
+func TestToolManager_Resolve_AskFallsThrough(t *testing.T) {
+	pol, _ := newPoliciesForTest(t)
+	// no row → Decide returns Ask; Resolve should not mark FromUser.
+	perms := &fakePermsWithAgent{agentID: "ag01"}
+	m := NewToolManager(perms, nil, nil, nil, nil)
+	m.SetPolicies(pol)
+	tl := Tool{
+		Name:             "bash-mcp:read_file",
+		Provider:         "bash-mcp",
+		PermissionObject: "hugen:tool:bash-mcp",
+	}
+	got, _, err := m.Resolve(context.Background(), tl, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.FromUser {
+		t.Errorf("FromUser = true on Ask; want false")
+	}
+}
