@@ -118,7 +118,10 @@ func (t *Tools) runCore(ctx context.Context, a runArgs) (*mcp.CallToolResult, er
 	if a.Cmd == "" {
 		return errResult("arg_validation", "cmd required"), nil
 	}
-	cwd := t.WS.WorkspaceRoot + "/" + t.WS.SessionID
+	cwd, err := os.Getwd()
+	if err != nil {
+		return errResult("io", err.Error()), nil
+	}
 	if a.Cwd != "" {
 		res, err := t.WS.Resolve(a.Cwd, false)
 		if err != nil {

@@ -94,17 +94,8 @@ func TestTools_WriteFile_ReadOnly(t *testing.T) {
 	root := t.TempDir()
 	roHost := filepath.Join(root, "ro")
 	_ = os.MkdirAll(roHost, 0o755)
-	w := &Workspace{
-		WorkspaceRoot: filepath.Join(root, "ws"),
-		SharedRoot:    filepath.Join(root, "shared"),
-		ReadonlyMnt:   []ReadonlyMnt{{Name: "site", Host: roHost}},
-		AgentID:       "a1",
-		SessionID:     "s1",
-	}
-	_ = os.MkdirAll(w.WorkspaceRoot, 0o755)
-	_ = os.MkdirAll(w.SharedRoot, 0o755)
-	_ = w.EnsureSessionDirs()
-	tools := &Tools{WS: w, Limits: Limits{OutputMaxBytes: 1024, ReadMaxBytes: 1024, DefaultTimeoutMS: 5000}}
+	tools, w := newTools(t)
+	w.ReadonlyMnt = []ReadonlyMnt{{Name: "site", Host: roHost}}
 	out, res := callJSON(t, tools.writeFile, map[string]any{
 		"path":    "/readonly/site/file",
 		"content": "x",
@@ -129,9 +120,10 @@ func TestTools_ReadFile_NotFound(t *testing.T) {
 }
 
 func TestTools_ListDir(t *testing.T) {
-	tools, w := newTools(t)
+	tools, _ := newTools(t)
+	cwd, _ := os.Getwd()
 	for _, n := range []string{"a.txt", "b.txt", "c.csv"} {
-		_ = os.WriteFile(filepath.Join(w.WorkspaceRoot, w.SessionID, n), []byte(n), 0o644)
+		_ = os.WriteFile(filepath.Join(cwd, n), []byte(n), 0o644)
 	}
 	out, res := callJSON(t, tools.listDir, map[string]any{"path": "."})
 	if res.IsError {
@@ -206,8 +198,9 @@ func TestTools_Shell_RunsViaSh(t *testing.T) {
 }
 
 func TestTools_Sed_InPlace(t *testing.T) {
-	tools, w := newTools(t)
-	path := filepath.Join(w.WorkspaceRoot, w.SessionID, "f.txt")
+	tools, _ := newTools(t)
+	cwd, _ := os.Getwd()
+	path := filepath.Join(cwd, "f.txt")
 	if err := os.WriteFile(path, []byte("foo\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

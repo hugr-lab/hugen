@@ -117,32 +117,3 @@ var (
 	ErrArgValidation    = errors.New("tool: args failed schema validation")
 )
 
-// Identity is what the manager passes to PermissionService and
-// the policy store. Mirrors pkg/auth/perm.Identity but stays in
-// this package to avoid the cycle (pkg/tool already imports
-// pkg/auth/perm).
-type Identity struct {
-	UserID          string
-	AgentID         string
-	Role            string
-	Roles           []string
-	SessionID       string
-	SessionMetadata map[string]string
-}
-
-type identityCtxKey struct{}
-
-// WithIdentity returns ctx with ident attached. Providers retrieve
-// it via IdentityFromContext when they need session-scoped data
-// (system-tools provider routes notepad_append / skill_* through
-// the caller's session, etc.).
-func WithIdentity(ctx context.Context, ident Identity) context.Context {
-	return context.WithValue(ctx, identityCtxKey{}, ident)
-}
-
-// IdentityFromContext returns the Identity attached by WithIdentity,
-// or zero Identity (and false) when none is present.
-func IdentityFromContext(ctx context.Context) (Identity, bool) {
-	ident, ok := ctx.Value(identityCtxKey{}).(Identity)
-	return ident, ok
-}

@@ -6,27 +6,30 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
-// Workspace resolves logical bash-mcp paths against the three
-// roots: /workspace/<session_id>/, /shared/<agent_id>/, and the
-// declared /readonly/<name>/ mounts. Every resolution runs
-// filepath.Clean → root-prefix attach → filepath.EvalSymlinks and
-// rejects paths whose canonical form escapes the allowed set.
+// Workspace resolves bash-mcp logical paths against three roots:
+//
+//   - the process cwd        — the session-scoped writable root.
+//     bash-mcp is started by the runtime with cmd.Dir set to
+//     <workspace_dir>/<session_id>/ (host-side) or /workspace/
+//     (in-container). bash-mcp itself never names the session id.
+//   - /shared/                — agent-wide, writable when configured.
+//   - /readonly/<mount>/      — operator-declared read-only mounts.
+//
+// Every resolution runs filepath.Clean → root-attach →
+// filepath.EvalSymlinks and rejects paths whose canonical form
+// escapes the allowed set.
 type Workspace struct {
-	WorkspaceRoot string         // host path of /workspace
-	SharedRoot    string         // host path of /shared
-	ReadonlyMnt   []ReadonlyMnt  // declared read-only mounts
-	AgentID       string         // for /shared/<agent_id>
-	SessionID     string         // for /workspace/<session_id>
-	OrphanTTL     time.Duration  // orphan workspace sweep window
+	SharedRoot     string        // host path of /shared (empty → disabled)
+	SharedWritable bool          // bash.write_file allowed under /shared
+	ReadonlyMnt    []ReadonlyMnt // declared read-only mounts
 }
 
 // ReadonlyMnt is one declared mount under /readonly/<name>/.
 type ReadonlyMnt struct {
-	Name string // logical name under /readonly/
-	Host string // host path; must exist at boot
+	Name string `json:"name"`
+	Host string `json:"path"`
 }
 
 // Errors returned by Workspace.Resolve.
@@ -34,46 +37,27 @@ var (
 	ErrPathEscape           = errors.New("bash-mcp: path resolves outside allowed roots")
 	ErrReadOnly             = errors.New("bash-mcp: write rejected on read-only mount")
 	ErrReadonlyMountMissing = errors.New("bash-mcp: declared readonly mount missing")
+	ErrSharedDisabled       = errors.New("bash-mcp: /shared not configured")
 )
 
 // Resolution is the result of Workspace.Resolve.
 type Resolution struct {
-	// Canonical is the EvalSymlinks-canonicalised host path. Use
-	// this for the actual file-system call.
-	Canonical string
-	// Logical is the input as logically rooted under one of the
-	// three trees ("/workspace/<sid>/foo"). Useful for audit
-	// frames so the operator sees what the LLM saw.
-	Logical string
-	// Root identifies which of the three trees the path is under.
-	Root WorkspaceRoot
+	Canonical string        // EvalSymlinks-resolved host path
+	Logical   string        // path as it appeared (or the cwd-relative form)
+	Root      WorkspaceRoot // tree the path resolved under
 }
 
 // WorkspaceRoot enumerates the three trees.
 type WorkspaceRoot int
 
 const (
-	RootWorkspace WorkspaceRoot = iota
+	RootSession WorkspaceRoot = iota // cwd
 	RootShared
 	RootReadOnly
 )
 
-// Validate checks that the workspace can boot: every declared
-// readonly mount must exist on the host, and the workspace and
-// shared roots must be writable directories.
+// Validate checks every declared readonly mount exists at boot.
 func (w *Workspace) Validate() error {
-	if w.WorkspaceRoot == "" {
-		return errors.New("bash-mcp: empty workspace root")
-	}
-	if w.SharedRoot == "" {
-		return errors.New("bash-mcp: empty shared root")
-	}
-	if w.SessionID == "" {
-		return errors.New("bash-mcp: empty session id")
-	}
-	if w.AgentID == "" {
-		return errors.New("bash-mcp: empty agent id")
-	}
 	for _, m := range w.ReadonlyMnt {
 		if m.Name == "" || m.Host == "" {
 			return fmt.Errorf("bash-mcp: invalid readonly mount %+v", m)
@@ -86,69 +70,61 @@ func (w *Workspace) Validate() error {
 	return nil
 }
 
-// EnsureSessionDirs creates the session's /workspace/<sid>/ and
-// /shared/<aid>/ host paths. Idempotent.
-func (w *Workspace) EnsureSessionDirs() error {
-	sess := filepath.Join(w.WorkspaceRoot, w.SessionID)
-	shared := filepath.Join(w.SharedRoot, w.AgentID)
-	for _, p := range []string{sess, shared} {
-		if err := os.MkdirAll(p, 0o755); err != nil {
-			return fmt.Errorf("bash-mcp: ensure %s: %w", p, err)
-		}
-	}
-	return nil
-}
-
 // Resolve canonicalises an input path. write=true rejects paths
-// under /readonly/.
+// under /readonly/ and (when SharedWritable is false) /shared/.
 func (w *Workspace) Resolve(input string, write bool) (Resolution, error) {
 	if input == "" {
 		return Resolution{}, fmt.Errorf("%w: empty path", ErrPathEscape)
 	}
 	clean := filepath.Clean(input)
-	logical, root, err := w.attachRoot(clean)
+	hostPath, root, err := w.attachRoot(clean)
 	if err != nil {
 		return Resolution{}, err
 	}
-	hostPath := w.hostPath(logical, root)
 	canonical, err := canonicalise(hostPath)
 	if err != nil {
 		return Resolution{}, err
 	}
-	// Re-check the canonical path is still under the right root —
-	// covers symlinks pointing outside the tree.
 	if !w.canonicalUnderRoot(canonical, root) {
 		return Resolution{}, fmt.Errorf("%w: %s -> %s", ErrPathEscape, input, canonical)
 	}
-	if write && root == RootReadOnly {
-		return Resolution{}, fmt.Errorf("%w: %s", ErrReadOnly, input)
+	if write {
+		switch root {
+		case RootReadOnly:
+			return Resolution{}, fmt.Errorf("%w: %s", ErrReadOnly, input)
+		case RootShared:
+			if !w.SharedWritable {
+				return Resolution{}, fmt.Errorf("%w: %s (shared read-only)", ErrReadOnly, input)
+			}
+		}
 	}
-	return Resolution{Canonical: canonical, Logical: logical, Root: root}, nil
+	return Resolution{Canonical: canonical, Logical: clean, Root: root}, nil
 }
 
-// attachRoot maps a cleaned input path to one of the three trees.
-// Relative paths default to /workspace/<sid>/.
+// attachRoot maps a cleaned input path to its host equivalent.
+// Relative paths default to the cwd (session root).
 func (w *Workspace) attachRoot(clean string) (string, WorkspaceRoot, error) {
 	if !filepath.IsAbs(clean) {
-		return "/workspace/" + w.SessionID + "/" + clean, RootWorkspace, nil
+		// Relative → cwd-anchored. Pass through unchanged so
+		// canonicalise resolves against os.Getwd().
+		return clean, RootSession, nil
 	}
 	switch {
-	case strings.HasPrefix(clean, "/workspace/"+w.SessionID):
-		return clean, RootWorkspace, nil
-	case strings.HasPrefix(clean, "/workspace/"):
-		// Cross-session traversal forbidden.
-		return "", 0, fmt.Errorf("%w: %s (cross-session)", ErrPathEscape, clean)
-	case strings.HasPrefix(clean, "/shared/"+w.AgentID):
-		return clean, RootShared, nil
-	case strings.HasPrefix(clean, "/shared/"):
-		return "", 0, fmt.Errorf("%w: %s (cross-agent)", ErrPathEscape, clean)
+	case strings.HasPrefix(clean, "/shared/") || clean == "/shared":
+		if w.SharedRoot == "" {
+			return "", 0, fmt.Errorf("%w: %s", ErrSharedDisabled, clean)
+		}
+		rest := strings.TrimPrefix(clean, "/shared")
+		return filepath.Join(w.SharedRoot, rest), RootShared, nil
 	case strings.HasPrefix(clean, "/readonly/"):
-		// Match against any declared mount.
 		rest := strings.TrimPrefix(clean, "/readonly/")
 		parts := strings.SplitN(rest, "/", 2)
 		for _, m := range w.ReadonlyMnt {
 			if m.Name == parts[0] {
-				return clean, RootReadOnly, nil
+				if len(parts) == 1 {
+					return m.Host, RootReadOnly, nil
+				}
+				return filepath.Join(m.Host, parts[1]), RootReadOnly, nil
 			}
 		}
 		return "", 0, fmt.Errorf("%w: %s (unknown readonly mount)", ErrPathEscape, clean)
@@ -157,40 +133,18 @@ func (w *Workspace) attachRoot(clean string) (string, WorkspaceRoot, error) {
 	}
 }
 
-// hostPath maps a logical path under one of the three trees to
-// the host-side path.
-func (w *Workspace) hostPath(logical string, root WorkspaceRoot) string {
-	switch root {
-	case RootWorkspace:
-		rest := strings.TrimPrefix(logical, "/workspace/"+w.SessionID)
-		return filepath.Join(w.WorkspaceRoot, w.SessionID, rest)
-	case RootShared:
-		rest := strings.TrimPrefix(logical, "/shared/"+w.AgentID)
-		return filepath.Join(w.SharedRoot, w.AgentID, rest)
-	case RootReadOnly:
-		// /readonly/<name>/<rest> -> ReadonlyMnt[name].Host/<rest>
-		rest := strings.TrimPrefix(logical, "/readonly/")
-		parts := strings.SplitN(rest, "/", 2)
-		for _, m := range w.ReadonlyMnt {
-			if m.Name == parts[0] {
-				if len(parts) == 1 {
-					return m.Host
-				}
-				return filepath.Join(m.Host, parts[1])
-			}
-		}
-	}
-	return ""
-}
-
 // canonicalUnderRoot returns true if canonical is under the host
 // directory backing root.
 func (w *Workspace) canonicalUnderRoot(canonical string, root WorkspaceRoot) bool {
 	switch root {
-	case RootWorkspace:
-		return underHostDir(canonical, filepath.Join(w.WorkspaceRoot, w.SessionID))
+	case RootSession:
+		cwd, err := os.Getwd()
+		if err != nil {
+			return false
+		}
+		return underHostDir(canonical, cwd)
 	case RootShared:
-		return underHostDir(canonical, filepath.Join(w.SharedRoot, w.AgentID))
+		return underHostDir(canonical, w.SharedRoot)
 	case RootReadOnly:
 		for _, m := range w.ReadonlyMnt {
 			if underHostDir(canonical, m.Host) {
@@ -210,7 +164,13 @@ func underHostDir(child, parent string) bool {
 	if err != nil {
 		pCanon = pAbs
 	}
-	rel, err := filepath.Rel(pCanon, child)
+	cAbs := child
+	if !filepath.IsAbs(cAbs) {
+		if abs, err := filepath.Abs(cAbs); err == nil {
+			cAbs = abs
+		}
+	}
+	rel, err := filepath.Rel(pCanon, cAbs)
 	if err != nil {
 		return false
 	}
@@ -227,9 +187,6 @@ func canonicalise(host string) (string, error) {
 	parent := filepath.Dir(host)
 	base := filepath.Base(host)
 	if _, err := os.Stat(parent); err != nil {
-		// Parent does not exist either; bash.write_file may need
-		// to create parents — return the input as-is, callers can
-		// MkdirAll the parent and re-resolve.
 		return host, nil
 	}
 	resolved, err := filepath.EvalSymlinks(parent)
@@ -237,41 +194,4 @@ func canonicalise(host string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(resolved, base), nil
-}
-
-// SweepOrphans removes session workspaces older than OrphanTTL.
-// Returns the count of removed entries.
-func (w *Workspace) SweepOrphans() (int, error) {
-	if w.OrphanTTL <= 0 {
-		return 0, nil
-	}
-	entries, err := os.ReadDir(w.WorkspaceRoot)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	cutoff := time.Now().Add(-w.OrphanTTL)
-	removed := 0
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		if e.Name() == w.SessionID {
-			// Live session.
-			continue
-		}
-		fi, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if fi.ModTime().Before(cutoff) {
-			path := filepath.Join(w.WorkspaceRoot, e.Name())
-			if err := os.RemoveAll(path); err == nil {
-				removed++
-			}
-		}
-	}
-	return removed, nil
 }

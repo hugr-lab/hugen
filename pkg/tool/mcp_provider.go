@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os/exec"
 	"strings"
 	"sync"
 
 	mcpcli "github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -21,6 +23,7 @@ type MCPProviderSpec struct {
 	Command     string            // executable path
 	Args        []string          // command args
 	Env         map[string]string // child-process env additions
+	Cwd         string            // working directory; per-session bash-mcp uses this
 	Lifetime    Lifetime          // honoured for catalogue; spawning is up to the caller
 	PermObject  string            // shared permission_object for every tool ("hugen:tool:bash-mcp")
 	Description string            // optional, surfaced as provider description
@@ -94,7 +97,17 @@ func newMCPProviderWithClient(ctx context.Context, spec MCPProviderSpec, cli *mc
 
 func (p *MCPProvider) connect(ctx context.Context) error {
 	env := envSlice(p.spec.Env)
-	cli, err := mcpcli.NewStdioMCPClient(p.spec.Command, env, p.spec.Args...)
+	var opts []transport.StdioOption
+	if p.spec.Cwd != "" {
+		cwd := p.spec.Cwd
+		opts = append(opts, transport.WithCommandFunc(func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
+			c := exec.CommandContext(ctx, command, args...)
+			c.Env = env
+			c.Dir = cwd
+			return c, nil
+		}))
+	}
+	cli, err := mcpcli.NewStdioMCPClientWithOptions(p.spec.Command, env, p.spec.Args, opts...)
 	if err != nil {
 		return fmt.Errorf("tool: spawn %s: %w", p.spec.Name, err)
 	}

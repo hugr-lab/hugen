@@ -19,14 +19,26 @@ import (
 // ToolManager dispatches tool calls through the three permission
 // tiers and the registered providers. One instance per agent;
 // per-session catalogue is materialised via Snapshot.
+//
+// Two scopes of providers are supported:
+//   - global: registered via AddProvider, visible to every session.
+//     System tools and remote-shared MCPs (e.g. hugr-main) live here.
+//   - session: registered via AddSessionProvider for a specific
+//     sessionID. Per-session bash-mcp / python-mcp / duckdb-mcp
+//     live here so each session has its own subprocess scoped to
+//     its own workspace directory. Session-scoped providers
+//     shadow global providers on Dispatch (a session can override
+//     a global "bash-mcp" with its own); for Snapshot they are
+//     merged by name (session wins on collision).
 type ToolManager struct {
 	perms  perm.Service
 	skills *skill.SkillManager
 	log    *slog.Logger
 
-	mu        sync.RWMutex
-	providers map[string]ToolProvider
-	cache     map[string]*cachedSnapshot
+	mu               sync.RWMutex
+	providers        map[string]ToolProvider
+	sessionProviders map[string]map[string]ToolProvider // sessionID → name → provider
+	cache            map[string]*cachedSnapshot
 
 	toolGen   atomic.Int64
 	policyGen atomic.Int64
@@ -69,13 +81,122 @@ func NewToolManager(p perm.Service, skills *skill.SkillManager, opts Options) *T
 		opts.DrainTimeout = 5 * time.Second
 	}
 	return &ToolManager{
-		perms:        p,
-		skills:       skills,
-		log:          opts.Logger,
-		providers:    make(map[string]ToolProvider),
-		cache:        make(map[string]*cachedSnapshot),
-		drainTimeout: opts.DrainTimeout,
+		perms:            p,
+		skills:           skills,
+		log:              opts.Logger,
+		providers:        make(map[string]ToolProvider),
+		sessionProviders: make(map[string]map[string]ToolProvider),
+		cache:            make(map[string]*cachedSnapshot),
+		drainTimeout:     opts.DrainTimeout,
 	}
+}
+
+// AddSessionProvider registers a provider scoped to one session.
+// Used for MCPs whose lifecycle is tied to the session (e.g.
+// per-session bash-mcp running in the session's workspace dir).
+// Returns an error if a session-scoped provider with the same
+// name is already registered for that session.
+func (m *ToolManager) AddSessionProvider(sessionID string, p ToolProvider) error {
+	if sessionID == "" {
+		return errors.New("tool: empty session id")
+	}
+	if p == nil {
+		return errors.New("tool: nil provider")
+	}
+	name := p.Name()
+	if name == "" {
+		return errors.New("tool: provider with empty name")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	scoped, ok := m.sessionProviders[sessionID]
+	if !ok {
+		scoped = make(map[string]ToolProvider)
+		m.sessionProviders[sessionID] = scoped
+	}
+	if _, exists := scoped[name]; exists {
+		return fmt.Errorf("tool: provider %q already registered for session %s", name, sessionID)
+	}
+	scoped[name] = p
+	delete(m.cache, sessionID) // force rebuild for this session
+	return nil
+}
+
+// RemoveSessionProvider drains in-flight calls before disposing
+// the named provider for one session. Idempotent: returns nil if
+// nothing is registered. Other sessions and global providers are
+// untouched.
+func (m *ToolManager) RemoveSessionProvider(ctx context.Context, sessionID, name string) error {
+	m.mu.Lock()
+	scoped, ok := m.sessionProviders[sessionID]
+	if !ok {
+		m.mu.Unlock()
+		return nil
+	}
+	p, ok := scoped[name]
+	if !ok {
+		m.mu.Unlock()
+		return nil
+	}
+	delete(scoped, name)
+	if len(scoped) == 0 {
+		delete(m.sessionProviders, sessionID)
+	}
+	delete(m.cache, sessionID)
+	m.mu.Unlock()
+
+	dctx, cancel := context.WithTimeout(ctx, m.drainTimeout)
+	defer cancel()
+	<-dctx.Done()
+	if err := p.Close(); err != nil {
+		return fmt.Errorf("tool: close session %s/%s: %w", sessionID, name, err)
+	}
+	return nil
+}
+
+// CloseSession tears down every provider registered for sessionID.
+// Returns the joined errors from each Close call. Used by the
+// session lifecycle on Close.
+func (m *ToolManager) CloseSession(ctx context.Context, sessionID string) error {
+	m.mu.Lock()
+	scoped := m.sessionProviders[sessionID]
+	delete(m.sessionProviders, sessionID)
+	delete(m.cache, sessionID)
+	m.mu.Unlock()
+	var errs []error
+	for name, p := range scoped {
+		if err := p.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close %s: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// Close tears down every provider — global and session-scoped.
+// Used on RuntimeCore.Shutdown to ensure no MCP subprocesses
+// outlive the parent process. Idempotent.
+func (m *ToolManager) Close() error {
+	m.mu.Lock()
+	globals := m.providers
+	scoped := m.sessionProviders
+	m.providers = make(map[string]ToolProvider)
+	m.sessionProviders = make(map[string]map[string]ToolProvider)
+	m.cache = make(map[string]*cachedSnapshot)
+	m.mu.Unlock()
+	var errs []error
+	for name, p := range globals {
+		if err := p.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close %s: %w", name, err))
+		}
+	}
+	for sid, by := range scoped {
+		for name, p := range by {
+			if err := p.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close session %s/%s: %w", sid, name, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // AddProvider registers a ToolProvider. Constitution exception
@@ -177,12 +298,20 @@ func (m *ToolManager) rebuildSnapshot(ctx context.Context, sessionID string, gen
 	allowed := allowedFromBindings(ctx, m.skills, sessionID)
 
 	m.mu.RLock()
-	provs := slices.Collect(maps_values(m.providers))
+	// Session-scoped providers shadow globals by name on collision —
+	// a session can override "bash-mcp" with its own subprocess.
+	merged := make(map[string]ToolProvider, len(m.providers))
+	for n, p := range m.providers {
+		merged[n] = p
+	}
+	for n, p := range m.sessionProviders[sessionID] {
+		merged[n] = p
+	}
 	m.mu.RUnlock()
 
 	var tools []Tool
 	var errs []error
-	for _, p := range provs {
+	for _, p := range merged {
 		got, err := p.List(ctx)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", p.Name(), err))
@@ -244,17 +373,11 @@ func allowedFromBindings(ctx context.Context, skills *skill.SkillManager, sessio
 // Permission (after Tier-1 + Tier-2 — Tier-3 hook lands in T058)
 // plus the effective args payload with template substitutions
 // applied. Returns ErrPermissionDenied wrapped with the deciding
-// tier on denial.
-func (m *ToolManager) Resolve(ctx context.Context, ident Identity, t Tool, args json.RawMessage) (perm.Permission, json.RawMessage, error) {
-	pIdent := perm.Identity{
-		UserID:          ident.UserID,
-		AgentID:         ident.AgentID,
-		Role:            ident.Role,
-		Roles:           ident.Roles,
-		SessionID:       ident.SessionID,
-		SessionMetadata: ident.SessionMetadata,
-	}
-	p, err := m.perms.Resolve(ctx, pIdent, t.PermissionObject, toolField(t.Name))
+// tier on denial. Per-call session facts (SessionID,
+// SessionMetadata) flow through ctx via perm.WithSession; the
+// agent identity is captured at perm.Service construction.
+func (m *ToolManager) Resolve(ctx context.Context, t Tool, args json.RawMessage) (perm.Permission, json.RawMessage, error) {
+	p, err := m.perms.Resolve(ctx, t.PermissionObject, toolField(t.Name))
 	if err != nil {
 		return perm.Permission{}, nil, err
 	}
@@ -273,10 +396,23 @@ func (m *ToolManager) Resolve(ctx context.Context, ident Identity, t Tool, args 
 }
 
 // Dispatch executes a tool call. Args MUST be the substituted
-// payload returned by Resolve, not the LLM's raw args.
+// payload returned by Resolve, not the LLM's raw args. Session-
+// scoped providers (via the SessionContext on ctx) shadow global
+// providers of the same name on dispatch — used by per-session
+// bash-mcp / python-mcp.
 func (m *ToolManager) Dispatch(ctx context.Context, t Tool, effectiveArgs json.RawMessage) (json.RawMessage, error) {
+	sc, _ := perm.SessionFromContext(ctx)
 	m.mu.RLock()
-	p, ok := m.providers[t.Provider]
+	var p ToolProvider
+	var ok bool
+	if sc.SessionID != "" {
+		if scoped, hasScope := m.sessionProviders[sc.SessionID]; hasScope {
+			p, ok = scoped[t.Provider]
+		}
+	}
+	if !ok {
+		p, ok = m.providers[t.Provider]
+	}
 	m.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrUnknownProvider, t.Provider)

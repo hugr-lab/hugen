@@ -13,12 +13,15 @@ import (
 	"github.com/hugr-lab/query-engine/types"
 
 	"github.com/hugr-lab/hugen/pkg/auth"
+	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/skill"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
 // RuntimeCore aggregates every dependency a subcommand handler needs.
@@ -43,6 +46,13 @@ type RuntimeCore struct {
 	Manager  *runtime.SessionManager
 	Commands *runtime.CommandRegistry
 	Codec    *protocol.Codec
+
+	// Phase-3 stack: skills + permissions + tools.
+	Skills      *skill.SkillManager
+	SkillStore  skill.SkillStore
+	Permissions perm.Service
+	Tools       *tool.ToolManager
+	workspaces  *sessionWorkspaces
 
 	// HTTPSrv hosts the auth endpoints (phase 1) and, in phase 2,
 	// /api/v1/* via pkg/adapter/http. Both share the same mux so the
@@ -95,6 +105,10 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	core.Boot = boot
 	core.Logger = newLogger(boot.LogLevel)
 	core.Logger.Info("starting hugen", "info", boot.Info())
+
+	if err := installBundledSkills(boot.StateDir, core.Logger); err != nil {
+		return nil, fmt.Errorf("buildRuntimeCore: install bundled skills: %w", err)
+	}
 
 	httpSrv, mux, err := startHTTPServer(ctx, boot, core.Logger)
 	if err != nil {
@@ -166,7 +180,37 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	core.Commands = cmds
 
 	core.Codec = protocol.NewCodec()
-	core.Manager = runtime.NewSessionManager(core.Store, agent, router, cmds, core.Codec, core.Logger)
+
+	skills, skillStore, err := buildSkillStack(core)
+	if err != nil {
+		return nil, failed("skills", err)
+	}
+	core.Skills = skills
+	core.SkillStore = skillStore
+
+	core.Permissions = buildPermissionService(core)
+
+	tools, err := buildToolStack(core, core.Permissions, skills)
+	if err != nil {
+		return nil, failed("tools", err)
+	}
+	core.Tools = tools
+
+	if err := cmds.Register("skill", runtime.CommandSpec{
+		Handler:     skillCommandHandler(core.Skills, core.SkillStore, core.Permissions),
+		Description: "list, load or unload skills: /skill list | /skill load <name> | /skill unload <name>",
+	}); err != nil {
+		return nil, failed("commands_skill", err)
+	}
+
+	core.workspaces = newSessionWorkspaces()
+	core.Manager = runtime.NewSessionManager(
+		core.Store, agent, router, cmds, core.Codec, core.Logger,
+		runtime.WithLifecycle(buildSessionLifecycle(core, core.workspaces)),
+		runtime.WithSessionOptions(runtime.WithTools(core.Tools)),
+	)
+
+	mountAgentTokenStub(core.Mux)
 
 	return core, nil
 }
@@ -213,6 +257,11 @@ func (c *RuntimeCore) Shutdown(ctx context.Context) {
 			c.Manager.ShutdownAll(sCtx)
 			cancel()
 			c.Logger.Info("shutdown: sessions persisted")
+		}
+		if c.Tools != nil {
+			if err := c.Tools.Close(); err != nil {
+				c.Logger.Warn("shutdown: close tool manager", "err", err)
+			}
 		}
 		if c.LocalEngine != nil {
 			if err := c.LocalEngine.Close(); err != nil {

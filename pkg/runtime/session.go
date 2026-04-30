@@ -2,14 +2,18 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
 // Session is one long-lived conversation. Phase 1: one user, one
@@ -23,6 +27,7 @@ type Session struct {
 	codec   *protocol.Codec
 	cmds    *CommandRegistry
 	notepad *Notepad
+	tools   *tool.ToolManager // optional; nil disables tool dispatch
 	logger  *slog.Logger
 
 	// Per-session model overrides. /model use mutates this.
@@ -57,6 +62,15 @@ type SessionOption func(*Session)
 // WithSessionLogger sets a per-session logger (useful in tests).
 func WithSessionLogger(l *slog.Logger) SessionOption {
 	return func(s *Session) { s.logger = l }
+}
+
+// WithTools attaches a ToolManager to the session so the Turn loop
+// can dispatch model-emitted tool calls. Sessions constructed
+// without WithTools simply skip the tool dispatch branch — the
+// model can stream its tool_call chunks but they're surfaced as
+// tool_error{code: not_found} so the LLM gets a clean signal.
+func WithTools(tm *tool.ToolManager) SessionOption {
+	return func(s *Session) { s.tools = tm }
 }
 
 // NewSession constructs a Session bound to its dependencies.
@@ -297,12 +311,6 @@ func (s *Session) handleUserMessage(ctx context.Context, f *protocol.UserMessage
 		return err
 	}
 
-	// Build request: history + new user message.
-	req := model.Request{
-		Messages: append(append([]model.Message{}, s.history...),
-			model.Message{Role: model.RoleUser, Content: f.Payload.Text}),
-	}
-
 	mdl, _, err := s.models.Resolve(ctx, model.Hint{
 		Intent:        model.IntentDefault,
 		SessionModels: s.sessionModels(),
@@ -324,52 +332,79 @@ func (s *Session) handleUserMessage(ctx context.Context, f *protocol.UserMessage
 		s.inflightMu.Unlock()
 	}()
 
-	stream, err := mdl.Generate(turnCtx, req)
-	if err != nil {
-		errFrame := protocol.NewError(s.id, s.agent.Participant(),
-			"model_call_failed", err.Error(), true)
-		return s.emit(ctx, errFrame)
-	}
-	defer stream.Close()
+	// First model turn: the user's input is the trailing message.
+	// Subsequent iterations append assistant + tool messages from
+	// dispatched tool calls so the LLM can react.
+	s.history = append(s.history, model.Message{Role: model.RoleUser, Content: f.Payload.Text})
 
-	finalText, err := s.streamTurn(ctx, turnCtx, stream)
-	if err != nil {
-		// Distinguish cancellation from real errors.
-		if turnCtx.Err() != nil && ctx.Err() == nil {
-			// Cancellation by /cancel — already emitted by handleCancel.
+	for iter := 0; iter < maxToolIterations; iter++ {
+		req := model.Request{Messages: append([]model.Message{}, s.history...)}
+		stream, err := mdl.Generate(turnCtx, req)
+		if err != nil {
+			errFrame := protocol.NewError(s.id, s.agent.Participant(),
+				"model_call_failed", err.Error(), true)
+			return s.emit(ctx, errFrame)
+		}
+		outcome, err := s.streamTurn(ctx, turnCtx, stream)
+		_ = stream.Close()
+		if err != nil {
+			if turnCtx.Err() != nil && ctx.Err() == nil {
+				return nil // /cancel — handleCancel already emitted.
+			}
+			errFrame := protocol.NewError(s.id, s.agent.Participant(),
+				"stream_error", err.Error(), true)
+			_ = s.emit(ctx, errFrame)
+			return err
+		}
+		if outcome.finalText != "" {
+			s.history = append(s.history, model.Message{Role: model.RoleAssistant, Content: outcome.finalText})
+		}
+		if len(outcome.toolCalls) == 0 {
 			return nil
 		}
-		errFrame := protocol.NewError(s.id, s.agent.Participant(),
-			"stream_error", err.Error(), true)
-		_ = s.emit(ctx, errFrame)
-		return err
+		for _, tc := range outcome.toolCalls {
+			result := s.dispatchToolCall(ctx, tc)
+			s.history = append(s.history, model.Message{
+				Role:       model.RoleTool,
+				Content:    result,
+				ToolCallID: tc.ID,
+			})
+		}
 	}
-
-	// Append the new user + assistant message into the working window
-	// so the next turn sees them without a re-walk.
-	s.history = append(s.history, model.Message{Role: model.RoleUser, Content: f.Payload.Text})
-	if finalText != "" {
-		s.history = append(s.history, model.Message{Role: model.RoleAssistant, Content: finalText})
-	}
-	return nil
+	s.logger.Warn("session: tool re-call cap hit", "session", s.id, "max", maxToolIterations)
+	limitFrame := protocol.NewError(s.id, s.agent.Participant(),
+		"tool_iteration_limit", fmt.Sprintf("max tool re-call iterations (%d) reached", maxToolIterations), false)
+	return s.emit(ctx, limitFrame)
 }
 
-// streamTurn drains a Stream into Reasoning + AgentMessage frames.
-// Returns the concatenated final assistant text for history.
+// turnOutcome carries everything one model.Generate call produced:
+// the concatenated final assistant text and any tool calls the
+// model emitted. handleUserMessage uses this to drive the bounded
+// re-call loop that lets the LLM react to tool results.
+type turnOutcome struct {
+	finalText string
+	toolCalls []model.ChunkToolCall
+}
+
+// streamTurn drains a Stream into Reasoning + AgentMessage frames
+// and collects every tool call the model emitted. Tool dispatch
+// itself happens after the stream drains (in handleUserMessage)
+// so the entire content/reasoning stream lands in the transcript
+// before any tool plumbing.
 //
 // The end-of-stream final flag is set on the final-content chunk
 // (chunk.Final=true) OR, if the provider didn't mark Final on a
 // content chunk, on a synthetic close emit when the stream channel
 // drains.
-func (s *Session) streamTurn(ctx, turnCtx context.Context, stream model.Stream) (string, error) {
+func (s *Session) streamTurn(ctx, turnCtx context.Context, stream model.Stream) (turnOutcome, error) {
 	agentSeq := 0
 	reasoningSeq := 0
-	var fullAnswer string
+	out := turnOutcome{}
 	var sawFinal bool
 	for {
 		chunk, more, err := stream.Next(turnCtx)
 		if err != nil {
-			return fullAnswer, err
+			return out, err
 		}
 		if !more {
 			break
@@ -378,33 +413,160 @@ func (s *Session) streamTurn(ctx, turnCtx context.Context, stream model.Stream) 
 			rf := protocol.NewReasoning(s.id, s.agent.Participant(),
 				*chunk.Reasoning, reasoningSeq, false)
 			if err := s.emit(ctx, rf); err != nil {
-				return fullAnswer, err
+				return out, err
 			}
 			reasoningSeq++
 		}
 		if chunk.Content != nil && *chunk.Content != "" {
-			fullAnswer += *chunk.Content
+			out.finalText += *chunk.Content
 			af := protocol.NewAgentMessage(s.id, s.agent.Participant(),
 				*chunk.Content, agentSeq, chunk.Final)
 			if err := s.emit(ctx, af); err != nil {
-				return fullAnswer, err
+				return out, err
 			}
 			agentSeq++
 			if chunk.Final {
 				sawFinal = true
 			}
 		}
+		if chunk.ToolCall != nil {
+			out.toolCalls = append(out.toolCalls, *chunk.ToolCall)
+		}
 	}
 	// Stream ended without an explicit final-flagged content chunk:
 	// emit a zero-text closer so subscribers can detect the boundary.
-	if agentSeq > 0 && !sawFinal {
+	// Skipped when the stream produced only tool calls — there's
+	// another model turn coming.
+	if agentSeq > 0 && !sawFinal && len(out.toolCalls) == 0 {
 		closer := protocol.NewAgentMessage(s.id, s.agent.Participant(),
 			"", agentSeq, true)
 		if err := s.emit(ctx, closer); err != nil {
-			return fullAnswer, err
+			return out, err
 		}
 	}
-	return fullAnswer, nil
+	return out, nil
+}
+
+// maxToolIterations caps how many model→tool→model loops one user
+// turn can drive. Prevents runaway tool-call loops; logged when hit.
+const maxToolIterations = 5
+
+// dispatchToolCall handles one model-emitted tool call: emits the
+// tool_call frame, runs Tier-1 permission resolution, and either
+// dispatches the call (success path) or surfaces a tool_error
+// frame plus a tool_denied marker (deny path). Returns the JSON
+// payload that should be fed back to the model as a tool-role
+// message; "" when the dispatch failed and there's nothing
+// useful to feed back beyond the error already on the wire.
+func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) string {
+	if s.tools == nil {
+		s.emitToolError(ctx, tc.ID, tc.Name, protocol.ToolErrorNotFound,
+			"tool dispatch not configured for this session", "")
+		return ""
+	}
+	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: s.id})
+
+	rawArgs := marshalToolArgs(tc.Args)
+	callFrame := protocol.NewToolCall(s.id, s.agent.Participant(), tc.ID, tc.Name, tc.Args)
+	if err := s.emit(ctx, callFrame); err != nil {
+		s.logger.Warn("emit tool_call", "err", err)
+	}
+
+	// Look up the Tool by fully-qualified name in the per-session
+	// snapshot. The snapshot already filters by skill bindings so
+	// an unbound provider won't appear here.
+	snap, snapErr := s.tools.Snapshot(dispatchCtx, s.id)
+	if snapErr != nil {
+		s.logger.Warn("tool snapshot failed", "err", snapErr)
+	}
+	var theTool tool.Tool
+	for _, t := range snap.Tools {
+		if t.Name == tc.Name {
+			theTool = t
+			break
+		}
+	}
+	if theTool.Name == "" {
+		s.emitToolError(ctx, tc.ID, tc.Name, protocol.ToolErrorNotFound,
+			fmt.Sprintf("tool %q not in current snapshot", tc.Name), "")
+		return ""
+	}
+
+	p, effective, err := s.tools.Resolve(dispatchCtx, theTool, rawArgs)
+	if err != nil {
+		if errors.Is(err, tool.ErrPermissionDenied) {
+			tier := "config"
+			if p.FromUser {
+				tier = "user"
+			} else if p.FromRemote {
+				tier = "remote"
+			}
+			s.emitToolError(ctx, tc.ID, tc.Name, protocol.ToolErrorPermissionDenied,
+				fmt.Sprintf("tool %q denied by %s tier", tc.Name, tier), tier)
+			s.emitToolDeniedMarker(ctx, tc.Name, tier)
+			return ""
+		}
+		s.emitToolError(ctx, tc.ID, tc.Name, "io", err.Error(), "")
+		return ""
+	}
+
+	result, err := s.tools.Dispatch(dispatchCtx, theTool, effective)
+	if err != nil {
+		code := "io"
+		switch {
+		case errors.Is(err, tool.ErrUnknownProvider), errors.Is(err, tool.ErrUnknownTool):
+			code = protocol.ToolErrorNotFound
+		case errors.Is(err, tool.ErrProviderRemoved):
+			code = protocol.ToolErrorProviderRemoved
+		}
+		s.emitToolError(ctx, tc.ID, tc.Name, code, err.Error(), "")
+		return ""
+	}
+
+	resultFrame := protocol.NewToolResult(s.id, s.agent.Participant(),
+		tc.ID, json.RawMessage(result), false)
+	if err := s.emit(ctx, resultFrame); err != nil {
+		s.logger.Warn("emit tool_result", "err", err)
+	}
+	return string(result)
+}
+
+func (s *Session) emitToolError(ctx context.Context, toolID, name, code, msg, tier string) {
+	payload := protocol.ToolError{Code: code, Message: msg, Tier: tier}
+	frame := protocol.NewToolResult(s.id, s.agent.Participant(), toolID, payload, true)
+	if err := s.emit(ctx, frame); err != nil {
+		s.logger.Warn("emit tool_error", "err", err, "tool", name)
+	}
+}
+
+func (s *Session) emitToolDeniedMarker(ctx context.Context, name, tier string) {
+	mk := protocol.NewSystemMarker(s.id, s.agent.Participant(),
+		protocol.SubjectToolDenied,
+		map[string]any{"tool": name, "tier": tier})
+	if err := s.emit(ctx, mk); err != nil {
+		s.logger.Warn("emit tool_denied marker", "err", err, "tool", name)
+	}
+}
+
+// marshalToolArgs encodes the model-supplied args (typically
+// map[string]any after JSON unmarshal in the provider) back to
+// JSON. Already-RawMessage values pass through.
+func marshalToolArgs(args any) json.RawMessage {
+	if args == nil {
+		return json.RawMessage(`{}`)
+	}
+	if raw, ok := args.(json.RawMessage); ok {
+		return raw
+	}
+	if s, ok := args.(string); ok {
+		// Some providers stream args as a JSON string.
+		return json.RawMessage(s)
+	}
+	body, err := json.Marshal(args)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return json.RawMessage(body)
 }
 
 // emitPendingSwitch emits a system_marker for a queued /model use,

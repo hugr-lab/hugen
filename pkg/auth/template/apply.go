@@ -8,8 +8,9 @@ import (
 )
 
 // Context carries the values Apply substitutes for placeholders.
-// Mirrors pkg/auth/perm.TemplateContext shape so callers can pass
-// the same struct to both packages without a conversion.
+// UserID and Role come from identity.WhoAmI; AgentID is the
+// runtime agent id; Session* come from the per-call ctx via
+// pkg/auth/perm.SessionFromContext.
 type Context struct {
 	UserID          string
 	Role            string
@@ -20,9 +21,9 @@ type Context struct {
 
 // Apply substitutes placeholders inside JSON string values:
 //
-//   - [$auth.user_id]
-//   - [$auth.role]
-//   - [$agent.id]
+//   - [$auth.user_id]   — WhoAmI.UserID (token bearer)
+//   - [$auth.role]      — WhoAmI.Role
+//   - [$agent.id]       — runtime agent id
 //   - [$session.id]
 //   - [$session.metadata.<key>]
 //

@@ -42,6 +42,21 @@ type OpenRequest struct {
 // either /end fires or the runtime is shut down explicitly. This
 // is what makes the long-lived-session promise honest — adapter
 // crash != session loss.
+// SessionLifecycle is an optional hook the runtime calls on
+// Session.Open and Session.Close. Used by cmd/hugen to spawn /
+// teardown per-session resources (the workspace directory and
+// the per-session bash-mcp subprocess + tool.MCPProvider). All
+// methods may be nil.
+//
+// Hooks run synchronously inside Open/Close; an OnOpen error
+// fails the Open and rolls back the session row. OnClose errors
+// are logged but do not fail Close (the session row is already
+// transitioning to closed).
+type SessionLifecycle struct {
+	OnOpen  func(ctx context.Context, sessionID string) error
+	OnClose func(ctx context.Context, sessionID string) error
+}
+
 type SessionManager struct {
 	store    RuntimeStore
 	agent    *Agent
@@ -50,11 +65,33 @@ type SessionManager struct {
 	codec    *protocol.Codec
 	logger   *slog.Logger
 
+	sessionOpts []SessionOption
+	lifecycle   SessionLifecycle
+
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
 
 	mu   sync.RWMutex
 	live map[string]*Session
+}
+
+// SessionManagerOption configures a SessionManager at construction.
+type SessionManagerOption func(*SessionManager)
+
+// WithLifecycle attaches OnOpen/OnClose hooks to the manager.
+// Used by cmd/hugen to wire per-session bash-mcp lifecycle without
+// pulling tool/skill/permission imports into pkg/runtime.
+func WithLifecycle(l SessionLifecycle) SessionManagerOption {
+	return func(m *SessionManager) { m.lifecycle = l }
+}
+
+// WithSessionOptions threads SessionOption values through every
+// spawned Session — typically used by cmd/hugen to attach the
+// shared *tool.ToolManager via WithTools.
+func WithSessionOptions(opts ...SessionOption) SessionManagerOption {
+	return func(m *SessionManager) {
+		m.sessionOpts = append(m.sessionOpts, opts...)
+	}
 }
 
 // NewSessionManager constructs the manager. All required deps are
@@ -68,12 +105,13 @@ func NewSessionManager(
 	commands *CommandRegistry,
 	codec *protocol.Codec,
 	logger *slog.Logger,
+	opts ...SessionManagerOption,
 ) *SessionManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	rootCtx, rootCancel := context.WithCancel(context.Background())
-	return &SessionManager{
+	m := &SessionManager{
 		store:      store,
 		agent:      agent,
 		models:     models,
@@ -84,6 +122,10 @@ func NewSessionManager(
 		rootCancel: rootCancel,
 		live:       make(map[string]*Session),
 	}
+	for _, o := range opts {
+		o(m)
+	}
+	return m
 }
 
 // Open creates a fresh session row, builds an in-memory *Session,
@@ -105,6 +147,15 @@ func (m *SessionManager) Open(ctx context.Context, req OpenRequest) (*Session, t
 	}
 	if err := m.store.OpenSession(ctx, row); err != nil {
 		return nil, time.Time{}, fmt.Errorf("manager: open session: %w", err)
+	}
+	if m.lifecycle.OnOpen != nil {
+		if err := m.lifecycle.OnOpen(ctx, id); err != nil {
+			// Roll back the session row so a failed lifecycle hook
+			// (e.g. workspace mkdir or bash-mcp spawn) doesn't leave
+			// an orphan active row.
+			_ = m.store.UpdateSessionStatus(ctx, id, StatusClosed)
+			return nil, time.Time{}, fmt.Errorf("manager: open session lifecycle: %w", err)
+		}
 	}
 	s := m.spawn(ctx, id)
 	// Mark the new session as "materialised already" — there's no
@@ -207,6 +258,11 @@ func (m *SessionManager) Close(ctx context.Context, id, reason string) (time.Tim
 	if err := m.store.UpdateSessionStatus(ctx, id, StatusClosed); err != nil {
 		return time.Time{}, err
 	}
+	if m.lifecycle.OnClose != nil {
+		if err := m.lifecycle.OnClose(ctx, id); err != nil {
+			m.logger.Warn("manager: close session lifecycle", "session", id, "err", err)
+		}
+	}
 	return time.Now().UTC(), nil
 }
 
@@ -289,7 +345,7 @@ func (m *SessionManager) ShutdownAll(ctx context.Context) {
 // Re-checks live[id] under the write lock so concurrent Open/Resume
 // callers can't double-spawn an orphan goroutine.
 func (m *SessionManager) spawn(_ context.Context, id string) *Session {
-	s := NewSession(id, m.agent, m.store, m.models, m.commands, m.codec, m.logger)
+	s := NewSession(id, m.agent, m.store, m.models, m.commands, m.codec, m.logger, m.sessionOpts...)
 	m.mu.Lock()
 	if existing, ok := m.live[id]; ok {
 		m.mu.Unlock()

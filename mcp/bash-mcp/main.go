@@ -1,10 +1,9 @@
 // Command bash-mcp is the in-tree file-and-shell MCP server,
-// spawned by the runtime over stdio (per-agent lifetime). It
-// exposes the bash.run, bash.shell, bash.read_file,
-// bash.write_file, bash.list_dir, and bash.sed tools against a
-// three-roots workspace: /workspace/<sid>/ (per-session,
-// ephemeral), /shared/<aid>/ (agent-wide), and /readonly/<name>/
-// (deployment mounts, read-only).
+// spawned by the runtime over stdio. It is stateless: the
+// runtime sets cmd.Dir to the session's writable workspace
+// directory before spawning, and bash-mcp just resolves logical
+// paths against (cwd, /shared, /readonly/<name>). The session
+// id never crosses the bash-mcp boundary.
 package main
 
 import (
@@ -14,7 +13,6 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
-	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -24,7 +22,6 @@ const (
 	defaultOutputMaxBytes   = 32 * 1024
 	defaultReadMaxBytes     = 1024 * 1024
 	defaultDefaultTimeoutMS = 30_000
-	defaultOrphanTTLMS      = 60 * 60 * 1000
 )
 
 func main() {
@@ -41,26 +38,13 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	ws := &Workspace{
-		WorkspaceRoot: cfg.WorkspaceRoot,
-		SharedRoot:    cfg.SharedRoot,
-		ReadonlyMnt:   cfg.ReadonlyMounts,
-		AgentID:       cfg.AgentID,
-		SessionID:     cfg.SessionID,
-		OrphanTTL:     time.Duration(cfg.OrphanTTLMS) * time.Millisecond,
+		SharedRoot:     cfg.SharedRoot,
+		SharedWritable: cfg.SharedWritable,
+		ReadonlyMnt:    cfg.ReadonlyMounts,
 	}
 	if err := ws.Validate(); err != nil {
 		return err
 	}
-	if err := ws.EnsureSessionDirs(); err != nil {
-		return err
-	}
-	go func() {
-		if removed, err := ws.SweepOrphans(); err != nil {
-			log.Warn("bash-mcp: orphan sweep failed", "err", err)
-		} else if removed > 0 {
-			log.Info("bash-mcp: orphan sweep", "removed", removed)
-		}
-	}()
 
 	tools := &Tools{
 		WS: ws,
@@ -78,11 +62,11 @@ func run(log *slog.Logger) error {
 	)
 	tools.Register(&serverAdapter{s: srv})
 
+	cwd, _ := os.Getwd()
 	log.Info("bash-mcp: starting stdio server",
-		"session_id", cfg.SessionID,
-		"agent_id", cfg.AgentID,
-		"workspace_root", cfg.WorkspaceRoot,
+		"cwd", cwd,
 		"shared_root", cfg.SharedRoot,
+		"shared_writable", cfg.SharedWritable,
 		"readonly_mounts", len(cfg.ReadonlyMounts),
 	)
 	return server.ServeStdio(srv)
@@ -98,35 +82,23 @@ func (a *serverAdapter) AddTool(tool mcp.Tool, handler func(ctx context.Context,
 }
 
 type bashConfig struct {
-	WorkspaceRoot    string
 	SharedRoot       string
+	SharedWritable   bool
 	ReadonlyMounts   []ReadonlyMnt
-	AgentID          string
-	SessionID        string
 	OutputMaxBytes   int
 	ReadMaxBytes     int
 	DefaultTimeoutMS int
-	OrphanTTLMS      int
 	MemMB            int
 }
 
 func loadConfigFromEnv() (bashConfig, error) {
 	cfg := bashConfig{
-		WorkspaceRoot:    envOrDefault("BASH_MCP_WORKSPACE_ROOT", "/workspace"),
-		SharedRoot:       envOrDefault("BASH_MCP_SHARED_ROOT", "/shared"),
-		AgentID:          os.Getenv("BASH_MCP_AGENT_ID"),
-		SessionID:        os.Getenv("BASH_MCP_SESSION_ID"),
+		SharedRoot:       os.Getenv("BASH_MCP_SHARED_ROOT"),
+		SharedWritable:   boolEnv("BASH_MCP_SHARED_WRITABLE", true),
 		OutputMaxBytes:   intEnv("BASH_MCP_OUTPUT_MAX_BYTES", defaultOutputMaxBytes),
 		ReadMaxBytes:     intEnv("BASH_MCP_READ_MAX_BYTES", defaultReadMaxBytes),
 		DefaultTimeoutMS: intEnv("BASH_MCP_DEFAULT_TIMEOUT_MS", defaultDefaultTimeoutMS),
-		OrphanTTLMS:      intEnv("BASH_MCP_ORPHAN_TTL_MS", defaultOrphanTTLMS),
 		MemMB:            intEnv("BASH_MCP_MEM_MB", 256),
-	}
-	if cfg.AgentID == "" {
-		return cfg, fmt.Errorf("bash-mcp: BASH_MCP_AGENT_ID not set")
-	}
-	if cfg.SessionID == "" {
-		return cfg, fmt.Errorf("bash-mcp: BASH_MCP_SESSION_ID not set")
 	}
 	if raw := os.Getenv("BASH_MCP_READONLY_MOUNTS"); raw != "" {
 		var entries []ReadonlyMnt
@@ -138,18 +110,25 @@ func loadConfigFromEnv() (bashConfig, error) {
 	return cfg, nil
 }
 
-func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
 func intEnv(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
+	}
+	return def
+}
+
+func boolEnv(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	switch v {
+	case "1", "true", "TRUE", "True", "yes":
+		return true
+	case "0", "false", "FALSE", "False", "no":
+		return false
 	}
 	return def
 }

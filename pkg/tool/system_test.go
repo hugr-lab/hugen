@@ -57,8 +57,9 @@ func TestSystemProvider_NotepadAppend(t *testing.T) {
 			return "note-xyz", nil
 		},
 	}
+	deps.AgentID = "a1"
 	p := NewSystemProvider(deps)
-	ctx := WithIdentity(context.Background(), Identity{AgentID: "a1", SessionID: "s1"})
+	ctx := perm.WithSession(context.Background(), perm.SessionContext{SessionID: "s1"})
 	out, err := p.Call(ctx, "notepad_append", json.RawMessage(`{"text":"hello"}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -98,7 +99,7 @@ body
 	}})
 	mgr := skill.NewSkillManager(store, nil)
 	p := NewSystemProvider(SystemDeps{Skills: mgr})
-	ctx := WithIdentity(context.Background(), Identity{SessionID: "s1"})
+	ctx := perm.WithSession(context.Background(), perm.SessionContext{SessionID: "s1"})
 	out, err := p.Call(ctx, "skill_load", json.RawMessage(`{"name":"alpha"}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -124,7 +125,7 @@ func TestSystemProvider_SkillLoad_MissingSession(t *testing.T) {
 func TestSystemProvider_SkillUnload_Idempotent(t *testing.T) {
 	mgr := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
 	p := NewSystemProvider(SystemDeps{Skills: mgr})
-	ctx := WithIdentity(context.Background(), Identity{SessionID: "s1"})
+	ctx := perm.WithSession(context.Background(), perm.SessionContext{SessionID: "s1"})
 	// Unload missing skill — must succeed (idempotent).
 	if _, err := p.Call(ctx, "skill_unload", json.RawMessage(`{"name":"missing"}`)); err != nil {
 		t.Errorf("Call: %v", err)
@@ -149,7 +150,7 @@ body
 	// and assert the not-found path instead — full e2e is via T043.
 	mgr := skill.NewSkillManager(store, nil)
 	p := NewSystemProvider(SystemDeps{Skills: mgr})
-	ctx := WithIdentity(context.Background(), Identity{SessionID: "s1"})
+	ctx := perm.WithSession(context.Background(), perm.SessionContext{SessionID: "s1"})
 	if err := mgr.Load(ctx, "s1", "alpha"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -272,7 +273,7 @@ func TestSystemProvider_PermissionGate_DispatchedThroughManager(t *testing.T) {
 		Provider:         "system",
 		PermissionObject: "hugen:tool:system",
 	}
-	_, _, err := m.Resolve(context.Background(), Identity{}, tool, json.RawMessage(`{"name":"x","command":"y"}`))
+	_, _, err := m.Resolve(context.Background(), tool, json.RawMessage(`{"name":"x","command":"y"}`))
 	if !errors.Is(err, ErrPermissionDenied) {
 		t.Errorf("err = %v, want ErrPermissionDenied", err)
 	}

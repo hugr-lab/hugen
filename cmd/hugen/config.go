@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,7 +31,29 @@ type BootstrapConfig struct {
 	Port       int
 	WebUIPort  int
 	BaseURI    string
-	Hugr       HugrConfig
+	// StateDir is the persistent state root (HUGEN_STATE).
+	// Used for installed skills (system/community/local), agent
+	// keys, and any other across-restart state. Defaults to
+	// "${HOME}/.hugen" on local mode.
+	StateDir string
+	// WorkspaceDir is the per-session scratch root
+	// (HUGEN_WORKSPACE_DIR). Each Session.Open creates
+	// "<WorkspaceDir>/<session_id>/" and bash-mcp is spawned
+	// with cmd.Dir set to it. Defaults to "./.hugen/workspace".
+	WorkspaceDir string
+	// BashMCPPath is the executable path for the bash-mcp binary.
+	// Defaults to "bash-mcp" (resolved via $PATH).
+	BashMCPPath string
+	// SharedRoot is /shared/ host path mounted into each session's
+	// bash-mcp instance. Empty disables /shared/ entirely.
+	SharedRoot string
+	// SharedWritable controls whether bash.write_file is allowed
+	// under /shared/. Defaults to true.
+	SharedWritable bool
+	// CleanupOnClose removes the session's workspace directory on
+	// Session.Close. Defaults to true.
+	CleanupOnClose bool
+	Hugr           HugrConfig
 }
 
 // HugrConfig — platform connection.
@@ -54,6 +77,9 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 
 	v.SetDefault("HUGR_URL", "http://localhost:15000")
 	v.SetDefault("HUGEN_PORT", 10000)
+	v.SetDefault("HUGEN_BASH_MCP_PATH", "bash-mcp")
+	v.SetDefault("HUGEN_SHARED_WRITABLE", true)
+	v.SetDefault("HUGEN_WORKSPACE_CLEANUP_ON_CLOSE", true)
 	v.SetDefault("HUGEN_WEBUI_PORT", 10001)
 	v.SetDefault("HUGEN_CONFIG_FILE", "config.yaml")
 	v.SetDefault("HUGEN_BASE_URL", "http://localhost:10000")
@@ -74,12 +100,18 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 	}
 
 	config := &BootstrapConfig{
-		Mode:       v.GetString("HUGEN_MODE"),
-		LogLevel:   v.GetString("HUGEN_LOG_LEVEL"),
-		ConfigPath: v.GetString("HUGEN_CONFIG_FILE"),
-		Port:       v.GetInt("HUGEN_PORT"),
-		WebUIPort:  v.GetInt("HUGEN_WEBUI_PORT"),
-		BaseURI:    v.GetString("HUGEN_BASE_URL"),
+		Mode:         v.GetString("HUGEN_MODE"),
+		LogLevel:     v.GetString("HUGEN_LOG_LEVEL"),
+		ConfigPath:   v.GetString("HUGEN_CONFIG_FILE"),
+		Port:         v.GetInt("HUGEN_PORT"),
+		WebUIPort:    v.GetInt("HUGEN_WEBUI_PORT"),
+		BaseURI:      v.GetString("HUGEN_BASE_URL"),
+		StateDir:       v.GetString("HUGEN_STATE"),
+		WorkspaceDir:   v.GetString("HUGEN_WORKSPACE_DIR"),
+		BashMCPPath:    v.GetString("HUGEN_BASH_MCP_PATH"),
+		SharedRoot:     v.GetString("HUGEN_SHARED_ROOT"),
+		SharedWritable: v.GetBool("HUGEN_SHARED_WRITABLE"),
+		CleanupOnClose: v.GetBool("HUGEN_WORKSPACE_CLEANUP_ON_CLOSE"),
 		Hugr: HugrConfig{
 			URL:         v.GetString("HUGR_URL"),
 			RedirectURI: v.GetString("HUGR_REDIRECT_URI"),
@@ -92,6 +124,16 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 	}
 	if config.BaseURI == "" {
 		config.BaseURI = fmt.Sprintf("http://localhost:%d", config.Port)
+	}
+	if config.StateDir == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			config.StateDir = filepath.Join(home, ".hugen")
+		} else {
+			config.StateDir = ".hugen"
+		}
+	}
+	if config.WorkspaceDir == "" {
+		config.WorkspaceDir = filepath.Join(".hugen", "workspace")
 	}
 	if config.Hugr.AccessToken != "" && config.Hugr.TokenURL == "" ||
 		config.Hugr.AccessToken == "" && config.Hugr.TokenURL != "" {

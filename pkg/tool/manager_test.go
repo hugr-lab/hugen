@@ -48,7 +48,7 @@ type fakePerms struct {
 	rules map[string]perm.Permission
 }
 
-func (f *fakePerms) Resolve(ctx context.Context, ident perm.Identity, object, field string) (perm.Permission, error) {
+func (f *fakePerms) Resolve(ctx context.Context, object, field string) (perm.Permission, error) {
 	if p, ok := f.rules[object+":"+field]; ok {
 		return p, nil
 	}
@@ -148,7 +148,7 @@ func TestToolManager_Resolve_Denied(t *testing.T) {
 	}}
 	m := NewToolManager(perms, nil, Options{})
 	tool := Tool{Name: "bash-mcp:bash.write_file", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"}
-	_, _, err := m.Resolve(context.Background(), Identity{}, tool, json.RawMessage(`{}`))
+	_, _, err := m.Resolve(context.Background(), tool, json.RawMessage(`{}`))
 	if !errors.Is(err, ErrPermissionDenied) {
 		t.Errorf("err = %v, want ErrPermissionDenied", err)
 	}
@@ -164,7 +164,7 @@ func TestToolManager_Resolve_DataMergedRuleWins(t *testing.T) {
 	m := NewToolManager(perms, nil, Options{})
 	tool := Tool{Name: "bash-mcp:bash.run", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"}
 	args := json.RawMessage(`{"cmd":"ls","workspace":"/tmp/llm-supplied"}`)
-	_, eff, err := m.Resolve(context.Background(), Identity{}, tool, args)
+	_, eff, err := m.Resolve(context.Background(), tool, args)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -228,5 +228,75 @@ func TestToolManager_BumpPolicyGen_InvalidatesCache(t *testing.T) {
 	b, _ := m.Snapshot(context.Background(), "s")
 	if b.Generations.Policy == a.Generations.Policy {
 		t.Errorf("Policy gen did not move: %d", b.Generations.Policy)
+	}
+}
+
+func TestToolManager_SessionProvider_VisibleOnlyToOwningSession(t *testing.T) {
+	m := NewToolManager(&fakePerms{}, nil, Options{DrainTimeout: 10 * time.Millisecond})
+	global := &fakeProvider{name: "system", tools: []Tool{{Name: "system:notepad", Provider: "system"}}}
+	if err := m.AddProvider(global); err != nil {
+		t.Fatal(err)
+	}
+	scoped := &fakeProvider{name: "bash-mcp", tools: []Tool{{Name: "bash-mcp:bash.run", Provider: "bash-mcp"}}}
+	if err := m.AddSessionProvider("s1", scoped); err != nil {
+		t.Fatal(err)
+	}
+
+	s1, _ := m.Snapshot(context.Background(), "s1")
+	if len(s1.Tools) != 2 {
+		t.Errorf("s1 tools = %d, want 2 (global + scoped)", len(s1.Tools))
+	}
+	s2, _ := m.Snapshot(context.Background(), "s2")
+	if len(s2.Tools) != 1 {
+		t.Errorf("s2 tools = %d, want 1 (global only)", len(s2.Tools))
+	}
+}
+
+func TestToolManager_SessionProvider_ShadowsGlobalOnDispatch(t *testing.T) {
+	m := NewToolManager(&fakePerms{}, nil, Options{DrainTimeout: 10 * time.Millisecond})
+	global := &fakeProvider{name: "bash-mcp", callFunc: func(name string, args json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"from":"global"}`), nil
+	}}
+	scoped := &fakeProvider{name: "bash-mcp", callFunc: func(name string, args json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"from":"scoped"}`), nil
+	}}
+	if err := m.AddProvider(global); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AddSessionProvider("s1", scoped); err != nil {
+		t.Fatal(err)
+	}
+	tool := Tool{Name: "bash-mcp:bash.run", Provider: "bash-mcp"}
+	ctx := perm.WithSession(context.Background(), perm.SessionContext{SessionID: "s1"})
+	out, err := m.Dispatch(ctx, tool, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if string(out) != `{"from":"scoped"}` {
+		t.Errorf("got %s, want scoped result", out)
+	}
+
+	ctx2 := perm.WithSession(context.Background(), perm.SessionContext{SessionID: "s2"})
+	out2, _ := m.Dispatch(ctx2, tool, json.RawMessage(`{}`))
+	if string(out2) != `{"from":"global"}` {
+		t.Errorf("got %s, want global result for s2", out2)
+	}
+}
+
+func TestToolManager_CloseSession_TearsDownProviders(t *testing.T) {
+	m := NewToolManager(&fakePerms{}, nil, Options{DrainTimeout: 10 * time.Millisecond})
+	p := &fakeProvider{name: "bash-mcp"}
+	if err := m.AddSessionProvider("s1", p); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CloseSession(context.Background(), "s1"); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+	if !p.closed.Load() {
+		t.Errorf("provider not closed")
+	}
+	snap, _ := m.Snapshot(context.Background(), "s1")
+	if len(snap.Tools) != 0 {
+		t.Errorf("tools after close = %d, want 0", len(snap.Tools))
 	}
 }

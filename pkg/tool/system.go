@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 
+	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
@@ -20,8 +21,9 @@ const (
 	systemSkillsPermObj = "hugen:tool:system" // grouped under one Tier-1 floor
 )
 
-// NotepadFunc appends text to the caller's notepad and returns the
-// new note id. AgentID and sessionID come from IdentityFromContext.
+// NotepadFunc appends text to the caller's notepad and returns
+// the new note id. SystemProvider supplies its own agentID (from
+// SystemDeps) and pulls sessionID from perm.SessionFromContext.
 type NotepadFunc func(ctx context.Context, agentID, sessionID, authorID, text string) (string, error)
 
 // MCPAddSpec carries the args of mcp_add_server. Caller wires it
@@ -38,7 +40,13 @@ type MCPAddSpec struct {
 // runtime. Every callback may be nil — the corresponding tool then
 // surfaces ErrSystemUnavailable on dispatch (Tier-1 may also strip
 // it from the catalogue).
+//
+// AgentID is the agent the provider belongs to; SystemProvider
+// passes it to NotepadFunc on every call without re-resolving the
+// identity per dispatch.
 type SystemDeps struct {
+	AgentID string
+
 	Notepad NotepadFunc
 
 	Skills *skill.SkillManager
@@ -174,8 +182,8 @@ func (p *SystemProvider) callNotepadAppend(ctx context.Context, args json.RawMes
 	if err := json.Unmarshal(args, &in); err != nil {
 		return nil, fmt.Errorf("%w: notepad_append: %v", ErrArgValidation, err)
 	}
-	ident, _ := IdentityFromContext(ctx)
-	id, err := p.deps.Notepad(ctx, ident.AgentID, ident.SessionID, in.AuthorID, in.Text)
+	sc, _ := perm.SessionFromContext(ctx)
+	id, err := p.deps.Notepad(ctx, p.deps.AgentID, sc.SessionID, in.AuthorID, in.Text)
 	if err != nil {
 		return nil, err
 	}
@@ -195,11 +203,11 @@ func (p *SystemProvider) callSkillLoad(ctx context.Context, args json.RawMessage
 	if in.Name == "" {
 		return nil, fmt.Errorf("%w: skill_load: name required", ErrArgValidation)
 	}
-	ident, _ := IdentityFromContext(ctx)
-	if ident.SessionID == "" {
+	sc, _ := perm.SessionFromContext(ctx)
+	if sc.SessionID == "" {
 		return nil, fmt.Errorf("%w: skill_load: missing session id on context", ErrArgValidation)
 	}
-	if err := p.deps.Skills.Load(ctx, ident.SessionID, in.Name); err != nil {
+	if err := p.deps.Skills.Load(ctx, sc.SessionID, in.Name); err != nil {
 		return nil, err
 	}
 	return json.RawMessage(`{"loaded":true}`), nil
@@ -215,8 +223,8 @@ func (p *SystemProvider) callSkillUnload(ctx context.Context, args json.RawMessa
 	if err := json.Unmarshal(args, &in); err != nil {
 		return nil, fmt.Errorf("%w: skill_unload: %v", ErrArgValidation, err)
 	}
-	ident, _ := IdentityFromContext(ctx)
-	if err := p.deps.Skills.Unload(ctx, ident.SessionID, in.Name); err != nil {
+	sc, _ := perm.SessionFromContext(ctx)
+	if err := p.deps.Skills.Unload(ctx, sc.SessionID, in.Name); err != nil {
 		return nil, err
 	}
 	return json.RawMessage(`{"unloaded":true}`), nil
@@ -236,8 +244,8 @@ func (p *SystemProvider) callSkillRef(ctx context.Context, args json.RawMessage)
 	if in.Skill == "" || in.Ref == "" {
 		return nil, fmt.Errorf("%w: skill_ref: skill and ref required", ErrArgValidation)
 	}
-	ident, _ := IdentityFromContext(ctx)
-	s, err := p.deps.Skills.LoadedSkill(ctx, ident.SessionID, in.Skill)
+	sc, _ := perm.SessionFromContext(ctx)
+	s, err := p.deps.Skills.LoadedSkill(ctx, sc.SessionID, in.Skill)
 	if err != nil {
 		return nil, fmt.Errorf("skill_ref: %w", err)
 	}

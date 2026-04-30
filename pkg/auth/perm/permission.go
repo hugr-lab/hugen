@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/auth/template"
 	"github.com/hugr-lab/hugen/pkg/config"
 )
 
@@ -29,31 +28,6 @@ type Permission struct {
 	FromConfig bool
 	FromRemote bool
 	FromUser   bool
-}
-
-// Identity is the caller identity threaded through Resolve. The
-// fields used by [pkg/auth/template.Apply] mirror Context one for
-// one.
-type Identity struct {
-	UserID          string
-	AgentID         string
-	Role            string
-	Roles           []string
-	SessionID       string
-	SessionMetadata map[string]string
-}
-
-// TemplateContext converts an Identity to the template package's
-// Context type. Convenience for callers that need to substitute
-// before dispatch.
-func (i Identity) TemplateContext() template.Context {
-	return template.Context{
-		UserID:          i.UserID,
-		Role:            i.Role,
-		AgentID:         i.AgentID,
-		SessionID:       i.SessionID,
-		SessionMetadata: i.SessionMetadata,
-	}
 }
 
 // RefreshEvent is what Subscribe streams. Useful for ToolManager

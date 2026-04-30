@@ -230,6 +230,25 @@ func (m *SkillManager) LoadedSkill(ctx context.Context, sessionID, name string) 
 	return s, nil
 }
 
+// LoadedNames returns the names of every skill currently loaded
+// for sessionID, sorted lexically. Empty slice (not nil) when
+// the session has no skills loaded — distinguishable from "no
+// skills configured" only by checking the slice length.
+func (m *SkillManager) LoadedNames(_ context.Context, sessionID string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	st, ok := m.sessions[sessionID]
+	if !ok {
+		return []string{}
+	}
+	out := make([]string, 0, len(st.loaded))
+	for n := range st.loaded {
+		out = append(out, n)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // Refresh re-reads `name` from the store and updates every
 // session that has it loaded. Returns the new generation token.
 func (m *SkillManager) Refresh(ctx context.Context, name string) (int64, error) {

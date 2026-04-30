@@ -10,32 +10,45 @@ import (
 	"sync/atomic"
 
 	"github.com/hugr-lab/hugen/pkg/auth/template"
+	"github.com/hugr-lab/hugen/pkg/identity"
 )
 
 // LocalPermissions resolves permissions entirely from operator
-// config (Tier 1). No Hugr round-trip; Refresh is a no-op unless
-// the underlying PermissionsView fires OnUpdate.
+// config (Tier 1). No Hugr round-trip on Resolve; Refresh is a
+// no-op unless the underlying PermissionsView fires OnUpdate.
+// AgentID and Role are sourced once from identity.Source
+// (Agent + WhoAmI) and cached for the lifetime of the service —
+// they're agent-stable and substituting them per call shouldn't
+// pay a network round-trip. Tier-2 RemotePermissions overrides
+// Role from the my_permissions snapshot in US4.
 type LocalPermissions struct {
-	cfg PermissionsView
+	cfg   PermissionsView
+	ident identity.Source
 
 	mu    sync.RWMutex
 	rules []Rule
 
-	gen           atomic.Int64
-	subscribersMu sync.Mutex
-	subscribers   []chan RefreshEvent
+	identityOnce sync.Once
+	agentID      string
+	userID       string
+	role         string
+
+	gen            atomic.Int64
+	subscribersMu  sync.Mutex
+	subscribers    []chan RefreshEvent
 	cancelOnUpdate func()
 }
 
 // Compile-time assertion.
 var _ Service = (*LocalPermissions)(nil)
 
-// NewLocalPermissions captures the current rule snapshot from
-// cfg. Watches cfg.OnUpdate to re-snapshot and emit a
-// RefreshEvent when the static service is replaced (phase-6+
-// live reload). For phase-3's static service this never fires.
-func NewLocalPermissions(cfg PermissionsView) *LocalPermissions {
-	l := &LocalPermissions{cfg: cfg}
+// NewLocalPermissions captures the current rule snapshot from cfg
+// and binds the identity source used to resolve [$auth.user_id]
+// / [$agent.id] template placeholders. Watches cfg.OnUpdate to
+// re-snapshot and emit a RefreshEvent when the static service is
+// replaced (phase-6+ live reload).
+func NewLocalPermissions(cfg PermissionsView, ident identity.Source) *LocalPermissions {
+	l := &LocalPermissions{cfg: cfg, ident: ident}
 	l.snapshot()
 	if cfg != nil {
 		l.cancelOnUpdate = cfg.OnUpdate(func() {
@@ -65,10 +78,40 @@ func (l *LocalPermissions) snapshot() {
 	l.mu.Unlock()
 }
 
+// identityFacts is the cached (agent, user, role) triple resolved
+// once from the bound identity.Source. AgentID is the agent's
+// own runtime id; UserID and Role come from WhoAmI — in local
+// mode both default to "local"; in remote/hub mode they reflect
+// whoever the bound Hugr token represents (the agent's own Hugr
+// identity, in autonomous deployments).
+type identityFacts struct {
+	AgentID, UserID, Role string
+}
+
+// resolveIdentity lazily resolves the cached identity facts.
+// Failures are swallowed — substitution returns empty strings,
+// which surface as a clear (empty) value rather than failing
+// every Resolve call.
+func (l *LocalPermissions) resolveIdentity(ctx context.Context) identityFacts {
+	l.identityOnce.Do(func() {
+		if l.ident == nil {
+			return
+		}
+		if a, err := l.ident.Agent(ctx); err == nil {
+			l.agentID = a.ID
+		}
+		if w, err := l.ident.WhoAmI(ctx); err == nil {
+			l.userID = w.UserID
+			l.role = w.Role
+		}
+	})
+	return identityFacts{AgentID: l.agentID, UserID: l.userID, Role: l.role}
+}
+
 // Resolve returns the merged Permission for (object, field). For
 // LocalPermissions this is just the Tier-1 floor — no remote
 // rules to layer on top.
-func (l *LocalPermissions) Resolve(ctx context.Context, ident Identity, object, field string) (Permission, error) {
+func (l *LocalPermissions) Resolve(ctx context.Context, object, field string) (Permission, error) {
 	if err := ctx.Err(); err != nil {
 		return Permission{}, err
 	}
@@ -76,11 +119,24 @@ func (l *LocalPermissions) Resolve(ctx context.Context, ident Identity, object, 
 	rules := slices.Clone(l.rules)
 	l.mu.RUnlock()
 
-	p, err := mergeConfig(rules, ident, object, field)
+	tctx := l.templateContext(ctx)
+	p, err := mergeConfig(rules, tctx, object, field)
 	if err != nil {
 		return Permission{}, err
 	}
 	return p, nil
+}
+
+func (l *LocalPermissions) templateContext(ctx context.Context) template.Context {
+	sc, _ := SessionFromContext(ctx)
+	id := l.resolveIdentity(ctx)
+	return template.Context{
+		UserID:          id.UserID,
+		AgentID:         id.AgentID,
+		Role:            id.Role,
+		SessionID:       sc.SessionID,
+		SessionMetadata: sc.SessionMetadata,
+	}
 }
 
 // Refresh re-reads the rule snapshot from cfg. A real change in
@@ -138,14 +194,10 @@ func (l *LocalPermissions) broadcast(ev RefreshEvent) {
 // against a rule list. Wildcard `*` rules contribute to the
 // merge; exact-field rules override on scalar conflict (more
 // specific wins inside the same tier).
-func mergeConfig(rules []Rule, ident Identity, object, field string) (Permission, error) {
+func mergeConfig(rules []Rule, tctx template.Context, object, field string) (Permission, error) {
 	out := Permission{}
 	matched := false
-	tctx := ident.TemplateContext()
 
-	// Wildcards first, then exact-field rules — that way
-	// exact-field scalar values win on conflict (config-wins
-	// inside the same tier).
 	apply := func(r Rule) error {
 		if r.Type != object {
 			return nil
@@ -218,11 +270,6 @@ func mergeDataConfigWins(prev, next json.RawMessage, tctx template.Context) (jso
 		return nil, errors.New("perm: data merge: rule is not an object")
 	}
 	for k, v := range nm {
-		// next (this rule) wins on conflict — config-wins inside
-		// Tier 1, and Tier 2's RemotePermissions will treat the
-		// Tier-1 result as `prev` and itself as `next` only when
-		// remote-wins; phase 3 ships LocalPermissions so this
-		// path is exercised here.
 		pm[k] = v
 	}
 	out, err := json.Marshal(pm)
