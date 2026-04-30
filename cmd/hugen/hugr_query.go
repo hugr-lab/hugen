@@ -35,7 +35,6 @@ type hugrQueryBuilder struct {
 	// agent is reachable to clients via `host.docker.internal` or
 	// any other non-loopback name.
 	loopbackPort int
-	hugrURL      string // upstream Hugr GraphQL endpoint
 	stateDir     string // ${HUGEN_STATE} — workspaces parent
 	sharedDir    string // ${HUGEN_SHARED_ROOT}
 	agentID      string
@@ -46,8 +45,8 @@ func (b *hugrQueryBuilder) Build(ctx context.Context, spec config.ToolProviderSp
 	if spec.Command == "" {
 		return nil, nil, fmt.Errorf("hugr-query: command is empty (set tool_providers[].command, e.g. ./bin/hugr-query)")
 	}
-	if b.hugrURL == "" {
-		return nil, nil, fmt.Errorf("hugr-query: HUGR_URL not configured (Hugr is optional — drop the provider entry to deploy without Hugr)")
+	if spec.Env["HUGR_URL"] == "" {
+		return nil, nil, fmt.Errorf("hugr-query: tool_providers[].env.HUGR_URL is required (e.g. ${HUGR_URL}/ipc — operator owns the exact endpoint)")
 	}
 
 	bootstrap, err := mintBootstrapToken()
@@ -59,15 +58,16 @@ func (b *hugrQueryBuilder) Build(ctx context.Context, spec config.ToolProviderSp
 		return nil, nil, fmt.Errorf("register spawn: %w", err)
 	}
 
-	// Compose env: operator-supplied keys (cfg.Env) layered under
-	// runtime-controlled keys. Runtime wins so a misconfigured
-	// HUGR_URL/HUGR_TOKEN_URL in YAML cannot escape the bootstrap
-	// flow.
-	env := make(map[string]string, len(spec.Env)+8)
+	// Compose env: start from the operator's YAML — they own
+	// HUGR_URL, optional timeout overrides, and any deploy-specific
+	// proxy headers. The runtime then layers in the four keys it
+	// has authority over (token URL, bootstrap secret, workspace
+	// roots, agent id) — those override silently because YAML
+	// can't see them anyway.
+	env := make(map[string]string, len(spec.Env)+5)
 	for k, v := range spec.Env {
 		env[k] = v
 	}
-	env["HUGR_URL"] = b.hugrURL
 	env["HUGR_TOKEN_URL"] = httpapi.LoopbackTokenURL("", b.loopbackPort)
 	env["HUGR_ACCESS_TOKEN"] = bootstrap
 	env["WORKSPACES_ROOT"] = filepath.Join(b.stateDir, "workspaces")
@@ -75,14 +75,6 @@ func (b *hugrQueryBuilder) Build(ctx context.Context, spec config.ToolProviderSp
 		env["SHARED_DIR"] = b.sharedDir
 	}
 	env["HUGEN_AGENT_ID"] = b.agentID
-	// Optional ceiling/default — leave to operator if they want
-	// to override; defaults baked into the binary cover the rest.
-	if _, has := env["HUGR_QUERY_TIMEOUT_MS"]; !has {
-		env["HUGR_QUERY_TIMEOUT_MS"] = "3600000"
-	}
-	if _, has := env["HUGR_QUERY_MAX_TIMEOUT_MS"]; !has {
-		env["HUGR_QUERY_MAX_TIMEOUT_MS"] = "86400000"
-	}
 
 	mcpSpec := tool.MCPProviderSpec{
 		Name:        spec.Name,

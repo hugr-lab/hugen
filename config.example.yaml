@@ -122,15 +122,28 @@ tool_providers:
   # In-tree Hugr GraphQL MCP (file output). Spawned per_agent over
   # stdio; persists tabular results as Parquet under each session's
   # workspace data dir, returns path + ≤ 50-row preview to the
-  # model. Auth is runtime-managed via /api/auth/agent-token (the
-  # agent mints a per-spawn bootstrap token; HUGR_TOKEN_URL etc.
-  # are injected at spawn time — operators do not write them
-  # here). Drop this entry to skip file-output queries; the
-  # `hugr-main` provider above still serves inline data tools.
+  # model.
+  #
+  # HUGR_URL is the literal endpoint the binary dials — usually
+  # `${HUGR_URL}/ipc` (multipart wire protocol). Operators behind a
+  # proxy with a non-standard prefix put the full path here; the
+  # runtime does NOT mangle it.
+  #
+  # The runtime injects HUGR_TOKEN_URL, HUGR_ACCESS_TOKEN,
+  # WORKSPACES_ROOT, SHARED_DIR, HUGEN_AGENT_ID at spawn time.
+  # Operators do not write those — they're per-spawn secrets and
+  # loopback paths the binary can't know on its own. HUGR_QUERY_*
+  # timeout knobs may be set here to override the binary defaults
+  # (1 h default, 24 h ceiling).
+  #
+  # Drop this entry to skip file-output queries; `hugr-main` above
+  # still serves inline data tools.
   - name: hugr-query
     type: hugr-query
     command: ./bin/hugr-query        # built by `make hugr-query`
     lifetime: per_agent
+    env:
+      HUGR_URL: ${HUGR_URL}/ipc
 
 local_db_enabled: true
 local_db:

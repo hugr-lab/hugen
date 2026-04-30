@@ -68,7 +68,6 @@ func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillMa
 		hq := &hugrQueryBuilder{
 			authStore:    tokenStore,
 			loopbackPort: core.Boot.Port,
-			hugrURL:      core.Boot.Hugr.URL,
 			stateDir:     core.Boot.StateDir,
 			sharedDir:    os.Getenv("HUGEN_SHARED_ROOT"),
 			agentID:      core.Agent.ID(),
