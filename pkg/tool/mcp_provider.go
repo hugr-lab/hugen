@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -412,13 +413,33 @@ func isEOF(err error) bool {
 	return strings.Contains(msg, "EOF") || strings.Contains(msg, "closed pipe") || strings.Contains(msg, "broken pipe")
 }
 
+// envSlice produces the env slice handed to a stdio MCP child.
+// The child inherits hugen's own os.Environ (PATH, locale, HOME,
+// etc.) so common shell binaries (sh, bash, du, ls) and language
+// runtimes resolve at exec time. The configured spec.Env overrides
+// any inherited keys with the same name and contributes new ones.
+// Without the inheritance step children would launch with
+// PATH="" — every shell command in bash-mcp would fail "executable
+// not found".
 func envSlice(env map[string]string) []string {
+	parent := os.Environ()
 	if len(env) == 0 {
-		return nil
+		return parent
 	}
-	out := make([]string, 0, len(env))
+	indexByKey := make(map[string]int, len(parent))
+	for i, kv := range parent {
+		if eq := strings.IndexByte(kv, '='); eq > 0 {
+			indexByKey[kv[:eq]] = i
+		}
+	}
+	out := append([]string(nil), parent...)
 	for k, v := range env {
-		out = append(out, k+"="+v)
+		entry := k + "=" + v
+		if idx, ok := indexByKey[k]; ok {
+			out[idx] = entry
+		} else {
+			out = append(out, entry)
+		}
 	}
 	return out
 }

@@ -51,6 +51,14 @@ type Session struct {
 	in     chan protocol.Frame
 	out    chan protocol.Frame
 	closed atomic.Bool
+
+	// statusMu serialises persistent status transitions (active /
+	// suspended / closed). DuckDB MVCC raises "Conflict on update"
+	// when two transactions update the same row concurrently —
+	// MarkClosed (from /end or adapter close) racing ShutdownAll's
+	// Suspend hits exactly this. Serialising the writes inside the
+	// runtime keeps the store layer simple.
+	statusMu sync.Mutex
 }
 
 // modelSwitch records a pending /model use until the next turn so
@@ -663,15 +671,14 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 	if err := s.emit(ctx, callFrame); err != nil {
 		s.logger.Warn("emit tool_call", "err", err)
 	}
-	// Log the per-call hash so phase-4 stuck-detection has a
-	// trail to verify against (and so operators can spot
-	// repeats in real time during debugging). Hash is a
-	// deterministic id over (name + raw args) — see
-	// pkg/models/hugr.go::hashToolCall.
-	if tc.Hash != "" {
-		s.logger.Debug("tool dispatch",
-			"session", s.id, "tool", tc.Name, "hash", tc.Hash)
-	}
+	// Log the dispatch with full args at debug level. The hash is
+	// included for phase-4 stuck-detection (deterministic id over
+	// name + raw args, see pkg/models/hugr.go::hashToolCall);
+	// args itself helps live debugging — operator can replay the
+	// exact call. Result lands on a sibling debug line below.
+	s.logger.Debug("tool dispatch",
+		"session", s.id, "tool", tc.Name, "hash", tc.Hash,
+		"args", string(rawArgs))
 
 	// Look up the Tool by fully-qualified name in the per-session
 	// snapshot. The snapshot already filters by skill bindings so
@@ -724,9 +731,14 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 		case errors.Is(err, tool.ErrProviderRemoved):
 			code = protocol.ToolErrorProviderRemoved
 		}
+		s.logger.Debug("tool result error",
+			"session", s.id, "tool", tc.Name, "code", code, "err", err)
 		s.emitToolError(ctx, tc.ID, tc.Name, code, err.Error(), "")
 		return ""
 	}
+	s.logger.Debug("tool result",
+		"session", s.id, "tool", tc.Name,
+		"result", truncatePayload(result, 2048))
 
 	resultFrame := protocol.NewToolResult(s.id, s.agent.Participant(),
 		tc.ID, json.RawMessage(result), false)
@@ -734,6 +746,18 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 		s.logger.Warn("emit tool_result", "err", err)
 	}
 	return string(result)
+}
+
+// truncatePayload caps a tool's raw JSON result for log lines so a
+// large file dump or query response doesn't drown the log. Returns
+// the head of the payload plus a "…(N bytes total)" suffix when
+// truncated; passes the value through unchanged when it already
+// fits.
+func truncatePayload(b []byte, max int) string {
+	if max <= 0 || len(b) <= max {
+		return string(b)
+	}
+	return fmt.Sprintf("%s…(%d bytes total)", b[:max], len(b))
 }
 
 func (s *Session) emitToolError(ctx context.Context, toolID, name, code, msg, tier string) {
@@ -794,6 +818,11 @@ func (s *Session) emitPendingSwitch(ctx context.Context) error {
 // Idempotent: a second call is a no-op once the row is already
 // closed (status update is idempotent at the store level too).
 func (s *Session) MarkClosed(ctx context.Context) error {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+	if s.closed.Load() {
+		return nil
+	}
 	if err := s.store.UpdateSessionStatus(ctx, s.id, StatusClosed); err != nil {
 		return fmt.Errorf("session %s: mark closed: %w", s.id, err)
 	}

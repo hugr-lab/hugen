@@ -82,23 +82,42 @@ models:
 # Hugr is OPTIONAL: omit the `hugr-main` / `hugr-query` entries to
 # run as a universal local agent (bash-mcp + system tools only).
 #
-# tool_providers:
-#   # Remote Hugr MCP (HTTP). Hugr is itself an MCP server exposing
-#   # `discovery-*` / `schema-*` / `data-*` tools. The agent reaches
-#   # it through the named auth source.
-#   - name: hugr-main
-#     type: mcp
-#     transport: http
-#     endpoint: ${HUGR_URL}/mcp
-#     auth: hugr
-#
-#   # In-tree per-session bash sandbox. Spawned by the runtime on
-#   # Session.Open (cwd = /workspace/<session_id>/).
-#   - name: bash-mcp
-#     type: mcp
-#     transport: stdio
-#     command: ./bin/bash-mcp
-#     lifetime: per_session
+tool_providers:
+  # In-tree per-session bash + filesystem MCP. Spawned by the
+  # runtime on Session.Open with
+  # cmd.Dir = <HUGEN_WORKSPACE_DIR>/<session_id>/.
+  #
+  # bash-mcp does no path translation. It exposes:
+  #   - bash.run / bash.shell — exec on the host filesystem.
+  #   - bash.read_file / write_file / list_dir / sed — convenience
+  #     wrappers that canonicalise paths but otherwise operate on
+  #     real host paths.
+  #
+  # Sandboxing is the deployment's job:
+  #   - container: rely on the kernel + bind mounts.
+  #   - local/dev: rely on filesystem ACL + (phase 5+) HITL
+  #     approval prompts before destructive operations.
+  - name: bash-mcp
+    type: mcp
+    transport: stdio
+    command: ./bin/bash-mcp        # built by `make bash-mcp`
+    lifetime: per_session
+    env:
+      # Real host directory the operator designates as the agent's
+      # user-visible exchange folder. The model is told about it via
+      # the _system skill and reads `$SHARED_DIR` in shell commands.
+      # Leave blank / unset to disable.
+      SHARED_DIR: ${HUGEN_SHARED_ROOT}
+
+  # Remote Hugr MCP (HTTP). Hugr is itself an MCP server exposing
+  # `discovery-*` / `schema-*` / `data-*` tools. The agent reaches
+  # it through the named auth source. Drop this entry to run as a
+  # universal local agent without Hugr.
+  - name: hugr-main
+    type: mcp
+    transport: http
+    endpoint: ${HUGR_URL}/mcp
+    auth: hugr
 
 local_db_enabled: true
 local_db:

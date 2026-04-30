@@ -200,6 +200,17 @@ func (m *SessionManager) Resume(ctx context.Context, id string) (*Session, error
 			m.logger.Warn("manager: re-activate session", "session", id, "err", err)
 		}
 	}
+	// Re-run the OnOpen hook so per-session resources reattach
+	// after a process restart: bash-mcp (and other per_session MCPs)
+	// must be respawned, autoload skills re-bound, workspace dir
+	// re-prepared. The hook is idempotent — MkdirAll, autoload-Load
+	// and AddSessionProvider all tolerate a no-op when state is
+	// already correct.
+	if m.lifecycle.OnOpen != nil {
+		if err := m.lifecycle.OnOpen(ctx, id); err != nil {
+			m.logger.Warn("manager: resume lifecycle", "session", id, "err", err)
+		}
+	}
 	s := m.spawn(ctx, id)
 	// Only emit the resume marker if spawn actually created a fresh
 	// goroutine (i.e. we won the race). Compare by pointer identity.
@@ -269,6 +280,8 @@ func (m *SessionManager) Close(ctx context.Context, id, reason string) (time.Tim
 // Suspend updates the row to suspended without ending the goroutine.
 // Used during graceful shutdown. Skips the in-band emit if the
 // session has already closed (e.g. /end fired before shutdown).
+// Serialised against MarkClosed via Session.statusMu so concurrent
+// /end + ShutdownAll don't collide on the same DuckDB row.
 func (m *SessionManager) Suspend(ctx context.Context, id string) error {
 	m.mu.RLock()
 	s, ok := m.live[id]
@@ -279,9 +292,13 @@ func (m *SessionManager) Suspend(ctx context.Context, id string) error {
 			m.logger.Warn("manager: emit session_suspended", "session", id, "err", err)
 		}
 	}
-	if ok && s.closed.Load() {
-		// Already closed — nothing more to mutate.
-		return nil
+	if ok {
+		s.statusMu.Lock()
+		defer s.statusMu.Unlock()
+		if s.closed.Load() {
+			// Already closed — nothing more to mutate.
+			return nil
+		}
 	}
 	return m.store.UpdateSessionStatus(ctx, id, StatusSuspended)
 }

@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -74,11 +73,20 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 	boot := &BootstrapConfig{
 		StateDir:       stateDir,
 		WorkspaceDir:   workspaceDir,
-		BashMCPPath:    bashMCPBinary,
-		SharedRoot:     sharedDir,
-		SharedWritable: true,
 		CleanupOnClose: true,
 	}
+	cfgSvc := config.NewStaticService(config.StaticInput{
+		ToolProviders: []config.ToolProviderSpec{{
+			Name:      "bash-mcp",
+			Type:      "mcp",
+			Transport: "stdio",
+			Command:   bashMCPBinary,
+			Lifetime:  "per_session",
+			Env: map[string]string{
+				"SHARED_DIR": sharedDir,
+			},
+		}},
+	})
 
 	skillStore := skill.NewSkillStore(skill.Options{
 		SystemRoot: filepath.Join(stateDir, "skills/system"),
@@ -92,6 +100,7 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 
 	rcLite := &RuntimeCore{
 		Boot:   boot,
+		Config: cfgSvc,
 		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 		Tools:  tools,
 	}
@@ -325,15 +334,19 @@ func TestUS1_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
 		t.Fatalf("bash.write_file missing")
 	}
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
-	_, eff, err := core.tools.Resolve(dispatchCtx, writeTool, json.RawMessage(`{"path":"/shared/seed.csv","content":"k,v\na,1\n"}`))
+	sharedFile := filepath.Join(core.sharedDir, "seed.csv")
+	writeArgs, _ := json.Marshal(map[string]any{
+		"path":    sharedFile,
+		"content": "k,v\na,1\n",
+	})
+	_, eff, err := core.tools.Resolve(dispatchCtx, writeTool, writeArgs)
 	if err != nil {
-		t.Fatalf("Resolve write /shared: %v", err)
+		t.Fatalf("Resolve write shared: %v", err)
 	}
 	if _, err := core.tools.Dispatch(dispatchCtx, writeTool, eff); err != nil {
-		t.Fatalf("Dispatch write /shared: %v", err)
+		t.Fatalf("Dispatch write shared: %v", err)
 	}
 
-	sharedFile := filepath.Join(core.sharedDir, "seed.csv")
 	body, err := os.ReadFile(sharedFile)
 	if err != nil {
 		t.Fatalf("read shared: %v", err)
@@ -354,29 +367,6 @@ func TestUS1_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
 	}
 	if _, err := os.Stat(sharedFile); err != nil {
 		t.Errorf("shared file removed: %v", err)
-	}
-}
-
-func TestUS1_ReadonlyMissingMount_FailsBoot(t *testing.T) {
-	root := t.TempDir()
-	workspaceDir := filepath.Join(root, "workspace")
-	sharedDir := filepath.Join(root, "shared")
-	for _, d := range []string{workspaceDir, sharedDir} {
-		_ = os.MkdirAll(d, 0o755)
-	}
-	mountsJSON := `[{"name":"datasets","path":"/this/does/not/exist"}]`
-	cmd := exec.Command(bashMCPBinary)
-	cmd.Env = append(os.Environ(),
-		"BASH_MCP_SHARED_ROOT="+sharedDir,
-		"BASH_MCP_READONLY_MOUNTS="+mountsJSON,
-	)
-	cmd.Dir = workspaceDir
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("expected non-zero exit; got none. output:\n%s", out)
-	}
-	if !strings.Contains(string(out), "readonly mount missing") {
-		t.Errorf("output missing fail-fast message: %s", out)
 	}
 }
 

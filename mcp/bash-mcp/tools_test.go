@@ -15,7 +15,8 @@ import (
 
 func newTools(t *testing.T) (*Tools, *Workspace) {
 	t.Helper()
-	w, _ := newWS(t)
+	chdirTo(t, t.TempDir())
+	w := &Workspace{}
 	return &Tools{
 		WS: w,
 		Limits: Limits{
@@ -73,38 +74,6 @@ func TestTools_WriteThenRead(t *testing.T) {
 	}
 	if out2["content"] != "hello world" {
 		t.Errorf("content = %v", out2["content"])
-	}
-}
-
-func TestTools_WriteFile_PathEscape(t *testing.T) {
-	tools, _ := newTools(t)
-	out, res := callJSON(t, tools.writeFile, map[string]any{
-		"path":    "/workspace/sess-other/secret",
-		"content": "x",
-	})
-	if !res.IsError {
-		t.Fatalf("expected IsError")
-	}
-	if out["code"] != "path_escape" {
-		t.Errorf("code = %v", out["code"])
-	}
-}
-
-func TestTools_WriteFile_ReadOnly(t *testing.T) {
-	root := t.TempDir()
-	roHost := filepath.Join(root, "ro")
-	_ = os.MkdirAll(roHost, 0o755)
-	tools, w := newTools(t)
-	w.ReadonlyMnt = []ReadonlyMnt{{Name: "site", Host: roHost}}
-	out, res := callJSON(t, tools.writeFile, map[string]any{
-		"path":    "/readonly/site/file",
-		"content": "x",
-	})
-	if !res.IsError {
-		t.Fatal("expected IsError")
-	}
-	if out["code"] != "readonly" {
-		t.Errorf("code = %v", out["code"])
 	}
 }
 
@@ -228,16 +197,6 @@ func TestTools_ArgValidation_MissingPath(t *testing.T) {
 	}
 }
 
-func TestTools_Run_PathEscapeOnCwd(t *testing.T) {
-	tools, _ := newTools(t)
-	out, _ := callJSON(t, tools.run, map[string]any{
-		"cmd": "echo",
-		"cwd": "/etc",
-	})
-	if out["code"] != "path_escape" {
-		t.Errorf("code = %v", out["code"])
-	}
-}
 
 func TestErrCode_KnownClasses(t *testing.T) {
 	cases := []struct {
@@ -245,7 +204,6 @@ func TestErrCode_KnownClasses(t *testing.T) {
 		want string
 	}{
 		{ErrPathEscape, "path_escape"},
-		{ErrReadOnly, "readonly"},
 		{fmt.Errorf("wrap: %w", ErrPathEscape), "path_escape"},
 		{errors.New("random"), "io"},
 	}

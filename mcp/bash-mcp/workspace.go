@@ -8,161 +8,79 @@ import (
 	"strings"
 )
 
-// Workspace resolves bash-mcp logical paths against three roots:
+// Workspace is the thin host-fs view bash-mcp's convenience tools
+// (read_file, write_file, list_dir, sed) use to canonicalise input
+// paths and enforce one safety property: never let a tool reach
+// into a peer session's scratch directory.
 //
-//   - the process cwd        — the session-scoped writable root.
-//     bash-mcp is started by the runtime with cmd.Dir set to
-//     <workspace_dir>/<session_id>/ (host-side) or /workspace/
-//     (in-container). bash-mcp itself never names the session id.
-//   - /shared/                — agent-wide, writable when configured.
-//   - /readonly/<mount>/      — operator-declared read-only mounts.
+// Two roots matter:
 //
-// Every resolution runs filepath.Clean → root-attach →
-// filepath.EvalSymlinks and rejects paths whose canonical form
-// escapes the allowed set.
+//   - SessionDir — this process's own scratch (= cwd at startup,
+//     the runtime sets cmd.Dir to <workspaces>/<session_id>/).
+//   - WorkspacesRoot — the parent of every session scratch. Any
+//     canonical path under this root that is not under
+//     SessionDir belongs to another session — the file tools
+//     reject access to it.
+//
+// Outside these two roots the host filesystem is open. Shell
+// tools (bash.run/shell) inherit the same SESSION_DIR /
+// WORKSPACES_ROOT environment variables but bash-mcp does not
+// gate their args at exec time — kernel/OS isolation in the
+// deployment is responsible there.
 type Workspace struct {
-	SharedRoot     string        // host path of /shared (empty → disabled)
-	SharedWritable bool          // bash.write_file allowed under /shared
-	ReadonlyMnt    []ReadonlyMnt // declared read-only mounts
-}
-
-// ReadonlyMnt is one declared mount under /readonly/<name>/.
-type ReadonlyMnt struct {
-	Name string `json:"name"`
-	Host string `json:"path"`
+	SessionDir     string // absolute path; must equal os.Getwd() at start
+	WorkspacesRoot string // absolute parent of SessionDir
 }
 
 // Errors returned by Workspace.Resolve.
 var (
-	ErrPathEscape           = errors.New("bash-mcp: path resolves outside allowed roots")
-	ErrReadOnly             = errors.New("bash-mcp: write rejected on read-only mount")
-	ErrReadonlyMountMissing = errors.New("bash-mcp: declared readonly mount missing")
-	ErrSharedDisabled       = errors.New("bash-mcp: /shared not configured")
+	ErrPathEscape       = errors.New("bash-mcp: path resolves outside allowed roots")
+	ErrCrossSessionPath = errors.New("bash-mcp: path resolves into another session's workspace")
 )
 
 // Resolution is the result of Workspace.Resolve.
 type Resolution struct {
-	Canonical string        // EvalSymlinks-resolved host path
-	Logical   string        // path as it appeared (or the cwd-relative form)
-	Root      WorkspaceRoot // tree the path resolved under
+	Canonical string // EvalSymlinks-resolved host path
+	Logical   string // path as the caller supplied it (cleaned)
 }
 
-// WorkspaceRoot enumerates the three trees.
-type WorkspaceRoot int
-
-const (
-	RootSession WorkspaceRoot = iota // cwd
-	RootShared
-	RootReadOnly
-)
-
-// Validate checks every declared readonly mount exists at boot.
-func (w *Workspace) Validate() error {
-	for _, m := range w.ReadonlyMnt {
-		if m.Name == "" || m.Host == "" {
-			return fmt.Errorf("bash-mcp: invalid readonly mount %+v", m)
-		}
-		fi, err := os.Stat(m.Host)
-		if err != nil || !fi.IsDir() {
-			return fmt.Errorf("%w: %s -> %s", ErrReadonlyMountMissing, m.Name, m.Host)
-		}
-	}
-	return nil
-}
-
-// Resolve canonicalises an input path. write=true rejects paths
-// under /readonly/ and (when SharedWritable is false) /shared/.
+// Resolve canonicalises an input path and enforces the
+// cross-session boundary: any canonical path under WorkspacesRoot
+// must also be under SessionDir, otherwise it belongs to a peer
+// session. Outside WorkspacesRoot the path is unconstrained.
+//
+// The `write` parameter is preserved for HITL approval routing
+// in phase 5 — phase 3 applies the same boundary check to both
+// reads and writes.
 func (w *Workspace) Resolve(input string, write bool) (Resolution, error) {
+	_ = write
 	if input == "" {
 		return Resolution{}, fmt.Errorf("%w: empty path", ErrPathEscape)
 	}
 	clean := filepath.Clean(input)
-	hostPath, root, err := w.attachRoot(clean)
+	canonical, err := canonicalise(clean)
 	if err != nil {
 		return Resolution{}, err
 	}
-	canonical, err := canonicalise(hostPath)
-	if err != nil {
-		return Resolution{}, err
-	}
-	if !w.canonicalUnderRoot(canonical, root) {
-		return Resolution{}, fmt.Errorf("%w: %s -> %s", ErrPathEscape, input, canonical)
-	}
-	if write {
-		switch root {
-		case RootReadOnly:
-			return Resolution{}, fmt.Errorf("%w: %s", ErrReadOnly, input)
-		case RootShared:
-			if !w.SharedWritable {
-				return Resolution{}, fmt.Errorf("%w: %s (shared read-only)", ErrReadOnly, input)
-			}
+	if w.WorkspacesRoot != "" && w.SessionDir != "" {
+		if underHostDir(canonical, w.WorkspacesRoot) && !underHostDir(canonical, w.SessionDir) {
+			return Resolution{}, fmt.Errorf("%w: %s", ErrCrossSessionPath, input)
 		}
 	}
-	return Resolution{Canonical: canonical, Logical: clean, Root: root}, nil
+	return Resolution{Canonical: canonical, Logical: clean}, nil
 }
 
-// attachRoot maps a cleaned input path to its host equivalent.
-// Relative paths default to the cwd (session root).
-func (w *Workspace) attachRoot(clean string) (string, WorkspaceRoot, error) {
-	if !filepath.IsAbs(clean) {
-		// Relative → cwd-anchored. Pass through unchanged so
-		// canonicalise resolves against os.Getwd().
-		return clean, RootSession, nil
-	}
-	switch {
-	case strings.HasPrefix(clean, "/shared/") || clean == "/shared":
-		if w.SharedRoot == "" {
-			return "", 0, fmt.Errorf("%w: %s", ErrSharedDisabled, clean)
-		}
-		rest := strings.TrimPrefix(clean, "/shared")
-		return filepath.Join(w.SharedRoot, rest), RootShared, nil
-	case strings.HasPrefix(clean, "/readonly/"):
-		rest := strings.TrimPrefix(clean, "/readonly/")
-		parts := strings.SplitN(rest, "/", 2)
-		for _, m := range w.ReadonlyMnt {
-			if m.Name == parts[0] {
-				if len(parts) == 1 {
-					return m.Host, RootReadOnly, nil
-				}
-				return filepath.Join(m.Host, parts[1]), RootReadOnly, nil
-			}
-		}
-		return "", 0, fmt.Errorf("%w: %s (unknown readonly mount)", ErrPathEscape, clean)
-	default:
-		return "", 0, fmt.Errorf("%w: %s", ErrPathEscape, clean)
-	}
-}
-
-// canonicalUnderRoot returns true if canonical is under the host
-// directory backing root.
-func (w *Workspace) canonicalUnderRoot(canonical string, root WorkspaceRoot) bool {
-	switch root {
-	case RootSession:
-		cwd, err := os.Getwd()
-		if err != nil {
-			return false
-		}
-		return underHostDir(canonical, cwd)
-	case RootShared:
-		return underHostDir(canonical, w.SharedRoot)
-	case RootReadOnly:
-		for _, m := range w.ReadonlyMnt {
-			if underHostDir(canonical, m.Host) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
+// underHostDir reports whether `child` is the same path as or a
+// descendant of `parent`. Both are canonicalised (filepath.Abs +
+// EvalSymlinks where the dir exists) before comparison so symlink
+// trickery cannot bypass the check.
 func underHostDir(child, parent string) bool {
 	pAbs, err := filepath.Abs(parent)
 	if err != nil {
 		return false
 	}
-	pCanon, err := filepath.EvalSymlinks(pAbs)
-	if err != nil {
-		pCanon = pAbs
+	if eval, err := filepath.EvalSymlinks(pAbs); err == nil {
+		pAbs = eval
 	}
 	cAbs := child
 	if !filepath.IsAbs(cAbs) {
@@ -170,17 +88,28 @@ func underHostDir(child, parent string) bool {
 			cAbs = abs
 		}
 	}
-	rel, err := filepath.Rel(pCanon, cAbs)
+	rel, err := filepath.Rel(pAbs, cAbs)
 	if err != nil {
 		return false
 	}
-	return rel == "." || (!strings.HasPrefix(rel, "..") && rel != "..")
+	if rel == "." {
+		return true
+	}
+	if strings.HasPrefix(rel, "..") {
+		return false
+	}
+	return true
 }
 
 // canonicalise runs filepath.EvalSymlinks. If the path doesn't
 // exist yet (writes that create new files), canonicalise the
 // parent directory and re-attach the basename.
 func canonicalise(host string) (string, error) {
+	if !filepath.IsAbs(host) {
+		if abs, err := filepath.Abs(host); err == nil {
+			host = abs
+		}
+	}
 	if _, err := os.Lstat(host); err == nil {
 		return filepath.EvalSymlinks(host)
 	}

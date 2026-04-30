@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 
 	"github.com/go-viper/mapstructure/v2"
 )
@@ -49,7 +51,28 @@ func LoadStaticInput(raw map[string]any, localDBEnabled bool) (StaticInput, erro
 	}
 
 	expandEnvInPlace(&in)
+	anchorProviderCommands(in.ToolProviders)
 	return in, nil
+}
+
+// anchorProviderCommands rewrites every relative path-like
+// `command:` value to its absolute form against the current
+// working directory. Per_session providers (e.g. bash-mcp) are
+// spawned with cmd.Dir set to the per-session workspace, so a
+// relative path like "./bin/bash-mcp" would otherwise resolve
+// against the workspace and miss the binary. Bare names without a
+// path separator (e.g. "bash-mcp") are left alone — exec resolves
+// them via $PATH at spawn time.
+func anchorProviderCommands(specs []ToolProviderSpec) {
+	for i := range specs {
+		c := specs[i].Command
+		if c == "" || filepath.IsAbs(c) || !strings.ContainsRune(c, filepath.Separator) {
+			continue
+		}
+		if abs, err := filepath.Abs(c); err == nil {
+			specs[i].Command = abs
+		}
+	}
 }
 
 // decodeKey extracts raw[key] (when present) and decodes it into

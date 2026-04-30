@@ -195,12 +195,36 @@ func TestIsEOF(t *testing.T) {
 }
 
 func TestEnvSlice(t *testing.T) {
+	// Pin a unique parent var so we can spot inheritance without
+	// caring about the rest of the parent environment.
+	const sentinel = "BASH_MCP_TEST_SENTINEL_VAR"
+	t.Setenv(sentinel, "parent-value")
+
 	out := envSlice(nil)
-	if out != nil {
-		t.Errorf("nil -> %v", out)
+	if !envContains(out, sentinel+"=parent-value") {
+		t.Errorf("nil override: missing inherited %s in %v", sentinel, out)
 	}
+
 	out = envSlice(map[string]string{"K": "v"})
-	if len(out) != 1 || out[0] != "K=v" {
-		t.Errorf("out = %v", out)
+	if !envContains(out, "K=v") {
+		t.Errorf("override: missing K=v")
 	}
+	if !envContains(out, sentinel+"=parent-value") {
+		t.Errorf("override should still inherit %s", sentinel)
+	}
+
+	// Override of an existing parent var replaces (not duplicates).
+	out = envSlice(map[string]string{sentinel: "overridden"})
+	if !envContains(out, sentinel+"=overridden") || envContains(out, sentinel+"=parent-value") {
+		t.Errorf("override of inherited var failed: %v", out)
+	}
+}
+
+func envContains(env []string, want string) bool {
+	for _, kv := range env {
+		if kv == want {
+			return true
+		}
+	}
+	return false
 }

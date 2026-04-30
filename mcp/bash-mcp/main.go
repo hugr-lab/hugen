@@ -1,17 +1,26 @@
 // Command bash-mcp is the in-tree file-and-shell MCP server,
-// spawned by the runtime over stdio. It is stateless: the
-// runtime sets cmd.Dir to the session's writable workspace
-// directory before spawning, and bash-mcp just resolves logical
-// paths against (cwd, /shared, /readonly/<name>). The session
-// id never crosses the bash-mcp boundary.
+// spawned by the runtime over stdio. The runtime sets cmd.Dir
+// to the session's scratch workspace before spawning; bash-mcp
+// itself does no path translation. Convenience file tools and
+// shell tools both operate on raw host paths. Sandboxing is
+// delegated:
+//
+//   - In container deployments the Linux kernel + bind mounts
+//     constrain what the agent can reach.
+//   - In local single-user deployments the OS filesystem ACL
+//     and (in phase 5+) HITL approval prompts gate writes.
+//
+// SHARED_DIR (optional env): a real host path the operator
+// designates as the user-visible exchange directory. bash-mcp
+// just forwards it to the child shell — the agent is taught
+// about it through the _system skill, no path translation.
 package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -33,17 +42,29 @@ func main() {
 }
 
 func run(log *slog.Logger) error {
-	cfg, err := loadConfigFromEnv()
-	if err != nil {
-		return err
+	cfg := loadConfigFromEnv()
+	cwd, _ := os.Getwd()
+	if cwd != "" {
+		if abs, err := filepath.Abs(cwd); err == nil {
+			cwd = abs
+		}
+	}
+	// Workspaces root is the dir that contains every session
+	// scratch — by convention the parent of cwd. Operator can
+	// override via WORKSPACES_ROOT (e.g. when sessions live two
+	// levels deep). Empty disables the cross-session check.
+	wsRoot := os.Getenv("WORKSPACES_ROOT")
+	if wsRoot == "" && cwd != "" {
+		wsRoot = filepath.Dir(cwd)
+	}
+	if wsRoot != "" {
+		if abs, err := filepath.Abs(wsRoot); err == nil {
+			wsRoot = abs
+		}
 	}
 	ws := &Workspace{
-		SharedRoot:     cfg.SharedRoot,
-		SharedWritable: cfg.SharedWritable,
-		ReadonlyMnt:    cfg.ReadonlyMounts,
-	}
-	if err := ws.Validate(); err != nil {
-		return err
+		SessionDir:     cwd,
+		WorkspacesRoot: wsRoot,
 	}
 
 	tools := &Tools{
@@ -62,12 +83,10 @@ func run(log *slog.Logger) error {
 	)
 	tools.Register(&serverAdapter{s: srv})
 
-	cwd, _ := os.Getwd()
 	log.Info("bash-mcp: starting stdio server",
-		"cwd", cwd,
-		"shared_root", cfg.SharedRoot,
-		"shared_writable", cfg.SharedWritable,
-		"readonly_mounts", len(cfg.ReadonlyMounts),
+		"session_dir", cwd,
+		"workspaces_root", wsRoot,
+		"shared_dir", os.Getenv("SHARED_DIR"),
 	)
 	return server.ServeStdio(srv)
 }
@@ -82,32 +101,19 @@ func (a *serverAdapter) AddTool(tool mcp.Tool, handler func(ctx context.Context,
 }
 
 type bashConfig struct {
-	SharedRoot       string
-	SharedWritable   bool
-	ReadonlyMounts   []ReadonlyMnt
 	OutputMaxBytes   int
 	ReadMaxBytes     int
 	DefaultTimeoutMS int
 	MemMB            int
 }
 
-func loadConfigFromEnv() (bashConfig, error) {
-	cfg := bashConfig{
-		SharedRoot:       os.Getenv("BASH_MCP_SHARED_ROOT"),
-		SharedWritable:   boolEnv("BASH_MCP_SHARED_WRITABLE", true),
+func loadConfigFromEnv() bashConfig {
+	return bashConfig{
 		OutputMaxBytes:   intEnv("BASH_MCP_OUTPUT_MAX_BYTES", defaultOutputMaxBytes),
 		ReadMaxBytes:     intEnv("BASH_MCP_READ_MAX_BYTES", defaultReadMaxBytes),
 		DefaultTimeoutMS: intEnv("BASH_MCP_DEFAULT_TIMEOUT_MS", defaultDefaultTimeoutMS),
 		MemMB:            intEnv("BASH_MCP_MEM_MB", 256),
 	}
-	if raw := os.Getenv("BASH_MCP_READONLY_MOUNTS"); raw != "" {
-		var entries []ReadonlyMnt
-		if err := json.Unmarshal([]byte(raw), &entries); err != nil {
-			return cfg, fmt.Errorf("bash-mcp: BASH_MCP_READONLY_MOUNTS invalid JSON: %w", err)
-		}
-		cfg.ReadonlyMounts = entries
-	}
-	return cfg, nil
 }
 
 func intEnv(key string, def int) int {
@@ -115,20 +121,6 @@ func intEnv(key string, def int) int {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
-	}
-	return def
-}
-
-func boolEnv(key string, def bool) bool {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	switch v {
-	case "1", "true", "TRUE", "True", "yes":
-		return true
-	case "0", "false", "FALSE", "False", "no":
-		return false
 	}
 	return def
 }

@@ -39,15 +39,6 @@ type BootstrapConfig struct {
 	// "<WorkspaceDir>/<session_id>/" and bash-mcp is spawned
 	// with cmd.Dir set to it. Defaults to "./.hugen/workspace".
 	WorkspaceDir string
-	// BashMCPPath is the executable path for the bash-mcp binary.
-	// Defaults to "bash-mcp" (resolved via $PATH).
-	BashMCPPath string
-	// SharedRoot is /shared/ host path mounted into each session's
-	// bash-mcp instance. Empty disables /shared/ entirely.
-	SharedRoot string
-	// SharedWritable controls whether bash.write_file is allowed
-	// under /shared/. Defaults to true.
-	SharedWritable bool
 	// CleanupOnClose removes the session's workspace directory on
 	// Session.Close. Defaults to true.
 	CleanupOnClose bool
@@ -75,8 +66,6 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 
 	v.SetDefault("HUGR_URL", "http://localhost:15000")
 	v.SetDefault("HUGEN_PORT", 10000)
-	v.SetDefault("HUGEN_BASH_MCP_PATH", "./bin/bash-mcp")
-	v.SetDefault("HUGEN_SHARED_WRITABLE", true)
 	v.SetDefault("HUGEN_WORKSPACE_CLEANUP_ON_CLOSE", true)
 	v.SetDefault("HUGEN_WEBUI_PORT", 10001)
 	v.SetDefault("HUGEN_CONFIG_FILE", "config.yaml")
@@ -84,17 +73,35 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 
 	_ = v.ReadInConfig()
 
+	// Force PWD to hugen's actual working directory before
+	// expanding .env values. The shell-set PWD survives most
+	// launchers (terminal, make, go run), but `dlv exec` and some
+	// IDE debug paths inherit a stale or absent PWD — leading to
+	// `${PWD}/data` resolving against the wrong root or vanishing.
+	// os.Getwd is what every other path inside the process uses, so
+	// keying off it gives consistent results across launchers.
+	if cwd, err := os.Getwd(); err == nil {
+		_ = os.Setenv("PWD", cwd)
+	}
+
 	// Export every key viper read from .env into os.Environ so that
 	// os.ExpandEnv calls in downstream config (e.g. pkg/store/local
-	// model paths "${LLM_LOCAL_URL}?...") see them.
+	// model paths "${LLM_LOCAL_URL}?...") see them. Values are
+	// expanded once before export so .env can reference shell vars
+	// (e.g. HUGEN_SHARED_ROOT=${PWD}/data) — pkg/config/loader
+	// runs only one ExpandEnv pass on its string fields, so without
+	// this pre-pass nested `${VAR}` placeholders would survive into
+	// the final config and reach MCP subprocesses verbatim.
 	for _, k := range v.AllKeys() {
 		key := upperEnv(k)
 		if os.Getenv(key) != "" {
 			continue
 		}
-		if val := v.GetString(k); val != "" {
-			_ = os.Setenv(key, val)
+		val := v.GetString(k)
+		if val == "" {
+			continue
 		}
+		_ = os.Setenv(key, os.ExpandEnv(val))
 	}
 
 	config := &BootstrapConfig{
@@ -106,9 +113,6 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 		BaseURI:      v.GetString("HUGEN_BASE_URL"),
 		StateDir:       v.GetString("HUGEN_STATE"),
 		WorkspaceDir:   v.GetString("HUGEN_WORKSPACE_DIR"),
-		BashMCPPath:    v.GetString("HUGEN_BASH_MCP_PATH"),
-		SharedRoot:     v.GetString("HUGEN_SHARED_ROOT"),
-		SharedWritable: v.GetBool("HUGEN_SHARED_WRITABLE"),
 		CleanupOnClose: v.GetBool("HUGEN_WORKSPACE_CLEANUP_ON_CLOSE"),
 		Hugr: HugrConfig{
 			URL:         v.GetString("HUGR_URL"),
@@ -132,17 +136,6 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 	}
 	if config.WorkspaceDir == "" {
 		config.WorkspaceDir = filepath.Join(".hugen", "workspace")
-	}
-	// Sessions spawn bash-mcp with cmd.Dir set to the per-session
-	// workspace, so a relative BashMCPPath would be resolved against
-	// the session dir (not hugen's startup cwd) and miss the binary.
-	// Anchor it to hugen's startup cwd here so "./bin/bash-mcp"
-	// resolves the same way every session sees it.
-	if config.BashMCPPath != "" && !filepath.IsAbs(config.BashMCPPath) &&
-		strings.ContainsRune(config.BashMCPPath, filepath.Separator) {
-		if abs, err := filepath.Abs(config.BashMCPPath); err == nil {
-			config.BashMCPPath = abs
-		}
 	}
 	if config.Hugr.AccessToken != "" && config.Hugr.TokenURL == "" ||
 		config.Hugr.AccessToken == "" && config.Hugr.TokenURL != "" {

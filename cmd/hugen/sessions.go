@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
@@ -85,6 +85,7 @@ func buildSessionLifecycle(core *RuntimeCore, ws *sessionWorkspaces) runtime.Ses
 	tools := core.Tools
 	skills := core.Skills
 	skillStore := core.SkillStore
+	providers := core.Config.ToolProviders()
 	log := core.Logger
 	cleanup := boot.CleanupOnClose
 
@@ -100,7 +101,7 @@ func buildSessionLifecycle(core *RuntimeCore, ws *sessionWorkspaces) runtime.Ses
 			}
 			ws.add(sessionID, sessDir)
 
-			provider, err := spawnBashMCP(ctx, boot, sessDir, log)
+			provider, err := spawnBashMCP(ctx, providers, sessDir, absRoot, log)
 			if err != nil {
 				if cleanup {
 					_ = os.RemoveAll(sessDir)
@@ -185,27 +186,56 @@ func sweepOrphans(workspaceDir string, liveSessions map[string]struct{}, ttl tim
 	return removed, nil
 }
 
-// spawnBashMCP builds the bash-mcp env from BootstrapConfig and
-// returns a ready *tool.MCPProvider rooted at sessDir.
-func spawnBashMCP(ctx context.Context, boot *BootstrapConfig, sessDir string, log *slog.Logger) (*tool.MCPProvider, error) {
-	env := map[string]string{}
-	if boot.SharedRoot != "" {
-		env["BASH_MCP_SHARED_ROOT"] = boot.SharedRoot
-		env["BASH_MCP_SHARED_WRITABLE"] = strconv.FormatBool(boot.SharedWritable)
+// spawnBashMCP looks up the bash-mcp entry in tool_providers and
+// spawns it with cmd.Dir = sessDir. Configuration (command, args,
+// env: SHARED_DIR) lives in config.yaml — there is no implicit
+// default. Returns a clear error when the operator has not
+// declared bash-mcp.
+//
+// SESSION_DIR / WORKSPACES_ROOT are injected here (not in YAML)
+// so the runtime is the single source of truth for the cross-
+// session boundary: bash-mcp uses them to refuse file-tool paths
+// that resolve into a peer session's scratch.
+func spawnBashMCP(ctx context.Context, providers config.ToolProvidersView, sessDir, workspacesRoot string, log *slog.Logger) (*tool.MCPProvider, error) {
+	cfg, ok := findToolProvider(providers, "bash-mcp")
+	if !ok {
+		return nil, fmt.Errorf("bash-mcp: not declared in tool_providers (add a per_session stdio entry to config.yaml)")
 	}
-	// Operator-mounted /readonly/<name>/ entries are out of scope
-	// for phase-3 BootstrapConfig — they arrive via PermissionsView
-	// Data in a later cut. Until then bash-mcp gets a zero list.
-
+	if cfg.Command == "" {
+		return nil, fmt.Errorf("bash-mcp: tool_providers entry has empty command")
+	}
+	env := make(map[string]string, len(cfg.Env)+2)
+	for k, v := range cfg.Env {
+		env[k] = v
+	}
+	env["SESSION_DIR"] = sessDir
+	env["WORKSPACES_ROOT"] = workspacesRoot
 	spec := tool.MCPProviderSpec{
-		Name:        "bash-mcp",
-		Command:     boot.BashMCPPath,
+		Name:        cfg.Name,
+		Command:     cfg.Command,
+		Args:        cfg.Args,
 		Env:         env,
 		Cwd:         sessDir,
 		Lifetime:    tool.LifetimePerSession,
-		PermObject:  "hugen:tool:bash-mcp",
+		PermObject:  "hugen:tool:" + cfg.Name,
 		Description: "session-scoped file + shell tools",
 	}
 	return tool.NewMCPProvider(ctx, spec, log)
+}
+
+// findToolProvider returns the named entry from a ToolProvidersView.
+// Used by per_session lifecycle hooks (bash-mcp today, python-mcp /
+// duckdb-mcp in phase 3.5) to read their config.yaml shape without
+// duplicating the providers slice.
+func findToolProvider(view config.ToolProvidersView, name string) (config.ToolProviderSpec, bool) {
+	if view == nil {
+		return config.ToolProviderSpec{}, false
+	}
+	for _, p := range view.Providers() {
+		if p.Name == name {
+			return p, true
+		}
+	}
+	return config.ToolProviderSpec{}, false
 }
 

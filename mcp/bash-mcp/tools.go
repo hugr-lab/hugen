@@ -428,10 +428,10 @@ func (t *Tools) sed(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 
 func errCode(err error) string {
 	switch {
+	case errors.Is(err, ErrCrossSessionPath):
+		return "cross_session"
 	case errors.Is(err, ErrPathEscape):
 		return "path_escape"
-	case errors.Is(err, ErrReadOnly):
-		return "readonly"
 	case errors.Is(err, fs.ErrNotExist):
 		return "not_found"
 	default:
