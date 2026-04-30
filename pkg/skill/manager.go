@@ -207,12 +207,23 @@ func (m *SkillManager) Bindings(ctx context.Context, sessionID string) (Bindings
 	return out, nil
 }
 
+// UnavailableProvider tags a tool grant whose provider is not
+// registered in the active ToolManager. Populated by
+// AnnotateUnavailable on a Bindings snapshot — used by the
+// no-Hugr (US5) deployment path so the model and operators can
+// see which skills declared grants nobody is serving.
+type UnavailableProvider struct {
+	Provider string
+	Tools    []string // tool patterns from the skill's allowed-tools
+}
+
 // Bindings is the per-Turn snapshot SkillManager hands ToolManager
 // and the runtime's prompt builder.
 type Bindings struct {
 	Generation       int64
 	Instructions     string                    // concatenated SKILL.md bodies
 	AllowedTools     []ToolGrant               // union across loaded skills
+	Unavailable      []UnavailableProvider     // grants whose provider is not registered (US5)
 	SubAgentRoles    []SubAgentRole            // phase 4 dispatch source
 	MemoryCategories map[string]MemoryCategory // for memory dispatch
 	// MaxTurns is the largest metadata.hugen.max_turns across
@@ -407,4 +418,35 @@ func (m *SkillManager) resolveClosure(ctx context.Context, root string) ([]Skill
 		return nil, err
 	}
 	return order, nil
+}
+
+// AnnotateUnavailable tags every allowed-tool grant in `b` whose
+// provider is not present in `registered` as Unavailable. This is
+// the US5 "warn-and-tag" surface: skills granting Hugr tools in a
+// no-Hugr deployment stay loaded (so the model can still reason
+// over the skill's instructions) but the runtime is honest about
+// which tools won't dispatch.
+//
+// Returns a fresh Bindings copy; the input is not mutated.
+func AnnotateUnavailable(b Bindings, registered []string) Bindings {
+	if len(registered) == 0 {
+		return b
+	}
+	known := make(map[string]struct{}, len(registered))
+	for _, p := range registered {
+		known[p] = struct{}{}
+	}
+	out := b
+	out.AllowedTools = append([]ToolGrant(nil), b.AllowedTools...)
+	out.Unavailable = nil
+	for _, g := range b.AllowedTools {
+		if _, ok := known[g.Provider]; ok {
+			continue
+		}
+		out.Unavailable = append(out.Unavailable, UnavailableProvider{
+			Provider: g.Provider,
+			Tools:    append([]string(nil), g.Tools...),
+		})
+	}
+	return out
 }
