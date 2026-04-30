@@ -26,7 +26,7 @@ func (stubIdentity) Permission(_ context.Context, _, _ string) (identity.Permiss
 }
 
 func newTestAgent() *runtime.Agent {
-	a, err := runtime.NewAgent("agent-test", "hugen-test", stubIdentity{})
+	a, err := runtime.NewAgent("agent-test", "hugen-test", stubIdentity{}, "")
 	if err != nil {
 		panic(err)
 	}

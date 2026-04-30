@@ -130,7 +130,7 @@ func makeRouter(t *testing.T) (*model.ModelRouter, *runtime.Agent) {
 	if err != nil {
 		t.Fatalf("router: %v", err)
 	}
-	agent, err := runtime.NewAgent("agent-it", "hugen", staticIdentity{id: "agent-it"})
+	agent, err := runtime.NewAgent("agent-it", "hugen", staticIdentity{id: "agent-it"}, "")
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}

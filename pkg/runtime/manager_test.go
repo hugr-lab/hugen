@@ -27,7 +27,7 @@ func newTestManager(t *testing.T, store RuntimeStore) *SessionManager {
 	t.Helper()
 	mdl := &scriptedModel{}
 	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"})
+	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestSessionManager_LifecycleHooks(t *testing.T) {
 	store := newFakeStore()
 	mdl := &scriptedModel{}
 	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"})
+	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestSessionManager_OnOpenErrorRollsBack(t *testing.T) {
 	store := newFakeStore()
 	mdl := &scriptedModel{}
 	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"})
+	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}

@@ -13,15 +13,19 @@ import (
 // Agent is a passive identity holder — Session is what runs the
 // turn loop. Identity is fixed at construction.
 type Agent struct {
-	id   string
-	name string
-	src  identity.Source
+	id           string
+	name         string
+	src          identity.Source
+	constitution string
 }
 
 // NewAgent constructs an Agent. id and name are the persisted
 // identifiers; src is the underlying identity.Source (which may be
 // re-queried at runtime if needed, e.g. for permission checks).
-func NewAgent(id, name string, src identity.Source) (*Agent, error) {
+// constitution is the markdown body Session prepends as the first
+// system message in every Turn — the universal rules every Turn
+// runs under (empty disables the system-prompt prefix).
+func NewAgent(id, name string, src identity.Source, constitution string) (*Agent, error) {
 	if id == "" {
 		return nil, fmt.Errorf("runtime: NewAgent requires id")
 	}
@@ -31,11 +35,12 @@ func NewAgent(id, name string, src identity.Source) (*Agent, error) {
 	if name == "" {
 		name = "hugen"
 	}
-	return &Agent{id: id, name: name, src: src}, nil
+	return &Agent{id: id, name: name, src: src, constitution: constitution}, nil
 }
 
 func (a *Agent) ID() string                      { return a.id }
 func (a *Agent) Name() string                    { return a.name }
+func (a *Agent) Constitution() string            { return a.constitution }
 func (a *Agent) IdentitySource() identity.Source { return a.src }
 
 // Participant returns the agent's ParticipantInfo for use in Frame

@@ -34,6 +34,12 @@ type SkillStore interface {
 // Backend is one origin of skills (system / community / local /
 // inline / hub). The store iterates backends in priority order
 // per Get's contract.
+//
+// Push-source backends (e.g. a future hub backend that subscribes
+// to remote "skill_published" events) hold a *Store reference at
+// construction and call Store.Refresh from their event handler —
+// invalidation flows through the same seam Publish uses, so the
+// cache layer stays unaware of where the change came from.
 type Backend interface {
 	Origin() Origin
 	List(ctx context.Context) ([]Skill, error)
@@ -77,21 +83,61 @@ func NewSkillStore(opts Options) *Store {
 }
 
 // Store satisfies SkillStore by fanning across registered Backend
-// implementations.
+// implementations. Results from List are cached; the cache is
+// invalidated by Publish (writable backends) and by an explicit
+// Refresh call (covers operator-side mutations like dropping a
+// new skill into ${HUGEN_STATE}/skills/local/ without going
+// through Publish).
 type Store struct {
 	backends []Backend
+
+	cacheMu  sync.RWMutex
+	cacheGen int64
+	cached   []Skill
+	cachedAt int64 // gen value at which cached was populated
+	cacheErr error
+	gen      int64 // bumped on every Publish / Refresh
 }
 
 // Compile-time assertion.
 var _ SkillStore = (*Store)(nil)
 
 func (s *Store) List(ctx context.Context) ([]Skill, error) {
+	s.cacheMu.RLock()
+	if s.cached != nil && s.cachedAt == s.currentGen() {
+		out := append([]Skill(nil), s.cached...)
+		err := s.cacheErr
+		s.cacheMu.RUnlock()
+		return out, err
+	}
+	s.cacheMu.RUnlock()
+	return s.refreshList(ctx)
+}
+
+// Refresh invalidates the List cache so the next call re-scans
+// every backend. Use after an out-of-band mutation (operator
+// dropped a new skill directory into the local/ root, an admin
+// pulled in a community update, etc.) — Publish does this
+// automatically and does not need a follow-up Refresh.
+func (s *Store) Refresh() {
+	s.cacheMu.Lock()
+	s.gen++
+	s.cached = nil
+	s.cacheErr = nil
+	s.cacheMu.Unlock()
+}
+
+func (s *Store) currentGen() int64 {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	return s.gen
+}
+
+func (s *Store) refreshList(ctx context.Context) ([]Skill, error) {
 	var out []Skill
 	var errs []error
 	for _, b := range s.backends {
 		if _, isHub := b.(*hubBackend); isHub {
-			// hub stub: skip; do not surface hub errors during
-			// List.
 			continue
 		}
 		got, err := b.List(ctx)
@@ -100,7 +146,13 @@ func (s *Store) List(ctx context.Context) ([]Skill, error) {
 		}
 		out = append(out, got...)
 	}
-	return out, errors.Join(errs...)
+	joined := errors.Join(errs...)
+	s.cacheMu.Lock()
+	s.cached = out
+	s.cachedAt = s.gen
+	s.cacheErr = joined
+	s.cacheMu.Unlock()
+	return append([]Skill(nil), out...), joined
 }
 
 func (s *Store) Get(ctx context.Context, name string) (Skill, error) {
@@ -123,6 +175,7 @@ func (s *Store) Publish(ctx context.Context, m Manifest, body fs.FS) error {
 	for _, b := range s.backends {
 		err := b.Publish(ctx, m, body)
 		if err == nil {
+			s.Refresh()
 			return nil
 		}
 		if errors.Is(err, ErrUnsupportedBackend) {

@@ -11,8 +11,40 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
+
+// autoloadSkills binds every skill that opts into autoload for
+// sessionType into the named session. Per-skill failures log a
+// warning and continue — one bad bundle must not deny the
+// session its working tool surface.
+func autoloadSkills(
+	ctx context.Context,
+	skills *skill.SkillManager,
+	store skill.SkillStore,
+	sessionID, sessionType string,
+	log *slog.Logger,
+) {
+	all, err := store.List(ctx)
+	if err != nil {
+		log.Warn("session: list skills for autoload",
+			"session", sessionID, "err", err)
+		// Partial — keep going with whatever the store returned.
+	}
+	for _, s := range all {
+		if !s.Manifest.AutoloadIn(sessionType) {
+			continue
+		}
+		if err := skills.Load(ctx, sessionID, s.Manifest.Name); err != nil {
+			log.Warn("session: autoload skill failed",
+				"session", sessionID, "skill", s.Manifest.Name, "err", err)
+			continue
+		}
+		log.Info("session: skill autoloaded",
+			"session", sessionID, "skill", s.Manifest.Name)
+	}
+}
 
 // sessionWorkspaces tracks per-session bookkeeping the lifecycle
 // hooks need: the workspace dir to remove on close. Provider
@@ -51,6 +83,8 @@ func (s *sessionWorkspaces) take(sessionID string) (string, bool) {
 func buildSessionLifecycle(core *RuntimeCore, ws *sessionWorkspaces) runtime.SessionLifecycle {
 	boot := core.Boot
 	tools := core.Tools
+	skills := core.Skills
+	skillStore := core.SkillStore
 	log := core.Logger
 	cleanup := boot.CleanupOnClose
 
@@ -81,6 +115,15 @@ func buildSessionLifecycle(core *RuntimeCore, ws *sessionWorkspaces) runtime.Ses
 				}
 				ws.take(sessionID)
 				return fmt.Errorf("session %s: register bash-mcp: %w", sessionID, err)
+			}
+			// Auto-load every skill whose manifest opts into autoload
+			// for this session's type. Phase-3 only opens `root`
+			// sessions; the SessionType label is hard-coded here and
+			// will become a Session attribute in phase 4. Without
+			// any autoload skill loaded, the model boots with an
+			// empty allowed-tools filter and reports "no active tools".
+			if skills != nil && skillStore != nil {
+				autoloadSkills(ctx, skills, skillStore, sessionID, skill.SessionTypeRoot, log)
 			}
 			log.Info("session workspace ready",
 				"session", sessionID, "dir", sessDir)

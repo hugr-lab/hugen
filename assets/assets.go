@@ -12,3 +12,12 @@ import "embed"
 //
 //go:embed all:skills
 var SkillsFS embed.FS
+
+// ConstitutionFS holds the agent constitution markdown bundled
+// with the binary. Top-level entries map one-to-one to session
+// types — `agent.md` is the universal constitution rendered for
+// every root session. Override via the operator's state directory:
+// ${HUGEN_STATE}/constitution/<file> shadows the embedded copy.
+//
+//go:embed all:constitution
+var ConstitutionFS embed.FS

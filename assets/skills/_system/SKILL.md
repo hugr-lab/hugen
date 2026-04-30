@@ -22,6 +22,8 @@ metadata:
     requires: []
     sub_agents: []
     memory: {}
+    autoload: true
+    autoload_for: [root, subagent]
 compatibility:
   model: any
   runtime: hugen-phase-3

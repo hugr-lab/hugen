@@ -94,7 +94,7 @@ func newToolSession(t *testing.T, mdl model.Model, perms perm.Service, providers
 	}
 
 	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"})
+	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}

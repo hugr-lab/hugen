@@ -81,7 +81,7 @@ func newSkillCmdEnv(t *testing.T) runtime.CommandEnv {
 	if err != nil {
 		t.Fatalf("router: %v", err)
 	}
-	agent, err := runtime.NewAgent("a1", "hugen", staticIdentity{id: "a1"})
+	agent, err := runtime.NewAgent("a1", "hugen", staticIdentity{id: "a1"}, "")
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}

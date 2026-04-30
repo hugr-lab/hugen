@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -370,7 +371,7 @@ func (s *Session) handleUserMessage(ctx context.Context, f *protocol.UserMessage
 			s.logger.Warn("session: build tool catalogue", "session", s.id, "err", err)
 		}
 		req := model.Request{
-			Messages: append([]model.Message{}, s.history...),
+			Messages: s.buildMessages(turnCtx),
 			Tools:    modelTools,
 		}
 		stream, err := mdl.Generate(turnCtx, req)
@@ -442,6 +443,81 @@ func (s *Session) resolveToolIterCap(ctx context.Context) int {
 	return defaultMaxToolIterations
 }
 
+// buildMessages prepends the per-Turn system message (agent
+// constitution + concatenated skill instructions) to the chat
+// history. Rebuilt every Turn because skill bindings can change
+// between Turns (skill_load / skill_unload during a session). The
+// returned slice is a fresh copy — callers can mutate it freely
+// without touching s.history.
+func (s *Session) buildMessages(ctx context.Context) []model.Message {
+	out := make([]model.Message, 0, len(s.history)+1)
+	if sys := s.systemPrompt(ctx); sys != "" {
+		out = append(out, model.Message{Role: model.RoleSystem, Content: sys})
+	}
+	out = append(out, s.history...)
+	return out
+}
+
+// systemPrompt assembles the system-prompt body for the next
+// model.Generate call. Order:
+//  1. Agent constitution (universal rules).
+//  2. Body of every skill currently loaded into the session
+//     (concrete tool-usage instructions for the active toolset).
+//  3. Catalogue of available-but-unloaded skills — names plus
+//     descriptions only — so the model can pick one and call
+//     skill_load without a separate discovery tool round-trip.
+func (s *Session) systemPrompt(ctx context.Context) string {
+	var parts []string
+	if s.agent != nil {
+		if c := s.agent.Constitution(); c != "" {
+			parts = append(parts, c)
+		}
+	}
+	if s.skills != nil {
+		if b, err := s.skills.Bindings(ctx, s.id); err == nil && b.Instructions != "" {
+			parts = append(parts, b.Instructions)
+		}
+		if catalogue := s.unloadedSkillCatalogue(ctx); catalogue != "" {
+			parts = append(parts, catalogue)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// unloadedSkillCatalogue renders the names and one-line
+// descriptions of every skill in the store that is NOT currently
+// loaded into the session. The model reads this to decide whether
+// to invoke skill_load — cheaper than a skill_list tool round-trip
+// and stable across Turns. Returns "" when nothing to advertise.
+func (s *Session) unloadedSkillCatalogue(ctx context.Context) string {
+	all, err := s.skills.List(ctx)
+	if err != nil || len(all) == 0 {
+		return ""
+	}
+	loadedSet := map[string]struct{}{}
+	for _, n := range s.skills.LoadedNames(ctx, s.id) {
+		loadedSet[n] = struct{}{}
+	}
+	var b strings.Builder
+	for _, sk := range all {
+		if _, on := loadedSet[sk.Manifest.Name]; on {
+			continue
+		}
+		if b.Len() == 0 {
+			b.WriteString("## Available skills\n\nLoad any of these via the `skill_load` tool when their domain becomes relevant. Already-loaded skills are not listed.\n\n")
+		}
+		b.WriteString("- `")
+		b.WriteString(sk.Manifest.Name)
+		b.WriteString("` — ")
+		b.WriteString(sk.Manifest.Description)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // modelToolsForSession converts the per-session ToolManager
 // snapshot into the []model.Tool catalogue the LLM provider
 // receives. Returns an empty slice when the session has no
@@ -465,7 +541,7 @@ func (s *Session) modelToolsForSession(ctx context.Context) ([]model.Tool, error
 			}
 		}
 		out = append(out, model.Tool{
-			Name:        t.Name,
+			Name:        tool.SanitizeName(t.Name),
 			Description: t.Description,
 			Schema:      schema,
 		})
@@ -604,9 +680,13 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 	if snapErr != nil {
 		s.logger.Warn("tool snapshot failed", "err", snapErr)
 	}
+	// Match on either the canonical name or the LLM-sanitized
+	// form — providers see canonical "<provider>:<field>", but
+	// the model receives (and echoes back) the dot/colon-stripped
+	// shape. ToolManager.Dispatch uses theTool (canonical) below.
 	var theTool tool.Tool
 	for _, t := range snap.Tools {
-		if t.Name == tc.Name {
+		if t.Name == tc.Name || tool.SanitizeName(t.Name) == tc.Name {
 			theTool = t
 			break
 		}

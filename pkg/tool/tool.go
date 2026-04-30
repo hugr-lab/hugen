@@ -4,7 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 )
+
+// SanitizeName returns an LLM-safe variant of a fully-qualified
+// tool name. Most chat-completion APIs (OpenAI, Anthropic, Gemini)
+// validate function names against `^[a-zA-Z0-9_-]+$` — `:` and `.`
+// trip the validator. We replace both with `_`, e.g.
+// "bash-mcp:bash.read_file" → "bash-mcp_bash_read_file". Round-trip
+// is recovered through the per-snapshot lookup in Session, so the
+// original Tool.Name stays canonical inside the runtime.
+func SanitizeName(name string) string {
+	if !strings.ContainsAny(name, ":.") {
+		return name
+	}
+	r := strings.NewReplacer(":", "_", ".", "_")
+	return r.Replace(name)
+}
 
 // Tool is the leaf — what the LLM dispatches.
 //

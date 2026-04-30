@@ -2,10 +2,12 @@ package skill
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"regexp"
+	"strings"
 
 	"github.com/oasdiff/yaml"
 )
@@ -19,7 +21,7 @@ type Manifest struct {
 	Description   string         `json:"description"`
 	License       string         `json:"license"`
 	Compatibility Compatibility  `json:"compatibility,omitempty"`
-	AllowedTools  []ToolGrant    `json:"allowed-tools,omitempty"`
+	AllowedTools  AllowedTools   `json:"allowed-tools,omitempty"`
 	Metadata      map[string]any `json:"metadata,omitempty"`
 
 	// Hugen is the typed projection of metadata.hugen.* — populated
@@ -52,6 +54,78 @@ type ToolGrant struct {
 	Tools    []string `json:"tools"`
 }
 
+// AllowedTools is the parsed allowed-tools list. Two manifest
+// notations decode into the same []ToolGrant:
+//
+//	# grouped — agentskills.io spec form
+//	allowed-tools:
+//	  - provider: bash-mcp
+//	    tools: [bash.run, bash.read_file]
+//
+//	# flat — hugen shorthand, "provider:tool" entries
+//	allowed-tools:
+//	  - bash-mcp:bash.run
+//	  - bash-mcp:bash.read_file
+//	  - system:skill_load
+//
+// Mixed lists are supported. Flat entries that share a provider
+// merge into a single ToolGrant for that provider.
+type AllowedTools []ToolGrant
+
+// UnmarshalJSON decodes either notation into the same []ToolGrant
+// shape. agentskills.io strict mode still gets a 1:1 round-trip
+// because grouped entries are decoded directly into ToolGrant.
+func (a *AllowedTools) UnmarshalJSON(data []byte) error {
+	if len(bytes.TrimSpace(data)) == 0 || string(bytes.TrimSpace(data)) == "null" {
+		*a = nil
+		return nil
+	}
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("allowed-tools: must be a list: %w", err)
+	}
+	out := make([]ToolGrant, 0, len(raw))
+	byProvider := map[string]int{} // provider → index in out
+	for i, item := range raw {
+		trimmed := bytes.TrimSpace(item)
+		if len(trimmed) == 0 {
+			return fmt.Errorf("allowed-tools[%d]: empty entry", i)
+		}
+		switch trimmed[0] {
+		case '"':
+			var entry string
+			if err := json.Unmarshal(item, &entry); err != nil {
+				return fmt.Errorf("allowed-tools[%d]: %w", i, err)
+			}
+			j := strings.Index(entry, ":")
+			if j <= 0 || j == len(entry)-1 {
+				return fmt.Errorf(`allowed-tools[%d]: %q must be "provider:tool"`, i, entry)
+			}
+			provider, name := entry[:j], entry[j+1:]
+			if idx, ok := byProvider[provider]; ok {
+				out[idx].Tools = append(out[idx].Tools, name)
+			} else {
+				byProvider[provider] = len(out)
+				out = append(out, ToolGrant{Provider: provider, Tools: []string{name}})
+			}
+		case '{':
+			var grant ToolGrant
+			if err := json.Unmarshal(item, &grant); err != nil {
+				return fmt.Errorf("allowed-tools[%d]: %w", i, err)
+			}
+			out = append(out, grant)
+			// Don't merge object-form entries into byProvider — the
+			// author may intentionally split a provider across two
+			// blocks (e.g. group commentary), and we want the
+			// round-trip to preserve that shape.
+		default:
+			return fmt.Errorf("allowed-tools[%d]: expected string or object, got %s", i, string(trimmed))
+		}
+	}
+	*a = out
+	return nil
+}
+
 // HugenMetadata is the typed view of metadata.hugen.* — the
 // hugen-specific extensions inside the manifest.
 type HugenMetadata struct {
@@ -67,7 +141,48 @@ type HugenMetadata struct {
 	// absent) defers to the runtime default (defaultMaxToolIterations,
 	// currently 15).
 	MaxTurns int `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
+
+	// Autoload, when true, tells the SessionManager to load this
+	// skill into every newly opened session whose type appears in
+	// AutoloadFor. Loading is idempotent — manual /skill load of
+	// the same name is a no-op.
+	Autoload bool `json:"autoload,omitempty" yaml:"autoload,omitempty"`
+
+	// AutoloadFor is the list of session types in which Autoload
+	// fires. Recognised values:
+	//   - "root"     — sessions where the user talks to the main
+	//                  agent (the only kind in phase 3).
+	//   - "subagent" — sessions where the main agent talks to a
+	//                  spawned sub-agent (phase 4).
+	// Empty defaults to ["root"] — the conservative behaviour that
+	// keeps autoload skills out of sub-agent sessions until an
+	// author opts in.
+	AutoloadFor []string `json:"autoload_for,omitempty" yaml:"autoload_for,omitempty"`
 }
+
+// AutoloadIn reports whether the manifest opts into autoload for
+// the given session type. Resolves the empty-AutoloadFor default
+// ([root]) so callers don't repeat the rule.
+func (m *Manifest) AutoloadIn(sessionType string) bool {
+	if !m.Hugen.Autoload {
+		return false
+	}
+	if len(m.Hugen.AutoloadFor) == 0 {
+		return sessionType == SessionTypeRoot
+	}
+	for _, t := range m.Hugen.AutoloadFor {
+		if t == sessionType {
+			return true
+		}
+	}
+	return false
+}
+
+// SessionType labels for Manifest.AutoloadFor entries.
+const (
+	SessionTypeRoot     = "root"
+	SessionTypeSubAgent = "subagent"
+)
 
 // SubAgentRole is the manifest shape phase-3 validates and
 // phase-4 will dispatch.

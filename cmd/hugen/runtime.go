@@ -173,7 +173,11 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	if err != nil {
 		return nil, failed("identity", err)
 	}
-	agent, err := runtime.NewAgent(agentInfo.ID, agentInfo.Name, core.Identity)
+	constitution, err := loadConstitution(boot.StateDir, core.Logger)
+	if err != nil {
+		return nil, failed("constitution", err)
+	}
+	agent, err := runtime.NewAgent(agentInfo.ID, agentInfo.Name, core.Identity, constitution)
 	if err != nil {
 		return nil, failed("agent", err)
 	}
