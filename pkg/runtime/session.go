@@ -162,6 +162,41 @@ func (s *Session) Outbox() <-chan protocol.Frame { return s.out }
 // callers wait on this after pushing a Close intent into s.in.
 func (s *Session) Done() <-chan struct{} { return s.done }
 
+// Submit pushes a frame onto the session's inbox without crashing
+// on a closed channel and without hanging on a full one. Three
+// exit paths:
+//
+//   - ctx done → caller wants to bail out (shutdown timeout, API
+//     cancel). Returns false so the caller can decide whether to
+//     report or move on.
+//   - Done closed → the session goroutine has exited; the frame
+//     can never be delivered. Returns false.
+//   - successful send → returns true.
+//
+// A "send on closed channel" panic is caught by recover so a race
+// between the goroutine's exit defer and our send doesn't crash
+// the process; the recovered case also maps to ok=false.
+//
+// External callers (Manager.Close, Manager.Suspend, ShutdownAll,
+// adapters) use Submit instead of touching s.in directly so the
+// "in writes belong to the session goroutine" invariant has a
+// single, audit-friendly entry point.
+func (s *Session) Submit(ctx context.Context, f protocol.Frame) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			ok = false
+		}
+	}()
+	select {
+	case s.in <- f:
+		return true
+	case <-s.done:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // Notepad returns the session's notepad handle.
 func (s *Session) Notepad() *Notepad { return s.notepad }
 

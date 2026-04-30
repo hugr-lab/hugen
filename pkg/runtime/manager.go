@@ -277,7 +277,7 @@ func (m *SessionManager) Close(ctx context.Context, id, reason string) (time.Tim
 
 	if !s.closed.Load() {
 		closed := protocol.NewSessionClosed(id, m.agent.Participant(), reason)
-		if !sendInboxFrame(ctx, s, closed) {
+		if !s.Submit(ctx,closed) {
 			m.logger.Warn("manager: session inbox closed before Close intent landed",
 				"session", id)
 		}
@@ -298,35 +298,6 @@ func (m *SessionManager) Close(ctx context.Context, id, reason string) (time.Tim
 	return time.Now().UTC(), nil
 }
 
-// sendInboxFrame pushes a frame into a session's inbox without
-// crashing on a closed channel and without hanging on a full one.
-// Three exit paths:
-//
-//   - ctx done → caller wants to bail out (shutdown timeout, API
-//     cancel). Returns false so the caller can decide whether to
-//     report or move on.
-//   - s.Done closed → the session goroutine has exited; the frame
-//     can never be delivered. Returns false.
-//   - successful send → returns true.
-//
-// A "send on closed channel" panic is caught by recover so a race
-// between the goroutine's defer and our send doesn't crash the
-// process; the recovered case maps to ok=false.
-func sendInboxFrame(ctx context.Context, s *Session, f protocol.Frame) (ok bool) {
-	defer func() {
-		if r := recover(); r != nil {
-			ok = false
-		}
-	}()
-	select {
-	case s.in <- f:
-		return true
-	case <-s.Done():
-		return false
-	case <-ctx.Done():
-		return false
-	}
-}
 
 // Suspend asks the session goroutine to record `suspended`
 // status. Implemented as a thin wrapper around the inbox-frame
@@ -350,7 +321,7 @@ func (m *SessionManager) Suspend(ctx context.Context, id string) error {
 		return nil
 	}
 	marker := protocol.NewSessionSuspended(id, m.agent.Participant())
-	if !sendInboxFrame(ctx, s, marker) {
+	if !s.Submit(ctx,marker) {
 		m.logger.Warn("manager: session inbox closed before Suspend intent landed",
 			"session", id)
 	}
@@ -405,7 +376,7 @@ func (m *SessionManager) ShutdownAll(ctx context.Context) {
 	for _, s := range live {
 		if !s.closed.Load() {
 			marker := protocol.NewSessionSuspended(s.id, m.agent.Participant())
-			_ = sendInboxFrame(ctx, s, marker)
+			_ = s.Submit(ctx,marker)
 		}
 		// close(s.in) lets the Run loop exit after draining any
 		// already-queued frames. The session's own /end-in-flight,
