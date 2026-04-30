@@ -229,6 +229,26 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 		// canceled / drained — no terminal chunk to emit.
 		return
 	}
+	// Hugr collapses tool_use into the finish event (carries
+	// `tool_use` finish_reason + a populated ToolCalls string)
+	// rather than streaming a separate tool_use chunk. Emit each
+	// tool call as its own chunk BEFORE the terminal Final chunk
+	// so the runtime's Turn loop sees them.
+	if finishEv.ToolCalls != "" {
+		calls, err := parseToolCalls(finishEv.ToolCalls)
+		if err != nil {
+			m.logger.Warn("hugr completion: parse tool_calls failed",
+				"model", finishEv.Model, "err", err, "raw_len", len(finishEv.ToolCalls))
+		}
+		for _, c := range calls {
+			tc := model.ChunkToolCall{
+				ID:   c.ID,
+				Name: c.Name,
+				Args: c.Arguments,
+			}
+			_ = sendItem(ctx, out, streamItem{chunk: model.Chunk{ToolCall: &tc}})
+		}
+	}
 	final := model.Chunk{Final: true}
 	if finishEv.PromptTokens != 0 || finishEv.CompletionTokens != 0 {
 		final.Usage = &model.Usage{
@@ -242,6 +262,7 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 		"finish_reason", finishEv.FinishReason,
 		"prompt_tokens", finishEv.PromptTokens,
 		"completion_tokens", finishEv.CompletionTokens,
+		"tool_calls_emitted", finishEv.ToolCalls != "",
 	)
 	_ = sendItem(ctx, out, streamItem{chunk: final})
 }

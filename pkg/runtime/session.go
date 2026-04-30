@@ -27,8 +27,9 @@ type Session struct {
 	codec   *protocol.Codec
 	cmds    *CommandRegistry
 	notepad *Notepad
-	tools   *tool.ToolManager // optional; nil disables tool dispatch
-	logger  *slog.Logger
+	tools        *tool.ToolManager // optional; nil disables tool dispatch
+	maxToolIters int               // 0 → defaultMaxToolIterations
+	logger       *slog.Logger
 
 	// Per-session model overrides. /model use mutates this.
 	overridesMu sync.RWMutex
@@ -71,6 +72,20 @@ func WithSessionLogger(l *slog.Logger) SessionOption {
 // tool_error{code: not_found} so the LLM gets a clean signal.
 func WithTools(tm *tool.ToolManager) SessionOption {
 	return func(s *Session) { s.tools = tm }
+}
+
+// WithMaxToolIterations overrides the per-Turn cap on
+// model→tool→model loops (default 15, mirroring ADK's
+// defaultDispatchMaxTurns). Caps are useful guardrails against
+// runaway tool loops on weak models; configurable per deployment
+// because data-exploration scenarios (hugr explorer, multi-step
+// reasoning) routinely need more.
+func WithMaxToolIterations(n int) SessionOption {
+	return func(s *Session) {
+		if n > 0 {
+			s.maxToolIters = n
+		}
+	}
 }
 
 // NewSession constructs a Session bound to its dependencies.
@@ -337,8 +352,20 @@ func (s *Session) handleUserMessage(ctx context.Context, f *protocol.UserMessage
 	// dispatched tool calls so the LLM can react.
 	s.history = append(s.history, model.Message{Role: model.RoleUser, Content: f.Payload.Text})
 
-	for iter := 0; iter < maxToolIterations; iter++ {
-		req := model.Request{Messages: append([]model.Message{}, s.history...)}
+	cap := s.maxToolIters
+	if cap <= 0 {
+		cap = defaultMaxToolIterations
+	}
+
+	for iter := 0; iter < cap; iter++ {
+		modelTools, err := s.modelToolsForSession(turnCtx)
+		if err != nil {
+			s.logger.Warn("session: build tool catalogue", "session", s.id, "err", err)
+		}
+		req := model.Request{
+			Messages: append([]model.Message{}, s.history...),
+			Tools:    modelTools,
+		}
 		stream, err := mdl.Generate(turnCtx, req)
 		if err != nil {
 			errFrame := protocol.NewError(s.id, s.agent.Participant(),
@@ -371,10 +398,41 @@ func (s *Session) handleUserMessage(ctx context.Context, f *protocol.UserMessage
 			})
 		}
 	}
-	s.logger.Warn("session: tool re-call cap hit", "session", s.id, "max", maxToolIterations)
+	s.logger.Warn("session: tool re-call cap hit", "session", s.id, "max", cap)
 	limitFrame := protocol.NewError(s.id, s.agent.Participant(),
-		"tool_iteration_limit", fmt.Sprintf("max tool re-call iterations (%d) reached", maxToolIterations), false)
+		"tool_iteration_limit", fmt.Sprintf("max tool re-call iterations (%d) reached", cap), false)
 	return s.emit(ctx, limitFrame)
+}
+
+// modelToolsForSession converts the per-session ToolManager
+// snapshot into the []model.Tool catalogue the LLM provider
+// receives. Returns an empty slice when the session has no
+// ToolManager wired.
+func (s *Session) modelToolsForSession(ctx context.Context) ([]model.Tool, error) {
+	if s.tools == nil {
+		return nil, nil
+	}
+	snap, err := s.tools.Snapshot(ctx, s.id)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.Tool, 0, len(snap.Tools))
+	for _, t := range snap.Tools {
+		var schema map[string]any
+		if len(t.ArgSchema) > 0 {
+			if err := json.Unmarshal(t.ArgSchema, &schema); err != nil {
+				s.logger.Warn("session: bad tool arg schema",
+					"session", s.id, "tool", t.Name, "err", err)
+				schema = nil
+			}
+		}
+		out = append(out, model.Tool{
+			Name:        t.Name,
+			Description: t.Description,
+			Schema:      schema,
+		})
+	}
+	return out, nil
 }
 
 // turnOutcome carries everything one model.Generate call produced:
@@ -447,9 +505,12 @@ func (s *Session) streamTurn(ctx, turnCtx context.Context, stream model.Stream) 
 	return out, nil
 }
 
-// maxToolIterations caps how many model→tool→model loops one user
-// turn can drive. Prevents runaway tool-call loops; logged when hit.
-const maxToolIterations = 5
+// defaultMaxToolIterations is the per-Turn cap on
+// model→tool→model loops applied when the session was
+// constructed without WithMaxToolIterations. 15 mirrors ADK's
+// defaultDispatchMaxTurns — proven adequate for typical hugr-
+// explorer / multi-step-reasoning sessions.
+const defaultMaxToolIterations = 15
 
 // dispatchToolCall handles one model-emitted tool call: emits the
 // tool_call frame, runs Tier-1 permission resolution, and either
