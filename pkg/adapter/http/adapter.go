@@ -312,7 +312,8 @@ func (a *Adapter) handleDevToken(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		Value:    a.devTok.Token(),
 		Path:     "/api/",
 		HttpOnly: true,
-		SameSite: stdhttp.SameSiteStrictMode,
+		SameSite: stdhttp.SameSiteNoneMode,
+		Secure:   true,
 	})
 	writeJSON(w, stdhttp.StatusOK, map[string]string{"token": a.devTok.Token()})
 }

@@ -127,16 +127,20 @@
 
   function attachStream(id) {
     if (es) { es.close(); es = null; }
-    const lastID = localStorage.getItem(lastEventKey(id));
     const url = new URL(apiOrigin + "/api/v1/sessions/" + id + "/stream");
-    // EventSource auto-attaches Last-Event-ID only on auto-reconnect
-    // after onerror; on a fresh page load we pass the cursor as a
-    // query param the server accepts as a fallback. After the first
-    // reconnect, EventSource takes over with the header.
-    if (lastID) url.searchParams.set("last_event_id", lastID);
-    // EventSource cannot set headers; the auth gate falls back to the
-    // hugen_dev_token cookie set by /api/auth/dev-token. Cross-origin
-    // cookies require withCredentials.
+    // Fresh page open replays the FULL session history (no cursor
+    // query param). Last-Event-ID semantics — "I already have N,
+    // give me what's new" — is wrong for a hard reload where the
+    // DOM is empty. Within the same page life, EventSource auto-
+    // attaches the Last-Event-ID header on its own reconnect, so
+    // brief network blips still resume incrementally without
+    // re-rendering everything. The localStorage cursor is still
+    // written below so a future "show only new since last visit"
+    // toggle can opt back in.
+    //
+    // EventSource cannot set headers; the auth gate falls back to
+    // the hugen_dev_token cookie set by /api/auth/dev-token. Cross-
+    // origin cookies require withCredentials.
     es = new EventSource(url.toString(), { withCredentials: true });
     es.onerror = () => {
       // EventSource auto-reconnects with the original Last-Event-ID

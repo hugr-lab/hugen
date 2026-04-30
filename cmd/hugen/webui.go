@@ -34,7 +34,8 @@ func runWebUI(ctx context.Context, core *RuntimeCore) int {
 		return 1
 	}
 
-	webuiOrigin := fmt.Sprintf("http://127.0.0.1:%d", core.Boot.WebUIPort)
+	webuiOriginIP := fmt.Sprintf("http://127.0.0.1:%d", core.Boot.WebUIPort)
+	webuiOriginHost := fmt.Sprintf("http://localhost:%d", core.Boot.WebUIPort)
 	httpAd, err := httpadapter.NewAdapter(httpadapter.Options{
 		Mux:                core.Mux,
 		Auth:               devToken,
@@ -42,7 +43,7 @@ func runWebUI(ctx context.Context, core *RuntimeCore) int {
 		Replay:             replay,
 		Logger:             core.Logger.With("adapter", "http"),
 		DevToken:           devToken,
-		CORSAllowedOrigins: []string{webuiOrigin},
+		CORSAllowedOrigins: []string{webuiOriginIP, webuiOriginHost},
 	})
 	if err != nil {
 		core.Logger.Error("build http adapter", "err", err)
