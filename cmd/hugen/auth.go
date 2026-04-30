@@ -7,6 +7,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/sources/hugr"
+	"github.com/hugr-lab/hugen/pkg/auth/sources/oidc"
 )
 
 func buildAuthService(ctx context.Context, boot *BootstrapConfig, mux *http.ServeMux, logger *slog.Logger) (*auth.Service, error) {
@@ -30,6 +31,13 @@ func buildAuthService(ctx context.Context, boot *BootstrapConfig, mux *http.Serv
 
 	if err := as.AddPrimary(hugrAuth); err != nil {
 		return nil, err
+	}
+	// In local-OIDC mode the primary source needs a browser flow to
+	// obtain the first token. Register its PromptLogin so the URL is
+	// printed once the HTTP listener is bound; runtime.go fires the
+	// queue right after this returns.
+	if oidcSrc, ok := hugrAuth.(*oidc.Source); ok {
+		as.RegisterPromptLogin(oidcSrc.PromptLogin)
 	}
 	return as, nil
 }

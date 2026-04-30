@@ -184,6 +184,22 @@ func (r *Service) PromptLogins() []func() {
 	return out
 }
 
+// FirePromptLogins drains and runs every queued prompt-login hook.
+// Safe to call multiple times — once a hook fires it is removed from
+// the queue so a later call only fires hooks added since the previous
+// FirePromptLogins. Hooks run synchronously (each one prints a login
+// URL + best-effort opens the browser) so subsequent code can
+// Token-block expecting the user to interact.
+func (r *Service) FirePromptLogins() {
+	r.mu.Lock()
+	hooks := r.promptLogins
+	r.promptLogins = nil
+	r.mu.Unlock()
+	for _, h := range hooks {
+		h()
+	}
+}
+
 // dispatchCallback routes /auth/callback to the Source that owns
 // the OAuth state parameter.
 func (r *Service) dispatchCallback(w http.ResponseWriter, req *http.Request) {
