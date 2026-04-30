@@ -40,10 +40,13 @@ type ToolManager struct {
 	authResolver   AuthResolver
 	connectTimeout time.Duration
 
+	builders         map[string]ProviderBuilder
+
 	mu               sync.RWMutex
 	providers        map[string]ToolProvider
 	sessionProviders map[string]map[string]ToolProvider // sessionID → name → provider
 	cache            map[string]*cachedSnapshot
+	cleanups         map[string][]func() // provider name → cleanup callbacks (e.g. revoke a minted secret)
 
 	toolGen   atomic.Int64
 	policyGen atomic.Int64
@@ -98,11 +101,12 @@ func NewToolManager(
 	providers config.ToolProvidersView,
 	resolver AuthResolver,
 	log *slog.Logger,
+	opts ...ToolManagerOption,
 ) *ToolManager {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &ToolManager{
+	tm := &ToolManager{
 		perms:            perms,
 		skills:           skills,
 		log:              log,
@@ -112,7 +116,38 @@ func NewToolManager(
 		providers:        make(map[string]ToolProvider),
 		sessionProviders: make(map[string]map[string]ToolProvider),
 		cache:            make(map[string]*cachedSnapshot),
+		cleanups:         make(map[string][]func()),
 		drainTimeout:     defaultDrainTimeout,
+	}
+	for _, opt := range opts {
+		opt(tm)
+	}
+	return tm
+}
+
+// ToolManagerOption configures optional dependencies on a
+// freshly-built ToolManager. Variadic at the end of NewToolManager
+// keeps the common case (no options) at the existing arity.
+type ToolManagerOption func(*ToolManager)
+
+// WithProviderBuilder registers a builder for a non-MCP provider
+// type. Init dispatches each tool_providers entry by `type` to its
+// builder; entries with `type: mcp` (or empty) use the built-in
+// MCP path. cmd/hugen registers `hugr-query`, `python-sandbox`
+// etc. — runtime-managed kinds that need access to listener URL,
+// agent token store, workspaces root, and similar facts pkg/tool
+// has no business knowing.
+//
+// A builder may return cleanup callbacks alongside the provider;
+// ToolManager runs them on RemoveProvider/Close. Use this for
+// runtime-minted secrets that must be revoked when the provider
+// goes away (e.g. agent_token bootstrap).
+func WithProviderBuilder(typeName string, builder ProviderBuilder) ToolManagerOption {
+	return func(tm *ToolManager) {
+		if tm.builders == nil {
+			tm.builders = make(map[string]ProviderBuilder)
+		}
+		tm.builders[strings.ToLower(typeName)] = builder
 	}
 }
 
@@ -257,6 +292,8 @@ func (m *ToolManager) RemoveProvider(ctx context.Context, name string) error {
 		return ErrUnknownProvider
 	}
 	delete(m.providers, name)
+	cleanups := m.cleanups[name]
+	delete(m.cleanups, name)
 	m.toolGen.Add(1)
 	m.invalidateAllSnapshots()
 	m.mu.Unlock()
@@ -268,10 +305,31 @@ func (m *ToolManager) RemoveProvider(ctx context.Context, name string) error {
 	dctx, cancel := context.WithTimeout(ctx, m.drainTimeout)
 	defer cancel()
 	<-dctx.Done()
-	if err := p.Close(); err != nil {
-		return fmt.Errorf("tool: close %s: %w", name, err)
+	closeErr := p.Close()
+	runCleanups(cleanups)
+	if closeErr != nil {
+		return fmt.Errorf("tool: close %s: %w", name, closeErr)
 	}
 	return nil
+}
+
+// recordCleanups associates teardown callbacks with a provider
+// name so RemoveProvider/Close can run them.
+func (m *ToolManager) recordCleanups(providerName string, cleanups []func()) {
+	if len(cleanups) == 0 {
+		return
+	}
+	m.mu.Lock()
+	m.cleanups[providerName] = append(m.cleanups[providerName], cleanups...)
+	m.mu.Unlock()
+}
+
+func runCleanups(fns []func()) {
+	for _, fn := range fns {
+		if fn != nil {
+			fn()
+		}
+	}
 }
 
 // Providers returns the names of every registered provider.
@@ -343,7 +401,7 @@ func (m *ToolManager) rebuildSnapshot(ctx context.Context, sessionID string, gen
 			continue
 		}
 		for _, t := range got {
-			if allowed != nil && !allowed[t.Name] {
+			if allowed != nil && !allowed.match(t.Name) {
 				continue
 			}
 			tools = append(tools, t)
@@ -360,7 +418,37 @@ func (m *ToolManager) rebuildSnapshot(ctx context.Context, sessionID string, gen
 	return snap, errors.Join(errs...)
 }
 
-func allowedFromBindings(ctx context.Context, skills *skill.SkillManager, sessionID string) map[string]bool {
+// allowedSet is the per-session compiled allow-list. Holds both
+// exact names and `provider:prefix*` glob patterns so a skill
+// granting `discovery-*` against the `hugr-main` provider matches
+// every `hugr-main:discovery-<anything>` tool.
+//
+// nil ⇒ no filter (skill manager not wired in tests).
+// empty (non-nil) ⇒ no skills loaded → empty catalogue.
+type allowedSet struct {
+	exact    map[string]bool
+	patterns []string // each is "provider:prefix" with the trailing * stripped
+}
+
+// match reports whether the fully-qualified tool name (e.g.
+// "hugr-main:discovery-search_data_sources") is allowed by any
+// rule in the set.
+func (a *allowedSet) match(name string) bool {
+	if a == nil {
+		return true
+	}
+	if a.exact[name] {
+		return true
+	}
+	for _, p := range a.patterns {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func allowedFromBindings(ctx context.Context, skills *skill.SkillManager, sessionID string) *allowedSet {
 	if skills == nil {
 		return nil // no filter; expose every registered tool
 	}
@@ -369,12 +457,19 @@ func allowedFromBindings(ctx context.Context, skills *skill.SkillManager, sessio
 		// No allowed-tools means no skills loaded — empty
 		// catalogue. Distinguishes "no skills loaded" from "no
 		// SkillManager configured" (the nil case above).
-		return map[string]bool{}
+		return &allowedSet{exact: map[string]bool{}}
 	}
-	out := map[string]bool{}
+	out := &allowedSet{exact: map[string]bool{}}
 	for _, g := range b.AllowedTools {
 		for _, t := range g.Tools {
-			out[g.Provider+":"+t] = true
+			full := g.Provider + ":" + t
+			if strings.HasSuffix(t, "*") {
+				// glob pattern → prefix match. Strip the trailing
+				// star; the prefix kept is "<provider>:<head>".
+				out.patterns = append(out.patterns, strings.TrimSuffix(full, "*"))
+				continue
+			}
+			out.exact[full] = true
 		}
 	}
 	return out

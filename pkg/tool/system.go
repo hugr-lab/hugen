@@ -87,54 +87,118 @@ func (p *SystemProvider) List(ctx context.Context) ([]Tool, error) {
 			Description:      "Append a note to the caller's session notepad.",
 			Provider:         systemProviderName,
 			PermissionObject: systemPermObject,
+			ArgSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "text": {"type": "string", "description": "Note body."},
+    "author_id": {"type": "string", "description": "Optional author tag; defaults to the calling identity."}
+  },
+  "required": ["text"]
+}`),
 		},
 		{
 			Name:             "system:skill_load",
-			Description:      "Load a skill (and transitive requires) into the caller's session.",
+			Description:      "Load a skill (and transitive requires) into the caller's session. Use the catalogue from your system prompt to discover available skills.",
 			Provider:         systemProviderName,
 			PermissionObject: systemPermObject,
+			ArgSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "name": {"type": "string", "description": "Skill name as listed in the catalogue (e.g. \"hugr-data\")."}
+  },
+  "required": ["name"]
+}`),
 		},
 		{
 			Name:             "system:skill_unload",
 			Description:      "Unload a skill from the caller's session.",
 			Provider:         systemProviderName,
 			PermissionObject: systemPermObject,
+			ArgSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "name": {"type": "string", "description": "Skill name to unload."}
+  },
+  "required": ["name"]
+}`),
 		},
 		{
 			Name:             "system:skill_publish",
 			Description:      "Publish a skill manifest+body into the local store.",
 			Provider:         systemProviderName,
 			PermissionObject: systemPermObject,
+			ArgSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "name": {"type": "string"},
+    "body": {"type": "string", "description": "Full SKILL.md contents (frontmatter + body)."}
+  },
+  "required": ["name", "body"]
+}`),
 		},
 		{
 			Name:             "system:skill_ref",
-			Description:      "Read a reference document (references/<name>.md) from a loaded skill.",
+			Description:      "Read a reference document (references/<ref>.md) from a loaded skill. References are listed in the skill's SKILL.md body.",
 			Provider:         systemProviderName,
 			PermissionObject: systemPermObject,
+			ArgSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "skill": {"type": "string", "description": "Loaded skill name."},
+    "ref":   {"type": "string", "description": "Reference base name without the .md extension (e.g. \"instructions\")."}
+  },
+  "required": ["skill", "ref"]
+}`),
 		},
 		{
 			Name:             "system:runtime_reload",
-			Description:      "Reload runtime subsystems (permissions, skills, mcp, all).",
+			Description:      "Reload runtime subsystems. target ∈ {permissions, skills, mcp, all}; defaults to all.",
 			Provider:         systemProviderName,
 			PermissionObject: systemPermObject,
+			ArgSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "target": {"type": "string", "enum": ["permissions", "skills", "mcp", "all"]}
+  }
+}`),
 		},
 		{
 			Name:             "system:mcp_add_server",
-			Description:      "Spawn and register an MCP server.",
+			Description:      "Spawn and register an MCP server (admin path).",
 			Provider:         systemProviderName,
 			PermissionObject: systemPermObject,
+			ArgSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "name": {"type": "string"},
+    "command": {"type": "string"},
+    "args": {"type": "array", "items": {"type": "string"}},
+    "env": {"type": "object", "additionalProperties": {"type": "string"}}
+  },
+  "required": ["name", "command"]
+}`),
 		},
 		{
 			Name:             "system:mcp_remove_server",
 			Description:      "Drain and remove an MCP server.",
 			Provider:         systemProviderName,
 			PermissionObject: systemPermObject,
+			ArgSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {"name": {"type": "string"}},
+  "required": ["name"]
+}`),
 		},
 		{
 			Name:             "system:mcp_reload_server",
 			Description:      "Restart a registered MCP server.",
 			Provider:         systemProviderName,
 			PermissionObject: systemPermObject,
+			ArgSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {"name": {"type": "string"}},
+  "required": ["name"]
+}`),
 		},
 	}
 	return tools, nil
@@ -252,7 +316,21 @@ func (p *SystemProvider) callSkillRef(ctx context.Context, args json.RawMessage)
 	if s.FS == nil {
 		return nil, fmt.Errorf("skill_ref: %s has no body fs", in.Skill)
 	}
-	body, err := readFile(s.FS, "references/"+in.Ref)
+	// Look up the ref body. The model addresses references by base
+	// name (e.g. "instructions"); the file on disk has a .md
+	// extension. Try the as-supplied path first so callers that
+	// already passed an explicit extension (or sub-directory) keep
+	// working.
+	refPath := "references/" + in.Ref
+	body, err := readFile(s.FS, refPath)
+	if err != nil {
+		altPath := refPath + ".md"
+		if alt, altErr := readFile(s.FS, altPath); altErr == nil {
+			body, err = alt, nil
+			refPath = altPath
+		}
+	}
+	_ = refPath
 	if err != nil {
 		return nil, fmt.Errorf("skill_ref: %s/%s: %w", in.Skill, in.Ref, err)
 	}

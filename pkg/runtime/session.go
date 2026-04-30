@@ -671,11 +671,12 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 	if err := s.emit(ctx, callFrame); err != nil {
 		s.logger.Warn("emit tool_call", "err", err)
 	}
-	// Log the dispatch with full args at debug level. The hash is
-	// included for phase-4 stuck-detection (deterministic id over
-	// name + raw args, see pkg/models/hugr.go::hashToolCall);
-	// args itself helps live debugging — operator can replay the
-	// exact call. Result lands on a sibling debug line below.
+	// Log the dispatch with full args BEFORE the call so the
+	// operator can correlate any downstream slowdown / hang with
+	// the exact request. Hash is included for phase-4
+	// stuck-detection (deterministic id over name + raw args, see
+	// pkg/models/hugr.go::hashToolCall). Sibling "tool result"
+	// line follows after the call returns.
 	s.logger.Debug("tool dispatch",
 		"session", s.id, "tool", tc.Name, "hash", tc.Hash,
 		"args", string(rawArgs))
@@ -699,6 +700,19 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 		}
 	}
 	if theTool.Name == "" {
+		// Surface the empty-snapshot case prominently — it usually
+		// means a skill granted a wildcard pattern that doesn't
+		// match the requested tool, or the provider hasn't returned
+		// any tools yet. Without this log the dispatch line above
+		// looks like a successful call followed by silence.
+		available := make([]string, 0, len(snap.Tools))
+		for _, t := range snap.Tools {
+			available = append(available, t.Name)
+		}
+		s.logger.Warn("tool not in snapshot",
+			"session", s.id, "tool", tc.Name,
+			"snapshot_size", len(snap.Tools),
+			"available", available)
 		s.emitToolError(ctx, tc.ID, tc.Name, protocol.ToolErrorNotFound,
 			fmt.Sprintf("tool %q not in current snapshot", tc.Name), "")
 		return ""
@@ -731,11 +745,15 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 		case errors.Is(err, tool.ErrProviderRemoved):
 			code = protocol.ToolErrorProviderRemoved
 		}
-		s.logger.Debug("tool result error",
+		s.logger.Warn("tool result error",
 			"session", s.id, "tool", tc.Name, "code", code, "err", err)
 		s.emitToolError(ctx, tc.ID, tc.Name, code, err.Error(), "")
 		return ""
 	}
+	// Log result AFTER the call so the operator sees the same
+	// dispatch/result pairing in chronological order. Truncated
+	// to 2 KiB so a big Parquet preview / file dump doesn't
+	// drown the log; the full payload is in the tool_result frame.
 	s.logger.Debug("tool result",
 		"session", s.id, "tool", tc.Name,
 		"result", truncatePayload(result, 2048))

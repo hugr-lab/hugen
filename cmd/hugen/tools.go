@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -43,19 +44,46 @@ func buildPermissionService(core *RuntimeCore) perm.Service {
 }
 
 // buildToolStack wires SkillManager + PermissionService + ToolManager
-// + SystemProvider, then asks the manager to open every per_agent
-// MCP entry from cfg.ToolProviders. Per_session MCP providers
-// (bash-mcp today) are wired by buildSessionLifecycle on Session.Open.
+// + SystemProvider, registers any non-MCP provider builders the
+// deployment opts into (hugr-query today), then asks the manager to
+// open every per_agent entry from cfg.ToolProviders. Per_session
+// providers (bash-mcp today) are wired by buildSessionLifecycle on
+// Session.Open.
 func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillManager) (*tool.ToolManager, error) {
-	tm := tool.NewToolManager(perms, skills, core.Config.ToolProviders(), authResolverFor(core.Auth), core.Logger)
+	opts := []tool.ToolManagerOption{}
+
+	// hugr-query is a runtime-managed provider type: it spawns the
+	// in-tree binary, mints a per-spawn agent-token bootstrap, and
+	// revokes it on Close. The store is only built when a `hugr`
+	// auth source is registered — US5 no-Hugr deployments skip
+	// this whole block and the `type: hugr-query` entry (if any)
+	// is rejected at Init with "unknown type", which is the
+	// correct degradation: drop the YAML entry to make it clean.
+	tokenStore, err := buildAgentTokenStore(core.Auth)
+	if err != nil {
+		return nil, fmt.Errorf("buildToolStack: agent-token store: %w", err)
+	}
+	if tokenStore != nil {
+		mountAgentTokenHandler(core.Mux, tokenStore)
+		hq := &hugrQueryBuilder{
+			authStore: tokenStore,
+			baseURL:   core.Boot.BaseURI,
+			hugrURL:   core.Boot.Hugr.URL,
+			stateDir:  core.Boot.StateDir,
+			sharedDir: os.Getenv("HUGEN_SHARED_ROOT"),
+			agentID:   core.Agent.ID(),
+			log:       core.Logger,
+		}
+		opts = append(opts, tool.WithProviderBuilder("hugr-query", hq))
+	}
+
+	tm := tool.NewToolManager(perms, skills, core.Config.ToolProviders(),
+		authResolverFor(core.Auth), core.Logger, opts...)
 
 	sys := tool.NewSystemProvider(tool.SystemDeps{
 		AgentID: core.Agent.ID(),
 		Notepad: newNotepadFunc(core.Store),
 		Skills:  skills,
-		// AddMCP/RemoveMCP/ReloadMCP/Reload are wired by the
-		// session-scoped bash-mcp lifecycle in T040 part 2; until
-		// then SystemProvider routes those calls to ErrSystemUnavailable.
 	})
 	if err := tm.AddProvider(sys); err != nil {
 		return nil, fmt.Errorf("buildToolStack: register system provider: %w", err)
@@ -97,11 +125,3 @@ func newNotepadFunc(store runtime.RuntimeStore) tool.NotepadFunc {
 	}
 }
 
-// mountAgentTokenStub mounts /api/auth/agent-token on the http
-// adapter and answers every request with 501. The real handler
-// lands in US2 alongside hugr-query (T044).
-func mountAgentTokenStub(mux *http.ServeMux) {
-	mux.HandleFunc("/api/auth/agent-token", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "agent-token endpoint not yet wired (US2)", http.StatusNotImplemented)
-	})
-}

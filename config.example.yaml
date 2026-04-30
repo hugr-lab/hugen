@@ -119,6 +119,19 @@ tool_providers:
     endpoint: ${HUGR_URL}/mcp
     auth: hugr
 
+  # In-tree Hugr GraphQL MCP (file output). Spawned per_agent over
+  # stdio; persists tabular results as Parquet under each session's
+  # workspace data dir, returns path + ≤ 50-row preview to the
+  # model. Auth is runtime-managed via /api/auth/agent-token (the
+  # agent mints a per-spawn bootstrap token; HUGR_TOKEN_URL etc.
+  # are injected at spawn time — operators do not write them
+  # here). Drop this entry to skip file-output queries; the
+  # `hugr-main` provider above still serves inline data tools.
+  - name: hugr-query
+    type: hugr-query
+    command: ./bin/hugr-query        # built by `make hugr-query`
+    lifetime: per_agent
+
 local_db_enabled: true
 local_db:
   db:

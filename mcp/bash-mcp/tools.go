@@ -36,17 +36,17 @@ type Tools struct {
 // Register attaches every bash.* tool to srv.
 func (t *Tools) Register(srv mcpToolRegistrar) {
 	srv.AddTool(mcp.NewTool("bash.run",
-		mcp.WithDescription("Execute a non-interactive command in the session workspace."),
-		mcp.WithString("cmd", mcp.Required()),
-		mcp.WithArray("args"),
+		mcp.WithDescription("Execute a single binary by name with literal argv. NO shell — pipes (|), redirects (>, <), globs (*), variable expansion ($X), or chained commands (&&) DO NOT work here. Use bash.shell instead for any of those. cmd is the binary name, args is the argv slice."),
+		mcp.WithString("cmd", mcp.Required(), mcp.Description("Binary name or absolute path. Must NOT contain shell syntax.")),
+		mcp.WithArray("args", mcp.Description("Argv slice as individual strings — e.g. [\"-la\", \"src\"]. NOT a single command line.")),
 		mcp.WithString("cwd"),
 		mcp.WithNumber("timeout_ms"),
 		mcp.WithBoolean("shell"),
 		mcp.WithObject("env"),
 	), t.run)
 	srv.AddTool(mcp.NewTool("bash.shell",
-		mcp.WithDescription("Run a shell command (sh -c) in the session workspace."),
-		mcp.WithString("cmd", mcp.Required()),
+		mcp.WithDescription("Run a shell command line via sh -c. Supports pipes, redirects, globs, $VAR expansion, &&, etc. Use this for anything more than a plain binary call."),
+		mcp.WithString("cmd", mcp.Required(), mcp.Description("Full shell command line — e.g. \"ls -R | grep foo\".")),
 		mcp.WithString("cwd"),
 		mcp.WithNumber("timeout_ms"),
 		mcp.WithObject("env"),

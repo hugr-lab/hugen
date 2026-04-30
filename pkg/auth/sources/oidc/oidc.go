@@ -119,19 +119,55 @@ func (s *Source) Name() string { return s.cfg.Name }
 // the user completes browser login. After that it refreshes
 // automatically.
 func (s *Source) Token(ctx context.Context) (string, error) {
+	tok, _, err := s.tokenWithTTL(ctx)
+	return tok, err
+}
+
+// TokenWithTTL is like Token but also reports the seconds until
+// the token's announced expiry. Callers that propagate the token
+// to a downstream consumer (the agent-token endpoint serving
+// hugr-query) need this so the consumer can size its own refresh
+// cadence to the JWT's actual lifetime, not a hardcoded default.
+//
+// Returns 0 TTL when the token is fresh enough that no expiry
+// metadata was tracked (e.g. injected at boot via env). Callers
+// should treat 0 as "unknown — don't trust me past the standard
+// short-lived window".
+func (s *Source) TokenWithTTL(ctx context.Context) (string, int, error) {
+	return s.tokenWithTTL(ctx)
+}
+
+func (s *Source) tokenWithTTL(ctx context.Context) (string, int, error) {
 	select {
 	case <-s.ready:
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return "", 0, ctx.Err()
 	}
 
 	s.tokenMu.Lock()
 	defer s.tokenMu.Unlock()
 
-	if time.Now().Before(s.expiresAt) {
-		return s.accessToken, nil
+	// Refresh proactively a bit before the announced expiry —
+	// short-lived JWTs and clock skew between us and Hugr's auth
+	// server otherwise produce "token expired" errors right at
+	// the boundary. 30s leaves enough room for a refresh round
+	// trip plus typical skew.
+	if time.Now().Add(30 * time.Second).Before(s.expiresAt) {
+		return s.accessToken, ttlSeconds(s.expiresAt), nil
 	}
-	return s.refresh(ctx)
+	tok, err := s.refresh(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+	return tok, ttlSeconds(s.expiresAt), nil
+}
+
+func ttlSeconds(expiresAt time.Time) int {
+	d := time.Until(expiresAt)
+	if d <= 0 {
+		return 0
+	}
+	return int(d / time.Second)
 }
 
 // Login implements Source — prints the login URL and opens the

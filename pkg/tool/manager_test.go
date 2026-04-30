@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
+	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // fakeProvider is a configurable ToolProvider for tests.
@@ -100,6 +101,85 @@ func TestToolManager_Snapshot_NoSkillsAllProvidersExposed(t *testing.T) {
 	}
 	if len(snap.Tools) != 2 {
 		t.Errorf("snap.Tools len = %d, want 2", len(snap.Tools))
+	}
+}
+
+// Wildcard grants in a skill manifest must expand at snapshot time
+// against the live tool list. Regression: an exact-match filter
+// silently dropped every tool whose grant was a wildcard
+// ("discovery-*", "schema-*", "data-*"), leaving the catalogue
+// missing exactly the tools the skill was supposed to expose.
+func TestToolManager_Snapshot_AllowedToolsWildcardMatches(t *testing.T) {
+	ctx := context.Background()
+
+	manifest := []byte(`---
+name: dataset
+description: minimal skill granting wildcards.
+allowed-tools:
+  - provider: hugr-main
+    tools:
+      - discovery-*
+      - schema-*
+  - provider: hugr-query
+    tools:
+      - query
+compatibility:
+  model: any
+  runtime: hugen-phase-3
+---
+
+body
+`)
+	store := skill.NewSkillStore(skill.Options{Inline: map[string][]byte{"dataset": manifest}})
+	skills := skill.NewSkillManager(store, nil)
+	if err := skills.Load(ctx, "s1", "dataset"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	m := NewToolManager(&fakePerms{}, skills, nil, nil, nil)
+	main := &fakeProvider{name: "hugr-main", tools: []Tool{
+		{Name: "hugr-main:discovery-search_modules", Provider: "hugr-main"},
+		{Name: "hugr-main:discovery-search_data_sources", Provider: "hugr-main"},
+		{Name: "hugr-main:schema-type_fields", Provider: "hugr-main"},
+		{Name: "hugr-main:data-validate_graphql_query", Provider: "hugr-main"},
+	}}
+	query := &fakeProvider{name: "hugr-query", tools: []Tool{
+		{Name: "hugr-query:query", Provider: "hugr-query"},
+		{Name: "hugr-query:query_jq", Provider: "hugr-query"},
+	}}
+	if err := m.AddProvider(main); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AddProvider(query); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := m.Snapshot(ctx, "s1")
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	got := map[string]bool{}
+	for _, t := range snap.Tools {
+		got[t.Name] = true
+	}
+	want := []string{
+		"hugr-main:discovery-search_modules",
+		"hugr-main:discovery-search_data_sources",
+		"hugr-main:schema-type_fields",
+		"hugr-query:query", // exact name, granted directly
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("missing tool %q in snapshot; got %v", w, got)
+		}
+	}
+	// data-* was NOT granted; data-validate must NOT appear.
+	if got["hugr-main:data-validate_graphql_query"] {
+		t.Errorf("data-validate_graphql_query leaked into snapshot — wildcard scope is wrong")
+	}
+	// query_jq was NOT granted; must NOT appear.
+	if got["hugr-query:query_jq"] {
+		t.Errorf("query_jq leaked into snapshot — exact-match grant should not include siblings")
 	}
 }
 

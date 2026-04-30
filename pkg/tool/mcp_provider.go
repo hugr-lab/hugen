@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	mcpcli "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -289,6 +290,16 @@ func (p *MCPProvider) Call(ctx context.Context, name string, args json.RawMessag
 	req := mcp.CallToolRequest{}
 	req.Params.Name = name
 	req.Params.Arguments = argsAny
+	// Per_agent MCPs (hugr-query today) need the session id to
+	// route file output under the right per-session workspace.
+	// Per_session MCPs see the same field but ignore it. Tests
+	// that bypass perm.WithSession leave Meta nil, which both
+	// kinds tolerate.
+	if sc, ok := perm.SessionFromContext(ctx); ok && sc.SessionID != "" {
+		req.Params.Meta = &mcp.Meta{
+			AdditionalFields: map[string]any{"session_id": sc.SessionID},
+		}
+	}
 
 	res, err := cli.CallTool(ctx, req)
 	if err != nil {

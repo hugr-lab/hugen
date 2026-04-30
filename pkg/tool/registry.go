@@ -18,6 +18,31 @@ type AuthResolver interface {
 	RoundTripper(name string) (http.RoundTripper, error)
 }
 
+// ProviderBuilder turns a config.ToolProviderSpec into a live
+// ToolProvider. Different `type` values get different builders.
+//
+// Built-in: `type: mcp` is handled by the default MCP builder
+// (see Init). Operators register additional builders at boot for
+// runtime-managed kinds — `hugr-query` mints a per-spawn agent
+// token, `python-sandbox` (later) attaches a per-session venv,
+// etc. Each builder owns its own knowledge of listener URL,
+// secrets, paths — pkg/tool does not need to know.
+//
+// The cleanups slice is run on RemoveProvider/Close. Use it to
+// revoke runtime-minted secrets, free temp dirs, etc.
+type ProviderBuilder interface {
+	Build(ctx context.Context, spec config.ToolProviderSpec) (provider ToolProvider, cleanups []func(), err error)
+}
+
+// ProviderBuilderFunc adapts a plain function into a
+// ProviderBuilder. Convenient for in-line registration.
+type ProviderBuilderFunc func(ctx context.Context, spec config.ToolProviderSpec) (ToolProvider, []func(), error)
+
+// Build implements ProviderBuilder.
+func (f ProviderBuilderFunc) Build(ctx context.Context, spec config.ToolProviderSpec) (ToolProvider, []func(), error) {
+	return f(ctx, spec)
+}
+
 // AuthResolverFunc adapts an ordinary function into an
 // AuthResolver. Useful for tests and small wirings.
 type AuthResolverFunc func(name string) (http.RoundTripper, error)
@@ -48,41 +73,70 @@ func (m *ToolManager) Init(ctx context.Context) error {
 		m.log.Warn("tool: live reload of tool_providers not implemented; restart hugen to apply changes")
 	})
 	for _, spec := range m.providersView.Providers() {
-		if !strings.EqualFold(spec.Type, "mcp") {
-			continue
-		}
 		if effectiveLifetime(spec) != LifetimePerAgent {
 			continue
 		}
-
-		mcpSpec, err := BuildMCPProviderSpec(spec, m.authResolver)
-		if err != nil {
-			m.log.Warn("mcp provider disabled: bad config",
-				"provider", spec.Name, "err", err)
+		builder := m.builderFor(spec.Type)
+		if builder == nil {
+			m.log.Warn("provider disabled: unknown type",
+				"provider", spec.Name, "type", spec.Type)
 			continue
 		}
 		connectCtx, cancel := context.WithTimeout(ctx, m.connectTimeout)
-		prov, err := NewMCPProvider(connectCtx, mcpSpec, m.log)
+		prov, cleanups, err := builder.Build(connectCtx, spec)
 		cancel()
 		if err != nil {
-			m.log.Warn("mcp provider disabled: connect failed",
-				"provider", spec.Name,
-				"endpoint", mcpSpec.Endpoint,
-				"err", err)
+			m.log.Warn("provider disabled: build failed",
+				"provider", spec.Name, "type", spec.Type, "err", err)
+			runCleanups(cleanups)
 			continue
 		}
 		if err := m.AddProvider(prov); err != nil {
 			_ = prov.Close()
-			m.log.Warn("mcp provider disabled: register failed",
+			runCleanups(cleanups)
+			m.log.Warn("provider disabled: register failed",
 				"provider", spec.Name, "err", err)
 			continue
 		}
-		m.log.Info("mcp provider ready",
-			"provider", spec.Name,
-			"transport", string(mcpSpec.Transport),
-			"endpoint", mcpSpec.Endpoint)
+		m.recordCleanups(spec.Name, cleanups)
+		m.log.Info("provider ready",
+			"provider", spec.Name, "type", spec.Type)
 	}
 	return nil
+}
+
+// builderFor returns the ProviderBuilder registered for typeName.
+// The empty type and `mcp` both map to the built-in MCP builder.
+// nil indicates no builder registered.
+func (m *ToolManager) builderFor(typeName string) ProviderBuilder {
+	t := strings.ToLower(typeName)
+	if t == "" {
+		t = "mcp"
+	}
+	if b, ok := m.builders[t]; ok {
+		return b
+	}
+	if t == "mcp" {
+		return defaultMCPBuilder{m: m}
+	}
+	return nil
+}
+
+// defaultMCPBuilder is the built-in handler for `type: mcp`. It
+// reuses BuildMCPProviderSpec + NewMCPProvider — same path as
+// before the builder abstraction landed.
+type defaultMCPBuilder struct{ m *ToolManager }
+
+func (b defaultMCPBuilder) Build(ctx context.Context, spec config.ToolProviderSpec) (ToolProvider, []func(), error) {
+	mcpSpec, err := BuildMCPProviderSpec(spec, b.m.authResolver)
+	if err != nil {
+		return nil, nil, err
+	}
+	prov, err := NewMCPProvider(ctx, mcpSpec, b.m.log)
+	if err != nil {
+		return nil, nil, err
+	}
+	return prov, nil, nil
 }
 
 // BuildMCPProviderSpec turns a config.ToolProviderSpec into the

@@ -223,7 +223,10 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 		),
 	)
 
-	mountAgentTokenStub(core.Mux)
+	// /api/auth/agent-token is mounted inside buildToolStack when
+	// the deployment carries a `hugr` auth source — see
+	// hugr_query.go:buildAgentTokenStore. No-Hugr deployments
+	// leave the path unmounted (404), which US5 expects.
 
 	return core, nil
 }
