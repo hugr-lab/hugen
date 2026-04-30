@@ -383,8 +383,21 @@ func (s *Session) handleUserMessage(ctx context.Context, f *protocol.UserMessage
 			_ = s.emit(ctx, errFrame)
 			return err
 		}
-		if outcome.finalText != "" {
-			s.history = append(s.history, model.Message{Role: model.RoleAssistant, Content: outcome.finalText})
+		// Persist the assistant turn before the tool results so the
+		// next model call sees well-formed history (assistant
+		// requested → tool responded). Skipping the assistant
+		// message — even when finalText is empty — confuses
+		// providers that key tool results by their tool_call
+		// antecedent (Gemma re-issues the call thinking it never
+		// happened).
+		if outcome.finalText != "" || len(outcome.toolCalls) > 0 {
+			s.history = append(s.history, model.Message{
+				Role:             model.RoleAssistant,
+				Content:          outcome.finalText,
+				ToolCalls:        outcome.toolCalls,
+				Thinking:         outcome.thinking,
+				ThoughtSignature: outcome.thoughtSignature,
+			})
 		}
 		if len(outcome.toolCalls) == 0 {
 			return nil
@@ -436,12 +449,17 @@ func (s *Session) modelToolsForSession(ctx context.Context) ([]model.Tool, error
 }
 
 // turnOutcome carries everything one model.Generate call produced:
-// the concatenated final assistant text and any tool calls the
-// model emitted. handleUserMessage uses this to drive the bounded
-// re-call loop that lets the LLM react to tool results.
+// the concatenated final assistant text, any tool calls the model
+// emitted, plus the per-turn reasoning state (thinking text +
+// thought_signature) some providers (Anthropic, Gemini 2.5+)
+// require fed back on subsequent turns. handleUserMessage uses
+// this to drive the bounded re-call loop that lets the LLM react
+// to tool results.
 type turnOutcome struct {
-	finalText string
-	toolCalls []model.ChunkToolCall
+	finalText        string
+	toolCalls        []model.ChunkToolCall
+	thinking         string
+	thoughtSignature string
 }
 
 // streamTurn drains a Stream into Reasoning + AgentMessage frames
@@ -489,6 +507,18 @@ func (s *Session) streamTurn(ctx, turnCtx context.Context, stream model.Stream) 
 		}
 		if chunk.ToolCall != nil {
 			out.toolCalls = append(out.toolCalls, *chunk.ToolCall)
+		}
+		if chunk.Final {
+			// Provider-supplied per-turn reasoning state. Captured
+			// on the Final chunk only — earlier chunks carry deltas,
+			// the finish event carries the canonical signature/
+			// thinking blob.
+			if chunk.Thinking != "" {
+				out.thinking = chunk.Thinking
+			}
+			if chunk.ThoughtSignature != "" {
+				out.thoughtSignature = chunk.ThoughtSignature
+			}
 		}
 	}
 	// Stream ended without an explicit final-flagged content chunk:

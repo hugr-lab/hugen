@@ -46,6 +46,7 @@ const chatCompletionSubscription = `subscription($model: String!, $messages: [St
 				prompt_tokens
 				completion_tokens
 				thought_signature
+				thinking
 			}
 		}
 	}
@@ -249,7 +250,11 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 			_ = sendItem(ctx, out, streamItem{chunk: model.Chunk{ToolCall: &tc}})
 		}
 	}
-	final := model.Chunk{Final: true}
+	final := model.Chunk{
+		Final:            true,
+		Thinking:         finishEv.Thinking,
+		ThoughtSignature: finishEv.ThoughtSignature,
+	}
 	if finishEv.PromptTokens != 0 || finishEv.CompletionTokens != 0 {
 		final.Usage = &model.Usage{
 			PromptTokens:     finishEv.PromptTokens,
@@ -401,6 +406,8 @@ func readStreamEvent(schema *arrow.Schema, batch arrow.RecordBatch, rowIdx int) 
 			ev.CompletionTokens = intVal(val)
 		case "thought_signature":
 			ev.ThoughtSignature = stringVal(val)
+		case "thinking":
+			ev.Thinking = stringVal(val)
 		}
 	}
 	return ev
