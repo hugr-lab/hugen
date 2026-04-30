@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hugr-lab/query-engine/types"
@@ -181,17 +182,55 @@ func (s *RuntimeStoreLocal) UpdateSessionStatus(ctx context.Context, id, status 
 	if status != StatusActive && status != StatusSuspended && status != StatusClosed {
 		return fmt.Errorf("%w: %q", ErrInvalidStatus, status)
 	}
-	return queries.RunMutation(ctx, s.querier,
-		`mutation ($id: String!, $data: hub_db_sessions_mut_data!) {
+	mutation := `mutation ($id: String!, $data: hub_db_sessions_mut_data!) {
 			hub { db { agent {
 				update_sessions(filter: {id: {eq: $id}}, data: $data) { affected_rows }
 			}}}
-		}`,
-		map[string]any{
-			"id":   id,
-			"data": map[string]any{"status": status},
-		},
-	)
+		}`
+	args := map[string]any{
+		"id":   id,
+		"data": map[string]any{"status": status},
+	}
+	// DuckDB MVCC sometimes flags a parallel writer on the
+	// sessions row as "Conflict on update" — typical case is the
+	// session goroutine and shutdown's Suspend racing on the same
+	// session_id. Retry with a small backoff; failure to retry
+	// leaves the row in its previous status, which on `/end`
+	// means a stale `active` row that the next console launch
+	// would try to resume. 3 attempts cover the contention
+	// window without dragging shutdown.
+	const maxAttempts = 3
+	var lastErr error
+	backoff := 20 * time.Millisecond
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err := queries.RunMutation(ctx, s.querier, mutation, args)
+		if err == nil {
+			return nil
+		}
+		if !isMVCCConflict(err) {
+			return err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return fmt.Errorf("update session status after %d retries: %w", maxAttempts, lastErr)
+}
+
+// isMVCCConflict reports whether a store error is the transient
+// DuckDB "Conflict on update" the runtime wants to retry rather
+// than surface to callers.
+func isMVCCConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Conflict on update") ||
+		strings.Contains(msg, "TransactionContext Error: Conflict")
 }
 
 func (s *RuntimeStoreLocal) NextSeq(ctx context.Context, sessionID string) (int, error) {
