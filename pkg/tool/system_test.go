@@ -207,6 +207,45 @@ func TestSystemProvider_RuntimeReload_DefaultAll(t *testing.T) {
 	}
 }
 
+func TestSystemProvider_RuntimeReload_BadTarget(t *testing.T) {
+	called := 0
+	p := NewSystemProvider(SystemDeps{
+		Reload: func(context.Context, string) error { called++; return nil },
+	})
+	_, err := p.Call(context.Background(), "runtime_reload", json.RawMessage(`{"target":"bogus"}`))
+	if !errors.Is(err, ErrArgValidation) {
+		t.Errorf("err = %v, want ErrArgValidation", err)
+	}
+	if called != 0 {
+		t.Errorf("Reload called %d times despite bad target", called)
+	}
+}
+
+func TestSystemProvider_RuntimeReload_GateDenied(t *testing.T) {
+	called := 0
+	perms := &fakePerms{rules: map[string]perm.Permission{
+		"hugen:command:runtime_reload:mcp": {Disabled: true, FromConfig: true},
+	}}
+	p := NewSystemProvider(SystemDeps{
+		Perms:  perms,
+		Reload: func(context.Context, string) error { called++; return nil },
+	})
+	_, err := p.Call(context.Background(), "runtime_reload", json.RawMessage(`{"target":"mcp"}`))
+	if !errors.Is(err, ErrPermissionDenied) {
+		t.Errorf("err = %v, want ErrPermissionDenied", err)
+	}
+	if called != 0 {
+		t.Errorf("Reload invoked %d times despite gate deny", called)
+	}
+	// Different target stays allowed.
+	if _, err := p.Call(context.Background(), "runtime_reload", json.RawMessage(`{"target":"skills"}`)); err != nil {
+		t.Errorf("non-denied target failed: %v", err)
+	}
+	if called != 1 {
+		t.Errorf("Reload calls = %d, want 1", called)
+	}
+}
+
 func TestSystemProvider_MCPAdd_RoutesSpec(t *testing.T) {
 	var captured MCPAddSpec
 	p := NewSystemProvider(SystemDeps{

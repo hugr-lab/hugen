@@ -129,7 +129,7 @@ func (l *LocalPermissions) Resolve(ctx context.Context, object, field string) (P
 	l.mu.RUnlock()
 
 	tctx := l.templateContext(ctx)
-	p, err := mergeConfig(rules, tctx, object, field)
+	p, err := mergeRules(rules, tctx, object, field)
 	if err != nil {
 		return Permission{}, err
 	}
@@ -199,70 +199,11 @@ func (l *LocalPermissions) broadcast(ev RefreshEvent) {
 	}
 }
 
-// mergeConfig produces the Tier-1 Permission for (object, field)
-// against a rule list. Wildcard `*` rules contribute to the
-// merge; exact-field rules override on scalar conflict (more
-// specific wins inside the same tier).
-func mergeConfig(rules []Rule, tctx template.Context, object, field string) (Permission, error) {
-	out := Permission{}
-	matched := false
-
-	apply := func(r Rule) error {
-		if r.Type != object {
-			return nil
-		}
-		if r.Field != "*" && r.Field != field {
-			return nil
-		}
-		if r.Disabled {
-			out.Disabled = true
-		}
-		if r.Hidden {
-			out.Hidden = true
-		}
-		if len(r.Data) > 0 {
-			merged, err := mergeDataConfigWins(out.Data, r.Data, tctx)
-			if err != nil {
-				return err
-			}
-			out.Data = merged
-		}
-		if r.Filter != "" {
-			f := template.ApplyString(r.Filter, tctx)
-			if out.Filter == "" {
-				out.Filter = f
-			} else {
-				out.Filter = "(" + out.Filter + ") AND (" + f + ")"
-			}
-		}
-		matched = true
-		return nil
-	}
-	for _, r := range rules {
-		if r.Field == "*" {
-			if err := apply(r); err != nil {
-				return Permission{}, err
-			}
-		}
-	}
-	for _, r := range rules {
-		if r.Field != "*" {
-			if err := apply(r); err != nil {
-				return Permission{}, err
-			}
-		}
-	}
-	if matched {
-		out.FromConfig = true
-	}
-	return out, nil
-}
-
-// mergeDataConfigWins merges two JSON objects with later (config
-// rule) values winning on scalar conflict. Both inputs must be
-// JSON objects; arrays are replaced wholesale; nested objects
-// recurse. Substitutes [$auth.*]/[$session.*] templates inside
-// JSON string values via pkg/auth/template.
+// mergeDataConfigWins merges two JSON objects with later (rule)
+// values winning on scalar conflict. Both inputs must be JSON
+// objects; arrays are replaced wholesale; nested objects do not
+// recurse (shallow). Substitutes [$auth.*]/[$session.*] templates
+// inside JSON string values via pkg/auth/template before merging.
 func mergeDataConfigWins(prev, next json.RawMessage, tctx template.Context) (json.RawMessage, error) {
 	nextSubst, err := template.Apply(next, tctx)
 	if err != nil {

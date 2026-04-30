@@ -393,10 +393,38 @@ func (p *SystemProvider) callRuntimeReload(ctx context.Context, args json.RawMes
 	if in.Target == "" {
 		in.Target = "all"
 	}
+	switch in.Target {
+	case "permissions", "skills", "mcp", "all":
+	default:
+		return nil, fmt.Errorf("%w: runtime_reload target %q (want permissions|skills|mcp|all)",
+			ErrArgValidation, in.Target)
+	}
+	if err := p.gateRuntimeReload(ctx, in.Target); err != nil {
+		return nil, err
+	}
 	if err := p.deps.Reload(ctx, in.Target); err != nil {
 		return nil, err
 	}
 	return json.Marshal(map[string]string{"reloaded": in.Target})
+}
+
+// gateRuntimeReload consults Tier-1 / Tier-2 for
+// hugen:command:runtime_reload with field=<target>. Operators can
+// disable runtime reload entirely (field "*") or scope it to
+// specific subsystems (e.g. allow "skills" but not "mcp").
+func (p *SystemProvider) gateRuntimeReload(ctx context.Context, target string) error {
+	if p.deps.Perms == nil {
+		return nil
+	}
+	got, err := p.deps.Perms.Resolve(ctx, "hugen:command:runtime_reload", target)
+	if err != nil {
+		return err
+	}
+	if got.Disabled {
+		return fmt.Errorf("%w: runtime_reload(%s) denied by %s tier",
+			ErrPermissionDenied, target, deniedPolicyTier(got))
+	}
+	return nil
 }
 
 func (p *SystemProvider) callMCPAdd(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
