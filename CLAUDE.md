@@ -1,6 +1,6 @@
 # hugen Development Guidelines
 
-Auto-generated from all feature plans. Last updated: 2026-04-28
+Auto-generated from all feature plans. Last updated: 2026-04-30
 
 ## Active Technologies
 
@@ -25,6 +25,7 @@ Go 1.26.1 (from `go.mod`): Follow standard conventions
 
 ## Recent Changes
 
+- 003-agent-runtime-phase-3: Action layer — `pkg/config` + `pkg/skill` + `pkg/tool` + `pkg/auth/perm` + `pkg/auth/template`; new binaries `mcp/bash-mcp` and `mcp/hugr-query`; bundled skill `assets/skills/hugr-data/`; `tool_policies` table (Tier 3); ADK still quarantined.
 - 002-agent-runtime-phase-2: HTTP/SSE adapter, web UI, ADK eviction; `cmd/hugen/runtime.go` (RuntimeCore) splits bootstrap from adapter wiring.
 - 001-agent-runtime-phase-1: Native agent core, console adapter, ModelRouter, Frame protocol, RuntimeStore.
 

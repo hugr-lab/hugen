@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/models"
 
@@ -157,15 +158,18 @@ func (c *BootstrapConfig) Info() string {
 }
 
 // RuntimeConfig is the YAML-driven config layered on top of the
-// bootstrap. Phase 1 only consumes Models, LocalDB, Embedding, Auth.
-// The legacy A2A / DevUI fields are intentionally absent — those
-// modes return in phase 2 (webui) and phase 10 (a2a).
+// bootstrap. Phase 3 adds Permissions, PermSettings, and
+// ToolProviders sections; phase 6+ live reload will subscribe via
+// pkg/config.Service rather than re-reading this struct.
 type RuntimeConfig struct {
 	Embedding      local.EmbeddingConfig
 	localDBEnabled bool
 	LocalDB        local.Config
 	Models         models.Config
 	Auth           []AuthConfig
+	Permissions    []config.PermissionRule    `mapstructure:"permissions"`
+	PermSettings   config.PermissionSettings  `mapstructure:"permission_settings"`
+	ToolProviders  []config.ToolProviderSpec  `mapstructure:"tool_providers"`
 }
 
 // LocalDBEnabled reports whether the embedded engine is on for this
@@ -221,5 +225,45 @@ func unmarshalSections(v *viper.Viper, cfg *RuntimeConfig) error {
 	if err := v.UnmarshalKey("auth", &cfg.Auth); err != nil {
 		return fmt.Errorf("unmarshal auth: %w", err)
 	}
+	if err := v.UnmarshalKey("permissions", &cfg.Permissions); err != nil {
+		return fmt.Errorf("unmarshal permissions: %w", err)
+	}
+	if err := v.UnmarshalKey("permission_settings", &cfg.PermSettings); err != nil {
+		return fmt.Errorf("unmarshal permission_settings: %w", err)
+	}
+	if err := v.UnmarshalKey("tool_providers", &cfg.ToolProviders); err != nil {
+		return fmt.Errorf("unmarshal tool_providers: %w", err)
+	}
 	return nil
+}
+
+// toStaticServiceInput converts the cmd/hugen-internal RuntimeConfig
+// aggregate into the pkg/config.StaticInput used by phase-3 consumers.
+// Pre-phase-3 wiring (models, local engine) keeps consuming
+// RuntimeConfig directly; phase-3 packages take per-domain Views via
+// the StaticService.
+func (c *RuntimeConfig) toStaticServiceInput() config.StaticInput {
+	auth := make([]config.AuthSource, 0, len(c.Auth))
+	for _, a := range c.Auth {
+		auth = append(auth, config.AuthSource{
+			Name:         a.Name,
+			Type:         a.Type,
+			Issuer:       a.Issuer,
+			ClientID:     a.ClientID,
+			CallbackPath: a.CallbackPath,
+			LoginPath:    a.LoginPath,
+			AccessToken:  a.AccessToken,
+			TokenURL:     a.TokenURL,
+		})
+	}
+	return config.StaticInput{
+		LocalDB:        c.LocalDB,
+		LocalDBEnabled: c.localDBEnabled,
+		Models:         c.Models,
+		Embedding:      c.Embedding,
+		Auth:           auth,
+		Permissions:    c.Permissions,
+		PermSettings:   c.PermSettings,
+		ToolProviders:  c.ToolProviders,
+	}
 }

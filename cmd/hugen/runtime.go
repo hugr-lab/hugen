@@ -13,6 +13,7 @@ import (
 	"github.com/hugr-lab/query-engine/types"
 
 	"github.com/hugr-lab/hugen/pkg/auth"
+	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/models"
@@ -29,6 +30,11 @@ import (
 type RuntimeCore struct {
 	Boot     *BootstrapConfig
 	Cfg      *RuntimeConfig
+	// Config is the phase-3 per-domain views aggregate built from
+	// Cfg. Phase-3+ packages (pkg/auth/perm, pkg/skill, pkg/tool)
+	// consume narrow Views via this service; legacy wiring still
+	// reads Cfg directly.
+	Config   *config.StaticService
 	Logger   *slog.Logger
 	Auth     *auth.Service
 	Identity identity.Source
@@ -113,6 +119,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 		return nil, failed("runtime_config", err)
 	}
 	core.Cfg = cfg
+	core.Config = config.NewStaticService(cfg.toStaticServiceInput())
 
 	if cfg.LocalDBEnabled() {
 		eng, err := buildLocalEngine(ctx, cfg, core.Identity, core.Logger)
