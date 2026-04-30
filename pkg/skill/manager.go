@@ -183,6 +183,9 @@ func (m *SkillManager) Bindings(ctx context.Context, sessionID string) (Bindings
 	for _, s := range st.loaded {
 		out.AllowedTools = append(out.AllowedTools, s.Manifest.AllowedTools...)
 		out.SubAgentRoles = append(out.SubAgentRoles, s.Manifest.Hugen.SubAgents...)
+		if s.Manifest.Hugen.MaxTurns > out.MaxTurns {
+			out.MaxTurns = s.Manifest.Hugen.MaxTurns
+		}
 		for k, v := range s.Manifest.Hugen.Memory {
 			memCats[k] = v
 		}
@@ -212,6 +215,13 @@ type Bindings struct {
 	AllowedTools     []ToolGrant               // union across loaded skills
 	SubAgentRoles    []SubAgentRole            // phase 4 dispatch source
 	MemoryCategories map[string]MemoryCategory // for memory dispatch
+	// MaxTurns is the largest metadata.hugen.max_turns across
+	// every loaded skill. 0 when no skill specifies one — the
+	// runtime then falls back to its default cap. Taking the max
+	// is the principle of least surprise: an explorer skill
+	// raising the budget shouldn't be undone by a co-loaded
+	// utility skill keeping the default.
+	MaxTurns int
 }
 
 // LoadedSkill returns the Skill named `name` if loaded into

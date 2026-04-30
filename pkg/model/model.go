@@ -102,10 +102,17 @@ type Chunk struct {
 }
 
 // ChunkToolCall is a streamed tool-call request from the model.
+//
+// Hash is a stable identifier for "this exact call" — sha256 of
+// the canonical (name + raw-args) bytes — computed once at the
+// model-provider boundary so downstream consumers can detect
+// repeats without re-marshaling. Empty string when the provider
+// didn't compute one.
 type ChunkToolCall struct {
 	ID   string
 	Name string
 	Args any
+	Hash string
 }
 
 // Usage carries token counts emitted on the final chunk.

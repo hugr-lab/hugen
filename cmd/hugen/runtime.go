@@ -207,7 +207,10 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	core.Manager = runtime.NewSessionManager(
 		core.Store, agent, router, cmds, core.Codec, core.Logger,
 		runtime.WithLifecycle(buildSessionLifecycle(core, core.workspaces)),
-		runtime.WithSessionOptions(runtime.WithTools(core.Tools)),
+		runtime.WithSessionOptions(
+			runtime.WithTools(core.Tools),
+			runtime.WithSkills(core.Skills),
+		),
 	)
 
 	mountAgentTokenStub(core.Mux)

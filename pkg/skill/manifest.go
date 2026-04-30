@@ -59,6 +59,14 @@ type HugenMetadata struct {
 	Intents   []string                  `json:"intents,omitempty"`
 	SubAgents []SubAgentRole            `json:"sub_agents,omitempty"`
 	Memory    map[string]MemoryCategory `json:"memory,omitempty"`
+	// MaxTurns is the per-skill cap on the model→tool→model loop
+	// inside a single user turn. Different skills warrant different
+	// budgets — explorer/analyst skills routinely need 25+ tool
+	// turns, while a quick-task skill may want a tight 3 to fail
+	// fast. The runtime takes the max across loaded skills; 0 (or
+	// absent) defers to the runtime default (defaultMaxToolIterations,
+	// currently 15).
+	MaxTurns int `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
 }
 
 // SubAgentRole is the manifest shape phase-3 validates and

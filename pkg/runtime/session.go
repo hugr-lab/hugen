@@ -13,6 +13,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -27,8 +28,9 @@ type Session struct {
 	codec   *protocol.Codec
 	cmds    *CommandRegistry
 	notepad *Notepad
-	tools        *tool.ToolManager // optional; nil disables tool dispatch
-	maxToolIters int               // 0 → defaultMaxToolIterations
+	tools        *tool.ToolManager   // optional; nil disables tool dispatch
+	skills       *skill.SkillManager // optional; consulted for per-skill max_turns
+	maxToolIters int                 // 0 → defaultMaxToolIterations
 	logger       *slog.Logger
 
 	// Per-session model overrides. /model use mutates this.
@@ -75,17 +77,25 @@ func WithTools(tm *tool.ToolManager) SessionOption {
 }
 
 // WithMaxToolIterations overrides the per-Turn cap on
-// model→tool→model loops (default 15, mirroring ADK's
-// defaultDispatchMaxTurns). Caps are useful guardrails against
-// runaway tool loops on weak models; configurable per deployment
-// because data-exploration scenarios (hugr explorer, multi-step
-// reasoning) routinely need more.
+// model→tool→model loops. Precedence at runtime: per-skill
+// metadata.hugen.max_turns (max across loaded skills) > this
+// option > defaultMaxToolIterations. Useful when no skill is
+// loaded but the deployment still wants a non-default ceiling.
 func WithMaxToolIterations(n int) SessionOption {
 	return func(s *Session) {
 		if n > 0 {
 			s.maxToolIters = n
 		}
 	}
+}
+
+// WithSkills attaches a SkillManager to the session so the Turn
+// loop can read per-skill metadata (currently max_turns; phase-4
+// adds sub-agent dispatch state). Optional — sessions without
+// WithSkills behave the same as before, just without skill-driven
+// caps.
+func WithSkills(sm *skill.SkillManager) SessionOption {
+	return func(s *Session) { s.skills = sm }
 }
 
 // NewSession constructs a Session bound to its dependencies.
@@ -352,10 +362,7 @@ func (s *Session) handleUserMessage(ctx context.Context, f *protocol.UserMessage
 	// dispatched tool calls so the LLM can react.
 	s.history = append(s.history, model.Message{Role: model.RoleUser, Content: f.Payload.Text})
 
-	cap := s.maxToolIters
-	if cap <= 0 {
-		cap = defaultMaxToolIterations
-	}
+	cap := s.resolveToolIterCap(turnCtx)
 
 	for iter := 0; iter < cap; iter++ {
 		modelTools, err := s.modelToolsForSession(turnCtx)
@@ -415,6 +422,24 @@ func (s *Session) handleUserMessage(ctx context.Context, f *protocol.UserMessage
 	limitFrame := protocol.NewError(s.id, s.agent.Participant(),
 		"tool_iteration_limit", fmt.Sprintf("max tool re-call iterations (%d) reached", cap), false)
 	return s.emit(ctx, limitFrame)
+}
+
+// resolveToolIterCap picks the tool-iteration cap for one user
+// Turn. Precedence: loaded skills' max(metadata.hugen.max_turns)
+// → session-level WithMaxToolIterations override → runtime
+// default. Sampled once at the top of the user turn so the cap
+// stays stable through the loop even if a tool call mutates the
+// loaded skills mid-turn.
+func (s *Session) resolveToolIterCap(ctx context.Context) int {
+	if s.skills != nil {
+		if b, err := s.skills.Bindings(ctx, s.id); err == nil && b.MaxTurns > 0 {
+			return b.MaxTurns
+		}
+	}
+	if s.maxToolIters > 0 {
+		return s.maxToolIters
+	}
+	return defaultMaxToolIterations
 }
 
 // modelToolsForSession converts the per-session ToolManager
@@ -561,6 +586,15 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 	callFrame := protocol.NewToolCall(s.id, s.agent.Participant(), tc.ID, tc.Name, tc.Args)
 	if err := s.emit(ctx, callFrame); err != nil {
 		s.logger.Warn("emit tool_call", "err", err)
+	}
+	// Log the per-call hash so phase-4 stuck-detection has a
+	// trail to verify against (and so operators can spot
+	// repeats in real time during debugging). Hash is a
+	// deterministic id over (name + raw args) — see
+	// pkg/models/hugr.go::hashToolCall.
+	if tc.Hash != "" {
+		s.logger.Debug("tool dispatch",
+			"session", s.id, "tool", tc.Name, "hash", tc.Hash)
 	}
 
 	// Look up the Tool by fully-qualified name in the per-session
