@@ -68,7 +68,7 @@ func (b *hugrQueryBuilder) Build(ctx context.Context, spec config.ToolProviderSp
 		env[k] = v
 	}
 	env["HUGR_URL"] = b.hugrURL
-	env["HUGR_TOKEN_URL"] = fmt.Sprintf("http://127.0.0.1:%d/api/auth/agent-token", b.loopbackPort)
+	env["HUGR_TOKEN_URL"] = httpapi.LoopbackTokenURL("", b.loopbackPort)
 	env["HUGR_ACCESS_TOKEN"] = bootstrap
 	env["WORKSPACES_ROOT"] = filepath.Join(b.stateDir, "workspaces")
 	if b.sharedDir != "" {
@@ -156,12 +156,12 @@ func buildAgentTokenStore(authSvc *auth.Service) (*httpapi.AgentTokenStore, erro
 }
 
 // mountAgentTokenHandler binds the AgentTokenStore handler at
-// /api/auth/agent-token. Replaces the 501 stub from T040.
+// httpapi.AgentTokenPath. Replaces the 501 stub from T040.
 func mountAgentTokenHandler(mux *http.ServeMux, store *httpapi.AgentTokenStore) {
 	if store == nil {
 		// No hugr source → no consumer. Leave the path unmounted
 		// so a probe sees 404 (clean signal) rather than a 501.
 		return
 	}
-	mux.Handle("/api/auth/agent-token", http.HandlerFunc(store.Handle))
+	mux.Handle(httpapi.AgentTokenPath, http.HandlerFunc(store.Handle))
 }

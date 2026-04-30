@@ -12,6 +12,33 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 )
 
+// AgentTokenPath is where the AgentTokenStore handler is mounted.
+// Defined here as the single source of truth so the cmd/hugen
+// builder that composes the child MCP's HUGR_TOKEN_URL doesn't
+// duplicate the literal — change once, both sides move together.
+const AgentTokenPath = "/api/auth/agent-token"
+
+// LoopbackTokenURL returns the URL a same-host child process
+// (e.g. hugr-query) should dial to reach the agent-token endpoint.
+// Always `localhost` + the agent's listener port, never the
+// user-visible BaseURI: child MCPs share the agent's network
+// namespace, so loopback works regardless of how external clients
+// reach the agent (host.docker.internal, public DNS name, etc.).
+//
+// `localhost` (rather than a literal 127.0.0.1) lets the OS pick
+// IPv4 / IPv6 per its hosts-file config — agent listener binds
+// `:port` on all interfaces, so either family connects fine.
+//
+// scheme is "http" today; passing "" picks the default. When TLS
+// arrives for the loopback listener (out of scope for phase 3),
+// callers can pass "https" without re-touching every consumer.
+func LoopbackTokenURL(scheme string, port int) string {
+	if scheme == "" {
+		scheme = "http"
+	}
+	return fmt.Sprintf("%s://localhost:%d%s", scheme, port, AgentTokenPath)
+}
+
 // AgentTokenSource mints the agent's current Hugr access token. The
 // implementation is the hugr auth source's Token method; the
 // adapter does not care whether that's an OIDC store or a remote
