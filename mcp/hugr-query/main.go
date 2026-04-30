@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/hugr-lab/query-engine/client"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -47,8 +48,14 @@ func run(log *slog.Logger) error {
 	timeouts := loadTimeoutConfig()
 	tokenSrc := buildTokenSource(authCfg)
 
+	// query-engine/client expects the IPC endpoint (multipart wire
+	// protocol) as the constructor URL — c.Query POSTs to c.url
+	// verbatim, while c.QueryJSON derives its URL by trimming
+	// `/ipc` and appending `/query` or `/jq-query`. cmd/hugen
+	// follows the same `<base>/ipc` convention; we mirror it here
+	// so operators only set HUGR_URL once (no `_IPC_URL` split).
 	cli := client.NewClient(
-		authCfg.HugrURL,
+		strings.TrimSuffix(authCfg.HugrURL, "/")+"/ipc",
 		client.WithTransport(buildTransport(tokenSrc)),
 	)
 
