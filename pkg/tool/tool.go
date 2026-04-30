@@ -129,3 +129,20 @@ type Identity struct {
 	SessionID       string
 	SessionMetadata map[string]string
 }
+
+type identityCtxKey struct{}
+
+// WithIdentity returns ctx with ident attached. Providers retrieve
+// it via IdentityFromContext when they need session-scoped data
+// (system-tools provider routes notepad_append / skill_* through
+// the caller's session, etc.).
+func WithIdentity(ctx context.Context, ident Identity) context.Context {
+	return context.WithValue(ctx, identityCtxKey{}, ident)
+}
+
+// IdentityFromContext returns the Identity attached by WithIdentity,
+// or zero Identity (and false) when none is present.
+func IdentityFromContext(ctx context.Context) (Identity, bool) {
+	ident, ok := ctx.Value(identityCtxKey{}).(Identity)
+	return ident, ok
+}

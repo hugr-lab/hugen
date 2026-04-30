@@ -214,6 +214,22 @@ type Bindings struct {
 	MemoryCategories map[string]MemoryCategory // for memory dispatch
 }
 
+// LoadedSkill returns the Skill named `name` if loaded into
+// `sessionID`. Returns ErrSkillNotFound otherwise.
+func (m *SkillManager) LoadedSkill(ctx context.Context, sessionID, name string) (Skill, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	st, ok := m.sessions[sessionID]
+	if !ok {
+		return Skill{}, ErrSkillNotFound
+	}
+	s, ok := st.loaded[name]
+	if !ok {
+		return Skill{}, ErrSkillNotFound
+	}
+	return s, nil
+}
+
 // Refresh re-reads `name` from the store and updates every
 // session that has it loaded. Returns the new generation token.
 func (m *SkillManager) Refresh(ctx context.Context, name string) (int64, error) {
