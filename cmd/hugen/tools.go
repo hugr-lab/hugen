@@ -66,13 +66,13 @@ func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillMa
 	if tokenStore != nil {
 		mountAgentTokenHandler(core.Mux, tokenStore)
 		hq := &hugrQueryBuilder{
-			authStore: tokenStore,
-			baseURL:   core.Boot.BaseURI,
-			hugrURL:   core.Boot.Hugr.URL,
-			stateDir:  core.Boot.StateDir,
-			sharedDir: os.Getenv("HUGEN_SHARED_ROOT"),
-			agentID:   core.Agent.ID(),
-			log:       core.Logger,
+			authStore:    tokenStore,
+			loopbackPort: core.Boot.Port,
+			hugrURL:      core.Boot.Hugr.URL,
+			stateDir:     core.Boot.StateDir,
+			sharedDir:    os.Getenv("HUGEN_SHARED_ROOT"),
+			agentID:      core.Agent.ID(),
+			log:          core.Logger,
 		}
 		opts = append(opts, tool.WithProviderBuilder("hugr-query", hq))
 	}

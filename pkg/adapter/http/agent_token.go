@@ -86,12 +86,20 @@ type AgentTokenOptions struct {
 // boot; nil is treated as a fatal misconfiguration so callers that
 // somehow disabled hugr auth but still want hugr-query get a clean
 // startup error rather than a runtime nil deref.
+//
+// BootstrapWindow defaults to 0 (no window) — per_agent MCPs may
+// idle for hours before the first tool call, and a short window
+// would lock them out. The bootstrap secret itself is a 32-byte
+// random known only to the spawned process via env; spawn
+// revocation on child exit is the real protection. Operators who
+// want the additional time-bound check can set a positive
+// duration explicitly.
 func NewAgentTokenStore(source AgentTokenSource, opts AgentTokenOptions) (*AgentTokenStore, error) {
 	if source == nil {
 		return nil, errors.New("http: AgentTokenSource is required")
 	}
-	if opts.BootstrapWindow <= 0 {
-		opts.BootstrapWindow = 30 * time.Second
+	if opts.BootstrapWindow < 0 {
+		opts.BootstrapWindow = 0
 	}
 	if opts.HistorySize <= 0 {
 		opts.HistorySize = 16
@@ -221,7 +229,7 @@ func (s *AgentTokenStore) lookup(token string) (*spawnEntry, bool) {
 		if entry.revoked {
 			return nil, false
 		}
-		if time.Since(entry.spawnedAt) > s.bootstrapWindow {
+		if s.bootstrapWindow > 0 && time.Since(entry.spawnedAt) > s.bootstrapWindow {
 			return nil, false
 		}
 		return entry, true

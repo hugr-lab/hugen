@@ -28,12 +28,18 @@ import (
 // after the MCP exits.
 type hugrQueryBuilder struct {
 	authStore *httpapi.AgentTokenStore
-	baseURL   string // agent's loopback HTTP base URL — TokenURL anchor
-	hugrURL   string // upstream Hugr GraphQL endpoint
-	stateDir  string // ${HUGEN_STATE} — workspaces parent
-	sharedDir string // ${HUGEN_SHARED_ROOT}
-	agentID   string
-	log       *slog.Logger
+	// loopbackPort is the port the agent's http server listens on.
+	// We hand the child a `http://127.0.0.1:<port>` URL — NOT the
+	// public BaseURI — because the child is a same-host subprocess
+	// in the same network namespace; using BaseURI breaks when the
+	// agent is reachable to clients via `host.docker.internal` or
+	// any other non-loopback name.
+	loopbackPort int
+	hugrURL      string // upstream Hugr GraphQL endpoint
+	stateDir     string // ${HUGEN_STATE} — workspaces parent
+	sharedDir    string // ${HUGEN_SHARED_ROOT}
+	agentID      string
+	log          *slog.Logger
 }
 
 func (b *hugrQueryBuilder) Build(ctx context.Context, spec config.ToolProviderSpec) (tool.ToolProvider, []func(), error) {
@@ -62,7 +68,7 @@ func (b *hugrQueryBuilder) Build(ctx context.Context, spec config.ToolProviderSp
 		env[k] = v
 	}
 	env["HUGR_URL"] = b.hugrURL
-	env["HUGR_TOKEN_URL"] = b.baseURL + "/api/auth/agent-token"
+	env["HUGR_TOKEN_URL"] = fmt.Sprintf("http://127.0.0.1:%d/api/auth/agent-token", b.loopbackPort)
 	env["HUGR_ACCESS_TOKEN"] = bootstrap
 	env["WORKSPACES_ROOT"] = filepath.Join(b.stateDir, "workspaces")
 	if b.sharedDir != "" {
