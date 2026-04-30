@@ -120,10 +120,6 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 		return nil, failed("auth", err)
 	}
 	core.Auth = authSvc
-	// Print primary OIDC login URL (if any) before downstream code
-	// blocks on Token() — identity / config / tool init all sit
-	// behind the bearer token in local-OIDC mode.
-	authSvc.FirePromptLogins()
 
 	if boot.Hugr.URL != "" && boot.IsRemoteMode() {
 		core.RemoteQuerier = connectRemote(boot, authSvc, core.Logger)
@@ -139,10 +135,6 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	if err := authSvc.LoadFromView(ctx, cfgSvc.Auth()); err != nil {
 		return nil, failed("auth_sources", err)
 	}
-	// Drain any prompt-login hooks added by LoadFromView (extra OIDC
-	// sources from config.auth) so their URLs print before tool Init
-	// connects MCP providers that depend on them.
-	authSvc.FirePromptLogins()
 
 	localView := core.Config.Local()
 	embedView := core.Config.Embedding()

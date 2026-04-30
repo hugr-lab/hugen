@@ -27,6 +27,7 @@ func (s *Service) LoadFromView(ctx context.Context, view config.AuthView) error 
 	view.OnUpdate(func() {
 		s.logger.Warn("auth: live reload not implemented; restart hugen to apply config.auth changes")
 	})
+	s.FirePromptLogins()
 	return nil
 }
 
@@ -60,7 +61,6 @@ func (s *Service) applySources(ctx context.Context, specs []config.AuthSource) e
 			if err := s.Add(src); err != nil {
 				return err
 			}
-			s.RegisterPromptLogin(src.PromptLogin)
 			s.logger.Info("auth source built",
 				"name", spec.Name, "type", "oidc", "issuer", spec.Issuer)
 

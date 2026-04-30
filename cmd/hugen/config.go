@@ -75,7 +75,7 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 
 	v.SetDefault("HUGR_URL", "http://localhost:15000")
 	v.SetDefault("HUGEN_PORT", 10000)
-	v.SetDefault("HUGEN_BASH_MCP_PATH", "bash-mcp")
+	v.SetDefault("HUGEN_BASH_MCP_PATH", "./bin/bash-mcp")
 	v.SetDefault("HUGEN_SHARED_WRITABLE", true)
 	v.SetDefault("HUGEN_WORKSPACE_CLEANUP_ON_CLOSE", true)
 	v.SetDefault("HUGEN_WEBUI_PORT", 10001)
@@ -132,6 +132,17 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 	}
 	if config.WorkspaceDir == "" {
 		config.WorkspaceDir = filepath.Join(".hugen", "workspace")
+	}
+	// Sessions spawn bash-mcp with cmd.Dir set to the per-session
+	// workspace, so a relative BashMCPPath would be resolved against
+	// the session dir (not hugen's startup cwd) and miss the binary.
+	// Anchor it to hugen's startup cwd here so "./bin/bash-mcp"
+	// resolves the same way every session sees it.
+	if config.BashMCPPath != "" && !filepath.IsAbs(config.BashMCPPath) &&
+		strings.ContainsRune(config.BashMCPPath, filepath.Separator) {
+		if abs, err := filepath.Abs(config.BashMCPPath); err == nil {
+			config.BashMCPPath = abs
+		}
 	}
 	if config.Hugr.AccessToken != "" && config.Hugr.TokenURL == "" ||
 		config.Hugr.AccessToken == "" && config.Hugr.TokenURL != "" {

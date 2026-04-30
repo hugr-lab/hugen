@@ -97,7 +97,7 @@ models:
 #   - name: bash-mcp
 #     type: mcp
 #     transport: stdio
-#     command: bash-mcp
+#     command: ./bin/bash-mcp
 #     lifetime: per_session
 
 local_db_enabled: true

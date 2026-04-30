@@ -44,6 +44,15 @@ type LoginHandler interface {
 	HandleLogin(w http.ResponseWriter, r *http.Request)
 }
 
+// LoginPrompter is implemented by Sources that need an interactive
+// browser flow to obtain their first token. Service.Add auto-queues
+// the hook; the caller drains the queue once the HTTP listener is
+// bound (Service.FirePromptLogins). Token-only sources (RemoteStore)
+// do not implement this — boot stays quiet for them.
+type LoginPrompter interface {
+	PromptLogin()
+}
+
 // EncodeState returns a state parameter scoped to a Source by
 // prefixing the random nonce with the Source name. The dispatcher
 // reads the prefix to route the callback.

@@ -17,8 +17,9 @@ import (
 // called either before or after Mount — the dispatcher looks up the
 // owning Source dynamically on each request.
 type Service struct {
-	logger  *slog.Logger
-	baseURL string
+	logger     *slog.Logger
+	baseURL    string
+	remoteMode bool
 
 	mu           sync.RWMutex
 	byName       map[string]sources.Source
@@ -34,16 +35,24 @@ type Service struct {
 // baseURL is the public origin of the hugen process — used when
 // LoadFromView builds OIDC sources to derive their redirect URL
 // ("<baseURL>/auth/callback").
-func NewService(logger *slog.Logger, mux *http.ServeMux, baseURL string) *Service {
+//
+// remoteMode disables interactive browser-based auth flows: when
+// true, Add ignores sources.LoginPrompter on registered sources so
+// no login URL is ever printed and FirePromptLogins has nothing to
+// drain. Personal-assistant deployments (HUGEN_MODE=remote) pass
+// true — they auth via static tokens + RemoteStore refresh and have
+// no human attached to a browser.
+func NewService(logger *slog.Logger, mux *http.ServeMux, baseURL string, remoteMode bool) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	s := &Service{
-		logger:  logger,
-		baseURL: baseURL,
-		byName:  make(map[string]sources.Source),
-		aliases: make(map[string]string),
-		mux:     mux,
+		logger:     logger,
+		baseURL:    baseURL,
+		remoteMode: remoteMode,
+		byName:     make(map[string]sources.Source),
+		aliases:    make(map[string]string),
+		mux:        mux,
 	}
 	s.mount()
 	return s
@@ -65,25 +74,40 @@ func (r *Service) AddPrimary(s sources.Source) error {
 
 func (r *Service) add(s sources.Source, primary bool) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	name := s.Name()
 	if name == "" {
+		r.mu.Unlock()
 		return fmt.Errorf("auth: Source has empty name")
 	}
 	if _, dup := r.byName[name]; dup {
+		r.mu.Unlock()
 		return fmt.Errorf("auth: duplicate source name %q", name)
 	}
 	if _, dup := r.aliases[name]; dup {
+		r.mu.Unlock()
 		return fmt.Errorf("auth: name %q collides with an existing alias", name)
 	}
 	if primary {
 		if r.primary != "" {
+			r.mu.Unlock()
 			return fmt.Errorf("auth: primary Source already registered (%q)", r.primary)
 		}
 		r.primary = name
 	}
 	r.byName[name] = s
+	// Auto-register the source's prompt-login hook (browser flow URL
+	// printer) when the Source implements sources.LoginPrompter and
+	// the deployment runs in interactive mode. Remote (personal-
+	// assistant) deployments skip registration — no human is
+	// attached. LoadFromView drains the queue via FirePromptLogins
+	// once the HTTP listener is bound.
+	if !r.remoteMode {
+		if pl, ok := s.(sources.LoginPrompter); ok {
+			r.promptLogins = append(r.promptLogins, pl.PromptLogin)
+		}
+	}
+	r.mu.Unlock()
 	return nil
 }
 

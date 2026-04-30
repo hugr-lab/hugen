@@ -28,7 +28,7 @@ func (s *stubAuthSource) HandleCallback(w http.ResponseWriter, _ *http.Request) 
 func newDiscardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 func TestAuthResolverFor_RegisteredSource(t *testing.T) {
-	svc := auth.NewService(newDiscardLogger(), http.NewServeMux(), "")
+	svc := auth.NewService(newDiscardLogger(), http.NewServeMux(), "", false)
 	if err := svc.Add(&stubAuthSource{name: "hugr", token: "tk"}); err != nil {
 		t.Fatalf("auth.Add: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestAuthResolverFor_RegisteredSource(t *testing.T) {
 }
 
 func TestAuthResolverFor_UnknownSource(t *testing.T) {
-	svc := auth.NewService(newDiscardLogger(), http.NewServeMux(), "")
+	svc := auth.NewService(newDiscardLogger(), http.NewServeMux(), "", false)
 	_, err := authResolverFor(svc).RoundTripper("missing")
 	if err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("expected unknown-source error, got %v", err)
