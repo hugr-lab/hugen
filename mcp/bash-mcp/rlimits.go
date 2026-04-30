@@ -103,9 +103,13 @@ func runProcess(ctx context.Context, opts RunOptions) (RunResult, error) {
 // inside the child via Setrlimit prior to exec when MemMB > 0;
 // the default Go runtime doesn't have a clean hook for that, so
 // we fall back to bash's `ulimit -v` wrapper when MemMB > 0.
-func procAttr(memMB int) *syscall.SysProcAttr {
-	a := &syscall.SysProcAttr{Setpgid: true}
-	return a
+func procAttr(_ int) *syscall.SysProcAttr {
+	// memMB is unused for now; RLIMIT_AS application requires a
+	// child-side hook that exec.Cmd doesn't expose cleanly. Wall-
+	// clock and output cap give us most of the safety; the rlimit
+	// can land via a small `sh -c "ulimit -v ...; exec ..."`
+	// wrapper later without churning callers.
+	return &syscall.SysProcAttr{Setpgid: true}
 }
 
 func killProcessGroup(pid int) {

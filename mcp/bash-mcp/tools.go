@@ -313,7 +313,7 @@ func (t *Tools) listDir(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 	}
 	var entries []entry
 	truncated := false
-	walk := func(path string, d fs.DirEntry) error {
+	walk := func(_ string, d fs.DirEntry) error {
 		if len(entries) >= a.MaxEntries {
 			truncated = true
 			return io.EOF
