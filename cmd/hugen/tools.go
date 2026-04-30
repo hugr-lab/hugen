@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"time"
 
+	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/skill"
@@ -41,10 +43,11 @@ func buildPermissionService(core *RuntimeCore) perm.Service {
 }
 
 // buildToolStack wires SkillManager + PermissionService + ToolManager
-// + SystemProvider. Returns the manager so adapters and the Session
-// Turn loop can resolve and dispatch tool calls.
+// + SystemProvider, then asks the manager to open every per_agent
+// MCP entry from cfg.ToolProviders. Per_session MCP providers
+// (bash-mcp today) are wired by buildSessionLifecycle on Session.Open.
 func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillManager) (*tool.ToolManager, error) {
-	tm := tool.NewToolManager(perms, skills, tool.Options{Logger: core.Logger})
+	tm := tool.NewToolManager(perms, skills, core.Config.ToolProviders(), authResolverFor(core.Auth), core.Logger)
 
 	sys := tool.NewSystemProvider(tool.SystemDeps{
 		AgentID: core.Agent.ID(),
@@ -57,7 +60,30 @@ func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillMa
 	if err := tm.AddProvider(sys); err != nil {
 		return nil, fmt.Errorf("buildToolStack: register system provider: %w", err)
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := tm.Init(ctx); err != nil {
+		return nil, err
+	}
 	return tm, nil
+}
+
+// authResolverFor wraps an *auth.Service into a tool.AuthResolver
+// that maps named auth sources to bearer-injecting RoundTrippers.
+// This is the only seam between pkg/tool and pkg/auth — pkg/tool
+// stays free of any direct auth dependency.
+func authResolverFor(svc *auth.Service) tool.AuthResolver {
+	return tool.AuthResolverFunc(func(name string) (http.RoundTripper, error) {
+		if svc == nil {
+			return nil, fmt.Errorf("auth service not initialised")
+		}
+		ts, ok := svc.TokenStore(name)
+		if !ok {
+			return nil, fmt.Errorf("auth source %q not registered", name)
+		}
+		return auth.Transport(ts, http.DefaultTransport), nil
+	})
 }
 
 // newNotepadFunc adapts runtime.Notepad to tool.NotepadFunc.

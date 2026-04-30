@@ -31,13 +31,11 @@ import (
 // See specs/002-agent-runtime-phase-2/contracts/runtime-core.md for
 // the full contract.
 type RuntimeCore struct {
-	Boot     *BootstrapConfig
-	Cfg      *RuntimeConfig
-	// Config is the phase-3 per-domain views aggregate built from
-	// Cfg. Phase-3+ packages (pkg/auth/perm, pkg/skill, pkg/tool)
-	// consume narrow Views via this service; legacy wiring still
-	// reads Cfg directly.
-	Config   *config.StaticService
+	Boot   *BootstrapConfig
+	// Config is the phase-3 per-domain views aggregate. All
+	// downstream packages (pkg/runtime, pkg/auth/perm, pkg/skill,
+	// pkg/tool, pkg/store/local) take narrow Views through it.
+	Config *config.StaticService
 	Logger   *slog.Logger
 	Auth     *auth.Service
 	Identity identity.Source
@@ -128,15 +126,22 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	}
 	core.Identity = buildIdentity(boot, core.RemoteQuerier)
 
-	cfg, err := buildRuntimeConfig(ctx, boot, core.Identity)
+	cfgSvc, err := buildConfigService(ctx, boot, core.Identity)
 	if err != nil {
-		return nil, failed("runtime_config", err)
+		return nil, failed("config", err)
 	}
-	core.Cfg = cfg
-	core.Config = config.NewStaticService(cfg.toStaticServiceInput())
+	core.Config = cfgSvc
 
-	if cfg.LocalDBEnabled() {
-		eng, err := buildLocalEngine(ctx, cfg, core.Identity, core.Logger)
+	if err := authSvc.LoadFromView(ctx, cfgSvc.Auth()); err != nil {
+		return nil, failed("auth_sources", err)
+	}
+
+	localView := core.Config.Local()
+	embedView := core.Config.Embedding()
+	modelsView := core.Config.Models()
+
+	if localView.LocalDBEnabled() {
+		eng, err := buildLocalEngine(ctx, localView, embedView, core.Identity, core.Logger)
 		if err != nil {
 			return nil, failed("local_engine", err)
 		}
@@ -144,14 +149,15 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 		core.LocalQuerier = eng
 	}
 
-	embedderEnabled := cfg.Embedding.Mode != "" && cfg.Embedding.Model != ""
+	embed := embedView.EmbeddingConfig()
+	embedderEnabled := embed.Mode != "" && embed.Model != ""
 	store := chooseStore(core.LocalQuerier, core.RemoteQuerier, embedderEnabled)
 	if store == nil {
 		return nil, failed("store", fmt.Errorf("no querier available (need local engine or remote hub)"))
 	}
 	core.Store = store
 
-	modelService := models.New(ctx, core.LocalQuerier, core.RemoteQuerier, cfg.Models, models.WithLogger(core.Logger))
+	modelService := models.New(ctx, core.LocalQuerier, core.RemoteQuerier, modelsView, models.WithLogger(core.Logger))
 	modelMap := models.BuildModelMap(modelService)
 	modelDefaults := models.IntentDefaults(modelService)
 	router, err := model.NewModelRouter(modelDefaults, modelMap)

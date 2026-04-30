@@ -264,7 +264,7 @@ func TestSystemProvider_PermissionGate_DispatchedThroughManager(t *testing.T) {
 	perms := &fakePerms{rules: map[string]perm.Permission{
 		"hugen:tool:system:mcp_add_server": {Disabled: true, FromConfig: true},
 	}}
-	m := NewToolManager(perms, nil, Options{})
+	m := NewToolManager(perms, nil, nil, nil, nil)
 	if err := m.AddProvider(sp); err != nil {
 		t.Fatalf("AddProvider: %v", err)
 	}

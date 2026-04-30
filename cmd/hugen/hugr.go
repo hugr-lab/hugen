@@ -6,8 +6,10 @@ import (
 	"net/http"
 
 	"github.com/hugr-lab/hugen/pkg/auth"
+	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/store/local"
+
 	hugr "github.com/hugr-lab/query-engine"
 	"github.com/hugr-lab/query-engine/client"
 )
@@ -25,15 +27,12 @@ func connectRemote(boot *BootstrapConfig, as *auth.Service, logger *slog.Logger)
 	)
 }
 
-func buildLocalEngine(ctx context.Context, config *RuntimeConfig, identity identity.Source, logger *slog.Logger) (*hugr.Service, error) {
-	agent, err := identity.Agent(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return local.New(ctx, config.LocalDB, local.Identity{
-		ID:      agent.ID,
-		Type:    agent.AgentTypeID,
-		ShortID: agent.ShortID,
-		Name:    agent.Name,
-	}, config.Embedding, logger)
+func buildLocalEngine(
+	ctx context.Context,
+	localView config.LocalView,
+	embedView config.EmbeddingView,
+	idSrc identity.Source,
+	logger *slog.Logger,
+) (*hugr.Service, error) {
+	return local.New(ctx, localView, embedView, idSrc, logger)
 }

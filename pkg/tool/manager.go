@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
+	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
@@ -34,6 +35,10 @@ type ToolManager struct {
 	perms  perm.Service
 	skills *skill.SkillManager
 	log    *slog.Logger
+
+	providersView  config.ToolProvidersView
+	authResolver   AuthResolver
+	connectTimeout time.Duration
 
 	mu               sync.RWMutex
 	providers        map[string]ToolProvider
@@ -66,28 +71,48 @@ type Generations struct {
 	Policy int64
 }
 
-// Options groups optional knobs ToolManager constructors take.
-type Options struct {
-	Logger       *slog.Logger
-	DrainTimeout time.Duration
-}
+const (
+	defaultDrainTimeout   = 5 * time.Second
+	defaultConnectTimeout = 30 * time.Second
+)
 
-// NewToolManager constructs the manager.
-func NewToolManager(p perm.Service, skills *skill.SkillManager, opts Options) *ToolManager {
-	if opts.Logger == nil {
-		opts.Logger = slog.New(slog.DiscardHandler)
-	}
-	if opts.DrainTimeout <= 0 {
-		opts.DrainTimeout = 5 * time.Second
+// NewToolManager constructs the manager. Construction is cheap —
+// no providers are connected here; call Init(ctx) when ready to
+// open the configured MCP connections.
+//
+// Args:
+//   - perms: permission service consulted on every Dispatch.
+//   - skills: skill manager consulted to filter the per-Turn tool
+//     catalogue (nil disables filtering — used by tests).
+//   - providers: per_agent MCP catalogue view. Read on Init()
+//     (and, in phase 6+, again on view.OnUpdate). Per_session
+//     entries are skipped (registered via AddSessionProvider).
+//     Pass nil if no MCP entries are configured.
+//   - resolver: maps named auth sources to bearer-injecting
+//     RoundTrippers. Required when any HTTP provider declares
+//     `auth: <name>`; pass nil if no provider needs auth.
+//   - log: structured logger; nil falls back to a discard handler.
+func NewToolManager(
+	perms perm.Service,
+	skills *skill.SkillManager,
+	providers config.ToolProvidersView,
+	resolver AuthResolver,
+	log *slog.Logger,
+) *ToolManager {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
 	}
 	return &ToolManager{
-		perms:            p,
+		perms:            perms,
 		skills:           skills,
-		log:              opts.Logger,
+		log:              log,
+		providersView:    providers,
+		authResolver:     resolver,
+		connectTimeout:   defaultConnectTimeout,
 		providers:        make(map[string]ToolProvider),
 		sessionProviders: make(map[string]map[string]ToolProvider),
 		cache:            make(map[string]*cachedSnapshot),
-		drainTimeout:     opts.DrainTimeout,
+		drainTimeout:     defaultDrainTimeout,
 	}
 }
 
@@ -333,20 +358,6 @@ func (m *ToolManager) rebuildSnapshot(ctx context.Context, sessionID string, gen
 	m.mu.Unlock()
 
 	return snap, errors.Join(errs...)
-}
-
-// maps_values is a tiny helper since we target Go 1.26 but the
-// stdlib slices.Collect / maps.Values combo works cleaner in
-// generic form here. Replace with maps.Values when the
-// surrounding code is updated to use it directly.
-func maps_values[K comparable, V any](m map[K]V) func(yield func(V) bool) {
-	return func(yield func(V) bool) {
-		for _, v := range m {
-			if !yield(v) {
-				return
-			}
-		}
-	}
 }
 
 func allowedFromBindings(ctx context.Context, skills *skill.SkillManager, sessionID string) map[string]bool {

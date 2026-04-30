@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os/exec"
 	"strings"
 	"sync"
@@ -16,15 +17,32 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
-// MCPProviderSpec describes how to spawn an MCP server. Only stdio
-// is supported in phase 3; HTTP/SSE land later.
+// MCPTransport selects the wire protocol an MCPProvider talks. Empty
+// is treated as TransportStdio for back-compat.
+type MCPTransport string
+
+const (
+	TransportStdio          MCPTransport = "stdio"
+	TransportStreamableHTTP MCPTransport = "http"
+	TransportSSE            MCPTransport = "sse"
+)
+
+// MCPProviderSpec describes how to reach an MCP server. Stdio servers
+// are spawned as subprocesses (Command/Args/Env/Cwd); http/sse servers
+// are connected over HTTP at Endpoint with optional auth applied via a
+// shared http.Client RoundTripper.
 type MCPProviderSpec struct {
-	Name        string            // provider short name (e.g. "bash-mcp")
-	Command     string            // executable path
-	Args        []string          // command args
-	Env         map[string]string // child-process env additions
-	Cwd         string            // working directory; per-session bash-mcp uses this
-	Lifetime    Lifetime          // honoured for catalogue; spawning is up to the caller
+	Name        string            // provider short name (e.g. "bash-mcp", "hugr-main")
+	Transport   MCPTransport      // "" → stdio (default); "http" → streamable HTTP; "sse" → SSE
+	Command     string            // stdio: executable path
+	Args        []string          // stdio: command args
+	Env         map[string]string // stdio: child-process env additions
+	Cwd         string            // stdio: working directory for the subprocess
+	Endpoint    string            // http/sse: base URL
+	HTTPClient  *http.Client      // http/sse: optional pre-built client (wins over RoundTripper)
+	RoundTripper http.RoundTripper // http/sse: wraps http.DefaultTransport (e.g. auth.Transport(store, base))
+	Headers     map[string]string // http/sse: static headers (e.g. X-API-Key); injected on every request
+	Lifetime    Lifetime          // honoured for catalogue; spawning/connecting is up to the caller
 	PermObject  string            // shared permission_object for every tool ("hugen:tool:bash-mcp")
 	Description string            // optional, surfaced as provider description
 }
@@ -54,8 +72,18 @@ func NewMCPProvider(ctx context.Context, spec MCPProviderSpec, log *slog.Logger)
 	if spec.Name == "" {
 		return nil, errors.New("tool: mcp spec missing name")
 	}
-	if spec.Command == "" {
-		return nil, errors.New("tool: mcp spec missing command")
+	switch spec.Transport {
+	case "", TransportStdio:
+		spec.Transport = TransportStdio
+		if spec.Command == "" {
+			return nil, errors.New("tool: stdio mcp spec missing command")
+		}
+	case TransportStreamableHTTP, TransportSSE:
+		if spec.Endpoint == "" {
+			return nil, fmt.Errorf("tool: %s mcp spec missing endpoint", spec.Transport)
+		}
+	default:
+		return nil, fmt.Errorf("tool: unsupported mcp transport %q (want stdio|http|sse)", spec.Transport)
 	}
 	p := &MCPProvider{spec: spec, log: log}
 	if err := p.connect(ctx); err != nil {
@@ -96,26 +124,21 @@ func newMCPProviderWithClient(ctx context.Context, spec MCPProviderSpec, cli *mc
 }
 
 func (p *MCPProvider) connect(ctx context.Context) error {
-	env := envSlice(p.spec.Env)
-	var opts []transport.StdioOption
-	if p.spec.Cwd != "" {
-		cwd := p.spec.Cwd
-		opts = append(opts, transport.WithCommandFunc(func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
-			c := exec.CommandContext(ctx, command, args...)
-			c.Env = env
-			c.Dir = cwd
-			return c, nil
-		}))
-	}
-	cli, err := mcpcli.NewStdioMCPClientWithOptions(p.spec.Command, env, p.spec.Args, opts...)
+	cli, needsStart, err := p.newClient()
 	if err != nil {
-		return fmt.Errorf("tool: spawn %s: %w", p.spec.Name, err)
+		return err
 	}
 	cli.OnNotification(func(n mcp.JSONRPCNotification) {
 		if n.Method == mcp.MethodNotificationToolsListChanged {
 			p.emit(ProviderEvent{Kind: ProviderToolsChanged})
 		}
 	})
+	if needsStart {
+		if err := cli.Start(ctx); err != nil {
+			_ = cli.Close()
+			return fmt.Errorf("tool: start %s: %w", p.spec.Name, err)
+		}
+	}
 	if _, err := cli.Initialize(ctx, mcp.InitializeRequest{
 		Params: mcp.InitializeParams{
 			ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
@@ -131,6 +154,76 @@ func (p *MCPProvider) connect(ctx context.Context) error {
 	p.mu.Lock()
 	p.client = cli
 	p.mu.Unlock()
+	return nil
+}
+
+// newClient builds the underlying mcp-go client for the configured
+// transport. The stdio client auto-starts inside its constructor;
+// http/sse clients return needsStart=true so the caller can call
+// Start before Initialize.
+func (p *MCPProvider) newClient() (cli *mcpcli.Client, needsStart bool, err error) {
+	switch p.spec.Transport {
+	case TransportStdio:
+		env := envSlice(p.spec.Env)
+		var opts []transport.StdioOption
+		if p.spec.Cwd != "" {
+			cwd := p.spec.Cwd
+			opts = append(opts, transport.WithCommandFunc(func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
+				c := exec.CommandContext(ctx, command, args...)
+				c.Env = env
+				c.Dir = cwd
+				return c, nil
+			}))
+		}
+		cli, err = mcpcli.NewStdioMCPClientWithOptions(p.spec.Command, env, p.spec.Args, opts...)
+		if err != nil {
+			return nil, false, fmt.Errorf("tool: spawn %s: %w", p.spec.Name, err)
+		}
+		return cli, false, nil
+
+	case TransportStreamableHTTP:
+		opts := []transport.StreamableHTTPCOption{}
+		if hc := p.httpClient(); hc != nil {
+			opts = append(opts, transport.WithHTTPBasicClient(hc))
+		}
+		if len(p.spec.Headers) > 0 {
+			opts = append(opts, transport.WithHTTPHeaders(p.spec.Headers))
+		}
+		cli, err = mcpcli.NewStreamableHttpClient(p.spec.Endpoint, opts...)
+		if err != nil {
+			return nil, false, fmt.Errorf("tool: connect %s: %w", p.spec.Name, err)
+		}
+		return cli, true, nil
+
+	case TransportSSE:
+		opts := []transport.ClientOption{}
+		if hc := p.httpClient(); hc != nil {
+			opts = append(opts, transport.WithHTTPClient(hc))
+		}
+		if len(p.spec.Headers) > 0 {
+			opts = append(opts, transport.WithHeaders(p.spec.Headers))
+		}
+		cli, err = mcpcli.NewSSEMCPClient(p.spec.Endpoint, opts...)
+		if err != nil {
+			return nil, false, fmt.Errorf("tool: connect %s: %w", p.spec.Name, err)
+		}
+		return cli, true, nil
+
+	default:
+		return nil, false, fmt.Errorf("tool: unsupported mcp transport %q", p.spec.Transport)
+	}
+}
+
+// httpClient resolves the *http.Client passed to mark3labs's HTTP
+// transports. Order: explicit HTTPClient > RoundTripper-wrapped client
+// > nil (mark3labs uses its default).
+func (p *MCPProvider) httpClient() *http.Client {
+	if p.spec.HTTPClient != nil {
+		return p.spec.HTTPClient
+	}
+	if p.spec.RoundTripper != nil {
+		return &http.Client{Transport: p.spec.RoundTripper}
+	}
 	return nil
 }
 

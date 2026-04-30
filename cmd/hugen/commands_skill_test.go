@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -39,7 +38,7 @@ func (v *permsView) OnUpdate(func()) func()         { return func() {} }
 
 // stubStore is a no-op RuntimeStore — the /skill handlers never
 // write to the store, but Session construction needs one.
-type stubStore struct{ mu sync.Mutex }
+type stubStore struct{}
 
 func (s *stubStore) OpenSession(_ context.Context, _ runtime.SessionRow) error { return nil }
 func (s *stubStore) LoadSession(_ context.Context, id string) (runtime.SessionRow, error) {

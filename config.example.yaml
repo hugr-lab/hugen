@@ -64,6 +64,42 @@ models:
 #     issuer: ${HUGR_OIDC_ISSUER}
 #     client_id: ${HUGR_OIDC_CLIENT_ID}
 
+# ── Tool providers (phase 3) ────────────────────────────────
+# MCP catalogue. Each entry becomes a `*tool.MCPProvider` registered
+# with the ToolManager. Keys:
+#   name        — provider id used as the tool prefix and permission
+#                 type (e.g. `hugen:tool:hugr-main`).
+#   type        — currently only `mcp`.
+#   transport   — `stdio` (subprocess) | `http` (streamable-HTTP) | `sse`.
+#   command/args/env — for `stdio` transports.
+#   endpoint    — for `http` / `sse` transports (URL of the MCP server).
+#   auth        — name of an `auth:` source above. Bearer tokens flow in
+#                 via `auth.Transport(...)` per request.
+#   lifetime    — `per_agent` (one process-wide connection — default for
+#                 HTTP) or `per_session` (spawned per Session.Open —
+#                 default for stdio; bash-mcp pattern).
+#
+# Hugr is OPTIONAL: omit the `hugr-main` / `hugr-query` entries to
+# run as a universal local agent (bash-mcp + system tools only).
+#
+# tool_providers:
+#   # Remote Hugr MCP (HTTP). Hugr is itself an MCP server exposing
+#   # `discovery-*` / `schema-*` / `data-*` tools. The agent reaches
+#   # it through the named auth source.
+#   - name: hugr-main
+#     type: mcp
+#     transport: http
+#     endpoint: ${HUGR_URL}/mcp
+#     auth: hugr
+#
+#   # In-tree per-session bash sandbox. Spawned by the runtime on
+#   # Session.Open (cwd = /workspace/<session_id>/).
+#   - name: bash-mcp
+#     type: mcp
+#     transport: stdio
+#     command: bash-mcp
+#     lifetime: per_session
+
 local_db_enabled: true
 local_db:
   db:

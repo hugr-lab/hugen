@@ -38,7 +38,7 @@ func TestStateOwnedBy(t *testing.T) {
 
 func TestService_AddAndAlias(t *testing.T) {
 	mux := http.NewServeMux()
-	reg := NewService(nil, mux)
+	reg := NewService(nil, mux, "")
 	a := &stubSource{name: "hugr", token: "a-token"}
 
 	require.NoError(t, reg.Add(a))
@@ -62,7 +62,7 @@ func TestService_AddAndAlias(t *testing.T) {
 
 func TestService_DispatchByState(t *testing.T) {
 	mux := http.NewServeMux()
-	reg := NewService(nil, mux)
+	reg := NewService(nil, mux, "")
 	a := &stubSource{name: "hugr"}
 	b := &stubSource{name: "weather"}
 	require.NoError(t, reg.Add(a))
@@ -102,7 +102,7 @@ func TestService_DispatchByState(t *testing.T) {
 
 func TestService_PromptLogins(t *testing.T) {
 	mux := http.NewServeMux()
-	reg := NewService(nil, mux)
+	reg := NewService(nil, mux, "")
 	called := 0
 	reg.RegisterPromptLogin(func() { called++ })
 	reg.RegisterPromptLogin(func() { called++ })

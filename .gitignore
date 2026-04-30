@@ -38,6 +38,7 @@ __debug_bin*
 # Runtime data (local DuckDB + WAL)
 .data/
 data/
+.hugen/
 
 # Local config (template lives in config.example.yaml)
 config.yaml

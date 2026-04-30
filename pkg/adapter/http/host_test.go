@@ -2,7 +2,6 @@ package http
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -254,7 +253,3 @@ type allowAllAuth struct{}
 
 func (allowAllAuth) Verify(_ string) error { return nil }
 
-// rejectAllAuth fails every token; used to assert 401s.
-type rejectAllAuth struct{}
-
-func (rejectAllAuth) Verify(_ string) error { return errors.New("rejected") }

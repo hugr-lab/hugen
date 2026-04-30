@@ -6,7 +6,6 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 )
@@ -61,7 +60,7 @@ func (f *fakePerms) Refresh(ctx context.Context) error                          
 func (f *fakePerms) Subscribe(ctx context.Context) (<-chan perm.RefreshEvent, error) { return nil, nil }
 
 func TestToolManager_AddRemoveProvider(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, Options{DrainTimeout: 10 * time.Millisecond})
+	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
 
 	p := &fakeProvider{name: "bash-mcp", tools: []Tool{
 		{Name: "bash-mcp:bash.read_file", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"},
@@ -87,7 +86,7 @@ func TestToolManager_AddRemoveProvider(t *testing.T) {
 }
 
 func TestToolManager_Snapshot_NoSkillsAllProvidersExposed(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, Options{}) // skills=nil → no filter
+	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil) // skills=nil → no filter
 	p := &fakeProvider{name: "bash-mcp", tools: []Tool{
 		{Name: "bash-mcp:bash.read_file", Provider: "bash-mcp"},
 		{Name: "bash-mcp:bash.write_file", Provider: "bash-mcp"},
@@ -105,7 +104,7 @@ func TestToolManager_Snapshot_NoSkillsAllProvidersExposed(t *testing.T) {
 }
 
 func TestToolManager_Snapshot_RebuildOnGenerationMove(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, Options{})
+	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
 	p1 := &fakeProvider{name: "p1", tools: []Tool{{Name: "p1:a", Provider: "p1"}}}
 	if err := m.AddProvider(p1); err != nil {
 		t.Fatal(err)
@@ -131,7 +130,7 @@ func TestToolManager_Snapshot_RebuildOnGenerationMove(t *testing.T) {
 }
 
 func TestToolManager_Snapshot_StableWithinGeneration(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, Options{})
+	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
 	if err := m.AddProvider(&fakeProvider{name: "p", tools: []Tool{{Name: "p:t", Provider: "p"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +145,7 @@ func TestToolManager_Resolve_Denied(t *testing.T) {
 	perms := &fakePerms{rules: map[string]perm.Permission{
 		"hugen:tool:bash-mcp:bash.write_file": {Disabled: true, FromConfig: true},
 	}}
-	m := NewToolManager(perms, nil, Options{})
+	m := NewToolManager(perms, nil, nil, nil, nil)
 	tool := Tool{Name: "bash-mcp:bash.write_file", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"}
 	_, _, err := m.Resolve(context.Background(), tool, json.RawMessage(`{}`))
 	if !errors.Is(err, ErrPermissionDenied) {
@@ -161,7 +160,7 @@ func TestToolManager_Resolve_DataMergedRuleWins(t *testing.T) {
 			Data:       json.RawMessage(`{"workspace":"/var/agents/x"}`),
 		},
 	}}
-	m := NewToolManager(perms, nil, Options{})
+	m := NewToolManager(perms, nil, nil, nil, nil)
 	tool := Tool{Name: "bash-mcp:bash.run", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"}
 	args := json.RawMessage(`{"cmd":"ls","workspace":"/tmp/llm-supplied"}`)
 	_, eff, err := m.Resolve(context.Background(), tool, args)
@@ -192,7 +191,7 @@ func TestToolManager_Dispatch_RoutesToProvider(t *testing.T) {
 			return json.RawMessage(`{"out":"ok"}`), nil
 		},
 	}
-	m := NewToolManager(&fakePerms{}, nil, Options{})
+	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
 	if err := m.AddProvider(p); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +209,7 @@ func TestToolManager_Dispatch_RoutesToProvider(t *testing.T) {
 }
 
 func TestToolManager_Dispatch_UnknownProvider(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, Options{})
+	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
 	tool := Tool{Name: "ghost:tool", Provider: "ghost"}
 	_, err := m.Dispatch(context.Background(), tool, nil)
 	if !errors.Is(err, ErrUnknownProvider) {
@@ -219,7 +218,7 @@ func TestToolManager_Dispatch_UnknownProvider(t *testing.T) {
 }
 
 func TestToolManager_BumpPolicyGen_InvalidatesCache(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, Options{})
+	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
 	if err := m.AddProvider(&fakeProvider{name: "p", tools: []Tool{{Name: "p:t", Provider: "p"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +231,7 @@ func TestToolManager_BumpPolicyGen_InvalidatesCache(t *testing.T) {
 }
 
 func TestToolManager_SessionProvider_VisibleOnlyToOwningSession(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, Options{DrainTimeout: 10 * time.Millisecond})
+	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
 	global := &fakeProvider{name: "system", tools: []Tool{{Name: "system:notepad", Provider: "system"}}}
 	if err := m.AddProvider(global); err != nil {
 		t.Fatal(err)
@@ -253,7 +252,7 @@ func TestToolManager_SessionProvider_VisibleOnlyToOwningSession(t *testing.T) {
 }
 
 func TestToolManager_SessionProvider_ShadowsGlobalOnDispatch(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, Options{DrainTimeout: 10 * time.Millisecond})
+	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
 	global := &fakeProvider{name: "bash-mcp", callFunc: func(name string, args json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`{"from":"global"}`), nil
 	}}
@@ -284,7 +283,7 @@ func TestToolManager_SessionProvider_ShadowsGlobalOnDispatch(t *testing.T) {
 }
 
 func TestToolManager_CloseSession_TearsDownProviders(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, Options{DrainTimeout: 10 * time.Millisecond})
+	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
 	p := &fakeProvider{name: "bash-mcp"}
 	if err := m.AddSessionProvider("s1", p); err != nil {
 		t.Fatal(err)

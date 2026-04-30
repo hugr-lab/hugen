@@ -87,7 +87,7 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 	view := &permsView{rules: ruleSet}
 	perms := perm.NewLocalPermissions(view, staticIdentity{id: "agent-it"})
 	t.Cleanup(perms.Close)
-	tools := tool.NewToolManager(perms, nil, tool.Options{DrainTimeout: 100 * time.Millisecond})
+	tools := tool.NewToolManager(perms, nil, nil, nil, nil)
 	t.Cleanup(func() { _ = tools.Close() })
 
 	rcLite := &RuntimeCore{

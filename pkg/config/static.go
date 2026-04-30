@@ -3,9 +3,6 @@ package config
 import (
 	"context"
 	"time"
-
-	"github.com/hugr-lab/hugen/pkg/models"
-	"github.com/hugr-lab/hugen/pkg/store/local"
 )
 
 // Compile-time assertion: *StaticService satisfies every View
@@ -28,10 +25,10 @@ var (
 // The struct itself satisfies every View interface; Service
 // methods all return the same pointer cast to the relevant view.
 type StaticService struct {
-	localDB        local.Config
+	localDB        LocalConfig
 	localDBEnabled bool
-	models         models.Config
-	embedding      local.EmbeddingConfig
+	models         ModelsConfig
+	embedding      EmbeddingConfig
 	auth           []AuthSource
 	permissions    []PermissionRule
 	permSettings   PermissionSettings
@@ -41,10 +38,10 @@ type StaticService struct {
 // StaticInput aggregates everything NewStaticService needs from
 // cmd/hugen. Pure data; no behaviour.
 type StaticInput struct {
-	LocalDB        local.Config
+	LocalDB        LocalConfig
 	LocalDBEnabled bool
-	Models         models.Config
-	Embedding      local.EmbeddingConfig
+	Models         ModelsConfig
+	Embedding      EmbeddingConfig
 	Auth           []AuthSource
 	Permissions    []PermissionRule
 	PermSettings   PermissionSettings
@@ -96,18 +93,18 @@ func (s *StaticService) Subscribe(ctx context.Context) (<-chan ConfigEvent, erro
 
 // --- LocalView ---
 
-func (s *StaticService) LocalDB() local.Config { return s.localDB }
-func (s *StaticService) LocalDBEnabled() bool  { return s.localDBEnabled }
+func (s *StaticService) LocalDB() LocalConfig { return s.localDB }
+func (s *StaticService) LocalDBEnabled() bool { return s.localDBEnabled }
 
 // --- ModelsView ---
 
-// modelsView shadows the StaticService Models() (which returns the
-// view interface) so the data accessor name doesn't collide.
-func (s *StaticService) ModelsConfig() models.Config { return s.models }
+// ModelsConfig is the data accessor; the Models() method on Service
+// returns the View interface, so the names don't collide.
+func (s *StaticService) ModelsConfig() ModelsConfig { return s.models }
 
 // --- EmbeddingView ---
 
-func (s *StaticService) EmbeddingConfig() local.EmbeddingConfig { return s.embedding }
+func (s *StaticService) EmbeddingConfig() EmbeddingConfig { return s.embedding }
 
 // --- AuthView ---
 

@@ -10,9 +10,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/identity"
-	"github.com/hugr-lab/hugen/pkg/models"
 
-	"github.com/hugr-lab/hugen/pkg/store/local"
 	"github.com/spf13/viper"
 )
 
@@ -199,113 +197,23 @@ func (c *BootstrapConfig) Info() string {
 	return w.String()
 }
 
-// RuntimeConfig is the YAML-driven config layered on top of the
-// bootstrap. Phase 3 adds Permissions, PermSettings, and
-// ToolProviders sections; phase 6+ live reload will subscribe via
-// pkg/config.Service rather than re-reading this struct.
-type RuntimeConfig struct {
-	Embedding      local.EmbeddingConfig
-	localDBEnabled bool
-	LocalDB        local.Config
-	Models         models.Config
-	Auth           []AuthConfig
-	Permissions    []config.PermissionRule    `mapstructure:"permissions"`
-	PermSettings   config.PermissionSettings  `mapstructure:"permission_settings"`
-	ToolProviders  []config.ToolProviderSpec  `mapstructure:"tool_providers"`
-}
-
-// LocalDBEnabled reports whether the embedded engine is on for this
-// deployment.
-func (c *RuntimeConfig) LocalDBEnabled() bool {
-	return c.localDBEnabled
-}
-
-// AuthConfig is the YAML-decoded form of an extra auth source entry.
-// Phase 1 has no extra sources by default; the field exists so phase-3
-// MCP providers can plug in.
-type AuthConfig struct {
-	Name         string `mapstructure:"name"`
-	Type         string `mapstructure:"type"`
-	Issuer       string `mapstructure:"issuer"`
-	ClientID     string `mapstructure:"client_id"`
-	CallbackPath string `mapstructure:"callback_path"`
-	LoginPath    string `mapstructure:"login_path"`
-	AccessToken  string `mapstructure:"access_token"`
-	TokenURL     string `mapstructure:"token_url"`
-}
-
-func buildRuntimeConfig(ctx context.Context, boot *BootstrapConfig, src identity.Source) (*RuntimeConfig, error) {
+// buildConfigService loads the YAML config aggregate (carried via
+// identity.Agent.Config) and returns the phase-3 *config.StaticService.
+// Every domain consumer reads through narrow Views off this Service —
+// no other config aggregate lives in cmd/hugen. The runtime agent
+// identity stays a separate live dependency (identity.Source) — it
+// is not snapshotted here.
+func buildConfigService(ctx context.Context, boot *BootstrapConfig, src identity.Source) (*config.StaticService, error) {
 	agent, err := src.Agent(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var cfg RuntimeConfig
-	v := viper.New()
-	if err := v.MergeConfigMap(agent.Config); err != nil {
-		return nil, fmt.Errorf("config: merge config map: %w", err)
+	in, err := config.LoadStaticInput(agent.Config, boot.IsLocalMode())
+	if err != nil {
+		return nil, err
 	}
-	if err := unmarshalSections(v, &cfg); err != nil {
-		return nil, fmt.Errorf("config: unmarshal sections: %w", err)
-	}
-	cfg.localDBEnabled = boot.IsLocalMode()
-	if cfg.Models.Model == "" {
+	if in.Models.Model == "" {
 		return nil, fmt.Errorf("config: models.model is empty (set in config.yaml)")
 	}
-	return &cfg, nil
-}
-
-func unmarshalSections(v *viper.Viper, cfg *RuntimeConfig) error {
-	if err := v.UnmarshalKey("models", &cfg.Models); err != nil {
-		return fmt.Errorf("unmarshal models: %w", err)
-	}
-	if err := v.UnmarshalKey("embedding", &cfg.Embedding); err != nil {
-		return fmt.Errorf("unmarshal embedding: %w", err)
-	}
-	if err := v.UnmarshalKey("local_db", &cfg.LocalDB); err != nil {
-		return fmt.Errorf("unmarshal local_db: %w", err)
-	}
-	if err := v.UnmarshalKey("auth", &cfg.Auth); err != nil {
-		return fmt.Errorf("unmarshal auth: %w", err)
-	}
-	if err := v.UnmarshalKey("permissions", &cfg.Permissions); err != nil {
-		return fmt.Errorf("unmarshal permissions: %w", err)
-	}
-	if err := v.UnmarshalKey("permission_settings", &cfg.PermSettings); err != nil {
-		return fmt.Errorf("unmarshal permission_settings: %w", err)
-	}
-	if err := v.UnmarshalKey("tool_providers", &cfg.ToolProviders); err != nil {
-		return fmt.Errorf("unmarshal tool_providers: %w", err)
-	}
-	return nil
-}
-
-// toStaticServiceInput converts the cmd/hugen-internal RuntimeConfig
-// aggregate into the pkg/config.StaticInput used by phase-3 consumers.
-// Pre-phase-3 wiring (models, local engine) keeps consuming
-// RuntimeConfig directly; phase-3 packages take per-domain Views via
-// the StaticService.
-func (c *RuntimeConfig) toStaticServiceInput() config.StaticInput {
-	auth := make([]config.AuthSource, 0, len(c.Auth))
-	for _, a := range c.Auth {
-		auth = append(auth, config.AuthSource{
-			Name:         a.Name,
-			Type:         a.Type,
-			Issuer:       a.Issuer,
-			ClientID:     a.ClientID,
-			CallbackPath: a.CallbackPath,
-			LoginPath:    a.LoginPath,
-			AccessToken:  a.AccessToken,
-			TokenURL:     a.TokenURL,
-		})
-	}
-	return config.StaticInput{
-		LocalDB:        c.LocalDB,
-		LocalDBEnabled: c.localDBEnabled,
-		Models:         c.Models,
-		Embedding:      c.Embedding,
-		Auth:           auth,
-		Permissions:    c.Permissions,
-		PermSettings:   c.PermSettings,
-		ToolProviders:  c.ToolProviders,
-	}
+	return config.NewStaticService(in), nil
 }

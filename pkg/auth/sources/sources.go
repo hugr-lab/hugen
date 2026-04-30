@@ -15,7 +15,7 @@ import (
 // Every Source also implements TokenStore — callers that only
 // need a token can keep using auth.Transport(src, base).
 type Source interface {
-	// Name is the registry key (matches AuthSpec.Name).
+	// Name is the registry key (matches config.AuthSource.Name).
 	Name() string
 
 	// Token returns a valid access token. Blocks until the first

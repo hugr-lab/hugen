@@ -5,9 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
-
-	"github.com/hugr-lab/hugen/pkg/models"
-	"github.com/hugr-lab/hugen/pkg/store/local"
 )
 
 func TestNewStaticService_DefaultRefreshInterval(t *testing.T) {
@@ -37,7 +34,7 @@ func TestNewStaticService_RefreshIntervalRespected(t *testing.T) {
 
 func TestStaticService_LocalView(t *testing.T) {
 	s := NewStaticService(StaticInput{
-		LocalDB:        local.Config{DB: local.DBConfig{Path: "/tmp/test.db"}},
+		LocalDB:        LocalConfig{DB: DBConfig{Path: "/tmp/test.db"}},
 		LocalDBEnabled: true,
 	})
 	v := s.Local()
@@ -51,7 +48,7 @@ func TestStaticService_LocalView(t *testing.T) {
 
 func TestStaticService_ModelsView(t *testing.T) {
 	s := NewStaticService(StaticInput{
-		Models: models.Config{Model: "claude-3-5-sonnet"},
+		Models: ModelsConfig{Model: "claude-3-5-sonnet"},
 	})
 	v := s.Models()
 	if got := v.ModelsConfig().Model; got != "claude-3-5-sonnet" {

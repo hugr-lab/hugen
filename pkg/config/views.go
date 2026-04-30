@@ -3,9 +3,6 @@ package config
 import (
 	"encoding/json"
 	"time"
-
-	"github.com/hugr-lab/hugen/pkg/models"
-	"github.com/hugr-lab/hugen/pkg/store/local"
 )
 
 // PermissionRule is one entry from operator configuration (Tier
@@ -27,14 +24,16 @@ type PermissionRule struct {
 // runtime spawns, or an external HTTP MCP endpoint the runtime
 // connects to.
 type ToolProviderSpec struct {
-	Name     string            `mapstructure:"name"      yaml:"name"`
-	Type     string            `mapstructure:"type"      yaml:"type"`
-	Lifetime string            `mapstructure:"lifetime"  yaml:"lifetime,omitempty"`
-	Command  string            `mapstructure:"command"   yaml:"command,omitempty"`
-	Args     []string          `mapstructure:"args"      yaml:"args,omitempty"`
-	Env      map[string]string `mapstructure:"env"       yaml:"env,omitempty"`
-	URL      string            `mapstructure:"url"       yaml:"url,omitempty"`
-	Headers  map[string]string `mapstructure:"headers"   yaml:"headers,omitempty"`
+	Name      string            `mapstructure:"name"       yaml:"name"`
+	Type      string            `mapstructure:"type"       yaml:"type"`
+	Transport string            `mapstructure:"transport"  yaml:"transport,omitempty"`
+	Lifetime  string            `mapstructure:"lifetime"   yaml:"lifetime,omitempty"`
+	Command   string            `mapstructure:"command"    yaml:"command,omitempty"`
+	Args      []string          `mapstructure:"args"       yaml:"args,omitempty"`
+	Env       map[string]string `mapstructure:"env"        yaml:"env,omitempty"`
+	Endpoint  string            `mapstructure:"endpoint"   yaml:"endpoint,omitempty"`
+	Headers   map[string]string `mapstructure:"headers"    yaml:"headers,omitempty"`
+	Auth      string            `mapstructure:"auth"       yaml:"auth,omitempty"`
 }
 
 // AuthSource is the unified config-level shape for an extra auth
@@ -61,7 +60,7 @@ type PermissionSettings struct {
 
 // LocalView is the surface pkg/store/local consumers take.
 type LocalView interface {
-	LocalDB() local.Config
+	LocalDB() LocalConfig
 	LocalDBEnabled() bool
 	OnUpdate(fn func()) (cancel func())
 }
@@ -69,13 +68,13 @@ type LocalView interface {
 // ModelsView is the surface pkg/model / pkg/runtime ModelRouter
 // take.
 type ModelsView interface {
-	ModelsConfig() models.Config
+	ModelsConfig() ModelsConfig
 	OnUpdate(fn func()) (cancel func())
 }
 
 // EmbeddingView is the surface pkg/store/local pin-embedder takes.
 type EmbeddingView interface {
-	EmbeddingConfig() local.EmbeddingConfig
+	EmbeddingConfig() EmbeddingConfig
 	OnUpdate(fn func()) (cancel func())
 }
 

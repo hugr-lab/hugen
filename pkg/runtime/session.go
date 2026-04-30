@@ -721,21 +721,6 @@ func (s *Session) MarkClosed(ctx context.Context) error {
 	return nil
 }
 
-// touchUpdated is used to refresh updated_at on activity. The hugr
-// schema auto-bumps updated_at on UPDATE; we reuse UpdateSessionStatus
-// with the same status to drive the touch. Phase 1 keeps this simple
-// and accepts that a no-op UPDATE writes one round-trip per turn —
-// trivial at the volumes phase 1 targets.
-func (s *Session) touchUpdated(ctx context.Context) error {
-	_ = ctx
-	// Skipping for phase 1 — the engine bumps updated_at on every
-	// row change including AppendEvent's (UPSERT) on hub.db. If the
-	// schema doesn't auto-update, we still get an updated_at via the
-	// next session_events insert. This is intentionally a no-op until
-	// real-time presence telemetry needs it.
-	return nil
-}
-
 // IsClosed reports whether the session has been closed.
 func (s *Session) IsClosed() bool { return s.closed.Load() }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/store/local/migrate"
 )
 
@@ -132,7 +133,7 @@ func TestVerifyLocalEmbedding_Unreachable(t *testing.T) {
 	svc := pinTestEngine(t, "nomic-embed-text", 768)
 	ctx := context.Background()
 
-	err := verifyLocalEmbedding(ctx, svc, EmbeddingConfig{
+	err := verifyLocalEmbedding(ctx, svc, config.EmbeddingConfig{
 		Mode:      "local",
 		Model:     "nomic-embed-text",
 		Dimension: 768,
@@ -151,7 +152,7 @@ func TestVerifyLocalEmbedding_RemoteMode_SkipsProbe(t *testing.T) {
 	ctx := context.Background()
 
 	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
-	err := verifyLocalEmbedding(ctx, svc, EmbeddingConfig{
+	err := verifyLocalEmbedding(ctx, svc, config.EmbeddingConfig{
 		Mode:      "remote",
 		Model:     "nomic-embed-text",
 		Dimension: 768,

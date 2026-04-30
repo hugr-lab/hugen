@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 
 	hugr "github.com/hugr-lab/query-engine"
 	"github.com/hugr-lab/query-engine/pkg/auth"
@@ -13,6 +12,8 @@ import (
 	"github.com/hugr-lab/query-engine/pkg/db"
 	"github.com/hugr-lab/query-engine/types"
 
+	"github.com/hugr-lab/hugen/pkg/config"
+	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/store/local/migrate"
 	"github.com/hugr-lab/hugen/pkg/store/queries"
 )
@@ -33,18 +34,38 @@ import (
 //   - Embedding dim mismatch vs embedding.Dimension → fatal (would
 //     silently corrupt stored vectors in memory_items).
 //   - Embedding probe transport errors → warn + FTS fallback.
+// New provisions the embedded engine + hub.db using the per-domain
+// Views from pkg/config plus a live identity.Source for the agent
+// id / name / type seeded into hub.db at provisioning time.
+//
+// The Views are read once at boot; live reload is a phase-6+
+// enhancement that will call back through OnUpdate.
 func New(
 	ctx context.Context,
-	cfg Config,
-	identity Identity,
-	embedding EmbeddingConfig,
+	localView config.LocalView,
+	embedView config.EmbeddingView,
+	idSrc identity.Source,
 	logger *slog.Logger,
 ) (*hugr.Service, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	if err := ensureSchema(cfg, identity, embedding); err != nil {
+	cfg := localView.LocalDB()
+	embedding := embedView.EmbeddingConfig()
+
+	agent, err := idSrc.Agent(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("local: resolve agent identity: %w", err)
+	}
+	ident := config.AgentIdentity{
+		ID:      agent.ID,
+		ShortID: agent.ShortID,
+		Name:    agent.Name,
+		Type:    agent.AgentTypeID,
+	}
+
+	if err := ensureSchema(cfg, ident, embedding); err != nil {
 		return nil, err
 	}
 	logger.Info("hub.db provisioned",
@@ -84,7 +105,7 @@ func New(
 // ensureSchema runs migrate.Ensure with a seed derived from the agent
 // identity. No-op on a DB that is already at the target schema
 // version.
-func ensureSchema(cfg Config, identity Identity, embedding EmbeddingConfig) error {
+func ensureSchema(cfg config.LocalConfig, identity config.AgentIdentity, embedding config.EmbeddingConfig) error {
 	seed := &migrate.SeedData{
 		AgentType: migrate.SeedAgentType{
 			ID:   identity.Type,
@@ -110,7 +131,7 @@ func ensureSchema(cfg Config, identity Identity, embedding EmbeddingConfig) erro
 // newEngine constructs the embedded hugr engine backed by the
 // configured CoreDB and pool settings. Memory hub.db is attached
 // separately in attachHubDB.
-func newEngine(cfg Config, embedding EmbeddingConfig) (*hugr.Service, error) {
+func newEngine(cfg config.LocalConfig, embedding config.EmbeddingConfig) (*hugr.Service, error) {
 	poolSettings := db.Settings{
 		Timezone:      cfg.DB.Settings.Timezone,
 		HomeDirectory: cfg.DB.Settings.HomeDirectory,
@@ -132,7 +153,7 @@ func newEngine(cfg Config, embedding EmbeddingConfig) (*hugr.Service, error) {
 }
 
 // attachHubDB wires hub.db into the engine as the "hub.db" RuntimeSource.
-func attachHubDB(ctx context.Context, service *hugr.Service, cfg Config, embedding EmbeddingConfig) error {
+func attachHubDB(ctx context.Context, service *hugr.Service, cfg config.LocalConfig, embedding config.EmbeddingConfig) error {
 	source := NewSource(SourceConfig{
 		Path:          cfg.MemoryPath,
 		VectorSize:    embedding.Dimension,
@@ -152,7 +173,7 @@ func attachHubDB(ctx context.Context, service *hugr.Service, cfg Config, embeddi
 // is the source of truth for paths (API keys, model names, timeouts);
 // we bulk-delete the existing rows first so edits propagate on every
 // startup. Per-row insert failures warn and continue.
-func registerModelSources(ctx context.Context, engine *hugr.Service, models []ModelDef, logger *slog.Logger) {
+func registerModelSources(ctx context.Context, engine *hugr.Service, models []config.ModelDef, logger *slog.Logger) {
 	if len(models) == 0 {
 		return
 	}
@@ -171,7 +192,7 @@ func registerModelSources(ctx context.Context, engine *hugr.Service, models []Mo
 			Type:     types.DataSourceType(m.Type),
 			Prefix:   m.Name,
 			AsModule: false,
-			Path:     os.ExpandEnv(m.Path),
+			Path:     m.Path,
 			Sources:  []types.CatalogSource{},
 		}
 		if err := engine.RegisterDataSource(ctx, ds); err != nil {
@@ -214,7 +235,7 @@ func deleteDataSources(ctx context.Context, engine *hugr.Service, names []string
 // those failures is fatal — bubble up to cmd/agent/main and abort
 // startup before the agent serves traffic that would silently miss
 // semantic paths.
-func verifyLocalEmbedding(ctx context.Context, service *hugr.Service, embedding EmbeddingConfig, logger *slog.Logger) error {
+func verifyLocalEmbedding(ctx context.Context, service *hugr.Service, embedding config.EmbeddingConfig, logger *slog.Logger) error {
 	if embedding.Mode != "local" || embedding.Model == "" {
 		return nil
 	}

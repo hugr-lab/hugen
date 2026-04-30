@@ -17,7 +17,8 @@ import (
 // called either before or after Mount — the dispatcher looks up the
 // owning Source dynamically on each request.
 type Service struct {
-	logger *slog.Logger
+	logger  *slog.Logger
+	baseURL string
 
 	mu           sync.RWMutex
 	byName       map[string]sources.Source
@@ -29,12 +30,17 @@ type Service struct {
 }
 
 // NewService creates an empty Service.
-func NewService(logger *slog.Logger, mux *http.ServeMux) *Service {
+//
+// baseURL is the public origin of the hugen process — used when
+// LoadFromView builds OIDC sources to derive their redirect URL
+// ("<baseURL>/auth/callback").
+func NewService(logger *slog.Logger, mux *http.ServeMux, baseURL string) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	s := &Service{
 		logger:  logger,
+		baseURL: baseURL,
 		byName:  make(map[string]sources.Source),
 		aliases: make(map[string]string),
 		mux:     mux,
@@ -50,7 +56,7 @@ func (r *Service) Add(s sources.Source) error {
 }
 
 // AddPrimary is Add + marks the Source as the primary (hugr-side)
-// Source. BuildSources uses the primary when resolving alias
+// Source. LoadFromView uses the primary when resolving alias
 // entries (`type: hugr`) without depending on a hardcoded name.
 // Only one Source can be primary — a second call returns an error.
 func (r *Service) AddPrimary(s sources.Source) error {

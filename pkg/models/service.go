@@ -6,6 +6,7 @@ import (
 
 	"github.com/hugr-lab/query-engine/types"
 
+	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/model"
 )
 
@@ -20,39 +21,85 @@ const (
 )
 
 // Service is the per-process registry of *HugrModel instances keyed
-// by intent name. Phase 2 (R-Plan-23) keyed it on pkg/model.Model
-// instead of the previous ADK adkmodel.LLM type. The shape of
-// New / ModelFor / BuildModelMap / IntentDefaults is unchanged.
+// by intent name. Holds a ModelsView and rebuilds its route map
+// when the view fires OnUpdate (phase 6+ live reload).
 type Service struct {
-	config Config
+	view config.ModelsView
+	opts []Option
 
 	local, remote types.Querier
 
 	mu           sync.RWMutex
 	defaultModel model.Model
 	routes       map[Intent]model.Model
+
+	cancelUpdate func()
 }
 
-func New(ctx context.Context, local, remote types.Querier, cfg Config, opts ...Option) *Service {
-	_ = ctx // reserved for future async config refresh
+// New constructs the registry from a ModelsView. The initial route
+// table is built immediately; if the view ever fires OnUpdate
+// (phase 6+ live reload), Service rebuilds in place and any new
+// resolution sees the updated route. The Stop method releases
+// the OnUpdate subscription.
+func New(ctx context.Context, local, remote types.Querier, view config.ModelsView, opts ...Option) *Service {
+	_ = ctx // reserved for future ctx-aware initialisation
+	s := &Service{
+		view:   view,
+		opts:   opts,
+		local:  local,
+		remote: remote,
+	}
+	s.rebuild()
+	if view != nil {
+		s.cancelUpdate = view.OnUpdate(s.rebuild)
+	}
+	return s
+}
+
+// Stop detaches the view subscription. Idempotent.
+func (s *Service) Stop() {
+	if s.cancelUpdate != nil {
+		s.cancelUpdate()
+		s.cancelUpdate = nil
+	}
+}
+
+func (s *Service) rebuild() {
+	cfg := config.ModelsConfig{}
+	if s.view != nil {
+		cfg = s.view.ModelsConfig()
+	}
 	routes := make(map[Intent]model.Model, len(cfg.Routes))
 	for intentStr, route := range cfg.Routes {
-		routes[Intent(intentStr)] = newRouteModel(local, remote, route, opts)
+		routes[Intent(intentStr)] = newRouteModel(s.local, s.remote, route, s.opts)
 	}
-	return &Service{
-		config:       cfg,
-		local:        local,
-		remote:       remote,
-		routes:       routes,
-		defaultModel: newRouteModel(local, remote, cfg, opts),
-	}
+	s.mu.Lock()
+	s.defaultModel = newRouteModel(s.local, s.remote, cfg, s.opts)
+	s.routes = routes
+	s.mu.Unlock()
 }
 
-func newRouteModel(local, remote types.Querier, cfg Config, opts []Option) model.Model {
-	if cfg.Mode == LocalMode {
-		return NewHugr(local, cfg.Model, append(opts, cfg.BuildOpts()...)...)
+func newRouteModel(local, remote types.Querier, cfg config.ModelsConfig, opts []Option) model.Model {
+	target := remote
+	if cfg.Mode == config.ModeLocal {
+		target = local
 	}
-	return NewHugr(remote, cfg.Model, append(opts, cfg.BuildOpts()...)...)
+	return NewHugr(target, cfg.Model, append(opts, buildOptsFor(cfg)...)...)
+}
+
+// buildOptsFor lifts MaxTokens / Temperature off a ModelsConfig into
+// the per-call Option slice. Lives in pkg/models because Option is a
+// pkg/models concept; the config struct itself stays a pure data
+// shape in pkg/config.
+func buildOptsFor(cfg config.ModelsConfig) []Option {
+	var out []Option
+	if cfg.MaxTokens > 0 {
+		out = append(out, WithMaxTokens(cfg.MaxTokens))
+	}
+	if cfg.Temperature > 0 {
+		out = append(out, WithTemperature(cfg.Temperature))
+	}
+	return out
 }
 
 // ModelFor returns the model registered for the given intent,
