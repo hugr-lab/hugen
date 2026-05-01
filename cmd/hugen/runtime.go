@@ -15,8 +15,6 @@ import (
 	httpapi "github.com/hugr-lab/hugen/pkg/adapter/http"
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
-	hugrsource "github.com/hugr-lab/hugen/pkg/auth/sources/hugr"
-	"github.com/hugr-lab/hugen/pkg/auth/spawn"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
@@ -225,20 +223,13 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	}
 
 	core.workspaces = session.NewWorkspace(boot.WorkspaceDir, boot.CleanupOnClose)
-	authSources := spawn.NewSources()
-	if core.AgentTokenStore != nil {
-		if err := authSources.Register(hugrsource.NewSpawner(core.AgentTokenStore, boot.Port)); err != nil {
-			return nil, failed("auth_sources", err)
-		}
-	}
 	resources := session.NewResources(session.ResourceDeps{
-		Providers:   core.Config.ToolProviders(),
-		Tools:       core.Tools,
-		Skills:      core.Skills,
-		SkillStore:  core.SkillStore,
-		Workspace:   core.workspaces,
-		AuthSources: authSources,
-		Logger:      core.Logger,
+		Providers:  core.Config.ToolProviders(),
+		Tools:      core.Tools,
+		Skills:     core.Skills,
+		SkillStore: core.SkillStore,
+		Workspace:  core.workspaces,
+		Logger:     core.Logger,
 	})
 	if err := resources.Validate(); err != nil {
 		return nil, failed("session_resources", err)

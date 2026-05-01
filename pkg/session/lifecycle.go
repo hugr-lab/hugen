@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/hugr-lab/hugen/pkg/auth/spawn"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
@@ -25,17 +24,14 @@ type Lifecycle interface {
 // ResourceDeps groups every dependency Resources needs.
 //
 // Providers / Tools / Workspace are required. Skills and SkillStore
-// may be nil for deployments that disable autoload. AuthSources
-// may be nil if no provider in tool_providers declares an `auth:`
-// field — Validate enforces that constraint at boot.
+// may be nil for deployments that disable autoload.
 type ResourceDeps struct {
-	Providers   config.ToolProvidersView
-	Tools       *tool.ToolManager
-	Skills      *skill.SkillManager
-	SkillStore  skill.SkillStore
-	Workspace   *Workspace
-	AuthSources *spawn.Sources
-	Logger      *slog.Logger
+	Providers  config.ToolProvidersView
+	Tools      *tool.ToolManager
+	Skills     *skill.SkillManager
+	SkillStore skill.SkillStore
+	Workspace  *Workspace
+	Logger     *slog.Logger
 
 	// SessionType labels the bound session for skill-autoload
 	// filtering. Today every session is a "root" session; phase 4
@@ -45,15 +41,21 @@ type ResourceDeps struct {
 
 // Resources is the per-session-resources owner. It implements
 // Lifecycle: Acquire spawns every per_session MCP provider listed
-// in tool_providers, composes their auth env via the spawn.Sources
-// registry, registers them with ToolManager, and autoloads skills.
-// Release tears it all down.
+// in tool_providers, registers them with ToolManager, and autoloads
+// skills. Release tears it all down.
 //
 // Resources is the single source of truth for "what is a session,
 // from the runtime's point of view": a workspace dir + a set of
-// per-session providers + a set of revoke callbacks. cmd/hugen
-// only knows how to construct it — it does not know about bash-mcp,
-// python-mcp, or any specific provider name.
+// per-session providers. cmd/hugen only knows how to construct it
+// — it does not know about bash-mcp, python-mcp, or any specific
+// provider name.
+//
+// Per-spawn auth credentials (the bootstrap-token pattern used by
+// hugr-query and python-mcp) are not the lifecycle's concern —
+// those providers are per_agent and mint their own credentials in
+// the cmd-level builder. If a future per_session provider needs
+// agent-minted credentials, this struct grows a Sources field
+// then; until then it stays simple.
 type Resources struct {
 	deps ResourceDeps
 
@@ -80,8 +82,7 @@ func NewResources(deps ResourceDeps) *Resources {
 
 // Validate inspects every per_session entry in tool_providers and
 // returns a fail-fast error for misconfigurations the runtime
-// would otherwise hit on the first session.Open: empty command,
-// or `auth: <name>` referring to a source that was not registered.
+// would otherwise hit on the first session.Open.
 //
 // Called once during boot from cmd/hugen/runtime.go.
 func (r *Resources) Validate() error {
@@ -96,21 +97,6 @@ func (r *Resources) Validate() error {
 		if cfg.Command == "" {
 			errs = append(errs, fmt.Sprintf("provider %q: empty command", cfg.Name))
 		}
-		name := strings.ToLower(strings.TrimSpace(cfg.Auth))
-		if name == "" {
-			continue
-		}
-		if r.deps.AuthSources == nil {
-			errs = append(errs, fmt.Sprintf(
-				"provider %q: auth: %q but no auth-source registry configured",
-				cfg.Name, name))
-			continue
-		}
-		if _, ok := r.deps.AuthSources.Get(name); !ok {
-			errs = append(errs, fmt.Sprintf(
-				"provider %q: auth: %q but no such source registered (have: %v)",
-				cfg.Name, name, r.deps.AuthSources.Names()))
-		}
 	}
 	if len(errs) == 0 {
 		return nil
@@ -123,7 +109,7 @@ func (r *Resources) Validate() error {
 // skills, and stores the per-session revokers for Release.
 //
 // On any failure, the partial state is unwound: spawned providers
-// are removed, auth revokers run, the workspace is released.
+// are removed, the workspace is released.
 func (r *Resources) Acquire(ctx context.Context, sessionID string) error {
 	if r.deps.Workspace == nil {
 		return fmt.Errorf("session %s: workspace not configured", sessionID)
@@ -138,16 +124,11 @@ func (r *Resources) Acquire(ctx context.Context, sessionID string) error {
 	}
 	root, _ := r.deps.Workspace.Root()
 
-	// Tracks rollback work that must run on partial-failure paths.
 	var (
-		revokes  []func()
 		opened   []string
 		rollback = func() {
 			for _, name := range opened {
 				_ = r.deps.Tools.RemoveSessionProvider(ctx, sessionID, name)
-			}
-			for _, rv := range revokes {
-				rv()
 			}
 			_, _ = r.deps.Workspace.Release(sessionID)
 		}
@@ -162,18 +143,8 @@ func (r *Resources) Acquire(ctx context.Context, sessionID string) error {
 			return fmt.Errorf("session %s: provider %q has empty command", sessionID, cfg.Name)
 		}
 
-		authEnv, revoke, err := r.prepareAuth(ctx, cfg, sessionID)
-		if err != nil {
-			rollback()
-			return fmt.Errorf("session %s: provider %q auth: %w", sessionID, cfg.Name, err)
-		}
-		if revoke != nil {
-			revokes = append(revokes, revoke)
-		}
-
-		env := make(map[string]string, len(cfg.Env)+len(authEnv)+2)
+		env := make(map[string]string, len(cfg.Env)+2)
 		maps.Copy(env, cfg.Env)
-		maps.Copy(env, authEnv)
 		env["SESSION_DIR"] = sessDir
 		env["WORKSPACES_ROOT"] = root
 
@@ -200,10 +171,6 @@ func (r *Resources) Acquire(ctx context.Context, sessionID string) error {
 		}
 		opened = append(opened, cfg.Name)
 	}
-
-	r.mu.Lock()
-	r.revokers[sessionID] = revokes
-	r.mu.Unlock()
 
 	if r.deps.Skills != nil && r.deps.SkillStore != nil {
 		r.autoloadSkills(ctx, sessionID)
@@ -238,25 +205,6 @@ func (r *Resources) Release(ctx context.Context, sessionID string) error {
 		}
 	}
 	return nil
-}
-
-// prepareAuth resolves cfg.Auth (case-insensitive, trimmed) to a
-// registered spawn.Source and asks it for env + revoke. An empty
-// `auth:` returns (nil, nil, nil) — the provider runs without
-// agent-minted credentials.
-func (r *Resources) prepareAuth(ctx context.Context, cfg config.ToolProviderSpec, sessionID string) (map[string]string, func(), error) {
-	name := strings.ToLower(strings.TrimSpace(cfg.Auth))
-	if name == "" {
-		return nil, nil, nil
-	}
-	if r.deps.AuthSources == nil {
-		return nil, nil, fmt.Errorf("auth: %q requested but no auth-source registry configured", name)
-	}
-	src, ok := r.deps.AuthSources.Get(name)
-	if !ok {
-		return nil, nil, fmt.Errorf("unknown auth source %q (registered: %v)", name, r.deps.AuthSources.Names())
-	}
-	return src.Env(ctx, sessionID)
 }
 
 // autoloadSkills binds every skill that opts into autoload for
