@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"slices"
+	"sort"
 	"sync"
 	"sync/atomic"
 )
@@ -180,7 +181,18 @@ func (m *SkillManager) Bindings(ctx context.Context, sessionID string) (Bindings
 	}
 	out := Bindings{Generation: st.gen}
 	memCats := map[string]MemoryCategory{}
-	for _, s := range st.loaded {
+	// Iterate `loaded` in name-sorted order. The system prompt is
+	// composed from skill bodies + AllowedTools — random map order
+	// would change the prompt byte-for-byte each Turn, defeating
+	// the upstream prompt-cache (Anthropic / OpenAI key cache by
+	// prefix bytes). Cheap insurance against quiet token cost.
+	names := make([]string, 0, len(st.loaded))
+	for n := range st.loaded {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		s := st.loaded[n]
 		out.AllowedTools = append(out.AllowedTools, s.Manifest.AllowedTools...)
 		out.SubAgentRoles = append(out.SubAgentRoles, s.Manifest.Hugen.SubAgents...)
 		if s.Manifest.Hugen.MaxTurns > out.MaxTurns {
@@ -189,11 +201,6 @@ func (m *SkillManager) Bindings(ctx context.Context, sessionID string) (Bindings
 		for k, v := range s.Manifest.Hugen.Memory {
 			memCats[k] = v
 		}
-		// Concatenate body content (skill instructions surfaced
-		// to the system prompt). Order is map-iteration order
-		// which is non-deterministic in Go — phase 4+ may want a
-		// stable order; for phase 3 it's sufficient that the
-		// contents are present.
 		if len(s.Manifest.Body) > 0 {
 			if out.Instructions != "" {
 				out.Instructions += "\n\n"

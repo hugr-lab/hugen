@@ -443,3 +443,55 @@ func TestSystemProvider_PolicyRevoke_MissingID(t *testing.T) {
 		t.Errorf("err = %v, want ErrArgValidation", err)
 	}
 }
+
+// Tier-1/2 must gate revoke as well as save: otherwise an LLM
+// could legitimately call policy_revoke to clear a deny pinned
+// by an operator (`hugen:policy:persist:<tool>` set Disabled in
+// config or in the Hugr role snapshot). Mirror the gate check.
+func TestSystemProvider_PolicyRevoke_GateDenied(t *testing.T) {
+	store := newFakePolicyStore()
+	// Pre-seed the row directly via the policies façade so we
+	// know the deny was installed by something other than the
+	// LLM about to try to revoke it.
+	policies := NewPolicies(newFakePolicyQuerier(store))
+	id, err := policies.Save(context.Background(), PolicyInput{
+		AgentID:   "ag01",
+		ToolName:  "bash-mcp:write_file",
+		Decision:  PolicyDeny,
+		CreatedBy: PolicyCreatorSystem,
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if len(store.rows) != 1 {
+		t.Fatalf("seed rows = %d", len(store.rows))
+	}
+	perms := &fakePerms{rules: map[string]perm.Permission{
+		"hugen:policy:persist:bash-mcp:write_file": {Disabled: true, FromConfig: true},
+	}}
+	sp := NewSystemProvider(SystemDeps{
+		AgentID:  "ag01",
+		Policies: policies,
+		Perms:    perms,
+	})
+	_, err = sp.Call(context.Background(), "policy_revoke",
+		json.RawMessage(`{"id":`+strconv.Quote(id)+`}`))
+	if !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("err = %v, want ErrPermissionDenied", err)
+	}
+	if len(store.rows) != 1 {
+		t.Errorf("rows after blocked revoke = %d, want 1 (deny preserved)", len(store.rows))
+	}
+}
+
+func TestSystemProvider_PolicyRevoke_BadID(t *testing.T) {
+	sp := NewSystemProvider(SystemDeps{
+		AgentID:  "ag01",
+		Policies: NewPolicies(newFakePolicyQuerier(newFakePolicyStore())),
+	})
+	_, err := sp.Call(context.Background(), "policy_revoke",
+		json.RawMessage(`{"id":"not-a-policy-id"}`))
+	if !errors.Is(err, ErrArgValidation) {
+		t.Errorf("err = %v, want ErrArgValidation", err)
+	}
+}

@@ -520,3 +520,38 @@ func TestToolManager_Resolve_AskFallsThrough(t *testing.T) {
 		t.Errorf("FromUser = true on Ask; want false")
 	}
 }
+
+// TestToolManager_SetPolicies_RaceFreeWithResolve exercises the
+// atomic.Pointer guard introduced for review B1: SetPolicies can
+// swap the Tier-3 store concurrently with in-flight Resolve calls
+// (e.g. through runtime_reload) without tripping `-race`. Before
+// the fix m.policies was protected by m.mu only on the write path;
+// Resolve dereferenced it lock-free.
+func TestToolManager_SetPolicies_RaceFreeWithResolve(t *testing.T) {
+	pol, _ := newPoliciesForTest(t)
+	perms := &fakePermsWithAgent{agentID: "ag01"}
+	m := NewToolManager(perms, nil, nil, nil, nil)
+	tl := Tool{
+		Name:             "bash-mcp:read_file",
+		Provider:         "bash-mcp",
+		PermissionObject: "hugen:tool:bash-mcp",
+	}
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 200; i++ {
+			if i%2 == 0 {
+				m.SetPolicies(pol)
+			} else {
+				m.SetPolicies(nil)
+			}
+		}
+		close(done)
+	}()
+	for i := 0; i < 200; i++ {
+		// We don't care about the outcome — only that the read
+		// path is race-clean. Decide is a no-op when policies is
+		// nil (IsConfigured false), so any swap is acceptable.
+		_, _, _ = m.Resolve(context.Background(), tl, json.RawMessage(`{}`))
+	}
+	<-done
+}

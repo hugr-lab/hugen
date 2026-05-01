@@ -526,6 +526,18 @@ func (p *SystemProvider) callPolicyRevoke(ctx context.Context, args json.RawMess
 	if in.ID == "" {
 		return nil, fmt.Errorf("%w: policy_revoke: id required", ErrArgValidation)
 	}
+	// Mirror the policy_save gate: parse tool_name out of the
+	// composite id so Tier-1/2 can forbid revoke of policies on
+	// sensitive tools (otherwise an LLM with revoke access could
+	// just delete a deny operator pinned via policy_save). The id
+	// shape is `agentID|toolName|scope` (see policyID).
+	_, toolName, _, perr := parsePolicyID(in.ID)
+	if perr != nil {
+		return nil, fmt.Errorf("%w: policy_revoke: %v", ErrArgValidation, perr)
+	}
+	if err := p.gatePolicyPersist(ctx, toolName); err != nil {
+		return nil, err
+	}
 	if err := p.deps.Policies.Revoke(ctx, in.ID); err != nil {
 		return nil, err
 	}

@@ -32,8 +32,13 @@ import (
 //     a global "bash-mcp" with its own); for Snapshot they are
 //     merged by name (session wins on collision).
 type ToolManager struct {
-	perms    perm.Service
-	policies *Policies // Tier-3; nil disables Tier-3 consultation
+	perms perm.Service
+	// policies is the Tier-3 store. Lock-free read in Resolve via
+	// atomic.Pointer — SetPolicies (and runtime_reload) can swap
+	// the store concurrently with in-flight dispatches without
+	// data-racing. nil pointer disables Tier-3 (IsConfigured is
+	// nil-safe on the value side).
+	policies atomic.Pointer[Policies]
 	skills   *skill.SkillManager
 	log      *slog.Logger
 
@@ -137,10 +142,14 @@ type ToolManagerOption func(*ToolManager)
 // change. Safe to call any time — typical wiring is right after
 // NewToolManager and before Init.
 func (m *ToolManager) SetPolicies(p *Policies) {
-	m.mu.Lock()
-	m.policies = p
-	m.mu.Unlock()
+	m.policies.Store(p)
 	m.BumpPolicyGen()
+}
+
+// policiesSnapshot returns the current Tier-3 store pointer.
+// nil-safe — callers can call IsConfigured on the result.
+func (m *ToolManager) policiesSnapshot() *Policies {
+	return m.policies.Load()
 }
 
 // WithProviderBuilder registers a builder for a non-MCP provider
@@ -199,6 +208,13 @@ func (m *ToolManager) AddSessionProvider(sessionID string, p ToolProvider) error
 // the named provider for one session. Idempotent: returns nil if
 // nothing is registered. Other sessions and global providers are
 // untouched.
+//
+// The drain is a fixed-budget grace period (m.drainTimeout) — it
+// always sleeps the full window before Close, regardless of how
+// many calls are in flight. Providers that need synchronous "wait
+// until last call returns" semantics should expose their own
+// inflight wait-group on Close; the manager keeps the simple
+// budget so a buggy provider can't block shutdown indefinitely.
 func (m *ToolManager) RemoveSessionProvider(ctx context.Context, sessionID, name string) error {
 	m.mu.Lock()
 	scoped, ok := m.sessionProviders[sessionID]
@@ -311,10 +327,13 @@ func (m *ToolManager) RemoveProvider(ctx context.Context, name string) error {
 	m.invalidateAllSnapshots()
 	m.mu.Unlock()
 
-	// Drain: give in-flight calls a chance to complete by waiting
-	// up to drainTimeout before Close. This is a coarse mechanism
-	// — providers that need finer drain semantics should expose
-	// their own Drain method on top of Close.
+	// Drain: sleep the full m.drainTimeout window before Close.
+	// This is a fixed-budget grace period, NOT a synchronous wait
+	// on inflight calls — the manager has no per-provider call
+	// counter, so a clean drain depends on the provider letting
+	// its in-flight handlers finish during the budget. Providers
+	// that need precise "wait for last call to return" semantics
+	// should expose their own inflight tracking and block in Close.
 	dctx, cancel := context.WithTimeout(ctx, m.drainTimeout)
 	defer cancel()
 	<-dctx.Done()
@@ -520,9 +539,9 @@ func (m *ToolManager) Resolve(ctx context.Context, t Tool, args json.RawMessage)
 	// RemotePermissions with its own AgentID accessor we read
 	// identity off the SessionContext for tests and fall back to
 	// the perm.Service when available.
-	if m.policies.IsConfigured() {
+	if pol := m.policiesSnapshot(); pol.IsConfigured() {
 		agentID, scope := tier3LookupKey(ctx, m.perms)
-		dec, derr := m.policies.Decide(ctx, agentID, t.Name, scope)
+		dec, derr := pol.Decide(ctx, agentID, t.Name, scope)
 		if derr != nil {
 			return p, nil, derr
 		}

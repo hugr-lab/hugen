@@ -251,9 +251,13 @@ func (d *queryDeps) writeResponse(sessionID, requestedDir, queryID string, resp 
 		if rows == 0 {
 			// Empty result — drop the placeholder file so the
 			// model never sees a 0-byte leftover, and surface
-			// `null` instead so the absence is explicit.
+			// `null` instead so the absence is explicit. Schema
+			// is intentionally omitted on null parts so the
+			// envelope stays consistent with the other null
+			// branches in this loop (no columns to enumerate
+			// when there's no data).
 			_ = os.Remove(path)
-			out = append(out, partEntry{Part: p, Null: true, Schema: schema})
+			out = append(out, partEntry{Part: p, Null: true})
 			continue
 		}
 		size, _ := fileSize(path)

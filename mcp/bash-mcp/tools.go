@@ -168,16 +168,41 @@ func (t *Tools) runCore(ctx context.Context, a runArgs) (*mcp.CallToolResult, er
 func buildEnv(extra map[string]string) []string {
 	out := make([]string, 0, len(extra)+8)
 	for _, kv := range os.Environ() {
-		// Strip our own internal vars before forwarding to the child.
-		if strings.HasPrefix(kv, "HUGR_") || strings.HasPrefix(kv, "HUGEN_") || strings.HasPrefix(kv, "BASH_MCP_") {
+		if isInternalEnvKey(envKey(kv)) {
 			continue
 		}
 		out = append(out, kv)
 	}
+	// Apply the same filter to caller-supplied env: otherwise an
+	// LLM could re-inject HUGR_ACCESS_TOKEN / HUGEN_AGENT_ID /
+	// BASH_MCP_* via bash.run env override and reach back into
+	// the agent's auth or workspace plumbing. The strip-on-inherit
+	// pass above is only meaningful when symmetric here.
 	for k, v := range extra {
+		if isInternalEnvKey(k) {
+			continue
+		}
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// envKey returns the leading "KEY" out of a "KEY=VALUE" pair.
+// os.Environ entries always carry an `=` so the lookup is safe.
+func envKey(kv string) string {
+	if i := strings.IndexByte(kv, '='); i >= 0 {
+		return kv[:i]
+	}
+	return kv
+}
+
+// isInternalEnvKey reports whether `name` is a runtime-private
+// variable that must not cross the bash-mcp / child-process
+// boundary in either direction.
+func isInternalEnvKey(name string) bool {
+	return strings.HasPrefix(name, "HUGR_") ||
+		strings.HasPrefix(name, "HUGEN_") ||
+		strings.HasPrefix(name, "BASH_MCP_")
 }
 
 // ----- bash.read_file -----
