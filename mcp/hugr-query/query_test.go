@@ -36,11 +36,11 @@ func makeArrowTable(t *testing.T) types.ArrowTable {
 }
 
 func TestWriteResponse_TabularToParquet(t *testing.T) {
-	d, ws, _ := newDeps(t)
+	d, ws := newDeps(t)
 	resp := &types.Response{
 		Data: map[string]any{"customers": makeArrowTable(t)},
 	}
-	written, err := d.writeResponse("sess1", "", "parquet", "qid", resp)
+	written, err := d.writeResponse("sess1", "", "qid", resp)
 	if err != nil {
 		t.Fatalf("writeResponse: %v", err)
 	}
@@ -48,23 +48,31 @@ func TestWriteResponse_TabularToParquet(t *testing.T) {
 		t.Fatalf("written=%d", len(written))
 	}
 	w := written[0]
-	if w.format != "parquet" {
-		t.Fatalf("format=%s", w.format)
+	if w.Format != "parquet" {
+		t.Fatalf("format=%s", w.Format)
 	}
-	if w.rowCount != 3 {
-		t.Fatalf("rowCount=%d want 3", w.rowCount)
+	if w.RowCount != 3 {
+		t.Fatalf("rowCount=%d want 3", w.RowCount)
+	}
+	if len(w.Schema) != 2 {
+		t.Fatalf("schema cols=%d want 2", len(w.Schema))
+	}
+	if w.Schema[0].Name != "id" || w.Schema[1].Name != "name" {
+		t.Fatalf("schema names = %+v", w.Schema)
 	}
 
-	// Validate the file exists under the session data dir and is
-	// a real Parquet (not a sentinel).
-	want := filepath.Join(ws, "sess1", "data", "qid_customers.parquet")
-	if w.path != want {
-		t.Fatalf("path=%s want %s", w.path, want)
+	// Validate the file exists under <session>/data/<queryID>/ and
+	// is a real Parquet (not a sentinel). Default-dir layout puts
+	// each part inside the per-call directory keyed by the
+	// sanitized GraphQL field path.
+	want := filepath.Join(ws, "sess1", "data", "qid", "customers.parquet")
+	if w.Path != want {
+		t.Fatalf("path=%s want %s", w.Path, want)
 	}
-	if _, err := os.Stat(w.path); err != nil {
+	if _, err := os.Stat(w.Path); err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	pf, err := file.OpenParquetFile(w.path, false)
+	pf, err := file.OpenParquetFile(w.Path, false)
 	if err != nil {
 		t.Fatalf("open parquet: %v", err)
 	}
@@ -72,23 +80,14 @@ func TestWriteResponse_TabularToParquet(t *testing.T) {
 	if pf.NumRows() != 3 {
 		t.Fatalf("parquet rows=%d want 3", pf.NumRows())
 	}
-
-	// Preview is a slice of maps (≤ previewRowCap).
-	prev, ok := w.preview.([]map[string]any)
-	if !ok {
-		t.Fatalf("preview type=%T", w.preview)
-	}
-	if len(prev) != 3 {
-		t.Fatalf("preview len=%d", len(prev))
-	}
 }
 
 func TestWriteResponse_ScalarTopLevelGoesToJSON(t *testing.T) {
-	d, ws, _ := newDeps(t)
+	d, ws := newDeps(t)
 	resp := &types.Response{
 		Data: map[string]any{"count": 42.0},
 	}
-	written, err := d.writeResponse("sess1", "", "parquet", "qid", resp)
+	written, err := d.writeResponse("sess1", "", "qid", resp)
 	if err != nil {
 		t.Fatalf("writeResponse: %v", err)
 	}
@@ -96,30 +95,33 @@ func TestWriteResponse_ScalarTopLevelGoesToJSON(t *testing.T) {
 		t.Fatalf("written=%d", len(written))
 	}
 	w := written[0]
-	if w.format != "json" {
-		t.Fatalf("format=%s want json", w.format)
+	if w.Format != "json" {
+		t.Fatalf("format=%s want json", w.Format)
 	}
-	body, err := os.ReadFile(w.path)
+	body, err := os.ReadFile(w.Path)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	if string(body) != "42" {
 		t.Fatalf("file=%q want 42", string(body))
 	}
-	if !filepath.IsAbs(w.path) || filepath.Dir(w.path) != filepath.Join(ws, "sess1", "data") {
-		t.Fatalf("path=%s not under session data", w.path)
+	if !filepath.IsAbs(w.Path) || filepath.Dir(w.Path) != filepath.Join(ws, "sess1", "data", "qid") {
+		t.Fatalf("path=%s not under <sid>/data/<qid>/", w.Path)
+	}
+	if w.Preview != "42" {
+		t.Fatalf("preview=%q want 42", w.Preview)
 	}
 }
 
 func TestWriteResponse_MultiOutput(t *testing.T) {
-	d, _, _ := newDeps(t)
+	d, _ := newDeps(t)
 	resp := &types.Response{
 		Data: map[string]any{
 			"customers": makeArrowTable(t),
 			"summary":   map[string]any{"total": 3},
 		},
 	}
-	written, err := d.writeResponse("sess1", "", "parquet", "qid", resp)
+	written, err := d.writeResponse("sess1", "", "qid", resp)
 	if err != nil {
 		t.Fatalf("writeResponse: %v", err)
 	}
@@ -129,7 +131,7 @@ func TestWriteResponse_MultiOutput(t *testing.T) {
 	// Each output uses a distinct path (key embedded).
 	paths := map[string]bool{}
 	for _, w := range written {
-		paths[w.path] = true
+		paths[w.Path] = true
 	}
 	if len(paths) != 2 {
 		t.Fatalf("paths collide: %v", paths)
@@ -137,7 +139,7 @@ func TestWriteResponse_MultiOutput(t *testing.T) {
 }
 
 func TestRunQueryJQ_ValidatesEmptyArgs(t *testing.T) {
-	d, _, _ := newDeps(t)
+	d, _ := newDeps(t)
 	_, err := d.runQueryJQ(t.Context(), "sess1", queryJQArgs{})
 	if err == nil {
 		t.Fatal("expected error on empty graphql")
@@ -149,7 +151,7 @@ func TestRunQueryJQ_ValidatesEmptyArgs(t *testing.T) {
 }
 
 func TestRunQuery_ValidatesEmptyGraphql(t *testing.T) {
-	d, _, _ := newDeps(t)
+	d, _ := newDeps(t)
 	_, err := d.runQuery(t.Context(), "sess1", queryArgs{})
 	if err == nil {
 		t.Fatal("expected error on empty graphql")
@@ -158,11 +160,18 @@ func TestRunQuery_ValidatesEmptyGraphql(t *testing.T) {
 
 func TestQueryResultEnvelope_ShapeStable(t *testing.T) {
 	out := queryResult{
-		QueryID:   "qid",
-		Path:      "/x.parquet",
-		Format:    "parquet",
-		RowCount:  10,
-		Preview:   []any{1, 2},
+		QueryID: "qid",
+		Part: &partEntry{
+			Path:     "/x.parquet",
+			Format:   "parquet",
+			Part:     "customers",
+			Size:     1234,
+			RowCount: 10,
+			Schema: []schemaColumn{
+				{Name: "id", Type: "int64"},
+				{Name: "name", Type: "utf8"},
+			},
+		},
 		ElapsedMS: 7,
 	}
 	body, err := json.Marshal(out)
@@ -173,9 +182,18 @@ func TestQueryResultEnvelope_ShapeStable(t *testing.T) {
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"query_id", "path", "format", "row_count", "preview", "elapsed_ms"} {
+	for _, k := range []string{"query_id", "part", "elapsed_ms"} {
 		if _, ok := parsed[k]; !ok {
 			t.Fatalf("missing key %q", k)
+		}
+	}
+	p, ok := parsed["part"].(map[string]any)
+	if !ok {
+		t.Fatalf("part = %T", parsed["part"])
+	}
+	for _, k := range []string{"path", "format", "row_count", "schema", "part", "size"} {
+		if _, ok := p[k]; !ok {
+			t.Fatalf("missing part.%s", k)
 		}
 	}
 }

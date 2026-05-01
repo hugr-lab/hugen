@@ -62,8 +62,6 @@ func run(log *slog.Logger) error {
 		client:    cli,
 		timeouts:  timeouts,
 		workspace: os.Getenv("WORKSPACES_ROOT"),
-		shared:    os.Getenv("SHARED_DIR"),
-		agentID:   os.Getenv("HUGEN_AGENT_ID"),
 	}
 
 	srv := server.NewMCPServer(
@@ -77,7 +75,6 @@ func run(log *slog.Logger) error {
 		"hugr_url", authCfg.HugrURL,
 		"token_url", authCfg.TokenURL,
 		"workspaces_root", deps.workspace,
-		"shared_dir", deps.shared,
 		"timeout_default_ms", timeouts.DefaultMS,
 		"timeout_max_ms", timeouts.MaxMS,
 	)
@@ -91,12 +88,46 @@ func run(log *slog.Logger) error {
 // dispatch. Direct callers (tests) populate the same key.
 func registerTools(srv *server.MCPServer, deps *queryDeps) {
 	srv.AddTool(mcp.NewTool("query",
-		mcp.WithDescription("Run a GraphQL query against Hugr; persist tabular results as Parquet (default) or JSON under the session workspace and return the path + a ≤ 50-row preview."),
+		mcp.WithDescription(`Run a GraphQL query against Hugr and persist every result part to disk under the session workspace. Use this for big result sets and anything you intend to read back later via bash tools — for small inline-friendly results prefer hugr-main:data-* tools.
+
+Per-part format is decided by the response shape, not by the caller:
+  - tabular parts (ArrowTable) → Parquet
+  - object / scalar parts      → JSON
+  - GraphQL "extensions"       → JSON (when present)
+
+Each part is named after its GraphQL field path (dots preserved as ` + "`_`" + `), e.g. ` + "`function_core_payments_aggregation.parquet`" + `. The ` + "`path`" + ` argument names the *directory* the parts land in.
+
+Result envelope:
+  { "query_id":   string,           // opaque id of this call
+    "elapsed_ms": int,               // actual wall time
+    "part":       partEntry,         // present when the response has exactly one part
+    "parts":      [partEntry, ...]   // present when the response has > 1 part
+  }
+
+partEntry:
+  { "path":      string,             // absolute on-disk path (omitted when "null": true)
+    "format":    "parquet"|"json",
+    "field":     string,             // dotted GraphQL path the part came from
+                                     //   e.g. "function.core.payments.aggregation"
+    "size":      int,                // bytes written
+    "row_count": int,                // Parquet only
+    "schema":    [{name,type,metadata?}, ...], // Parquet only — Arrow schema
+    "preview":   string,             // JSON only — first ≤ 1 KB of the file body
+    "truncated": bool,               // JSON only — true when preview was capped
+    "null":      bool                // part was null/empty; no file written
+  }
+
+Empty / null parts are NOT written to disk — the entry just carries field+null:true so you still see the shape of the response. Read full file contents back via bash-mcp when needed.`),
 		mcp.WithString("graphql", mcp.Required(), mcp.Description("Full GraphQL query text.")),
 		mcp.WithObject("variables", mcp.Description("GraphQL variables.")),
-		mcp.WithString("path", mcp.Description("Output path. Relative paths anchor at the session workspace root; absolute paths must resolve under <workspace>/<sid>/ or <shared>/<agent>/. Default: data/<short_id>.<ext>.")),
-		mcp.WithString("format", mcp.Description("parquet (default) or json. Honoured for tabular shapes only.")),
-		mcp.WithNumber("timeout_ms", mcp.Description("Per-call deadline in ms. Silently clamped to the operator ceiling. Defaults to HUGR_QUERY_TIMEOUT_MS.")),
+		mcp.WithString("path", mcp.Description(
+			`Optional relative directory (inside your session workspace) where parts will be written. `+
+				`Each part lands in this directory under a filename derived from its GraphQL path `+
+				`(e.g. "function_core_payments_aggregation.parquet"). `+
+				`Output never leaves the session workspace — if you need the files in the agent's shared `+
+				`folder, copy them there afterwards via bash-mcp. `+
+				`Default (omitted): "data/<query_id>/".`)),
+		mcp.WithNumber("timeout_ms", mcp.Description("Per-call deadline in ms. Silently clamped to the operator ceiling (HUGR_QUERY_MAX_TIMEOUT_MS, default 24 h). Defaults to HUGR_QUERY_TIMEOUT_MS (default 1 h).")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var args queryArgs
 		if err := req.BindArguments(&args); err != nil {

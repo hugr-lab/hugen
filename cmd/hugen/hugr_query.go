@@ -36,8 +36,6 @@ type hugrQueryBuilder struct {
 	// any other non-loopback name.
 	loopbackPort int
 	stateDir     string // ${HUGEN_STATE} — workspaces parent
-	sharedDir    string // ${HUGEN_SHARED_ROOT}
-	agentID      string
 	log          *slog.Logger
 }
 
@@ -60,21 +58,17 @@ func (b *hugrQueryBuilder) Build(ctx context.Context, spec config.ToolProviderSp
 
 	// Compose env: start from the operator's YAML — they own
 	// HUGR_URL, optional timeout overrides, and any deploy-specific
-	// proxy headers. The runtime then layers in the four keys it
-	// has authority over (token URL, bootstrap secret, workspace
-	// roots, agent id) — those override silently because YAML
-	// can't see them anyway.
-	env := make(map[string]string, len(spec.Env)+5)
+	// proxy headers. The runtime then layers in the keys it has
+	// authority over (token URL, bootstrap secret, workspace
+	// roots) — those override silently because YAML can't see
+	// them anyway.
+	env := make(map[string]string, len(spec.Env)+3)
 	for k, v := range spec.Env {
 		env[k] = v
 	}
 	env["HUGR_TOKEN_URL"] = httpapi.LoopbackTokenURL("", b.loopbackPort)
 	env["HUGR_ACCESS_TOKEN"] = bootstrap
 	env["WORKSPACES_ROOT"] = filepath.Join(b.stateDir, "workspaces")
-	if b.sharedDir != "" {
-		env["SHARED_DIR"] = b.sharedDir
-	}
-	env["HUGEN_AGENT_ID"] = b.agentID
 
 	mcpSpec := tool.MCPProviderSpec{
 		Name:        spec.Name,

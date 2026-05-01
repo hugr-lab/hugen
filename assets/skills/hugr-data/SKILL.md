@@ -90,10 +90,11 @@ This skill grants two distinct tool surfaces:
   `hugr-main:data-*`. Results land **inline** in the model's context. Use
   for schema exploration and small result sets.
 - **`hugr-query`** (in-tree, local MCP) — `hugr-query:query`,
-  `hugr-query:query_jq`. Persists results as Parquet/JSON under the session
-  workspace and returns a path + ≤ 50-row preview. Use for big result
-  sets, file output, and JQ post-processing. See `references/hugr-query.md`
-  before first use.
+  `hugr-query:query_jq`. Tabular leaves persist as Parquet, object
+  leaves as JSON; returns one entry per file with path, format, and
+  either Arrow schema + row count (Parquet) or a short text preview
+  (JSON). Use for big result sets, file output, and JQ post-
+  processing. See `references/hugr-query.md` before first use.
 
 Rule of thumb: anything that fits comfortably in the model context (rows ≤ 50,
 small JSON) goes through `hugr-main`. Bigger payloads or anything you intend
@@ -145,7 +146,7 @@ filtered per-role and module names cannot be guessed.
 7. **Validate** → `hugr-main:data-validate_graphql_query`
 8. **Execute** —
    - Small inline reply? → `hugr-main:data-inline_graphql_result` (use jq to reshape; increase `max_result_size` up to 5000 if truncated)
-   - Big result, file output? → `hugr-query:query` (Parquet by default; JSON when `format: json`)
+   - Big result, file output? → `hugr-query:query` (engine response decides Parquet vs JSON per leaf)
    - JQ post-process to one JSON value? → `hugr-query:query_jq` — JQ input is the full `{data, errors}` envelope; results live under `.data.<field>`
 9. **Present** — tables, charts, dashboards, or concise text summaries
 

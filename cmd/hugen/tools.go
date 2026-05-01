@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -106,8 +105,6 @@ func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillMa
 			authStore:    tokenStore,
 			loopbackPort: core.Boot.Port,
 			stateDir:     core.Boot.StateDir,
-			sharedDir:    os.Getenv("HUGEN_SHARED_ROOT"),
-			agentID:      core.Agent.ID(),
 			log:          core.Logger,
 		}
 		opts = append(opts, tool.WithProviderBuilder("hugr-query", hq))

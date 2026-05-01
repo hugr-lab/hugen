@@ -80,17 +80,3 @@ func hugrError(list gqlerror.List) error {
 	return &toolError{Code: "hugr_error", GraphQLErrs: out}
 }
 
-// capPreview reduces a value to ≤ previewRowCap rows when it's a
-// JSON array. For other shapes the value passes through untouched
-// — the LLM gets the full object, which is small by definition
-// (the caller already routed bulk payloads to disk).
-func capPreview(v any) any {
-	arr, ok := v.([]any)
-	if !ok {
-		return v
-	}
-	if len(arr) <= previewRowCap {
-		return arr
-	}
-	return arr[:previewRowCap]
-}

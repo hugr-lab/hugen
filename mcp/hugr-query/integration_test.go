@@ -146,7 +146,6 @@ func TestHugrQuery_BootstrapAuthFlow(t *testing.T) {
 			"HUGR_TOKEN_URL":    tokenSrv.URL + "/api/auth/agent-token",
 			"HUGR_ACCESS_TOKEN": bootstrap,
 			"WORKSPACES_ROOT":   wsRoot,
-			"HUGEN_AGENT_ID":    "agent-int",
 		},
 	}
 	prov, err := tool.NewMCPProvider(ctx, spec, slog.New(slog.DiscardHandler))

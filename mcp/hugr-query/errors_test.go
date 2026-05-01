@@ -67,23 +67,3 @@ func TestHugrError_FormatsList(t *testing.T) {
 	}
 }
 
-func TestCapPreview_TruncatesArray(t *testing.T) {
-	in := make([]any, 100)
-	for i := range in {
-		in[i] = i
-	}
-	got, ok := capPreview(in).([]any)
-	if !ok {
-		t.Fatalf("not []any")
-	}
-	if len(got) != previewRowCap {
-		t.Fatalf("len=%d want %d", len(got), previewRowCap)
-	}
-}
-
-func TestCapPreview_PassesThroughNonArray(t *testing.T) {
-	v := map[string]any{"a": 1}
-	if got := capPreview(v); got == nil {
-		t.Fatal("got nil")
-	}
-}

@@ -21,33 +21,46 @@ Use `hugr-main`'s `data-inline_graphql_result` when:
 
 ## Tool: `hugr-query:query`
 
-Run a GraphQL query and persist tabular/object results to files.
+Run a GraphQL query and persist every result leaf to a file.
+There is no `format` knob: the engine response decides — table
+leaves go to **Parquet**, object leaves (and `extensions`) go
+to **JSON**.
 
 **Args**:
 - `graphql` (string, required) — query text.
 - `variables` (object, optional) — GraphQL variables.
 - `path` (string, optional) — output path under
   `/workspace/<session_id>/data/` or `/shared/<agent_id>/`.
-  Defaults to a generated path under
-  `/workspace/<session_id>/data/<short_id>.parquet`.
-- `format` (`parquet` (default) | `json`) — applies to tabular
-  shapes; non-tabular always serialises to JSON regardless.
+  Honoured only when the response produces a single leaf;
+  multi-leaf responses always auto-name. The on-disk extension
+  is rewritten to match the actual format, so `out.parquet`
+  becomes `out.json` when the leaf is non-tabular. Defaults to
+  `/workspace/<session_id>/data/<short_id>.<ext>`.
 - `timeout_ms` (int, optional) — per-call deadline. Silently
   clamped to the operator's ceiling (`HUGR_QUERY_MAX_TIMEOUT_MS`,
   default 24 h). Default per-call budget is 1 h.
 
 **Returns**: `QueryResult` —
 - `query_id` — short id of the call.
-- `path` — written file when single output.
-- `paths` — array of paths when GraphQL produced multiple
-  top-level siblings.
-- `format` — `parquet` or `json`.
-- `row_count` — for tabular outputs.
-- `preview` — ≤ 50 rows for tabular shapes; the value itself
-  (capped) for objects/scalars.
+- `file` — single-leaf descriptor (only when one leaf was
+  produced).
+- `files` — array of leaf descriptors (only when multiple
+  leaves — table + object, multi-table queries, etc.).
 - `elapsed_ms` — actual time the call took.
 
-## Tool: `hugr-query:queryJQ`
+Each `fileEntry` contains:
+- `path` — absolute on-disk path.
+- `format` — `parquet` (table leaf) or `json` (object / scalar
+  leaf, or `extensions`).
+- `field` — dotted GraphQL path the leaf came from
+  (e.g. `function.core.payments.aggregation`).
+- `row_count` + `schema` — Parquet only. `schema` is an array
+  of `{name, type, metadata}` describing each Arrow column.
+- `preview` + `truncated` — JSON only. `preview` is the first
+  ≤ 2 KB of the file body verbatim; `truncated` is `true` when
+  the body was longer.
+
+## Tool: `hugr-query:query_jq`
 
 Run a GraphQL query and post-process via JQ before persisting a
 single JSON value.
@@ -57,10 +70,11 @@ single JSON value.
 - `variables` (object, optional).
 - `jq` (string, required) — JQ expression applied server-side.
 - `path` (string, optional) — defaults to
-  `/workspace/<session_id>/data/<short_id>.json`.
+  `/workspace/<session_id>/data/<short_id>.json`. The extension
+  is rewritten to `.json` if it differs.
 - `timeout_ms` (int, optional) — same semantics as `hugr-query:query`.
 
-**Returns**: `QueryResult` with `format=json`.
+**Returns**: `QueryResult` with `file.format=json`.
 
 ## Errors
 
@@ -82,10 +96,10 @@ The provider reports structured `tool_error` codes:
 - Absolute `path` → must canonicalise (post-symlink-resolution)
   under either the session workspace or the shared dir.
   Anything else is rejected with `path_escape`.
-- Multi-output GraphQL (more than one top-level field) writes
-  one file per field; `paths` holds the array, `path` is empty.
-  Field names are sanitised in filenames (slashes / spaces /
-  dots become `_`).
+- Multi-leaf GraphQL responses (more than one table / object /
+  extensions) write one file per leaf; the result envelope's
+  `files` array holds them. Field names are sanitised in
+  filenames (slashes / spaces / dots become `_`).
 
 ## Reading the result back
 
@@ -95,10 +109,13 @@ the same session. Example:
 
 ```text
 1. hugr-query:query graphql=…
-   → { path: "/workspace/<sid>/data/abc12345.parquet",
-       row_count: 12345, preview: [...] }
+   → { query_id: "abc12345",
+       file: { path: "/workspace/<sid>/data/abc12345_function_core_payments.parquet",
+               format: "parquet", row_count: 12345,
+               schema: [{name: "id", type: "int64"}, ...] },
+       elapsed_ms: 412 }
 2. bash.list_dir path="data"
-3. bash.read_file path="data/abc12345.parquet" start=0 length=1024
+3. bash.read_file path="data/abc12345_function_core_payments.parquet" start=0 length=1024
    → first KB of the parquet header (binary)
 ```
 

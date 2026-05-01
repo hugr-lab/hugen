@@ -17,6 +17,12 @@ allowed-tools:
       - skill_load
       - skill_unload
       - skill_ref
+      - policy_save
+      - policy_revoke
+      - runtime_reload
+      - mcp_add_server
+      - mcp_remove_server
+      - mcp_reload_server
 metadata:
   hugen:
     requires: []
@@ -87,6 +93,21 @@ shell tools and file tools see exactly the same paths.
   prompt before loading.
 - `skill_ref` — read a reference document that ships with a
   loaded skill (`references/<name>.md`).
+- `policy_save` / `policy_revoke` — persist or remove a personal
+  Tier-3 tool policy ("always allow" / "always deny") for the
+  caller. Args: `tool_name` (`<provider>:<field>`, glob `*`
+  suffix accepted), `decision` (`allow|deny|ask`), optional
+  `scope` (default `global`) and `note`. Tier 3 NEVER overrides
+  the operator floor or the user's role rules — when the user
+  asks "always allow X", call this; if X is later denied by a
+  higher tier the call still blocks (that's correct behaviour).
+- `runtime_reload` — re-read live runtime state. `target` ∈
+  `permissions` (re-fetch Hugr role rules), `skills` (rescan
+  skill stores), `mcp` (re-spawn per-agent MCP providers), or
+  `all`. Use only when the user explicitly asks to refresh.
+- `mcp_add_server` / `mcp_remove_server` / `mcp_reload_server`
+  — admin path to attach or detach an MCP server at runtime.
+  Operator-only; the call may be denied by policy.
 
 ## Operator policy
 
