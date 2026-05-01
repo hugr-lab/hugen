@@ -76,7 +76,7 @@ func buildPermissionService(core *RuntimeCore) perm.Service {
 		return local
 	}
 	core.Logger.Info("permissions: remote tier enabled (function.core.auth.my_permissions)")
-	return perm.NewRemotePermissions(view, core.Identity, newPermQuerier(q))
+	return perm.NewRemotePermissions(view, core.Identity, perm.NewRemoteQuerier(q))
 }
 
 // buildToolStack wires SkillManager + PermissionService + ToolManager

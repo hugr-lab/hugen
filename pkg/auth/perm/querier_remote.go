@@ -1,4 +1,4 @@
-package main
+package perm
 
 import (
 	"context"
@@ -6,25 +6,28 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/store/queries"
 	"github.com/hugr-lab/query-engine/types"
 )
 
-// permQuerier adapts a types.Querier into a perm.Querier that
+// RemoteQuerier adapts a types.Querier into a perm.Querier that
 // runs function.core.auth.my_permissions and maps the response
-// to []perm.Rule. The function ignores its argument list — Hugr
+// to []Rule. The function ignores its argument list — Hugr
 // resolves identity from the GraphQL request's Authorization
 // header, so QueryRules is parameter-free on the consumer side.
-type permQuerier struct {
+type RemoteQuerier struct {
 	q types.Querier
 }
 
-func newPermQuerier(q types.Querier) *permQuerier {
+// NewRemoteQuerier wraps a types.Querier so it can serve as the
+// Querier behind RemotePermissions. Returns nil if q is nil so the
+// caller can pass the result straight to NewRemotePermissions
+// without a defensive check.
+func NewRemoteQuerier(q types.Querier) *RemoteQuerier {
 	if q == nil {
 		return nil
 	}
-	return &permQuerier{q: q}
+	return &RemoteQuerier{q: q}
 }
 
 // permEntry mirrors auth_my_permission_entry from the Hugr
@@ -45,10 +48,10 @@ type myPermissionsResponse struct {
 }
 
 // QueryRules fetches the current role's permission rules from
-// Hugr and maps them to perm.Rule. An ErrNoData / ErrWrongDataPath
+// Hugr and maps them to Rule. An ErrNoData / ErrWrongDataPath
 // surface means the caller has no role assignments — that's a
 // valid empty list, not an error.
-func (p *permQuerier) QueryRules(ctx context.Context) ([]perm.Rule, error) {
+func (p *RemoteQuerier) QueryRules(ctx context.Context) ([]Rule, error) {
 	got, err := queries.RunQuery[myPermissionsResponse](ctx, p.q,
 		`query {
 			function { core { auth { my_permissions {
@@ -68,11 +71,11 @@ func (p *permQuerier) QueryRules(ctx context.Context) ([]perm.Rule, error) {
 	if got.Disabled {
 		// Role itself is disabled — surface as a single
 		// catch-all deny so every Resolve fails fast.
-		return []perm.Rule{{Type: "*", Field: "*", Disabled: true}}, nil
+		return []Rule{{Type: "*", Field: "*", Disabled: true}}, nil
 	}
-	rules := make([]perm.Rule, 0, len(got.Permissions))
+	rules := make([]Rule, 0, len(got.Permissions))
 	for _, e := range got.Permissions {
-		rules = append(rules, perm.Rule{
+		rules = append(rules, Rule{
 			Type:     e.Object,
 			Field:    e.Field,
 			Disabled: e.Disabled,
