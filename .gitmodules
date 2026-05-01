@@ -1,0 +1,4 @@
+[submodule "vendor/mcp-server-motherduck"]
+	path = vendor/mcp-server-motherduck
+	url = https://github.com/motherduckdb/mcp-server-motherduck.git
+	branch = main

@@ -1,0 +1,22 @@
+# Phase 3.5 — analyst toolkit baseline. The python-mcp build mode
+# (`python-mcp --create-template <this file>`) installs these into a
+# relocatable venv that sessions copy on first run_code / run_script
+# call. No version pins in this phase; uv resolves latest at template
+# build time. Determinism via a uv.lock is a phase-4+ concern.
+#
+# Operators who need extra packages: extend this list and rebuild the
+# template (`make python-mcp-template`).
+#
+# Note: weasyprint also requires the system libraries Cairo, Pango,
+# gdk-pixbuf, and libffi at run time; install via the host package
+# manager. See README §Prerequisites.
+
+pandas
+pyarrow
+duckdb
+hugr-client
+matplotlib
+plotly
+great_tables
+folium
+weasyprint
