@@ -749,10 +749,11 @@ func (s *Session) streamTurn(ctx, turnCtx context.Context, stream model.Stream) 
 
 // defaultMaxToolIterations is the per-Turn cap on
 // model→tool→model loops applied when the session was
-// constructed without WithMaxToolIterations. 15 mirrors ADK's
-// defaultDispatchMaxTurns — proven adequate for typical hugr-
-// explorer / multi-step-reasoning sessions.
-const defaultMaxToolIterations = 15
+// constructed without WithMaxToolIterations. 20 covers
+// hugr-data exploration patterns where the model legitimately
+// chains discovery → schema lookup → query validate → query
+// without hitting the cap on a single user request.
+const defaultMaxToolIterations = 20
 
 // dispatchToolCall handles one model-emitted tool call: emits the
 // tool_call frame, runs Tier-1 permission resolution, and either
