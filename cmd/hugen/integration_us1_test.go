@@ -55,7 +55,7 @@ type integrationCore struct {
 	skills       *skill.SkillManager
 	skillStore   skill.SkillStore
 	manager      *session.Manager
-	workspaces   *sessionWorkspaces
+	workspaces   *session.Workspace
 }
 
 func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrationCore {
@@ -104,7 +104,7 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 		Tools:  tools,
 	}
-	ws := newSessionWorkspaces()
+	ws := session.NewWorkspace(workspaceDir, true)
 	lc := buildSessionLifecycle(rcLite, ws)
 
 	router, agent := makeRouter(t)
@@ -304,7 +304,8 @@ func TestUS1_OrphanSweep(t *testing.T) {
 	old := time.Now().Add(-2 * time.Hour)
 	_ = os.Chtimes(orphan, old, old)
 
-	removed, err := sweepOrphans(workspaceDir, map[string]struct{}{"ses-live": {}}, time.Hour)
+	ws := session.NewWorkspace(workspaceDir, true)
+	removed, err := ws.SweepOrphans(map[string]struct{}{"ses-live": {}}, time.Hour)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}

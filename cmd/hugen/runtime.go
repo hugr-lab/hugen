@@ -50,7 +50,7 @@ type RuntimeCore struct {
 	SkillStore  skill.SkillStore
 	Permissions perm.Service
 	Tools       *tool.ToolManager
-	workspaces  *sessionWorkspaces
+	workspaces  *session.Workspace
 
 	// HTTPSrv hosts the auth endpoints (phase 1) and, in phase 2,
 	// /api/v1/* via pkg/adapter/http. Both share the same mux so the
@@ -213,7 +213,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 		return nil, failed("commands_skill", err)
 	}
 
-	core.workspaces = newSessionWorkspaces()
+	core.workspaces = session.NewWorkspace(boot.WorkspaceDir, boot.CleanupOnClose)
 	core.Manager = session.NewManager(
 		core.Store, agent, router, cmds, core.Codec, core.Logger,
 		session.WithLifecycle(buildSessionLifecycle(core, core.workspaces)),
