@@ -42,20 +42,6 @@ type OpenRequest struct {
 // either /end fires or the runtime is shut down explicitly. This
 // is what makes the long-lived-session promise honest — adapter
 // crash != session loss.
-// SessionLifecycle is an optional hook the runtime calls on
-// Session.Open and Session.Close. Used by cmd/hugen to spawn /
-// teardown per-session resources (the workspace directory and
-// the per-session bash-mcp subprocess + tool.MCPProvider). All
-// methods may be nil.
-//
-// Hooks run synchronously inside Open/Close; an OnOpen error
-// fails the Open and rolls back the session row. OnClose errors
-// are logged but do not fail Close (the session row is already
-// transitioning to closed).
-type SessionLifecycle struct {
-	OnOpen  func(ctx context.Context, sessionID string) error
-	OnClose func(ctx context.Context, sessionID string) error
-}
 
 type Manager struct {
 	store    RuntimeStore
@@ -66,7 +52,7 @@ type Manager struct {
 	logger   *slog.Logger
 
 	sessionOpts []SessionOption
-	lifecycle   SessionLifecycle
+	lifecycle   Lifecycle
 
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
@@ -84,10 +70,12 @@ type Manager struct {
 // ManagerOption configures a Manager at construction.
 type ManagerOption func(*Manager)
 
-// WithLifecycle attaches OnOpen/OnClose hooks to the manager.
-// Used by cmd/hugen to wire per-session bash-mcp lifecycle without
-// pulling tool/skill/permission imports into pkg/runtime.
-func WithLifecycle(l SessionLifecycle) ManagerOption {
+// WithLifecycle attaches a Lifecycle to the manager. The Lifecycle
+// owns per-session resource acquisition and release — typically a
+// *Resources constructed by cmd/hugen at boot. A nil Lifecycle
+// means the manager opens sessions without per-session resources
+// (used by tests that don't wire a workspace or tool stack).
+func WithLifecycle(l Lifecycle) ManagerOption {
 	return func(m *Manager) { m.lifecycle = l }
 }
 
@@ -154,11 +142,10 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, time.Tim
 	if err := m.store.OpenSession(ctx, row); err != nil {
 		return nil, time.Time{}, fmt.Errorf("manager: open session: %w", err)
 	}
-	if m.lifecycle.OnOpen != nil {
-		if err := m.lifecycle.OnOpen(ctx, id); err != nil {
-			// Roll back the session row so a failed lifecycle hook
-			// (e.g. workspace mkdir or bash-mcp spawn) doesn't leave
-			// an orphan active row.
+	if m.lifecycle != nil {
+		if err := m.lifecycle.Acquire(ctx, id); err != nil {
+			// Roll back the session row so a failed Acquire doesn't
+			// leave an orphan active row.
 			_ = m.store.UpdateSessionStatus(ctx, id, StatusClosed)
 			return nil, time.Time{}, fmt.Errorf("manager: open session lifecycle: %w", err)
 		}
@@ -206,14 +193,13 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
 			m.logger.Warn("manager: re-activate session", "session", id, "err", err)
 		}
 	}
-	// Re-run the OnOpen hook so per-session resources reattach
-	// after a process restart: bash-mcp (and other per_session MCPs)
-	// must be respawned, autoload skills re-bound, workspace dir
-	// re-prepared. The hook is idempotent — MkdirAll, autoload-Load
-	// and AddSessionProvider all tolerate a no-op when state is
-	// already correct.
-	if m.lifecycle.OnOpen != nil {
-		if err := m.lifecycle.OnOpen(ctx, id); err != nil {
+	// Re-run Acquire so per-session resources reattach after a
+	// process restart: per_session MCPs are respawned, autoload
+	// skills re-bound, workspace dir re-prepared. Resources.Acquire
+	// is idempotent (MkdirAll, autoload-Load and AddSessionProvider
+	// all tolerate a no-op when state is already correct).
+	if m.lifecycle != nil {
+		if err := m.lifecycle.Acquire(ctx, id); err != nil {
 			m.logger.Warn("manager: resume lifecycle", "session", id, "err", err)
 		}
 	}
@@ -267,8 +253,8 @@ func (m *Manager) Close(ctx context.Context, id, reason string) (time.Time, erro
 		if err := m.store.UpdateSessionStatus(ctx, id, StatusClosed); err != nil {
 			return time.Time{}, err
 		}
-		if m.lifecycle.OnClose != nil {
-			if err := m.lifecycle.OnClose(ctx, id); err != nil {
+		if m.lifecycle != nil {
+			if err := m.lifecycle.Release(ctx, id); err != nil {
 				m.logger.Warn("manager: close session lifecycle", "session", id, "err", err)
 			}
 		}
@@ -290,8 +276,8 @@ func (m *Manager) Close(ctx context.Context, id, reason string) (time.Time, erro
 	case <-ctx.Done():
 		return time.Time{}, ctx.Err()
 	}
-	if m.lifecycle.OnClose != nil {
-		if err := m.lifecycle.OnClose(ctx, id); err != nil {
+	if m.lifecycle != nil {
+		if err := m.lifecycle.Release(ctx, id); err != nil {
 			m.logger.Warn("manager: close session lifecycle", "session", id, "err", err)
 		}
 	}

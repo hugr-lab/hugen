@@ -83,8 +83,8 @@ func buildPermissionService(core *RuntimeCore) perm.Service {
 // + SystemProvider, registers any non-MCP provider builders the
 // deployment opts into (hugr-query today), then asks the manager to
 // open every per_agent entry from cfg.ToolProviders. Per_session
-// providers (bash-mcp today) are wired by buildSessionLifecycle on
-// Session.Open.
+// providers (bash-mcp today) are wired by session.Resources on
+// Session.Open via the spawn.Sources / Lifecycle plumbing.
 func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillManager) (*tool.ToolManager, error) {
 	opts := []tool.ToolManagerOption{}
 
@@ -101,6 +101,11 @@ func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillMa
 	}
 	if tokenStore != nil {
 		mountAgentTokenHandler(core.Mux, tokenStore)
+		// Hand the store to the rest of the runtime so per-session
+		// providers with `auth: hugr` (composed via the spawn.Source
+		// registry in buildRuntimeCore) share the same loopback
+		// exchange surface as hugr-query.
+		core.AgentTokenStore = tokenStore
 		hq := &hugrQueryBuilder{
 			authStore:    tokenStore,
 			loopbackPort: core.Boot.Port,

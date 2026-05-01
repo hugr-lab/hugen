@@ -53,7 +53,7 @@ func (f AuthResolverFunc) RoundTripper(name string) (http.RoundTripper, error) {
 // Init opens the per_agent MCP entries from the configuration
 // passed to NewToolManager and registers them as global providers.
 // Per_session entries are skipped — they are spawned in the
-// SessionLifecycle.OnOpen hook (bash-mcp pattern).
+// session.Resources.Acquire path (bash-mcp pattern).
 //
 // A per-provider failure (bad config, unreachable endpoint,
 // initialise error) is logged and the provider is skipped — Init
@@ -73,7 +73,7 @@ func (m *ToolManager) Init(ctx context.Context) error {
 		m.log.Warn("tool: live reload of tool_providers not implemented; restart hugen to apply changes")
 	})
 	for _, spec := range m.providersView.Providers() {
-		if effectiveLifetime(spec) != LifetimePerAgent {
+		if EffectiveLifetime(spec) != LifetimePerAgent {
 			continue
 		}
 		builder := m.builderFor(spec.Type)
@@ -201,10 +201,13 @@ func IsHTTPTransport(t string) bool {
 	}
 }
 
-// effectiveLifetime applies the default rule: HTTP/SSE → per_agent
+// EffectiveLifetime applies the default rule: HTTP/SSE → per_agent
 // (one connection for the whole process); stdio → per_session
 // (the bash-mcp pattern). Explicit cfg.Lifetime always wins.
-func effectiveLifetime(spec config.ToolProviderSpec) Lifetime {
+//
+// Exported for the session package, which uses it to decide which
+// providers to spawn on session.Open vs at boot.
+func EffectiveLifetime(spec config.ToolProviderSpec) Lifetime {
 	return parseLifetime(spec.Lifetime, IsHTTPTransport(spec.Transport))
 }
 

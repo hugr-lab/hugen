@@ -70,11 +70,6 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 		}
 	}
 
-	boot := &BootstrapConfig{
-		StateDir:       stateDir,
-		WorkspaceDir:   workspaceDir,
-		CleanupOnClose: true,
-	}
 	cfgSvc := config.NewStaticService(config.StaticInput{
 		ToolProviders: []config.ToolProviderSpec{{
 			Name:      "bash-mcp",
@@ -98,20 +93,22 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 	tools := tool.NewToolManager(perms, nil, nil, nil, nil)
 	t.Cleanup(func() { _ = tools.Close() })
 
-	rcLite := &RuntimeCore{
-		Boot:   boot,
-		Config: cfgSvc,
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
-		Tools:  tools,
-	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	ws := session.NewWorkspace(workspaceDir, true)
-	lc := buildSessionLifecycle(rcLite, ws)
+	resources := session.NewResources(session.ResourceDeps{
+		Providers:  cfgSvc.ToolProviders(),
+		Tools:      tools,
+		Skills:     skills,
+		SkillStore: skillStore,
+		Workspace:  ws,
+		Logger:     logger,
+	})
 
 	router, agent := makeRouter(t)
 	mgr := session.NewManager(
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), nil,
-		session.WithLifecycle(lc),
+		session.WithLifecycle(resources),
 		session.WithSessionOptions(session.WithTools(tools)),
 	)
 

@@ -12,8 +12,11 @@ import (
 	"github.com/hugr-lab/query-engine/client"
 	"github.com/hugr-lab/query-engine/types"
 
+	httpapi "github.com/hugr-lab/hugen/pkg/adapter/http"
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
+	hugrsource "github.com/hugr-lab/hugen/pkg/auth/sources/hugr"
+	"github.com/hugr-lab/hugen/pkg/auth/spawn"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
@@ -51,6 +54,14 @@ type RuntimeCore struct {
 	Permissions perm.Service
 	Tools       *tool.ToolManager
 	workspaces  *session.Workspace
+
+	// AgentTokenStore mediates the loopback /api/auth/agent-token
+	// endpoint that lets MCP children refresh their Hugr JWTs.
+	// Set in buildToolStack iff the deployment carries a `hugr`
+	// auth source; nil under US5 no-Hugr deployments. Held on the
+	// core so the per-session hugr Spawner and the per-agent
+	// hugr-query builder share one store.
+	AgentTokenStore *httpapi.AgentTokenStore
 
 	// HTTPSrv hosts the auth endpoints (phase 1) and, in phase 2,
 	// /api/v1/* via pkg/adapter/http. Both share the same mux so the
@@ -214,9 +225,27 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	}
 
 	core.workspaces = session.NewWorkspace(boot.WorkspaceDir, boot.CleanupOnClose)
+	authSources := spawn.NewSources()
+	if core.AgentTokenStore != nil {
+		if err := authSources.Register(hugrsource.NewSpawner(core.AgentTokenStore, boot.Port)); err != nil {
+			return nil, failed("auth_sources", err)
+		}
+	}
+	resources := session.NewResources(session.ResourceDeps{
+		Providers:   core.Config.ToolProviders(),
+		Tools:       core.Tools,
+		Skills:      core.Skills,
+		SkillStore:  core.SkillStore,
+		Workspace:   core.workspaces,
+		AuthSources: authSources,
+		Logger:      core.Logger,
+	})
+	if err := resources.Validate(); err != nil {
+		return nil, failed("session_resources", err)
+	}
 	core.Manager = session.NewManager(
 		core.Store, agent, router, cmds, core.Codec, core.Logger,
-		session.WithLifecycle(buildSessionLifecycle(core, core.workspaces)),
+		session.WithLifecycle(resources),
 		session.WithSessionOptions(
 			session.WithTools(core.Tools),
 			session.WithSkills(core.Skills),

@@ -11,6 +11,28 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
+// stubLifecycle is a function-bag Lifecycle for tests that just
+// want to assert OnOpen/OnClose call counts. Production code uses
+// *Resources, never this.
+type stubLifecycle struct {
+	acquire func(ctx context.Context, sessionID string) error
+	release func(ctx context.Context, sessionID string) error
+}
+
+func (s stubLifecycle) Acquire(ctx context.Context, sessionID string) error {
+	if s.acquire == nil {
+		return nil
+	}
+	return s.acquire(ctx, sessionID)
+}
+
+func (s stubLifecycle) Release(ctx context.Context, sessionID string) error {
+	if s.release == nil {
+		return nil
+	}
+	return s.release(ctx, sessionID)
+}
+
 // instrumentedStore wraps fakeStore with call counters used by the
 // lazy-materialisation tests.
 type instrumentedStore struct {
@@ -168,12 +190,12 @@ func TestManager_LifecycleHooks(t *testing.T) {
 
 	var openCalled, closeCalled atomic.Int32
 	mgr := NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil,
-		WithLifecycle(SessionLifecycle{
-			OnOpen: func(ctx context.Context, sessionID string) error {
+		WithLifecycle(stubLifecycle{
+			acquire: func(ctx context.Context, sessionID string) error {
 				openCalled.Add(1)
 				return nil
 			},
-			OnClose: func(ctx context.Context, sessionID string) error {
+			release: func(ctx context.Context, sessionID string) error {
 				closeCalled.Add(1)
 				return nil
 			},
@@ -204,8 +226,8 @@ func TestManager_OnOpenErrorRollsBack(t *testing.T) {
 	}
 	failErr := errors.New("hook fail")
 	mgr := NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil,
-		WithLifecycle(SessionLifecycle{
-			OnOpen: func(ctx context.Context, sessionID string) error { return failErr },
+		WithLifecycle(stubLifecycle{
+			acquire: func(ctx context.Context, sessionID string) error { return failErr },
 		}),
 	)
 	_, _, err = mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
