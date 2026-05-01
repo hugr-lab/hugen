@@ -1,4 +1,4 @@
-package runtime
+package session
 
 import (
 	"context"
@@ -47,8 +47,8 @@ type stubProvider struct {
 	result string
 }
 
-func (p *stubProvider) Name() string                            { return "fake" }
-func (p *stubProvider) Lifetime() tool.Lifetime                 { return tool.LifetimePerAgent }
+func (p *stubProvider) Name() string                                { return "fake" }
+func (p *stubProvider) Lifetime() tool.Lifetime                     { return tool.LifetimePerAgent }
 func (p *stubProvider) List(_ context.Context) ([]tool.Tool, error) { return p.tools, nil }
 func (p *stubProvider) Call(_ context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
 	return json.RawMessage(p.result), nil
@@ -64,7 +64,7 @@ type permsAllow struct{}
 func (permsAllow) Resolve(_ context.Context, _, _ string) (perm.Permission, error) {
 	return perm.Permission{}, nil
 }
-func (permsAllow) Refresh(_ context.Context) error                            { return nil }
+func (permsAllow) Refresh(_ context.Context) error                               { return nil }
 func (permsAllow) Subscribe(_ context.Context) (<-chan perm.RefreshEvent, error) { return nil, nil }
 
 // permsDeny denies a fixed (object, field).
@@ -78,7 +78,7 @@ func (d permsDeny) Resolve(_ context.Context, object, field string) (perm.Permis
 	}
 	return perm.Permission{}, nil
 }
-func (permsDeny) Refresh(_ context.Context) error                            { return nil }
+func (permsDeny) Refresh(_ context.Context) error                               { return nil }
 func (permsDeny) Subscribe(_ context.Context) (<-chan perm.RefreshEvent, error) { return nil, nil }
 
 func newToolSession(t *testing.T, mdl model.Model, perms perm.Service, providers ...tool.ToolProvider) (*Session, context.CancelFunc) {

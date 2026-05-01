@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // newTestServer wires up an Adapter against a fakeHost on a fresh
@@ -88,8 +88,8 @@ func TestHandlers_OpenSession(t *testing.T) {
 	if body.SessionID == "" {
 		t.Errorf("session_id is empty")
 	}
-	if body.Status != runtime.StatusActive {
-		t.Errorf("status = %q, want %q", body.Status, runtime.StatusActive)
+	if body.Status != session.StatusActive {
+		t.Errorf("status = %q, want %q", body.Status, session.StatusActive)
 	}
 	if body.OpenedAt.IsZero() {
 		t.Errorf("opened_at is zero")
@@ -205,8 +205,8 @@ func TestHandlers_CloseIdempotent(t *testing.T) {
 		t.Fatalf("second close status = %d, want 200", resp2.StatusCode)
 	}
 	resp2.Body.Close()
-	if got := host.sessions[open.SessionID].Status; got != runtime.StatusClosed {
-		t.Errorf("status after close = %q, want %q", got, runtime.StatusClosed)
+	if got := host.sessions[open.SessionID].Status; got != session.StatusClosed {
+		t.Errorf("status after close = %q, want %q", got, session.StatusClosed)
 	}
 }
 
@@ -215,8 +215,8 @@ func TestHandlers_ListSessions_Filter(t *testing.T) {
 
 	// Create one active and one closed session directly through the
 	// fake host so we don't depend on the close handler.
-	active, _, _ := host.OpenSession(context.Background(), runtime.OpenRequest{})
-	closed, _, _ := host.OpenSession(context.Background(), runtime.OpenRequest{})
+	active, _, _ := host.OpenSession(context.Background(), session.OpenRequest{})
+	closed, _, _ := host.OpenSession(context.Background(), session.OpenRequest{})
 	_, _ = host.CloseSession(context.Background(), closed.ID(), "test")
 
 	resp := doJSON(t, srv, "GET", "/api/v1/sessions?status=active", "tok", nil)

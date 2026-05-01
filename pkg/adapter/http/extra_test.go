@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // pausableReplay wraps a fakeStore and blocks ListEvents on a signal
@@ -30,7 +30,7 @@ func newPausableReplay(inner *fakeStore) *pausableReplay {
 	return &pausableReplay{inner: inner, proceed: make(chan struct{})}
 }
 
-func (p *pausableReplay) ListEvents(ctx context.Context, sessionID string, opts runtime.ListEventsOpts) ([]runtime.EventRow, error) {
+func (p *pausableReplay) ListEvents(ctx context.Context, sessionID string, opts session.ListEventsOpts) ([]session.EventRow, error) {
 	<-p.proceed
 	return p.inner.ListEvents(ctx, sessionID, opts)
 }
@@ -136,7 +136,7 @@ func TestReconnect_ReplayLiveOverlap_NoDuplicate(t *testing.T) {
 	author := protocol.ParticipantInfo{ID: "agent-test", Kind: protocol.ParticipantAgent}
 	live := protocol.NewAgentMessage(open.SessionID, author, "msg 6", 6, true)
 	live.SetSeq(6)
-	row, _, _ := runtime.FrameToEventRow(live, "agent-test")
+	row, _, _ := session.FrameToEventRow(live, "agent-test")
 	row.Seq = 6
 	host.store.appendEvent(open.SessionID, row)
 	host.publish(open.SessionID, live)
@@ -327,7 +327,7 @@ func TestIsLoopback(t *testing.T) {
 // must surface as 409 session_closed, not 500 internal.
 func TestHandlers_PostToClosed_Returns409(t *testing.T) {
 	host, srv := newTestServer(t, allowAllAuth{})
-	host.submitErr = runtime.ErrSessionClosed
+	host.submitErr = session.ErrSessionClosed
 
 	openResp := doJSON(t, srv, "POST", "/api/v1/sessions", "tok", nil)
 	var open OpenSessionResponse
@@ -366,7 +366,7 @@ func TestAPILifecycle_OpenSubscribePostListClose(t *testing.T) {
 		t.Fatalf("decode open: %v", err)
 	}
 	resp.Body.Close()
-	if open.SessionID == "" || open.Status != runtime.StatusActive {
+	if open.SessionID == "" || open.Status != session.StatusActive {
 		t.Fatalf("open response = %+v", open)
 	}
 
@@ -449,7 +449,7 @@ func TestAPILifecycle_OpenSubscribePostListClose(t *testing.T) {
 	var closed CloseSessionResponse
 	_ = json.NewDecoder(closeResp.Body).Decode(&closed)
 	closeResp.Body.Close()
-	if closed.Status != runtime.StatusClosed || closed.ClosedAt.IsZero() {
+	if closed.Status != session.StatusClosed || closed.ClosedAt.IsZero() {
 		t.Errorf("close response = %+v", closed)
 	}
 }
@@ -484,7 +484,7 @@ func TestSlowConsumer_RecoversViaReconnect(t *testing.T) {
 	for i := 1; i <= N; i++ {
 		f := protocol.NewAgentMessage(open.SessionID, author, "msg", i, false)
 		f.SetSeq(i)
-		row, _, _ := runtime.FrameToEventRow(f, "agent-test")
+		row, _, _ := session.FrameToEventRow(f, "agent-test")
 		row.Seq = i
 		host.store.appendEvent(open.SessionID, row)
 		host.publish(open.SessionID, f)

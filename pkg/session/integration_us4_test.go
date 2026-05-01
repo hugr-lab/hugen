@@ -1,4 +1,4 @@
-package runtime
+package session
 
 import (
 	"context"
@@ -37,10 +37,10 @@ type us4View struct {
 	refreshInterval time.Duration
 }
 
-func (v *us4View) Rules() []perm.Rule              { return v.rules }
-func (v *us4View) RefreshInterval() time.Duration  { return v.refreshInterval }
-func (v *us4View) RemoteEnabled() bool             { return true }
-func (v *us4View) OnUpdate(_ func()) func()        { return func() {} }
+func (v *us4View) Rules() []perm.Rule             { return v.rules }
+func (v *us4View) RefreshInterval() time.Duration { return v.refreshInterval }
+func (v *us4View) RemoteEnabled() bool            { return true }
+func (v *us4View) OnUpdate(_ func()) func()       { return func() {} }
 
 // us4Querier is a stub perm.Querier with mutable rule list and a
 // call counter so we can assert refresh behaviour.
@@ -89,17 +89,17 @@ func (us4FakeIdentity) Permission(context.Context, string, string) (identity.Per
 // after permission resolution so the test can assert injected
 // data values.
 type us4Stub struct {
-	tools     []tool.Tool
-	result    string
-	lastArgs  json.RawMessage
-	calls     int
+	tools    []tool.Tool
+	result   string
+	lastArgs json.RawMessage
+	calls    int
 }
 
-func (p *us4Stub) Name() string                                                            { return "fake" }
-func (p *us4Stub) Lifetime() tool.Lifetime                                                 { return tool.LifetimePerAgent }
-func (p *us4Stub) List(context.Context) ([]tool.Tool, error)                               { return p.tools, nil }
-func (p *us4Stub) Subscribe(context.Context) (<-chan tool.ProviderEvent, error)            { return nil, nil }
-func (p *us4Stub) Close() error                                                            { return nil }
+func (p *us4Stub) Name() string                                                 { return "fake" }
+func (p *us4Stub) Lifetime() tool.Lifetime                                      { return tool.LifetimePerAgent }
+func (p *us4Stub) List(context.Context) ([]tool.Tool, error)                    { return p.tools, nil }
+func (p *us4Stub) Subscribe(context.Context) (<-chan tool.ProviderEvent, error) { return nil, nil }
+func (p *us4Stub) Close() error                                                 { return nil }
 func (p *us4Stub) Call(_ context.Context, _ string, args json.RawMessage) (json.RawMessage, error) {
 	p.calls++
 	p.lastArgs = append(json.RawMessage(nil), args...)

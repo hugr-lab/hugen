@@ -1,4 +1,4 @@
-// Package main is the entry point for the hugen runtime.
+// Package main is the entry point for the hugen session.
 //
 // Phase-2 startup flow:
 //
@@ -27,7 +27,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/identity"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 const (
@@ -92,17 +92,17 @@ func run(args []string, errOut io.Writer) int {
 //     localQ is nil. Sessions/memory/artifacts persist in the
 //     shared hub DB and the agent identifies itself by the bearer
 //     token its identity source supplies. The schema is the same —
-//     runtime.NewRuntimeStoreLocal is mode-agnostic; the "local"
+//     session.NewRuntimeStoreLocal is mode-agnostic; the "local"
 //     in its name refers to the Go-side facade, not the DB.
 //
 // Mixing the two queriers would split state across stores and is
 // not supported.
-func chooseStore(localQ, remoteQ types.Querier, embedderEnabled bool) runtime.RuntimeStore {
+func chooseStore(localQ, remoteQ types.Querier, embedderEnabled bool) session.RuntimeStore {
 	if localQ != nil {
-		return runtime.NewRuntimeStoreLocal(localQ, embedderEnabled)
+		return session.NewRuntimeStoreLocal(localQ, embedderEnabled)
 	}
 	if remoteQ != nil {
-		return runtime.NewRuntimeStoreLocal(remoteQ, embedderEnabled)
+		return session.NewRuntimeStoreLocal(remoteQ, embedderEnabled)
 	}
 	return nil
 }

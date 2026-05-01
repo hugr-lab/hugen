@@ -1,4 +1,4 @@
-package runtime
+package session
 
 import (
 	"context"
@@ -87,7 +87,7 @@ type ListEventsOpts struct {
 }
 
 // RuntimeStore is the persistence facade consumed by Session and
-// SessionManager. Declared at the consumer per constitution principle
+// Manager. Declared at the consumer per constitution principle
 // III; *RuntimeStoreLocal below is the phase-1 implementation.
 type RuntimeStore interface {
 	OpenSession(ctx context.Context, row SessionRow) error

@@ -9,7 +9,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
@@ -26,8 +26,8 @@ const permObjectSkill = "hugen:skill"
 //   - /skill list                — show available + loaded skills
 //   - /skill load <name>         — load <name> into the session
 //   - /skill unload <name>       — unload <name>
-func skillCommandHandler(skills *skill.SkillManager, store skill.SkillStore, perms perm.Service) runtime.CommandHandler {
-	return func(ctx context.Context, env runtime.CommandEnv, args []string) ([]protocol.Frame, error) {
+func skillCommandHandler(skills *skill.SkillManager, store skill.SkillStore, perms perm.Service) session.CommandHandler {
+	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
 		if len(args) == 0 {
 			return []protocol.Frame{
 				protocol.NewError(env.Session.ID(), env.AgentAuthor, "usage_error",
@@ -53,7 +53,7 @@ func skillCommandHandler(skills *skill.SkillManager, store skill.SkillStore, per
 	}
 }
 
-func skillListHandler(ctx context.Context, env runtime.CommandEnv, skills *skill.SkillManager, store skill.SkillStore) ([]protocol.Frame, error) {
+func skillListHandler(ctx context.Context, env session.CommandEnv, skills *skill.SkillManager, store skill.SkillStore) ([]protocol.Frame, error) {
 	available, err := store.List(ctx)
 	if err != nil {
 		return []protocol.Frame{
@@ -102,7 +102,7 @@ func skillListHandler(ctx context.Context, env runtime.CommandEnv, skills *skill
 	}, nil
 }
 
-func skillLoadHandler(ctx context.Context, env runtime.CommandEnv, args []string, skills *skill.SkillManager, perms perm.Service) ([]protocol.Frame, error) {
+func skillLoadHandler(ctx context.Context, env session.CommandEnv, args []string, skills *skill.SkillManager, perms perm.Service) ([]protocol.Frame, error) {
 	if len(args) == 0 || args[0] == "" {
 		return []protocol.Frame{
 			protocol.NewError(env.Session.ID(), env.AgentAuthor, "usage_error",
@@ -157,7 +157,7 @@ func skillLoadHandler(ctx context.Context, env runtime.CommandEnv, args []string
 	}, nil
 }
 
-func skillUnloadHandler(ctx context.Context, env runtime.CommandEnv, args []string, skills *skill.SkillManager) ([]protocol.Frame, error) {
+func skillUnloadHandler(ctx context.Context, env session.CommandEnv, args []string, skills *skill.SkillManager) ([]protocol.Frame, error) {
 	if len(args) == 0 || args[0] == "" {
 		return []protocol.Frame{
 			protocol.NewError(env.Session.ID(), env.AgentAuthor, "usage_error",

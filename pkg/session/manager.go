@@ -1,4 +1,4 @@
-package runtime
+package session
 
 import (
 	"context"
@@ -24,7 +24,7 @@ type SessionSummary struct {
 	Metadata  map[string]any
 }
 
-// OpenRequest carries the parameters for SessionManager.Open.
+// OpenRequest carries the parameters for Manager.Open.
 type OpenRequest struct {
 	OwnerID      string
 	Participants []protocol.ParticipantInfo
@@ -34,7 +34,7 @@ type OpenRequest struct {
 	Metadata map[string]any
 }
 
-// SessionManager owns the live *Session map and brokers
+// Manager owns the live *Session map and brokers
 // open/resume/close. Each Session runs in its own goroutine.
 //
 // Sessions outlive the adapter goroutines that opened them: if an
@@ -57,7 +57,7 @@ type SessionLifecycle struct {
 	OnClose func(ctx context.Context, sessionID string) error
 }
 
-type SessionManager struct {
+type Manager struct {
 	store    RuntimeStore
 	agent    *Agent
 	models   *model.ModelRouter
@@ -81,43 +81,43 @@ type SessionManager struct {
 	wg sync.WaitGroup
 }
 
-// SessionManagerOption configures a SessionManager at construction.
-type SessionManagerOption func(*SessionManager)
+// ManagerOption configures a Manager at construction.
+type ManagerOption func(*Manager)
 
 // WithLifecycle attaches OnOpen/OnClose hooks to the manager.
 // Used by cmd/hugen to wire per-session bash-mcp lifecycle without
 // pulling tool/skill/permission imports into pkg/runtime.
-func WithLifecycle(l SessionLifecycle) SessionManagerOption {
-	return func(m *SessionManager) { m.lifecycle = l }
+func WithLifecycle(l SessionLifecycle) ManagerOption {
+	return func(m *Manager) { m.lifecycle = l }
 }
 
 // WithSessionOptions threads SessionOption values through every
 // spawned Session — typically used by cmd/hugen to attach the
 // shared *tool.ToolManager via WithTools.
-func WithSessionOptions(opts ...SessionOption) SessionManagerOption {
-	return func(m *SessionManager) {
+func WithSessionOptions(opts ...SessionOption) ManagerOption {
+	return func(m *Manager) {
 		m.sessionOpts = append(m.sessionOpts, opts...)
 	}
 }
 
-// NewSessionManager constructs the manager. All required deps are
+// NewManager constructs the manager. All required deps are
 // passed in (constitution principle II). The manager owns a root
 // context (separate from any adapter's errgroup context) that scopes
 // every session goroutine; Shutdown cancels it.
-func NewSessionManager(
+func NewManager(
 	store RuntimeStore,
 	agent *Agent,
 	models *model.ModelRouter,
 	commands *CommandRegistry,
 	codec *protocol.Codec,
 	logger *slog.Logger,
-	opts ...SessionManagerOption,
-) *SessionManager {
+	opts ...ManagerOption,
+) *Manager {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	rootCtx, rootCancel := context.WithCancel(context.Background())
-	m := &SessionManager{
+	m := &Manager{
 		store:      store,
 		agent:      agent,
 		models:     models,
@@ -138,7 +138,7 @@ func NewSessionManager(
 // starts its goroutine, and emits a session_opened frame. Returns
 // the session and the row's CreatedAt timestamp so callers can
 // echo the persisted opened_at without an extra LoadSession.
-func (m *SessionManager) Open(ctx context.Context, req OpenRequest) (*Session, time.Time, error) {
+func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, time.Time, error) {
 	id := newSessionID()
 	now := time.Now().UTC()
 	row := SessionRow{
@@ -185,7 +185,7 @@ func (m *SessionManager) Open(ctx context.Context, req OpenRequest) (*Session, t
 // Concurrent calls for the same id will share the same *Session —
 // the spawn-side double-check guarantees no orphan goroutine. Only
 // the first caller observes the session_resumed marker.
-func (m *SessionManager) Resume(ctx context.Context, id string) (*Session, error) {
+func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
 	row, err := m.store.LoadSession(ctx, id)
 	if err != nil {
 		return nil, err
@@ -243,7 +243,7 @@ func (m *SessionManager) Resume(ctx context.Context, id string) (*Session, error
 // Idempotent: a session that's already terminated returns the
 // stored closed_at. Returns ErrSessionNotFound if the session
 // doesn't exist in the store either.
-func (m *SessionManager) Close(ctx context.Context, id, reason string) (time.Time, error) {
+func (m *Manager) Close(ctx context.Context, id, reason string) (time.Time, error) {
 	m.mu.RLock()
 	s, live := m.live[id]
 	m.mu.RUnlock()
@@ -277,7 +277,7 @@ func (m *SessionManager) Close(ctx context.Context, id, reason string) (time.Tim
 
 	if !s.closed.Load() {
 		closed := protocol.NewSessionClosed(id, m.agent.Participant(), reason)
-		if !s.Submit(ctx,closed) {
+		if !s.Submit(ctx, closed) {
 			m.logger.Warn("manager: session inbox closed before Close intent landed",
 				"session", id)
 		}
@@ -298,7 +298,6 @@ func (m *SessionManager) Close(ctx context.Context, id, reason string) (time.Tim
 	return time.Now().UTC(), nil
 }
 
-
 // Suspend asks the session goroutine to record `suspended`
 // status. Implemented as a thin wrapper around the inbox-frame
 // dispatch so the single-writer invariant holds — Manager never
@@ -310,7 +309,7 @@ func (m *SessionManager) Close(ctx context.Context, id, reason string) (time.Tim
 // If no live goroutine is around (suspended or never spawned),
 // the row is updated directly — there is no goroutine that could
 // race the write.
-func (m *SessionManager) Suspend(ctx context.Context, id string) error {
+func (m *Manager) Suspend(ctx context.Context, id string) error {
 	m.mu.RLock()
 	s, live := m.live[id]
 	m.mu.RUnlock()
@@ -321,7 +320,7 @@ func (m *SessionManager) Suspend(ctx context.Context, id string) error {
 		return nil
 	}
 	marker := protocol.NewSessionSuspended(id, m.agent.Participant())
-	if !s.Submit(ctx,marker) {
+	if !s.Submit(ctx, marker) {
 		m.logger.Warn("manager: session inbox closed before Suspend intent landed",
 			"session", id)
 	}
@@ -330,7 +329,7 @@ func (m *SessionManager) Suspend(ctx context.Context, id string) error {
 
 // List returns lightweight summaries of every session row for this
 // agent.
-func (m *SessionManager) List(ctx context.Context, status string) ([]SessionSummary, error) {
+func (m *Manager) List(ctx context.Context, status string) ([]SessionSummary, error) {
 	rows, err := m.store.ListSessions(ctx, m.agent.ID(), status)
 	if err != nil {
 		return nil, err
@@ -350,7 +349,7 @@ func (m *SessionManager) List(ctx context.Context, status string) ([]SessionSumm
 
 // Get returns a live *Session by id (already-running). Used by the
 // supervisor goroutine to route inbound frames.
-func (m *SessionManager) Get(id string) (*Session, bool) {
+func (m *Manager) Get(id string) (*Session, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	s, ok := m.live[id]
@@ -366,7 +365,7 @@ func (m *SessionManager) Get(id string) (*Session, bool) {
 // (Tools.Close, LocalEngine.Close) starts.
 //
 // Idempotent and safe to call multiple times.
-func (m *SessionManager) ShutdownAll(ctx context.Context) {
+func (m *Manager) ShutdownAll(ctx context.Context) {
 	m.mu.Lock()
 	live := make([]*Session, 0, len(m.live))
 	for _, s := range m.live {
@@ -376,7 +375,7 @@ func (m *SessionManager) ShutdownAll(ctx context.Context) {
 	for _, s := range live {
 		if !s.closed.Load() {
 			marker := protocol.NewSessionSuspended(s.id, m.agent.Participant())
-			_ = s.Submit(ctx,marker)
+			_ = s.Submit(ctx, marker)
 		}
 		// close(s.in) lets the Run loop exit after draining any
 		// already-queued frames. The session's own /end-in-flight,
@@ -401,7 +400,7 @@ func (m *SessionManager) ShutdownAll(ctx context.Context) {
 //
 // Re-checks live[id] under the write lock so concurrent Open/Resume
 // callers can't double-spawn an orphan goroutine.
-func (m *SessionManager) spawn(_ context.Context, id string) *Session {
+func (m *Manager) spawn(_ context.Context, id string) *Session {
 	s := NewSession(id, m.agent, m.store, m.models, m.commands, m.codec, m.logger, m.sessionOpts...)
 	m.mu.Lock()
 	if existing, ok := m.live[id]; ok {
@@ -433,7 +432,7 @@ func (m *SessionManager) spawn(_ context.Context, id string) *Session {
 }
 
 // SessionsLive returns the IDs of currently live sessions.
-func (m *SessionManager) SessionsLive() []string {
+func (m *Manager) SessionsLive() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]string, 0, len(m.live))

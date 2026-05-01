@@ -1,4 +1,4 @@
-package runtime
+package session
 
 import (
 	"context"
@@ -156,9 +156,9 @@ func (p *us3Perms) Resolve(_ context.Context, object, field string) (perm.Permis
 	}
 	return perm.Permission{}, nil
 }
-func (p *us3Perms) Refresh(context.Context) error                            { return nil }
+func (p *us3Perms) Refresh(context.Context) error                               { return nil }
 func (p *us3Perms) Subscribe(context.Context) (<-chan perm.RefreshEvent, error) { return nil, nil }
-func (p *us3Perms) AgentID() string                                            { return p.agentID }
+func (p *us3Perms) AgentID() string                                             { return p.agentID }
 
 // us3Stub is the test "fake" tool. It tracks call counts so we
 // can assert the second invocation skips the prompt path.
@@ -168,9 +168,9 @@ type us3Stub struct {
 	calls  int
 }
 
-func (p *us3Stub) Name() string                                  { return "fake" }
-func (p *us3Stub) Lifetime() tool.Lifetime                       { return tool.LifetimePerAgent }
-func (p *us3Stub) List(context.Context) ([]tool.Tool, error)     { return p.tools, nil }
+func (p *us3Stub) Name() string                              { return "fake" }
+func (p *us3Stub) Lifetime() tool.Lifetime                   { return tool.LifetimePerAgent }
+func (p *us3Stub) List(context.Context) ([]tool.Tool, error) { return p.tools, nil }
 func (p *us3Stub) Subscribe(context.Context) (<-chan tool.ProviderEvent, error) {
 	return nil, nil
 }
@@ -226,7 +226,7 @@ func TestUS3_AlwaysAllow_NextCallSkipsPromptPath(t *testing.T) {
 		turns: [][]model.Chunk{
 			{
 				{ToolCall: &model.ChunkToolCall{
-					ID: "tc-allow",
+					ID:   "tc-allow",
 					Name: "system:policy_save",
 					Args: map[string]any{
 						"tool_name": "fake:do",

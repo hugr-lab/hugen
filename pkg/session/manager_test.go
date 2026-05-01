@@ -1,4 +1,4 @@
-package runtime
+package session
 
 import (
 	"context"
@@ -23,7 +23,7 @@ func (s *instrumentedStore) ListEvents(ctx context.Context, sid string, opts Lis
 	return s.fakeStore.ListEvents(ctx, sid, opts)
 }
 
-func newTestManager(t *testing.T, store RuntimeStore) *SessionManager {
+func newTestManager(t *testing.T, store RuntimeStore) *Manager {
 	t.Helper()
 	mdl := &scriptedModel{}
 	router := newRouterWithModel(t, mdl)
@@ -31,10 +31,10 @@ func newTestManager(t *testing.T, store RuntimeStore) *SessionManager {
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
-	return NewSessionManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil)
+	return NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil)
 }
 
-func TestSessionManager_LazyMaterialisation(t *testing.T) {
+func TestManager_LazyMaterialisation(t *testing.T) {
 	base := newFakeStore()
 	// Seed the store with a session row + 100 historic events.
 	_ = base.OpenSession(context.Background(), SessionRow{
@@ -100,7 +100,7 @@ func TestSessionManager_LazyMaterialisation(t *testing.T) {
 	}
 }
 
-func TestSessionManager_ResumeClosed(t *testing.T) {
+func TestManager_ResumeClosed(t *testing.T) {
 	store := newFakeStore()
 	_ = store.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "a1", Status: StatusClosed})
 	mgr := newTestManager(t, store)
@@ -109,7 +109,7 @@ func TestSessionManager_ResumeClosed(t *testing.T) {
 	}
 }
 
-func TestSessionManager_ResumeNotFound(t *testing.T) {
+func TestManager_ResumeNotFound(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
 	if _, err := mgr.Resume(context.Background(), "nope"); !errors.Is(err, ErrSessionNotFound) {
@@ -117,7 +117,7 @@ func TestSessionManager_ResumeNotFound(t *testing.T) {
 	}
 }
 
-func TestSessionManager_OpenAndList(t *testing.T) {
+func TestManager_OpenAndList(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
 	s, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
@@ -157,7 +157,7 @@ func TestProjectHistory_Window(t *testing.T) {
 // Touch the model package to avoid an unused-import lint.
 var _ = model.IntentDefault
 
-func TestSessionManager_LifecycleHooks(t *testing.T) {
+func TestManager_LifecycleHooks(t *testing.T) {
 	store := newFakeStore()
 	mdl := &scriptedModel{}
 	router := newRouterWithModel(t, mdl)
@@ -167,7 +167,7 @@ func TestSessionManager_LifecycleHooks(t *testing.T) {
 	}
 
 	var openCalled, closeCalled atomic.Int32
-	mgr := NewSessionManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil,
+	mgr := NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil,
 		WithLifecycle(SessionLifecycle{
 			OnOpen: func(ctx context.Context, sessionID string) error {
 				openCalled.Add(1)
@@ -194,7 +194,7 @@ func TestSessionManager_LifecycleHooks(t *testing.T) {
 	}
 }
 
-func TestSessionManager_OnOpenErrorRollsBack(t *testing.T) {
+func TestManager_OnOpenErrorRollsBack(t *testing.T) {
 	store := newFakeStore()
 	mdl := &scriptedModel{}
 	router := newRouterWithModel(t, mdl)
@@ -203,7 +203,7 @@ func TestSessionManager_OnOpenErrorRollsBack(t *testing.T) {
 		t.Fatalf("agent: %v", err)
 	}
 	failErr := errors.New("hook fail")
-	mgr := NewSessionManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil,
+	mgr := NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil,
 		WithLifecycle(SessionLifecycle{
 			OnOpen: func(ctx context.Context, sessionID string) error { return failErr },
 		}),

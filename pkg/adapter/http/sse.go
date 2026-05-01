@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // sseConfig holds the tunable cadences for the SSE writer.
@@ -66,13 +66,13 @@ func (a *Adapter) writeSSE(
 	w stdhttp.ResponseWriter,
 	flusher stdhttp.Flusher,
 	sessionID string,
-	replay []runtime.EventRow,
+	replay []session.EventRow,
 	live <-chan protocol.Frame,
 ) {
 	// Replay first: deterministic ordering, no heartbeats interleaved.
 	maxReplayedSeq := 0
 	for _, row := range replay {
-		f, err := runtime.EventRowToFrame(row)
+		f, err := session.EventRowToFrame(row)
 		if err != nil {
 			a.logger.Warn("sse: failed to materialise replay row",
 				"session", sessionID, "seq", row.Seq, "err", err)

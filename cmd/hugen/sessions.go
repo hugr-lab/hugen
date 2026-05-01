@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/config"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -80,7 +80,7 @@ func (s *sessionWorkspaces) take(sessionID string) (string, bool) {
 // bash-mcp with cmd.Dir set; OnClose tears down the bash-mcp
 // process via ToolManager.CloseSession and (when configured)
 // removes the workspace dir.
-func buildSessionLifecycle(core *RuntimeCore, ws *sessionWorkspaces) runtime.SessionLifecycle {
+func buildSessionLifecycle(core *RuntimeCore, ws *sessionWorkspaces) session.SessionLifecycle {
 	boot := core.Boot
 	tools := core.Tools
 	skills := core.Skills
@@ -89,7 +89,7 @@ func buildSessionLifecycle(core *RuntimeCore, ws *sessionWorkspaces) runtime.Ses
 	log := core.Logger
 	cleanup := boot.CleanupOnClose
 
-	return runtime.SessionLifecycle{
+	return session.SessionLifecycle{
 		OnOpen: func(ctx context.Context, sessionID string) error {
 			absRoot, err := filepath.Abs(boot.WorkspaceDir)
 			if err != nil {
@@ -238,4 +238,3 @@ func findToolProvider(view config.ToolProvidersView, name string) (config.ToolPr
 	}
 	return config.ToolProviderSpec{}, false
 }
-

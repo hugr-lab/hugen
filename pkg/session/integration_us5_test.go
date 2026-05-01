@@ -1,4 +1,4 @@
-package runtime
+package session
 
 import (
 	"context"
@@ -39,10 +39,10 @@ type fsToolStub struct {
 	files map[string]string
 }
 
-func (p *fsToolStub) Name() string                                                                 { return "bash-mcp" }
-func (p *fsToolStub) Lifetime() tool.Lifetime                                                      { return tool.LifetimePerSession }
-func (p *fsToolStub) Subscribe(context.Context) (<-chan tool.ProviderEvent, error)                 { return nil, nil }
-func (p *fsToolStub) Close() error                                                                 { return nil }
+func (p *fsToolStub) Name() string                                                 { return "bash-mcp" }
+func (p *fsToolStub) Lifetime() tool.Lifetime                                      { return tool.LifetimePerSession }
+func (p *fsToolStub) Subscribe(context.Context) (<-chan tool.ProviderEvent, error) { return nil, nil }
+func (p *fsToolStub) Close() error                                                 { return nil }
 func (p *fsToolStub) List(context.Context) ([]tool.Tool, error) {
 	return []tool.Tool{
 		{Name: "bash-mcp:write_file", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"},
@@ -199,7 +199,7 @@ type fakeUS5View struct {
 	rules []perm.Rule
 }
 
-func (v *fakeUS5View) Rules() []perm.Rule              { return v.rules }
-func (v *fakeUS5View) RefreshInterval() time.Duration  { return time.Hour }
-func (v *fakeUS5View) RemoteEnabled() bool             { return false }
-func (v *fakeUS5View) OnUpdate(_ func()) func()        { return func() {} }
+func (v *fakeUS5View) Rules() []perm.Rule             { return v.rules }
+func (v *fakeUS5View) RefreshInterval() time.Duration { return time.Hour }
+func (v *fakeUS5View) RemoteEnabled() bool            { return false }
+func (v *fakeUS5View) OnUpdate(_ func()) func()       { return func() {} }

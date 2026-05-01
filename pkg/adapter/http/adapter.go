@@ -20,7 +20,7 @@ import (
 	"sync/atomic"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // Authenticator validates a bearer token for /api/v1/* endpoints.
@@ -75,7 +75,7 @@ var ErrUnauthenticated = errors.New("http: unauthenticated")
 
 // Adapter mounts the /api/v1/* JSON+SSE surface on a shared mux.
 //
-// It is a runtime.Adapter — Run blocks until ctx is done, returning
+// It is a session.Adapter — Run blocks until ctx is done, returning
 // the ctx error. Run does not own a *http.Server; the listener is
 // owned by cmd/hugen via RuntimeCore.HTTPSrv.
 type Adapter struct {
@@ -189,7 +189,7 @@ func (a *Adapter) MarkReady() { a.ready.Store(true) }
 // Run mounts handlers (idempotent) and blocks until ctx is done.
 // Returns the ctx error so the runtime errgroup can distinguish
 // graceful shutdown from a real failure.
-func (a *Adapter) Run(ctx context.Context, host runtime.AdapterHost) error {
+func (a *Adapter) Run(ctx context.Context, host session.AdapterHost) error {
 	if host == nil {
 		return errors.New("http: nil host")
 	}
@@ -204,7 +204,7 @@ func (a *Adapter) Run(ctx context.Context, host runtime.AdapterHost) error {
 // guard against double-mount is the closed mountedCh: a closed
 // channel select returns immediately, so a second mount is a
 // no-op. Tests synchronise on Mounted().
-func (a *Adapter) mount(host runtime.AdapterHost) {
+func (a *Adapter) mount(host session.AdapterHost) {
 	a.mountMu.Lock()
 	defer a.mountMu.Unlock()
 	select {

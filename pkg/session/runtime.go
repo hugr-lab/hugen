@@ -1,10 +1,10 @@
 // Package runtime is the core of the hugen agent: it owns the
-// supervisor goroutine, the SessionManager, and brokers Frame
+// supervisor goroutine, the Manager, and brokers Frame
 // traffic between adapters and Sessions.
 //
 // Phase 1 ships a single Adapter (console) and a single Agent.
 // Sub-agents, peer groups, and remote adapters are later phases.
-package runtime
+package session
 
 import (
 	"context"
@@ -41,7 +41,7 @@ type AdapterHost interface {
 
 // Runtime is the supervisor.
 type Runtime struct {
-	manager  *SessionManager
+	manager  *Manager
 	adapters []Adapter
 	logger   *slog.Logger
 
@@ -50,7 +50,7 @@ type Runtime struct {
 }
 
 // NewRuntime constructs the supervisor. Adapters are started by Start.
-func NewRuntime(manager *SessionManager, adapters []Adapter, logger *slog.Logger) *Runtime {
+func NewRuntime(manager *Manager, adapters []Adapter, logger *slog.Logger) *Runtime {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -62,9 +62,9 @@ func NewRuntime(manager *SessionManager, adapters []Adapter, logger *slog.Logger
 	}
 }
 
-// Manager exposes the underlying SessionManager (used by main.go for
+// Manager exposes the underlying Manager (used by main.go for
 // boot-time resume).
-func (r *Runtime) Manager() *SessionManager { return r.manager }
+func (r *Runtime) Manager() *Manager { return r.manager }
 
 // Start runs every adapter under one errgroup and blocks until ctx
 // is done or one of the adapters errors.

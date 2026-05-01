@@ -1,4 +1,4 @@
-package runtime
+package session
 
 import (
 	"context"
@@ -22,13 +22,13 @@ import (
 // agent. The session goroutine is started by Manager.spawn; clients
 // only interact through Inbox / Outbox.
 type Session struct {
-	id      string
-	agent   *Agent
-	store   RuntimeStore
-	models  *model.ModelRouter
-	codec   *protocol.Codec
-	cmds    *CommandRegistry
-	notepad *Notepad
+	id           string
+	agent        *Agent
+	store        RuntimeStore
+	models       *model.ModelRouter
+	codec        *protocol.Codec
+	cmds         *CommandRegistry
+	notepad      *Notepad
 	tools        *tool.ToolManager   // optional; nil disables tool dispatch
 	skills       *skill.SkillManager // optional; consulted for per-skill max_turns
 	maxToolIters int                 // 0 → defaultMaxToolIterations

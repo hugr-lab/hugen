@@ -14,7 +14,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/adapter"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // Adapter is the stdin/stdout REPL adapter. Single session per
@@ -29,7 +29,7 @@ type Adapter struct {
 	user   protocol.ParticipantInfo
 
 	host    adapter.Host
-	session *runtime.Session
+	session *session.Session
 
 	// Render state — track per-turn final newlines so we don't
 	// double-print blank lines between Reasoning and AgentMessage.
@@ -89,7 +89,7 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	if a.logger == nil {
 		a.logger = host.Logger()
 	}
-	var session *runtime.Session
+	var session *session.Session
 	var err error
 	if a.resume != "" {
 		session, err = host.ResumeSession(ctx, a.resume)

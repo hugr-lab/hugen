@@ -10,7 +10,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/query-engine/types"
@@ -229,14 +229,13 @@ func joinErrs(errs []error) error {
 	return fmt.Errorf("runtime_reload: %w", errors.Join(errs...))
 }
 
-// newNotepadFunc adapts runtime.Notepad to tool.NotepadFunc.
+// newNotepadFunc adapts session.Notepad to tool.NotepadFunc.
 // AgentID and SessionID are forwarded verbatim from the
 // IdentityFromContext-supplied values; the Notepad itself is
 // constructed per-call against the shared RuntimeStore.
-func newNotepadFunc(store runtime.RuntimeStore) tool.NotepadFunc {
+func newNotepadFunc(store session.RuntimeStore) tool.NotepadFunc {
 	return func(ctx context.Context, agentID, sessionID, authorID, text string) (string, error) {
-		np := runtime.NewNotepad(store, agentID, sessionID)
+		np := session.NewNotepad(store, agentID, sessionID)
 		return np.Append(ctx, authorID, text)
 	}
 }
-

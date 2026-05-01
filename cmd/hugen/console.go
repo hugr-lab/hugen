@@ -10,7 +10,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/adapter/console"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // runConsole attaches the console adapter to a shared *RuntimeCore
@@ -26,7 +26,7 @@ func runConsole(ctx context.Context, core *RuntimeCore) int {
 		console.WithUser(operatorParticipant()),
 	)
 
-	rt := runtime.NewRuntime(core.Manager, []runtime.Adapter{consoleAdapter}, core.Logger)
+	rt := session.NewRuntime(core.Manager, []session.Adapter{consoleAdapter}, core.Logger)
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -44,8 +44,8 @@ func runConsole(ctx context.Context, core *RuntimeCore) int {
 	return exitOK
 }
 
-func tryFindResumableSession(ctx context.Context, m *runtime.SessionManager, logger *slog.Logger) string {
-	rows, err := m.List(ctx, runtime.StatusActive)
+func tryFindResumableSession(ctx context.Context, m *session.Manager, logger *slog.Logger) string {
+	rows, err := m.List(ctx, session.StatusActive)
 	if err != nil {
 		logger.Warn("list active sessions", "err", err)
 		return ""
@@ -75,14 +75,14 @@ func operatorParticipant() protocol.ParticipantInfo {
 // registerBuiltinCommands wires the Phase-1 set of slash commands
 // onto the registry. Phase 5 adds /help, /note, /cancel, /end,
 // /model bodies; this registration is the seam.
-func registerBuiltinCommands(reg *runtime.CommandRegistry, logger *slog.Logger) error {
+func registerBuiltinCommands(reg *session.CommandRegistry, logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 	binds := []struct {
 		name        string
 		description string
-		handler     runtime.CommandHandler
+		handler     session.CommandHandler
 	}{
 		{"help", "list available commands", helpHandler(reg)},
 		{"note", "save a note to the session notepad: /note <text>", noteHandler()},
@@ -91,7 +91,7 @@ func registerBuiltinCommands(reg *runtime.CommandRegistry, logger *slog.Logger) 
 		{"model", "switch the model for this session: /model use <intent|provider/name>", modelHandler()},
 	}
 	for _, b := range binds {
-		if err := reg.Register(b.name, runtime.CommandSpec{
+		if err := reg.Register(b.name, session.CommandSpec{
 			Handler:     b.handler,
 			Description: b.description,
 		}); err != nil {
@@ -102,8 +102,8 @@ func registerBuiltinCommands(reg *runtime.CommandRegistry, logger *slog.Logger) 
 	return nil
 }
 
-func helpHandler(reg *runtime.CommandRegistry) runtime.CommandHandler {
-	return func(ctx context.Context, env runtime.CommandEnv, args []string) ([]protocol.Frame, error) {
+func helpHandler(reg *session.CommandRegistry) session.CommandHandler {
+	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
 		body := "Available commands:\n" + reg.Describe()
 		return []protocol.Frame{
 			protocol.NewAgentMessage(env.Session.ID(), env.AgentAuthor, body, 0, true),
@@ -111,8 +111,8 @@ func helpHandler(reg *runtime.CommandRegistry) runtime.CommandHandler {
 	}
 }
 
-func noteHandler() runtime.CommandHandler {
-	return func(ctx context.Context, env runtime.CommandEnv, args []string) ([]protocol.Frame, error) {
+func noteHandler() session.CommandHandler {
+	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
 		if len(args) == 0 {
 			return []protocol.Frame{
 				protocol.NewError(env.Session.ID(), env.AgentAuthor, "empty_note",
@@ -133,8 +133,8 @@ func noteHandler() runtime.CommandHandler {
 	}
 }
 
-func cancelHandler() runtime.CommandHandler {
-	return func(ctx context.Context, env runtime.CommandEnv, args []string) ([]protocol.Frame, error) {
+func cancelHandler() session.CommandHandler {
+	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
 		// The actual stream-stop happens in Session.handleCancel; we
 		// just emit the Cancel frame so the transcript records intent.
 		reason := "user_cancelled"
@@ -147,8 +147,8 @@ func cancelHandler() runtime.CommandHandler {
 	}
 }
 
-func endHandler() runtime.CommandHandler {
-	return func(ctx context.Context, env runtime.CommandEnv, args []string) ([]protocol.Frame, error) {
+func endHandler() session.CommandHandler {
+	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
 		reason := "user_end"
 		if len(args) > 0 {
 			reason = joinArgs(args)
@@ -161,8 +161,8 @@ func endHandler() runtime.CommandHandler {
 	}
 }
 
-func modelHandler() runtime.CommandHandler {
-	return func(ctx context.Context, env runtime.CommandEnv, args []string) ([]protocol.Frame, error) {
+func modelHandler() session.CommandHandler {
+	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
 		if len(args) < 2 || args[0] != "use" {
 			return []protocol.Frame{
 				protocol.NewError(env.Session.ID(), env.AgentAuthor, "usage_error",

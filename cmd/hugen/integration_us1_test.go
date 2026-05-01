@@ -15,7 +15,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -54,7 +54,7 @@ type integrationCore struct {
 	tools        *tool.ToolManager
 	skills       *skill.SkillManager
 	skillStore   skill.SkillStore
-	manager      *runtime.SessionManager
+	manager      *session.Manager
 	workspaces   *sessionWorkspaces
 }
 
@@ -108,11 +108,11 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 	lc := buildSessionLifecycle(rcLite, ws)
 
 	router, agent := makeRouter(t)
-	mgr := runtime.NewSessionManager(
+	mgr := session.NewManager(
 		&stubStore{}, agent, router,
-		runtime.NewCommandRegistry(), protocol.NewCodec(), nil,
-		runtime.WithLifecycle(lc),
-		runtime.WithSessionOptions(runtime.WithTools(tools)),
+		session.NewCommandRegistry(), protocol.NewCodec(), nil,
+		session.WithLifecycle(lc),
+		session.WithSessionOptions(session.WithTools(tools)),
 	)
 
 	return &integrationCore{
@@ -130,7 +130,7 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 // makeRouter constructs a stub-backed ModelRouter + Agent for
 // integration sessions. The /skill and bash-mcp dispatch paths
 // don't ever call the model, so a stub is enough.
-func makeRouter(t *testing.T) (*model.ModelRouter, *runtime.Agent) {
+func makeRouter(t *testing.T) (*model.ModelRouter, *session.Agent) {
 	t.Helper()
 	spec := model.ModelSpec{Provider: "fake", Name: "f"}
 	router, err := model.NewModelRouter(map[model.Intent]model.ModelSpec{
@@ -139,7 +139,7 @@ func makeRouter(t *testing.T) (*model.ModelRouter, *runtime.Agent) {
 	if err != nil {
 		t.Fatalf("router: %v", err)
 	}
-	agent, err := runtime.NewAgent("agent-it", "hugen", staticIdentity{id: "agent-it"}, "")
+	agent, err := session.NewAgent("agent-it", "hugen", staticIdentity{id: "agent-it"}, "")
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestUS1_BashMCP_WriteRead(t *testing.T) {
 	core := newIntegrationCore(t, nil)
 
 	ctx := context.Background()
-	sess, _, err := core.manager.Open(ctx, runtime.OpenRequest{OwnerID: "u"})
+	sess, _, err := core.manager.Open(ctx, session.OpenRequest{OwnerID: "u"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestUS1_BashMCP_PermissionDenied(t *testing.T) {
 	core := newIntegrationCore(t, rules)
 
 	ctx := context.Background()
-	sess, _, err := core.manager.Open(ctx, runtime.OpenRequest{OwnerID: "u"})
+	sess, _, err := core.manager.Open(ctx, session.OpenRequest{OwnerID: "u"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestUS1_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
 	core := newIntegrationCore(t, nil)
 
 	ctx := context.Background()
-	sess, _, err := core.manager.Open(ctx, runtime.OpenRequest{OwnerID: "u"})
+	sess, _, err := core.manager.Open(ctx, session.OpenRequest{OwnerID: "u"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

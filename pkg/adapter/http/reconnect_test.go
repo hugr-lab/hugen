@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 func TestParseLastEventID(t *testing.T) {
@@ -39,7 +39,7 @@ func seedEvents(host *fakeHost, sessionID, agentID string, n int) {
 	author := protocol.ParticipantInfo{ID: agentID, Kind: protocol.ParticipantAgent}
 	for i := 1; i <= n; i++ {
 		f := protocol.NewAgentMessage(sessionID, author, "msg "+strconv.Itoa(i), i, true)
-		row, _, err := runtime.FrameToEventRow(f, agentID)
+		row, _, err := session.FrameToEventRow(f, agentID)
 		if err != nil {
 			panic(err)
 		}
