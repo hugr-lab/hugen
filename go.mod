@@ -6,14 +6,17 @@ require (
 	github.com/a2aproject/a2a-go v0.3.15
 	github.com/apache/arrow-go/v18 v18.5.2
 	github.com/duckdb/duckdb-go/v2 v2.10502.0
+	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/hugr-lab/query-engine v0.3.33
 	github.com/hugr-lab/query-engine/client v0.3.33
 	github.com/hugr-lab/query-engine/types v0.3.33
 	github.com/jackc/pgx/v5 v5.9.2
+	github.com/mark3labs/mcp-go v0.49.0
 	github.com/oasdiff/yaml v0.0.9
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
+	github.com/vektah/gqlparser/v2 v2.5.33
 	golang.org/x/sync v0.20.0
 	google.golang.org/adk v1.2.0
 )
@@ -25,6 +28,7 @@ require (
 	github.com/agnivade/levenshtein v1.2.1 // indirect
 	github.com/allegro/bigcache/v3 v3.1.0 // indirect
 	github.com/andybalholm/brotli v1.2.1 // indirect
+	github.com/apache/thrift v0.22.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bradfitz/gomemcache v0.0.0-20260422231931-4d751bb6e37c // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -49,9 +53,9 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/jsonpointer v0.23.1 // indirect
 	github.com/go-openapi/swag/jsonname v0.26.0 // indirect
-	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
+	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
@@ -68,10 +72,12 @@ require (
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
+	github.com/klauspost/asmfmt v1.3.2 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/mailru/easyjson v0.9.2 // indirect
-	github.com/mark3labs/mcp-go v0.49.0 // indirect
+	github.com/minio/asm2plan9s v0.0.0-20200509001527-cdd76441f9d8 // indirect
+	github.com/minio/c2goasm v0.0.0-20190812172519-36a3d3bbc4f3 // indirect
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/oasdiff/yaml3 v0.0.12 // indirect
@@ -92,7 +98,6 @@ require (
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/uber/h3-go/v4 v4.4.1 // indirect
-	github.com/vektah/gqlparser/v2 v2.5.33 // indirect
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/woodsbury/decimal128 v1.4.0 // indirect

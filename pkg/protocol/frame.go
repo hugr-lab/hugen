@@ -176,6 +176,55 @@ type SystemMarkerPayload struct {
 	Details map[string]any `json:"details,omitempty"`
 }
 
+// Phase-3 system_marker subjects. Adapters surface these as
+// audit events in the conversation transcript; the runtime emits
+// them at significant lifecycle steps so an operator can
+// reconstruct what happened post-hoc.
+const (
+	SubjectToolDenied            = "tool_denied"
+	SubjectPermissionRefresh     = "permission_refresh"
+	SubjectSkillLoaded           = "skill_loaded"
+	SubjectSkillUnloaded         = "skill_unloaded"
+	SubjectSkillPublished        = "skill_published"
+	SubjectSkillPublishBlocked   = "skill_publish_blocked"
+	SubjectSkillDependencyFailed = "skill_dependency_failed"
+	SubjectMCPProviderAdded      = "mcp_provider_added"
+	SubjectMCPProviderRemoved    = "mcp_provider_removed"
+	SubjectMCPProviderCrashed    = "mcp_provider_crashed"
+)
+
+// Phase-3 tool_error codes. Returned as the "code" field inside
+// a ToolResult{IsError:true}.Result map (or a typed ToolError
+// payload — wire-compatible). Tools that abort dispatch use these
+// codes so the LLM can react predictably and audit can categorise.
+const (
+	ToolErrorPermissionDenied = "permission_denied"
+	ToolErrorTimeout          = "timeout"
+	ToolErrorPathEscape       = "path_escape"
+	ToolErrorReadOnly         = "readonly"
+	ToolErrorNotFound         = "not_found"
+	ToolErrorProviderCrashed  = "provider_crashed"
+	ToolErrorProviderRemoved  = "provider_removed"
+	ToolErrorOutputTruncated  = "output_truncated"
+	ToolErrorHugrError        = "hugr_error"
+	ToolErrorAuth             = "auth"
+	ToolErrorIO               = "io"
+	ToolErrorJQError          = "jq_error"
+	ToolErrorArgValidation    = "arg_validation"
+)
+
+// ToolError is the recommended structured shape callers stuff
+// into ToolResultPayload.Result when IsError is true. It is not
+// load-bearing for adapters — they treat Result as opaque — but
+// using it in the runtime keeps audit and rendering consistent.
+type ToolError struct {
+	Code      string         `json:"code"`
+	Message   string         `json:"message,omitempty"`
+	Tier      string         `json:"tier,omitempty"`       // "config" | "remote" | "user" — for permission_denied
+	ElapsedMs int            `json:"elapsed_ms,omitempty"` // for timeout
+	Details   map[string]any `json:"details,omitempty"`
+}
+
 // Concrete variants. Each embeds BaseFrame + a typed payload.
 
 type UserMessage struct {

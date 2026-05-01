@@ -27,7 +27,7 @@ func newTestManager(t *testing.T, store RuntimeStore) *SessionManager {
 	t.Helper()
 	mdl := &scriptedModel{}
 	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"})
+	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
@@ -156,6 +156,63 @@ func TestProjectHistory_Window(t *testing.T) {
 
 // Touch the model package to avoid an unused-import lint.
 var _ = model.IntentDefault
+
+func TestSessionManager_LifecycleHooks(t *testing.T) {
+	store := newFakeStore()
+	mdl := &scriptedModel{}
+	router := newRouterWithModel(t, mdl)
+	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+
+	var openCalled, closeCalled atomic.Int32
+	mgr := NewSessionManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil,
+		WithLifecycle(SessionLifecycle{
+			OnOpen: func(ctx context.Context, sessionID string) error {
+				openCalled.Add(1)
+				return nil
+			},
+			OnClose: func(ctx context.Context, sessionID string) error {
+				closeCalled.Add(1)
+				return nil
+			},
+		}),
+	)
+	s, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if openCalled.Load() != 1 {
+		t.Errorf("OnOpen calls = %d, want 1", openCalled.Load())
+	}
+	if _, err := mgr.Close(context.Background(), s.ID(), "user_end"); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if closeCalled.Load() != 1 {
+		t.Errorf("OnClose calls = %d, want 1", closeCalled.Load())
+	}
+}
+
+func TestSessionManager_OnOpenErrorRollsBack(t *testing.T) {
+	store := newFakeStore()
+	mdl := &scriptedModel{}
+	router := newRouterWithModel(t, mdl)
+	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	failErr := errors.New("hook fail")
+	mgr := NewSessionManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil,
+		WithLifecycle(SessionLifecycle{
+			OnOpen: func(ctx context.Context, sessionID string) error { return failErr },
+		}),
+	)
+	_, _, err = mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
+	if err == nil || !errors.Is(err, failErr) {
+		t.Fatalf("err = %v, want wrap of %v", err, failErr)
+	}
+}
 
 func drainOutboxOnce(out <-chan protocol.Frame) {
 	select {

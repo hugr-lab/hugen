@@ -15,7 +15,7 @@ import (
 // Every Source also implements TokenStore — callers that only
 // need a token can keep using auth.Transport(src, base).
 type Source interface {
-	// Name is the registry key (matches AuthSpec.Name).
+	// Name is the registry key (matches config.AuthSource.Name).
 	Name() string
 
 	// Token returns a valid access token. Blocks until the first
@@ -42,6 +42,15 @@ type Source interface {
 // route fires.
 type LoginHandler interface {
 	HandleLogin(w http.ResponseWriter, r *http.Request)
+}
+
+// LoginPrompter is implemented by Sources that need an interactive
+// browser flow to obtain their first token. Service.Add auto-queues
+// the hook; the caller drains the queue once the HTTP listener is
+// bound (Service.FirePromptLogins). Token-only sources (RemoteStore)
+// do not implement this — boot stays quiet for them.
+type LoginPrompter interface {
+	PromptLogin()
 }
 
 // EncodeState returns a state parameter scoped to a Source by

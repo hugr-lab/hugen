@@ -1,11 +1,9 @@
-package local
+package config
 
-// Config is the local-DB section of the agent config. Populated by
-// pkg/config when cfg.LocalDBEnabled is true. pkg/config composes this
-// type into Config.LocalDB; pkg/store/local itself does not import
-// pkg/config, which keeps the dependency direction one-way
-// (config → local, never local → config).
-type Config struct {
+// LocalConfig is the local-DB section of the agent config — file
+// paths, pool settings, model registrations. Owned by pkg/config;
+// pkg/store/local consumes it through LocalView.
+type LocalConfig struct {
 	// DB holds the CoreDB (engine.db) path and pool settings.
 	DB DBConfig `mapstructure:"db"`
 
@@ -14,9 +12,8 @@ type Config struct {
 	MemoryPath string `mapstructure:"memory_path"`
 
 	// Models registers additional data sources in the engine (llm-*
-	// and embedding types). local.New hands each entry to
-	// engine.RegisterDataSource as-is. Filtering / routing is not a
-	// concern of this package.
+	// and embedding types). pkg/store/local hands each entry to
+	// engine.RegisterDataSource as-is.
 	Models []ModelDef `mapstructure:"models"`
 }
 
@@ -26,9 +23,8 @@ type DBConfig struct {
 	Settings DBSettings `mapstructure:"settings"`
 }
 
-// DBSettings mirrors query-engine/pkg/db.Settings — duplicated here to
-// keep pkg/store/local independent of engine-internal types (Viper
-// decodes directly into this struct).
+// DBSettings mirrors query-engine/pkg/db.Settings — duplicated here
+// to keep pkg/store/local independent of engine-internal types.
 type DBSettings struct {
 	Timezone      string `mapstructure:"timezone"`
 	HomeDirectory string `mapstructure:"home_directory"`
@@ -45,10 +41,10 @@ type ModelDef struct {
 	Path string `mapstructure:"path"`
 }
 
-// Identity identifies the running agent instance. Declared here
-// (rather than in pkg/config) so pkg/config can compose local.Config
-// without inducing a cycle through Identity back into pkg/config.
-type Identity struct {
+// AgentIdentity identifies the running agent instance. Lives in
+// pkg/config so every consumer (pkg/store/local for hub.db identity,
+// pkg/auth/perm for template substitution) reads the same shape.
+type AgentIdentity struct {
 	ID      string `mapstructure:"id"`
 	ShortID string `mapstructure:"short_id"`
 	Name    string `mapstructure:"name"`
@@ -56,10 +52,9 @@ type Identity struct {
 }
 
 // EmbeddingConfig is the agent's embedding setup (model name, vector
-// dimension, and whether to register locally or defer to remote Hugr).
-// Declared in pkg/store/local for the same cycle-avoidance reason as
-// Identity. Used by local.New (for probe + source registration) and
-// by pkg/store consumers (for vector search dim).
+// dimension, and whether to register locally or defer to remote
+// Hugr). Used by pkg/store/local for source registration and by
+// memory-pipeline consumers for vector-search dim.
 type EmbeddingConfig struct {
 	Mode      string `mapstructure:"mode"` // local | hugr
 	Model     string `mapstructure:"model"`

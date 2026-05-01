@@ -64,6 +64,87 @@ models:
 #     issuer: ${HUGR_OIDC_ISSUER}
 #     client_id: ${HUGR_OIDC_CLIENT_ID}
 
+# ── Tool providers (phase 3) ────────────────────────────────
+# MCP catalogue. Each entry becomes a `*tool.MCPProvider` registered
+# with the ToolManager. Keys:
+#   name        — provider id used as the tool prefix and permission
+#                 type (e.g. `hugen:tool:hugr-main`).
+#   type        — currently only `mcp`.
+#   transport   — `stdio` (subprocess) | `http` (streamable-HTTP) | `sse`.
+#   command/args/env — for `stdio` transports.
+#   endpoint    — for `http` / `sse` transports (URL of the MCP server).
+#   auth        — name of an `auth:` source above. Bearer tokens flow in
+#                 via `auth.Transport(...)` per request.
+#   lifetime    — `per_agent` (one process-wide connection — default for
+#                 HTTP) or `per_session` (spawned per Session.Open —
+#                 default for stdio; bash-mcp pattern).
+#
+# Hugr is OPTIONAL: omit the `hugr-main` / `hugr-query` entries to
+# run as a universal local agent (bash-mcp + system tools only).
+#
+tool_providers:
+  # In-tree per-session bash + filesystem MCP. Spawned by the
+  # runtime on Session.Open with
+  # cmd.Dir = <HUGEN_WORKSPACE_DIR>/<session_id>/.
+  #
+  # bash-mcp does no path translation. It exposes:
+  #   - bash.run / bash.shell — exec on the host filesystem.
+  #   - bash.read_file / write_file / list_dir / sed — convenience
+  #     wrappers that canonicalise paths but otherwise operate on
+  #     real host paths.
+  #
+  # Sandboxing is the deployment's job:
+  #   - container: rely on the kernel + bind mounts.
+  #   - local/dev: rely on filesystem ACL + (phase 5+) HITL
+  #     approval prompts before destructive operations.
+  - name: bash-mcp
+    type: mcp
+    transport: stdio
+    command: ./bin/bash-mcp        # built by `make bash-mcp`
+    lifetime: per_session
+    env:
+      # Real host directory the operator designates as the agent's
+      # user-visible exchange folder. The model is told about it via
+      # the _system skill and reads `$SHARED_DIR` in shell commands.
+      # Leave blank / unset to disable.
+      SHARED_DIR: ${HUGEN_SHARED_ROOT}
+
+  # Remote Hugr MCP (HTTP). Hugr is itself an MCP server exposing
+  # `discovery-*` / `schema-*` / `data-*` tools. The agent reaches
+  # it through the named auth source. Drop this entry to run as a
+  # universal local agent without Hugr.
+  - name: hugr-main
+    type: mcp
+    transport: http
+    endpoint: ${HUGR_URL}/mcp
+    auth: hugr
+
+  # In-tree Hugr GraphQL MCP (file output). Spawned per_agent over
+  # stdio; persists tabular results as Parquet under each session's
+  # workspace data dir, returns path + ≤ 50-row preview to the
+  # model.
+  #
+  # HUGR_URL is the literal endpoint the binary dials — usually
+  # `${HUGR_URL}/ipc` (multipart wire protocol). Operators behind a
+  # proxy with a non-standard prefix put the full path here; the
+  # runtime does NOT mangle it.
+  #
+  # The runtime injects HUGR_TOKEN_URL, HUGR_ACCESS_TOKEN,
+  # WORKSPACES_ROOT, SHARED_DIR, HUGEN_AGENT_ID at spawn time.
+  # Operators do not write those — they're per-spawn secrets and
+  # loopback paths the binary can't know on its own. HUGR_QUERY_*
+  # timeout knobs may be set here to override the binary defaults
+  # (1 h default, 24 h ceiling).
+  #
+  # Drop this entry to skip file-output queries; `hugr-main` above
+  # still serves inline data tools.
+  - name: hugr-query
+    type: hugr-query
+    command: ./bin/hugr-query        # built by `make hugr-query`
+    lifetime: per_agent
+    env:
+      HUGR_URL: ${HUGR_URL}/ipc
+
 local_db_enabled: true
 local_db:
   db:

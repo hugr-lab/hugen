@@ -10,6 +10,8 @@ package models
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +48,7 @@ const chatCompletionSubscription = `subscription($model: String!, $messages: [St
 				prompt_tokens
 				completion_tokens
 				thought_signature
+				thinking
 			}
 		}
 	}
@@ -229,7 +232,32 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 		// canceled / drained — no terminal chunk to emit.
 		return
 	}
-	final := model.Chunk{Final: true}
+	// Hugr collapses tool_use into the finish event (carries
+	// `tool_use` finish_reason + a populated ToolCalls string)
+	// rather than streaming a separate tool_use chunk. Emit each
+	// tool call as its own chunk BEFORE the terminal Final chunk
+	// so the runtime's Turn loop sees them.
+	if finishEv.ToolCalls != "" {
+		calls, err := parseToolCalls(finishEv.ToolCalls)
+		if err != nil {
+			m.logger.Warn("hugr completion: parse tool_calls failed",
+				"model", finishEv.Model, "err", err, "raw_len", len(finishEv.ToolCalls))
+		}
+		for _, c := range calls {
+			tc := model.ChunkToolCall{
+				ID:   c.Call.ID,
+				Name: c.Call.Name,
+				Args: c.Call.Arguments,
+				Hash: c.Hash,
+			}
+			_ = sendItem(ctx, out, streamItem{chunk: model.Chunk{ToolCall: &tc}})
+		}
+	}
+	final := model.Chunk{
+		Final:            true,
+		Thinking:         finishEv.Thinking,
+		ThoughtSignature: finishEv.ThoughtSignature,
+	}
 	if finishEv.PromptTokens != 0 || finishEv.CompletionTokens != 0 {
 		final.Usage = &model.Usage{
 			PromptTokens:     finishEv.PromptTokens,
@@ -242,6 +270,7 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 		"finish_reason", finishEv.FinishReason,
 		"prompt_tokens", finishEv.PromptTokens,
 		"completion_tokens", finishEv.CompletionTokens,
+		"tool_calls_emitted", finishEv.ToolCalls != "",
 	)
 	_ = sendItem(ctx, out, streamItem{chunk: final})
 }
@@ -273,9 +302,10 @@ func streamEventToChunk(ev types.LLMStreamEvent) (model.Chunk, bool) {
 		}
 		first := calls[0]
 		return model.Chunk{ToolCall: &model.ChunkToolCall{
-			ID:   first.ID,
-			Name: first.Name,
-			Args: first.Arguments,
+			ID:   first.Call.ID,
+			Name: first.Call.Name,
+			Args: first.Call.Arguments,
+			Hash: first.Hash,
 		}}, true
 	}
 	return model.Chunk{}, false
@@ -380,6 +410,8 @@ func readStreamEvent(schema *arrow.Schema, batch arrow.RecordBatch, rowIdx int) 
 			ev.CompletionTokens = intVal(val)
 		case "thought_signature":
 			ev.ThoughtSignature = stringVal(val)
+		case "thinking":
+			ev.Thinking = stringVal(val)
 		}
 	}
 	return ev
@@ -417,9 +449,23 @@ func intVal(v any) int {
 	return 0
 }
 
-// parseToolCalls parses the Hugr stream's ToolCalls string. The format
-// varies by provider — see comment block in convert.go.
-func parseToolCalls(raw string) ([]types.LLMToolCall, error) {
+// parsedToolCall pairs a fully-decoded LLMToolCall (Arguments
+// resolved to a Go value, ready for downstream JSON re-marshaling
+// or direct dispatch) with a stable per-call hash computed from
+// the raw bytes. Hashing here avoids re-marshaling Arguments back
+// to JSON later — the raw form is already on the wire.
+type parsedToolCall struct {
+	Call types.LLMToolCall
+	Hash string
+}
+
+// parseToolCalls parses the Hugr stream's ToolCalls string. The
+// format varies by provider — see comment block in convert.go.
+// The function uses a json.RawMessage shim for Arguments so the
+// hash sees the bytes verbatim (whitespace + key order as the
+// provider sent them — providers are deterministic enough that
+// this gives a stable repeat-detection signal).
+func parseToolCalls(raw string) ([]parsedToolCall, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
@@ -428,27 +474,57 @@ func parseToolCalls(raw string) ([]types.LLMToolCall, error) {
 	if len(truncated) > 200 {
 		truncated = truncated[:200] + "..."
 	}
+	type rawCall struct {
+		ID        string          `json:"id"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	var calls []rawCall
 	switch {
 	case strings.HasPrefix(raw, "["):
-		var calls []types.LLMToolCall
 		if err := json.Unmarshal([]byte(raw), &calls); err != nil {
 			return nil, fmt.Errorf("unmarshal tool_calls array: %w (raw: %s)", err, truncated)
 		}
-		return calls, nil
 	case strings.HasPrefix(raw, "{"):
-		var tc types.LLMToolCall
-		if err := json.Unmarshal([]byte(raw), &tc); err != nil {
+		var single rawCall
+		if err := json.Unmarshal([]byte(raw), &single); err != nil {
 			return nil, fmt.Errorf("unmarshal tool_call object: %w (raw: %s)", err, truncated)
 		}
-		if tc.Name != "" {
-			return []types.LLMToolCall{tc}, nil
+		if single.Name == "" {
+			// Provider streamed only the args envelope — fold it
+			// into a nameless call. Caller (LLM-side) must not
+			// have asked tools, so this is best-effort.
+			single.Arguments = json.RawMessage(raw)
 		}
-		var args any
-		if err := json.Unmarshal([]byte(raw), &args); err != nil {
-			return nil, fmt.Errorf("unmarshal tool_call args: %w (raw: %s)", err, truncated)
-		}
-		return []types.LLMToolCall{{Arguments: args}}, nil
+		calls = []rawCall{single}
 	default:
 		return nil, fmt.Errorf("unexpected tool_calls format (raw: %s)", truncated)
 	}
+
+	out := make([]parsedToolCall, 0, len(calls))
+	for _, rc := range calls {
+		var args any
+		if len(rc.Arguments) > 0 {
+			if err := json.Unmarshal(rc.Arguments, &args); err != nil {
+				return nil, fmt.Errorf("unmarshal tool_call args for %q: %w (raw: %s)", rc.Name, err, truncated)
+			}
+		}
+		out = append(out, parsedToolCall{
+			Call: types.LLMToolCall{ID: rc.ID, Name: rc.Name, Arguments: args},
+			Hash: hashToolCall(rc.Name, rc.Arguments),
+		})
+	}
+	return out, nil
+}
+
+// hashToolCall returns a deterministic identifier for a single
+// tool call. Computed from the raw arguments bytes (no canonical
+// re-marshaling) so it costs one sha-256 pass and nothing else.
+// Repeat detection compares this string — equal hash → same call.
+func hashToolCall(name string, rawArgs []byte) string {
+	h := sha256.New()
+	h.Write([]byte(name))
+	h.Write([]byte{0})
+	h.Write(rawArgs)
+	return hex.EncodeToString(h.Sum(nil))
 }

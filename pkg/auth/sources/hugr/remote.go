@@ -45,6 +45,25 @@ func NewRemoteStore(name, accessToken, tokenURL string) *RemoteStore {
 	}
 }
 
+// NewRemoteStoreBootstrap is like NewRemoteStore but treats the
+// initial access token as a one-shot bootstrap secret rather than a
+// usable bearer. The first Token() call triggers an immediate
+// exchange — there is no "use the initial token briefly" window.
+//
+// hugr-query uses this constructor: HUGR_ACCESS_TOKEN is a random
+// secret that the agent's /api/auth/agent-token endpoint redeems
+// for the agent's actual Hugr JWT, and using the secret directly
+// against Hugr would 401 every call.
+func NewRemoteStoreBootstrap(name, bootstrap, tokenURL string) *RemoteStore {
+	return &RemoteStore{
+		name:     name,
+		tokenURL: tokenURL,
+		token:    bootstrap,
+		// expiresAt zero (= epoch) → first Token() falls through to refresh.
+		client: &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
 // Name implements Source.
 func (s *RemoteStore) Name() string { return s.name }
 
@@ -61,14 +80,45 @@ func (s *RemoteStore) HandleCallback(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *RemoteStore) Token(ctx context.Context) (string, error) {
+	tok, _, err := s.tokenWithTTL(ctx)
+	return tok, err
+}
+
+// TokenWithTTL is like Token but also reports remaining seconds
+// until the cached token's expiry. Callers that propagate the
+// token to a downstream agent-token endpoint use this so the
+// downstream RemoteStore caches for the JWT's actual lifetime.
+func (s *RemoteStore) TokenWithTTL(ctx context.Context) (string, int, error) {
+	return s.tokenWithTTL(ctx)
+}
+
+func (s *RemoteStore) tokenWithTTL(ctx context.Context) (string, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.token != "" && time.Now().Before(s.expiresAt) {
-		return s.token, nil
+	// Refresh ~30s before expiry so a token that's "still valid"
+	// by our clock isn't already rejected by Hugr (clock skew /
+	// short server-side TTLs). This matches the OIDC source's
+	// behaviour and avoids tail-end "token expired" errors that
+	// look like an unrecoverable failure but are actually just
+	// timing.
+	if s.token != "" && time.Now().Add(30*time.Second).Before(s.expiresAt) {
+		return s.token, ttlSeconds(s.expiresAt), nil
 	}
 
-	return s.refresh(ctx)
+	tok, err := s.refresh(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+	return tok, ttlSeconds(s.expiresAt), nil
+}
+
+func ttlSeconds(expiresAt time.Time) int {
+	d := time.Until(expiresAt)
+	if d <= 0 {
+		return 0
+	}
+	return int(d / time.Second)
 }
 
 // refresh exchanges the expired token for a new one.

@@ -166,18 +166,6 @@ func (b *sessionBus) deliver(s *subscriber, f protocol.Frame) {
 // warning instead).
 func (b *sessionBus) dropCount() int64 { return b.drops.Load() }
 
-// busDrops returns the drop count for a session's bus, or 0 when
-// no bus exists. Test-only accessor on the adapter; production code
-// has no reason to peek here.
-func (a *Adapter) busDrops(sessionID string) int64 {
-	a.busesMu.Lock()
-	defer a.busesMu.Unlock()
-	if b, ok := a.buses[sessionID]; ok {
-		return b.dropCount()
-	}
-	return 0
-}
-
 // addSubscriber registers a new connection on the bus. Returns the
 // per-connection out channel. If the bus is shutting down (busCtx
 // already cancelled — covers both the upstream-closed and the

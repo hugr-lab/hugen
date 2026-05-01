@@ -23,9 +23,22 @@ func messagesToHugrJSON(messages []model.Message) ([]string, error) {
 			return nil, fmt.Errorf("messagesToHugrJSON: empty role on message %d", i)
 		}
 		hm := types.LLMMessage{
-			Role:       role,
-			Content:    msg.Content,
-			ToolCallID: msg.ToolCallID,
+			Role:             role,
+			Content:          msg.Content,
+			ToolCallID:       msg.ToolCallID,
+			Thinking:         msg.Thinking,
+			ThoughtSignature: msg.ThoughtSignature,
+		}
+		if len(msg.ToolCalls) > 0 {
+			calls := make([]types.LLMToolCall, len(msg.ToolCalls))
+			for i, tc := range msg.ToolCalls {
+				calls[i] = types.LLMToolCall{
+					ID:        tc.ID,
+					Name:      tc.Name,
+					Arguments: tc.Args,
+				}
+			}
+			hm.ToolCalls = calls
 		}
 		b, err := json.Marshal(hm)
 		if err != nil {

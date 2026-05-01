@@ -1,4 +1,4 @@
-.PHONY: build run run-console run-webui test vet lint check tidy clean
+.PHONY: build mcps bash-mcp hugr-query run run-console run-webui test vet lint check tidy clean
 
 BINARY := bin/hugen
 TAGS   := duckdb_arrow
@@ -6,8 +6,19 @@ TAGS   := duckdb_arrow
 # Debug-friendly CGO flags (DuckDB symbols visible in delve / stack traces).
 CGO_DEBUG_FLAGS := -O1 -g
 
-build:
+build: $(BINARY) mcps
+
+$(BINARY):
 	go build -tags=$(TAGS) -o $(BINARY) ./cmd/hugen
+
+# MCP companion binaries spawned by the runtime over stdio.
+mcps: bash-mcp hugr-query
+
+bash-mcp:
+	go build -o bin/bash-mcp ./mcp/bash-mcp
+
+hugr-query:
+	go build -tags=$(TAGS) -o bin/hugr-query ./mcp/hugr-query
 
 run:
 	go run -tags=$(TAGS) ./cmd/hugen

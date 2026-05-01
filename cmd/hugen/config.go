@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/identity"
-	"github.com/hugr-lab/hugen/pkg/models"
 
-	"github.com/hugr-lab/hugen/pkg/store/local"
 	"github.com/spf13/viper"
 )
 
@@ -29,7 +29,20 @@ type BootstrapConfig struct {
 	Port       int
 	WebUIPort  int
 	BaseURI    string
-	Hugr       HugrConfig
+	// StateDir is the persistent state root (HUGEN_STATE).
+	// Used for installed skills (system/community/local), agent
+	// keys, and any other across-restart state. Defaults to
+	// "${HOME}/.hugen" on local mode.
+	StateDir string
+	// WorkspaceDir is the per-session scratch root
+	// (HUGEN_WORKSPACE_DIR). Each Session.Open creates
+	// "<WorkspaceDir>/<session_id>/" and bash-mcp is spawned
+	// with cmd.Dir set to it. Defaults to "./.hugen/workspace".
+	WorkspaceDir string
+	// CleanupOnClose removes the session's workspace directory on
+	// Session.Close. Defaults to true.
+	CleanupOnClose bool
+	Hugr           HugrConfig
 }
 
 // HugrConfig — platform connection.
@@ -53,32 +66,54 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 
 	v.SetDefault("HUGR_URL", "http://localhost:15000")
 	v.SetDefault("HUGEN_PORT", 10000)
+	v.SetDefault("HUGEN_WORKSPACE_CLEANUP_ON_CLOSE", true)
 	v.SetDefault("HUGEN_WEBUI_PORT", 10001)
 	v.SetDefault("HUGEN_CONFIG_FILE", "config.yaml")
 	v.SetDefault("HUGEN_BASE_URL", "http://localhost:10000")
 
 	_ = v.ReadInConfig()
 
+	// Force PWD to hugen's actual working directory before
+	// expanding .env values. The shell-set PWD survives most
+	// launchers (terminal, make, go run), but `dlv exec` and some
+	// IDE debug paths inherit a stale or absent PWD — leading to
+	// `${PWD}/data` resolving against the wrong root or vanishing.
+	// os.Getwd is what every other path inside the process uses, so
+	// keying off it gives consistent results across launchers.
+	if cwd, err := os.Getwd(); err == nil {
+		_ = os.Setenv("PWD", cwd)
+	}
+
 	// Export every key viper read from .env into os.Environ so that
 	// os.ExpandEnv calls in downstream config (e.g. pkg/store/local
-	// model paths "${LLM_LOCAL_URL}?...") see them.
+	// model paths "${LLM_LOCAL_URL}?...") see them. Values are
+	// expanded once before export so .env can reference shell vars
+	// (e.g. HUGEN_SHARED_ROOT=${PWD}/data) — pkg/config/loader
+	// runs only one ExpandEnv pass on its string fields, so without
+	// this pre-pass nested `${VAR}` placeholders would survive into
+	// the final config and reach MCP subprocesses verbatim.
 	for _, k := range v.AllKeys() {
 		key := upperEnv(k)
 		if os.Getenv(key) != "" {
 			continue
 		}
-		if val := v.GetString(k); val != "" {
-			_ = os.Setenv(key, val)
+		val := v.GetString(k)
+		if val == "" {
+			continue
 		}
+		_ = os.Setenv(key, os.ExpandEnv(val))
 	}
 
 	config := &BootstrapConfig{
-		Mode:       v.GetString("HUGEN_MODE"),
-		LogLevel:   v.GetString("HUGEN_LOG_LEVEL"),
-		ConfigPath: v.GetString("HUGEN_CONFIG_FILE"),
-		Port:       v.GetInt("HUGEN_PORT"),
-		WebUIPort:  v.GetInt("HUGEN_WEBUI_PORT"),
-		BaseURI:    v.GetString("HUGEN_BASE_URL"),
+		Mode:         v.GetString("HUGEN_MODE"),
+		LogLevel:     v.GetString("HUGEN_LOG_LEVEL"),
+		ConfigPath:   v.GetString("HUGEN_CONFIG_FILE"),
+		Port:         v.GetInt("HUGEN_PORT"),
+		WebUIPort:    v.GetInt("HUGEN_WEBUI_PORT"),
+		BaseURI:      v.GetString("HUGEN_BASE_URL"),
+		StateDir:       v.GetString("HUGEN_STATE"),
+		WorkspaceDir:   v.GetString("HUGEN_WORKSPACE_DIR"),
+		CleanupOnClose: v.GetBool("HUGEN_WORKSPACE_CLEANUP_ON_CLOSE"),
 		Hugr: HugrConfig{
 			URL:         v.GetString("HUGR_URL"),
 			RedirectURI: v.GetString("HUGR_REDIRECT_URI"),
@@ -91,6 +126,16 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 	}
 	if config.BaseURI == "" {
 		config.BaseURI = fmt.Sprintf("http://localhost:%d", config.Port)
+	}
+	if config.StateDir == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			config.StateDir = filepath.Join(home, ".hugen")
+		} else {
+			config.StateDir = ".hugen"
+		}
+	}
+	if config.WorkspaceDir == "" {
+		config.WorkspaceDir = filepath.Join(".hugen", "workspace")
 	}
 	if config.Hugr.AccessToken != "" && config.Hugr.TokenURL == "" ||
 		config.Hugr.AccessToken == "" && config.Hugr.TokenURL != "" {
@@ -156,70 +201,23 @@ func (c *BootstrapConfig) Info() string {
 	return w.String()
 }
 
-// RuntimeConfig is the YAML-driven config layered on top of the
-// bootstrap. Phase 1 only consumes Models, LocalDB, Embedding, Auth.
-// The legacy A2A / DevUI fields are intentionally absent — those
-// modes return in phase 2 (webui) and phase 10 (a2a).
-type RuntimeConfig struct {
-	Embedding      local.EmbeddingConfig
-	localDBEnabled bool
-	LocalDB        local.Config
-	Models         models.Config
-	Auth           []AuthConfig
-}
-
-// LocalDBEnabled reports whether the embedded engine is on for this
-// deployment.
-func (c *RuntimeConfig) LocalDBEnabled() bool {
-	return c.localDBEnabled
-}
-
-// AuthConfig is the YAML-decoded form of an extra auth source entry.
-// Phase 1 has no extra sources by default; the field exists so phase-3
-// MCP providers can plug in.
-type AuthConfig struct {
-	Name         string `mapstructure:"name"`
-	Type         string `mapstructure:"type"`
-	Issuer       string `mapstructure:"issuer"`
-	ClientID     string `mapstructure:"client_id"`
-	CallbackPath string `mapstructure:"callback_path"`
-	LoginPath    string `mapstructure:"login_path"`
-	AccessToken  string `mapstructure:"access_token"`
-	TokenURL     string `mapstructure:"token_url"`
-}
-
-func buildRuntimeConfig(ctx context.Context, boot *BootstrapConfig, src identity.Source) (*RuntimeConfig, error) {
+// buildConfigService loads the YAML config aggregate (carried via
+// identity.Agent.Config) and returns the phase-3 *config.StaticService.
+// Every domain consumer reads through narrow Views off this Service —
+// no other config aggregate lives in cmd/hugen. The runtime agent
+// identity stays a separate live dependency (identity.Source) — it
+// is not snapshotted here.
+func buildConfigService(ctx context.Context, boot *BootstrapConfig, src identity.Source) (*config.StaticService, error) {
 	agent, err := src.Agent(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var cfg RuntimeConfig
-	v := viper.New()
-	if err := v.MergeConfigMap(agent.Config); err != nil {
-		return nil, fmt.Errorf("config: merge config map: %w", err)
+	in, err := config.LoadStaticInput(agent.Config, boot.IsLocalMode())
+	if err != nil {
+		return nil, err
 	}
-	if err := unmarshalSections(v, &cfg); err != nil {
-		return nil, fmt.Errorf("config: unmarshal sections: %w", err)
-	}
-	cfg.localDBEnabled = boot.IsLocalMode()
-	if cfg.Models.Model == "" {
+	if in.Models.Model == "" {
 		return nil, fmt.Errorf("config: models.model is empty (set in config.yaml)")
 	}
-	return &cfg, nil
-}
-
-func unmarshalSections(v *viper.Viper, cfg *RuntimeConfig) error {
-	if err := v.UnmarshalKey("models", &cfg.Models); err != nil {
-		return fmt.Errorf("unmarshal models: %w", err)
-	}
-	if err := v.UnmarshalKey("embedding", &cfg.Embedding); err != nil {
-		return fmt.Errorf("unmarshal embedding: %w", err)
-	}
-	if err := v.UnmarshalKey("local_db", &cfg.LocalDB); err != nil {
-		return fmt.Errorf("unmarshal local_db: %w", err)
-	}
-	if err := v.UnmarshalKey("auth", &cfg.Auth); err != nil {
-		return fmt.Errorf("unmarshal auth: %w", err)
-	}
-	return nil
+	return config.NewStaticService(in), nil
 }

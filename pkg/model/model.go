@@ -48,6 +48,21 @@ type Message struct {
 	Parts []Part
 	// Optional: for role=tool, the tool call id this is a response to.
 	ToolCallID string
+	// Optional: for role=assistant, the tool calls the model emitted
+	// in this turn. Populated by the runtime so that subsequent
+	// model.Generate calls see well-formed history (assistant
+	// requested → tool responded). Without this, providers like
+	// Gemma route the absent-antecedent tool result back to the
+	// model as "I haven't called this yet" and re-issue the call.
+	ToolCalls []ChunkToolCall
+	// Optional: for role=assistant. Anthropic / OpenAI thinking
+	// (reasoning) text and Gemini 2.5+ / Anthropic encrypted
+	// thought_signature. Carried through history so the model can
+	// continue multi-turn reasoning chains coherently — Anthropic
+	// in particular refuses to continue without the signature
+	// when extended thinking is on.
+	Thinking         string
+	ThoughtSignature string
 }
 
 // Part is a placeholder for future multimodal content (images,
@@ -77,13 +92,27 @@ type Chunk struct {
 	ToolCall  *ChunkToolCall
 	Usage     *Usage
 	Final     bool
+	// Set on the Final chunk only when the provider surfaced
+	// per-turn reasoning state. The runtime captures these and
+	// attaches them to the assistant Message it persists in
+	// history so subsequent turns retain the reasoning chain
+	// (Anthropic extended thinking, Gemini 2.5+ signature).
+	Thinking         string
+	ThoughtSignature string
 }
 
 // ChunkToolCall is a streamed tool-call request from the model.
+//
+// Hash is a stable identifier for "this exact call" — sha256 of
+// the canonical (name + raw-args) bytes — computed once at the
+// model-provider boundary so downstream consumers can detect
+// repeats without re-marshaling. Empty string when the provider
+// didn't compute one.
 type ChunkToolCall struct {
 	ID   string
 	Name string
 	Args any
+	Hash string
 }
 
 // Usage carries token counts emitted on the final chunk.

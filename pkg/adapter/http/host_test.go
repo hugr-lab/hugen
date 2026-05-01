@@ -2,7 +2,6 @@ package http
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -27,7 +26,7 @@ func (stubIdentity) Permission(_ context.Context, _, _ string) (identity.Permiss
 }
 
 func newTestAgent() *runtime.Agent {
-	a, err := runtime.NewAgent("agent-test", "hugen-test", stubIdentity{})
+	a, err := runtime.NewAgent("agent-test", "hugen-test", stubIdentity{}, "")
 	if err != nil {
 		panic(err)
 	}
@@ -254,7 +253,3 @@ type allowAllAuth struct{}
 
 func (allowAllAuth) Verify(_ string) error { return nil }
 
-// rejectAllAuth fails every token; used to assert 401s.
-type rejectAllAuth struct{}
-
-func (rejectAllAuth) Verify(_ string) error { return errors.New("rejected") }

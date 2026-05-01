@@ -25,11 +25,18 @@ import (
 func TestADKQuarantine(t *testing.T) {
 	leaves := []string{
 		"github.com/hugr-lab/hugen/cmd/hugen/...",
+		"github.com/hugr-lab/hugen/cmd/hugen-skill-validate/...",
 		"github.com/hugr-lab/hugen/pkg/protocol/...",
 		"github.com/hugr-lab/hugen/pkg/model/...",
 		"github.com/hugr-lab/hugen/pkg/models/...",
 		"github.com/hugr-lab/hugen/pkg/runtime/...",
 		"github.com/hugr-lab/hugen/pkg/adapter/...",
+		"github.com/hugr-lab/hugen/pkg/config/...",
+		"github.com/hugr-lab/hugen/pkg/skill/...",
+		"github.com/hugr-lab/hugen/pkg/tool/...",
+		"github.com/hugr-lab/hugen/pkg/auth/...",
+		"github.com/hugr-lab/hugen/mcp/bash-mcp/...",
+		"github.com/hugr-lab/hugen/mcp/hugr-query/...",
 	}
 	args := append([]string{"list", "-tags=duckdb_arrow", "-deps"}, leaves...)
 	out, err := exec.Command("go", args...).CombinedOutput()
