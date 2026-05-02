@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -49,6 +50,19 @@ func run(args []string, errOut io.Writer) int {
 	if len(args) > 0 {
 		sub = args[0]
 	}
+	// Expose hugen's startup cwd to config.yaml as ${HUGEN_VENDOR_DIR}
+	// so per_session MCP args that reference vendored sources (e.g.
+	// `uvx --from ${HUGEN_VENDOR_DIR}/mcp-server-motherduck`) resolve
+	// correctly. Without this, uvx interprets a relative path against
+	// its own cwd (= session workspace) and fails. Operators who want
+	// a different vendor location can set HUGEN_VENDOR_DIR explicitly
+	// before launching hugen.
+	if cwd, err := os.Getwd(); err == nil {
+		if _, ok := os.LookupEnv("HUGEN_VENDOR_DIR"); !ok {
+			_ = os.Setenv("HUGEN_VENDOR_DIR", filepath.Join(cwd, "vendor"))
+		}
+	}
+
 	switch sub {
 	case "a2a":
 		fmt.Fprintln(errOut, "the a2a mode is not yet available in this build; planned for phase 10")

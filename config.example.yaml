@@ -207,8 +207,12 @@ tool_providers:
     command: uvx
     lifetime: per_session
     args:
+      # Path resolved by uvx — must be absolute, because uvx runs
+      # with cwd = session workspace, not hugen's startup dir.
+      # ${HUGEN_VENDOR_DIR} is set by hugen at startup to <pwd>/vendor;
+      # operators can override it before launching hugen.
       - --from
-      - ./vendor/mcp-server-motherduck
+      - ${HUGEN_VENDOR_DIR}/mcp-server-motherduck
       - mcp-server-motherduck
       - --db-path
       - ":memory:"
