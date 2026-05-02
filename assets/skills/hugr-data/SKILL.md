@@ -99,11 +99,6 @@ Rule of thumb: anything that fits comfortably in the model context (rows ≤ 50,
 small JSON) goes through `hugr-main`. Bigger payloads or anything you intend
 to read back later via bash tools goes through `hugr-query`.
 
-> **Tool prefix note.** `hugr-main:` and `hugr-query:` follow the operator's
-> `tool_providers[].name` from `config.yaml`. Default names match the bundled
-> YAML; if your deployment renamed a provider, every reference shifts
-> accordingly. See `_system` skill body for the full convention.
-
 ## Core Principles
 
 1. **Lazy stepwise introspection** — start broad, refine with tools. Never assume field names.

@@ -31,9 +31,9 @@ Pure reference skill — no tool grants. Use it via `skill_ref` to look up:
 - date / time / interval / string functions,
 - window functions and `OVER` clause variants.
 
-Load this skill alongside `duckdb-data` when you are composing a real
-query, or alone when the user asks a SQL-syntax question that does not
-need execution.
+Load alongside `duckdb-data` when you are composing a real query, or
+alone when the user asks a SQL-syntax question that does not need
+execution.
 
 > Content ported from upstream
 > [`duckdb/duckdb-skills`](https://github.com/duckdb/duckdb-skills)

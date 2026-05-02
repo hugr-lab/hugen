@@ -3,12 +3,14 @@ name: duckdb-data
 license: MIT
 description: >
   Run analytical SQL on workspace files via DuckDB (in-memory, per
-  session). Use to attach Parquet / CSV / JSON / GeoJSON as queryable
-  tables, join across files, convert formats via COPY, query S3 / HTTP
-  URLs, and run spatial ops (ST_Distance, ST_Intersects). For DuckDB
-  syntax / function lookup load `duckdb-docs` alongside; for fetching
-  data from the Hugr platform use `hugr-data`; for charts / HTML / PDF
-  reports use `python-runner`.
+  session). The cheapest path for joining and post-processing data
+  pulled from upstream sources (Hugr, REST exports, hand-written CSVs)
+  — attach Parquet / CSV / JSON / GeoJSON as queryable tables,
+  cross-file joins, aggregations and window functions, format
+  conversion via COPY, queries against S3 / HTTP URLs, spatial ops
+  (ST_Distance, ST_Intersects). For DuckDB syntax / function lookup
+  load `duckdb-docs` alongside; for fetching source data use
+  `hugr-data`; for charts / HTML / PDF reports use `python-runner`.
 allowed-tools:
   - provider: duckdb-mcp
     tools:
@@ -59,8 +61,6 @@ NEVER guess a function or operator before consulting `duckdb-docs` — DuckDB
 SQL diverges from Postgres in places (FILTER clause, QUALIFY, list / struct
 / map types, named-parameter calls).
 
-0. **Read the relevant reference** below via `skill_ref` the first time
-   you touch a workflow this session.
 1. **Use relative paths** — files live under `${SESSION_DIR}/`. DuckDB
    resolves them against its cwd, which the runtime sets to that dir.
 2. **Compose SQL** — point `read_parquet('data/X.parquet')` /
@@ -68,22 +68,6 @@ SQL diverges from Postgres in places (FILTER clause, QUALIFY, list / struct
    `ATTACH` is needed for one-off reads.
 3. **Write outputs via COPY** — `COPY (SELECT ...) TO 'data/out.parquet'`.
    Surface relative paths back to the user.
-
-## Task-specific guidance
-
-| Task | Reference | When to read |
-|------|-----------|--------------|
-| Attach a file as a queryable table | `attach` | Reusing the same file across many queries |
-| Ad-hoc one-shot SELECT over a file | `query` | First time you `read_parquet` / `read_csv_auto` |
-| csv ↔ parquet ↔ json conversion | `convert` | Any `COPY ... TO ...` |
-| Inline file content as rows | `read` | Tiny reference files (lookup tables, config) |
-| Object-storage / HTTP URLs | `s3` | `s3://`, `https://` data sources, signed URLs |
-| Geospatial ops (ST_*) | `spatial` | GeoJSON, Parquet with WKB / WKT geometry |
-| Workspace conventions, hugr-query bridging | `workspace` | Always — first time this session |
-
-If a query fails on something one of these references covers (e.g.
-`ST_Distance` argument types, `read_csv` header detection, `httpfs` URL
-form), fix the reference and re-read it instead of trial-and-error.
 
 ## Critical rules
 
@@ -102,14 +86,6 @@ form), fix the reference and re-read it instead of trial-and-error.
   `execute_query`.
 - **Surface relative paths to the user** — they read files via the
   workspace root, not the host root.
-
-## Tool prefix note
-
-Tool names in this skill (`duckdb-mcp:execute_query` etc.) follow
-the operator's `tool_providers[].name` from `config.yaml`. The
-default name `duckdb-mcp` matches the bundled YAML; if your
-deployment renamed the provider, every reference shifts
-accordingly. See `_system` skill body for the full convention.
 
 ## Why not Python first?
 

@@ -94,17 +94,9 @@ patterns below cover the majority of tasks and prevent the typical
 | **Charts** | `plotting` | matplotlib (static) or plotly (interactive) |
 | **HTML / PDF reports, maps** | `visualization` | great_tables, folium, weasyprint |
 
-If you skip the reference and the script fails on something covered there
-(stale token, absolute path, headless backend, geometry decoding), the
-correction belongs in the reference — read it before retrying.
-
-## Tool prefix note
-
-Tool names in this skill (`python-mcp:run_code`, `python-mcp:run_script`)
-follow the operator's `tool_providers[].name` from `config.yaml`. The
-default name `python-mcp` matches the bundled YAML; if your deployment
-renamed the provider, every reference shifts accordingly. See `_system`
-skill body for the full convention.
+If a script fails on something one of these references covers (stale
+token, absolute path, headless backend, geometry decoding), re-read the
+reference instead of retrying.
 
 ## Critical rules (never forget)
 

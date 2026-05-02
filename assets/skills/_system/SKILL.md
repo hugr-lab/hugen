@@ -115,27 +115,28 @@ shell tools and file tools see exactly the same paths.
   — admin path to attach or detach an MCP server at runtime.
   Operator-only; the call may be denied by policy.
 
-## Tool naming
+## Discovering skill contents
 
-Every tool you can call is named `<provider>:<tool>`. The
-`<provider>` half is set by the deployment's `tool_providers:`
-config — what the operator wrote as `name:` in YAML. The bundled
-defaults you'll see most often:
+A loaded skill's body (this SKILL.md) is the entry point but rarely
+the whole story. Skills ship references, sample data, scripts, and
+templates under their own filesystem root. The standard discovery
+flow:
 
-| Provider name | Source                                |
-|---------------|----------------------------------------|
-| `bash-mcp`    | in-tree shell + filesystem MCP         |
-| `hugr-main`   | remote Hugr GraphQL/MCP (if Hugr is configured) |
-| `hugr-query`  | in-tree file-output Hugr MCP           |
-| `duckdb-mcp`  | vendored MotherDuck DuckDB MCP         |
-| `python-mcp`  | in-tree Python execution MCP           |
-| `system`      | built-in (this skill's tools)          |
+1. **`skill_files(name="<skill>")`** — list every file the skill
+   ships, with relative + absolute paths, size, and mode. Optional
+   `subdir` (e.g. `"references"`) and `glob` (e.g. `"*.md"`) narrow
+   the listing.
+2. **`skill_ref(skill="<skill>", ref="<base>")`** — convenience for
+   reference docs: reads `references/<base>.md` directly without
+   needing the absolute path.
+3. **`bash.read_file <abs path>`** — for any other bundled file
+   (sample data, scripts, templates) once `skill_files` gave you
+   the path.
 
-If your deployment renamed a provider (e.g. `python-mcp` →
-`pp-mcp`), every tool-call references shift accordingly
-(`pp-mcp:run_code` instead of `python-mcp:run_code`). When skill
-references and your snapshot disagree on a name, trust the
-snapshot — that's what the runtime actually exposes.
+Skill bodies SHOULD point at the references they consider important
+in narrative form, but you do NOT have to wait for an explicit
+mention. If a workflow looks underspecified or a reference may
+exist, run `skill_files` and read what is there.
 
 ## Operator policy
 
