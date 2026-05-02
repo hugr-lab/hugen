@@ -2,8 +2,6 @@ package tool
 
 import (
 	"context"
-	"errors"
-	"time"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,7 +9,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/hugr-lab/hugen/pkg/auth"
+	"github.com/hugr-lab/hugen/pkg/auth/sources"
 	"github.com/hugr-lab/hugen/pkg/config"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -20,23 +21,41 @@ import (
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-func TestBuildMCPProviderSpec_HugrMain_HTTPWithAuth(t *testing.T) {
-	called := false
-	rt := AuthResolverFunc(func(name string) (http.RoundTripper, error) {
-		if name != "hugr" {
-			t.Fatalf("unexpected auth name %q", name)
-		}
-		called = true
-		return roundTripperStub{}, nil
-	})
+// stubBearerSource implements sources.Source with a static token —
+// auth.Service.TokenStore returns it, auth.Transport wraps it as a
+// bearer header on outbound requests.
+type stubBearerSource struct {
+	name  string
+	token string
+}
 
-	got, err := BuildMCPProviderSpec(config.ToolProviderSpec{
+func (s *stubBearerSource) Name() string                          { return s.name }
+func (s *stubBearerSource) Token(context.Context) (string, error) { return s.token, nil }
+func (s *stubBearerSource) Login(context.Context) error           { return nil }
+func (s *stubBearerSource) OwnsState(state string) bool           { return sources.StateOwnedBy(s.name, state) }
+func (s *stubBearerSource) HandleCallback(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "no", http.StatusBadRequest)
+}
+
+func newAuthSvcWith(t *testing.T, src sources.Source) *auth.Service {
+	t.Helper()
+	svc := auth.NewService(discardLogger(), http.NewServeMux(), "", 0, false)
+	if err := svc.Add(src); err != nil {
+		t.Fatalf("auth.Add: %v", err)
+	}
+	return svc
+}
+
+func TestBuildMCPProviderSpec_HugrMain_HTTPWithAuth(t *testing.T) {
+	svc := newAuthSvcWith(t, &stubBearerSource{name: "hugr", token: "tk"})
+
+	got, _, err := BuildMCPProviderSpec(config.ToolProviderSpec{
 		Name:      "hugr-main",
 		Type:      "mcp",
 		Transport: "http",
 		Endpoint:  "https://hugr.example.com/mcp",
 		Auth:      "hugr",
-	}, rt)
+	}, svc, "")
 	if err != nil {
 		t.Fatalf("BuildMCPProviderSpec: %v", err)
 	}
@@ -52,57 +71,53 @@ func TestBuildMCPProviderSpec_HugrMain_HTTPWithAuth(t *testing.T) {
 	if got.PermObject != "hugen:tool:hugr-main" {
 		t.Errorf("PermObject = %q", got.PermObject)
 	}
-	if !called {
-		t.Error("AuthResolver never invoked")
-	}
 }
 
 func TestBuildMCPProviderSpec_MissingEndpoint(t *testing.T) {
-	_, err := BuildMCPProviderSpec(config.ToolProviderSpec{
+	_, _, err := BuildMCPProviderSpec(config.ToolProviderSpec{
 		Name:      "hugr-main",
 		Type:      "mcp",
 		Transport: "http",
-	}, nil)
+	}, nil, "")
 	if err == nil || !strings.Contains(err.Error(), "missing endpoint") {
 		t.Fatalf("expected missing-endpoint error, got %v", err)
 	}
 }
 
-func TestBuildMCPProviderSpec_AuthWithoutResolver(t *testing.T) {
-	_, err := BuildMCPProviderSpec(config.ToolProviderSpec{
+func TestBuildMCPProviderSpec_AuthWithoutService(t *testing.T) {
+	_, _, err := BuildMCPProviderSpec(config.ToolProviderSpec{
 		Name:      "hugr-main",
 		Type:      "mcp",
 		Transport: "http",
 		Endpoint:  "http://x",
 		Auth:      "hugr",
-	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "no resolver") {
-		t.Fatalf("expected no-resolver error, got %v", err)
+	}, nil, "")
+	if err == nil || !strings.Contains(err.Error(), "auth.Service") {
+		t.Fatalf("expected no-service error, got %v", err)
 	}
 }
 
-func TestBuildMCPProviderSpec_ResolverError(t *testing.T) {
-	want := errors.New("missing")
-	rt := AuthResolverFunc(func(name string) (http.RoundTripper, error) { return nil, want })
-	_, err := BuildMCPProviderSpec(config.ToolProviderSpec{
+func TestBuildMCPProviderSpec_AuthSourceMissing(t *testing.T) {
+	svc := auth.NewService(discardLogger(), http.NewServeMux(), "", 0, false)
+	_, _, err := BuildMCPProviderSpec(config.ToolProviderSpec{
 		Name:      "hugr-main",
 		Type:      "mcp",
 		Transport: "http",
 		Endpoint:  "http://x",
 		Auth:      "hugr",
-	}, rt)
-	if err == nil || !errors.Is(err, want) {
-		t.Fatalf("err chain missing resolver error: %v", err)
+	}, svc, "")
+	if err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("expected source-missing error, got %v", err)
 	}
 }
 
 func TestBuildMCPProviderSpec_GenericHTTP(t *testing.T) {
-	got, err := BuildMCPProviderSpec(config.ToolProviderSpec{
+	got, _, err := BuildMCPProviderSpec(config.ToolProviderSpec{
 		Name:      "weather",
 		Type:      "mcp",
 		Transport: "http",
 		Endpoint:  "http://w/mcp",
-	}, nil)
+	}, nil, "")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -112,10 +127,10 @@ func TestBuildMCPProviderSpec_GenericHTTP(t *testing.T) {
 }
 
 func TestBuildMCPProviderSpec_StdioMissingCommand(t *testing.T) {
-	_, err := BuildMCPProviderSpec(config.ToolProviderSpec{
+	_, _, err := BuildMCPProviderSpec(config.ToolProviderSpec{
 		Name: "x",
 		Type: "mcp",
-	}, nil)
+	}, nil, "")
 	if err == nil || !strings.Contains(err.Error(), "missing command") {
 		t.Fatalf("expected missing-command error, got %v", err)
 	}
@@ -183,13 +198,7 @@ func TestInit_DegradesOnConnectFailure(t *testing.T) {
 func TestInit_HTTPLive(t *testing.T) {
 	srv, oks := startAuthedTestMCP(t, "ok-token")
 
-	rt := AuthResolverFunc(func(name string) (http.RoundTripper, error) {
-		return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-			r := req.Clone(req.Context())
-			r.Header.Set("Authorization", "Bearer ok-token")
-			return http.DefaultTransport.RoundTrip(r)
-		}), nil
-	})
+	svc := newAuthSvcWith(t, &stubBearerSource{name: "hugr", token: "ok-token"})
 
 	view := &fakeProvidersView{specs: []config.ToolProviderSpec{{
 		Name:      "hugr-main",
@@ -198,7 +207,7 @@ func TestInit_HTTPLive(t *testing.T) {
 		Endpoint:  srv.URL,
 		Auth:      "hugr",
 	}}}
-	tm := NewToolManager(nil, nil, view, rt, discardLogger())
+	tm := NewToolManager(nil, nil, view, svc, discardLogger())
 	t.Cleanup(func() { _ = tm.Close() })
 
 	if err := tm.Init(context.Background()); err != nil {
@@ -245,7 +254,3 @@ func startAuthedTestMCP(t *testing.T, wantBearer string) (*httptest.Server, *int
 	t.Cleanup(srv.Close)
 	return srv, &oks
 }
-
-type roundTripperStub struct{}
-
-func (roundTripperStub) RoundTrip(*http.Request) (*http.Response, error) { panic("never called") }

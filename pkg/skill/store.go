@@ -253,10 +253,15 @@ func (b *dirBackend) readSkillDir(dir string) (Skill, error) {
 	if err != nil {
 		return Skill{}, err
 	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = dir
+	}
 	return Skill{
 		Manifest: m,
 		Origin:   b.origin,
 		FS:       os.DirFS(dir),
+		Root:     abs,
 	}, nil
 }
 

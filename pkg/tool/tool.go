@@ -131,5 +131,8 @@ var (
 	ErrProviderRemoved  = errors.New("tool: provider removed mid-call")
 	ErrSnapshotStale    = errors.New("tool: snapshot stale (rebuild needed)")
 	ErrArgValidation    = errors.New("tool: args failed schema validation")
+	ErrNotFound         = errors.New("tool: not found")
+	ErrPathEscape       = errors.New("tool: path escapes allowed root")
+	ErrIO               = errors.New("tool: io")
 )
 

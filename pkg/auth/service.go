@@ -17,9 +17,10 @@ import (
 // called either before or after Mount — the dispatcher looks up the
 // owning Source dynamically on each request.
 type Service struct {
-	logger     *slog.Logger
-	baseURL    string
-	remoteMode bool
+	logger       *slog.Logger
+	baseURL      string
+	loopbackPort int
+	remoteMode   bool
 
 	mu           sync.RWMutex
 	byName       map[string]sources.Source
@@ -28,6 +29,14 @@ type Service struct {
 	promptLogins []func()
 
 	mux *http.ServeMux
+
+	// agentTokens mediates the loopback /api/auth/agent-token
+	// exchange used by stdio MCP children to keep their bearer
+	// fresh. Lazily constructed when AddPrimary registers a
+	// hugr-flavoured Source (see agent_token.go); nil under
+	// no-Hugr deployments. The handler is mounted on this
+	// Service's own mux at construction time.
+	agentTokens *agentTokenStore
 }
 
 // NewService creates an empty Service.
@@ -36,23 +45,29 @@ type Service struct {
 // LoadFromView builds OIDC sources to derive their redirect URL
 // ("<baseURL>/auth/callback").
 //
+// loopbackPort is the local TCP port the hugen HTTP listener
+// binds. It is used to format the loopback URL handed to stdio
+// MCP children so they can refresh their Hugr access token via
+// /api/auth/agent-token (see agent_token.go).
+//
 // remoteMode disables interactive browser-based auth flows: when
 // true, Add ignores sources.LoginPrompter on registered sources so
 // no login URL is ever printed and FirePromptLogins has nothing to
 // drain. Personal-assistant deployments (HUGEN_MODE=remote) pass
 // true — they auth via static tokens + RemoteStore refresh and have
 // no human attached to a browser.
-func NewService(logger *slog.Logger, mux *http.ServeMux, baseURL string, remoteMode bool) *Service {
+func NewService(logger *slog.Logger, mux *http.ServeMux, baseURL string, loopbackPort int, remoteMode bool) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	s := &Service{
-		logger:     logger,
-		baseURL:    baseURL,
-		remoteMode: remoteMode,
-		byName:     make(map[string]sources.Source),
-		aliases:    make(map[string]string),
-		mux:        mux,
+		logger:       logger,
+		baseURL:      baseURL,
+		loopbackPort: loopbackPort,
+		remoteMode:   remoteMode,
+		byName:       make(map[string]sources.Source),
+		aliases:      make(map[string]string),
+		mux:          mux,
 	}
 	s.mount()
 	return s
@@ -96,6 +111,13 @@ func (r *Service) add(s sources.Source, primary bool) error {
 		r.primary = name
 	}
 	r.byName[name] = s
+	if primary {
+		// Side-effect: when the primary is hugr-flavoured, wire the
+		// loopback agent-token store + endpoint. attachAgentTokens
+		// is a no-op for non-hugr primaries. Done under the same
+		// lock so attach state stays consistent with byName.
+		r.attachAgentTokensLocked(s)
+	}
 	// Auto-register the source's prompt-login hook (browser flow URL
 	// printer) when the Source implements sources.LoginPrompter and
 	// the deployment runs in interactive mode. Remote (personal-

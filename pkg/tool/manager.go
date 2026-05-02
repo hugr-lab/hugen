@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/skill"
@@ -43,7 +44,8 @@ type ToolManager struct {
 	log      *slog.Logger
 
 	providersView  config.ToolProvidersView
-	authResolver   AuthResolver
+	auth           *auth.Service
+	workspaceRoot  string
 	connectTimeout time.Duration
 
 	builders map[string]ProviderBuilder
@@ -97,15 +99,17 @@ const (
 //     (and, in phase 6+, again on view.OnUpdate). Per_session
 //     entries are skipped (registered via AddSessionProvider).
 //     Pass nil if no MCP entries are configured.
-//   - resolver: maps named auth sources to bearer-injecting
-//     RoundTrippers. Required when any HTTP provider declares
-//     `auth: <name>`; pass nil if no provider needs auth.
+//   - authSvc: auth.Service consulted whenever a provider declares
+//     `auth: <name>`. HTTP providers receive a bearer-injecting
+//     RoundTripper; stdio providers receive a per-spawn StdioAuth
+//     bootstrap. Required only when some provider asks for auth;
+//     pass nil if none does.
 //   - log: structured logger; nil falls back to a discard handler.
 func NewToolManager(
 	perms perm.Service,
 	skills *skill.SkillManager,
 	providers config.ToolProvidersView,
-	resolver AuthResolver,
+	authSvc *auth.Service,
 	log *slog.Logger,
 	opts ...ToolManagerOption,
 ) *ToolManager {
@@ -117,7 +121,7 @@ func NewToolManager(
 		skills:           skills,
 		log:              log,
 		providersView:    providers,
-		authResolver:     resolver,
+		auth:             authSvc,
 		connectTimeout:   defaultConnectTimeout,
 		providers:        make(map[string]ToolProvider),
 		sessionProviders: make(map[string]map[string]ToolProvider),
@@ -150,6 +154,21 @@ func (m *ToolManager) SetPolicies(p *Policies) {
 // nil-safe — callers can call IsConfigured on the result.
 func (m *ToolManager) policiesSnapshot() *Policies {
 	return m.policies.Load()
+}
+
+// WithWorkspaceRoot pins the absolute on-disk root every stdio MCP
+// provider should write under. The manager injects it into each
+// stdio child's env as WORKSPACES_ROOT, overriding any operator-
+// supplied value — workspaces are a runtime concern, like
+// SESSION_DIR, and operators must not be able to point per_agent
+// children at a tree the per_session children don't share.
+//
+// Empty string disables injection (tests; deployments without
+// session.Workspace wired in).
+func WithWorkspaceRoot(root string) ToolManagerOption {
+	return func(tm *ToolManager) {
+		tm.workspaceRoot = root
+	}
 }
 
 // WithProviderBuilder registers a builder for a non-MCP provider

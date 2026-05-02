@@ -12,7 +12,6 @@ import (
 	"github.com/hugr-lab/query-engine/client"
 	"github.com/hugr-lab/query-engine/types"
 
-	httpapi "github.com/hugr-lab/hugen/pkg/adapter/http"
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
@@ -52,14 +51,6 @@ type RuntimeCore struct {
 	Permissions perm.Service
 	Tools       *tool.ToolManager
 	workspaces  *session.Workspace
-
-	// AgentTokenStore mediates the loopback /api/auth/agent-token
-	// endpoint that lets MCP children refresh their Hugr JWTs.
-	// Set in buildToolStack iff the deployment carries a `hugr`
-	// auth source; nil under US5 no-Hugr deployments. Held on the
-	// core so the per-session hugr Spawner and the per-agent
-	// hugr-query builder share one store.
-	AgentTokenStore *httpapi.AgentTokenStore
 
 	// HTTPSrv hosts the auth endpoints (phase 1) and, in phase 2,
 	// /api/v1/* via pkg/adapter/http. Both share the same mux so the
@@ -209,6 +200,13 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 
 	core.Permissions = buildPermissionService(core)
 
+	// Workspace must exist before buildToolStack so per_agent stdio
+	// MCPs can be told where to write — the runtime injects
+	// WORKSPACES_ROOT into every stdio child from Workspace.Root(),
+	// keeping per_session bash-mcp and per_agent hugr-query/python-mcp
+	// pointed at the same on-disk tree.
+	core.workspaces = session.NewWorkspace(boot.WorkspaceDir, boot.CleanupOnClose)
+
 	tools, err := buildToolStack(core, core.Permissions, skills)
 	if err != nil {
 		return nil, failed("tools", err)
@@ -221,8 +219,6 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	}); err != nil {
 		return nil, failed("commands_skill", err)
 	}
-
-	core.workspaces = session.NewWorkspace(boot.WorkspaceDir, boot.CleanupOnClose)
 	resources := session.NewResources(session.ResourceDeps{
 		Providers:  core.Config.ToolProviders(),
 		Tools:      core.Tools,
@@ -243,10 +239,10 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 		),
 	)
 
-	// /api/auth/agent-token is mounted inside buildToolStack when
-	// the deployment carries a `hugr` auth source — see
-	// hugr_query.go:buildAgentTokenStore. No-Hugr deployments
-	// leave the path unmounted (404), which US5 expects.
+	// /api/auth/agent-token is mounted inside auth.Service when
+	// AddPrimary registers a hugr-flavoured source — see
+	// pkg/auth/agent_token.go. No-Hugr deployments leave the path
+	// unmounted (404), which US5 expects.
 
 	return core, nil
 }

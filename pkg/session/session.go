@@ -574,9 +574,10 @@ func (s *Session) buildMessages(ctx context.Context) []model.Message {
 //  1. Agent constitution (universal rules).
 //  2. Body of every skill currently loaded into the session
 //     (concrete tool-usage instructions for the active toolset).
-//  3. Catalogue of available-but-unloaded skills — names plus
-//     descriptions only — so the model can pick one and call
+//  3. Catalogue of every skill the agent can reach — both loaded
+//     and unloaded — so the model picks the right one and calls
 //     skill_load without a separate discovery tool round-trip.
+//     Loaded skills are tagged so the model doesn't reload them.
 func (s *Session) systemPrompt(ctx context.Context) string {
 	var parts []string
 	if s.agent != nil {
@@ -588,7 +589,7 @@ func (s *Session) systemPrompt(ctx context.Context) string {
 		if b, err := s.skills.Bindings(ctx, s.id); err == nil && b.Instructions != "" {
 			parts = append(parts, b.Instructions)
 		}
-		if catalogue := s.unloadedSkillCatalogue(ctx); catalogue != "" {
+		if catalogue := s.skillCatalogue(ctx); catalogue != "" {
 			parts = append(parts, catalogue)
 		}
 	}
@@ -598,12 +599,12 @@ func (s *Session) systemPrompt(ctx context.Context) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// unloadedSkillCatalogue renders the names and one-line
-// descriptions of every skill in the store that is NOT currently
-// loaded into the session. The model reads this to decide whether
-// to invoke skill_load — cheaper than a skill_list tool round-trip
-// and stable across Turns. Returns "" when nothing to advertise.
-func (s *Session) unloadedSkillCatalogue(ctx context.Context) string {
+// skillCatalogue renders one bullet per skill in the store using
+// the manifest's frontmatter `description` (capped at ~120 tokens
+// by the manifest validator). Loaded skills carry a `(loaded)` tag
+// so the model sees its current toolset alongside everything else
+// available. Returns "" when the store is empty.
+func (s *Session) skillCatalogue(ctx context.Context) string {
 	all, err := s.skills.List(ctx)
 	if err != nil || len(all) == 0 {
 		return ""
@@ -613,17 +614,16 @@ func (s *Session) unloadedSkillCatalogue(ctx context.Context) string {
 		loadedSet[n] = struct{}{}
 	}
 	var b strings.Builder
+	b.WriteString("## Available skills\n\nLoad any of these via the `skill_load` tool when their domain becomes relevant. Already-loaded skills are tagged `(loaded)`.\n\n")
 	for _, sk := range all {
-		if _, on := loadedSet[sk.Manifest.Name]; on {
-			continue
-		}
-		if b.Len() == 0 {
-			b.WriteString("## Available skills\n\nLoad any of these via the `skill_load` tool when their domain becomes relevant. Already-loaded skills are not listed.\n\n")
-		}
 		b.WriteString("- `")
 		b.WriteString(sk.Manifest.Name)
-		b.WriteString("` — ")
-		b.WriteString(sk.Manifest.Description)
+		b.WriteString("`")
+		if _, on := loadedSet[sk.Manifest.Name]; on {
+			b.WriteString(" (loaded)")
+		}
+		b.WriteString(" — ")
+		b.WriteString(strings.TrimSpace(sk.Manifest.Description))
 		b.WriteString("\n")
 	}
 	return b.String()

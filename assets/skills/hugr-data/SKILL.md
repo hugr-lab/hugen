@@ -5,12 +5,15 @@ description: >
   Work with Hugr Data Mesh platform via MCP. Hugr is a GraphQL-over-SQL engine federating
   PostgreSQL, DuckDB, Parquet, Iceberg, REST APIs into unified GraphQL schema.
   Use whenever the user wants to: explore/analyze data via Hugr GraphQL API, build queries,
-  perform aggregations, create dashboards from Hugr data, discover schemas/modules/fields,
-  work with bucket aggregations, jq transforms, or Hugr MCP tools (discovery-*, schema-*, data-*).
+  perform aggregations, discover schemas/modules/fields, work with bucket aggregations,
+  jq transforms, or Hugr MCP tools (discovery-*, schema-*, data-*).
   Trigger on: Hugr, hugr-lab, data mesh, GraphQL aggregation, bucket aggregation, MCP data tools,
-  "query the data", "analyze the dataset", "build a dashboard", "explore the schema",
+  "query the data", "analyze the dataset", "explore the schema",
   modules, catalogs, data objects, spatial joins, dynamic joins.
   Even "show me the data" or "what data do we have" should trigger this if Hugr MCP is available.
+  This skill ONLY queries Hugr — it does NOT render charts, plots, dashboards, HTML
+  or PDF reports. Visualisation tasks require loading the `python-runner` skill alongside
+  this one (or instead, when the user already has data on disk).
 allowed-tools:
   - provider: hugr-main
     tools:

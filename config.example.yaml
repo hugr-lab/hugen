@@ -79,8 +79,9 @@ models:
 #                 HTTP) or `per_session` (spawned per Session.Open —
 #                 default for stdio; bash-mcp pattern).
 #
-# Hugr is OPTIONAL: omit the `hugr-main` / `hugr-query` entries to
-# run as a universal local agent (bash-mcp + system tools only).
+# Hugr is OPTIONAL: omit the `hugr-main` / `hugr-query` / `python-mcp`
+# entries to run as a universal local agent (bash-mcp + system tools
+# only).
 #
 tool_providers:
   # In-tree per-session bash + filesystem MCP. Spawned by the
@@ -124,26 +125,59 @@ tool_providers:
   # workspace data dir, returns path + ≤ 50-row preview to the
   # model.
   #
+  # `auth: hugr` flips on the loopback bootstrap injection — at
+  # spawn time the runtime mints a per-spawn HUGR_ACCESS_TOKEN +
+  # HUGR_TOKEN_URL pair the binary uses to keep its bearer fresh
+  # against /api/auth/agent-token. WORKSPACES_ROOT below is the
+  # operator-controlled parent of every session's data dir.
+  #
   # HUGR_URL is the literal endpoint the binary dials — usually
   # `${HUGR_URL}/ipc` (multipart wire protocol). Operators behind a
   # proxy with a non-standard prefix put the full path here; the
   # runtime does NOT mangle it.
   #
-  # The runtime injects HUGR_TOKEN_URL, HUGR_ACCESS_TOKEN,
-  # WORKSPACES_ROOT, SHARED_DIR, HUGEN_AGENT_ID at spawn time.
-  # Operators do not write those — they're per-spawn secrets and
-  # loopback paths the binary can't know on its own. HUGR_QUERY_*
-  # timeout knobs may be set here to override the binary defaults
-  # (1 h default, 24 h ceiling).
-  #
   # Drop this entry to skip file-output queries; `hugr-main` above
   # still serves inline data tools.
   - name: hugr-query
-    type: hugr-query
+    type: mcp
+    transport: stdio
     command: ./bin/hugr-query        # built by `make hugr-query`
     lifetime: per_agent
+    auth: hugr
     env:
       HUGR_URL: ${HUGR_URL}/ipc
+      # WORKSPACES_ROOT is injected by the runtime — do not set it here.
+      # The runtime points it at the same on-disk tree per_session
+      # bash-mcp uses, so files written by hugr-query land where the
+      # rest of the toolchain can find them.
+
+  # In-tree Python MCP (per-session venv). Spawned per_agent over
+  # stdio; lazily provisions each session's relocatable .venv from
+  # the bundled template on first call. Tools: python.run_code (short
+  # snippets) and python.run_script (file in the session workspace).
+  #
+  # `auth: hugr` injects the same loopback bootstrap as hugr-query —
+  # Python scripts that import `hugr-client` reuse the agent's JWT
+  # without seeing the operator's seed token. WORKSPACES_ROOT is the
+  # parent of every session's `.venv` and `data/` dirs.
+  #
+  # The operator runs `python-mcp --create-template
+  # ./assets/python/requirements.txt` once after building; the
+  # resulting venv is referenced via --template below. uv ≥ 0.4.0
+  # and Python ≥ 3.10 must be on the host. Drop this entry to run
+  # without the analyst toolkit.
+  - name: python-mcp
+    type: mcp
+    transport: stdio
+    command: ./bin/python-mcp        # built by `make python-mcp`
+    args: [--template, "${HUGEN_PYTHON_TEMPLATE}"]
+    lifetime: per_agent
+    auth: hugr
+    env:
+      HUGR_URL: ${HUGR_URL}/ipc
+      # WORKSPACES_ROOT is injected by the runtime — same tree as
+      # bash-mcp and hugr-query, so a script written by bash.write_file
+      # is reachable by python.run_script in the same session.
 
 local_db_enabled: true
 local_db:
