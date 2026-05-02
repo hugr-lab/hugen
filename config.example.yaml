@@ -80,8 +80,11 @@ models:
 #                 default for stdio; bash-mcp pattern).
 #
 # Hugr is OPTIONAL: omit the `hugr-main` / `hugr-query` / `python-mcp`
-# entries to run as a universal local agent (bash-mcp + system tools
-# only).
+# entries to run a universal local agent without Hugr. The analyst
+# providers `duckdb-mcp` / `python-mcp` are likewise OPTIONAL — drop
+# either or both to fall back to the phase-3 baseline (bash-mcp +
+# system tools only). Skills that grant tools from a missing provider
+# are flagged unavailable rather than rejected.
 #
 tool_providers:
   # In-tree per-session bash + filesystem MCP. Spawned by the
@@ -178,6 +181,47 @@ tool_providers:
       # WORKSPACES_ROOT is injected by the runtime — same tree as
       # bash-mcp and hugr-query, so a script written by bash.write_file
       # is reachable by python.run_script in the same session.
+
+  # Vendored MotherDuck MCP (DuckDB analytical SQL). Spawned per-session
+  # via `uvx` against the pinned submodule under
+  # `vendor/mcp-server-motherduck/`. Tools: execute_query / list_databases
+  # / list_tables / list_columns. The connection is `:memory:` per
+  # session — closes with the session, no on-disk DuckDB file.
+  #
+  # `--init-sql` is the operator's hardening hook: bound memory / threads,
+  # pin spill + secret directories under the session workspace, and
+  # pre-load the `spatial` and `httpfs` extensions so skills don't have
+  # to (and the `duckdb-data` skill is forbidden from running per-call
+  # `INSTALL` for either).
+  #
+  # `extension_directory` defaults to `~/.duckdb/extensions/` — the
+  # first session pays the install cost (~10–30 s for spatial + httpfs);
+  # subsequent sessions reuse the cache.
+  #
+  # No `auth:` — DuckDB SQL never reaches into Hugr; that's the
+  # `hugr-main` / `hugr-query` job. Drop this entry to run without
+  # analytical SQL on workspace files.
+  - name: duckdb-mcp
+    type: mcp
+    transport: stdio
+    command: uvx
+    lifetime: per_session
+    args:
+      - --from
+      - ./vendor/mcp-server-motherduck
+      - mcp-server-motherduck
+      - --db-path
+      - ":memory:"
+      - --read-write
+      - --allow-switch-databases
+      - --init-sql
+      - |
+        SET memory_limit     = '4GB';
+        SET threads          = 4;
+        SET temp_directory   = '.duckdb/tmp';
+        SET secret_directory = '.duckdb/secrets';
+        INSTALL spatial; LOAD spatial;
+        INSTALL httpfs;  LOAD httpfs;
 
 local_db_enabled: true
 local_db:

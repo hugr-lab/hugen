@@ -2,18 +2,14 @@
 name: hugr-data
 license: Apache-2.0
 description: >
-  Work with Hugr Data Mesh platform via MCP. Hugr is a GraphQL-over-SQL engine federating
-  PostgreSQL, DuckDB, Parquet, Iceberg, REST APIs into unified GraphQL schema.
-  Use whenever the user wants to: explore/analyze data via Hugr GraphQL API, build queries,
-  perform aggregations, discover schemas/modules/fields, work with bucket aggregations,
-  jq transforms, or Hugr MCP tools (discovery-*, schema-*, data-*).
-  Trigger on: Hugr, hugr-lab, data mesh, GraphQL aggregation, bucket aggregation, MCP data tools,
-  "query the data", "analyze the dataset", "explore the schema",
-  modules, catalogs, data objects, spatial joins, dynamic joins.
-  Even "show me the data" or "what data do we have" should trigger this if Hugr MCP is available.
-  This skill ONLY queries Hugr — it does NOT render charts, plots, dashboards, HTML
-  or PDF reports. Visualisation tasks require loading the `python-runner` skill alongside
-  this one (or instead, when the user already has data on disk).
+  Query the Hugr Data Mesh — a GraphQL-over-SQL engine that federates
+  PostgreSQL, DuckDB, Parquet, Iceberg, and REST APIs under one schema.
+  Use to discover modules / catalogs / data objects, build GraphQL
+  queries, run aggregations and bucket aggregations, do spatial or
+  dynamic joins, save large results to Parquet via hugr-query, and
+  apply jq transforms. Read-only data fetch from the platform —
+  for SQL on local files load `duckdb-data`; for charts / HTML / PDF
+  reports load `python-runner`.
 allowed-tools:
   - provider: hugr-main
     tools:

@@ -17,6 +17,7 @@ allowed-tools:
       - skill_load
       - skill_unload
       - skill_ref
+      - skill_files
       - policy_save
       - policy_revoke
       - runtime_reload
@@ -93,6 +94,11 @@ shell tools and file tools see exactly the same paths.
   prompt before loading.
 - `skill_ref` — read a reference document that ships with a
   loaded skill (`references/<name>.md`).
+- `skill_files` — list the on-disk files of a loaded skill with
+  relative + absolute paths so other tools (`bash.read_file`,
+  `python-mcp:run_script`, `duckdb-mcp:execute_query`) can address
+  them directly. Optional `subdir` / `glob` filters narrow the
+  listing.
 - `policy_save` / `policy_revoke` — persist or remove a personal
   Tier-3 tool policy ("always allow" / "always deny") for the
   caller. Args: `tool_name` (`<provider>:<field>`, glob `*`

@@ -2,10 +2,12 @@
 name: python-runner
 license: Apache-2.0
 description: >
-  Run Python in a per-session venv (pandas, duckdb, matplotlib, plotly,
-  great_tables, folium, weasyprint, hugr-client). The only path in this
-  runtime for charts, plots, maps, HTML/PDF reports, and any data
-  transform that doesn't fit a single SQL/GraphQL query.
+  Run Python in a per-session venv (pandas, pyarrow, duckdb, plotly,
+  matplotlib, great_tables, folium, weasyprint, hugr-client). The only
+  path in this runtime for charts / plots / maps, HTML & PDF reports,
+  and data transforms that don't fit a single SQL or GraphQL query.
+  For pure SQL on workspace files prefer `duckdb-data`; for fetching
+  from the Hugr platform prefer `hugr-data`.
 allowed-tools:
   - provider: python-mcp
     tools:
