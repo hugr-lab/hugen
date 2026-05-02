@@ -27,8 +27,8 @@ We are mid-execution of **design 001 — Hugr Agent Runtime**
 | 1. Native core + ModelRouter + console UI | shipped |
 | 2. HTTP/SSE + webui + ADK eviction | shipped |
 | 3. Action layer (skills + tools + 3-tier permissions + bash/hugr-mcp) | shipped |
-| **3.5. Analyst toolkit (duckdb-mcp + python-mcp + analyst skills)** | **shipped** |
-| 4. Sub-agents + missions | next |
+| 3.5. Analyst toolkit (duckdb-mcp + python-mcp + analyst skills) | shipped |
+| **4. Sub-agents + missions** | **spec drafting** (`phase-4-spec.md` v0, under discussion) |
 | 4.1. Analyst mega-skill + role sub-agents + `skill_builder` + community-skill onboarding (empty `allowed-tools` semantics, `system:tool_catalog`) | follows 4 |
 | 5. HITL: approvals + clarifications + compactor | open |
 | 6. Workspaces + PeerGroups | open |

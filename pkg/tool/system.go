@@ -201,7 +201,7 @@ func (p *SystemProvider) List(ctx context.Context) ([]Tool, error) {
     "name": {"type": "string"},
     "command": {"type": "string"},
     "args": {"type": "array", "items": {"type": "string"}},
-    "env": {"type": "object", "additionalProperties": {"type": "string"}}
+    "env": {"type": "object", "description": "Environment variables as a flat string→string map."}
   },
   "required": ["name", "command"]
 }`),
@@ -257,6 +257,11 @@ func (p *SystemProvider) List(ctx context.Context) ([]Tool, error) {
   "required": ["id"]
 }`),
 		},
+	}
+	for i := range tools {
+		if err := ValidateLLMSchema(tools[i].ArgSchema); err != nil {
+			return nil, fmt.Errorf("system tool %q: %w", tools[i].Name, err)
+		}
 	}
 	return tools, nil
 }
