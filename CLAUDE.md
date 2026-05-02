@@ -29,7 +29,7 @@ We are mid-execution of **design 001 — Hugr Agent Runtime**
 | 3. Action layer (skills + tools + 3-tier permissions + bash/hugr-mcp) | shipped |
 | **3.5. Analyst toolkit (duckdb-mcp + python-mcp + analyst skills)** | **shipped** |
 | 4. Sub-agents + missions | next |
-| 4.1. Analyst mega-skill + role sub-agents | follows 4 |
+| 4.1. Analyst mega-skill + role sub-agents + `skill_builder` + community-skill onboarding (empty `allowed-tools` semantics, `system:tool_catalog`) | follows 4 |
 | 5. HITL: approvals + clarifications + compactor | open |
 | 6. Workspaces + PeerGroups | open |
 | 7. Memory pipeline + LLM Wiki (short + long-term) | open |
