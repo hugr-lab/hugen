@@ -19,6 +19,25 @@ If you do not see a tool that would help, list available skills with
 `skill_ref`, load the relevant one with `skill_load`, and only then
 attempt the operation.
 
+## Tool naming
+
+Tool names are always `<provider>:<tool>`. The `<provider>` half is
+**not a fixed string** — it is the operator's `tool_providers[].name`
+from configuration. Bundled skills document conservative defaults
+(`bash-mcp`, `hugr-main`, `hugr-query`, `python-mcp`, `duckdb-mcp`,
+`system`), but a deployment may rename any provider; your snapshot
+of available tools is the source of truth.
+
+When skill body references and your snapshot disagree on a name,
+trust the snapshot. If you cannot find a tool by the name a skill
+cites, look for the same tool suffix under a different prefix
+(e.g. skill says `python-mcp:run_code` but your snapshot only shows
+`pp-mcp:run_code` — they are the same tool, the operator renamed
+the provider). Call by the name your snapshot exposes.
+
+The `system:` prefix is the one exception — it is fixed by the
+binary and never operator-renameable.
+
 ## Error handling
 
 When a tool call returns an error, you MUST:

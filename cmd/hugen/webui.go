@@ -7,7 +7,7 @@ import (
 
 	httpadapter "github.com/hugr-lab/hugen/pkg/adapter/http"
 	"github.com/hugr-lab/hugen/pkg/adapter/webui"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // runWebUI attaches the HTTP and web-UI adapters to *RuntimeCore.
@@ -64,8 +64,8 @@ func runWebUI(ctx context.Context, core *RuntimeCore) int {
 	webuiAd := webui.NewAdapter("127.0.0.1", core.Boot.WebUIPort, apiBase,
 		core.Logger.With("adapter", "webui"))
 
-	rt := runtime.NewRuntime(core.Manager,
-		[]runtime.Adapter{httpAd, webuiAd}, core.Logger)
+	rt := session.NewRuntime(core.Manager,
+		[]session.Adapter{httpAd, webuiAd}, core.Logger)
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

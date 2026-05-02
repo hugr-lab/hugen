@@ -1,4 +1,4 @@
-// Package main is the entry point for the hugen runtime.
+// Package main is the entry point for the hugen session.
 //
 // Phase-2 startup flow:
 //
@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -27,7 +28,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/identity"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 const (
@@ -49,6 +50,19 @@ func run(args []string, errOut io.Writer) int {
 	if len(args) > 0 {
 		sub = args[0]
 	}
+	// Expose hugen's startup cwd to config.yaml as ${HUGEN_VENDOR_DIR}
+	// so per_session MCP args that reference vendored sources (e.g.
+	// `uvx --from ${HUGEN_VENDOR_DIR}/mcp-server-motherduck`) resolve
+	// correctly. Without this, uvx interprets a relative path against
+	// its own cwd (= session workspace) and fails. Operators who want
+	// a different vendor location can set HUGEN_VENDOR_DIR explicitly
+	// before launching hugen.
+	if cwd, err := os.Getwd(); err == nil {
+		if _, ok := os.LookupEnv("HUGEN_VENDOR_DIR"); !ok {
+			_ = os.Setenv("HUGEN_VENDOR_DIR", filepath.Join(cwd, "vendor"))
+		}
+	}
+
 	switch sub {
 	case "a2a":
 		fmt.Fprintln(errOut, "the a2a mode is not yet available in this build; planned for phase 10")
@@ -92,17 +106,17 @@ func run(args []string, errOut io.Writer) int {
 //     localQ is nil. Sessions/memory/artifacts persist in the
 //     shared hub DB and the agent identifies itself by the bearer
 //     token its identity source supplies. The schema is the same —
-//     runtime.NewRuntimeStoreLocal is mode-agnostic; the "local"
+//     session.NewRuntimeStoreLocal is mode-agnostic; the "local"
 //     in its name refers to the Go-side facade, not the DB.
 //
 // Mixing the two queriers would split state across stores and is
 // not supported.
-func chooseStore(localQ, remoteQ types.Querier, embedderEnabled bool) runtime.RuntimeStore {
+func chooseStore(localQ, remoteQ types.Querier, embedderEnabled bool) session.RuntimeStore {
 	if localQ != nil {
-		return runtime.NewRuntimeStoreLocal(localQ, embedderEnabled)
+		return session.NewRuntimeStoreLocal(localQ, embedderEnabled)
 	}
 	if remoteQ != nil {
-		return runtime.NewRuntimeStoreLocal(remoteQ, embedderEnabled)
+		return session.NewRuntimeStoreLocal(remoteQ, embedderEnabled)
 	}
 	return nil
 }

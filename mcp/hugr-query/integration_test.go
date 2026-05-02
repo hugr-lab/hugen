@@ -17,17 +17,26 @@ import (
 	"testing"
 	"time"
 
-	httpapi "github.com/hugr-lab/hugen/pkg/adapter/http"
+	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
-// staticTokenSource is the AgentTokenStore's upstream — returns a
-// constant JWT regardless of how many times Token is called.
-type staticTokenSource string
+// staticPrimary is a sources.Source + ttlAware impl that returns a
+// constant JWT — drives auth.Service through its NewStdioAuth path
+// without needing a real Hugr.
+type staticPrimary struct{ jwt string }
 
-func (s staticTokenSource) Token(_ context.Context) (string, int, error) {
-	return string(s), 3600, nil
+func (s *staticPrimary) Name() string { return "hugr" }
+func (s *staticPrimary) Token(ctx context.Context) (string, error) {
+	tok, _, err := s.TokenWithTTL(ctx)
+	return tok, err
+}
+func (s *staticPrimary) TokenWithTTL(_ context.Context) (string, int, error) { return s.jwt, 3600, nil }
+func (s *staticPrimary) Login(context.Context) error                         { return nil }
+func (s *staticPrimary) OwnsState(string) bool                               { return false }
+func (s *staticPrimary) HandleCallback(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "no", http.StatusBadRequest)
 }
 
 // buildBinary compiles mcp/hugr-query into a temp file. Tests run
@@ -49,20 +58,20 @@ func buildBinary(t *testing.T) string {
 	return bin
 }
 
-// startAgentTokenServer mounts the AgentTokenStore on an httptest
-// server and returns the URL of the agent-token endpoint plus the
-// store handle.
-func startAgentTokenServer(t *testing.T, jwt string) (*httptest.Server, *httpapi.AgentTokenStore) {
+// startAgentTokenServer wires up an auth.Service backed by a static
+// primary, mounts its mux on an httptest server, and returns the URL
+// + the service so the test can mint StdioAuth bindings.
+func startAgentTokenServer(t *testing.T, jwt string) (*httptest.Server, *auth.Service) {
 	t.Helper()
-	store, err := httpapi.NewAgentTokenStore(staticTokenSource(jwt), httpapi.AgentTokenOptions{})
-	if err != nil {
-		t.Fatalf("NewAgentTokenStore: %v", err)
-	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/auth/agent-token", store.Handle)
+	logger := slog.New(slog.DiscardHandler)
+	svc := auth.NewService(logger, mux, "", 0, false)
+	if err := svc.AddPrimary(&staticPrimary{jwt: jwt}); err != nil {
+		t.Fatalf("AddPrimary: %v", err)
+	}
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return srv, store
+	return srv, svc
 }
 
 // startHugrStub returns an httptest server that records the
@@ -116,15 +125,15 @@ func startHugrStub(t *testing.T) *hugrStub {
 // upstream Hugr endpoint.
 func TestHugrQuery_BootstrapAuthFlow(t *testing.T) {
 	const jwt = "real-hugr-jwt-token"
-	tokenSrv, store := startAgentTokenServer(t, jwt)
+	tokenSrv, svc := startAgentTokenServer(t, jwt)
 	hugrSrv := startHugrStub(t)
 
-	bootstrap := "test-bootstrap-secret-1234567890abcdef"
-	revoke, err := store.RegisterSpawn(bootstrap)
+	sa, err := svc.NewStdioAuth(context.Background(), "hugr")
 	if err != nil {
-		t.Fatalf("RegisterSpawn: %v", err)
+		t.Fatalf("NewStdioAuth: %v", err)
 	}
-	t.Cleanup(revoke)
+	t.Cleanup(sa.RevokeFunc)
+	bootstrap := sa.BootstrapToken
 
 	bin := buildBinary(t)
 	wsRoot := t.TempDir()
@@ -137,9 +146,9 @@ func TestHugrQuery_BootstrapAuthFlow(t *testing.T) {
 	defer cancel()
 
 	spec := tool.MCPProviderSpec{
-		Name:     "hugr-query",
-		Command:  bin,
-		Lifetime: tool.LifetimePerAgent,
+		Name:      "hugr-query",
+		Command:   bin,
+		Lifetime:  tool.LifetimePerAgent,
 		Transport: tool.TransportStdio,
 		Env: map[string]string{
 			"HUGR_URL":          hugrSrv.srv.URL,

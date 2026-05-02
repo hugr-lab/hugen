@@ -4,13 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"path/filepath"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/query-engine/types"
@@ -76,42 +74,29 @@ func buildPermissionService(core *RuntimeCore) perm.Service {
 		return local
 	}
 	core.Logger.Info("permissions: remote tier enabled (function.core.auth.my_permissions)")
-	return perm.NewRemotePermissions(view, core.Identity, newPermQuerier(q))
+	return perm.NewRemotePermissions(view, core.Identity, perm.NewRemoteQuerier(q))
 }
 
 // buildToolStack wires SkillManager + PermissionService + ToolManager
-// + SystemProvider, registers any non-MCP provider builders the
-// deployment opts into (hugr-query today), then asks the manager to
-// open every per_agent entry from cfg.ToolProviders. Per_session
-// providers (bash-mcp today) are wired by buildSessionLifecycle on
-// Session.Open.
+// + SystemProvider, then asks the manager to open every per_agent
+// entry from cfg.ToolProviders. Per_session providers (bash-mcp
+// today) are wired by session.Resources on Session.Open. cmd/hugen
+// knows nothing about provider names — every stdio MCP carrying
+// `auth: hugr` lands on the auth.Service-owned loopback uniformly.
 func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillManager) (*tool.ToolManager, error) {
-	opts := []tool.ToolManagerOption{}
-
-	// hugr-query is a runtime-managed provider type: it spawns the
-	// in-tree binary, mints a per-spawn agent-token bootstrap, and
-	// revokes it on Close. The store is only built when a `hugr`
-	// auth source is registered — US5 no-Hugr deployments skip
-	// this whole block and the `type: hugr-query` entry (if any)
-	// is rejected at Init with "unknown type", which is the
-	// correct degradation: drop the YAML entry to make it clean.
-	tokenStore, err := buildAgentTokenStore(core.Auth)
-	if err != nil {
-		return nil, fmt.Errorf("buildToolStack: agent-token store: %w", err)
-	}
-	if tokenStore != nil {
-		mountAgentTokenHandler(core.Mux, tokenStore)
-		hq := &hugrQueryBuilder{
-			authStore:    tokenStore,
-			loopbackPort: core.Boot.Port,
-			stateDir:     core.Boot.StateDir,
-			log:          core.Logger,
+	wsRoot := ""
+	if core.workspaces != nil {
+		// Resolve once; cmd surfaces the error so an unset / unwritable
+		// HUGEN_WORKSPACE_DIR isn't silently swallowed by per_agent
+		// children that would then fall back to whatever the YAML had.
+		root, err := core.workspaces.Root()
+		if err != nil {
+			return nil, fmt.Errorf("buildToolStack: workspace root: %w", err)
 		}
-		opts = append(opts, tool.WithProviderBuilder("hugr-query", hq))
+		wsRoot = root
 	}
-
 	tm := tool.NewToolManager(perms, skills, core.Config.ToolProviders(),
-		authResolverFor(core.Auth), core.Logger, opts...)
+		core.Auth, core.Logger, tool.WithWorkspaceRoot(wsRoot))
 
 	var policies *tool.Policies
 	if core.LocalQuerier != nil {
@@ -137,23 +122,6 @@ func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillMa
 		return nil, err
 	}
 	return tm, nil
-}
-
-// authResolverFor wraps an *auth.Service into a tool.AuthResolver
-// that maps named auth sources to bearer-injecting RoundTrippers.
-// This is the only seam between pkg/tool and pkg/auth — pkg/tool
-// stays free of any direct auth dependency.
-func authResolverFor(svc *auth.Service) tool.AuthResolver {
-	return tool.AuthResolverFunc(func(name string) (http.RoundTripper, error) {
-		if svc == nil {
-			return nil, fmt.Errorf("auth service not initialised")
-		}
-		ts, ok := svc.TokenStore(name)
-		if !ok {
-			return nil, fmt.Errorf("auth source %q not registered", name)
-		}
-		return auth.Transport(ts, http.DefaultTransport), nil
-	})
 }
 
 // newRuntimeReloadFunc returns the dispatcher wired into
@@ -207,9 +175,8 @@ func newRuntimeReloadFunc(core *RuntimeCore, perms perm.Service, skills *skill.S
 }
 
 // reloadMCPProviders drains every registered per_agent provider
-// (system + bash + hugr-main + hugr-query) and re-Init's the
-// ToolManager so freshly-edited cfg.ToolProviders takes effect.
-// The system provider is re-registered alongside.
+// and re-Init's the ToolManager so freshly-edited cfg.ToolProviders
+// takes effect. The system provider is re-registered alongside.
 func reloadMCPProviders(ctx context.Context, tm *tool.ToolManager, core *RuntimeCore) error {
 	for _, name := range tm.Providers() {
 		if err := tm.RemoveProvider(ctx, name); err != nil {
@@ -229,14 +196,13 @@ func joinErrs(errs []error) error {
 	return fmt.Errorf("runtime_reload: %w", errors.Join(errs...))
 }
 
-// newNotepadFunc adapts runtime.Notepad to tool.NotepadFunc.
+// newNotepadFunc adapts session.Notepad to tool.NotepadFunc.
 // AgentID and SessionID are forwarded verbatim from the
 // IdentityFromContext-supplied values; the Notepad itself is
 // constructed per-call against the shared RuntimeStore.
-func newNotepadFunc(store runtime.RuntimeStore) tool.NotepadFunc {
+func newNotepadFunc(store session.RuntimeStore) tool.NotepadFunc {
 	return func(ctx context.Context, agentID, sessionID, authorID, text string) (string, error) {
-		np := runtime.NewNotepad(store, agentID, sessionID)
+		np := session.NewNotepad(store, agentID, sessionID)
 		return np.Append(ctx, authorID, text)
 	}
 }
-

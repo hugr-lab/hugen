@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // maxReplayLimit caps how many historical events a single
@@ -16,11 +16,11 @@ import (
 const maxReplayLimit = 10_000
 
 // ReplaySource is the consumer-side view of the runtime store the
-// http adapter needs for reconnection replay. *runtime.RuntimeStoreLocal
+// http adapter needs for reconnection replay. *session.RuntimeStoreLocal
 // satisfies it via its existing ListEvents method; tests can satisfy
 // it with a slice-backed fake.
 type ReplaySource interface {
-	ListEvents(ctx context.Context, sessionID string, opts runtime.ListEventsOpts) ([]runtime.EventRow, error)
+	ListEvents(ctx context.Context, sessionID string, opts session.ListEventsOpts) ([]session.EventRow, error)
 }
 
 // parseLastEventID interprets the SSE reconnection cursor per
@@ -51,8 +51,8 @@ func parseLastEventID(header string) (int, bool) {
 
 // loadReplay queries the replay source for events with seq > minSeq,
 // capped at maxReplayLimit. Returns nil on no match.
-func loadReplay(ctx context.Context, source ReplaySource, sessionID string, minSeq int) ([]runtime.EventRow, error) {
-	rows, err := source.ListEvents(ctx, sessionID, runtime.ListEventsOpts{
+func loadReplay(ctx context.Context, source ReplaySource, sessionID string, minSeq int) ([]session.EventRow, error) {
+	rows, err := source.ListEvents(ctx, sessionID, session.ListEventsOpts{
 		MinSeq: minSeq,
 		Limit:  maxReplayLimit,
 	})

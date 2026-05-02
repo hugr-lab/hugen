@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,8 +27,8 @@ func TestSystemProvider_NameAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(tools) != 11 {
-		t.Errorf("len(tools) = %d, want 11", len(tools))
+	if len(tools) != 12 {
+		t.Errorf("len(tools) = %d, want 12", len(tools))
 	}
 	for _, tt := range tools {
 		if tt.Provider != "system" {
@@ -495,3 +497,162 @@ func TestSystemProvider_PolicyRevoke_BadID(t *testing.T) {
 		t.Errorf("err = %v, want ErrArgValidation", err)
 	}
 }
+
+// skillFilesFixture writes a minimal on-disk skill named `gamma`
+// with one file in the root and two under references/, then loads
+// it into session sid via SkillManager. Returns the SystemProvider
+// wired with deps and the absolute skill root path for assertions.
+func skillFilesFixture(t *testing.T, sid string, perms perm.Service) (*SystemProvider, string, context.Context) {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "gamma")
+	if err := os.MkdirAll(filepath.Join(dir, "references"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `---
+name: gamma
+description: Test skill for skill_files.
+license: MIT
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.read_file]
+---
+# Gamma
+`
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "references/attach.md"), []byte("attach body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "references/query.md"), []byte("query body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := skill.NewSkillStore(skill.Options{LocalRoot: root})
+	mgr := skill.NewSkillManager(store, nil)
+	ctx := perm.WithSession(context.Background(), perm.SessionContext{SessionID: sid})
+	if err := mgr.Load(ctx, sid, "gamma"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	sp := NewSystemProvider(SystemDeps{Skills: mgr, Perms: perms})
+	abs, _ := filepath.Abs(dir)
+	return sp, abs, ctx
+}
+
+func TestSystemProvider_SkillFiles_HappyPath(t *testing.T) {
+	sp, root, ctx := skillFilesFixture(t, "s1", nil)
+	raw, err := sp.Call(ctx, "skill_files", json.RawMessage(`{"name":"gamma"}`))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	var got skillFilesResult
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Skill != "gamma" {
+		t.Errorf("Skill = %q", got.Skill)
+	}
+	if got.Root != root {
+		t.Errorf("Root = %q want %q", got.Root, root)
+	}
+	if got.Truncated {
+		t.Errorf("Truncated = true on tiny fixture")
+	}
+	wantRels := []string{"SKILL.md", "references/attach.md", "references/query.md"}
+	if len(got.Files) != len(wantRels) {
+		t.Fatalf("len(files) = %d, want %d (%+v)", len(got.Files), len(wantRels), got.Files)
+	}
+	for i, f := range got.Files {
+		if f.Rel != wantRels[i] {
+			t.Errorf("[%d] rel = %q, want %q", i, f.Rel, wantRels[i])
+		}
+		if f.Abs == "" || !strings.HasPrefix(f.Abs, root) {
+			t.Errorf("[%d] abs = %q (not under root)", i, f.Abs)
+		}
+		if f.Size <= 0 {
+			t.Errorf("[%d] size = %d", i, f.Size)
+		}
+		if f.Mode == "" {
+			t.Errorf("[%d] mode empty", i)
+		}
+	}
+}
+
+func TestSystemProvider_SkillFiles_SubdirFilter(t *testing.T) {
+	sp, _, ctx := skillFilesFixture(t, "s1", nil)
+	raw, err := sp.Call(ctx, "skill_files", json.RawMessage(`{"name":"gamma","subdir":"references"}`))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	var got skillFilesResult
+	_ = json.Unmarshal(raw, &got)
+	if len(got.Files) != 2 {
+		t.Fatalf("len(files) = %d, want 2 (%+v)", len(got.Files), got.Files)
+	}
+	for _, f := range got.Files {
+		if !strings.HasPrefix(f.Rel, "references/") {
+			t.Errorf("rel %q not under references/", f.Rel)
+		}
+	}
+}
+
+func TestSystemProvider_SkillFiles_Glob(t *testing.T) {
+	sp, root, ctx := skillFilesFixture(t, "s1", nil)
+	// Add a non-md sibling so the glob actually filters something.
+	if err := os.WriteFile(filepath.Join(root, "references/data.bin"), []byte("xx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sp.Call(ctx, "skill_files", json.RawMessage(`{"name":"gamma","subdir":"references","glob":"references/*.md"}`))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	var got skillFilesResult
+	_ = json.Unmarshal(raw, &got)
+	if len(got.Files) != 2 {
+		t.Errorf("len(files) = %d, want 2 (md only)", len(got.Files))
+	}
+	for _, f := range got.Files {
+		if !strings.HasSuffix(f.Rel, ".md") {
+			t.Errorf("non-md leaked: %q", f.Rel)
+		}
+	}
+}
+
+func TestSystemProvider_SkillFiles_PathEscape(t *testing.T) {
+	sp, _, ctx := skillFilesFixture(t, "s1", nil)
+	_, err := sp.Call(ctx, "skill_files", json.RawMessage(`{"name":"gamma","subdir":"../etc"}`))
+	if !errors.Is(err, ErrPathEscape) {
+		t.Fatalf("err = %v, want ErrPathEscape", err)
+	}
+}
+
+func TestSystemProvider_SkillFiles_NotLoaded(t *testing.T) {
+	sp, _, _ := skillFilesFixture(t, "s1", nil)
+	// Different session id → gamma is not loaded there.
+	other := perm.WithSession(context.Background(), perm.SessionContext{SessionID: "s2"})
+	_, err := sp.Call(other, "skill_files", json.RawMessage(`{"name":"gamma"}`))
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSystemProvider_SkillFiles_PermissionDenied(t *testing.T) {
+	denied := &fakePerms{rules: map[string]perm.Permission{
+		"hugen:command:skill_files:gamma": {Disabled: true, FromConfig: true},
+	}}
+	sp, _, ctx := skillFilesFixture(t, "s1", denied)
+	_, err := sp.Call(ctx, "skill_files", json.RawMessage(`{"name":"gamma"}`))
+	if !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("err = %v, want ErrPermissionDenied", err)
+	}
+}
+
+func TestSystemProvider_SkillFiles_BadGlob(t *testing.T) {
+	sp, _, ctx := skillFilesFixture(t, "s1", nil)
+	_, err := sp.Call(ctx, "skill_files", json.RawMessage(`{"name":"gamma","glob":"["}`))
+	if !errors.Is(err, ErrArgValidation) {
+		t.Fatalf("err = %v, want ErrArgValidation", err)
+	}
+}
+

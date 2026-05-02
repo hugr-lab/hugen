@@ -19,7 +19,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -31,18 +31,18 @@ import (
 // See specs/002-agent-runtime-phase-2/contracts/runtime-core.md for
 // the full contract.
 type RuntimeCore struct {
-	Boot   *BootstrapConfig
+	Boot *BootstrapConfig
 	// Config is the phase-3 per-domain views aggregate. All
 	// downstream packages (pkg/runtime, pkg/auth/perm, pkg/skill,
 	// pkg/tool, pkg/store/local) take narrow Views through it.
-	Config *config.StaticService
+	Config   *config.StaticService
 	Logger   *slog.Logger
 	Auth     *auth.Service
 	Identity identity.Source
-	Agent    *runtime.Agent
+	Agent    *session.Agent
 	Models   *model.ModelRouter
-	Manager  *runtime.SessionManager
-	Commands *runtime.CommandRegistry
+	Manager  *session.Manager
+	Commands *session.CommandRegistry
 	Codec    *protocol.Codec
 
 	// Phase-3 stack: skills + permissions + tools.
@@ -50,7 +50,7 @@ type RuntimeCore struct {
 	SkillStore  skill.SkillStore
 	Permissions perm.Service
 	Tools       *tool.ToolManager
-	workspaces  *sessionWorkspaces
+	workspaces  *session.Workspace
 
 	// HTTPSrv hosts the auth endpoints (phase 1) and, in phase 2,
 	// /api/v1/* via pkg/adapter/http. Both share the same mux so the
@@ -70,7 +70,7 @@ type RuntimeCore struct {
 	// Held on the core so adapters that need replay (the http
 	// adapter for Last-Event-ID resume) can reach it without
 	// reaching into the manager.
-	Store runtime.RuntimeStore
+	Store session.RuntimeStore
 
 	shutdownOnce sync.Once
 }
@@ -177,13 +177,13 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	if err != nil {
 		return nil, failed("constitution", err)
 	}
-	agent, err := runtime.NewAgent(agentInfo.ID, agentInfo.Name, core.Identity, constitution)
+	agent, err := session.NewAgent(agentInfo.ID, agentInfo.Name, core.Identity, constitution)
 	if err != nil {
 		return nil, failed("agent", err)
 	}
 	core.Agent = agent
 
-	cmds := runtime.NewCommandRegistry()
+	cmds := session.NewCommandRegistry()
 	if err := registerBuiltinCommands(cmds, core.Logger); err != nil {
 		return nil, failed("commands", err)
 	}
@@ -200,33 +200,49 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 
 	core.Permissions = buildPermissionService(core)
 
+	// Workspace must exist before buildToolStack so per_agent stdio
+	// MCPs can be told where to write — the runtime injects
+	// WORKSPACES_ROOT into every stdio child from Workspace.Root(),
+	// keeping per_session bash-mcp and per_agent hugr-query/python-mcp
+	// pointed at the same on-disk tree.
+	core.workspaces = session.NewWorkspace(boot.WorkspaceDir, boot.CleanupOnClose)
+
 	tools, err := buildToolStack(core, core.Permissions, skills)
 	if err != nil {
 		return nil, failed("tools", err)
 	}
 	core.Tools = tools
 
-	if err := cmds.Register("skill", runtime.CommandSpec{
+	if err := cmds.Register("skill", session.CommandSpec{
 		Handler:     skillCommandHandler(core.Skills, core.SkillStore, core.Permissions),
 		Description: "list, load or unload skills: /skill list | /skill load <name> | /skill unload <name>",
 	}); err != nil {
 		return nil, failed("commands_skill", err)
 	}
-
-	core.workspaces = newSessionWorkspaces()
-	core.Manager = runtime.NewSessionManager(
+	resources := session.NewResources(session.ResourceDeps{
+		Providers:  core.Config.ToolProviders(),
+		Tools:      core.Tools,
+		Skills:     core.Skills,
+		SkillStore: core.SkillStore,
+		Workspace:  core.workspaces,
+		Logger:     core.Logger,
+	})
+	if err := resources.Validate(); err != nil {
+		return nil, failed("session_resources", err)
+	}
+	core.Manager = session.NewManager(
 		core.Store, agent, router, cmds, core.Codec, core.Logger,
-		runtime.WithLifecycle(buildSessionLifecycle(core, core.workspaces)),
-		runtime.WithSessionOptions(
-			runtime.WithTools(core.Tools),
-			runtime.WithSkills(core.Skills),
+		session.WithLifecycle(resources),
+		session.WithSessionOptions(
+			session.WithTools(core.Tools),
+			session.WithSkills(core.Skills),
 		),
 	)
 
-	// /api/auth/agent-token is mounted inside buildToolStack when
-	// the deployment carries a `hugr` auth source — see
-	// hugr_query.go:buildAgentTokenStore. No-Hugr deployments
-	// leave the path unmounted (404), which US5 expects.
+	// /api/auth/agent-token is mounted inside auth.Service when
+	// AddPrimary registers a hugr-flavoured source — see
+	// pkg/auth/agent_token.go. No-Hugr deployments leave the path
+	// unmounted (404), which US5 expects.
 
 	return core, nil
 }

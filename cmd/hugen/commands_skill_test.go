@@ -11,7 +11,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
@@ -40,25 +40,25 @@ func (v *permsView) OnUpdate(func()) func()         { return func() {} }
 // write to the store, but Session construction needs one.
 type stubStore struct{}
 
-func (s *stubStore) OpenSession(_ context.Context, _ runtime.SessionRow) error { return nil }
-func (s *stubStore) LoadSession(_ context.Context, id string) (runtime.SessionRow, error) {
-	return runtime.SessionRow{ID: id, AgentID: "a1", Status: runtime.StatusActive}, nil
+func (s *stubStore) OpenSession(_ context.Context, _ session.SessionRow) error { return nil }
+func (s *stubStore) LoadSession(_ context.Context, id string) (session.SessionRow, error) {
+	return session.SessionRow{ID: id, AgentID: "a1", Status: session.StatusActive}, nil
 }
 func (s *stubStore) UpdateSessionStatus(_ context.Context, _, _ string) error { return nil }
-func (s *stubStore) AppendEvent(_ context.Context, _ runtime.EventRow, _ string) error {
+func (s *stubStore) AppendEvent(_ context.Context, _ session.EventRow, _ string) error {
 	return nil
 }
-func (s *stubStore) ListEvents(_ context.Context, _ string, _ runtime.ListEventsOpts) ([]runtime.EventRow, error) {
+func (s *stubStore) ListEvents(_ context.Context, _ string, _ session.ListEventsOpts) ([]session.EventRow, error) {
 	return nil, nil
 }
 func (s *stubStore) NextSeq(_ context.Context, _ string) (int, error) {
 	return 1, nil
 }
-func (s *stubStore) AppendNote(_ context.Context, _ runtime.NoteRow) error { return nil }
-func (s *stubStore) ListNotes(_ context.Context, _ string, _ int) ([]runtime.NoteRow, error) {
+func (s *stubStore) AppendNote(_ context.Context, _ session.NoteRow) error { return nil }
+func (s *stubStore) ListNotes(_ context.Context, _ string, _ int) ([]session.NoteRow, error) {
 	return nil, nil
 }
-func (s *stubStore) ListSessions(_ context.Context, _, _ string) ([]runtime.SessionRow, error) {
+func (s *stubStore) ListSessions(_ context.Context, _, _ string) ([]session.SessionRow, error) {
 	return nil, nil
 }
 
@@ -71,7 +71,7 @@ func (stubModel) Generate(_ context.Context, _ model.Request) (model.Stream, err
 	return nil, nil
 }
 
-func newSkillCmdEnv(t *testing.T) runtime.CommandEnv {
+func newSkillCmdEnv(t *testing.T) session.CommandEnv {
 	t.Helper()
 	store := &stubStore{}
 	spec := model.ModelSpec{Provider: "fake", Name: "f"}
@@ -81,12 +81,12 @@ func newSkillCmdEnv(t *testing.T) runtime.CommandEnv {
 	if err != nil {
 		t.Fatalf("router: %v", err)
 	}
-	agent, err := runtime.NewAgent("a1", "hugen", staticIdentity{id: "a1"}, "")
+	agent, err := session.NewAgent("a1", "hugen", staticIdentity{id: "a1"}, "")
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
-	s := runtime.NewSession("s1", agent, store, router, runtime.NewCommandRegistry(), protocol.NewCodec(), nil)
-	return runtime.CommandEnv{
+	s := session.NewSession("s1", agent, store, router, session.NewCommandRegistry(), protocol.NewCodec(), nil)
+	return session.CommandEnv{
 		Session:     s,
 		Author:      protocol.ParticipantInfo{ID: "u", Kind: protocol.ParticipantUser},
 		AgentAuthor: agent.Participant(),

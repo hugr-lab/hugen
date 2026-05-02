@@ -17,6 +17,7 @@ allowed-tools:
       - skill_load
       - skill_unload
       - skill_ref
+      - skill_files
       - policy_save
       - policy_revoke
       - runtime_reload
@@ -93,6 +94,11 @@ shell tools and file tools see exactly the same paths.
   prompt before loading.
 - `skill_ref` — read a reference document that ships with a
   loaded skill (`references/<name>.md`).
+- `skill_files` — list the on-disk files of a loaded skill with
+  relative + absolute paths so other tools (`bash.read_file`,
+  `python-mcp:run_script`, `duckdb-mcp:execute_query`) can address
+  them directly. Optional `subdir` / `glob` filters narrow the
+  listing.
 - `policy_save` / `policy_revoke` — persist or remove a personal
   Tier-3 tool policy ("always allow" / "always deny") for the
   caller. Args: `tool_name` (`<provider>:<field>`, glob `*`
@@ -108,6 +114,29 @@ shell tools and file tools see exactly the same paths.
 - `mcp_add_server` / `mcp_remove_server` / `mcp_reload_server`
   — admin path to attach or detach an MCP server at runtime.
   Operator-only; the call may be denied by policy.
+
+## Discovering skill contents
+
+A loaded skill's body (this SKILL.md) is the entry point but rarely
+the whole story. Skills ship references, sample data, scripts, and
+templates under their own filesystem root. The standard discovery
+flow:
+
+1. **`skill_files(name="<skill>")`** — list every file the skill
+   ships, with relative + absolute paths, size, and mode. Optional
+   `subdir` (e.g. `"references"`) and `glob` (e.g. `"*.md"`) narrow
+   the listing.
+2. **`skill_ref(skill="<skill>", ref="<base>")`** — convenience for
+   reference docs: reads `references/<base>.md` directly without
+   needing the absolute path.
+3. **`bash.read_file <abs path>`** — for any other bundled file
+   (sample data, scripts, templates) once `skill_files` gave you
+   the path.
+
+Skill bodies SHOULD point at the references they consider important
+in narrative form, but you do NOT have to wait for an explicit
+mention. If a workflow looks underspecified or a reference may
+exist, run `skill_files` and read what is there.
 
 ## Operator policy
 

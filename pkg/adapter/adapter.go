@@ -8,14 +8,14 @@
 // import "pkg/adapter" rather than "pkg/runtime".
 package adapter
 
-import "github.com/hugr-lab/hugen/pkg/runtime"
+import "github.com/hugr-lab/hugen/pkg/session"
 
-// Adapter is an alias for runtime.Adapter — the interface every
+// Adapter is an alias for session.Adapter — the interface every
 // adapter implementation must satisfy.
-type Adapter = runtime.Adapter
+type Adapter = session.Adapter
 
-// Host is the adapter-side view of the runtime.
-type Host = runtime.AdapterHost
+// Host is the adapter-side view of the session.
+type Host = session.AdapterHost
 
 // OpenRequest is the parameter shape for Host.OpenSession.
-type OpenRequest = runtime.OpenRequest
+type OpenRequest = session.OpenRequest

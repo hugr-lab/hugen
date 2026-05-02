@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // allowedKinds enumerates the inbound Frame kinds the API accepts on
@@ -49,7 +49,7 @@ func (a *Adapter) decodeBody(w stdhttp.ResponseWriter, r *stdhttp.Request, v any
 }
 
 // handleOpenSession serves POST /api/v1/sessions.
-func (a *Adapter) handleOpenSession(host runtime.AdapterHost) stdhttp.HandlerFunc {
+func (a *Adapter) handleOpenSession(host session.AdapterHost) stdhttp.HandlerFunc {
 	return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		var req OpenSessionRequest
 		if !a.decodeBody(w, r, &req) {
@@ -61,26 +61,26 @@ func (a *Adapter) handleOpenSession(host runtime.AdapterHost) stdhttp.HandlerFun
 			writeError(w, stdhttp.StatusBadRequest, "invalid_metadata", "metadata exceeds 32 entries")
 			return
 		}
-		s, openedAt, err := host.OpenSession(r.Context(), runtime.OpenRequest{Metadata: req.Metadata})
+		s, openedAt, err := host.OpenSession(r.Context(), session.OpenRequest{Metadata: req.Metadata})
 		if err != nil {
 			a.routeError(w, err)
 			return
 		}
 		writeJSON(w, stdhttp.StatusCreated, OpenSessionResponse{
 			SessionID: s.ID(),
-			Status:    runtime.StatusActive,
+			Status:    session.StatusActive,
 			OpenedAt:  openedAt,
 		})
 	}
 }
 
 // handleListSessions serves GET /api/v1/sessions.
-func (a *Adapter) handleListSessions(host runtime.AdapterHost) stdhttp.HandlerFunc {
+func (a *Adapter) handleListSessions(host session.AdapterHost) stdhttp.HandlerFunc {
 	return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		q := r.URL.Query()
 		status := q.Get("status")
 		switch status {
-		case "", runtime.StatusActive, runtime.StatusSuspended, runtime.StatusClosed:
+		case "", session.StatusActive, session.StatusSuspended, session.StatusClosed:
 			// ok
 		default:
 			writeError(w, stdhttp.StatusBadRequest, "bad_query", "unknown status: "+status)
@@ -120,7 +120,7 @@ func (a *Adapter) handleListSessions(host runtime.AdapterHost) stdhttp.HandlerFu
 // mutation, then decodes the same bytes into the typed
 // PostFrameRequest. MaxBytesReader caps the body size; oversize
 // → 413 payload_too_large.
-func (a *Adapter) handlePostFrame(host runtime.AdapterHost) stdhttp.HandlerFunc {
+func (a *Adapter) handlePostFrame(host session.AdapterHost) stdhttp.HandlerFunc {
 	return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		sessionID := r.PathValue("id")
 		if sessionID == "" {
@@ -202,7 +202,7 @@ func (a *Adapter) handlePostFrame(host runtime.AdapterHost) stdhttp.HandlerFunc 
 //
 // Idempotent (FR-013): closing an already-closed session returns 200
 // with the original closed_at when known.
-func (a *Adapter) handleCloseSession(host runtime.AdapterHost) stdhttp.HandlerFunc {
+func (a *Adapter) handleCloseSession(host session.AdapterHost) stdhttp.HandlerFunc {
 	return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		sessionID := r.PathValue("id")
 		if sessionID == "" {
@@ -224,7 +224,7 @@ func (a *Adapter) handleCloseSession(host runtime.AdapterHost) stdhttp.HandlerFu
 		}
 		writeJSON(w, stdhttp.StatusOK, CloseSessionResponse{
 			SessionID: sessionID,
-			Status:    runtime.StatusClosed,
+			Status:    session.StatusClosed,
 			ClosedAt:  closedAt,
 		})
 	}
@@ -237,7 +237,7 @@ func (a *Adapter) handleCloseSession(host runtime.AdapterHost) stdhttp.HandlerFu
 // subscriber on the runtime fan-out BEFORE reading the replay block,
 // so any frame produced during the replay window is queued on the
 // live channel rather than dropped.
-func (a *Adapter) handleStream(host runtime.AdapterHost) stdhttp.HandlerFunc {
+func (a *Adapter) handleStream(host session.AdapterHost) stdhttp.HandlerFunc {
 	return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		sessionID := r.PathValue("id")
 		if sessionID == "" {
@@ -301,9 +301,9 @@ func (a *Adapter) handleStream(host runtime.AdapterHost) stdhttp.HandlerFunc {
 // ErrorEnvelope catalogue per contracts/http-api.md.
 func (a *Adapter) routeError(w stdhttp.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, runtime.ErrSessionNotFound):
+	case errors.Is(err, session.ErrSessionNotFound):
 		writeError(w, stdhttp.StatusNotFound, "session_not_found", err.Error())
-	case errors.Is(err, runtime.ErrSessionClosed):
+	case errors.Is(err, session.ErrSessionClosed):
 		writeError(w, stdhttp.StatusConflict, "session_closed", err.Error())
 	default:
 		// Treat unknown errors as 500 with a generic code; the

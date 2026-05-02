@@ -79,8 +79,12 @@ models:
 #                 HTTP) or `per_session` (spawned per Session.Open —
 #                 default for stdio; bash-mcp pattern).
 #
-# Hugr is OPTIONAL: omit the `hugr-main` / `hugr-query` entries to
-# run as a universal local agent (bash-mcp + system tools only).
+# Hugr is OPTIONAL: omit the `hugr-main` / `hugr-query` / `python-mcp`
+# entries to run a universal local agent without Hugr. The analyst
+# providers `duckdb-mcp` / `python-mcp` are likewise OPTIONAL — drop
+# either or both to fall back to the phase-3 baseline (bash-mcp +
+# system tools only). Skills that grant tools from a missing provider
+# are flagged unavailable rather than rejected.
 #
 tool_providers:
   # In-tree per-session bash + filesystem MCP. Spawned by the
@@ -124,26 +128,104 @@ tool_providers:
   # workspace data dir, returns path + ≤ 50-row preview to the
   # model.
   #
+  # `auth: hugr` flips on the loopback bootstrap injection — at
+  # spawn time the runtime mints a per-spawn HUGR_ACCESS_TOKEN +
+  # HUGR_TOKEN_URL pair the binary uses to keep its bearer fresh
+  # against /api/auth/agent-token. WORKSPACES_ROOT below is the
+  # operator-controlled parent of every session's data dir.
+  #
   # HUGR_URL is the literal endpoint the binary dials — usually
   # `${HUGR_URL}/ipc` (multipart wire protocol). Operators behind a
   # proxy with a non-standard prefix put the full path here; the
   # runtime does NOT mangle it.
   #
-  # The runtime injects HUGR_TOKEN_URL, HUGR_ACCESS_TOKEN,
-  # WORKSPACES_ROOT, SHARED_DIR, HUGEN_AGENT_ID at spawn time.
-  # Operators do not write those — they're per-spawn secrets and
-  # loopback paths the binary can't know on its own. HUGR_QUERY_*
-  # timeout knobs may be set here to override the binary defaults
-  # (1 h default, 24 h ceiling).
-  #
   # Drop this entry to skip file-output queries; `hugr-main` above
   # still serves inline data tools.
   - name: hugr-query
-    type: hugr-query
+    type: mcp
+    transport: stdio
     command: ./bin/hugr-query        # built by `make hugr-query`
     lifetime: per_agent
+    auth: hugr
     env:
       HUGR_URL: ${HUGR_URL}/ipc
+      # WORKSPACES_ROOT is injected by the runtime — do not set it here.
+      # The runtime points it at the same on-disk tree per_session
+      # bash-mcp uses, so files written by hugr-query land where the
+      # rest of the toolchain can find them.
+
+  # In-tree Python MCP (per-session venv). Spawned per_agent over
+  # stdio; lazily provisions each session's relocatable .venv from
+  # the bundled template on first call. Tools: python.run_code (short
+  # snippets) and python.run_script (file in the session workspace).
+  #
+  # `auth: hugr` injects the same loopback bootstrap as hugr-query —
+  # Python scripts that import `hugr-client` reuse the agent's JWT
+  # without seeing the operator's seed token. WORKSPACES_ROOT is the
+  # parent of every session's `.venv` and `data/` dirs.
+  #
+  # The operator runs `python-mcp --create-template
+  # ./assets/python/requirements.txt` once after building; the
+  # resulting venv is referenced via --template below. uv ≥ 0.4.0
+  # and Python ≥ 3.10 must be on the host. Drop this entry to run
+  # without the analyst toolkit.
+  - name: python-mcp
+    type: mcp
+    transport: stdio
+    command: ./bin/python-mcp        # built by `make python-mcp`
+    args: [--template, "${HUGEN_PYTHON_TEMPLATE}"]
+    lifetime: per_agent
+    auth: hugr
+    env:
+      HUGR_URL: ${HUGR_URL}/ipc
+      # WORKSPACES_ROOT is injected by the runtime — same tree as
+      # bash-mcp and hugr-query, so a script written by bash.write_file
+      # is reachable by python.run_script in the same session.
+
+  # Vendored MotherDuck MCP (DuckDB analytical SQL). Spawned per-session
+  # via `uvx` against the pinned submodule under
+  # `vendor/mcp-server-motherduck/`. Tools: execute_query / list_databases
+  # / list_tables / list_columns. The connection is `:memory:` per
+  # session — closes with the session, no on-disk DuckDB file.
+  #
+  # `--init-sql` is the operator's hardening hook: bound memory / threads,
+  # pin spill + secret directories under the session workspace, and
+  # pre-load the `spatial` and `httpfs` extensions so skills don't have
+  # to (and the `duckdb-data` skill is forbidden from running per-call
+  # `INSTALL` for either).
+  #
+  # `extension_directory` defaults to `~/.duckdb/extensions/` — the
+  # first session pays the install cost (~10–30 s for spatial + httpfs);
+  # subsequent sessions reuse the cache.
+  #
+  # No `auth:` — DuckDB SQL never reaches into Hugr; that's the
+  # `hugr-main` / `hugr-query` job. Drop this entry to run without
+  # analytical SQL on workspace files.
+  - name: duckdb-mcp
+    type: mcp
+    transport: stdio
+    command: uvx
+    lifetime: per_session
+    args:
+      # Path resolved by uvx — must be absolute, because uvx runs
+      # with cwd = session workspace, not hugen's startup dir.
+      # ${HUGEN_VENDOR_DIR} is set by hugen at startup to <pwd>/vendor;
+      # operators can override it before launching hugen.
+      - --from
+      - ${HUGEN_VENDOR_DIR}/mcp-server-motherduck
+      - mcp-server-motherduck
+      - --db-path
+      - ":memory:"
+      - --read-write
+      - --allow-switch-databases
+      - --init-sql
+      - |
+        SET memory_limit     = '4GB';
+        SET threads          = 4;
+        SET temp_directory   = '.duckdb/tmp';
+        SET secret_directory = '.duckdb/secrets';
+        INSTALL spatial; LOAD spatial;
+        INSTALL httpfs;  LOAD httpfs;
 
 local_db_enabled: true
 local_db:

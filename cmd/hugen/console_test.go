@@ -3,11 +3,11 @@ package main
 import (
 	"testing"
 
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 func TestRegisterBuiltinCommands(t *testing.T) {
-	reg := runtime.NewCommandRegistry()
+	reg := session.NewCommandRegistry()
 	if err := registerBuiltinCommands(reg, nil); err != nil {
 		t.Fatalf("register: %v", err)
 	}

@@ -2,15 +2,14 @@
 name: hugr-data
 license: Apache-2.0
 description: >
-  Work with Hugr Data Mesh platform via MCP. Hugr is a GraphQL-over-SQL engine federating
-  PostgreSQL, DuckDB, Parquet, Iceberg, REST APIs into unified GraphQL schema.
-  Use whenever the user wants to: explore/analyze data via Hugr GraphQL API, build queries,
-  perform aggregations, create dashboards from Hugr data, discover schemas/modules/fields,
-  work with bucket aggregations, jq transforms, or Hugr MCP tools (discovery-*, schema-*, data-*).
-  Trigger on: Hugr, hugr-lab, data mesh, GraphQL aggregation, bucket aggregation, MCP data tools,
-  "query the data", "analyze the dataset", "build a dashboard", "explore the schema",
-  modules, catalogs, data objects, spatial joins, dynamic joins.
-  Even "show me the data" or "what data do we have" should trigger this if Hugr MCP is available.
+  Query the Hugr Data Mesh — a GraphQL-over-SQL engine that federates
+  PostgreSQL, DuckDB, Parquet, Iceberg, and REST APIs under one schema.
+  Use to discover modules / catalogs / data objects, build GraphQL
+  queries, run aggregations and bucket aggregations, do spatial or
+  dynamic joins, save large results to Parquet via hugr-query, and
+  apply jq transforms. Read-only data fetch from the platform —
+  for SQL on local files load `duckdb-data`; for charts / HTML / PDF
+  reports load `python-runner`.
 allowed-tools:
   - provider: hugr-main
     tools:
@@ -137,8 +136,15 @@ references.
 NEVER write a GraphQL query before running discovery first — the schema is
 filtered per-role and module names cannot be guessed.
 
+0. **Read `instructions` via `skill_ref`** the first time you touch a new
+   schema in this session. The system prompt only carries the cheat-sheet
+   below; query patterns, dotted-module nesting, filter rules, and edge
+   cases live in the reference. **One `skill_ref` call now beats fifteen
+   trial-and-error tool calls later.**
 1. **Parse user intent** — entities, metrics, filters, time ranges
-2. **Find modules** → `hugr-main:discovery-search_modules`
+2. **Find modules** → `hugr-main:discovery-search_modules`. Note the
+   exact module names returned: dots in names are **structure**, not
+   typos (see "Critical Rules" below).
 3. **Find data objects** → `hugr-main:discovery-search_module_data_objects`
 4. **Inspect fields** → `hugr-main:schema-type_fields(type_name: "prefix_tablename")` — **MUST** call before building queries
 5. **Explore values** → `hugr-main:discovery-field_values` — understand distributions before filtering
@@ -149,6 +155,29 @@ filtered per-role and module names cannot be guessed.
    - Big result, file output? → `hugr-query:query` (engine response decides Parquet vs JSON per leaf)
    - JQ post-process to one JSON value? → `hugr-query:query_jq` — JQ input is the full `{data, errors}` envelope; results live under `.data.<field>`
 9. **Present** — tables, charts, dashboards, or concise text summaries
+
+## Error Recovery — Stop, Read, Resolve
+
+When a query fails, the wrong response is to retweak and retry the same
+shape. Read the error, then escalate to the right tool:
+
+- **`Cannot query field "X" on type "Query"`** — `X` is not a top-level
+  field. Either it's a **submodule** (dotted module name expressed as
+  nesting — see Critical Rules) or it's gated by RBAC. **STOP.** Run
+  `hugr-main:discovery-search_modules` and read the result before the
+  next query. Do **not** keep guessing underscored or prefixed forms.
+- **`Cannot query field "Y" on type "Z"`** — `Y` does not exist on `Z`.
+  Run `hugr-main:schema-type_fields(type_name: "Z")` and pick a real
+  field. Never guess.
+- **Unknown filter operator / argument shape** — read the
+  `filter-guide` reference via `skill_ref`. The filter language is
+  not standard GraphQL.
+- **Repeated identical error after one retry** — you're guessing. Stop
+  the loop, switch to discovery / schema tools, and re-plan.
+
+The same applies before the first query on a schema: if you've never
+seen `instructions` in this session and the user asks for non-trivial
+data, read it before composing a query.
 
 ## Task-Specific Guidance
 
@@ -231,6 +260,11 @@ filter: { _not: { status: { in: ["cancelled", "expired"] } } }
 
 ## Critical Rules (Never Forget)
 
+- **Dotted module names are nesting, not identifiers.** A module named
+  `osm.bw` is queried as `osm { bw { ... } }` — never as `osm_bw { ... }`,
+  `osm.bw { ... }`, or any prefixed form. Same for `transport.public.routes`
+  → `transport { public { routes(...) { ... } } }`. The dot count in the
+  module name equals the nesting depth before the data-object field.
 - **ALWAYS** call `schema-type_fields` before building queries — field names cannot be guessed
 - Use **type name** (`prefix_tablename`) for introspection, **query field name** (`tablename`) inside modules
 - Fields in `order_by` **MUST** be selected in the query

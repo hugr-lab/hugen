@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/skill"
@@ -147,6 +150,21 @@ func (p *SystemProvider) List(ctx context.Context) ([]Tool, error) {
 }`),
 		},
 		{
+			Name:             "system:skill_files",
+			Description:      "List on-disk files of a loaded skill with relative + absolute paths so other tools (bash.read_file, python.run_script) can read them. Optional subdir narrows the listing; optional glob filters by path pattern.",
+			Provider:         systemProviderName,
+			PermissionObject: systemPermObject,
+			ArgSchema: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "name":   {"type": "string", "description": "Loaded skill name."},
+    "subdir": {"type": "string", "description": "Optional sub-directory under the skill root (e.g. \"references\")."},
+    "glob":   {"type": "string", "description": "Optional filepath.Match-flavour glob filter on the relative path (e.g. \"*.md\")."}
+  },
+  "required": ["name"]
+}`),
+		},
+		{
 			Name:             "system:skill_ref",
 			Description:      "Read a reference document (references/<ref>.md) from a loaded skill. References are listed in the skill's SKILL.md body.",
 			Provider:         systemProviderName,
@@ -255,6 +273,8 @@ func (p *SystemProvider) Call(ctx context.Context, name string, args json.RawMes
 		return nil, fmt.Errorf("%w: skill_publish requires inline body wiring (deferred to T039)", ErrSystemUnavailable)
 	case "skill_ref":
 		return p.callSkillRef(ctx, args)
+	case "skill_files":
+		return p.callSkillFiles(ctx, args)
 	case "runtime_reload":
 		return p.callRuntimeReload(ctx, args)
 	case "mcp_add_server":
@@ -378,6 +398,142 @@ func (p *SystemProvider) callSkillRef(ctx context.Context, args json.RawMessage)
 		return nil, fmt.Errorf("skill_ref: %s/%s: %w", in.Skill, in.Ref, err)
 	}
 	return json.Marshal(map[string]string{"skill": in.Skill, "ref": in.Ref, "body": string(body)})
+}
+
+// skillFilesMaxEntries caps the listing per the contract (SC-010).
+// Beyond this, the result envelope sets truncated=true so the model
+// narrows with subdir / glob and re-calls.
+const skillFilesMaxEntries = 1000
+
+type skillFileEntry struct {
+	Rel  string `json:"rel"`
+	Abs  string `json:"abs"`
+	Size int64  `json:"size"`
+	Mode string `json:"mode"`
+}
+
+type skillFilesResult struct {
+	Skill     string           `json:"skill"`
+	Root      string           `json:"root"`
+	Files     []skillFileEntry `json:"files"`
+	Truncated bool             `json:"truncated,omitempty"`
+}
+
+func (p *SystemProvider) callSkillFiles(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	if p.deps.Skills == nil {
+		return nil, ErrSystemUnavailable
+	}
+	var in struct {
+		Name   string `json:"name"`
+		Subdir string `json:"subdir,omitempty"`
+		Glob   string `json:"glob,omitempty"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil {
+		return nil, fmt.Errorf("%w: skill_files: %v", ErrArgValidation, err)
+	}
+	if in.Name == "" {
+		return nil, fmt.Errorf("%w: skill_files: name required", ErrArgValidation)
+	}
+	sc, _ := perm.SessionFromContext(ctx)
+	if sc.SessionID == "" {
+		return nil, fmt.Errorf("%w: skill_files: missing session id", ErrArgValidation)
+	}
+	if in.Glob != "" {
+		// fail-fast on malformed pattern (filepath.Match returns
+		// ErrBadPattern only when the pattern itself is invalid).
+		if _, err := filepath.Match(in.Glob, ""); err != nil {
+			return nil, fmt.Errorf("%w: skill_files: bad glob %q: %v", ErrArgValidation, in.Glob, err)
+		}
+	}
+	if err := p.gateSkillFiles(ctx, in.Name); err != nil {
+		return nil, err
+	}
+	s, err := p.deps.Skills.LoadedSkill(ctx, sc.SessionID, in.Name)
+	if err != nil {
+		if errors.Is(err, skill.ErrSkillNotFound) {
+			return nil, fmt.Errorf("%w: skill not loaded: %s", ErrNotFound, in.Name)
+		}
+		return nil, fmt.Errorf("skill_files: %w", err)
+	}
+	out := skillFilesResult{Skill: in.Name, Files: []skillFileEntry{}}
+	if s.Root == "" {
+		// Inline / hub skill — no on-disk content to surface.
+		return json.Marshal(out)
+	}
+	out.Root = s.Root
+	walkStart := s.Root
+	if in.Subdir != "" {
+		if filepath.IsAbs(in.Subdir) {
+			return nil, fmt.Errorf("%w: skill_files: subdir must be relative", ErrPathEscape)
+		}
+		joined := filepath.Join(s.Root, in.Subdir)
+		rel, err := filepath.Rel(s.Root, joined)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("%w: skill_files: subdir escapes skill root", ErrPathEscape)
+		}
+		walkStart = joined
+	}
+	walkErr := filepath.WalkDir(walkStart, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			if errors.Is(werr, fs.ErrNotExist) {
+				return fs.SkipAll
+			}
+			return werr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(s.Root, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if in.Glob != "" {
+			ok, _ := filepath.Match(in.Glob, rel)
+			if !ok {
+				return nil
+			}
+		}
+		info, statErr := d.Info()
+		if statErr != nil {
+			return nil
+		}
+		if len(out.Files) >= skillFilesMaxEntries {
+			out.Truncated = true
+			return fs.SkipAll
+		}
+		out.Files = append(out.Files, skillFileEntry{
+			Rel:  rel,
+			Abs:  path,
+			Size: info.Size(),
+			Mode: fmt.Sprintf("0%o", info.Mode().Perm()),
+		})
+		return nil
+	})
+	if walkErr != nil && !errors.Is(walkErr, fs.SkipAll) {
+		return nil, fmt.Errorf("%w: skill_files: walk %s: %v", ErrIO, walkStart, walkErr)
+	}
+	sort.Slice(out.Files, func(i, j int) bool { return out.Files[i].Rel < out.Files[j].Rel })
+	return json.Marshal(out)
+}
+
+// gateSkillFiles consults Tier-1 / Tier-2 for
+// hugen:command:skill_files:<skill_name>. Default decision is allow
+// (the listing is informational); operators may pin a deny rule for
+// sensitive skills.
+func (p *SystemProvider) gateSkillFiles(ctx context.Context, name string) error {
+	if p.deps.Perms == nil {
+		return nil
+	}
+	got, err := p.deps.Perms.Resolve(ctx, "hugen:command:skill_files", name)
+	if err != nil {
+		return err
+	}
+	if got.Disabled {
+		return fmt.Errorf("%w: skill_files(%s) denied by %s tier",
+			ErrPermissionDenied, name, deniedPolicyTier(got))
+	}
+	return nil
 }
 
 func (p *SystemProvider) callRuntimeReload(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {

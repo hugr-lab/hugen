@@ -15,7 +15,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -54,8 +54,8 @@ type integrationCore struct {
 	tools        *tool.ToolManager
 	skills       *skill.SkillManager
 	skillStore   skill.SkillStore
-	manager      *runtime.SessionManager
-	workspaces   *sessionWorkspaces
+	manager      *session.Manager
+	workspaces   *session.Workspace
 }
 
 func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrationCore {
@@ -70,11 +70,6 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 		}
 	}
 
-	boot := &BootstrapConfig{
-		StateDir:       stateDir,
-		WorkspaceDir:   workspaceDir,
-		CleanupOnClose: true,
-	}
 	cfgSvc := config.NewStaticService(config.StaticInput{
 		ToolProviders: []config.ToolProviderSpec{{
 			Name:      "bash-mcp",
@@ -98,21 +93,23 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 	tools := tool.NewToolManager(perms, nil, nil, nil, nil)
 	t.Cleanup(func() { _ = tools.Close() })
 
-	rcLite := &RuntimeCore{
-		Boot:   boot,
-		Config: cfgSvc,
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
-		Tools:  tools,
-	}
-	ws := newSessionWorkspaces()
-	lc := buildSessionLifecycle(rcLite, ws)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	ws := session.NewWorkspace(workspaceDir, true)
+	resources := session.NewResources(session.ResourceDeps{
+		Providers:  cfgSvc.ToolProviders(),
+		Tools:      tools,
+		Skills:     skills,
+		SkillStore: skillStore,
+		Workspace:  ws,
+		Logger:     logger,
+	})
 
 	router, agent := makeRouter(t)
-	mgr := runtime.NewSessionManager(
+	mgr := session.NewManager(
 		&stubStore{}, agent, router,
-		runtime.NewCommandRegistry(), protocol.NewCodec(), nil,
-		runtime.WithLifecycle(lc),
-		runtime.WithSessionOptions(runtime.WithTools(tools)),
+		session.NewCommandRegistry(), protocol.NewCodec(), nil,
+		session.WithLifecycle(resources),
+		session.WithSessionOptions(session.WithTools(tools)),
 	)
 
 	return &integrationCore{
@@ -130,7 +127,7 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 // makeRouter constructs a stub-backed ModelRouter + Agent for
 // integration sessions. The /skill and bash-mcp dispatch paths
 // don't ever call the model, so a stub is enough.
-func makeRouter(t *testing.T) (*model.ModelRouter, *runtime.Agent) {
+func makeRouter(t *testing.T) (*model.ModelRouter, *session.Agent) {
 	t.Helper()
 	spec := model.ModelSpec{Provider: "fake", Name: "f"}
 	router, err := model.NewModelRouter(map[model.Intent]model.ModelSpec{
@@ -139,7 +136,7 @@ func makeRouter(t *testing.T) (*model.ModelRouter, *runtime.Agent) {
 	if err != nil {
 		t.Fatalf("router: %v", err)
 	}
-	agent, err := runtime.NewAgent("agent-it", "hugen", staticIdentity{id: "agent-it"}, "")
+	agent, err := session.NewAgent("agent-it", "hugen", staticIdentity{id: "agent-it"}, "")
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
@@ -217,7 +214,7 @@ func TestUS1_BashMCP_WriteRead(t *testing.T) {
 	core := newIntegrationCore(t, nil)
 
 	ctx := context.Background()
-	sess, _, err := core.manager.Open(ctx, runtime.OpenRequest{OwnerID: "u"})
+	sess, _, err := core.manager.Open(ctx, session.OpenRequest{OwnerID: "u"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -273,7 +270,7 @@ func TestUS1_BashMCP_PermissionDenied(t *testing.T) {
 	core := newIntegrationCore(t, rules)
 
 	ctx := context.Background()
-	sess, _, err := core.manager.Open(ctx, runtime.OpenRequest{OwnerID: "u"})
+	sess, _, err := core.manager.Open(ctx, session.OpenRequest{OwnerID: "u"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -304,7 +301,8 @@ func TestUS1_OrphanSweep(t *testing.T) {
 	old := time.Now().Add(-2 * time.Hour)
 	_ = os.Chtimes(orphan, old, old)
 
-	removed, err := sweepOrphans(workspaceDir, map[string]struct{}{"ses-live": {}}, time.Hour)
+	ws := session.NewWorkspace(workspaceDir, true)
+	removed, err := ws.SweepOrphans(map[string]struct{}{"ses-live": {}}, time.Hour)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -323,7 +321,7 @@ func TestUS1_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
 	core := newIntegrationCore(t, nil)
 
 	ctx := context.Background()
-	sess, _, err := core.manager.Open(ctx, runtime.OpenRequest{OwnerID: "u"})
+	sess, _, err := core.manager.Open(ctx, session.OpenRequest{OwnerID: "u"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

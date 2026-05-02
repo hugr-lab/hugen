@@ -12,6 +12,13 @@ type Skill struct {
 	// FS is rooted at the skill's own directory. Empty for
 	// inline skills (Manifest is the entire content).
 	FS fs.FS
+	// Root is the absolute filesystem path of the skill directory
+	// when it lives on disk (system / local / community backends).
+	// Empty for inline / hub backends. Used by tools that need
+	// real OS paths (e.g. system:skill_files surfacing absolute
+	// paths so bash.read_file / python.run_script can consume
+	// them directly).
+	Root string
 }
 
 // Origin tags where a skill came from. Shadowing order at

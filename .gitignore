@@ -7,7 +7,6 @@
 *.test
 *.out
 bin/
-vendor/
 
 # Environment
 .env

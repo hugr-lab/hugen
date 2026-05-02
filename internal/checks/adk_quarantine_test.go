@@ -37,6 +37,7 @@ func TestADKQuarantine(t *testing.T) {
 		"github.com/hugr-lab/hugen/pkg/auth/...",
 		"github.com/hugr-lab/hugen/mcp/bash-mcp/...",
 		"github.com/hugr-lab/hugen/mcp/hugr-query/...",
+		"github.com/hugr-lab/hugen/mcp/python-mcp/...",
 	}
 	args := append([]string{"list", "-tags=duckdb_arrow", "-deps"}, leaves...)
 	out, err := exec.Command("go", args...).CombinedOutput()

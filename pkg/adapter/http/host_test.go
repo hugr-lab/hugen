@@ -8,11 +8,11 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // stubIdentity is the minimal identity.Source the tests need to feed
-// runtime.NewAgent (which rejects nil sources).
+// session.NewAgent (which rejects nil sources).
 type stubIdentity struct{}
 
 func (stubIdentity) Agent(_ context.Context) (identity.Agent, error) {
@@ -25,24 +25,24 @@ func (stubIdentity) Permission(_ context.Context, _, _ string) (identity.Permiss
 	return identity.Permission{Enabled: true}, nil
 }
 
-func newTestAgent() *runtime.Agent {
-	a, err := runtime.NewAgent("agent-test", "hugen-test", stubIdentity{}, "")
+func newTestAgent() *session.Agent {
+	a, err := session.NewAgent("agent-test", "hugen-test", stubIdentity{}, "")
 	if err != nil {
 		panic(err)
 	}
 	return a
 }
 
-// fakeHost is a minimal in-memory runtime.AdapterHost suitable for
+// fakeHost is a minimal in-memory session.AdapterHost suitable for
 // HTTP-adapter tests: no DuckDB, no real session goroutine, just
 // enough to exercise handler shapes, SSE framing, slow-consumer
 // behaviour, and reconnection replay.
 type fakeHost struct {
 	mu        sync.Mutex
 	logger    *slog.Logger
-	agent     *runtime.Agent
+	agent     *session.Agent
 	store     *fakeStore
-	sessions  map[string]*runtime.SessionRow
+	sessions  map[string]*session.SessionRow
 	subs      map[string][]chan protocol.Frame
 	openErr   error
 	submitErr error
@@ -55,15 +55,15 @@ func newFakeHost() *fakeHost {
 		logger:   slog.Default(),
 		agent:    newTestAgent(),
 		store:    newFakeStore(),
-		sessions: map[string]*runtime.SessionRow{},
+		sessions: map[string]*session.SessionRow{},
 		subs:     map[string][]chan protocol.Frame{},
 	}
 }
 
-// Logger satisfies runtime.AdapterHost.
+// Logger satisfies session.AdapterHost.
 func (f *fakeHost) Logger() *slog.Logger { return f.logger }
 
-func (f *fakeHost) OpenSession(_ context.Context, req runtime.OpenRequest) (*runtime.Session, time.Time, error) {
+func (f *fakeHost) OpenSession(_ context.Context, req session.OpenRequest) (*session.Session, time.Time, error) {
 	if f.openErr != nil {
 		return nil, time.Time{}, f.openErr
 	}
@@ -71,26 +71,26 @@ func (f *fakeHost) OpenSession(_ context.Context, req runtime.OpenRequest) (*run
 	defer f.mu.Unlock()
 	id := "ses-test-" + nextSessionSuffix()
 	now := time.Now().UTC()
-	f.sessions[id] = &runtime.SessionRow{
+	f.sessions[id] = &session.SessionRow{
 		ID:        id,
-		Status:    runtime.StatusActive,
+		Status:    session.StatusActive,
 		Metadata:  req.Metadata,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	// fakeHost returns a non-nil *runtime.Session so handlers can
+	// fakeHost returns a non-nil *session.Session so handlers can
 	// call Session.ID(). The session goroutine isn't running; only
 	// the public id surface is read by handlers.
-	return runtime.NewSession(id, f.agent, nil, nil, nil, nil, f.logger), now, nil
+	return session.NewSession(id, f.agent, nil, nil, nil, nil, f.logger), now, nil
 }
 
-func (f *fakeHost) ResumeSession(_ context.Context, id string) (*runtime.Session, error) {
+func (f *fakeHost) ResumeSession(_ context.Context, id string) (*session.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.sessions[id]; !ok {
-		return nil, runtime.ErrSessionNotFound
+		return nil, session.ErrSessionNotFound
 	}
-	return runtime.NewSession(id, f.agent, nil, nil, nil, nil, f.logger), nil
+	return session.NewSession(id, f.agent, nil, nil, nil, nil, f.logger), nil
 }
 
 func (f *fakeHost) Submit(_ context.Context, frame protocol.Frame) error {
@@ -140,25 +140,25 @@ func (f *fakeHost) CloseSession(_ context.Context, id, _ string) (time.Time, err
 	defer f.mu.Unlock()
 	row, ok := f.sessions[id]
 	if !ok {
-		return time.Time{}, runtime.ErrSessionNotFound
+		return time.Time{}, session.ErrSessionNotFound
 	}
-	if row.Status == runtime.StatusClosed {
+	if row.Status == session.StatusClosed {
 		return row.UpdatedAt, nil
 	}
-	row.Status = runtime.StatusClosed
+	row.Status = session.StatusClosed
 	row.UpdatedAt = time.Now().UTC()
 	return row.UpdatedAt, nil
 }
 
-func (f *fakeHost) ListSessions(_ context.Context, status string) ([]runtime.SessionSummary, error) {
+func (f *fakeHost) ListSessions(_ context.Context, status string) ([]session.SessionSummary, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]runtime.SessionSummary, 0, len(f.sessions))
+	out := make([]session.SessionSummary, 0, len(f.sessions))
 	for _, row := range f.sessions {
 		if status != "" && row.Status != status {
 			continue
 		}
-		out = append(out, runtime.SessionSummary{
+		out = append(out, session.SessionSummary{
 			ID:        row.ID,
 			Status:    row.Status,
 			OpenedAt:  row.CreatedAt,
@@ -183,22 +183,22 @@ func (f *fakeHost) publish(sessionID string, frame protocol.Frame) {
 // fakeStore is a slice-backed ReplaySource for reconnection tests.
 type fakeStore struct {
 	mu     sync.Mutex
-	events map[string][]runtime.EventRow
+	events map[string][]session.EventRow
 	err    error
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{events: map[string][]runtime.EventRow{}}
+	return &fakeStore{events: map[string][]session.EventRow{}}
 }
 
-func (s *fakeStore) ListEvents(_ context.Context, sessionID string, opts runtime.ListEventsOpts) ([]runtime.EventRow, error) {
+func (s *fakeStore) ListEvents(_ context.Context, sessionID string, opts session.ListEventsOpts) ([]session.EventRow, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows := s.events[sessionID]
-	out := make([]runtime.EventRow, 0, len(rows))
+	out := make([]session.EventRow, 0, len(rows))
 	for _, r := range rows {
 		if opts.MinSeq > 0 && r.Seq <= opts.MinSeq {
 			continue
@@ -211,7 +211,7 @@ func (s *fakeStore) ListEvents(_ context.Context, sessionID string, opts runtime
 	return out, nil
 }
 
-func (s *fakeStore) appendEvent(sessionID string, ev runtime.EventRow) {
+func (s *fakeStore) appendEvent(sessionID string, ev session.EventRow) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.events[sessionID] = append(s.events[sessionID], ev)
@@ -252,4 +252,3 @@ func itoa(n int) string {
 type allowAllAuth struct{}
 
 func (allowAllAuth) Verify(_ string) error { return nil }
-

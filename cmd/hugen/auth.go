@@ -10,7 +10,7 @@ import (
 )
 
 func buildAuthService(ctx context.Context, boot *BootstrapConfig, mux *http.ServeMux, logger *slog.Logger) (*auth.Service, error) {
-	as := auth.NewService(logger, mux, boot.BaseURI, boot.IsRemoteMode())
+	as := auth.NewService(logger, mux, boot.BaseURI, boot.Port, boot.IsRemoteMode())
 	if boot.Hugr.URL == "" {
 		logger.Info("no hugr auth config; skipping hugr auth source")
 		return as, nil

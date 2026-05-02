@@ -2,7 +2,7 @@
 
 // Package http integration tests wire the http adapter to a REAL
 // runtime stack — DuckDB-backed pkg/store/local, real
-// runtime.SessionManager, real handlers. The unit-level tests in
+// session.Manager, real handlers. The unit-level tests in
 // this package cover handler shapes via fakeHost; this file covers
 // the persistence-and-state-agreement half of SC-002 / SC-010
 // ("API list and DB direct inspection always agree").
@@ -31,7 +31,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/runtime"
+	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/store/local"
 	"github.com/hugr-lab/hugen/pkg/store/local/migrate"
 	"github.com/hugr-lab/hugen/pkg/store/queries"
@@ -84,7 +84,7 @@ func realStoreEngine(t *testing.T) *hugr.Service {
 	return service
 }
 
-// stubIdentitySource fills runtime.NewAgent's required dep without
+// stubIdentitySource fills session.NewAgent's required dep without
 // reaching out to a remote IdP.
 type stubIdentitySource struct{}
 
@@ -127,9 +127,9 @@ func (nullModel) Generate(_ context.Context, _ model.Request) (model.Stream, err
 // Skipped from `go test ./...` by the integration build tag.
 func TestIntegration_LifecyclePersistsThroughLocalStore(t *testing.T) {
 	engine := realStoreEngine(t)
-	store := runtime.NewRuntimeStoreLocal(engine, false)
+	store := session.NewRuntimeStoreLocal(engine, false)
 
-	agent, err := runtime.NewAgent(intgAgentID, intgAgentNm, stubIdentitySource{})
+	agent, err := session.NewAgent(intgAgentID, intgAgentNm, stubIdentitySource{})
 	require.NoError(t, err)
 
 	// Minimal model router: one stub model under the default intent.
@@ -143,9 +143,9 @@ func TestIntegration_LifecyclePersistsThroughLocalStore(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	mgr := runtime.NewSessionManager(store, agent, router,
-		runtime.NewCommandRegistry(), protocol.NewCodec(), nil)
-	rt := runtime.NewRuntime(mgr, nil, nil)
+	mgr := session.NewManager(store, agent, router,
+		session.NewCommandRegistry(), protocol.NewCodec(), nil)
+	rt := session.NewRuntime(mgr, nil, nil)
 
 	mux := stdhttp.NewServeMux()
 	a, err := NewAdapter(Options{
@@ -262,7 +262,7 @@ func TestIntegration_LifecyclePersistsThroughLocalStore(t *testing.T) {
 	require.True(t, apiClosed, "API list status=closed missed session %s", open.SessionID)
 }
 
-// runtimeAdapterHost converts a *runtime.Runtime into an
+// runtimeAdapterHost converts a *session.Runtime into an
 // AdapterHost. The runtime exposes its host implementation only via
 // Start; we need it directly for the integration test that drives
 // the http adapter's Run loop without the runtime supervisor.
@@ -273,14 +273,14 @@ func TestIntegration_LifecyclePersistsThroughLocalStore(t *testing.T) {
 // build a thin wrapper that satisfies AdapterHost using the
 // runtime's Manager directly.
 type integrationHost struct {
-	rt *runtime.Runtime
+	rt *session.Runtime
 }
 
-func runtimeAdapterHost(rt *runtime.Runtime) runtime.AdapterHost {
+func runtimeAdapterHost(rt *session.Runtime) session.AdapterHost {
 	return &integrationHost{rt: rt}
 }
 
-func (h *integrationHost) OpenSession(ctx context.Context, req runtime.OpenRequest) (*runtime.Session, time.Time, error) {
+func (h *integrationHost) OpenSession(ctx context.Context, req session.OpenRequest) (*session.Session, time.Time, error) {
 	s, openedAt, err := h.rt.Manager().Open(ctx, req)
 	if err != nil {
 		return nil, time.Time{}, err
@@ -288,7 +288,7 @@ func (h *integrationHost) OpenSession(ctx context.Context, req runtime.OpenReque
 	return s, openedAt, nil
 }
 
-func (h *integrationHost) ResumeSession(ctx context.Context, id string) (*runtime.Session, error) {
+func (h *integrationHost) ResumeSession(ctx context.Context, id string) (*session.Session, error) {
 	return h.rt.Manager().Resume(ctx, id)
 }
 
@@ -297,7 +297,7 @@ func (h *integrationHost) Submit(_ context.Context, _ protocol.Frame) error {
 	// would spin the session goroutine and reach into the
 	// (nil) model. Return ErrSessionClosed so the post path is a
 	// loud no-op instead of a panic — same code the API reports.
-	return runtime.ErrSessionClosed
+	return session.ErrSessionClosed
 }
 
 func (h *integrationHost) Subscribe(ctx context.Context, sessionID string) (<-chan protocol.Frame, error) {
@@ -314,7 +314,7 @@ func (h *integrationHost) CloseSession(ctx context.Context, id, reason string) (
 	return h.rt.Manager().Close(ctx, id, reason)
 }
 
-func (h *integrationHost) ListSessions(ctx context.Context, status string) ([]runtime.SessionSummary, error) {
+func (h *integrationHost) ListSessions(ctx context.Context, status string) ([]session.SessionSummary, error) {
 	return h.rt.Manager().List(ctx, status)
 }
 
