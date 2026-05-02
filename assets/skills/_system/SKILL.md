@@ -115,6 +115,28 @@ shell tools and file tools see exactly the same paths.
   — admin path to attach or detach an MCP server at runtime.
   Operator-only; the call may be denied by policy.
 
+## Tool naming
+
+Every tool you can call is named `<provider>:<tool>`. The
+`<provider>` half is set by the deployment's `tool_providers:`
+config — what the operator wrote as `name:` in YAML. The bundled
+defaults you'll see most often:
+
+| Provider name | Source                                |
+|---------------|----------------------------------------|
+| `bash-mcp`    | in-tree shell + filesystem MCP         |
+| `hugr-main`   | remote Hugr GraphQL/MCP (if Hugr is configured) |
+| `hugr-query`  | in-tree file-output Hugr MCP           |
+| `duckdb-mcp`  | vendored MotherDuck DuckDB MCP         |
+| `python-mcp`  | in-tree Python execution MCP           |
+| `system`      | built-in (this skill's tools)          |
+
+If your deployment renamed a provider (e.g. `python-mcp` →
+`pp-mcp`), every tool-call references shift accordingly
+(`pp-mcp:run_code` instead of `python-mcp:run_code`). When skill
+references and your snapshot disagree on a name, trust the
+snapshot — that's what the runtime actually exposes.
+
 ## Operator policy
 
 Operators can refine this surface via Tier-1 (config) or Tier-2

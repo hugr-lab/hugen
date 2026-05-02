@@ -109,6 +109,25 @@ runtime, but every other workflow keeps working).
 + system tools). Skills that grant tools from a missing provider are
 flagged unavailable rather than rejected.
 
+### 6. Tool naming and the provider prefix
+
+Every tool the LLM sees is named `<provider>:<tool>`, where
+`<provider>` is the YAML `tool_providers[].name` — not a hard-coded
+constant. The MCPProvider builds the catalogue entry as
+`spec.Name + ":" + tool.Name` (`pkg/tool/mcp_provider.go: List`).
+
+This lets a deployment register two MCP servers with overlapping bare
+tool names under distinct `name:` keys and have both surface
+unambiguously. The trade-off: bundled skills hard-code the **default**
+provider names (`bash-mcp`, `hugr-main`, `hugr-query`, `python-mcp`,
+`duckdb-mcp`) in their `allowed-tools` and body markdown. If you
+rename a provider, ship a custom skill manifest pointing at the new
+name; otherwise the rename will leave the bundled skill's grants
+flagged Unavailable in the session.
+
+System tools are the exception — their prefix is the literal string
+`system`, set by the binary, and is not operator-renameable.
+
 ## Repository layout (planned)
 
 ```text

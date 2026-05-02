@@ -103,6 +103,14 @@ form), fix the reference and re-read it instead of trial-and-error.
 - **Surface relative paths to the user** — they read files via the
   workspace root, not the host root.
 
+## Tool prefix note
+
+Tool names in this skill (`duckdb-mcp:execute_query` etc.) follow
+the operator's `tool_providers[].name` from `config.yaml`. The
+default name `duckdb-mcp` matches the bundled YAML; if your
+deployment renamed the provider, every reference shifts
+accordingly. See `_system` skill body for the full convention.
+
 ## Why not Python first?
 
 DuckDB SQL is the cheapest path for: schema introspection, row counts,
