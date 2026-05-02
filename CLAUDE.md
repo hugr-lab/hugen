@@ -30,11 +30,12 @@ We are mid-execution of **design 001 — Hugr Agent Runtime**
 | **3.5. Analyst toolkit (duckdb-mcp + python-mcp + analyst skills)** | **shipped** |
 | 4. Sub-agents + missions | next |
 | 4.1. Analyst mega-skill + role sub-agents | follows 4 |
-| 5. HITL approvals + context compaction | open |
-| 6. Live config reload | open |
-| 7. Reviewer + transcript tooling | open |
-| 8. Cron / scheduler | open |
-| 9. Artifacts + A2A | open |
+| 5. HITL: approvals + clarifications + compactor | open |
+| 6. Workspaces + PeerGroups | open |
+| 7. Memory pipeline + LLM Wiki (short + long-term) | open |
+| 8. Cron + scheduler | open |
+| 9. Artifacts | open |
+| 10. A2A adapter | open (defer until needed) |
 
 Goal: finish design-001 cleanly, then move to **hub integration**
 (container packaging, deployment story, hub-spawned mode). Hub work is
