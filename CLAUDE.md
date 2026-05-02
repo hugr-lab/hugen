@@ -1,36 +1,139 @@
-# hugen Development Guidelines
+# hugen — Claude Operating Notes
 
-Auto-generated from all feature plans. Last updated: 2026-05-01
+## What hugen is
 
-## Active Technologies
-- Go 1.26.1 (from `go.mod`); host Python 3.x (operator-installed); host `uv` (operator-installed; `--relocatable` venv builder). (004-analyst-toolkit)
+Native AI-agent runtime for the Hugr Data Mesh platform. One Go binary
+that hosts the agent loop, tool dispatch, prompt assembly, skill
+loading, and per-session lifecycle. Two run modes:
 
-- Go 1.26.1 (from `go.mod`) (001-agent-runtime-phase-1, 002-agent-runtime-phase-2, 003-agent-runtime-phase-3)
-- DuckDB via `pkg/store/local` (consumed through `pkg/runtime.RuntimeStore`); phase 2 reconnection replay queries `session_events` by `seq` ascending — no schema migration. (002-agent-runtime-phase-2)
-- `net/http` + `embed.FS` for `pkg/adapter/http` (JSON+SSE) and `pkg/adapter/webui` (static UI). No third-party router, no JS bundler. (002-agent-runtime-phase-2)
-- Three-tier permission stack `pkg/auth/perm`: Tier-1 LocalPermissions (config floor) + Tier-2 RemotePermissions (`function.core.auth.my_permissions` snapshot, TTL + singleflight + 3× hard expiry) + Tier-3 `pkg/tool.Policies` against `tool_policies` table. (003-agent-runtime-phase-3)
-- `mark3labs/mcp-go` for MCP transport (server in `mcp/bash-mcp` + `mcp/hugr-query`, client in `pkg/tool.MCPProvider`); `apache/arrow-go/v18` + `pqarrow` for the hugr-query Parquet writer. (003-agent-runtime-phase-3)
+- **local** — embeds Hugr in-process via DuckDB; runs as a
+  single-tenant analyst on the user's host.
+- **hub** — connects to a remote Hugr deployment for catalog,
+  memory, and data queries.
 
-## Project Structure
+The agent treats Hugr as the LLM backend, the data exploration layer,
+and the persistent memory store — all through GraphQL + MCP. We build
+inside a Hugr ecosystem; constraints from that environment are
+authoritative (see `.specify/memory/constitution.md` and
+`assets/constitution/agent.md`).
+
+## Where we are
+
+We are mid-execution of **design 001 — Hugr Agent Runtime**
+(`design/001-agent-runtime/design.md`). Phase plan:
+
+| Phase | Status |
+|-------|--------|
+| 1. Native core + ModelRouter + console UI | shipped |
+| 2. HTTP/SSE + webui + ADK eviction | shipped |
+| 3. Action layer (skills + tools + 3-tier permissions + bash/hugr-mcp) | shipped |
+| **3.5. Analyst toolkit (duckdb-mcp + python-mcp + analyst skills)** | **shipped** |
+| 4. Sub-agents + missions | next |
+| 4.1. Analyst mega-skill + role sub-agents | follows 4 |
+| 5. HITL approvals + context compaction | open |
+| 6. Live config reload | open |
+| 7. Reviewer + transcript tooling | open |
+| 8. Cron / scheduler | open |
+| 9. Artifacts + A2A | open |
+
+Goal: finish design-001 cleanly, then move to **hub integration**
+(container packaging, deployment story, hub-spawned mode). Hub work is
+explicitly deferred until design-001 is complete — `phase-3.5-spec.md
+§Out of scope` and `design.md §16.8`.
+
+## Project structure
 
 ```text
-src/
-tests/
+cmd/
+├── hugen/                # main binary — runtime bootstrap, console + webui adapters
+└── hugen-skill-validate/ # CLI: validate a SKILL.md manifest
+mcp/
+├── bash-mcp/             # in-tree shell + filesystem MCP (per_session)
+├── hugr-query/           # in-tree Hugr GraphQL → file output (per_agent)
+└── python-mcp/           # in-tree Python execution + lazy per-session venv (per_agent)
+pkg/
+├── adapter/{console,http,webui}  # transport adapters
+├── auth/{perm,sources,template}  # 3-tier permission stack + auth.Service loopback
+├── config/                       # YAML schema + StaticService
+├── identity/{local,hub}          # who-am-I providers
+├── model/, models/, protocol/    # LLM routing + Frame protocol
+├── session/                      # Session, Manager, Resources, Workspace, RuntimeStore
+├── skill/                        # Manifest parser + SkillManager + stores (system/local/community/inline/hub)
+├── store/local/                  # embedded DuckDB persistence
+└── tool/                         # ToolManager + MCPProvider + SystemProvider + Policies
+assets/
+├── constitution/agent.md         # universal agent constitution (rendered into prompt)
+├── python/requirements.txt       # bundled analyst venv package list
+└── skills/                       # bundled skills: _system, hugr-data, duckdb-data, duckdb-docs, python-runner
+vendor/
+└── mcp-server-motherduck/        # vendored MotherDuck DuckDB MCP (git submodule, MIT)
+design/001-agent-runtime/         # design + per-phase specs (gitignored after promotion)
+specs/<NNN-feature-name>/         # per-feature speckit artefacts (gitignored)
+.specify/memory/constitution.md   # Go code constitution (load-bearing rules)
 ```
 
-## Commands
+## How I should behave (Claude operating mode)
 
-# Add commands for Go 1.26.1 (from `go.mod`)
+I am logical, consistent, and grounded in the actual codebase. I do
+not invent APIs, package layouts, or architectural decisions; I read
+code first, propose second, edit third. When the user asks something
+I do not know, I check (`grep`, `Read`, `gh`, build/test) before
+answering. I am allowed to speculate — but every speculation must end
+with "let me verify" or "this is a guess, please correct me", and I
+evaluate every proposal against what already exists in the tree.
 
-## Code Style
+I am brief. End-of-turn summaries are one or two sentences. Updates
+mid-task are one short line. I do not narrate internal deliberation.
 
-Go 1.26.1 (from `go.mod`): Follow standard conventions
+Russian / English: I match the user's language.
 
-## Recent Changes
-- 004-analyst-toolkit: Analyst toolkit (phase 3.5) — vendored `motherduckdb/mcp-server-motherduck` v1.0.6 (MIT) under `vendor/` (per_session, uvx-spawned, `--init-sql` hardening); new `mcp/python-mcp/` Go binary (~250 LOC; `--create-template` builds relocatable venv via `uv venv --relocatable`, `--template` runs as stdio MCP with `sync.Once` lazy bootstrap + CoW copy + `.bootstrap-complete` stamp; per-call HUGR token refresh via existing `*hugr.RemoteStore`, injected as `HUGR_TOKEN`); `system:skill_files` tool in `pkg/tool/system.go`; bundled skills `assets/skills/{duckdb-data,duckdb-docs,python-runner}/` (DuckDB skills adapted from `duckdb/duckdb-skills` MIT, Hugr Python client ref ported from `hugr-lab.github.io/docs/6-querying/4-python-client.md`); `assets/python/requirements.txt` (pandas, pyarrow, duckdb, hugr-client, matplotlib, plotly, great_tables, folium, weasyprint); host prereqs: Python ≥ 3.10, uv ≥ 0.4.0, Cairo/Pango/gdk-pixbuf/libffi for weasyprint; `cmd/hugen/sessions.go: spawnBashMCP` refactored to generic `spawnPerSessionMCP(name)`; no new DB schema, no new third-party Go deps; ADK still quarantined.
+## Flexibility with deliberation
 
-- 003-agent-runtime-phase-3: Action layer — `pkg/config` + `pkg/skill` + `pkg/tool` + `pkg/auth/perm` + `pkg/auth/template`; new binaries `mcp/bash-mcp` and `mcp/hugr-query`; bundled skill `assets/skills/hugr-data/`; `tool_policies` table (Tier 3) with `policy_save`/`policy_revoke` system tools; Tier-2 RemotePermissions with TTL refresh + `runtime_reload`; no-Hugr (US5) deployment via `skill.AnnotateUnavailable` + existing config guards; ADK still quarantined.
-- 002-agent-runtime-phase-2: HTTP/SSE adapter, web UI, ADK eviction; `cmd/hugen/runtime.go` (RuntimeCore) splits bootstrap from adapter wiring.
+We are **flexible on goals and architecture**: design-001 phases can
+be re-ordered, scopes can be moved, providers can be added or
+collapsed, package boundaries can shift. But every such change is a
+deliberate decision, not a drift:
+
+1. **Surface the question.** When I or the user notice the current
+   plan no longer fits, I name it explicitly.
+2. **Discuss before editing.** Architecture / goal pivots are
+   discussed before code lands — even when the patch is small.
+3. **Record and justify.** The decision goes into the relevant
+   `design/001-agent-runtime/*.md` (or a new ADR-style note alongside
+   it) with the *why*, the alternative considered, and what it
+   supersedes. Implementation memos go into the per-phase spec's
+   "Implementation update" footer (the pattern phase 3.5 used after
+   `2026-05-01`).
+4. **No silent rewrites.** Refactoring code that touches a documented
+   contract requires updating the contract in the same PR or in an
+   immediately-visible follow-up.
+
+Code-level constitution (Go conventions, package layering, ADK
+quarantine, append-only persistence) lives in
+`.specify/memory/constitution.md` and is **non-negotiable** at PR
+review. Goals and architecture are negotiable but only via the flow
+above.
+
+## Build / test cheatsheet
+
+```sh
+make build                       # bin/{hugen,bash-mcp,hugr-query,python-mcp}
+make test                        # go test -race -tags=duckdb_arrow ./...
+make submodule-check             # gate against vendored MCP drift
+make python-mcp-template         # one-time analyst venv build (after make build)
+go vet -tags=duckdb_arrow ./...  # static checks
+```
+
+Constitution gates (every PR): clean build with `-tags=duckdb_arrow`,
+green tests, `go vet` clean, no new ADK imports below `pkg/models`,
+new public function/method comes with happy-path + edge-case test.
+
+## Speckit flow
+
+Per-feature work goes through `/speckit.specify` → `/speckit.plan` →
+`/speckit.tasks` under `specs/<NNN-feature-name>/`. The active feature
+slot is `.specify/feature.json`. Outputs are gitignored by design
+(per-developer) and only get reflected in `design/` when promoted.
 
 <!-- MANUAL ADDITIONS START -->
 <!-- MANUAL ADDITIONS END -->
