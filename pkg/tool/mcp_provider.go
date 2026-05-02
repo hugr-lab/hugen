@@ -262,10 +262,26 @@ func (p *MCPProvider) List(ctx context.Context) ([]Tool, error) {
 	out := make([]Tool, 0, len(res.Tools))
 	for _, t := range res.Tools {
 		schema, _ := json.Marshal(t.InputSchema)
+		fqName := p.spec.Name + ":" + t.Name
+		// Vendored MCP tools (motherduck, etc.) routinely emit
+		// `additionalProperties` or arrays without `items` — that
+		// fails downstream at the chat-completion provider. Sanitise
+		// in-place; if anything changed, log once so operators can
+		// see it.
+		cleaned, notes, err := SanitizeLLMSchema(schema)
+		if err != nil {
+			p.log.Warn("tool: invalid schema, dropping tool",
+				"provider", p.spec.Name, "tool", fqName, "err", err)
+			continue
+		}
+		if len(notes) > 0 {
+			p.log.Warn("tool: schema sanitised",
+				"provider", p.spec.Name, "tool", fqName, "repairs", notes)
+		}
 		out = append(out, Tool{
-			Name:             p.spec.Name + ":" + t.Name,
+			Name:             fqName,
 			Description:      t.Description,
-			ArgSchema:        schema,
+			ArgSchema:        cleaned,
 			Provider:         p.spec.Name,
 			PermissionObject: p.spec.PermObject,
 		})

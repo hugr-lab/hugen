@@ -289,7 +289,10 @@ func (s *Session) Run(ctx context.Context) error {
 				return nil
 			}
 			if err := s.handle(ctx, f); err != nil {
-				s.logger.Error("session frame handler", "session", s.id, "err", err)
+				// Debug, not Error: handle() already emitted a
+				// protocol.Error frame to the user where appropriate;
+				// stderr Error here just clobbers the REPL prompt.
+				s.logger.Debug("session frame handler", "session", s.id, "err", err)
 			}
 		}
 	}
@@ -472,6 +475,13 @@ func (s *Session) handleUserMessage(ctx context.Context, f *protocol.UserMessage
 	// First model turn: the user's input is the trailing message.
 	// Subsequent iterations append assistant + tool messages from
 	// dispatched tool calls so the LLM can react.
+	//
+	// historyBaseline marks the index of this user message so we can
+	// trim back to "before the failed turn" if the model call dies
+	// without producing an assistant response. Without that rollback
+	// the next user attempt would emit two consecutive user-role
+	// messages (line 510 comment notes this confuses providers).
+	historyBaseline := len(s.history)
 	s.history = append(s.history, model.Message{Role: model.RoleUser, Content: f.Payload.Text})
 
 	cap := s.resolveToolIterCap(turnCtx)
@@ -487,6 +497,7 @@ func (s *Session) handleUserMessage(ctx context.Context, f *protocol.UserMessage
 		}
 		stream, err := mdl.Generate(turnCtx, req)
 		if err != nil {
+			s.history = s.history[:historyBaseline]
 			errFrame := protocol.NewError(s.id, s.agent.Participant(),
 				"model_call_failed", err.Error(), true)
 			return s.emit(ctx, errFrame)
@@ -495,8 +506,10 @@ func (s *Session) handleUserMessage(ctx context.Context, f *protocol.UserMessage
 		_ = stream.Close()
 		if err != nil {
 			if turnCtx.Err() != nil && ctx.Err() == nil {
+				s.history = s.history[:historyBaseline]
 				return nil // /cancel — handleCancel already emitted.
 			}
+			s.history = s.history[:historyBaseline]
 			errFrame := protocol.NewError(s.id, s.agent.Participant(),
 				"stream_error", err.Error(), true)
 			_ = s.emit(ctx, errFrame)
