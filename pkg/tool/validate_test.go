@@ -111,6 +111,39 @@ func TestSanitizeLLMSchema(t *testing.T) {
 	}
 }
 
+// SanitizeLLMSchema must be idempotent: running it on already-clean
+// output produces zero further repairs. Guards against a future
+// repair rule that introduces something the next pass would itself
+// flag.
+func TestSanitizeLLMSchema_Idempotent(t *testing.T) {
+	dirty := []string{
+		`{"properties":{"e":{"type":"object","additionalProperties":{"type":"string"}}}}`,
+		`{"type":"object","properties":{"a":{"type":"array"},"b":{"$ref":"#/X"}}}`,
+		`{"properties":{"x":{"oneOf":[{"type":"string"}]}}}`,
+	}
+	for _, in := range dirty {
+		t.Run(in, func(t *testing.T) {
+			first, n1, err := SanitizeLLMSchema(json.RawMessage(in))
+			if err != nil {
+				t.Fatalf("first pass: %v", err)
+			}
+			if len(n1) == 0 {
+				t.Fatalf("expected first pass to repair, got zero notes")
+			}
+			second, n2, err := SanitizeLLMSchema(first)
+			if err != nil {
+				t.Fatalf("second pass: %v", err)
+			}
+			if len(n2) != 0 {
+				t.Errorf("second pass produced repairs %v on already-clean schema:\n%s", n2, first)
+			}
+			if string(second) != string(first) {
+				t.Errorf("second pass changed bytes:\nfirst:  %s\nsecond: %s", first, second)
+			}
+		})
+	}
+}
+
 // Asserts every static schema baked into SystemProvider passes the
 // validator. SystemProvider.List itself is fail-fast, so this gives
 // a clean error message on regression rather than runtime panics.

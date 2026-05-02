@@ -476,11 +476,16 @@ func (s *Session) handleUserMessage(ctx context.Context, f *protocol.UserMessage
 	// Subsequent iterations append assistant + tool messages from
 	// dispatched tool calls so the LLM can react.
 	//
-	// historyBaseline marks the index of this user message so we can
-	// trim back to "before the failed turn" if the model call dies
-	// without producing an assistant response. Without that rollback
-	// the next user attempt would emit two consecutive user-role
-	// messages (line 510 comment notes this confuses providers).
+	// historyBaseline marks the index of this user message so we
+	// can trim back to "before the failed turn" if the model call
+	// dies without producing an assistant response. Without that
+	// rollback the next user attempt would emit two consecutive
+	// user-role messages — the comment further down ("Skipping
+	// the assistant message — even when finalText is empty —
+	// confuses providers") names the same failure mode for the
+	// adjacent case. Applies to /cancel too: an aborted turn
+	// leaves no assistant counterpart, so the user message has
+	// to roll back as well.
 	historyBaseline := len(s.history)
 	s.history = append(s.history, model.Message{Role: model.RoleUser, Content: f.Payload.Text})
 
