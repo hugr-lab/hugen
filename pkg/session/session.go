@@ -431,10 +431,18 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 	}
 	// Allocate the seq cursor BEFORE AppendEvent so the in-memory
 	// Frame can be tagged with its seq atomically with persistence.
-	// Session.Run is a single goroutine per session, so NextSeq +
-	// AppendEvent + outbox push has no within-session race; the
-	// per-session seq column has a uniqueness invariant the store
-	// upholds across sessions.
+	// emit is reachable from multiple goroutines per session — the
+	// Run loop (model events, drainPendingInbound, inline handlers)
+	// AND tool dispatcher goroutines (Spawn's subagent_started emit,
+	// dispatchToolCall's tool_call/tool_result, wait_subagents's
+	// consumed-result emit). Concurrent emits are made safe by the
+	// store's NextSeq + AppendEvent serialisation (per-session seq
+	// uniqueness enforced at the store layer); the channel send onto
+	// s.out is itself goroutine-safe. The remaining nuance — that
+	// outbox arrival order can interleave between two concurrent
+	// emits when their AppendEvent commits race — is acceptable for
+	// adapters, which read events back through ListEvents (ordered
+	// by seq) for any post-hoc correctness check.
 	nextSeq, perr := s.store.NextSeq(ctx, s.id)
 	if perr != nil {
 		return fmt.Errorf("session %s: next seq: %w", s.id, perr)
@@ -735,12 +743,13 @@ func (s *Session) handleExit(runCtx context.Context) {
 	// any active wait_subagents through the routing layer; on Submit
 	// failure (parent inbox closed because parent itself is shutting
 	// down) the result is appended directly to parent's events so a
-	// future restart-walker drain or wait_subagents cached lookup
-	// still sees the terminal row.
+	// future settleDanglingSubagents pass or wait_subagents cached
+	// lookup still sees the terminal row.
 	//
-	// Symmetric with the recover.go synthetic emit: that handles the
-	// "child died without graceful exit" case; this handler covers
-	// every other terminate path (subagent_cancel, /end, parent
+	// Symmetric with recover.go's settleDanglingSubagents synthetic
+	// emit (US6): settle handles the "child died without graceful
+	// exit, parent re-attached at boot" case; this handler covers
+	// every other live terminate path (subagent_cancel, /end, parent
 	// cascade).
 	if s.parent != nil {
 		s.emitSubagentResultToParent(writeCtx, reason)
@@ -782,10 +791,14 @@ func (s *Session) handleExit(runCtx context.Context) {
 // Offline path: if Submit fails because the parent's inbox has
 // already closed (parent terminated first), append the SubagentResult
 // directly to parent's events via the store so a future
-// drainCachedSubagentResults / restart-walker query still surfaces
-// the terminal row. Idempotent: if the parent already has a
-// subagent_result row for this child id, the direct append is
-// skipped.
+// drainCachedSubagentResults call or settleDanglingSubagents pass
+// still surfaces the terminal row.
+//
+// Called once from handleExit per session lifetime — no in-handler
+// dedup against an existing parent-side subagent_result row, since
+// the goroutine reaches handleExit at most once. The settle primitive
+// (recover.go) is the deduplication site for any subagent_result row
+// the parent might already carry from an earlier path.
 func (s *Session) emitSubagentResultToParent(persistCtx context.Context, reason string) {
 	parent := s.parent
 	if parent == nil {

@@ -8,11 +8,13 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
-// TestSoftWarningText_RoleConditioned pins the spec wording: the root
-// variant nudges toward sub-agent decomposition; the sub-agent variant
-// reminds the model that sub-sub-agents aren't available at depth.
+// TestSoftWarningText_RoleConditioned pins the spec wording across
+// the three audiences: root (always nudge to spawn_subagent),
+// sub-agent with depth budget (suggest fan-out), sub-agent at the
+// max-depth floor (omit fan-out, point at return / give up / change
+// tack).
 func TestSoftWarningText_RoleConditioned(t *testing.T) {
-	root := softWarningText("root", "", 7)
+	root := softWarningText("root", "", 7, true)
 	if !strings.Contains(root, "spawn_subagent") {
 		t.Errorf("root variant missing spawn_subagent hint: %q", root)
 	}
@@ -20,15 +22,26 @@ func TestSoftWarningText_RoleConditioned(t *testing.T) {
 		t.Errorf("root variant missing 'soft signal' phrasing: %q", root)
 	}
 
-	sub := softWarningText("explorer", "list sources", 7)
-	if !strings.Contains(sub, `"list sources"`) {
-		t.Errorf("sub-agent variant missing task quote: %q", sub)
+	subDeeper := softWarningText("explorer", "list sources", 7, true)
+	if !strings.Contains(subDeeper, `"list sources"`) {
+		t.Errorf("sub-agent (depth ok) variant missing task quote: %q", subDeeper)
 	}
-	if !strings.Contains(sub, "Sub-sub-agents are not available") {
-		t.Errorf("sub-agent variant missing depth notice: %q", sub)
+	if !strings.Contains(subDeeper, "spawn_subagent") {
+		t.Errorf("sub-agent (depth ok) variant should mention spawn_subagent: %q", subDeeper)
 	}
-	if strings.Contains(sub, "spawn_subagent") {
-		t.Errorf("sub-agent variant should not advertise spawn_subagent: %q", sub)
+	if strings.Contains(subDeeper, "Sub-sub-agents are not available") {
+		t.Errorf("sub-agent (depth ok) variant must not say sub-sub-agents are unavailable: %q", subDeeper)
+	}
+
+	subFloor := softWarningText("explorer", "list sources", 7, false)
+	if !strings.Contains(subFloor, `"list sources"`) {
+		t.Errorf("sub-agent (at depth) variant missing task quote: %q", subFloor)
+	}
+	if !strings.Contains(subFloor, "Sub-sub-agents are not available") {
+		t.Errorf("sub-agent (at depth) variant missing depth notice: %q", subFloor)
+	}
+	if strings.Contains(subFloor, "spawn_subagent") {
+		t.Errorf("sub-agent (at depth) variant should not advertise spawn_subagent: %q", subFloor)
 	}
 }
 

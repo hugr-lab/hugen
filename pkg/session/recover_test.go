@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -266,6 +267,42 @@ func TestRestoreActive_RestoresActiveRoot(t *testing.T) {
 	}
 	if !saw {
 		t.Errorf("active root missing settle subagent_result for sub1")
+	}
+}
+
+// TestResume_RejectsSubAgentID confirms the Manager.Resume invariant
+// that m.live is root-only (phase-4-tree-ctx-routing ADR D4): passing
+// a sub-agent id surfaces ErrNotRootSession instead of registering
+// the row in m.live as a fake root. Sub-agents are reachable only
+// through their parent's children map.
+func TestResume_RejectsSubAgentID(t *testing.T) {
+	store := newFakeStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	mustOpen(t, store, ctx, SessionRow{
+		ID: "root1", AgentID: "a1", SessionType: "root", Status: StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	mustOpen(t, store, ctx, SessionRow{
+		ID: "sub1", AgentID: "a1", ParentSessionID: "root1",
+		SessionType: "subagent", Status: StatusActive,
+		Metadata:    map[string]any{"depth": 1},
+		CreatedAt:   now, UpdatedAt: now,
+	})
+
+	mgr := newTestManager(t, store)
+	defer mgr.ShutdownAll(ctx)
+
+	if _, err := mgr.Resume(ctx, "sub1"); err == nil {
+		t.Fatalf("Resume(subagent) returned nil error, want ErrNotRootSession")
+	} else if !errors.Is(err, ErrNotRootSession) {
+		t.Errorf("Resume(subagent) err = %v, want to wrap ErrNotRootSession", err)
+	}
+	for _, id := range mgr.SessionsLive() {
+		if id == "sub1" {
+			t.Errorf("sub-agent leaked into m.live after rejected Resume")
+		}
 	}
 }
 

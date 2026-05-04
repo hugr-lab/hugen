@@ -221,6 +221,12 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, time.Tim
 // newSessionRestore. Materialisation is deferred to the first inbound
 // Frame after resume.
 //
+// Resume is **root-only**: passing a sub-agent id surfaces
+// ErrNotRootSession instead of silently registering the sub-agent in
+// m.live and breaking the "m.live is roots only" invariant
+// (phase-4-tree-ctx-routing ADR D4). Sub-agents are owned by their
+// parent's children map; cross-tree access goes through the parent.
+//
 // Concurrent calls on the same id are made safe by a post-construction
 // double-check on m.live; the loser cancels its freshly-built ctx and
 // returns the winner's *Session. (The loser may already have appended
@@ -233,6 +239,15 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
 		return existing, nil
 	}
 	m.mu.RUnlock()
+
+	row, err := m.store.LoadSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if row.SessionType != "" && row.SessionType != "root" {
+		return nil, fmt.Errorf("manager: cannot resume %s session %q: %w",
+			row.SessionType, id, ErrNotRootSession)
+	}
 
 	s, err := newSessionRestore(ctx, id, nil, m.deps)
 	if err != nil {
@@ -277,6 +292,12 @@ func (m *Manager) Deliver(ctx context.Context, to string, f protocol.Frame) erro
 // goroutine has exited (its inbox is closed) — the frame can never
 // be delivered.
 var ErrSessionGone = errors.New("manager: session goroutine exited")
+
+// ErrNotRootSession is returned by Manager.Resume when the requested
+// id maps to a non-root session row. Manager only tracks roots in
+// m.live (phase-4-tree-ctx-routing ADR D4); sub-agents are reachable
+// only through their parent.
+var ErrNotRootSession = errors.New("manager: not a root session")
 
 // BroadcastSystemMarker pushes a system_marker Frame into every live
 // root session's inbox. Used by callers that need to surface a

@@ -394,9 +394,10 @@ func (s *Session) turnComplete() bool {
 //
 // pendingInbound drain order: handled at every turn boundary BEFORE
 // the next prompt is built so RouteBuffered frames reach the model's
-// next view of s.history. C5 only projects UserMessage; phase-4 step
-// 12 refines per-Frame projection (subagent_started, whiteboard_message,
-// …) once the visibility filter lands.
+// next view of s.history. The drain runs each Frame through the §11
+// visibility filter (visibility.go::projectFrameToHistory) — default-
+// deny except the explicit allow-list (UserMessage, SubagentStarted,
+// SubagentResult, SystemMessage, WhiteboardMessage).
 func (s *Session) advanceOrFinish(runCtx context.Context) {
 	st := s.turnState
 	if st == nil {

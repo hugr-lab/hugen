@@ -91,7 +91,9 @@ func (s *Session) maybeInjectSoftWarning(runCtx context.Context) {
 		return
 	}
 	role, task := s.roleAndTaskForNudge(runCtx)
-	text := softWarningText(role, task, st.iter)
+	canSpawnDeeper := s.deps == nil || s.deps.maxDepth <= 0 ||
+		s.depth+1 <= s.deps.maxDepth
+	text := softWarningText(role, task, st.iter, canSpawnDeeper)
 	frame := protocol.NewSystemMessage(s.id, s.agent.Participant(),
 		protocol.SystemMessageSoftWarning, text)
 	if err := s.emit(runCtx, frame); err != nil {
@@ -109,7 +111,13 @@ func (s *Session) maybeInjectSoftWarning(runCtx context.Context) {
 // softWarningText renders the role-conditioned phrase from spec §8.1.
 // Kept in one place so the wording is reviewable as a unit and the
 // tests can pin substring expectations cheaply.
-func softWarningText(role, task string, turns int) string {
+//
+// canSpawnDeeper toggles the "you can fan out further" advice on the
+// sub-agent branch — for a root the spawn-subagents nudge always
+// applies; for a sub-agent we only suggest spawning when the runtime
+// max-depth still allows another level. Otherwise the sub-agent gets
+// only the "return / give up / change tack" branches.
+func softWarningText(role, task string, turns int, canSpawnDeeper bool) string {
 	if role == "root" {
 		return fmt.Sprintf("You've used %d turns on this task. This is just a soft signal — the loop may be productive. Before the next call, consider: are you still on the right path? Would breaking the remaining work into focused sub-agents (`spawn_subagent`) make progress more reliable? If you're confident in the current approach, continue.", turns)
 	}
@@ -117,7 +125,13 @@ func softWarningText(role, task string, turns int) string {
 	if task != "" {
 		taskClause = fmt.Sprintf(" inside task %q", task)
 	}
-	return fmt.Sprintf("You've used %d turns%s. The loop may be productive — but consider stopping to think: is the current approach still right? You can return what you have, give up cleanly explaining what blocked you, or change tack. Sub-sub-agents are not available at this depth.", turns, taskClause)
+	tail := "You can return what you have, give up cleanly explaining what blocked you, or change tack."
+	if canSpawnDeeper {
+		tail += " You can also fan out via `spawn_subagent` if the remaining work splits cleanly."
+	} else {
+		tail += " Sub-sub-agents are not available at this depth."
+	}
+	return fmt.Sprintf("You've used %d turns%s. The loop may be productive — but consider stopping to think: is the current approach still right? %s", turns, taskClause, tail)
 }
 
 // triggerHardCeiling invokes the §8.2 termination path. The session

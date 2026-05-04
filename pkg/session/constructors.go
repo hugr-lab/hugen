@@ -160,8 +160,17 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 	s.openedAt = row.CreatedAt
 	s.ownerID = row.OwnerID
 
-	// Idempotent re-Acquire: workspace dir already exists, autoload
-	// re-binds, per_session MCPs respawn if needed.
+	// Re-Acquire on the resume path: workspace dir is idempotent
+	// (mkdir is a no-op when present), autoload re-binds the skill
+	// catalogue, and per_session MCP providers re-spawn since they
+	// don't survive a process exit. NOT idempotent under concurrent
+	// resume of the same id — Lifecycle.AddSessionProvider rejects
+	// duplicate (sessionID, name) registrations, so two adapters
+	// racing Manager.Resume on the same id can leave one with a
+	// half-built provider set. Manager.Resume's m.live double-check
+	// at the end keeps the live tree clean (loser's session is
+	// cancelled), but the brief window during construction is a
+	// known follow-up — see review note L2.
 	if deps.lifecycle != nil {
 		if err := deps.lifecycle.Acquire(ctx, id); err != nil {
 			cancel(nil)
