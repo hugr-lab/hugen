@@ -27,6 +27,37 @@ func TestCodec_RoundTrip(t *testing.T) {
 		{"heartbeat", NewHeartbeat("s1", testAgent)},
 		{"error", NewError("s1", testAgent, "model_unavailable", "no model", true)},
 		{"system_marker", NewSystemMarker("s1", testAgent, "note_added", map[string]any{"id": "n1"})},
+		{"subagent_started", NewSubagentStarted("s1", testAgent, SubagentStartedPayload{
+			ChildSessionID: "s2", Skill: "hugr-data", Role: "explorer",
+			Task: "list sources", Depth: 1,
+			Inputs: map[string]any{"hint": "x"},
+		})},
+		{"subagent_result", NewSubagentResult("s1", "s2", testAgent, SubagentResultPayload{
+			SessionID: "s2", Result: "found 3 tables",
+			Reason: TerminationCompleted, TurnsUsed: 4,
+		})},
+		{"plan_op_set", NewPlanOp("s1", testAgent, PlanOpPayload{
+			Op: "set", Text: "# Plan\n1. discover\n2. aggregate", CurrentStep: "step 1",
+		})},
+		{"plan_op_comment", NewPlanOp("s1", testAgent, PlanOpPayload{
+			Op: "comment", Text: "found A,B,C", CurrentStep: "step 2",
+		})},
+		{"plan_op_clear", NewPlanOp("s1", testAgent, PlanOpPayload{Op: "clear"})},
+		{"whiteboard_op_init", NewWhiteboardOp("s1", "", testAgent, WhiteboardOpPayload{Op: "init"})},
+		{"whiteboard_op_write", NewWhiteboardOp("s1", "s2", testAgent, WhiteboardOpPayload{
+			Op: "write", Seq: 7, FromSessionID: "s2", FromRole: "explorer", Text: "found auth_logs",
+		})},
+		{"whiteboard_op_stop", NewWhiteboardOp("s1", "", testAgent, WhiteboardOpPayload{Op: "stop"})},
+		{"whiteboard_message", NewWhiteboardMessage("s1", "s3", testAgent, WhiteboardMessagePayload{
+			FromSessionID: "s2", FromRole: "explorer", Seq: 7, Text: "found auth_logs",
+		})},
+		{"session_terminated", NewSessionTerminated("s1", testAgent, SessionTerminatedPayload{
+			Reason: TerminationHardCeiling, TurnsUsed: 30,
+		})},
+		{"system_message_soft_warning", NewSystemMessage("s1", testAgent,
+			SystemMessageSoftWarning, "you have used N turns")},
+		{"system_message_whiteboard", NewSystemMessage("s1", testAgent,
+			SystemMessageWhiteboard, "[whiteboard] explorer (s2): found auth_logs")},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -52,6 +83,194 @@ func TestCodec_RoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCodec_RoundTrip_EnvelopeAdditions asserts the phase-4 BaseFrame
+// fields (FromSession, FromParticipant, RequestID) round-trip cleanly
+// when set and remain absent (omitempty) when empty.
+func TestCodec_RoundTrip_EnvelopeAdditions(t *testing.T) {
+	codec := NewCodec()
+	t.Run("set", func(t *testing.T) {
+		f := NewSubagentResult("parent", "child", testAgent, SubagentResultPayload{
+			SessionID: "child", Result: "ok", Reason: TerminationCompleted, TurnsUsed: 2,
+		})
+		f.RequestID = "req-7"
+		f.FromParticipant = "human-alice"
+		data, err := codec.EncodeFrame(f)
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		out, err := codec.DecodeFrame(data)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		got, ok := out.(*SubagentResult)
+		if !ok {
+			t.Fatalf("decoded type %T, want *SubagentResult", out)
+		}
+		if got.FromSession != "child" {
+			t.Errorf("FromSession = %q, want child", got.FromSession)
+		}
+		if got.RequestID != "req-7" {
+			t.Errorf("RequestID = %q, want req-7", got.RequestID)
+		}
+		if got.FromParticipant != "human-alice" {
+			t.Errorf("FromParticipant = %q, want human-alice", got.FromParticipant)
+		}
+		if got.Payload.SessionID != "child" || got.Payload.Reason != TerminationCompleted ||
+			got.Payload.TurnsUsed != 2 || got.Payload.Result != "ok" {
+			t.Errorf("payload drift: %+v", got.Payload)
+		}
+	})
+	t.Run("omitted_when_empty", func(t *testing.T) {
+		f := NewUserMessage("s1", testAuthor, "hi")
+		data, err := codec.EncodeFrame(f)
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		// omitempty: the JSON body must not contain the optional fields.
+		s := string(data)
+		for _, key := range []string{"from_session", "from_participant", "request_id"} {
+			if contains(s, key) {
+				t.Errorf("envelope unexpectedly contains %q for empty value: %s", key, s)
+			}
+		}
+	})
+}
+
+// TestCodec_RoundTrip_CancelCascade asserts the phase-4 Cancel.Cascade
+// flag round-trips and is absent when false.
+func TestCodec_RoundTrip_CancelCascade(t *testing.T) {
+	codec := NewCodec()
+	t.Run("cascade_true", func(t *testing.T) {
+		f := NewCancel("s1", testAuthor, "user_cancelled")
+		f.Payload.Cascade = true
+		data, err := codec.EncodeFrame(f)
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		out, err := codec.DecodeFrame(data)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		got, ok := out.(*Cancel)
+		if !ok {
+			t.Fatalf("decoded %T, want *Cancel", out)
+		}
+		if !got.Payload.Cascade {
+			t.Errorf("Cascade lost in round-trip")
+		}
+	})
+	t.Run("cascade_false_omitted", func(t *testing.T) {
+		f := NewCancel("s1", testAuthor, "user_cancelled")
+		data, err := codec.EncodeFrame(f)
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		if contains(string(data), `"cascade"`) {
+			t.Errorf("cascade=false should be omitted from JSON: %s", data)
+		}
+	})
+}
+
+// TestCodec_PayloadIntegrity_Phase4 asserts every phase-4 payload's
+// fields survive a full encode→decode cycle.
+func TestCodec_PayloadIntegrity_Phase4(t *testing.T) {
+	codec := NewCodec()
+	t.Run("subagent_started", func(t *testing.T) {
+		in := NewSubagentStarted("p", testAgent, SubagentStartedPayload{
+			ChildSessionID: "c", Skill: "hugr-data", Role: "explorer",
+			Task: "do thing", Depth: 2, Inputs: map[string]any{"k": float64(1)},
+			ParentWhiteboardActive: true,
+		})
+		data, _ := codec.EncodeFrame(in)
+		out, err := codec.DecodeFrame(data)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		got := out.(*SubagentStarted).Payload
+		if got.ChildSessionID != "c" || got.Skill != "hugr-data" || got.Role != "explorer" ||
+			got.Task != "do thing" || got.Depth != 2 || !got.ParentWhiteboardActive {
+			t.Errorf("payload drift: %+v", got)
+		}
+	})
+	t.Run("plan_op_clear_no_text", func(t *testing.T) {
+		in := NewPlanOp("s", testAgent, PlanOpPayload{Op: "clear"})
+		data, _ := codec.EncodeFrame(in)
+		out, _ := codec.DecodeFrame(data)
+		got := out.(*PlanOp).Payload
+		if got.Op != "clear" || got.Text != "" || got.CurrentStep != "" {
+			t.Errorf("clear payload drift: %+v", got)
+		}
+	})
+	t.Run("whiteboard_op_truncated_flag", func(t *testing.T) {
+		in := NewWhiteboardOp("h", "c", testAgent, WhiteboardOpPayload{
+			Op: "write", Seq: 99, FromSessionID: "c", FromRole: "x", Text: "y", Truncated: true,
+		})
+		data, _ := codec.EncodeFrame(in)
+		out, _ := codec.DecodeFrame(data)
+		got := out.(*WhiteboardOp).Payload
+		if !got.Truncated || got.Seq != 99 {
+			t.Errorf("write payload drift: %+v", got)
+		}
+	})
+	t.Run("session_terminated_with_result", func(t *testing.T) {
+		in := NewSessionTerminated("s", testAgent, SessionTerminatedPayload{
+			Reason: TerminationCompleted, Result: "final answer", TurnsUsed: 3,
+		})
+		data, _ := codec.EncodeFrame(in)
+		out, _ := codec.DecodeFrame(data)
+		got := out.(*SessionTerminated).Payload
+		if got.Reason != TerminationCompleted || got.Result != "final answer" || got.TurnsUsed != 3 {
+			t.Errorf("payload drift: %+v", got)
+		}
+	})
+}
+
+// TestValidate_Phase4 covers per-variant validation.
+func TestValidate_Phase4(t *testing.T) {
+	cases := []struct {
+		name    string
+		f       Frame
+		wantErr bool
+	}{
+		{"subagent_started_ok", NewSubagentStarted("p", testAgent, SubagentStartedPayload{
+			ChildSessionID: "c", Task: "t", Depth: 1,
+		}), false},
+		{"subagent_started_missing_task", NewSubagentStarted("p", testAgent, SubagentStartedPayload{
+			ChildSessionID: "c", Depth: 1,
+		}), true},
+		{"subagent_result_missing_reason", NewSubagentResult("p", "c", testAgent, SubagentResultPayload{
+			SessionID: "c",
+		}), true},
+		{"plan_op_invalid_op", NewPlanOp("s", testAgent, PlanOpPayload{Op: "rename"}), true},
+		{"whiteboard_op_invalid_op", NewWhiteboardOp("s", "", testAgent, WhiteboardOpPayload{Op: "spin"}), true},
+		{"whiteboard_message_missing_from", NewWhiteboardMessage("h", "r", testAgent, WhiteboardMessagePayload{}), true},
+		{"session_terminated_missing_reason", NewSessionTerminated("s", testAgent, SessionTerminatedPayload{}), true},
+		{"system_message_missing_kind", NewSystemMessage("s", testAgent, "", "x"), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := Validate(c.f)
+			if c.wantErr && err == nil {
+				t.Errorf("expected error, got nil")
+			}
+			if !c.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// contains is a small helper to avoid importing strings into a test
+// already light on imports.
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCodec_DecodeUnknownKind_AsOpaque(t *testing.T) {

@@ -32,6 +32,15 @@ const (
 	KindHeartbeat        Kind = "heartbeat"
 	KindError            Kind = "error"
 	KindSystemMarker     Kind = "system_marker"
+
+	// Phase-4 kinds (sub-agents, plan, whiteboard, runtime injections).
+	KindSubagentStarted    Kind = "subagent_started"
+	KindSubagentResult     Kind = "subagent_result"
+	KindPlanOp             Kind = "plan_op"
+	KindWhiteboardOp       Kind = "whiteboard_op"
+	KindWhiteboardMessage  Kind = "whiteboard_message"
+	KindSessionTerminated  Kind = "session_terminated"
+	KindSystemMessage      Kind = "system_message"
 )
 
 // ParticipantInfo identifies who emitted (or is addressed by) a Frame.
@@ -68,6 +77,13 @@ type Frame interface {
 	OccurredAt() time.Time
 	Seq() int
 
+	// Envelope additions (phase 4 / `design.md §19 — Foundation 2`).
+	// FromSession is filled for cross-session frames; the other two
+	// are reserved for phase 5 / phase 10 producers.
+	FromSessionID() string
+	FromParticipantID() string
+	RequestIDValue() string
+
 	// payload returns the variant payload as a JSON-encodable value.
 	// The codec uses this to produce the wire payload object.
 	payload() any
@@ -88,21 +104,42 @@ type SeqSetter interface {
 // the SeqSetter interface. The field is private-ish (lowercase
 // JSON tag, no JSON serialisation) because the wire envelope uses
 // the SSE `id:` line, not the JSON payload, to carry seq.
+//
+// Phase-4 envelope additions (`design.md §19 — Foundation 2`):
+//
+//   - FromSession is the direct-neighbour sender id and is filled
+//     for any Frame that crosses a session boundary in phase 4
+//     (subagent_result child→parent, whiteboard_write child→host,
+//     whiteboard_message host→members).
+//   - FromParticipant is reserved for phase-10 multi-party
+//     workspaces; phase 4-9 producers leave it empty.
+//   - RequestID is reserved for phase-5 HITL chain forwarding;
+//     phase 4 producers leave it empty.
+//
+// Reserving the slots now means zero schema migration when phase 5
+// / phase 10 begin to fill them — every persisted Frame envelope
+// already has the field.
 type BaseFrame struct {
-	ID      string          `json:"frame_id"`
-	Session string          `json:"session_id"`
-	K       Kind            `json:"kind"`
-	Auth    ParticipantInfo `json:"author"`
-	At      time.Time       `json:"occurred_at"`
-	S       int             `json:"-"`
+	ID              string          `json:"frame_id"`
+	Session         string          `json:"session_id"`
+	K               Kind            `json:"kind"`
+	Auth            ParticipantInfo `json:"author"`
+	At              time.Time       `json:"occurred_at"`
+	S               int             `json:"-"`
+	FromSession     string          `json:"from_session,omitempty"`
+	FromParticipant string          `json:"from_participant,omitempty"`
+	RequestID       string          `json:"request_id,omitempty"`
 }
 
-func (b BaseFrame) FrameID() string         { return b.ID }
-func (b BaseFrame) SessionID() string       { return b.Session }
-func (b BaseFrame) Kind() Kind              { return b.K }
-func (b BaseFrame) Author() ParticipantInfo { return b.Auth }
-func (b BaseFrame) OccurredAt() time.Time   { return b.At }
-func (b BaseFrame) Seq() int                { return b.S }
+func (b BaseFrame) FrameID() string           { return b.ID }
+func (b BaseFrame) SessionID() string         { return b.Session }
+func (b BaseFrame) Kind() Kind                { return b.K }
+func (b BaseFrame) Author() ParticipantInfo   { return b.Auth }
+func (b BaseFrame) OccurredAt() time.Time     { return b.At }
+func (b BaseFrame) Seq() int                  { return b.S }
+func (b BaseFrame) FromSessionID() string     { return b.FromSession }
+func (b BaseFrame) FromParticipantID() string { return b.FromParticipant }
+func (b BaseFrame) RequestIDValue() string    { return b.RequestID }
 
 // SetSeq sets the per-session sequence number. The runtime calls it
 // once, after AppendEvent assigns the cursor; adapters never call
@@ -149,6 +186,23 @@ type SlashCommandPayload struct {
 
 type CancelPayload struct {
 	Reason string `json:"reason"`
+	// Cascade controls whether the cancel terminates the receiving
+	// session's sub-agent subtree in addition to aborting the
+	// in-flight turn.
+	//
+	//   - false (default) → only the receiving session's in-flight
+	//     turn stops (mdl.Generate + any in-flight tool dispatches
+	//     abort). Sub-agents keep running; the model reacts on its
+	//     next prompt build.
+	//   - true → same in-flight abort PLUS the receiving session
+	//     calls Manager.Terminate(child, "cancel_cascade") for every
+	//     active child. Each child's ctx-cancellation propagates
+	//     down its subtree; each writes its own
+	//     session_terminated{reason:"cancel_cascade"} event. The
+	//     receiving session itself does NOT terminate.
+	//
+	// User-facing slash commands: /cancel → false; /cancel all → true.
+	Cascade bool `json:"cascade,omitempty"`
 }
 
 type SessionOpenedPayload struct {
@@ -292,6 +346,157 @@ type SystemMarker struct {
 	Payload SystemMarkerPayload
 }
 
+// Phase-4 payloads.
+
+// SubagentStartedPayload is appended to the parent's events when a
+// child sub-agent session is spawned. Inputs is arbitrary JSON the
+// parent passes to the child via spawn_subagent.
+type SubagentStartedPayload struct {
+	ChildSessionID            string    `json:"child_session_id"`
+	Skill                     string    `json:"skill,omitempty"`
+	Role                      string    `json:"role,omitempty"`
+	Task                      string    `json:"task"`
+	Depth                     int       `json:"depth"`
+	StartedAt                 time.Time `json:"started_at"`
+	Inputs                    any       `json:"inputs,omitempty"`
+	ParentWhiteboardActive    bool      `json:"parent_whiteboard_active,omitempty"`
+}
+
+// SubagentResultPayload is delivered to the parent's inbox as a Frame
+// when the sub-agent's goroutine exits. Reason mirrors the child's
+// session_terminated.reason exactly: "completed" | "hard_ceiling" |
+// "subagent_cancel: <rationale>" | "cancel_cascade" | "restart_died" |
+// "panic: <msg>" | ...
+type SubagentResultPayload struct {
+	SessionID  string `json:"session_id"`
+	Result     string `json:"result,omitempty"`
+	Reason     string `json:"reason"`
+	TurnsUsed  int    `json:"turns_used"`
+}
+
+// PlanOpPayload is appended to a session's own events. op ∈ {set,
+// comment, clear}. Set / comment carry Text and optionally CurrentStep;
+// clear carries neither.
+type PlanOpPayload struct {
+	Op          string `json:"op"`
+	Text        string `json:"text,omitempty"`
+	CurrentStep string `json:"current_step,omitempty"`
+}
+
+// WhiteboardOpPayload is appended to a host's events on
+// init/write/stop and to each receiving member's events on receipt of
+// a whiteboard_message Frame at turn-boundary drain. Seq is
+// host-monotonic; FromSessionID + FromRole + Text apply only to
+// op="write".
+type WhiteboardOpPayload struct {
+	Op             string `json:"op"`
+	Seq            int64  `json:"seq,omitempty"`
+	FromSessionID  string `json:"from_session_id,omitempty"`
+	FromRole       string `json:"from_role,omitempty"`
+	Text           string `json:"text,omitempty"`
+	Truncated      bool   `json:"truncated,omitempty"`
+}
+
+// WhiteboardMessagePayload is the host→member broadcast Frame; each
+// member persists its own WhiteboardOp{op:"write"} on receipt.
+type WhiteboardMessagePayload struct {
+	FromSessionID string `json:"from_session_id"`
+	FromRole      string `json:"from_role"`
+	Seq           int64  `json:"seq"`
+	Text          string `json:"text"`
+}
+
+// SessionTerminatedPayload is the sole terminal write for any
+// session. Reason is free-form; phase-4 writers use:
+// "completed", "hard_ceiling", "subagent_cancel: <rationale>",
+// "cancel_cascade", "restart_died", "panic: <msg>", "user:/end".
+type SessionTerminatedPayload struct {
+	Reason    string `json:"reason"`
+	Result    string `json:"result,omitempty"`
+	TurnsUsed int    `json:"turns_used,omitempty"`
+}
+
+// SystemMessagePayload is a model-visible runtime injection (distinct
+// from the UI-only SystemMarker). Rendered into the session's
+// in-memory model history as model.Message{Role:RoleUser,
+// Content:"[system: <kind>] <content>"} (provider-portable across
+// Anthropic / OpenAI / Gemini).
+//
+// Phase-4 Kind values: "soft_warning", "stuck_nudge", "whiteboard",
+// "spawned_note".
+type SystemMessagePayload struct {
+	Kind    string `json:"kind"`
+	Content string `json:"content"`
+}
+
+// Phase-4 system_message kinds.
+const (
+	SystemMessageSoftWarning = "soft_warning"
+	SystemMessageStuckNudge  = "stuck_nudge"
+	SystemMessageWhiteboard  = "whiteboard"
+	SystemMessageSpawnedNote = "spawned_note"
+)
+
+// Phase-4 system_marker subjects (machine-readable, adapter-only).
+const (
+	SubjectMCPRecovered    = "mcp_recovered"
+	SubjectHardCeilingHit  = "hard_ceiling_hit"
+	SubjectNoProgress      = "no_progress"
+)
+
+// Phase-4 session_terminated reason constants. Reason is free-form;
+// these are the well-known values phase-4 producers emit.
+const (
+	TerminationCompleted      = "completed"
+	TerminationHardCeiling    = "hard_ceiling"
+	TerminationCancelCascade  = "cancel_cascade"
+	TerminationRestartDied    = "restart_died"
+	TerminationUserEnd        = "user:/end"
+	// TerminationSubagentCancelPrefix is concatenated with the
+	// caller-provided rationale: "subagent_cancel: <rationale>".
+	TerminationSubagentCancelPrefix = "subagent_cancel: "
+	// TerminationPanicPrefix is concatenated with the recovered
+	// panic message: "panic: <msg>".
+	TerminationPanicPrefix = "panic: "
+)
+
+// Concrete phase-4 Frame variants.
+
+type SubagentStarted struct {
+	BaseFrame
+	Payload SubagentStartedPayload
+}
+
+type SubagentResult struct {
+	BaseFrame
+	Payload SubagentResultPayload
+}
+
+type PlanOp struct {
+	BaseFrame
+	Payload PlanOpPayload
+}
+
+type WhiteboardOp struct {
+	BaseFrame
+	Payload WhiteboardOpPayload
+}
+
+type WhiteboardMessage struct {
+	BaseFrame
+	Payload WhiteboardMessagePayload
+}
+
+type SessionTerminated struct {
+	BaseFrame
+	Payload SessionTerminatedPayload
+}
+
+type SystemMessage struct {
+	BaseFrame
+	Payload SystemMessagePayload
+}
+
 // OpaqueFrame represents a Frame variant the codec does not know.
 // Phase 2 introduces opaque round-trip so future-phase variants
 // (sub_agent_*, approval_*, clarification_*, ...) survive an
@@ -309,20 +514,27 @@ type OpaqueFrame struct {
 	RawPayload json.RawMessage
 }
 
-func (f UserMessage) payload() any      { return f.Payload }
-func (f AgentMessage) payload() any     { return f.Payload }
-func (f Reasoning) payload() any        { return f.Payload }
-func (f ToolCall) payload() any         { return f.Payload }
-func (f ToolResult) payload() any       { return f.Payload }
-func (f SlashCommand) payload() any     { return f.Payload }
-func (f Cancel) payload() any           { return f.Payload }
-func (f SessionOpened) payload() any    { return f.Payload }
-func (f SessionClosed) payload() any    { return f.Payload }
-func (f SessionSuspended) payload() any { return f.Payload }
-func (f Heartbeat) payload() any        { return f.Payload }
-func (f Error) payload() any            { return f.Payload }
-func (f SystemMarker) payload() any     { return f.Payload }
-func (f OpaqueFrame) payload() any      { return f.RawPayload }
+func (f UserMessage) payload() any       { return f.Payload }
+func (f AgentMessage) payload() any      { return f.Payload }
+func (f Reasoning) payload() any         { return f.Payload }
+func (f ToolCall) payload() any          { return f.Payload }
+func (f ToolResult) payload() any        { return f.Payload }
+func (f SlashCommand) payload() any      { return f.Payload }
+func (f Cancel) payload() any            { return f.Payload }
+func (f SessionOpened) payload() any     { return f.Payload }
+func (f SessionClosed) payload() any     { return f.Payload }
+func (f SessionSuspended) payload() any  { return f.Payload }
+func (f Heartbeat) payload() any         { return f.Payload }
+func (f Error) payload() any             { return f.Payload }
+func (f SystemMarker) payload() any      { return f.Payload }
+func (f SubagentStarted) payload() any   { return f.Payload }
+func (f SubagentResult) payload() any    { return f.Payload }
+func (f PlanOp) payload() any            { return f.Payload }
+func (f WhiteboardOp) payload() any      { return f.Payload }
+func (f WhiteboardMessage) payload() any { return f.Payload }
+func (f SessionTerminated) payload() any { return f.Payload }
+func (f SystemMessage) payload() any     { return f.Payload }
+func (f OpaqueFrame) payload() any       { return f.RawPayload }
 
 // newOpaqueFrame is package-private so only the codec materialises
 // opaque frames. base.K MUST equal kindRaw at the call site.
@@ -438,6 +650,71 @@ func NewSystemMarker(sessionID string, author ParticipantInfo, subject string, d
 	}
 }
 
+// Phase-4 constructors.
+
+func NewSubagentStarted(parentSessionID string, author ParticipantInfo, p SubagentStartedPayload) *SubagentStarted {
+	if p.StartedAt.IsZero() {
+		p.StartedAt = time.Now().UTC()
+	}
+	return &SubagentStarted{
+		BaseFrame: newBase(parentSessionID, KindSubagentStarted, author),
+		Payload:   p,
+	}
+}
+
+// NewSubagentResult builds the cross-session terminal result Frame.
+// fromSessionID is the child's session id; the BaseFrame.FromSession
+// envelope field is filled to match.
+func NewSubagentResult(parentSessionID, fromSessionID string, author ParticipantInfo, p SubagentResultPayload) *SubagentResult {
+	base := newBase(parentSessionID, KindSubagentResult, author)
+	base.FromSession = fromSessionID
+	if p.SessionID == "" {
+		p.SessionID = fromSessionID
+	}
+	return &SubagentResult{BaseFrame: base, Payload: p}
+}
+
+func NewPlanOp(sessionID string, author ParticipantInfo, p PlanOpPayload) *PlanOp {
+	return &PlanOp{
+		BaseFrame: newBase(sessionID, KindPlanOp, author),
+		Payload:   p,
+	}
+}
+
+// NewWhiteboardOp builds a whiteboard_op Frame. fromSessionID is the
+// author's session id for op="write" (echoed in BaseFrame.FromSession
+// for cross-session writes; empty for the host's own op="init"/"stop").
+func NewWhiteboardOp(sessionID, fromSessionID string, author ParticipantInfo, p WhiteboardOpPayload) *WhiteboardOp {
+	base := newBase(sessionID, KindWhiteboardOp, author)
+	if fromSessionID != "" {
+		base.FromSession = fromSessionID
+	}
+	return &WhiteboardOp{BaseFrame: base, Payload: p}
+}
+
+// NewWhiteboardMessage builds the host→member broadcast Frame.
+// hostSessionID is the broadcasting host (BaseFrame.FromSession).
+// recipientSessionID is the addressed sibling (BaseFrame.SessionID).
+func NewWhiteboardMessage(hostSessionID, recipientSessionID string, author ParticipantInfo, p WhiteboardMessagePayload) *WhiteboardMessage {
+	base := newBase(recipientSessionID, KindWhiteboardMessage, author)
+	base.FromSession = hostSessionID
+	return &WhiteboardMessage{BaseFrame: base, Payload: p}
+}
+
+func NewSessionTerminated(sessionID string, author ParticipantInfo, p SessionTerminatedPayload) *SessionTerminated {
+	return &SessionTerminated{
+		BaseFrame: newBase(sessionID, KindSessionTerminated, author),
+		Payload:   p,
+	}
+}
+
+func NewSystemMessage(sessionID string, author ParticipantInfo, kind, content string) *SystemMessage {
+	return &SystemMessage{
+		BaseFrame: newBase(sessionID, KindSystemMessage, author),
+		Payload:   SystemMessagePayload{Kind: kind, Content: content},
+	}
+}
+
 // Validate returns a non-nil error if a Frame would be rejected by
 // the codec. Constructors don't validate; callers building frames
 // from external input should run Validate.
@@ -470,6 +747,44 @@ func Validate(f Frame) error {
 	case *SlashCommand:
 		if v.Payload.Name == "" {
 			return fmt.Errorf("protocol: empty slash command name")
+		}
+	case *SubagentStarted:
+		if v.Payload.ChildSessionID == "" {
+			return fmt.Errorf("protocol: subagent_started missing child_session_id")
+		}
+		if v.Payload.Task == "" {
+			return fmt.Errorf("protocol: subagent_started missing task")
+		}
+	case *SubagentResult:
+		if v.Payload.SessionID == "" {
+			return fmt.Errorf("protocol: subagent_result missing session_id")
+		}
+		if v.Payload.Reason == "" {
+			return fmt.Errorf("protocol: subagent_result missing reason")
+		}
+	case *PlanOp:
+		switch v.Payload.Op {
+		case "set", "comment", "clear":
+		default:
+			return fmt.Errorf("protocol: plan_op invalid op %q", v.Payload.Op)
+		}
+	case *WhiteboardOp:
+		switch v.Payload.Op {
+		case "init", "write", "stop":
+		default:
+			return fmt.Errorf("protocol: whiteboard_op invalid op %q", v.Payload.Op)
+		}
+	case *WhiteboardMessage:
+		if v.Payload.FromSessionID == "" {
+			return fmt.Errorf("protocol: whiteboard_message missing from_session_id")
+		}
+	case *SessionTerminated:
+		if v.Payload.Reason == "" {
+			return fmt.Errorf("protocol: session_terminated missing reason")
+		}
+	case *SystemMessage:
+		if v.Payload.Kind == "" {
+			return fmt.Errorf("protocol: system_message missing kind")
 		}
 	case *OpaqueFrame:
 		// OpaqueFrame round-trips deferred kinds the binary doesn't
