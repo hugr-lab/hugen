@@ -25,13 +25,47 @@ type SessionSummary struct {
 }
 
 // OpenRequest carries the parameters for Manager.Open.
+//
+// Phase-4 fields:
+//
+//   - ParentSessionID, Depth, SessionType, SpawnedFromEventID — set by
+//     Manager.Spawn for sub-agent sessions; left zero for root
+//     sessions opened by adapters.
 type OpenRequest struct {
 	OwnerID      string
 	Participants []protocol.ParticipantInfo
 	// Metadata is persisted verbatim on the session row. Adapters
 	// validate size/shape before passing it through; the manager
-	// stores it as-is.
+	// stores it as-is. For sub-agents the manager also writes
+	// metadata["depth"] (set to parent.depth+1, immutable) here.
 	Metadata map[string]any
+
+	ParentSessionID    string
+	Depth              int
+	SessionType        string
+	SpawnedFromEventID string
+}
+
+// SpawnSpec is the input to Manager.Spawn. Carries the model-supplied
+// fields from session:spawn_subagent (skill, role, task, inputs) plus
+// the parent's spawn-event id used for diagnostics.
+type SpawnSpec struct {
+	Skill   string
+	Role    string
+	Task    string
+	Inputs  any
+	EventID string
+	// Metadata is merged into the child session row's metadata map
+	// after the manager fills in metadata["depth"] / metadata["spawn_role"]
+	// / metadata["spawn_skill"]. Caller-supplied keys win on collision.
+	Metadata map[string]any
+	// ParentWhiteboardActive captures the host's whiteboard projection
+	// state at spawn time (FR-035 conditional autoload). Set by
+	// callSpawnSubagent (phase-3 commit 10) when the parent's
+	// whiteboard projection has Active=true. Phase-4 commit 4 only
+	// plumbs the field through to OpenRequest / SubagentStarted so the
+	// child's session_started event captures it.
+	ParentWhiteboardActive bool
 }
 
 // Manager owns the live *Session map and brokers
@@ -155,18 +189,29 @@ func NewManager(
 // starts its goroutine, and emits a session_opened frame. Returns
 // the session and the row's CreatedAt timestamp so callers can
 // echo the persisted opened_at without an extra LoadSession.
+//
+// Phase 4: req.ParentSessionID/Depth/SessionType/SpawnedFromEventID
+// are written to the row when set. Sub-agents reach this code path
+// via Manager.Spawn; root sessions leave those fields zero so
+// SessionType defaults to "root".
 func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, time.Time, error) {
 	id := newSessionID()
 	now := time.Now().UTC()
+	sessionType := req.SessionType
+	if sessionType == "" {
+		sessionType = "root"
+	}
 	row := SessionRow{
-		ID:          id,
-		AgentID:     m.agent.ID(),
-		OwnerID:     req.OwnerID,
-		SessionType: "root",
-		Status:      StatusActive,
-		Metadata:    req.Metadata,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:                 id,
+		AgentID:            m.agent.ID(),
+		OwnerID:            req.OwnerID,
+		ParentSessionID:    req.ParentSessionID,
+		SessionType:        sessionType,
+		SpawnedFromEventID: req.SpawnedFromEventID,
+		Status:             StatusActive,
+		Metadata:           req.Metadata,
+		CreatedAt:          now,
+		UpdatedAt:          now,
 	}
 	if err := m.store.OpenSession(ctx, row); err != nil {
 		return nil, time.Time{}, fmt.Errorf("manager: open session: %w", err)
@@ -247,6 +292,102 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
 	}
 	return s, nil
 }
+
+// Spawn opens a sub-agent session as a child of parent. The child row
+// is written via Open with session_type="subagent", parent_session_id
+// set, and metadata["depth"] = parent.depth+1 (immutable after create).
+// A subagent_started event is appended to the **parent's** events
+// carrying the child id, role, task, depth, started_at, optional
+// inputs, and the captured parent_whiteboard_active flag. Caller is
+// responsible for permission / depth-ceiling / role.can_spawn checks
+// (those land in commit 10).
+//
+// Returns the child *Session (already running its goroutine) so the
+// caller can hold a reference if needed; the subagent_result Frame
+// will be delivered to parent's inbox by the child goroutine on exit.
+func (m *Manager) Spawn(ctx context.Context, parent *Session, spec SpawnSpec) (*Session, error) {
+	if parent == nil {
+		return nil, fmt.Errorf("manager: spawn requires parent session")
+	}
+	// Load parent row to read depth + owner. Cheap because the row
+	// is hot in the local store; phase-4 makes the row immutable so
+	// caching is also safe but unnecessary for spawn.
+	parentRow, err := m.store.LoadSession(ctx, parent.ID())
+	if err != nil {
+		return nil, fmt.Errorf("manager: spawn load parent: %w", err)
+	}
+	parentDepth := 0
+	if d, ok := parentRow.Metadata["depth"].(int); ok {
+		parentDepth = d
+	} else if df, ok := parentRow.Metadata["depth"].(float64); ok {
+		parentDepth = int(df)
+	}
+	childDepth := parentDepth + 1
+	childMeta := map[string]any{
+		"depth":       childDepth,
+		"spawn_role":  spec.Role,
+		"spawn_skill": spec.Skill,
+	}
+	for k, v := range spec.Metadata {
+		childMeta[k] = v
+	}
+	child, openedAt, err := m.Open(ctx, OpenRequest{
+		OwnerID:            parentRow.OwnerID,
+		ParentSessionID:    parent.ID(),
+		Depth:              childDepth,
+		SessionType:        "subagent",
+		SpawnedFromEventID: spec.EventID,
+		Metadata:           childMeta,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("manager: spawn open: %w", err)
+	}
+	// Append subagent_started to the parent's events. parent.emit
+	// allocates the next per-session seq + persists, like every other
+	// frame. The frame is also fanned out to parent.out so adapters
+	// observe the spawn live.
+	started := protocol.NewSubagentStarted(parent.ID(), m.agent.Participant(), protocol.SubagentStartedPayload{
+		ChildSessionID:         child.ID(),
+		Skill:                  spec.Skill,
+		Role:                   spec.Role,
+		Task:                   spec.Task,
+		Depth:                  childDepth,
+		StartedAt:              openedAt,
+		Inputs:                 spec.Inputs,
+		ParentWhiteboardActive: spec.ParentWhiteboardActive,
+	})
+	if err := parent.emit(ctx, started); err != nil {
+		m.logger.Warn("manager: emit subagent_started", "parent", parent.ID(), "child", child.ID(), "err", err)
+	}
+	return child, nil
+}
+
+// Deliver pushes a Frame onto the addressed session's inbox. Recover-
+// safe wrapper over Session.Submit so cross-session frame delivery
+// has a single audit-friendly entry point and so panics from a
+// goroutine racing its own exit don't propagate.
+//
+// Used by phase-4 cross-session paths: a child emitting subagent_result
+// to its parent, a sub-agent's whiteboard_write Frame to its host
+// parent, the host's whiteboard_message broadcast to siblings, and
+// (phase 5) HITL chain forwarding.
+func (m *Manager) Deliver(ctx context.Context, to string, f protocol.Frame) error {
+	m.mu.RLock()
+	s, ok := m.live[to]
+	m.mu.RUnlock()
+	if !ok {
+		return ErrSessionNotFound
+	}
+	if !s.Submit(ctx, f) {
+		return ErrSessionGone
+	}
+	return nil
+}
+
+// ErrSessionGone is returned by Deliver when the addressed session's
+// goroutine has exited (its inbox is closed) — the frame can never
+// be delivered.
+var ErrSessionGone = errors.New("manager: session goroutine exited")
 
 // Terminate is the unified session-termination path for phase 4 and
 // onward. It cancels the target session's ctx with a terminationCause

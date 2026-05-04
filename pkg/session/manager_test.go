@@ -243,6 +243,137 @@ func TestManager_OnOpenErrorRollsBack(t *testing.T) {
 	}
 }
 
+// TestManager_Spawn_HappyPath asserts a sub-agent session is created
+// with the right row fields, metadata.depth = parent.depth+1, and the
+// parent's events contain a subagent_started record naming the child.
+func TestManager_Spawn_HappyPath(t *testing.T) {
+	store := newFakeStore()
+	mgr := newTestManager(t, store)
+	ctx := context.Background()
+
+	parent, _, err := mgr.Open(ctx, OpenRequest{OwnerID: "alice"})
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	// Drain the session_opened frame so the outbox doesn't block.
+	drainOutboxOnce(parent.Outbox())
+
+	child, err := mgr.Spawn(ctx, parent, SpawnSpec{
+		Skill: "hugr-data",
+		Role:  "explorer",
+		Task:  "list sources",
+		Inputs: map[string]any{"hint": "begin with auth_logs"},
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if child.ID() == parent.ID() {
+		t.Fatal("child id collides with parent")
+	}
+
+	childRow, err := store.LoadSession(ctx, child.ID())
+	if err != nil {
+		t.Fatalf("load child row: %v", err)
+	}
+	if childRow.SessionType != "subagent" {
+		t.Errorf("session_type = %q, want subagent", childRow.SessionType)
+	}
+	if childRow.ParentSessionID != parent.ID() {
+		t.Errorf("parent_session_id = %q, want %q", childRow.ParentSessionID, parent.ID())
+	}
+	if d, _ := childRow.Metadata["depth"].(int); d != 1 {
+		t.Errorf("metadata.depth = %v, want 1", childRow.Metadata["depth"])
+	}
+	if r, _ := childRow.Metadata["spawn_role"].(string); r != "explorer" {
+		t.Errorf("metadata.spawn_role = %v, want explorer", childRow.Metadata["spawn_role"])
+	}
+
+	// Parent's events contain a subagent_started record.
+	parentEvents, _ := store.ListEvents(ctx, parent.ID(), ListEventsOpts{})
+	var foundStart bool
+	for _, ev := range parentEvents {
+		if ev.EventType == string(protocol.KindSubagentStarted) {
+			foundStart = true
+			if ev.Metadata["child_session_id"] != child.ID() {
+				t.Errorf("subagent_started child id = %v, want %s", ev.Metadata["child_session_id"], child.ID())
+			}
+			break
+		}
+	}
+	if !foundStart {
+		t.Error("parent events missing subagent_started")
+	}
+	_ = mgr.Terminate(ctx, child.ID(), "test_cleanup")
+	_ = mgr.Terminate(ctx, parent.ID(), "test_cleanup")
+}
+
+// TestManager_Spawn_DepthIncrements asserts a 2-deep spawn yields
+// depth 2 on the grandchild, derived from the parent's metadata.
+func TestManager_Spawn_DepthIncrements(t *testing.T) {
+	store := newFakeStore()
+	mgr := newTestManager(t, store)
+	ctx := context.Background()
+
+	root, _, _ := mgr.Open(ctx, OpenRequest{OwnerID: "alice"})
+	drainOutboxOnce(root.Outbox())
+	child, err := mgr.Spawn(ctx, root, SpawnSpec{Role: "x", Task: "t"})
+	if err != nil {
+		t.Fatalf("spawn child: %v", err)
+	}
+	drainOutboxOnce(child.Outbox())
+	grand, err := mgr.Spawn(ctx, child, SpawnSpec{Role: "y", Task: "t2"})
+	if err != nil {
+		t.Fatalf("spawn grandchild: %v", err)
+	}
+	row, _ := store.LoadSession(ctx, grand.ID())
+	if d, _ := row.Metadata["depth"].(int); d != 2 {
+		t.Errorf("grandchild depth = %v, want 2", row.Metadata["depth"])
+	}
+}
+
+// TestManager_Deliver_RoutesToSession asserts Deliver pushes the frame
+// onto the addressed session's inbox and returns no error.
+func TestManager_Deliver_RoutesToSession(t *testing.T) {
+	store := newFakeStore()
+	mgr := newTestManager(t, store)
+	ctx := context.Background()
+
+	target, _, _ := mgr.Open(ctx, OpenRequest{OwnerID: "alice"})
+	drainOutboxOnce(target.Outbox())
+
+	frame := protocol.NewSystemMessage(target.ID(),
+		protocol.ParticipantInfo{ID: "tester", Kind: protocol.ParticipantSystem},
+		protocol.SystemMessageWhiteboard, "[whiteboard] tester (none): synthetic")
+	if err := mgr.Deliver(ctx, target.ID(), frame); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	// The session goroutine echos system_message via emit (default
+	// case in handle); wait for it on the outbox.
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case f := <-target.Outbox():
+			if f.Kind() == protocol.KindSystemMessage {
+				return
+			}
+		case <-deadline.C:
+			t.Fatal("system_message did not surface on outbox")
+		}
+	}
+}
+
+// TestManager_Deliver_UnknownSession returns ErrSessionNotFound for an
+// id that has never been opened.
+func TestManager_Deliver_UnknownSession(t *testing.T) {
+	store := newFakeStore()
+	mgr := newTestManager(t, store)
+	frame := protocol.NewHeartbeat("ghost", protocol.ParticipantInfo{ID: "x", Kind: "system"})
+	if err := mgr.Deliver(context.Background(), "ghost", frame); !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("err = %v, want ErrSessionNotFound", err)
+	}
+}
+
 func drainOutboxOnce(out <-chan protocol.Frame) {
 	select {
 	case <-out:
