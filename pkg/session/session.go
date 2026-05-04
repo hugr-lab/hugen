@@ -496,6 +496,21 @@ func (s *Session) handleExit(runCtx context.Context) {
 		s.logger.Warn("session: project session_terminated", "session", s.id, "err", perr)
 	}
 	s.closed.Store(true)
+	// Surface subagent_result to the parent on every explicit
+	// terminate (including cascade). Live delivery via Submit feeds
+	// any active wait_subagents through the routing layer; on Submit
+	// failure (parent inbox closed because parent itself is shutting
+	// down) the result is appended directly to parent's events so a
+	// future restart-walker drain or wait_subagents cached lookup
+	// still sees the terminal row.
+	//
+	// Symmetric with the recover.go synthetic emit: that handles the
+	// "child died without graceful exit" case; this handler covers
+	// every other terminate path (subagent_cancel, /end, parent
+	// cascade).
+	if s.parent != nil {
+		s.emitSubagentResultToParent(persistCtx, reason)
+	}
 	// SessionClosed is the model-/adapter-visible counterpart;
 	// best-effort outbox push is fine since closed=true is now set
 	// and emit will recover-safely panic on a closed outbox.
@@ -520,6 +535,49 @@ func (s *Session) handleExit(runCtx context.Context) {
 			default:
 			}
 		}()
+	}
+}
+
+// emitSubagentResultToParent surfaces this session's terminal state
+// to its parent at exit time. Live path: Submit to parent's inbox
+// so any active wait_subagents tool feed catches it; the routing
+// layer either delivers via RouteToolFeed (consumed + persisted by
+// wait_subagents) or buffers via RouteBuffered (persisted at the
+// next turn boundary's drain).
+//
+// Offline path: if Submit fails because the parent's inbox has
+// already closed (parent terminated first), append the SubagentResult
+// directly to parent's events via the store so a future
+// drainCachedSubagentResults / restart-walker query still surfaces
+// the terminal row. Idempotent: if the parent already has a
+// subagent_result row for this child id, the direct append is
+// skipped.
+func (s *Session) emitSubagentResultToParent(persistCtx context.Context, reason string) {
+	parent := s.parent
+	if parent == nil {
+		return
+	}
+	result := protocol.NewSubagentResult(parent.id, s.id, s.agent.Participant(),
+		protocol.SubagentResultPayload{
+			SessionID: s.id,
+			Reason:    reason,
+		})
+	if parent.Submit(persistCtx, result) {
+		return
+	}
+	// Parent inbox closed — fall back to direct store append.
+	resRow, summary, err := FrameToEventRow(result, s.agent.ID())
+	if err != nil {
+		s.logger.Warn("session: project subagent_result for parent",
+			"parent", parent.id, "child", s.id, "err", err)
+		return
+	}
+	if nextSeq, err := s.store.NextSeq(persistCtx, parent.id); err == nil {
+		resRow.Seq = nextSeq
+	}
+	if err := s.store.AppendEvent(persistCtx, resRow, summary); err != nil {
+		s.logger.Warn("session: append subagent_result to parent",
+			"parent", parent.id, "child", s.id, "err", err)
 	}
 }
 
