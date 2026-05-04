@@ -243,10 +243,10 @@ func TestManager_OnOpenErrorRollsBack(t *testing.T) {
 	}
 }
 
-// TestManager_Spawn_HappyPath asserts a sub-agent session is created
+// TestSession_Spawn_HappyPath asserts a sub-agent session is created
 // with the right row fields, metadata.depth = parent.depth+1, and the
 // parent's events contain a subagent_started record naming the child.
-func TestManager_Spawn_HappyPath(t *testing.T) {
+func TestSession_Spawn_HappyPath(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
@@ -258,7 +258,7 @@ func TestManager_Spawn_HappyPath(t *testing.T) {
 	// Drain the session_opened frame so the outbox doesn't block.
 	drainOutboxOnce(parent.Outbox())
 
-	child, err := mgr.Spawn(ctx, parent, SpawnSpec{
+	child, err := parent.Spawn(ctx, SpawnSpec{
 		Skill: "hugr-data",
 		Role:  "explorer",
 		Task:  "list sources",
@@ -307,21 +307,21 @@ func TestManager_Spawn_HappyPath(t *testing.T) {
 	_ = mgr.Terminate(ctx, parent.ID(), "test_cleanup")
 }
 
-// TestManager_Spawn_DepthIncrements asserts a 2-deep spawn yields
-// depth 2 on the grandchild, derived from the parent's metadata.
-func TestManager_Spawn_DepthIncrements(t *testing.T) {
+// TestSession_Spawn_DepthIncrements asserts a 2-deep spawn yields
+// depth 2 on the grandchild, derived from the in-memory parent.depth.
+func TestSession_Spawn_DepthIncrements(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
 
 	root, _, _ := mgr.Open(ctx, OpenRequest{OwnerID: "alice"})
 	drainOutboxOnce(root.Outbox())
-	child, err := mgr.Spawn(ctx, root, SpawnSpec{Role: "x", Task: "t"})
+	child, err := root.Spawn(ctx, SpawnSpec{Role: "x", Task: "t"})
 	if err != nil {
 		t.Fatalf("spawn child: %v", err)
 	}
 	drainOutboxOnce(child.Outbox())
-	grand, err := mgr.Spawn(ctx, child, SpawnSpec{Role: "y", Task: "t2"})
+	grand, err := child.Spawn(ctx, SpawnSpec{Role: "y", Task: "t2"})
 	if err != nil {
 		t.Fatalf("spawn grandchild: %v", err)
 	}

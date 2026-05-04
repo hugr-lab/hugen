@@ -73,6 +73,7 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 		return nil, fmt.Errorf("session: open row: %w", err)
 	}
 	s.openedAt = now
+	s.ownerID = req.OwnerID
 
 	// 3. Lifecycle.Acquire (workspace dir, autoload skills, per_session
 	// MCPs). Failure here means the row exists but no goroutine —
@@ -144,6 +145,7 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 
 	s := buildSessionShell(id, depth, parent, deps, sessCtx, cancel)
 	s.openedAt = row.CreatedAt
+	s.ownerID = row.OwnerID
 
 	// Idempotent re-Acquire: workspace dir already exists, autoload
 	// re-binds, per_session MCPs respawn if needed.

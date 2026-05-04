@@ -32,6 +32,7 @@ import (
 // in one go.
 type Session struct {
 	id           string
+	ownerID      string              // owner from SessionRow.OwnerID; inherited by subagents
 	depth        int                 // 0 for root; parent.depth+1 for subagent
 	deps         *sessionDeps        // shared bundle; nil only in legacy NewSession callers
 	agent        *Agent

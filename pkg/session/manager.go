@@ -28,9 +28,11 @@ type SessionSummary struct {
 //
 // Phase-4 fields:
 //
-//   - ParentSessionID, Depth, SessionType, SpawnedFromEventID — set by
-//     Manager.Spawn for sub-agent sessions; left zero for root
-//     sessions opened by adapters.
+//   - ParentSessionID, SpawnedFromEventID — set by Session.Spawn for
+//     sub-agent sessions via newSession(parent, ...); left zero for
+//     root sessions opened by adapters. (Depth/SessionType are no
+//     longer carried in OpenRequest — newSession derives them from the
+//     parent argument.)
 type OpenRequest struct {
 	OwnerID      string
 	Participants []protocol.ParticipantInfo
@@ -41,12 +43,10 @@ type OpenRequest struct {
 	Metadata map[string]any
 
 	ParentSessionID    string
-	Depth              int
-	SessionType        string
 	SpawnedFromEventID string
 }
 
-// SpawnSpec is the input to Manager.Spawn. Carries the model-supplied
+// SpawnSpec is the input to Session.Spawn. Carries the model-supplied
 // fields from session:spawn_subagent (skill, role, task, inputs) plus
 // the parent's spawn-event id used for diagnostics.
 type SpawnSpec struct {
@@ -102,11 +102,10 @@ type Manager struct {
 	rootCancel context.CancelFunc
 
 	mu sync.RWMutex
-	// live maps session id → *Session. Pivot 4 narrows this to
-	// root-only; pivot 3 still registers every session that goes
-	// through Manager.Open / Resume / Spawn here so that
-	// Manager.Terminate / Get / Deliver lookups keep working
-	// unchanged.
+	// live maps root-session id → *Session. Sub-agents are owned by
+	// their parent's `children` map and never appear here. Manager
+	// is therefore the registry / router for the *forest of trees*;
+	// per-tree subagent lookup is parent.FindDescendant.
 	live map[string]*Session
 	// wg tracks every spawned session goroutine. ShutdownAll uses
 	// it to wait for every goroutine to finish exiting BEFORE the
@@ -276,98 +275,15 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
 	return s, nil
 }
 
-// Spawn opens a sub-agent session as a child of parent. The child row
-// is written via Open with session_type="subagent", parent_session_id
-// set, and metadata["depth"] = parent.depth+1 (immutable after create).
-// A subagent_started event is appended to the **parent's** events
-// carrying the child id, role, task, depth, started_at, optional
-// inputs, and the captured parent_whiteboard_active flag. Caller is
-// responsible for permission / depth-ceiling / role.can_spawn checks
-// (those land in commit 10).
+// Deliver pushes a Frame onto the addressed root session's inbox.
+// Pivot 4 narrows m.live to roots only — Deliver is therefore a
+// root-only entry point. Cross-tree delivery to a sub-agent goes
+// through its parent (parent forwards via Submit), keeping the
+// "Manager only routes to roots" invariant clean.
 //
-// Returns the child *Session (already running its goroutine) so the
-// caller can hold a reference if needed; the subagent_result Frame
-// will be delivered to parent's inbox by the child goroutine on exit.
-func (m *Manager) Spawn(ctx context.Context, parent *Session, spec SpawnSpec) (*Session, error) {
-	if parent == nil {
-		return nil, fmt.Errorf("manager: spawn requires parent session")
-	}
-	// Load parent row to read owner. Depth is taken from parent.depth
-	// (the in-memory authoritative value); the row read is here only
-	// because subagent inherits the parent's owner.
-	parentRow, err := m.store.LoadSession(ctx, parent.ID())
-	if err != nil {
-		return nil, fmt.Errorf("manager: spawn load parent: %w", err)
-	}
-	childDepth := parent.depth + 1
-	childMeta := map[string]any{
-		"depth":       childDepth,
-		"spawn_role":  spec.Role,
-		"spawn_skill": spec.Skill,
-	}
-	for k, v := range spec.Metadata {
-		childMeta[k] = v
-	}
-	req := OpenRequest{
-		OwnerID:            parentRow.OwnerID,
-		ParentSessionID:    parent.ID(),
-		SpawnedFromEventID: spec.EventID,
-		Metadata:           childMeta,
-	}
-	child, err := newSession(ctx, parent, m.deps, req)
-	if err != nil {
-		return nil, fmt.Errorf("manager: spawn open: %w", err)
-	}
-	m.mu.Lock()
-	if existing, ok := m.live[child.id]; ok {
-		// Defensive: id collision is statistically impossible for
-		// fresh ids, but mirror the Open guard so a future bug can't
-		// leak a goroutine.
-		m.mu.Unlock()
-		child.cancel(nil)
-		return existing, nil
-	}
-	m.live[child.id] = child
-	m.mu.Unlock()
-	// Track in parent.children too so cancel cascade / SubagentsView
-	// can walk the tree without scanning the whole live map. Pivot 4
-	// makes parent.children authoritative (m.live narrows to roots).
-	parent.childMu.Lock()
-	if parent.children == nil {
-		parent.children = make(map[string]*Session)
-	}
-	parent.children[child.id] = child
-	parent.childMu.Unlock()
-	child.start(m.deregisterChildFn(parent, child))
-	// Append subagent_started to the parent's events. parent.emit
-	// allocates the next per-session seq + persists, like every other
-	// frame. The frame is also fanned out to parent.out so adapters
-	// observe the spawn live.
-	started := protocol.NewSubagentStarted(parent.ID(), m.agent.Participant(), protocol.SubagentStartedPayload{
-		ChildSessionID:         child.ID(),
-		Skill:                  spec.Skill,
-		Role:                   spec.Role,
-		Task:                   spec.Task,
-		Depth:                  childDepth,
-		StartedAt:              child.openedAt,
-		Inputs:                 spec.Inputs,
-		ParentWhiteboardActive: spec.ParentWhiteboardActive,
-	})
-	if err := parent.emit(ctx, started); err != nil {
-		m.logger.Warn("manager: emit subagent_started", "parent", parent.ID(), "child", child.ID(), "err", err)
-	}
-	return child, nil
-}
-
-// Deliver pushes a Frame onto the addressed session's inbox. Recover-
-// safe wrapper over Session.Submit so cross-session frame delivery
-// has a single audit-friendly entry point and so panics from a
-// goroutine racing its own exit don't propagate.
-//
-// Used by phase-4 cross-session paths: a child emitting subagent_result
-// to its parent, a sub-agent's whiteboard_write Frame to its host
-// parent, the host's whiteboard_message broadcast to siblings, and
-// (phase 5) HITL chain forwarding.
+// Recover-safe wrapper over Session.Submit so cross-session frame
+// delivery has a single audit-friendly entry point and so panics from
+// a goroutine racing its own exit don't propagate.
 func (m *Manager) Deliver(ctx context.Context, to string, f protocol.Frame) error {
 	m.mu.RLock()
 	s, ok := m.live[to]
@@ -521,26 +437,6 @@ func (m *Manager) deregisterFn(id string, s *Session) func() {
 	}
 }
 
-// deregisterChildFn is the onExit callback for sub-agent sessions.
-// In addition to the m.live deregister (still needed in pivot 3 since
-// every session is in m.live), it removes the child from
-// parent.children so cancel-cascade and tree-walk lookups stay tidy.
-// Pivot 4 narrows m.live to roots only; this helper continues to be
-// the right exit hook for subagents.
-func (m *Manager) deregisterChildFn(parent *Session, child *Session) func() {
-	return func() {
-		parent.childMu.Lock()
-		if cur, ok := parent.children[child.id]; ok && cur == child {
-			delete(parent.children, child.id)
-		}
-		parent.childMu.Unlock()
-		m.mu.Lock()
-		if cur, ok := m.live[child.id]; ok && cur == child {
-			delete(m.live, child.id)
-		}
-		m.mu.Unlock()
-	}
-}
 
 // SessionsLive returns the IDs of currently live sessions.
 func (m *Manager) SessionsLive() []string {
