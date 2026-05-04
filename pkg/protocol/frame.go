@@ -19,19 +19,18 @@ import (
 type Kind string
 
 const (
-	KindUserMessage      Kind = "user_message"
-	KindAgentMessage     Kind = "agent_message"
-	KindReasoning        Kind = "reasoning"
-	KindToolCall         Kind = "tool_call"
-	KindToolResult       Kind = "tool_result"
-	KindSlashCommand     Kind = "slash_command"
-	KindCancel           Kind = "cancel"
-	KindSessionOpened    Kind = "session_opened"
-	KindSessionClosed    Kind = "session_closed"
-	KindSessionSuspended Kind = "session_suspended"
-	KindHeartbeat        Kind = "heartbeat"
-	KindError            Kind = "error"
-	KindSystemMarker     Kind = "system_marker"
+	KindUserMessage   Kind = "user_message"
+	KindAgentMessage  Kind = "agent_message"
+	KindReasoning     Kind = "reasoning"
+	KindToolCall      Kind = "tool_call"
+	KindToolResult    Kind = "tool_result"
+	KindSlashCommand  Kind = "slash_command"
+	KindCancel        Kind = "cancel"
+	KindSessionOpened Kind = "session_opened"
+	KindSessionClosed Kind = "session_closed"
+	KindHeartbeat     Kind = "heartbeat"
+	KindError         Kind = "error"
+	KindSystemMarker  Kind = "system_marker"
 
 	// Phase-4 kinds (sub-agents, plan, whiteboard, runtime injections).
 	KindSubagentStarted    Kind = "subagent_started"
@@ -213,8 +212,6 @@ type SessionClosedPayload struct {
 	Reason string `json:"reason"`
 }
 
-type SessionSuspendedPayload struct{}
-
 type HeartbeatPayload struct {
 	Now time.Time `json:"now"`
 }
@@ -324,11 +321,6 @@ type SessionOpened struct {
 type SessionClosed struct {
 	BaseFrame
 	Payload SessionClosedPayload
-}
-
-type SessionSuspended struct {
-	BaseFrame
-	Payload SessionSuspendedPayload
 }
 
 type Heartbeat struct {
@@ -523,7 +515,6 @@ func (f SlashCommand) payload() any      { return f.Payload }
 func (f Cancel) payload() any            { return f.Payload }
 func (f SessionOpened) payload() any     { return f.Payload }
 func (f SessionClosed) payload() any     { return f.Payload }
-func (f SessionSuspended) payload() any  { return f.Payload }
 func (f Heartbeat) payload() any         { return f.Payload }
 func (f Error) payload() any             { return f.Payload }
 func (f SystemMarker) payload() any      { return f.Payload }
@@ -620,12 +611,6 @@ func NewSessionClosed(sessionID string, author ParticipantInfo, reason string) *
 	return &SessionClosed{
 		BaseFrame: newBase(sessionID, KindSessionClosed, author),
 		Payload:   SessionClosedPayload{Reason: reason},
-	}
-}
-
-func NewSessionSuspended(sessionID string, author ParticipantInfo) *SessionSuspended {
-	return &SessionSuspended{
-		BaseFrame: newBase(sessionID, KindSessionSuspended, author),
 	}
 }
 

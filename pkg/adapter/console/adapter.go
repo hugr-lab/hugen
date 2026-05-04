@@ -248,7 +248,7 @@ func (a *Adapter) render(f protocol.Frame) {
 		default:
 			close(a.closed)
 		}
-	case *protocol.SessionOpened, *protocol.SessionSuspended,
+	case *protocol.SessionOpened,
 		*protocol.SlashCommand, *protocol.Cancel, *protocol.Heartbeat:
 		// Lifecycle / control frames are silent; the user can see
 		// them in the persisted transcript.

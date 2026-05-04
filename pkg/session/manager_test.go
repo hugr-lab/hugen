@@ -124,9 +124,16 @@ func TestManager_LazyMaterialisation(t *testing.T) {
 
 func TestManager_ResumeClosed(t *testing.T) {
 	store := newFakeStore()
-	_ = store.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "a1", Status: StatusClosed})
+	ctx := context.Background()
+	_ = store.OpenSession(ctx, SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
+	// Phase-4: liveness is event-derived. Append a session_terminated
+	// event so isSessionTerminated returns true on Resume.
+	terminal := protocol.NewSessionTerminated("s1", protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent},
+		protocol.SessionTerminatedPayload{Reason: protocol.TerminationUserEnd})
+	row, summary, _ := FrameToEventRow(terminal, "a1")
+	_ = store.AppendEvent(ctx, row, summary)
 	mgr := newTestManager(t, store)
-	if _, err := mgr.Resume(context.Background(), "s1"); !errors.Is(err, ErrSessionClosed) {
+	if _, err := mgr.Resume(ctx, "s1"); !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("expected ErrSessionClosed, got %v", err)
 	}
 }
@@ -208,8 +215,8 @@ func TestManager_LifecycleHooks(t *testing.T) {
 	if openCalled.Load() != 1 {
 		t.Errorf("OnOpen calls = %d, want 1", openCalled.Load())
 	}
-	if _, err := mgr.Close(context.Background(), s.ID(), "user_end"); err != nil {
-		t.Fatalf("close: %v", err)
+	if err := mgr.Terminate(context.Background(), s.ID(), "user:/end"); err != nil {
+		t.Fatalf("terminate: %v", err)
 	}
 	if closeCalled.Load() != 1 {
 		t.Errorf("OnClose calls = %d, want 1", closeCalled.Load())

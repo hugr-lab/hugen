@@ -68,7 +68,7 @@ func TestUS3_5_US3_AnalystLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { _, _ = core.manager.Close(ctx, sess.ID(), "test") })
+	t.Cleanup(func() { _ = core.manager.Terminate(ctx, sess.ID(), "user:/end") })
 
 	snap, err := core.tools.Snapshot(ctx, sess.ID())
 	if err != nil {

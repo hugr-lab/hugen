@@ -203,7 +203,10 @@ func (h *adapterHost) Subscribe(ctx context.Context, sessionID string) (<-chan p
 }
 
 func (h *adapterHost) CloseSession(ctx context.Context, id, reason string) (time.Time, error) {
-	return h.rt.manager.Close(ctx, id, reason)
+	if err := h.rt.manager.Terminate(ctx, id, reason); err != nil {
+		return time.Time{}, err
+	}
+	return time.Now().UTC(), nil
 }
 
 func (h *adapterHost) ListSessions(ctx context.Context, status string) ([]SessionSummary, error) {

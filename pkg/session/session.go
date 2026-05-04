@@ -51,21 +51,20 @@ type Session struct {
 	in     chan protocol.Frame
 	out    chan protocol.Frame
 	closed atomic.Bool
-	// done is closed by Run on exit. External callers (Manager.Close,
+	// done is closed by Run on exit. External callers (Manager.Terminate,
 	// ShutdownAll) wait on it to know the session goroutine has
-	// finished writing its terminal status to the store before
-	// returning. The session goroutine is the ONLY writer for its
-	// own sessions row — external callers push intent frames into
-	// s.in and wait on this channel.
+	// finished its exit handler — including any session_terminated
+	// event append.
 	done chan struct{}
 
-	// statusMu serialises persistent status transitions (active /
-	// suspended / closed). DuckDB MVCC raises "Conflict on update"
-	// when two transactions update the same row concurrently —
-	// MarkClosed (from /end or adapter close) racing ShutdownAll's
-	// Suspend hits exactly this. Serialising the writes inside the
-	// runtime keeps the store layer simple.
-	statusMu sync.Mutex
+	// terminate cancels the per-session ctx with a terminationCause.
+	// Set by Manager.spawn; called from /end (cause carries
+	// emitClose=false because the handler already emitted the
+	// SessionClosed Frame for the transcript).
+	//
+	// Nil only for Sessions constructed directly by tests without a
+	// Manager (rare); guards in handleSlashCommand check for nil.
+	terminate context.CancelCauseFunc
 }
 
 // modelSwitch records a pending /model use until the next turn so
@@ -274,15 +273,22 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 	}
 }
 
-// Run drives the turn loop. Phase-2 skeleton: handles Cancel
-// directly, routes SlashCommand through CommandRegistry, no LLM
-// dispatch yet (that lands in Phase 3 / T037).
+// Run drives the turn loop. On ctx cancellation, the loop reads the
+// cancel cause: if it's a *terminationCause (from Manager.Terminate
+// or from /end via s.terminate), the goroutine appends a
+// session_terminated event with the supplied reason and optionally
+// emits a SessionClosed Frame for adapter back-compat. If the cancel
+// has no cause (graceful process shutdown via Manager.ShutdownAll),
+// the goroutine writes nothing — sessions without a terminal event
+// are exactly the "needs-restart-decision" set on next boot
+// (FR-028 + FR-029).
 func (s *Session) Run(ctx context.Context) error {
 	defer close(s.done) // signal external waiters BEFORE outbox closes
 	defer close(s.out)
 	for {
 		select {
 		case <-ctx.Done():
+			s.handleExit(ctx)
 			return ctx.Err()
 		case f, ok := <-s.in:
 			if !ok {
@@ -298,10 +304,52 @@ func (s *Session) Run(ctx context.Context) error {
 	}
 }
 
-// handle dispatches a single inbound Frame. The full LLM-call branch
-// is wired in Phase 3 (T037); for Phase 2 the skeleton implements
-// just enough to make the binary boot and exercise the persistence
-// path for slash commands and lifecycle frames.
+// handleExit runs when the per-session ctx fires. It distinguishes
+// Manager.Terminate / /end (terminationCause attached) from graceful
+// Manager.ShutdownAll (no cause): only the former path appends a
+// session_terminated event.
+//
+// Persistence uses a fresh context.Background() because the session
+// ctx is already cancelled at this point — the underlying store
+// queries would fail to round-trip via a cancelled ctx. Persistence
+// is bounded by an explicit deadline so a stuck store can't pin
+// shutdown.
+func (s *Session) handleExit(runCtx context.Context) {
+	cause := context.Cause(runCtx)
+	tc, ok := cause.(*terminationCause)
+	if !ok {
+		// Graceful shutdown — write nothing.
+		return
+	}
+	if s.closed.Load() {
+		return
+	}
+	s.closed.Store(true)
+	persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	terminal := protocol.NewSessionTerminated(s.id, s.agent.Participant(), protocol.SessionTerminatedPayload{
+		Reason: tc.reason,
+	})
+	if err := s.emit(persistCtx, terminal); err != nil {
+		s.logger.Warn("session: append session_terminated", "session", s.id, "err", err)
+	}
+	if tc.emitClose {
+		closed := protocol.NewSessionClosed(s.id, s.agent.Participant(), tc.reason)
+		if err := s.emit(persistCtx, closed); err != nil {
+			s.logger.Warn("session: emit SessionClosed marker", "session", s.id, "err", err)
+		}
+	}
+}
+
+// handle dispatches a single inbound Frame.
+//
+// Phase 4 removed the SessionClosed / SessionSuspended intent
+// branches: lifecycle is now driven entirely through the per-session
+// ctx (Manager.Terminate / s.terminate). SessionClosed Frames
+// observed inbound (e.g., the legacy /end handler returning a
+// SessionClosed frame) flow through the default emit path so adapters
+// still see them in the transcript; the actual termination is
+// triggered by handleSlashCommand calling s.terminate.
 func (s *Session) handle(ctx context.Context, f protocol.Frame) error {
 	switch v := f.(type) {
 	case *protocol.Cancel:
@@ -310,70 +358,10 @@ func (s *Session) handle(ctx context.Context, f protocol.Frame) error {
 		return s.handleSlashCommand(ctx, v)
 	case *protocol.UserMessage:
 		return s.handleUserMessage(ctx, v)
-	case *protocol.SessionClosed:
-		// Inbound SessionClosed = "please close me" intent from
-		// Manager.Close (HTTP /api/v1/sessions/{id}/close). The
-		// session goroutine itself records the terminal status —
-		// no external writer touches the row.
-		return s.handleClosedIntent(ctx, v)
-	case *protocol.SessionSuspended:
-		// Inbound SessionSuspended = "please suspend me" intent
-		// from Manager.Suspend / ShutdownAll. Non-terminal: the
-		// goroutine keeps draining s.in (so any frames already
-		// queued by the user run to completion) and exits when
-		// the inbox is closed by the same caller.
-		return s.handleSuspendedIntent(ctx, v)
 	default:
 		// Other Frame kinds: persist and fan out unchanged.
 		return s.emit(ctx, v)
 	}
-}
-
-// handleClosedIntent processes an inbound SessionClosed frame —
-// the message-passing form of "close this session" from external
-// callers (Manager.Close). Emits the marker so adapters see it,
-// records terminal status via MarkClosed, then closes s.in so
-// the Run loop exits. After Run returns, s.done is closed,
-// unblocking Manager.Close's wait.
-//
-// Idempotent: if the session is already closed (e.g. /end ran
-// concurrently), this is a no-op past the closed check inside
-// MarkClosed.
-func (s *Session) handleClosedIntent(ctx context.Context, f *protocol.SessionClosed) error {
-	if s.closed.Load() {
-		return nil
-	}
-	if err := s.emit(ctx, f); err != nil && !errors.Is(err, ErrSessionClosed) {
-		return err
-	}
-	if err := s.MarkClosed(ctx); err != nil {
-		s.logger.Warn("session: MarkClosed (inbound)", "session", s.id, "err", err)
-	}
-	go func() {
-		defer func() { _ = recover() }()
-		close(s.in)
-	}()
-	return nil
-}
-
-// handleSuspendedIntent processes an inbound SessionSuspended
-// frame. Records suspended status via MarkSuspended; goroutine
-// stays alive draining s.in until the caller (typically
-// ShutdownAll) closes the inbox.
-//
-// Skipped silently if the session has already entered a terminal
-// state — a /end racing shutdown is the normal case.
-func (s *Session) handleSuspendedIntent(ctx context.Context, f *protocol.SessionSuspended) error {
-	if s.closed.Load() {
-		return nil
-	}
-	if err := s.emit(ctx, f); err != nil && !errors.Is(err, ErrSessionClosed) {
-		return err
-	}
-	if err := s.MarkSuspended(ctx); err != nil {
-		s.logger.Warn("session: MarkSuspended", "session", s.id, "err", err)
-	}
-	return nil
 }
 
 func (s *Session) handleCancel(ctx context.Context, f *protocol.Cancel) error {
@@ -410,26 +398,27 @@ func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashComma
 		return s.emit(ctx, errFrame)
 	}
 	var sawClose bool
+	var closeReason string
 	for _, out := range frames {
-		if _, ok := out.(*protocol.SessionClosed); ok {
+		if c, ok := out.(*protocol.SessionClosed); ok {
 			sawClose = true
+			closeReason = c.Payload.Reason
 		}
 		if err := s.emit(ctx, out); err != nil {
 			return err
 		}
 	}
-	// If a handler emitted SessionClosed, persist status=closed and
-	// stop the loop. We close s.in from a side goroutine to avoid
-	// racing concurrent Submit calls; the recover guards against a
-	// double close from ShutdownAll.
-	if sawClose {
-		if err := s.MarkClosed(ctx); err != nil {
-			s.logger.Warn("session: MarkClosed", "session", s.id, "err", err)
-		}
-		go func() {
-			defer func() { _ = recover() }()
-			close(s.in)
-		}()
+	// If a handler emitted SessionClosed (e.g. /end), trigger the
+	// per-session ctx-cancel via s.terminate so the Run loop's
+	// handleExit appends a session_terminated event and exits.
+	// emitClose=false: the handler already emitted the SessionClosed
+	// Frame for the transcript; the exit handler must NOT emit a
+	// duplicate.
+	if sawClose && s.terminate != nil {
+		s.terminate(&terminationCause{
+			reason:    "user:" + f.Payload.Name + " " + closeReason,
+			emitClose: false,
+		})
 	}
 	return nil
 }
@@ -951,49 +940,6 @@ func (s *Session) emitPendingSwitch(ctx context.Context) error {
 	marker := protocol.NewSystemMarker(s.id, s.agent.Participant(), "model_switched",
 		map[string]any{"from": switch_.from.String(), "to": switch_.to.String()})
 	return s.emit(ctx, marker)
-}
-
-// MarkClosed flips the session status to closed and sets the
-// in-memory closed flag. Called by the built-in /end handler and
-// by handleClosedIntent (inbound SessionClosed frame from
-// Manager.Close). Idempotent: a second call is a no-op once the
-// row is already closed.
-//
-// Single-writer invariant: this is the ONLY path that writes
-// `closed` to a sessions row, and it always runs on the session's
-// own goroutine. External callers push frames into s.in instead
-// of UPDATEing the row themselves.
-func (s *Session) MarkClosed(ctx context.Context) error {
-	s.statusMu.Lock()
-	defer s.statusMu.Unlock()
-	if s.closed.Load() {
-		return nil
-	}
-	if err := s.store.UpdateSessionStatus(ctx, s.id, StatusClosed); err != nil {
-		return fmt.Errorf("session %s: mark closed: %w", s.id, err)
-	}
-	s.closed.Store(true)
-	return nil
-}
-
-// MarkSuspended flips the session status to suspended. Called by
-// handleSuspendedIntent (inbound SessionSuspended frame from
-// Manager.Suspend / ShutdownAll). Does NOT set s.closed because
-// suspend is non-terminal — the goroutine keeps draining s.in
-// until the inbox is closed.
-//
-// Same single-writer invariant as MarkClosed: only the session's
-// own goroutine ever writes to its sessions row.
-func (s *Session) MarkSuspended(ctx context.Context) error {
-	s.statusMu.Lock()
-	defer s.statusMu.Unlock()
-	if s.closed.Load() {
-		return nil
-	}
-	if err := s.store.UpdateSessionStatus(ctx, s.id, StatusSuspended); err != nil {
-		return fmt.Errorf("session %s: mark suspended: %w", s.id, err)
-	}
-	return nil
 }
 
 // IsClosed reports whether the session has been closed.

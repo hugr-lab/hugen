@@ -59,13 +59,41 @@ type Manager struct {
 
 	mu   sync.RWMutex
 	live map[string]*Session
+	// cancels keys per-session ctx cancellation by session id, set by
+	// spawn(). Used by Terminate to cancel one session without
+	// affecting siblings; by ShutdownAll only via rootCancel
+	// (which propagates to every per-session ctx via context derivation).
+	cancels map[string]context.CancelCauseFunc
 	// wg tracks every spawned session goroutine. ShutdownAll uses
-	// it to wait for every goroutine to finish writing its
-	// terminal status BEFORE the local DuckDB engine closes —
-	// without this guarantee an in-flight UPDATE races the engine
-	// teardown.
+	// it to wait for every goroutine to finish exiting BEFORE the
+	// local DuckDB engine closes — without this guarantee an
+	// in-flight AppendEvent races the engine teardown.
 	wg sync.WaitGroup
 }
+
+// terminationCause is the cancel cause attached to a per-session ctx
+// when Manager.Terminate (or the /end slash command) wants the session
+// goroutine to append a `session_terminated` event on exit. Graceful
+// process shutdown (rootCancel) uses no cause, so the goroutine
+// distinguishes the two paths via context.Cause(ctx) and writes
+// nothing on graceful shutdown.
+//
+// emitClose controls whether the goroutine's exit handler emits a
+// SessionClosed Frame to the outbox in addition to appending the
+// session_terminated event:
+//
+//   - emitClose=true  → the caller (Manager.Terminate) hasn't already
+//     surfaced a SessionClosed; the goroutine emits one for adapter
+//     back-compat.
+//   - emitClose=false → the caller already emitted SessionClosed (the
+//     /end slash command path); the goroutine writes the event but
+//     suppresses a duplicate frame.
+type terminationCause struct {
+	reason    string
+	emitClose bool
+}
+
+func (c *terminationCause) Error() string { return "session terminated: " + c.reason }
 
 // ManagerOption configures a Manager at construction.
 type ManagerOption func(*Manager)
@@ -115,6 +143,7 @@ func NewManager(
 		rootCtx:    rootCtx,
 		rootCancel: rootCancel,
 		live:       make(map[string]*Session),
+		cancels:    make(map[string]context.CancelCauseFunc),
 	}
 	for _, o := range opts {
 		o(m)
@@ -144,9 +173,16 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, time.Tim
 	}
 	if m.lifecycle != nil {
 		if err := m.lifecycle.Acquire(ctx, id); err != nil {
-			// Roll back the session row so a failed Acquire doesn't
-			// leave an orphan active row.
-			_ = m.store.UpdateSessionStatus(ctx, id, StatusClosed)
+			// Phase-4 strict event-sourcing: the sessions row is
+			// immutable after create. Mark the orphaned session
+			// terminal via a session_terminated event so the restart
+			// walker on next boot doesn't try to resume it.
+			terminal := protocol.NewSessionTerminated(id, m.agent.Participant(), protocol.SessionTerminatedPayload{
+				Reason: "acquire_failed",
+			})
+			if termRow, summary, perr := FrameToEventRow(terminal, m.agent.ID()); perr == nil {
+				_ = m.store.AppendEvent(ctx, termRow, summary)
+			}
 			return nil, time.Time{}, fmt.Errorf("manager: open session lifecycle: %w", err)
 		}
 	}
@@ -177,7 +213,7 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if row.Status == StatusClosed {
+	if isSessionTerminated(ctx, m.store, id) {
 		return nil, ErrSessionClosed
 	}
 	m.mu.RLock()
@@ -186,13 +222,6 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
 		return existing, nil
 	}
 	m.mu.RUnlock()
-
-	// Re-mark active if we're resuming from suspended.
-	if row.Status == StatusSuspended {
-		if err := m.store.UpdateSessionStatus(ctx, id, StatusActive); err != nil {
-			m.logger.Warn("manager: re-activate session", "session", id, "err", err)
-		}
-	}
 	// Re-run Acquire so per-session resources reattach after a
 	// process restart: per_session MCPs are respawned, autoload
 	// skills re-bound, workspace dir re-prepared. Resources.Acquire
@@ -219,96 +248,73 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
 	return s, nil
 }
 
-// Close transitions the session to "closed" and waits for the
-// session's goroutine to finish writing the terminal status. The
-// goroutine itself is the only writer to the row (single-writer
-// invariant) — Manager pushes a SessionClosed intent frame into
-// the inbox and blocks on s.Done until the goroutine has run
-// MarkClosed and exited.
+// Terminate is the unified session-termination path for phase 4 and
+// onward. It cancels the target session's ctx with a terminationCause
+// carrying the caller-supplied reason and waits for the goroutine to
+// append its session_terminated event and exit.
 //
-// Idempotent: a session that's already terminated returns the
-// stored closed_at. Returns ErrSessionNotFound if the session
-// doesn't exist in the store either.
-func (m *Manager) Close(ctx context.Context, id, reason string) (time.Time, error) {
+// Mechanism:
+//
+//   - Live session: cancel per-session ctx via CancelCauseFunc;
+//     goroutine's ctx.Done handler reads context.Cause(ctx) →
+//     appends session_terminated{reason} → emits SessionClosed Frame
+//     for adapter back-compat → exits. Then Manager waits on s.Done()
+//     and runs lifecycle.Release.
+//
+//   - Not live (process restart edge case, /end during shutdown,
+//     subagent already terminal): append a session_terminated event
+//     directly via the store. The sessions row is NOT updated —
+//     liveness is event-derived (FR-027).
+//
+// Idempotent: calling Terminate on a session that already has a
+// session_terminated event is a no-op (skipped silently).
+func (m *Manager) Terminate(ctx context.Context, id, reason string) error {
+	if reason == "" {
+		reason = "terminated"
+	}
 	m.mu.RLock()
 	s, live := m.live[id]
+	cancel, hasCancel := m.cancels[id]
 	m.mu.RUnlock()
-
-	if !live {
-		// No live goroutine to forward to. Status update on
-		// already-suspended rows happens via a different code
-		// path (resume + close), out of scope here. We just read
-		// the existing row and report.
-		row, err := m.store.LoadSession(ctx, id)
-		if err != nil {
-			return time.Time{}, err
+	if live && hasCancel {
+		if !s.closed.Load() {
+			cancel(&terminationCause{reason: reason, emitClose: true})
 		}
-		if row.Status == StatusClosed {
-			return row.UpdatedAt, nil
-		}
-		// Session is in the store but not live (suspended). The
-		// goroutine isn't around to enforce the single-writer
-		// invariant — fall back to a direct update, which is
-		// safe because nobody else is touching the row.
-		if err := m.store.UpdateSessionStatus(ctx, id, StatusClosed); err != nil {
-			return time.Time{}, err
+		select {
+		case <-s.Done():
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 		if m.lifecycle != nil {
 			if err := m.lifecycle.Release(ctx, id); err != nil {
-				m.logger.Warn("manager: close session lifecycle", "session", id, "err", err)
+				m.logger.Warn("manager: terminate session lifecycle", "session", id, "err", err)
 			}
 		}
-		return time.Now().UTC(), nil
+		return nil
 	}
-
-	if !s.closed.Load() {
-		closed := protocol.NewSessionClosed(id, m.agent.Participant(), reason)
-		if !s.Submit(ctx, closed) {
-			m.logger.Warn("manager: session inbox closed before Close intent landed",
-				"session", id)
+	// Not-live path: append the terminal event ourselves so the
+	// session is unambiguously terminated on next boot.
+	if existing, err := m.store.ListEvents(ctx, id, ListEventsOpts{Limit: 1000}); err == nil {
+		for _, ev := range existing {
+			if ev.EventType == string(protocol.KindSessionTerminated) {
+				return nil // already terminal
+			}
 		}
 	}
-	// Wait for the session's goroutine to flush its terminal
-	// status and exit. Hard cap on ctx so a stuck handler can't
-	// pin the API caller indefinitely.
-	select {
-	case <-s.Done():
-	case <-ctx.Done():
-		return time.Time{}, ctx.Err()
+	terminal := protocol.NewSessionTerminated(id, m.agent.Participant(), protocol.SessionTerminatedPayload{
+		Reason: reason,
+	})
+	row, summary, err := FrameToEventRow(terminal, m.agent.ID())
+	if err != nil {
+		return fmt.Errorf("manager: terminate (offline) project frame: %w", err)
+	}
+	if err := m.store.AppendEvent(ctx, row, summary); err != nil {
+		return fmt.Errorf("manager: terminate (offline) append: %w", err)
 	}
 	if m.lifecycle != nil {
 		if err := m.lifecycle.Release(ctx, id); err != nil {
-			m.logger.Warn("manager: close session lifecycle", "session", id, "err", err)
+			m.logger.Warn("manager: terminate (offline) lifecycle", "session", id, "err", err)
 		}
-	}
-	return time.Now().UTC(), nil
-}
-
-// Suspend asks the session goroutine to record `suspended`
-// status. Implemented as a thin wrapper around the inbox-frame
-// dispatch so the single-writer invariant holds — Manager never
-// UPDATEs a sessions row directly when a goroutine owns it.
-//
-// Returns immediately after pushing the intent. Status is
-// recorded asynchronously by the session goroutine on its next
-// turn boundary; subsequent calls observe it through the store.
-// If no live goroutine is around (suspended or never spawned),
-// the row is updated directly — there is no goroutine that could
-// race the write.
-func (m *Manager) Suspend(ctx context.Context, id string) error {
-	m.mu.RLock()
-	s, live := m.live[id]
-	m.mu.RUnlock()
-	if !live {
-		return m.store.UpdateSessionStatus(ctx, id, StatusSuspended)
-	}
-	if s.closed.Load() {
-		return nil
-	}
-	marker := protocol.NewSessionSuspended(id, m.agent.Participant())
-	if !s.Submit(ctx, marker) {
-		m.logger.Warn("manager: session inbox closed before Suspend intent landed",
-			"session", id)
 	}
 	return nil
 }
@@ -342,79 +348,85 @@ func (m *Manager) Get(id string) (*Session, bool) {
 	return s, ok
 }
 
-// ShutdownAll asks every live session to suspend, then waits for
-// their goroutines to exit. Single-writer ordering: the session
-// goroutine is the only writer to its sessions row; here we just
-// push intents and wait. Only after every wg.Done has fired do
-// we cancel the root context — that way any in-flight UPDATE
-// finished against a still-open store before downstream tear-down
-// (Tools.Close, LocalEngine.Close) starts.
+// ShutdownAll cancels the root context (which propagates to every
+// per-session ctx) and waits for every session goroutine to exit.
+//
+// **Phase-4 invariant**: graceful shutdown writes nothing — no
+// `session_terminated` events are appended. Sessions whose goroutines
+// died without a terminal event are exactly the "needs-restart-
+// decision" set on the next boot:
+//
+//   - root sessions resume on next user input (standard phase-3 path);
+//   - sub-agent sessions are processed by the restart BFS walker
+//     (phase-4 commit 14) which appends
+//     `session_terminated{reason:"restart_died"}` to each and delivers
+//     a synthetic subagent_result Frame to its parent's inbox.
 //
 // Idempotent and safe to call multiple times.
 func (m *Manager) ShutdownAll(ctx context.Context) {
-	m.mu.Lock()
-	live := make([]*Session, 0, len(m.live))
-	for _, s := range m.live {
-		live = append(live, s)
-	}
-	m.mu.Unlock()
-	for _, s := range live {
-		if !s.closed.Load() {
-			marker := protocol.NewSessionSuspended(s.id, m.agent.Participant())
-			_ = s.Submit(ctx, marker)
-		}
-		// close(s.in) lets the Run loop exit after draining any
-		// already-queued frames. The session's own /end-in-flight,
-		// if any, runs to completion before this empty inbox is
-		// observed.
-		func() {
-			defer func() { _ = recover() }()
-			close(s.in)
-		}()
-	}
-	// Wait for every session goroutine to finish writing terminal
-	// status and exit. Goroutines self-deregister from m.live in
-	// their defer chain, so by the time wg.Wait returns m.live is
-	// empty.
-	m.wg.Wait()
 	m.rootCancel()
+	m.wg.Wait()
 }
 
 // spawn registers a new live Session and starts its goroutine.
-// The session goroutine runs against m.rootCtx so it survives the
-// caller's context (typically an adapter's errgroup context).
+// Each session runs against a per-session ctx derived from m.rootCtx
+// via WithCancelCause, so Terminate can cancel one session in
+// isolation while ShutdownAll cancels every session at once via
+// rootCancel.
 //
 // Re-checks live[id] under the write lock so concurrent Open/Resume
 // callers can't double-spawn an orphan goroutine.
 func (m *Manager) spawn(_ context.Context, id string) *Session {
 	s := NewSession(id, m.agent, m.store, m.models, m.commands, m.codec, m.logger, m.sessionOpts...)
+	sessCtx, cancel := context.WithCancelCause(m.rootCtx)
 	m.mu.Lock()
 	if existing, ok := m.live[id]; ok {
 		m.mu.Unlock()
+		cancel(nil) // race lost; release the ctx we created
 		return existing
 	}
 	m.live[id] = s
+	m.cancels[id] = cancel
+	s.terminate = cancel
 	m.wg.Add(1)
 	m.mu.Unlock()
 	go func() {
 		defer m.wg.Done()
-		// Self-deregister on exit so Manager.Get / Snapshot
-		// reflect the live state without an external write.
-		// Done strictly after the Run loop returns, so by the
-		// time another goroutine looks up id == not-live, the
-		// terminal status is already in the store.
+		// Self-deregister on exit so Manager.Get reflects the live
+		// state without an external write. Done strictly after the
+		// Run loop returns, so by the time another goroutine looks
+		// up id == not-live, any session_terminated event is
+		// already in the store.
 		defer func() {
 			m.mu.Lock()
 			if cur, ok := m.live[id]; ok && cur == s {
 				delete(m.live, id)
 			}
+			delete(m.cancels, id)
 			m.mu.Unlock()
 		}()
-		if err := s.Run(m.rootCtx); err != nil && !errors.Is(err, context.Canceled) {
+		if err := s.Run(sessCtx); err != nil && !errors.Is(err, context.Canceled) {
 			m.logger.Warn("session loop exited", "session", id, "err", err)
 		}
 	}()
 	return s
+}
+
+// isSessionTerminated reports whether the session id has a
+// session_terminated event in its events. Phase-4 liveness is
+// event-derived (FR-027); the legacy `sessions.status` column is
+// pinned to 'active' at create and never updated.
+func isSessionTerminated(ctx context.Context, store RuntimeStore, id string) bool {
+	events, err := store.ListEvents(ctx, id, ListEventsOpts{Limit: 1000})
+	if err != nil {
+		return false
+	}
+	for _, ev := range events {
+		if ev.EventType == string(protocol.KindSessionTerminated) {
+			return true
+		}
+	}
+	return false
 }
 
 // SessionsLive returns the IDs of currently live sessions.

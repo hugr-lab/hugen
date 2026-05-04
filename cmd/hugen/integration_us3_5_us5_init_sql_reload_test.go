@@ -57,7 +57,7 @@ func TestUS3_5_US5_InitSQLReload(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
-		defer core.manager.Close(ctx, sess.ID(), "test")
+		defer core.manager.Terminate(ctx, sess.ID(), "user:/end")
 
 		snap, err := core.tools.Snapshot(ctx, sess.ID())
 		if err != nil {

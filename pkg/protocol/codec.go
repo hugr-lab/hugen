@@ -142,8 +142,6 @@ func (c *Codec) materialise(base BaseFrame, payload []byte) (Frame, error) {
 			return nil, err
 		}
 		return &SessionClosed{BaseFrame: base, Payload: p}, nil
-	case KindSessionSuspended:
-		return &SessionSuspended{BaseFrame: base}, nil
 	case KindHeartbeat:
 		var p HeartbeatPayload
 		if err := unmarshalPayload(payload, &p); err != nil {

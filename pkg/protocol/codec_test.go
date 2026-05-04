@@ -23,7 +23,6 @@ func TestCodec_RoundTrip(t *testing.T) {
 		{"cancel", NewCancel("s1", testAuthor, "user_cancelled")},
 		{"session_opened", NewSessionOpened("s1", testAgent, []ParticipantInfo{testAuthor, testAgent})},
 		{"session_closed", NewSessionClosed("s1", testAgent, "user_end")},
-		{"session_suspended", NewSessionSuspended("s1", testAgent)},
 		{"heartbeat", NewHeartbeat("s1", testAgent)},
 		{"error", NewError("s1", testAgent, "model_unavailable", "no model", true)},
 		{"system_marker", NewSystemMarker("s1", testAgent, "note_added", map[string]any{"id": "n1"})},
