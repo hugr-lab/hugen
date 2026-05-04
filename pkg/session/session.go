@@ -15,6 +15,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/plan"
+	"github.com/hugr-lab/hugen/pkg/session/whiteboard"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -148,6 +149,18 @@ type Session struct {
 	// say) self-heals on the next materialise / restart.
 	planMu sync.Mutex
 	plan   plan.Plan
+
+	// whiteboard is the in-memory projection of whiteboard_op
+	// events (US3). On a host session it carries the canonical
+	// message log + NextSeq; on a member session it carries the
+	// member's own snapshot of broadcasts received. Built once at
+	// materialise and updated by the four whiteboard_* tool
+	// handlers (host side) and the member-side internal handler
+	// for inbound whiteboard_message Frames. whiteboardMu serialises
+	// the seq-allocate + emit + Apply sequence on the host so two
+	// concurrent broadcasts can't reuse the same seq.
+	whiteboardMu sync.Mutex
+	whiteboard   whiteboard.Whiteboard
 
 	in     chan protocol.Frame
 	out    chan protocol.Frame

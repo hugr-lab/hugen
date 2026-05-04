@@ -40,12 +40,22 @@ const (
 // kindRoutes maps Frame Kind to its routing category. Entries omitted
 // from this map default to RouteBuffered.
 //
-// Phase 4 only seeds RouteToolFeed for subagent_result (consumed by
-// wait_subagents in C7). Whiteboard host-side kinds register here in
-// step 10 with RouteInternal once protocol gains the matching Kind
-// constants. Phase 5 HITL kinds register on landing.
+// Phase 4:
+//   - subagent_result → RouteToolFeed (consumed by wait_subagents).
+//   - whiteboard_op → RouteInternal on the host (handler validates
+//     active board, persists host-monotonic seq, broadcasts to
+//     children).
+//   - whiteboard_message → RouteInternal on the member (handler
+//     persists member's local whiteboard_op event, updates the
+//     in-memory projection, surfaces the broadcast to history as a
+//     formatted system_message so the model sees it on its next
+//     prompt build).
+//
+// Phase 5 HITL kinds register on landing.
 var kindRoutes = map[protocol.Kind]InboundRoute{
-	protocol.KindSubagentResult: RouteToolFeed,
+	protocol.KindSubagentResult:    RouteToolFeed,
+	protocol.KindWhiteboardOp:      RouteInternal,
+	protocol.KindWhiteboardMessage: RouteInternal,
 }
 
 // routeFor looks up the InboundRoute for a Frame Kind. Default is
