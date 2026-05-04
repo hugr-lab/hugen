@@ -129,7 +129,20 @@ func (a *AllowedTools) UnmarshalJSON(data []byte) error {
 // HugenMetadata is the typed view of metadata.hugen.* — the
 // hugen-specific extensions inside the manifest.
 type HugenMetadata struct {
-	Requires  []string                  `json:"requires,omitempty"`
+	// Requires is the legacy phase-3 spelling of the transitive
+	// skill-dependency declaration. RequiresSkills (phase-4) is the
+	// canonical name; both fields merge in AllRequires for the
+	// closure resolver.
+	Requires []string `json:"requires,omitempty"`
+
+	// RequiresSkills is the phase-4 canonical name for transitive
+	// skill dependencies (phase-4-spec §3 step 8 / §4.4 / Q19). The
+	// resolver walks the closure with DFS + cycle detection
+	// (ErrSkillCycle) at SkillManager.Load. Dependencies stay
+	// loaded for the session's lifetime — there's no refcount on
+	// unload.
+	RequiresSkills []string `json:"requires_skills,omitempty" yaml:"requires_skills,omitempty"`
+
 	Intents   []string                  `json:"intents,omitempty"`
 	SubAgents []SubAgentRole            `json:"sub_agents,omitempty"`
 	Memory    map[string]MemoryCategory `json:"memory,omitempty"`
@@ -141,6 +154,20 @@ type HugenMetadata struct {
 	// absent) defers to the runtime default (defaultMaxToolIterations,
 	// currently 15).
 	MaxTurns int `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
+
+	// MaxTurnsHard is the per-skill hard ceiling on the model→tool
+	// →model loop, after which the runtime calls
+	// Manager.Terminate(self, "hard_ceiling") rather than soft-
+	// nudge the model. 0 (or absent) defers to the runtime default
+	// (MaxTurns * 2). See phase-4-spec §8.2.
+	MaxTurnsHard int `json:"max_turns_hard,omitempty" yaml:"max_turns_hard,omitempty"`
+
+	// StuckDetection tunes the per-pattern detectors operating
+	// independently of the soft/hard caps (repeated_hash,
+	// tight_density, no_progress). All detectors default to
+	// conservative values when the field is absent. See phase-4-spec
+	// §8.3.
+	StuckDetection StuckDetectionPolicy `json:"stuck_detection,omitempty" yaml:"stuck_detection,omitempty"`
 
 	// Autoload, when true, tells the SessionManager to load this
 	// skill into every newly opened session whose type appears in
@@ -158,11 +185,87 @@ type HugenMetadata struct {
 	// keeps autoload skills out of sub-agent sessions until an
 	// author opts in.
 	AutoloadFor []string `json:"autoload_for,omitempty" yaml:"autoload_for,omitempty"`
+
+	// AutoloadWhenRoleCanSpawn gates autoload on the sub-agent's
+	// role having CanSpawn=true. Used by skills that only make
+	// sense for orchestrators (e.g. _whiteboard for a sub-agent
+	// that itself spawns deeper children). No-op for root
+	// sessions. Phase-4-spec §3 step 8 + §7.7.
+	AutoloadWhenRoleCanSpawn bool `json:"autoload_when_role_can_spawn,omitempty" yaml:"autoload_when_role_can_spawn,omitempty"`
+
+	// AutoloadWhenParentHasActiveWhiteboard gates autoload on the
+	// parent session currently owning an active whiteboard. The
+	// canonical user is _whiteboard for sub-agents — the skill is
+	// only useful when a broadcast channel exists upstream.
+	// Phase-4-spec §3 step 8 + §7.7.
+	AutoloadWhenParentHasActiveWhiteboard bool `json:"autoload_when_parent_has_active_whiteboard,omitempty" yaml:"autoload_when_parent_has_active_whiteboard,omitempty"`
+}
+
+// AllRequires returns the merged transitive-dependency list,
+// combining the legacy Requires field with the phase-4 canonical
+// RequiresSkills. Order: RequiresSkills first, then any Requires
+// entries not already present (de-duped). Caller can iterate the
+// result without worrying about which key the manifest used.
+func (h HugenMetadata) AllRequires() []string {
+	if len(h.RequiresSkills) == 0 {
+		return h.Requires
+	}
+	if len(h.Requires) == 0 {
+		return h.RequiresSkills
+	}
+	seen := make(map[string]struct{}, len(h.RequiresSkills)+len(h.Requires))
+	out := make([]string, 0, len(h.RequiresSkills)+len(h.Requires))
+	for _, n := range h.RequiresSkills {
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	for _, n := range h.Requires {
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	return out
+}
+
+// StuckDetectionPolicy tunes the per-pattern stuck-detection
+// heuristics on a session. Zero-value fields fall back to the
+// runtime's defaults (repeated_hash=3, tight_density_count=3,
+// tight_density_window=2s). Enabled defaults to true — set
+// explicitly to false to disable a single pattern at the skill
+// level. See phase-4-spec §4.4 + §8.3.
+type StuckDetectionPolicy struct {
+	RepeatedHash       int    `json:"repeated_hash,omitempty" yaml:"repeated_hash,omitempty"`
+	TightDensityCount  int    `json:"tight_density_count,omitempty" yaml:"tight_density_count,omitempty"`
+	TightDensityWindow string `json:"tight_density_window,omitempty" yaml:"tight_density_window,omitempty"`
+	// Enabled is a tri-state: nil = default (true), &false = off,
+	// &true = explicit on. Pointer rather than bool so an absent
+	// key isn't conflated with an explicit `enabled: false`.
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+}
+
+// IsEnabled returns the effective enable state of stuck detection
+// for this skill: true when Enabled is nil (default) or explicitly
+// &true; false only when Enabled is &false.
+func (p StuckDetectionPolicy) IsEnabled() bool {
+	if p.Enabled == nil {
+		return true
+	}
+	return *p.Enabled
 }
 
 // AutoloadIn reports whether the manifest opts into autoload for
-// the given session type. Resolves the empty-AutoloadFor default
-// ([root]) so callers don't repeat the rule.
+// the given session type, ignoring phase-4 conditional gates. Use
+// AutoloadEligible when the conditional flags
+// (AutoloadWhenRoleCanSpawn / AutoloadWhenParentHasActiveWhiteboard)
+// matter — typically at sub-agent spawn time.
+//
+// Resolves the empty-AutoloadFor default ([root]) so callers don't
+// repeat the rule.
 func (m *Manifest) AutoloadIn(sessionType string) bool {
 	if !m.Hugen.Autoload {
 		return false
@@ -178,6 +281,55 @@ func (m *Manifest) AutoloadIn(sessionType string) bool {
 	return false
 }
 
+// AutoloadContext carries the per-session signals AutoloadEligible
+// consults to evaluate the phase-4 conditional autoload flags.
+// Callers populate it from session/role state at the autoload
+// decision point (sub-agent spawn for the conditional flags,
+// session open for plain autoload). Zero-value fields are safe —
+// they map to "no conditional restriction satisfied" so a manifest
+// requiring the gate stays out of the session.
+type AutoloadContext struct {
+	// SessionType is one of SessionTypeRoot / SessionTypeSubAgent.
+	// Required.
+	SessionType string
+
+	// RoleCanSpawn is the SubAgentRole.CanSpawnEffective() value of
+	// the role this sub-agent was spawned with. Ignored for root
+	// sessions. Consumed only by manifests that set
+	// AutoloadWhenRoleCanSpawn.
+	RoleCanSpawn bool
+
+	// ParentHasActiveWhiteboard is whether the parent session
+	// currently owns an active whiteboard at spawn time. Consumed
+	// only by manifests that set
+	// AutoloadWhenParentHasActiveWhiteboard.
+	ParentHasActiveWhiteboard bool
+}
+
+// AutoloadEligible reports whether the manifest should be autoloaded
+// into a session described by ctx. Combines the base AutoloadIn
+// predicate with the phase-4 conditional gates: each "AutoloadWhen…"
+// flag, when true, ANDs an extra precondition on top of the base
+// autoload check.
+//
+// Conditional flags are skipped for root sessions — they target
+// sub-agent autoload semantics by definition.
+func (m *Manifest) AutoloadEligible(ctx AutoloadContext) bool {
+	if !m.AutoloadIn(ctx.SessionType) {
+		return false
+	}
+	if ctx.SessionType != SessionTypeSubAgent {
+		return true
+	}
+	if m.Hugen.AutoloadWhenRoleCanSpawn && !ctx.RoleCanSpawn {
+		return false
+	}
+	if m.Hugen.AutoloadWhenParentHasActiveWhiteboard && !ctx.ParentHasActiveWhiteboard {
+		return false
+	}
+	return true
+}
+
 // SessionType labels for Manifest.AutoloadFor entries.
 const (
 	SessionTypeRoot     = "root"
@@ -185,11 +337,30 @@ const (
 )
 
 // SubAgentRole is the manifest shape phase-3 validates and
-// phase-4 will dispatch.
+// phase-4 dispatches.
 type SubAgentRole struct {
 	Name        string      `json:"name"`
 	Description string      `json:"description,omitempty"`
 	Tools       []ToolGrant `json:"tools,omitempty"`
+
+	// CanSpawn controls whether this role itself may call
+	// spawn_subagent (phase-4-spec §3 step 8 + §4.4). Default true:
+	// nil means "not specified, use default", &false explicitly
+	// disallows further spawning, &true is the redundant-explicit
+	// case. Pointer so the default-true semantics survive the
+	// missing-key case (a plain bool would default to false).
+	CanSpawn *bool `json:"can_spawn,omitempty" yaml:"can_spawn,omitempty"`
+}
+
+// CanSpawnEffective resolves SubAgentRole.CanSpawn to the boolean
+// the runtime actually checks. Default true — only an explicit
+// `can_spawn: false` in the manifest disables further spawning for
+// this role.
+func (r SubAgentRole) CanSpawnEffective() bool {
+	if r.CanSpawn == nil {
+		return true
+	}
+	return *r.CanSpawn
 }
 
 // MemoryCategory ports the legacy memory.yaml shape.

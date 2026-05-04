@@ -227,3 +227,181 @@ func contains(s []string, want string) bool {
 	}
 	return false
 }
+
+// TestParse_RequiresSkillsCanonical exercises the phase-4 canonical
+// `requires_skills` key. AllRequires must surface the dependency
+// regardless of which spelling the manifest uses.
+func TestParse_RequiresSkillsCanonical(t *testing.T) {
+	src := `---
+name: needs-planner
+description: Sub-agent skill that pulls in the planner.
+license: MIT
+metadata:
+  hugen:
+    requires_skills:
+      - _planner
+---
+`
+	m, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !contains(m.Hugen.RequiresSkills, "_planner") {
+		t.Errorf("Hugen.RequiresSkills = %v, want [_planner]", m.Hugen.RequiresSkills)
+	}
+	if !contains(m.Hugen.AllRequires(), "_planner") {
+		t.Errorf("AllRequires = %v, want [_planner]", m.Hugen.AllRequires())
+	}
+}
+
+// TestParse_RequiresAndRequiresSkills_Merged verifies a manifest
+// using both spellings de-duplicates and preserves order
+// (RequiresSkills first).
+func TestParse_RequiresAndRequiresSkills_Merged(t *testing.T) {
+	src := `---
+name: dual
+description: Both keys present.
+license: MIT
+metadata:
+  hugen:
+    requires_skills: [_planner, _memory]
+    requires: [_memory, _system]
+---
+`
+	m, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := m.Hugen.AllRequires()
+	want := []string{"_planner", "_memory", "_system"}
+	if len(got) != len(want) {
+		t.Fatalf("AllRequires len = %d, want %d (got %v)", len(got), len(want), got)
+	}
+	for i, n := range want {
+		if got[i] != n {
+			t.Errorf("AllRequires[%d] = %q, want %q (full %v)", i, got[i], n, got)
+		}
+	}
+}
+
+// TestParse_PhaseFourFlags exercises the new manifest fields:
+// max_turns_hard, stuck_detection, can_spawn, autoload_when_*.
+func TestParse_PhaseFourFlags(t *testing.T) {
+	src := `---
+name: heavy-explorer
+description: Phase-4 fields exercised end-to-end.
+license: MIT
+metadata:
+  hugen:
+    max_turns: 30
+    max_turns_hard: 60
+    stuck_detection:
+      repeated_hash: 4
+      tight_density_count: 5
+      tight_density_window: "3s"
+      enabled: false
+    sub_agents:
+      - name: explorer
+        description: leaf
+        can_spawn: false
+    autoload: true
+    autoload_for: [subagent]
+    autoload_when_role_can_spawn: true
+    autoload_when_parent_has_active_whiteboard: true
+---
+`
+	m, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if m.Hugen.MaxTurnsHard != 60 {
+		t.Errorf("MaxTurnsHard = %d, want 60", m.Hugen.MaxTurnsHard)
+	}
+	if m.Hugen.StuckDetection.RepeatedHash != 4 {
+		t.Errorf("StuckDetection.RepeatedHash = %d, want 4", m.Hugen.StuckDetection.RepeatedHash)
+	}
+	if m.Hugen.StuckDetection.IsEnabled() {
+		t.Errorf("StuckDetection.IsEnabled = true, want false (explicit override)")
+	}
+	if len(m.Hugen.SubAgents) != 1 {
+		t.Fatalf("SubAgents len = %d, want 1", len(m.Hugen.SubAgents))
+	}
+	if got := m.Hugen.SubAgents[0]; got.CanSpawnEffective() {
+		t.Errorf("SubAgent.CanSpawnEffective = true, want false (explicit can_spawn: false)")
+	}
+	if !m.Hugen.AutoloadWhenRoleCanSpawn {
+		t.Errorf("AutoloadWhenRoleCanSpawn not parsed")
+	}
+	if !m.Hugen.AutoloadWhenParentHasActiveWhiteboard {
+		t.Errorf("AutoloadWhenParentHasActiveWhiteboard not parsed")
+	}
+}
+
+// TestCanSpawn_DefaultsTrue verifies SubAgentRole.CanSpawnEffective
+// returns true when the manifest omits can_spawn (the default-true
+// semantic from §4.4).
+func TestCanSpawn_DefaultsTrue(t *testing.T) {
+	r := SubAgentRole{Name: "explorer"}
+	if !r.CanSpawnEffective() {
+		t.Error("CanSpawnEffective = false on default; want true")
+	}
+}
+
+// TestStuckDetection_DefaultEnabled verifies IsEnabled returns true
+// when Enabled is unset, mirroring the conservative-default stance
+// from §8.3.
+func TestStuckDetection_DefaultEnabled(t *testing.T) {
+	var p StuckDetectionPolicy
+	if !p.IsEnabled() {
+		t.Error("IsEnabled = false on default; want true")
+	}
+}
+
+// TestAutoloadEligible_RootIgnoresConditional verifies the
+// conditional flags are silently ignored for root sessions —
+// they target sub-agent autoload semantics by definition.
+func TestAutoloadEligible_RootIgnoresConditional(t *testing.T) {
+	m := &Manifest{}
+	m.Hugen.Autoload = true
+	m.Hugen.AutoloadWhenRoleCanSpawn = true
+	if !m.AutoloadEligible(AutoloadContext{SessionType: SessionTypeRoot}) {
+		t.Error("AutoloadEligible(root) = false; conditional flags should not apply to roots")
+	}
+}
+
+// TestAutoloadEligible_SubAgent_RoleCanSpawnGate exercises the
+// AutoloadWhenRoleCanSpawn gate: the manifest only autoloads when
+// the spawned role's CanSpawn is true.
+func TestAutoloadEligible_SubAgent_RoleCanSpawnGate(t *testing.T) {
+	m := &Manifest{}
+	m.Hugen.Autoload = true
+	m.Hugen.AutoloadFor = []string{SessionTypeSubAgent}
+	m.Hugen.AutoloadWhenRoleCanSpawn = true
+
+	yes := AutoloadContext{SessionType: SessionTypeSubAgent, RoleCanSpawn: true}
+	if !m.AutoloadEligible(yes) {
+		t.Error("AutoloadEligible(role can spawn) = false, want true")
+	}
+	no := AutoloadContext{SessionType: SessionTypeSubAgent, RoleCanSpawn: false}
+	if m.AutoloadEligible(no) {
+		t.Error("AutoloadEligible(role cannot spawn) = true, want false")
+	}
+}
+
+// TestAutoloadEligible_SubAgent_WhiteboardGate exercises the
+// AutoloadWhenParentHasActiveWhiteboard gate.
+func TestAutoloadEligible_SubAgent_WhiteboardGate(t *testing.T) {
+	m := &Manifest{}
+	m.Hugen.Autoload = true
+	m.Hugen.AutoloadFor = []string{SessionTypeSubAgent}
+	m.Hugen.AutoloadWhenParentHasActiveWhiteboard = true
+
+	yes := AutoloadContext{SessionType: SessionTypeSubAgent, ParentHasActiveWhiteboard: true}
+	if !m.AutoloadEligible(yes) {
+		t.Error("AutoloadEligible(active whiteboard) = false, want true")
+	}
+	no := AutoloadContext{SessionType: SessionTypeSubAgent, ParentHasActiveWhiteboard: false}
+	if m.AutoloadEligible(no) {
+		t.Error("AutoloadEligible(no whiteboard) = true, want false")
+	}
+}

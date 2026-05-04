@@ -410,7 +410,7 @@ func (m *SkillManager) resolveClosure(ctx context.Context, root string) ([]Skill
 		if err != nil {
 			return fmt.Errorf("skill: load %s: %w", name, err)
 		}
-		for _, dep := range s.Manifest.Hugen.Requires {
+		for _, dep := range s.Manifest.Hugen.AllRequires() {
 			if err := visit(dep, name); err != nil {
 				return err
 			}

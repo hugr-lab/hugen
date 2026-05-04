@@ -123,6 +123,44 @@ allowed-tools:
 	}
 }
 
+// TestManager_LoadResolvesRequiresSkills_PhaseFour mirrors the
+// transitive-deps coverage above using the phase-4 canonical
+// `requires_skills` key — proves the closure resolver consumes the
+// new key alongside the legacy `requires`.
+func TestManager_LoadResolvesRequiresSkills_PhaseFour(t *testing.T) {
+	m := newTestManager(t, map[string][]byte{
+		"top": []byte(`---
+name: top
+description: top
+license: MIT
+metadata:
+  hugen:
+    requires_skills: [base]
+---
+`),
+		"base": []byte(`---
+name: base
+description: base
+license: MIT
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.read_file]
+---
+`),
+	})
+
+	if err := m.Load(context.Background(), "s", "top"); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	b, err := m.Bindings(context.Background(), "s")
+	if err != nil {
+		t.Fatalf("Bindings: %v", err)
+	}
+	if len(b.AllowedTools) != 1 {
+		t.Errorf("AllowedTools = %+v, want one entry from base via requires_skills", b.AllowedTools)
+	}
+}
+
 func TestManager_LoadMissingSkill(t *testing.T) {
 	m := newTestManager(t, nil)
 	err := m.Load(context.Background(), "s", "ghost")
