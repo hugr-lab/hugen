@@ -76,14 +76,50 @@ type Session struct {
 	//     (the parent's terminate caused our ctx to fire).
 	explicitTerminate atomic.Bool
 
-	// Per-session model overrides. /model use mutates this.
+	// Per-session model overrides. /model use mutates this. The
+	// overridesMu lock survives the C5 select-loop refactor because
+	// SetModelOverride is reachable from CommandEnv handlers and from
+	// future Tool implementations that may run on background goroutines
+	// (e.g. Manager-as-ToolProvider in C7).
 	overridesMu sync.RWMutex
 	overrides   map[model.Intent]model.ModelSpec
 
-	// Streaming state — set when a turn is in flight.
-	inflightMu     sync.Mutex
-	inflightCancel context.CancelFunc
-	pendingSwitch  *modelSwitch
+	// pendingSwitch captures a /model use queued for the next turn.
+	// Single-goroutine (Run) reader/writer post-C5 — no lock needed.
+	pendingSwitch *modelSwitch
+
+	// Per-turn state populated by startTurn (turn.go). All four fields
+	// are owned by the Run goroutine and reset to nil in retireTurn:
+	//   - turnCtx / turnCancel: child of runCtx; cancelled by /cancel
+	//     so the model + tool dispatch goroutines abort cleanly.
+	//   - modelChunks: fan-in from the model goroutine. nil between
+	//     turns and after the goroutine closes the channel — select
+	//     case on a nil channel blocks forever, disabling the branch.
+	//   - toolResults: same pattern for the tool dispatcher.
+	turnCtx     context.Context
+	turnCancel  context.CancelFunc
+	modelChunks chan modelChunkEvent
+	toolResults chan toolResultEvent
+	turnState   *turnState
+
+	// turnWG tracks per-turn goroutines (model streamer + tool
+	// dispatcher) so Run can wait for them to exit before closing
+	// s.out. Without this wait the dispatcher's emit races with
+	// Run's defer close(s.out) — visible immediately to the race
+	// detector even when defer-recover masks the runtime panic.
+	turnWG sync.WaitGroup
+
+	// pendingInbound buffers RouteBuffered Frames received mid-turn.
+	// Drained at every turn boundary into s.history. C5 buffers
+	// non-Cancel/non-SlashCommand frames received while a turn is in
+	// flight; C6 will replace the inline routing with a kindRoutes
+	// table.
+	pendingInbound []protocol.Frame
+
+	// activeToolFeed is the slot a phase-4 blocking system tool (e.g.
+	// wait_subagents) registers to consume RouteToolFeed Frames. C5
+	// reserves the field; first wired in C7.
+	activeToolFeed *ToolFeed
 
 	// Materialisation state for restart-resume (Phase 4 fills this in).
 	materialised atomic.Bool
@@ -325,33 +361,68 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 	}
 }
 
-// Run drives the turn loop. On ctx cancellation, the loop reads the
-// cancel cause: if it's a *terminationCause (from Manager.Terminate
-// or from /end via s.terminate), the goroutine appends a
-// session_terminated event with the supplied reason and optionally
-// emits a SessionClosed Frame for adapter back-compat. If the cancel
-// has no cause (graceful process shutdown via Manager.ShutdownAll),
-// the goroutine writes nothing — sessions without a terminal event
-// are exactly the "needs-restart-decision" set on next boot
-// (FR-028 + FR-029).
+// Run drives the event-driven session loop (phase-4 spec §10.3).
+// Three live event sources select against ctx.Done:
+//
+//   - s.in: inbound Frames. Routed inline (Cancel / SlashCommand /
+//     UserMessage) or buffered into pendingInbound for drain at the
+//     next turn boundary.
+//   - s.modelChunks: per-chunk events from a running model.Generate
+//     goroutine. nil between turns — a select case on a nil channel
+//     blocks forever, so the branch is automatically disabled.
+//   - s.toolResults: tool dispatch results from a running tool
+//     dispatcher goroutine. Same nil-channel pattern.
+//
+// After every select branch, advanceOrFinish runs if turnComplete()
+// reports the model + tool dispatchers have both exited. That's the
+// turn boundary where pendingInbound drains, the next iteration kicks
+// off, or the turn retires (FR-014).
+//
+// Termination cases (unchanged from C4):
+//   - graceful (rootCancel without cause): handleExit writes nothing.
+//   - explicit (s.terminate): handleExit appends session_terminated
+//     with the caller's reason.
+//   - cascade (parent terminated): handleExit appends with reason
+//     "cancel_cascade".
 func (s *Session) Run(ctx context.Context) error {
 	defer close(s.done) // signal external waiters BEFORE outbox closes
 	defer close(s.out)
 	for {
 		select {
 		case <-ctx.Done():
+			// Cancel any in-flight turn so the model + tool goroutines
+			// see turnCtx.Done and exit, then wait for them. Without
+			// the wait, dispatcher emits race with the deferred
+			// close(s.out) below; -race flags it even though
+			// defer-recover masks the runtime panic.
+			if s.turnCancel != nil {
+				s.turnCancel()
+			}
+			s.waitTurnGoroutines(5 * time.Second)
 			s.handleExit(ctx)
 			return ctx.Err()
 		case f, ok := <-s.in:
 			if !ok {
 				return nil
 			}
-			if err := s.handle(ctx, f); err != nil {
-				// Debug, not Error: handle() already emitted a
-				// protocol.Error frame to the user where appropriate;
-				// stderr Error here just clobbers the REPL prompt.
+			if err := s.routeInbound(ctx, f); err != nil {
 				s.logger.Debug("session frame handler", "session", s.id, "err", err)
 			}
+		case ev, ok := <-s.modelChunks:
+			if !ok {
+				s.modelChunks = nil
+			} else {
+				s.handleModelEvent(ctx, ev)
+			}
+		case ev, ok := <-s.toolResults:
+			if !ok {
+				s.toolResults = nil
+			} else {
+				s.handleToolResult(ctx, ev)
+			}
+		}
+		if s.turnComplete() {
+			s.advanceOrFinish(ctx)
 		}
 	}
 }
@@ -449,35 +520,61 @@ func (s *Session) handleExit(runCtx context.Context) {
 	}
 }
 
-// handle dispatches a single inbound Frame.
+// routeInbound dispatches a single inbound Frame.
 //
-// Phase 4 removed the SessionClosed / SessionSuspended intent
-// branches: lifecycle is now driven entirely through the per-session
-// ctx (Manager.Terminate / s.terminate). SessionClosed Frames
-// observed inbound (e.g., the legacy /end handler returning a
-// SessionClosed frame) flow through the default emit path so adapters
-// still see them in the transcript; the actual termination is
-// triggered by handleSlashCommand calling s.terminate.
-func (s *Session) handle(ctx context.Context, f protocol.Frame) error {
+// C5: inline routing pending the C6 kindRoutes table. Cancel / Slash /
+// fresh-turn UserMessage handle synchronously (immediate side effects);
+// every other Frame buffers into pendingInbound for turn-boundary drain.
+//
+// SessionClosed Frames observed inbound (e.g. legacy /end handler
+// returning a SessionClosed frame directly) flow through the buffered
+// path so adapters still see them in the transcript; the actual
+// termination is triggered by handleSlashCommand calling s.terminate.
+func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 	switch v := f.(type) {
 	case *protocol.Cancel:
 		return s.handleCancel(ctx, v)
 	case *protocol.SlashCommand:
 		return s.handleSlashCommand(ctx, v)
 	case *protocol.UserMessage:
-		return s.handleUserMessage(ctx, v)
+		// Concurrent UserMessage during a turn is unusual (UI typically
+		// gates on AgentMessage{Final:true}). Buffer it; advanceOrFinish
+		// will fold it into history at the next turn boundary so the
+		// next prompt sees the late input.
+		if s.turnState != nil {
+			s.pendingInbound = append(s.pendingInbound, f)
+			return nil
+		}
+		s.startTurn(ctx, v)
+		return nil
 	default:
-		// Other Frame kinds: persist and fan out unchanged.
-		return s.emit(ctx, v)
+		// RouteBuffered (default). Phase-4 §10 spec calls for
+		// per-Kind routing tables landing in C6; until then any
+		// non-trigger Frame buffers + drains at the next boundary.
+		// If no turn is in flight, buffer is drained immediately
+		// (drainPendingInbound runs, but startTurn won't fire — the
+		// frame just sits there until the next user input). For
+		// transcript consistency emit straight through when no turn
+		// is in flight.
+		if s.turnState == nil {
+			return s.emit(ctx, v)
+		}
+		s.pendingInbound = append(s.pendingInbound, f)
+		return nil
 	}
 }
 
+// handleCancel aborts the in-flight turn (if any) by cancelling
+// turnCtx — the model and tool dispatcher goroutines will see
+// turnCtx.Done, exit, and close their fan-in channels. The Run loop
+// then sees ok=false, nils s.modelChunks / s.toolResults, and
+// turnComplete() returns true on the next pass; advanceOrFinish
+// rolls back history baseline (nothing is emitted to the user — the
+// Cancel frame itself is the user-visible signal).
 func (s *Session) handleCancel(ctx context.Context, f *protocol.Cancel) error {
-	s.inflightMu.Lock()
-	if s.inflightCancel != nil {
-		s.inflightCancel()
+	if s.turnCancel != nil {
+		s.turnCancel()
 	}
-	s.inflightMu.Unlock()
 	return s.emit(ctx, f)
 }
 
@@ -529,126 +626,6 @@ func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashComma
 		})
 	}
 	return nil
-}
-
-// handleUserMessage runs one turn: persist the user input, hydrate
-// the working window if needed, resolve a Model, stream chunks back
-// out as Reasoning + AgentMessage frames, and emit a model_switched
-// marker on the first turn after a /model use.
-func (s *Session) handleUserMessage(ctx context.Context, f *protocol.UserMessage) error {
-	if err := s.emit(ctx, f); err != nil {
-		return err
-	}
-	if err := s.materialise(ctx); err != nil {
-		s.logger.Warn("materialise failed; proceeding with empty history", "session", s.id, "err", err)
-	}
-
-	// If a /model use is pending, emit its marker before this turn.
-	if err := s.emitPendingSwitch(ctx); err != nil {
-		return err
-	}
-
-	mdl, _, err := s.models.Resolve(ctx, model.Hint{
-		Intent:        model.IntentDefault,
-		SessionModels: s.sessionModels(),
-	})
-	if err != nil {
-		errFrame := protocol.NewError(s.id, s.agent.Participant(),
-			"model_unavailable", err.Error(), true)
-		return s.emit(ctx, errFrame)
-	}
-
-	turnCtx, cancel := context.WithCancel(ctx)
-	s.inflightMu.Lock()
-	s.inflightCancel = cancel
-	s.inflightMu.Unlock()
-	defer func() {
-		cancel()
-		s.inflightMu.Lock()
-		s.inflightCancel = nil
-		s.inflightMu.Unlock()
-	}()
-
-	// First model turn: the user's input is the trailing message.
-	// Subsequent iterations append assistant + tool messages from
-	// dispatched tool calls so the LLM can react.
-	//
-	// historyBaseline marks the index of this user message so we
-	// can trim back to "before the failed turn" if the model call
-	// dies without producing an assistant response. Without that
-	// rollback the next user attempt would emit two consecutive
-	// user-role messages — the comment further down ("Skipping
-	// the assistant message — even when finalText is empty —
-	// confuses providers") names the same failure mode for the
-	// adjacent case. Applies to /cancel too: an aborted turn
-	// leaves no assistant counterpart, so the user message has
-	// to roll back as well.
-	historyBaseline := len(s.history)
-	s.history = append(s.history, model.Message{Role: model.RoleUser, Content: f.Payload.Text})
-
-	cap := s.resolveToolIterCap(turnCtx)
-
-	for iter := 0; iter < cap; iter++ {
-		modelTools, err := s.modelToolsForSession(turnCtx)
-		if err != nil {
-			s.logger.Warn("session: build tool catalogue", "session", s.id, "err", err)
-		}
-		req := model.Request{
-			Messages: s.buildMessages(turnCtx),
-			Tools:    modelTools,
-		}
-		stream, err := mdl.Generate(turnCtx, req)
-		if err != nil {
-			s.history = s.history[:historyBaseline]
-			errFrame := protocol.NewError(s.id, s.agent.Participant(),
-				"model_call_failed", err.Error(), true)
-			return s.emit(ctx, errFrame)
-		}
-		outcome, err := s.streamTurn(ctx, turnCtx, stream)
-		_ = stream.Close()
-		if err != nil {
-			if turnCtx.Err() != nil && ctx.Err() == nil {
-				s.history = s.history[:historyBaseline]
-				return nil // /cancel — handleCancel already emitted.
-			}
-			s.history = s.history[:historyBaseline]
-			errFrame := protocol.NewError(s.id, s.agent.Participant(),
-				"stream_error", err.Error(), true)
-			_ = s.emit(ctx, errFrame)
-			return err
-		}
-		// Persist the assistant turn before the tool results so the
-		// next model call sees well-formed history (assistant
-		// requested → tool responded). Skipping the assistant
-		// message — even when finalText is empty — confuses
-		// providers that key tool results by their tool_call
-		// antecedent (Gemma re-issues the call thinking it never
-		// happened).
-		if outcome.finalText != "" || len(outcome.toolCalls) > 0 {
-			s.history = append(s.history, model.Message{
-				Role:             model.RoleAssistant,
-				Content:          outcome.finalText,
-				ToolCalls:        outcome.toolCalls,
-				Thinking:         outcome.thinking,
-				ThoughtSignature: outcome.thoughtSignature,
-			})
-		}
-		if len(outcome.toolCalls) == 0 {
-			return nil
-		}
-		for _, tc := range outcome.toolCalls {
-			result := s.dispatchToolCall(ctx, tc)
-			s.history = append(s.history, model.Message{
-				Role:       model.RoleTool,
-				Content:    result,
-				ToolCallID: tc.ID,
-			})
-		}
-	}
-	s.logger.Warn("session: tool re-call cap hit", "session", s.id, "max", cap)
-	limitFrame := protocol.NewError(s.id, s.agent.Participant(),
-		"tool_iteration_limit", fmt.Sprintf("max tool re-call iterations (%d) reached", cap), false)
-	return s.emit(ctx, limitFrame)
 }
 
 // resolveToolIterCap picks the tool-iteration cap for one user
@@ -775,93 +752,6 @@ func (s *Session) modelToolsForSession(ctx context.Context) ([]model.Tool, error
 	return out, nil
 }
 
-// turnOutcome carries everything one model.Generate call produced:
-// the concatenated final assistant text, any tool calls the model
-// emitted, plus the per-turn reasoning state (thinking text +
-// thought_signature) some providers (Anthropic, Gemini 2.5+)
-// require fed back on subsequent turns. handleUserMessage uses
-// this to drive the bounded re-call loop that lets the LLM react
-// to tool results.
-type turnOutcome struct {
-	finalText        string
-	toolCalls        []model.ChunkToolCall
-	thinking         string
-	thoughtSignature string
-}
-
-// streamTurn drains a Stream into Reasoning + AgentMessage frames
-// and collects every tool call the model emitted. Tool dispatch
-// itself happens after the stream drains (in handleUserMessage)
-// so the entire content/reasoning stream lands in the transcript
-// before any tool plumbing.
-//
-// The end-of-stream final flag is set on the final-content chunk
-// (chunk.Final=true) OR, if the provider didn't mark Final on a
-// content chunk, on a synthetic close emit when the stream channel
-// drains.
-func (s *Session) streamTurn(ctx, turnCtx context.Context, stream model.Stream) (turnOutcome, error) {
-	agentSeq := 0
-	reasoningSeq := 0
-	out := turnOutcome{}
-	var sawFinal bool
-	for {
-		chunk, more, err := stream.Next(turnCtx)
-		if err != nil {
-			return out, err
-		}
-		if !more {
-			break
-		}
-		if chunk.Reasoning != nil && *chunk.Reasoning != "" {
-			rf := protocol.NewReasoning(s.id, s.agent.Participant(),
-				*chunk.Reasoning, reasoningSeq, false)
-			if err := s.emit(ctx, rf); err != nil {
-				return out, err
-			}
-			reasoningSeq++
-		}
-		if chunk.Content != nil && *chunk.Content != "" {
-			out.finalText += *chunk.Content
-			af := protocol.NewAgentMessage(s.id, s.agent.Participant(),
-				*chunk.Content, agentSeq, chunk.Final)
-			if err := s.emit(ctx, af); err != nil {
-				return out, err
-			}
-			agentSeq++
-			if chunk.Final {
-				sawFinal = true
-			}
-		}
-		if chunk.ToolCall != nil {
-			out.toolCalls = append(out.toolCalls, *chunk.ToolCall)
-		}
-		if chunk.Final {
-			// Provider-supplied per-turn reasoning state. Captured
-			// on the Final chunk only — earlier chunks carry deltas,
-			// the finish event carries the canonical signature/
-			// thinking blob.
-			if chunk.Thinking != "" {
-				out.thinking = chunk.Thinking
-			}
-			if chunk.ThoughtSignature != "" {
-				out.thoughtSignature = chunk.ThoughtSignature
-			}
-		}
-	}
-	// Stream ended without an explicit final-flagged content chunk:
-	// emit a zero-text closer so subscribers can detect the boundary.
-	// Skipped when the stream produced only tool calls — there's
-	// another model turn coming.
-	if agentSeq > 0 && !sawFinal && len(out.toolCalls) == 0 {
-		closer := protocol.NewAgentMessage(s.id, s.agent.Participant(),
-			"", agentSeq, true)
-		if err := s.emit(ctx, closer); err != nil {
-			return out, err
-		}
-	}
-	return out, nil
-}
-
 // defaultMaxToolIterations is the per-Turn cap on
 // model→tool→model loops applied when the session was
 // constructed without WithMaxToolIterations. 20 covers
@@ -877,13 +767,20 @@ const defaultMaxToolIterations = 20
 // payload that should be fed back to the model as a tool-role
 // message; "" when the dispatch failed and there's nothing
 // useful to feed back beyond the error already on the wire.
-func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) string {
+//
+// Two contexts:
+//   - dispatchCtx (turnCtx): threaded into permission resolve and
+//     tool.Dispatch so /cancel cleanly aborts long-running tools.
+//   - emitCtx (runCtx): used for s.emit so transcript frames keep
+//     landing even if the user is mid-cancellation; emit's own ctx
+//     is the session's run ctx, never cancelled until process shutdown.
+func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.ChunkToolCall) string {
 	if s.tools == nil {
-		s.emitToolError(ctx, tc.ID, tc.Name, protocol.ToolErrorNotFound,
+		s.emitToolError(emitCtx, tc.ID, tc.Name, protocol.ToolErrorNotFound,
 			"tool dispatch not configured for this session", "")
 		return ""
 	}
-	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: s.id})
+	dispatchCtx := perm.WithSession(turnCtx, perm.SessionContext{SessionID: s.id})
 	// Wire the live *Session into the dispatch ctx so session-scoped
 	// ToolProviders (Manager-as-ToolProvider, skill_files, …) can
 	// recover the caller without going through Manager.Get — Manager
@@ -893,7 +790,7 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 
 	rawArgs := marshalToolArgs(tc.Args)
 	callFrame := protocol.NewToolCall(s.id, s.agent.Participant(), tc.ID, tc.Name, tc.Args)
-	if err := s.emit(ctx, callFrame); err != nil {
+	if err := s.emit(emitCtx, callFrame); err != nil {
 		s.logger.Warn("emit tool_call", "err", err)
 	}
 	// Log the dispatch with full args BEFORE the call so the
@@ -938,7 +835,7 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 			"session", s.id, "tool", tc.Name,
 			"snapshot_size", len(snap.Tools),
 			"available", available)
-		s.emitToolError(ctx, tc.ID, tc.Name, protocol.ToolErrorNotFound,
+		s.emitToolError(emitCtx, tc.ID, tc.Name, protocol.ToolErrorNotFound,
 			fmt.Sprintf("tool %q not in current snapshot", tc.Name), "")
 		return ""
 	}
@@ -952,12 +849,12 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 			} else if p.FromRemote {
 				tier = "remote"
 			}
-			s.emitToolError(ctx, tc.ID, tc.Name, protocol.ToolErrorPermissionDenied,
+			s.emitToolError(emitCtx, tc.ID, tc.Name, protocol.ToolErrorPermissionDenied,
 				fmt.Sprintf("tool %q denied by %s tier", tc.Name, tier), tier)
-			s.emitToolDeniedMarker(ctx, tc.Name, tier)
+			s.emitToolDeniedMarker(emitCtx, tc.Name, tier)
 			return ""
 		}
-		s.emitToolError(ctx, tc.ID, tc.Name, "io", err.Error(), "")
+		s.emitToolError(emitCtx, tc.ID, tc.Name, "io", err.Error(), "")
 		return ""
 	}
 
@@ -972,7 +869,7 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 		}
 		s.logger.Warn("tool result error",
 			"session", s.id, "tool", tc.Name, "code", code, "err", err)
-		s.emitToolError(ctx, tc.ID, tc.Name, code, err.Error(), "")
+		s.emitToolError(emitCtx, tc.ID, tc.Name, code, err.Error(), "")
 		return ""
 	}
 	// Log result AFTER the call so the operator sees the same
@@ -985,7 +882,7 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 
 	resultFrame := protocol.NewToolResult(s.id, s.agent.Participant(),
 		tc.ID, json.RawMessage(result), false)
-	if err := s.emit(ctx, resultFrame); err != nil {
+	if err := s.emit(emitCtx, resultFrame); err != nil {
 		s.logger.Warn("emit tool_result", "err", err)
 	}
 	return string(result)
@@ -1042,18 +939,40 @@ func marshalToolArgs(args any) json.RawMessage {
 }
 
 // emitPendingSwitch emits a system_marker for a queued /model use,
-// then clears the flag. No-op if no switch is pending.
+// then clears the flag. No-op if no switch is pending. Single-goroutine
+// (Run) reader/writer post-C5 — no lock needed.
 func (s *Session) emitPendingSwitch(ctx context.Context) error {
-	s.inflightMu.Lock()
 	switch_ := s.pendingSwitch
 	s.pendingSwitch = nil
-	s.inflightMu.Unlock()
 	if switch_ == nil {
 		return nil
 	}
 	marker := protocol.NewSystemMarker(s.id, s.agent.Participant(), "model_switched",
 		map[string]any{"from": switch_.from.String(), "to": switch_.to.String()})
 	return s.emit(ctx, marker)
+}
+
+// waitTurnGoroutines blocks until all per-turn goroutines (model
+// streamer + tool dispatcher) finish, or the timeout elapses.
+// Bounded so a stuck tool can't pin shutdown — beyond the deadline
+// we drop into the close path with goroutines still running, and
+// their writes hit defer-recover on a closed s.out.
+func (s *Session) waitTurnGoroutines(timeout time.Duration) {
+	if timeout <= 0 {
+		s.turnWG.Wait()
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		s.turnWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		s.logger.Warn("session: turn goroutines did not exit within deadline",
+			"session", s.id, "deadline", timeout)
+	}
 }
 
 // IsClosed reports whether the session has been closed.

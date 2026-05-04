@@ -238,3 +238,111 @@ func contains(ss []string, want string) bool {
 	}
 	return false
 }
+
+// blockingProvider is a one-tool ToolProvider whose Call blocks until
+// the dispatch ctx fires. Used by the /cancel-mid-tool test to verify
+// turnCtx threads through to s.tools.Dispatch (C5 promise: "Pass
+// turnCtx to dispatch goroutines so /cancel cleanly aborts both
+// model and tools").
+type blockingProvider struct {
+	tools  []tool.Tool
+	dispatchEntered chan struct{} // closed on first Call entry
+}
+
+func (p *blockingProvider) Name() string                                { return "fake" }
+func (p *blockingProvider) Lifetime() tool.Lifetime                     { return tool.LifetimePerAgent }
+func (p *blockingProvider) List(_ context.Context) ([]tool.Tool, error) { return p.tools, nil }
+func (p *blockingProvider) Call(ctx context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
+	select {
+	case <-p.dispatchEntered:
+	default:
+		close(p.dispatchEntered)
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (p *blockingProvider) Subscribe(_ context.Context) (<-chan tool.ProviderEvent, error) {
+	return nil, nil
+}
+func (p *blockingProvider) Close() error { return nil }
+
+// TestSession_CancelMidTool_RollsBack verifies the C5 contract: a
+// Cancel frame received while a tool dispatch is in flight aborts
+// the tool's ctx, the next user message starts a fresh turn (no
+// duplicate user-role messages), and the model is NOT re-invoked
+// after cancel.
+func TestSession_CancelMidTool_RollsBack(t *testing.T) {
+	mdl := &scriptedToolModel{
+		turns: [][]model.Chunk{
+			{
+				{ToolCall: &model.ChunkToolCall{ID: "tc1", Name: "fake:slow"}},
+			},
+			// 2nd turn must not be reached: cancel rolls back before
+			// dispatcher posts a tool_result.
+			{
+				{Content: ptr("after-cancel"), Final: true},
+			},
+		},
+	}
+	provider := &blockingProvider{
+		tools:           []tool.Tool{{Name: "fake:slow", Provider: "fake", PermissionObject: "hugen:tool:fake"}},
+		dispatchEntered: make(chan struct{}),
+	}
+	sess, cancel := newToolSession(t, mdl, permsAllow{}, provider)
+	defer cancel()
+
+	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
+	sess.Inbox() <- protocol.NewUserMessage("s1", user, "go")
+
+	// Wait for the tool to enter Call (proves dispatcher goroutine ran).
+	select {
+	case <-provider.dispatchEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tool Call never entered")
+	}
+
+	// Drain frames produced so far; we expect at least UserMessage +
+	// ToolCall before /cancel.
+	preCancel := drainOutbox(sess, 200*time.Millisecond)
+	if !contains(kindNames(preCancel), string(protocol.KindToolCall)) {
+		t.Fatalf("expected tool_call before cancel; got %v", kindNames(preCancel))
+	}
+
+	sess.Inbox() <- protocol.NewCancel("s1", user, "tc1")
+
+	// Wait for the Cancel frame to surface — proves handleCancel
+	// emitted it.
+	postCancel := collectFrames(t, sess, func(seen []protocol.Frame) bool {
+		_, ok := seen[len(seen)-1].(*protocol.Cancel)
+		return ok
+	}, 2*time.Second)
+	if !contains(kindNames(postCancel), string(protocol.KindCancel)) {
+		t.Fatalf("expected cancel frame; got %v", kindNames(postCancel))
+	}
+
+	// After cancel: the model must NOT have been re-invoked. Model
+	// goroutine ran exactly once (the initial Generate call with the
+	// user message).
+	time.Sleep(100 * time.Millisecond) // let any spurious goroutines drain
+	if got := mdl.calls.Load(); got != 1 {
+		t.Errorf("model.Generate calls = %d, want 1 (cancel rolled back before re-call)", got)
+	}
+}
+
+// drainOutbox reads from the session's outbox for at most `linger`
+// duration after the last received frame. Used to capture "everything
+// the loop has produced so far" without hard-coding a count.
+func drainOutbox(sess *Session, linger time.Duration) []protocol.Frame {
+	var out []protocol.Frame
+	for {
+		select {
+		case f, ok := <-sess.Outbox():
+			if !ok {
+				return out
+			}
+			out = append(out, f)
+		case <-time.After(linger):
+			return out
+		}
+	}
+}
