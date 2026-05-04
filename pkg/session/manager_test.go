@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -180,6 +181,40 @@ func TestProjectHistory_Window(t *testing.T) {
 	got := projectHistory(rows, 50)
 	if len(got) != 50 {
 		t.Errorf("len = %d, want 50", len(got))
+	}
+}
+
+// TestProjectHistory_IncludesSystemMessage verifies the phase-4 US6
+// extension: system_message rows replay into history under the
+// canonical "[system: <kind>] <content>" prefix so runtime-injected
+// notices (auto-respawn spawned_note, soft_warning, stuck_nudge,
+// whiteboard) survive a process restart's materialise. Read shape
+// matches the live visibility filter (visibility.go) so the model
+// sees identical text whether the frame arrived live or on replay.
+func TestProjectHistory_IncludesSystemMessage(t *testing.T) {
+	rows := []EventRow{
+		{EventType: string(protocol.KindUserMessage), Content: "hi"},
+		{
+			EventType: string(protocol.KindSystemMessage),
+			Content:   "sub-agent X died on restart; Y respawned.",
+			Metadata:  map[string]any{"kind": protocol.SystemMessageSpawnedNote},
+		},
+		{
+			EventType: string(protocol.KindAgentMessage),
+			Content:   "ack",
+			Metadata:  map[string]any{"final": true},
+		},
+	}
+	got := projectHistory(rows, 50)
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3 (user + system + agent); got=%v", len(got), got)
+	}
+	if got[1].Role != model.RoleUser {
+		t.Errorf("system_message Role = %v, want RoleUser", got[1].Role)
+	}
+	wantPrefix := "[system: " + protocol.SystemMessageSpawnedNote + "] "
+	if !strings.HasPrefix(got[1].Content, wantPrefix) {
+		t.Errorf("system_message Content = %q, want prefix %q", got[1].Content, wantPrefix)
 	}
 }
 

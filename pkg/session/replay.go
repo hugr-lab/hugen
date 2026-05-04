@@ -172,11 +172,21 @@ func planEventsFrom(rows []EventRow) []plan.ProjectEvent {
 }
 
 // projectHistory walks events newest-last and keeps the most recent
-// `window` user/agent text messages, rebuilding model.Message slice.
+// `window` user/agent/system text messages, rebuilding model.Message
+// slice.
 //
 // Reasoning frames are excluded — phase 1 doesn't replay reasoning
 // to the model; the model emits its own reasoning per turn. Tool
 // calls are excluded too (Phase 3+ tools emit their own frames).
+//
+// system_message rows ARE projected — as RoleUser with the same
+// "[system: <kind>] <content>" prefix the live visibility filter
+// uses (visibility.go projectFrameToHistory). Without this the
+// runtime-injected nudges (soft_warning, stuck_nudge, whiteboard
+// broadcasts, the auto-respawn spawned_note added by phase-4 US6)
+// would be invisible to the model after a process restart.
+// Reading the same shape live and after replay keeps the model's
+// mental model continuous across the cut.
 func projectHistory(rows []EventRow, window int) []model.Message {
 	if window <= 0 {
 		window = defaultHistoryWindow
@@ -194,6 +204,15 @@ func projectHistory(rows []EventRow, window int) []model.Message {
 			if final, _ := metadataBool(r.Metadata, "final"); final {
 				all = append(all, model.Message{Role: model.RoleAssistant, Content: r.Content})
 			}
+		case protocol.KindSystemMessage:
+			kind, _ := r.Metadata["kind"].(string)
+			if kind == "" {
+				kind = "system"
+			}
+			all = append(all, model.Message{
+				Role:    model.RoleUser,
+				Content: fmt.Sprintf("[system: %s] %s", kind, r.Content),
+			})
 		}
 	}
 	if len(all) <= window {
