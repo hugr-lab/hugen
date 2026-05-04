@@ -135,15 +135,22 @@ func noteHandler() session.CommandHandler {
 
 func cancelHandler() session.CommandHandler {
 	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
+		// `/cancel`     — turn-only abort (Cascade=false).
+		// `/cancel all` — turn abort + recursive sub-agent termination.
 		// The actual stream-stop happens in Session.handleCancel; we
 		// just emit the Cancel frame so the transcript records intent.
+		cascade := false
+		if len(args) > 0 && args[0] == "all" {
+			cascade = true
+			args = args[1:]
+		}
 		reason := "user_cancelled"
 		if len(args) > 0 {
 			reason = joinArgs(args)
 		}
-		return []protocol.Frame{
-			protocol.NewCancel(env.Session.ID(), env.Author, reason),
-		}, nil
+		c := protocol.NewCancel(env.Session.ID(), env.Author, reason)
+		c.Payload.Cascade = cascade
+		return []protocol.Frame{c}, nil
 	}
 }
 

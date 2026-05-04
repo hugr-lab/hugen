@@ -117,9 +117,12 @@ type Session struct {
 	pendingInbound []protocol.Frame
 
 	// activeToolFeed is the slot a phase-4 blocking system tool (e.g.
-	// wait_subagents) registers to consume RouteToolFeed Frames. C5
-	// reserves the field; first wired in C7.
-	activeToolFeed *ToolFeed
+	// wait_subagents) registers to consume RouteToolFeed Frames. The
+	// Run goroutine reads via Load on every routeInbound call; the tool
+	// dispatcher (a different goroutine) writes via Store / clears via
+	// Store(nil). atomic.Pointer keeps the read+write race-free without
+	// adding a mutex hot-path on every inbound frame.
+	activeToolFeed atomic.Pointer[ToolFeed]
 
 	// Materialisation state for restart-resume (Phase 4 fills this in).
 	materialised atomic.Bool
@@ -569,7 +572,7 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 		s.dispatchInternal(ctx, f)
 		return nil
 	case RouteToolFeed:
-		if feed := s.activeToolFeed; feed != nil &&
+		if feed := s.activeToolFeed.Load(); feed != nil &&
 			feed.Consumes != nil && feed.Consumes(f.Kind()) {
 			feed.Feed(f)
 			return nil
@@ -593,11 +596,43 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 // turnComplete() returns true on the next pass; advanceOrFinish
 // rolls back history baseline (nothing is emitted to the user — the
 // Cancel frame itself is the user-visible signal).
+//
+// Cascade=true (`/cancel all`): in addition to the local turn abort,
+// terminate every active child with reason "cancel_cascade". Each
+// child's ctx is derived from this session's ctx, so the cause
+// propagates down the entire subtree without a fan-out walk here.
+// The receiving session itself does NOT terminate — only its
+// turn aborts (per phase-4-spec §13.2 #5).
 func (s *Session) handleCancel(ctx context.Context, f *protocol.Cancel) error {
 	if s.turnCancel != nil {
 		s.turnCancel()
 	}
+	if f.Payload.Cascade {
+		s.cascadeCancelChildren()
+	}
 	return s.emit(ctx, f)
+}
+
+// cascadeCancelChildren walks the immediate children map and triggers
+// terminate on each. Idempotent on already-closed children. A child
+// that's mid-spawn (registered but goroutine not yet running its first
+// select) sees turnCtx.Done immediately on entry into Run.
+func (s *Session) cascadeCancelChildren() {
+	s.childMu.Lock()
+	children := make([]*Session, 0, len(s.children))
+	for _, c := range s.children {
+		children = append(children, c)
+	}
+	s.childMu.Unlock()
+	for _, c := range children {
+		if c.IsClosed() {
+			continue
+		}
+		c.terminate(&terminationCause{
+			reason:    protocol.TerminationCancelCascade,
+			emitClose: false,
+		})
+	}
 }
 
 func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashCommand) error {
