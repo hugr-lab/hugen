@@ -522,9 +522,24 @@ func (s *Session) handleExit(runCtx context.Context) {
 
 // routeInbound dispatches a single inbound Frame.
 //
-// C5: inline routing pending the C6 kindRoutes table. Cancel / Slash /
-// fresh-turn UserMessage handle synchronously (immediate side effects);
-// every other Frame buffers into pendingInbound for turn-boundary drain.
+// Control frames (Cancel, SlashCommand, UserMessage) handle inline:
+// they're the session-lifecycle triggers, not session-to-session
+// data, and the phase-4 three-route model (§10.2) targets multi-
+// session frames (subagent_*, whiteboard_*, future hitl_*).
+//
+// Everything else routes through routeFor (pkg/session/routes.go):
+//   - RouteInternal → dispatchInternal runs a sync side-effect
+//     handler from internalHandlers; the Frame never reaches
+//     s.history. C6 ships an empty handler table — phase-4 step
+//     10 (whiteboard primitive) fills it in.
+//   - RouteToolFeed → if s.activeToolFeed is registered AND its
+//     Consumes predicate matches the kind, the Frame is forwarded
+//     to the blocking tool's feed; otherwise falls back to
+//     RouteBuffered.
+//   - RouteBuffered (default) → if a turn is in flight, append to
+//     pendingInbound for drain at the next boundary; if idle, emit
+//     pass-through so transcript stays consistent (no turn means
+//     no boundary to drain into).
 //
 // SessionClosed Frames observed inbound (e.g. legacy /end handler
 // returning a SessionClosed frame directly) flow through the buffered
@@ -547,21 +562,28 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 		}
 		s.startTurn(ctx, v)
 		return nil
-	default:
-		// RouteBuffered (default). Phase-4 §10 spec calls for
-		// per-Kind routing tables landing in C6; until then any
-		// non-trigger Frame buffers + drains at the next boundary.
-		// If no turn is in flight, buffer is drained immediately
-		// (drainPendingInbound runs, but startTurn won't fire — the
-		// frame just sits there until the next user input). For
-		// transcript consistency emit straight through when no turn
-		// is in flight.
+	}
+
+	switch routeFor(f.Kind()) {
+	case RouteInternal:
+		s.dispatchInternal(ctx, f)
+		return nil
+	case RouteToolFeed:
+		if feed := s.activeToolFeed; feed != nil &&
+			feed.Consumes != nil && feed.Consumes(f.Kind()) {
+			feed.Feed(f)
+			return nil
+		}
+		// No matching feed: fall through to RouteBuffered.
+		fallthrough
+	case RouteBuffered:
 		if s.turnState == nil {
-			return s.emit(ctx, v)
+			return s.emit(ctx, f)
 		}
 		s.pendingInbound = append(s.pendingInbound, f)
 		return nil
 	}
+	return nil
 }
 
 // handleCancel aborts the in-flight turn (if any) by cancelling
