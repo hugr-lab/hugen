@@ -818,6 +818,12 @@ func (s *Session) dispatchToolCall(ctx context.Context, tc model.ChunkToolCall) 
 		return ""
 	}
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: s.id})
+	// Wire the live *Session into the dispatch ctx so session-scoped
+	// ToolProviders (Manager-as-ToolProvider, skill_files, …) can
+	// recover the caller without going through Manager.Get — Manager
+	// is root-only after pivot 4, so a sub-agent caller would not be
+	// findable that way.
+	dispatchCtx = WithSession(dispatchCtx, s)
 
 	rawArgs := marshalToolArgs(tc.Args)
 	callFrame := protocol.NewToolCall(s.id, s.agent.Participant(), tc.ID, tc.Name, tc.Args)
