@@ -248,6 +248,24 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 		return nil, failed("session_tool_provider", err)
 	}
 
+	// Wire the MCP reconnector recovery hook (phase-4 US7): every time
+	// a per_agent provider crawls back from stale to healthy, broadcast
+	// a system_marker{mcp_recovered, provider} into every live root
+	// session's inbox so the model on each root sees the recovery in
+	// its transcript and can retry tools that previously surfaced as
+	// `provider_removed`.
+	if rc := core.Tools.Reconnector(); rc != nil {
+		mgr := core.Manager
+		logger := core.Logger
+		rc.OnRecover(func(name string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			mgr.BroadcastSystemMarker(ctx, "mcp_recovered",
+				map[string]any{"provider": name})
+			logger.Info("mcp reconnect: marker broadcast", "provider", name)
+		})
+	}
+
 	// /api/auth/agent-token is mounted inside auth.Service when
 	// AddPrimary registers a hugr-flavoured source — see
 	// pkg/auth/agent_token.go. No-Hugr deployments leave the path

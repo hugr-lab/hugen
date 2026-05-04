@@ -278,6 +278,33 @@ func (m *Manager) Deliver(ctx context.Context, to string, f protocol.Frame) erro
 // be delivered.
 var ErrSessionGone = errors.New("manager: session goroutine exited")
 
+// BroadcastSystemMarker pushes a system_marker Frame into every live
+// root session's inbox. Used by callers that need to surface a
+// runtime-wide event across every active conversation — currently
+// the MCP reconnector, which fires `mcp_recovered` so the model on
+// each root sees the recovery in its transcript and can retry tools
+// that previously surfaced as `provider_removed`.
+//
+// Best-effort per session: a Submit failure (closed inbox, full
+// buffer, ctx cancellation) is logged at Debug and the broadcast
+// continues to the next session — one stuck session must not block
+// the rest of the rooster.
+func (m *Manager) BroadcastSystemMarker(ctx context.Context, subject string, meta map[string]any) {
+	m.mu.RLock()
+	targets := make([]*Session, 0, len(m.live))
+	for _, s := range m.live {
+		targets = append(targets, s)
+	}
+	m.mu.RUnlock()
+	for _, s := range targets {
+		marker := protocol.NewSystemMarker(s.id, m.agent.Participant(), subject, meta)
+		if !s.Submit(ctx, marker) {
+			m.logger.Debug("manager: broadcast system_marker dropped",
+				"session", s.id, "subject", subject)
+		}
+	}
+}
+
 // Terminate cancels a *root* session's ctx with a terminationCause
 // carrying the caller-supplied reason and waits for the goroutine to
 // run its sequential teardown (turn cancel → children wait → persist

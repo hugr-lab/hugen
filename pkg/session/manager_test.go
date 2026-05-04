@@ -184,6 +184,56 @@ func TestProjectHistory_Window(t *testing.T) {
 	}
 }
 
+// TestManager_BroadcastSystemMarker_ReachesLiveRoots verifies phase-4
+// US7 wiring: the MCP reconnector's OnRecover callback ultimately
+// calls Manager.BroadcastSystemMarker; every live root session must
+// see a system_marker frame on its outbox carrying the supplied
+// subject + metadata.
+func TestManager_BroadcastSystemMarker_ReachesLiveRoots(t *testing.T) {
+	store := newFakeStore()
+	mgr := newTestManager(t, store)
+	defer mgr.ShutdownAll(context.Background())
+
+	// Open two roots so we can observe the broadcast lands on both.
+	r1, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "u1"})
+	if err != nil {
+		t.Fatalf("Open r1: %v", err)
+	}
+	r2, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "u2"})
+	if err != nil {
+		t.Fatalf("Open r2: %v", err)
+	}
+	drainOutboxOnce(r1.Outbox()) // SessionOpened
+	drainOutboxOnce(r2.Outbox())
+
+	mgr.BroadcastSystemMarker(context.Background(), "mcp_recovered",
+		map[string]any{"provider": "hugr-main"})
+
+	check := func(t *testing.T, s *Session) {
+		t.Helper()
+		select {
+		case f := <-s.Outbox():
+			marker, ok := f.(*protocol.SystemMarker)
+			if !ok {
+				t.Errorf("session %s outbox: got %T, want SystemMarker", s.ID(), f)
+				return
+			}
+			if marker.Payload.Subject != "mcp_recovered" {
+				t.Errorf("session %s subject = %q, want mcp_recovered",
+					s.ID(), marker.Payload.Subject)
+			}
+			if got, _ := marker.Payload.Details["provider"].(string); got != "hugr-main" {
+				t.Errorf("session %s details.provider = %v, want hugr-main",
+					s.ID(), marker.Payload.Details["provider"])
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("session %s never received broadcast marker", s.ID())
+		}
+	}
+	check(t, r1)
+	check(t, r2)
+}
+
 // TestProjectHistory_IncludesSubagentFrames verifies phase-4 US6:
 // subagent_started and subagent_result events replay into history
 // with the same "[system: spawned_note] ..." / "[system:

@@ -60,6 +60,13 @@ type ToolManager struct {
 	policyGen atomic.Int64
 
 	drainTimeout time.Duration
+
+	// reconnector picks up MCPProviders that transition to stale
+	// (after a synchronous maybeReconnect failure) and retries
+	// connect with exponential backoff in the background. Created
+	// by NewToolManager; Init starts its goroutine; Close stops it.
+	// Nil-tolerant — providers without an MCP runtime keep working.
+	reconnector *Reconnector
 }
 
 type cachedSnapshot struct {
@@ -128,12 +135,18 @@ func NewToolManager(
 		cache:            make(map[string]*cachedSnapshot),
 		cleanups:         make(map[string][]func()),
 		drainTimeout:     defaultDrainTimeout,
+		reconnector:      NewReconnector(log),
 	}
 	for _, opt := range opts {
 		opt(tm)
 	}
 	return tm
 }
+
+// Reconnector returns the manager's MCP background reconnector, used
+// by callers (cmd/hugen) that want to wire OnRecover callbacks for
+// session-level system_marker broadcasts.
+func (m *ToolManager) Reconnector() *Reconnector { return m.reconnector }
 
 // ToolManagerOption configures optional dependencies on a
 // freshly-built ToolManager. Variadic at the end of NewToolManager
@@ -284,6 +297,9 @@ func (m *ToolManager) CloseSession(ctx context.Context, sessionID string) error 
 // Used on RuntimeCore.Shutdown to ensure no MCP subprocesses
 // outlive the parent process. Idempotent.
 func (m *ToolManager) Close() error {
+	if m.reconnector != nil {
+		m.reconnector.Stop()
+	}
 	m.mu.Lock()
 	globals := m.providers
 	scoped := m.sessionProviders
@@ -309,22 +325,33 @@ func (m *ToolManager) Close() error {
 
 // AddProvider registers a ToolProvider. Constitution exception
 // for plug-in registries (II.1).
+//
+// MCPProviders get a stale-hook wired to the manager's Reconnector
+// so a mid-flight EOF that fails an inline reconnect surfaces as a
+// background retry instead of silently leaving the provider dead
+// until process restart.
 func (m *ToolManager) AddProvider(p ToolProvider) error {
 	if p == nil {
 		return errors.New("tool: nil provider")
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	name := p.Name()
 	if name == "" {
+		m.mu.Unlock()
 		return errors.New("tool: provider with empty name")
 	}
 	if _, exists := m.providers[name]; exists {
+		m.mu.Unlock()
 		return fmt.Errorf("tool: provider %q already registered", name)
 	}
 	m.providers[name] = p
 	m.toolGen.Add(1)
 	m.invalidateAllSnapshots()
+	m.mu.Unlock()
+
+	if mp, ok := p.(*MCPProvider); ok && m.reconnector != nil {
+		mp.SetStaleHook(m.reconnector.Track)
+	}
 	return nil
 }
 
@@ -356,6 +383,9 @@ func (m *ToolManager) RemoveProvider(ctx context.Context, name string) error {
 	dctx, cancel := context.WithTimeout(ctx, m.drainTimeout)
 	defer cancel()
 	<-dctx.Done()
+	if m.reconnector != nil {
+		m.reconnector.Forget(name)
+	}
 	closeErr := p.Close()
 	runCleanups(cleanups)
 	if closeErr != nil {
