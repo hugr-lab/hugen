@@ -61,6 +61,9 @@ func (s *stubStore) ListNotes(_ context.Context, _ string, _ int) ([]session.Not
 func (s *stubStore) ListSessions(_ context.Context, _, _ string) ([]session.SessionRow, error) {
 	return nil, nil
 }
+func (s *stubStore) ListChildren(_ context.Context, _ string) ([]session.SessionRow, error) {
+	return nil, nil
+}
 
 // stubModel is the minimal Model required to satisfy the
 // ModelRouter constructor. /skill handlers never call Generate.

@@ -98,7 +98,7 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { _, _ = mgr.Close(ctx, sess.ID(), "test") })
+	t.Cleanup(func() { _ = mgr.Terminate(ctx, sess.ID(), "user:/end") })
 
 	// Loading duckdb-data must succeed even though duckdb-mcp is
 	// absent — phase-3 path: skill manifest validates, allowed-tools

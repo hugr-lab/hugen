@@ -25,13 +25,47 @@ type SessionSummary struct {
 }
 
 // OpenRequest carries the parameters for Manager.Open.
+//
+// Phase-4 fields:
+//
+//   - ParentSessionID, SpawnedFromEventID — set by Session.Spawn for
+//     sub-agent sessions via newSession(parent, ...); left zero for
+//     root sessions opened by adapters. (Depth/SessionType are no
+//     longer carried in OpenRequest — newSession derives them from the
+//     parent argument.)
 type OpenRequest struct {
 	OwnerID      string
 	Participants []protocol.ParticipantInfo
 	// Metadata is persisted verbatim on the session row. Adapters
 	// validate size/shape before passing it through; the manager
-	// stores it as-is.
+	// stores it as-is. For sub-agents the manager also writes
+	// metadata["depth"] (set to parent.depth+1, immutable) here.
 	Metadata map[string]any
+
+	ParentSessionID    string
+	SpawnedFromEventID string
+}
+
+// SpawnSpec is the input to Session.Spawn. Carries the model-supplied
+// fields from session:spawn_subagent (skill, role, task, inputs) plus
+// the parent's spawn-event id used for diagnostics.
+type SpawnSpec struct {
+	Skill   string
+	Role    string
+	Task    string
+	Inputs  any
+	EventID string
+	// Metadata is merged into the child session row's metadata map
+	// after the manager fills in metadata["depth"] / metadata["spawn_role"]
+	// / metadata["spawn_skill"]. Caller-supplied keys win on collision.
+	Metadata map[string]any
+	// ParentWhiteboardActive captures the host's whiteboard projection
+	// state at spawn time (FR-035 conditional autoload). Set by
+	// callSpawnSubagent (phase-3 commit 10) when the parent's
+	// whiteboard projection has Active=true. Phase-4 commit 4 only
+	// plumbs the field through to OpenRequest / SubagentStarted so the
+	// child's session_started event captures it.
+	ParentWhiteboardActive bool
 }
 
 // Manager owns the live *Session map and brokers
@@ -54,16 +88,29 @@ type Manager struct {
 	sessionOpts []SessionOption
 	lifecycle   Lifecycle
 
+	// deps mirrors the per-session dependency bundle passed by
+	// reference to every Session in this Manager's tree (root +
+	// subagents). Populated by NewManager from the same arguments
+	// that fill the explicit fields above; both views point at the
+	// same wg / rootCtx / RuntimeStore so existing manager.go code
+	// can continue to read m.store / m.agent / ... without a churn,
+	// while newSession / newSessionRestore can take m.deps
+	// monolithically.
+	deps *sessionDeps
+
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
 
-	mu   sync.RWMutex
+	mu sync.RWMutex
+	// live maps root-session id → *Session. Sub-agents are owned by
+	// their parent's `children` map and never appear here. Manager
+	// is therefore the registry / router for the *forest of trees*;
+	// per-tree subagent lookup is parent.FindDescendant.
 	live map[string]*Session
 	// wg tracks every spawned session goroutine. ShutdownAll uses
-	// it to wait for every goroutine to finish writing its
-	// terminal status BEFORE the local DuckDB engine closes —
-	// without this guarantee an in-flight UPDATE races the engine
-	// teardown.
+	// it to wait for every goroutine to finish exiting BEFORE the
+	// local DuckDB engine closes — without this guarantee an
+	// in-flight AppendEvent races the engine teardown.
 	wg sync.WaitGroup
 }
 
@@ -119,67 +166,73 @@ func NewManager(
 	for _, o := range opts {
 		o(m)
 	}
+	// Build the shared sessionDeps view AFTER the options ran, so
+	// Lifecycle and SessionOption updates picked up by m.lifecycle /
+	// m.sessionOpts are reflected in the bundle that newSession /
+	// newSessionRestore see.
+	m.deps = &sessionDeps{
+		store:     m.store,
+		agent:     m.agent,
+		models:    m.models,
+		commands:  m.commands,
+		codec:     m.codec,
+		logger:    m.logger,
+		lifecycle: m.lifecycle,
+		opts:      m.sessionOpts,
+		rootCtx:   m.rootCtx,
+		wg:        &m.wg,
+		maxDepth:  defaultMaxDepth,
+	}
 	return m
 }
 
-// Open creates a fresh session row, builds an in-memory *Session,
-// starts its goroutine, and emits a session_opened frame. Returns
-// the session and the row's CreatedAt timestamp so callers can
-// echo the persisted opened_at without an extra LoadSession.
-func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, time.Time, error) {
-	id := newSessionID()
-	now := time.Now().UTC()
-	row := SessionRow{
-		ID:          id,
-		AgentID:     m.agent.ID(),
-		OwnerID:     req.OwnerID,
-		SessionType: "root",
-		Status:      StatusActive,
-		Metadata:    req.Metadata,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	if err := m.store.OpenSession(ctx, row); err != nil {
-		return nil, time.Time{}, fmt.Errorf("manager: open session: %w", err)
-	}
-	if m.lifecycle != nil {
-		if err := m.lifecycle.Acquire(ctx, id); err != nil {
-			// Roll back the session row so a failed Acquire doesn't
-			// leave an orphan active row.
-			_ = m.store.UpdateSessionStatus(ctx, id, StatusClosed)
-			return nil, time.Time{}, fmt.Errorf("manager: open session lifecycle: %w", err)
-		}
-	}
-	s := m.spawn(ctx, id)
-	// Mark the new session as "materialised already" — there's no
-	// prior history to walk.
-	s.materialised.Store(true)
+// defaultMaxDepth is the phase-4 fallback for sessionDeps.maxDepth
+// until commit 9 wires cfg.Subagents().DefaultMaxDepth. Matches
+// `phase-4-spec.md §5.7` Layer 2 default.
+const defaultMaxDepth = 5
 
-	parts := req.Participants
-	if len(parts) == 0 {
-		parts = []protocol.ParticipantInfo{m.agent.Participant()}
+// Open creates a fresh root session via newSession, registers it in
+// m.live, and starts its goroutine. Returns the session and the row's
+// CreatedAt timestamp so callers can echo the persisted opened_at
+// without an extra LoadSession.
+//
+// Phase 4: only roots reach this path. Sub-agents go through
+// Manager.Spawn → newSession(ctx, parent, ...) which bypasses Open.
+func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, time.Time, error) {
+	s, err := newSession(ctx, nil, m.deps, req)
+	if err != nil {
+		return nil, time.Time{}, err
 	}
-	opened := protocol.NewSessionOpened(id, m.agent.Participant(), parts)
-	if err := s.emit(ctx, opened); err != nil {
-		m.logger.Error("manager: emit session_opened", "session", id, "err", err)
+	m.mu.Lock()
+	if existing, ok := m.live[s.id]; ok {
+		// Race is theoretical for roots (id is random); keep the
+		// branch defensive so a duplicate id can't leak goroutines.
+		m.mu.Unlock()
+		s.cancel(nil)
+		return existing, existing.openedAt, nil
 	}
-	return s, now, nil
+	m.live[s.id] = s
+	m.mu.Unlock()
+	s.start(m.deregisterFn(s.id, s))
+	return s, s.openedAt, nil
 }
 
-// Resume reattaches to an existing session row. Materialisation is
-// deferred to the first inbound Frame after resume.
+// Resume reattaches to an existing root session row via
+// newSessionRestore. Materialisation is deferred to the first inbound
+// Frame after resume.
 //
-// Concurrent calls for the same id will share the same *Session —
-// the spawn-side double-check guarantees no orphan goroutine. Only
-// the first caller observes the session_resumed marker.
+// Resume is **root-only**: passing a sub-agent id surfaces
+// ErrNotRootSession instead of silently registering the sub-agent in
+// m.live and breaking the "m.live is roots only" invariant
+// (phase-4-tree-ctx-routing ADR D4). Sub-agents are owned by their
+// parent's children map; cross-tree access goes through the parent.
+//
+// Concurrent calls on the same id are made safe by a post-construction
+// double-check on m.live; the loser cancels its freshly-built ctx and
+// returns the winner's *Session. (The loser may already have appended
+// a session_resumed marker — same hazard as the pre-pivot code path,
+// rare in practice.)
 func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
-	row, err := m.store.LoadSession(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if row.Status == StatusClosed {
-		return nil, ErrSessionClosed
-	}
 	m.mu.RLock()
 	if existing, ok := m.live[id]; ok {
 		m.mu.RUnlock()
@@ -187,135 +240,139 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
 	}
 	m.mu.RUnlock()
 
-	// Re-mark active if we're resuming from suspended.
-	if row.Status == StatusSuspended {
-		if err := m.store.UpdateSessionStatus(ctx, id, StatusActive); err != nil {
-			m.logger.Warn("manager: re-activate session", "session", id, "err", err)
-		}
+	row, err := m.store.LoadSession(ctx, id)
+	if err != nil {
+		return nil, err
 	}
-	// Re-run Acquire so per-session resources reattach after a
-	// process restart: per_session MCPs are respawned, autoload
-	// skills re-bound, workspace dir re-prepared. Resources.Acquire
-	// is idempotent (MkdirAll, autoload-Load and AddSessionProvider
-	// all tolerate a no-op when state is already correct).
-	if m.lifecycle != nil {
-		if err := m.lifecycle.Acquire(ctx, id); err != nil {
-			m.logger.Warn("manager: resume lifecycle", "session", id, "err", err)
-		}
+	if row.SessionType != "" && row.SessionType != "root" {
+		return nil, fmt.Errorf("manager: cannot resume %s session %q: %w",
+			row.SessionType, id, ErrNotRootSession)
 	}
-	s := m.spawn(ctx, id)
-	// Only emit the resume marker if spawn actually created a fresh
-	// goroutine (i.e. we won the race). Compare by pointer identity.
-	m.mu.RLock()
-	current := m.live[id]
-	m.mu.RUnlock()
-	if current == s {
-		marker := protocol.NewSystemMarker(id, m.agent.Participant(), "session_resumed",
-			map[string]any{"prior_status": row.Status})
-		if err := s.emit(ctx, marker); err != nil {
-			m.logger.Warn("manager: emit session_resumed marker", "session", id, "err", err)
-		}
+
+	s, err := newSessionRestore(ctx, id, nil, m.deps)
+	if err != nil {
+		return nil, err
 	}
+
+	m.mu.Lock()
+	if existing, ok := m.live[id]; ok {
+		m.mu.Unlock()
+		s.cancel(nil)
+		return existing, nil
+	}
+	m.live[id] = s
+	m.mu.Unlock()
+	s.start(m.deregisterFn(id, s))
 	return s, nil
 }
 
-// Close transitions the session to "closed" and waits for the
-// session's goroutine to finish writing the terminal status. The
-// goroutine itself is the only writer to the row (single-writer
-// invariant) — Manager pushes a SessionClosed intent frame into
-// the inbox and blocks on s.Done until the goroutine has run
-// MarkClosed and exited.
+// Deliver pushes a Frame onto the addressed root session's inbox.
+// Pivot 4 narrows m.live to roots only — Deliver is therefore a
+// root-only entry point. Cross-tree delivery to a sub-agent goes
+// through its parent (parent forwards via Submit), keeping the
+// "Manager only routes to roots" invariant clean.
 //
-// Idempotent: a session that's already terminated returns the
-// stored closed_at. Returns ErrSessionNotFound if the session
-// doesn't exist in the store either.
-func (m *Manager) Close(ctx context.Context, id, reason string) (time.Time, error) {
+// Recover-safe wrapper over Session.Submit so cross-session frame
+// delivery has a single audit-friendly entry point and so panics from
+// a goroutine racing its own exit don't propagate.
+func (m *Manager) Deliver(ctx context.Context, to string, f protocol.Frame) error {
 	m.mu.RLock()
-	s, live := m.live[id]
+	s, ok := m.live[to]
 	m.mu.RUnlock()
-
-	if !live {
-		// No live goroutine to forward to. Status update on
-		// already-suspended rows happens via a different code
-		// path (resume + close), out of scope here. We just read
-		// the existing row and report.
-		row, err := m.store.LoadSession(ctx, id)
-		if err != nil {
-			return time.Time{}, err
-		}
-		if row.Status == StatusClosed {
-			return row.UpdatedAt, nil
-		}
-		// Session is in the store but not live (suspended). The
-		// goroutine isn't around to enforce the single-writer
-		// invariant — fall back to a direct update, which is
-		// safe because nobody else is touching the row.
-		if err := m.store.UpdateSessionStatus(ctx, id, StatusClosed); err != nil {
-			return time.Time{}, err
-		}
-		if m.lifecycle != nil {
-			if err := m.lifecycle.Release(ctx, id); err != nil {
-				m.logger.Warn("manager: close session lifecycle", "session", id, "err", err)
-			}
-		}
-		return time.Now().UTC(), nil
+	if !ok {
+		return ErrSessionNotFound
 	}
-
-	if !s.closed.Load() {
-		closed := protocol.NewSessionClosed(id, m.agent.Participant(), reason)
-		if !s.Submit(ctx, closed) {
-			m.logger.Warn("manager: session inbox closed before Close intent landed",
-				"session", id)
-		}
-	}
-	// Wait for the session's goroutine to flush its terminal
-	// status and exit. Hard cap on ctx so a stuck handler can't
-	// pin the API caller indefinitely.
-	select {
-	case <-s.Done():
-	case <-ctx.Done():
-		return time.Time{}, ctx.Err()
-	}
-	if m.lifecycle != nil {
-		if err := m.lifecycle.Release(ctx, id); err != nil {
-			m.logger.Warn("manager: close session lifecycle", "session", id, "err", err)
-		}
-	}
-	return time.Now().UTC(), nil
-}
-
-// Suspend asks the session goroutine to record `suspended`
-// status. Implemented as a thin wrapper around the inbox-frame
-// dispatch so the single-writer invariant holds — Manager never
-// UPDATEs a sessions row directly when a goroutine owns it.
-//
-// Returns immediately after pushing the intent. Status is
-// recorded asynchronously by the session goroutine on its next
-// turn boundary; subsequent calls observe it through the store.
-// If no live goroutine is around (suspended or never spawned),
-// the row is updated directly — there is no goroutine that could
-// race the write.
-func (m *Manager) Suspend(ctx context.Context, id string) error {
-	m.mu.RLock()
-	s, live := m.live[id]
-	m.mu.RUnlock()
-	if !live {
-		return m.store.UpdateSessionStatus(ctx, id, StatusSuspended)
-	}
-	if s.closed.Load() {
-		return nil
-	}
-	marker := protocol.NewSessionSuspended(id, m.agent.Participant())
-	if !s.Submit(ctx, marker) {
-		m.logger.Warn("manager: session inbox closed before Suspend intent landed",
-			"session", id)
+	if !s.Submit(ctx, f) {
+		return ErrSessionGone
 	}
 	return nil
 }
 
-// List returns lightweight summaries of every session row for this
-// agent.
-func (m *Manager) List(ctx context.Context, status string) ([]SessionSummary, error) {
+// ErrSessionGone is returned by Deliver when the addressed session's
+// goroutine has exited (its inbox is closed) — the frame can never
+// be delivered.
+var ErrSessionGone = errors.New("manager: session goroutine exited")
+
+// ErrNotRootSession is returned by Manager.Resume when the requested
+// id maps to a non-root session row. Manager only tracks roots in
+// m.live (phase-4-tree-ctx-routing ADR D4); sub-agents are reachable
+// only through their parent.
+var ErrNotRootSession = errors.New("manager: not a root session")
+
+// BroadcastSystemMarker pushes a system_marker Frame into every live
+// root session's inbox. Used by callers that need to surface a
+// runtime-wide event across every active conversation — currently
+// the MCP reconnector, which fires `mcp_recovered` so the model on
+// each root sees the recovery in its transcript and can retry tools
+// that previously surfaced as `provider_removed`.
+//
+// Best-effort per session: a Submit failure (closed inbox, full
+// buffer, ctx cancellation) is logged at Debug and the broadcast
+// continues to the next session — one stuck session must not block
+// the rest of the rooster.
+func (m *Manager) BroadcastSystemMarker(ctx context.Context, subject string, meta map[string]any) {
+	m.mu.RLock()
+	targets := make([]*Session, 0, len(m.live))
+	for _, s := range m.live {
+		targets = append(targets, s)
+	}
+	m.mu.RUnlock()
+	for _, s := range targets {
+		marker := protocol.NewSystemMarker(s.id, m.agent.Participant(), subject, meta)
+		if !s.Submit(ctx, marker) {
+			m.logger.Debug("manager: broadcast system_marker dropped",
+				"session", s.id, "subject", subject)
+		}
+	}
+}
+
+// Terminate cancels a *root* session's ctx with a terminationCause
+// carrying the caller-supplied reason and waits for the goroutine to
+// run its sequential teardown (turn cancel → children wait → persist
+// pending inbound → lifecycle.Release → session_terminated +
+// SessionClosed → close). The session's own goroutine owns the
+// terminal write — Manager just signals and waits.
+//
+// Manager only knows roots: m.live[id] is the lookup. Sub-agents are
+// owned by their parent's children map; sub-agent termination goes
+// through callSubagentCancel (caller.children[id] direct lookup +
+// child.terminate). Calling Terminate with a sub-agent id surfaces
+// ErrSessionNotFound — by design, not a bug.
+//
+// Idempotent: a second call after the goroutine has exited returns
+// ErrSessionNotFound (the deregister callback already removed the
+// entry from m.live). The first call's terminationCause is the one
+// honoured — context.Cause semantics.
+func (m *Manager) Terminate(ctx context.Context, id, reason string) error {
+	if reason == "" {
+		reason = "terminated"
+	}
+	m.mu.RLock()
+	s, ok := m.live[id]
+	m.mu.RUnlock()
+	if !ok {
+		return ErrSessionNotFound
+	}
+	if !s.closed.Load() {
+		s.terminate(&terminationCause{
+			reason:    reason,
+			emitClose: true,
+			writeCtx:  ctx,
+		})
+	}
+	select {
+	case <-s.Done():
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
+}
+
+// ListSessions returns lightweight summaries of every session row
+// for this agent. Renamed from Manager.List in phase-4 step 6 to free
+// the unqualified List slot for the tool.ToolProvider interface
+// implementation in pkg/session/manager_tool_provider.go.
+func (m *Manager) ListSessions(ctx context.Context, status string) ([]SessionSummary, error) {
 	rows, err := m.store.ListSessions(ctx, m.agent.ID(), status)
 	if err != nil {
 		return nil, err
@@ -342,80 +399,42 @@ func (m *Manager) Get(id string) (*Session, bool) {
 	return s, ok
 }
 
-// ShutdownAll asks every live session to suspend, then waits for
-// their goroutines to exit. Single-writer ordering: the session
-// goroutine is the only writer to its sessions row; here we just
-// push intents and wait. Only after every wg.Done has fired do
-// we cancel the root context — that way any in-flight UPDATE
-// finished against a still-open store before downstream tear-down
-// (Tools.Close, LocalEngine.Close) starts.
+// ShutdownAll cancels the root context (which propagates to every
+// per-session ctx) and waits for every session goroutine to exit.
+//
+// **Phase-4 invariant**: graceful shutdown writes nothing — no
+// `session_terminated` events are appended. Sessions whose goroutines
+// died without a terminal event are exactly the "needs-restart-
+// decision" set on the next boot:
+//
+//   - root sessions resume on next user input (standard phase-3 path);
+//   - sub-agent sessions are processed by the restart BFS walker
+//     (phase-4 commit 14) which appends
+//     `session_terminated{reason:"restart_died"}` to each and delivers
+//     a synthetic subagent_result Frame to its parent's inbox.
 //
 // Idempotent and safe to call multiple times.
 func (m *Manager) ShutdownAll(ctx context.Context) {
-	m.mu.Lock()
-	live := make([]*Session, 0, len(m.live))
-	for _, s := range m.live {
-		live = append(live, s)
-	}
-	m.mu.Unlock()
-	for _, s := range live {
-		if !s.closed.Load() {
-			marker := protocol.NewSessionSuspended(s.id, m.agent.Participant())
-			_ = s.Submit(ctx, marker)
-		}
-		// close(s.in) lets the Run loop exit after draining any
-		// already-queued frames. The session's own /end-in-flight,
-		// if any, runs to completion before this empty inbox is
-		// observed.
-		func() {
-			defer func() { _ = recover() }()
-			close(s.in)
-		}()
-	}
-	// Wait for every session goroutine to finish writing terminal
-	// status and exit. Goroutines self-deregister from m.live in
-	// their defer chain, so by the time wg.Wait returns m.live is
-	// empty.
-	m.wg.Wait()
 	m.rootCancel()
+	m.wg.Wait()
 }
 
-// spawn registers a new live Session and starts its goroutine.
-// The session goroutine runs against m.rootCtx so it survives the
-// caller's context (typically an adapter's errgroup context).
-//
-// Re-checks live[id] under the write lock so concurrent Open/Resume
-// callers can't double-spawn an orphan goroutine.
-func (m *Manager) spawn(_ context.Context, id string) *Session {
-	s := NewSession(id, m.agent, m.store, m.models, m.commands, m.codec, m.logger, m.sessionOpts...)
-	m.mu.Lock()
-	if existing, ok := m.live[id]; ok {
-		m.mu.Unlock()
-		return existing
-	}
-	m.live[id] = s
-	m.wg.Add(1)
-	m.mu.Unlock()
-	go func() {
-		defer m.wg.Done()
-		// Self-deregister on exit so Manager.Get / Snapshot
-		// reflect the live state without an external write.
-		// Done strictly after the Run loop returns, so by the
-		// time another goroutine looks up id == not-live, the
-		// terminal status is already in the store.
-		defer func() {
-			m.mu.Lock()
-			if cur, ok := m.live[id]; ok && cur == s {
-				delete(m.live, id)
-			}
-			m.mu.Unlock()
-		}()
-		if err := s.Run(m.rootCtx); err != nil && !errors.Is(err, context.Canceled) {
-			m.logger.Warn("session loop exited", "session", id, "err", err)
+// deregisterFn returns the onExit callback used by root sessions
+// (Manager.Open / Manager.Resume) to remove themselves from m.live
+// when their goroutine exits. The cur == s identity check guards
+// against a re-Open race that registered a fresh session under the
+// same id between this session's Run() return and the deregister
+// callback firing.
+func (m *Manager) deregisterFn(id string, s *Session) func() {
+	return func() {
+		m.mu.Lock()
+		if cur, ok := m.live[id]; ok && cur == s {
+			delete(m.live, id)
 		}
-	}()
-	return s
+		m.mu.Unlock()
+	}
 }
+
 
 // SessionsLive returns the IDs of currently live sessions.
 func (m *Manager) SessionsLive() []string {

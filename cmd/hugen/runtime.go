@@ -238,6 +238,33 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 			session.WithSkills(core.Skills),
 		),
 	)
+	// Manager satisfies tool.ToolProvider (phase-4-spec §15 step 6).
+	// The "session" provider's dispatch table is empty in C7; per-tool
+	// methods (spawn_subagent, plan_*, whiteboard_*) populate it as
+	// later commits land. Registration must happen AFTER the Manager
+	// is built and before the first session opens — adding it here
+	// keeps the wiring local.
+	if err := core.Tools.AddProvider(core.Manager); err != nil {
+		return nil, failed("session_tool_provider", err)
+	}
+
+	// Wire the MCP reconnector recovery hook (phase-4 US7): every time
+	// a per_agent provider crawls back from stale to healthy, broadcast
+	// a system_marker{mcp_recovered, provider} into every live root
+	// session's inbox so the model on each root sees the recovery in
+	// its transcript and can retry tools that previously surfaced as
+	// `provider_removed`.
+	if rc := core.Tools.Reconnector(); rc != nil {
+		mgr := core.Manager
+		logger := core.Logger
+		rc.OnRecover(func(name string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			mgr.BroadcastSystemMarker(ctx, "mcp_recovered",
+				map[string]any{"provider": name})
+			logger.Info("mcp reconnect: marker broadcast", "provider", name)
+		})
+	}
 
 	// /api/auth/agent-token is mounted inside auth.Service when
 	// AddPrimary registers a hugr-flavoured source — see

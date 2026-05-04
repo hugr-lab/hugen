@@ -52,6 +52,21 @@ type MCPProviderSpec struct {
 // MCPProvider wraps mark3labs/mcp-go's stdio Client and conforms to
 // ToolProvider so ToolManager can route calls through it. One
 // instance per registered MCP server.
+//
+// Stale-state contract (phase-4 US7):
+//
+//   - "stale" means the underlying client is gone (EOF / closed pipe
+//     / failed reconnect) but the provider object is still alive and
+//     registered in ToolManager. Calls return ErrProviderRemoved
+//     until a successful Reconnect clears the flag.
+//   - The transition stale=true is announced via a registered
+//     stale-hook (see SetStaleHook) so the Reconnector can pick the
+//     provider up. Without a hook the provider just sits stale,
+//     reconnect-able only by an inline maybeReconnect on the next
+//     tool call.
+//   - Reconnect() is the public entry point the Reconnector loop
+//     calls every backoff tick. It is also called inline by
+//     maybeReconnect on EOF — the same primitive serves both paths.
 type MCPProvider struct {
 	spec MCPProviderSpec
 	log  *slog.Logger
@@ -59,6 +74,11 @@ type MCPProvider struct {
 	mu     sync.Mutex
 	client *mcpcli.Client
 	closed bool
+	// stale is set when the client is gone but the provider object
+	// is still registered. While stale is true, every call returns
+	// ErrProviderRemoved until Reconnect succeeds.
+	stale     bool
+	staleHook func(*MCPProvider) // optional; called once on each healthy → stale transition
 
 	subsMu sync.Mutex
 	subs   []chan ProviderEvent
@@ -235,10 +255,98 @@ func (p *MCPProvider) currentClient() (*mcpcli.Client, error) {
 	if p.closed {
 		return nil, ErrProviderRemoved
 	}
+	if p.stale {
+		return nil, ErrProviderRemoved
+	}
 	if p.client == nil {
 		return nil, fmt.Errorf("tool: %s not connected", p.spec.Name)
 	}
 	return p.client, nil
+}
+
+// IsStale reports whether the provider's underlying client is gone
+// pending a Reconnect. Callers that don't want to issue a tool call
+// just to probe state (e.g. the Reconnector loop) read this directly.
+func (p *MCPProvider) IsStale() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stale
+}
+
+// IsClosed reports whether the provider has been Close()'d. Used by
+// the Reconnector to skip-and-untrack a provider that was removed
+// externally between Track and the next tick.
+func (p *MCPProvider) IsClosed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed
+}
+
+// SetStaleHook installs a callback fired once each time the provider
+// transitions healthy → stale. ToolManager wires this to its
+// Reconnector.Track on AddProvider so a stale provider self-registers
+// for background reconnect attempts. Passing nil clears the hook.
+// Idempotent.
+func (p *MCPProvider) SetStaleHook(fn func(*MCPProvider)) {
+	p.mu.Lock()
+	p.staleHook = fn
+	p.mu.Unlock()
+}
+
+// markStale transitions healthy → stale and fires the stale hook
+// outside the lock. Idempotent: a second markStale on an already-stale
+// provider is a no-op (no double-trigger of the hook). Caller is
+// responsible for closing the dead client first.
+func (p *MCPProvider) markStale() {
+	p.mu.Lock()
+	if p.closed || p.stale {
+		p.mu.Unlock()
+		return
+	}
+	p.stale = true
+	hook := p.staleHook
+	p.mu.Unlock()
+	p.emit(ProviderEvent{Kind: ProviderHealthChanged, Data: HealthDead})
+	if hook != nil {
+		hook(p)
+	}
+}
+
+// Reconnect rebuilds the underlying mcp-go client and re-runs
+// Initialize. On success it clears the stale flag and emits
+// ProviderHealthChanged{Healthy}. On failure the provider remains
+// stale and the caller (typically the Reconnector loop) is expected
+// to retry with backoff.
+//
+// Closed providers cannot be reconnected — Reconnect returns
+// ErrProviderRemoved without attempting anything. Already-healthy
+// providers (the Reconnector observed someone else recovered them
+// inline) return nil.
+func (p *MCPProvider) Reconnect(ctx context.Context) error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return ErrProviderRemoved
+	}
+	if !p.stale {
+		p.mu.Unlock()
+		return nil
+	}
+	// Drop any old client handle before re-dialling. Close errors are
+	// ignored — the connection's already presumed dead.
+	if p.client != nil {
+		_ = p.client.Close()
+		p.client = nil
+	}
+	p.mu.Unlock()
+	if err := p.connect(ctx); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	p.stale = false
+	p.mu.Unlock()
+	p.emit(ProviderEvent{Kind: ProviderHealthChanged, Data: HealthHealthy})
+	return nil
 }
 
 func (p *MCPProvider) Name() string       { return p.spec.Name }
@@ -401,9 +509,11 @@ func (p *MCPProvider) Close() error {
 }
 
 // maybeReconnect re-spawns the underlying stdio client if the
-// returned error looks like an EOF / closed-pipe condition.
-// Returns nil on a successful reconnect; the original error
-// otherwise.
+// returned error looks like an EOF / closed-pipe condition. One
+// inline retry is attempted; on failure the provider transitions to
+// stale (markStale) and the registered Reconnector — if any — picks
+// it up for background retries. Returns nil on a successful inline
+// reconnect, the original error otherwise.
 func (p *MCPProvider) maybeReconnect(ctx context.Context, callErr error) error {
 	if callErr == nil {
 		return nil
@@ -423,6 +533,10 @@ func (p *MCPProvider) maybeReconnect(ctx context.Context, callErr error) error {
 	}
 	p.mu.Unlock()
 	if err := p.connect(ctx); err != nil {
+		// Inline recovery failed — degrade to stale and let the
+		// background Reconnector keep trying. Caller still sees the
+		// original call error.
+		p.markStale()
 		return err
 	}
 	p.emit(ProviderEvent{Kind: ProviderHealthChanged, Data: HealthHealthy})

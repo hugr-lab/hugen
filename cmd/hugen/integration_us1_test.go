@@ -218,7 +218,7 @@ func TestUS1_BashMCP_WriteRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer core.manager.Close(ctx, sess.ID(), "test")
+	defer core.manager.Terminate(ctx, sess.ID(), "user:/end")
 
 	snap, err := core.tools.Snapshot(ctx, sess.ID())
 	if err != nil {
@@ -274,7 +274,7 @@ func TestUS1_BashMCP_PermissionDenied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer core.manager.Close(ctx, sess.ID(), "test")
+	defer core.manager.Terminate(ctx, sess.ID(), "user:/end")
 
 	snap, _ := core.tools.Snapshot(ctx, sess.ID())
 	writeTool, ok := findTool(snap.Tools, "bash-mcp:bash.write_file")
@@ -357,7 +357,7 @@ func TestUS1_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
 	if _, err := os.Stat(sessDir); err != nil {
 		t.Fatalf("workspace dir missing before close: %v", err)
 	}
-	if _, err := core.manager.Close(ctx, sess.ID(), "test"); err != nil {
+	if core.manager.Terminate(ctx, sess.ID(), "user:/end"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if _, err := os.Stat(sessDir); !os.IsNotExist(err) {

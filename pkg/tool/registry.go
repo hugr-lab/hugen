@@ -49,6 +49,12 @@ func (m *ToolManager) Init(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if m.reconnector != nil {
+		// Use the caller's ctx as the cancel root so a process-shutdown
+		// ctx cleanly exits the reconnector loop alongside everything
+		// else. Close() also calls Stop() as belt-and-braces.
+		m.reconnector.Start(ctx)
+	}
 	if m.providersView == nil {
 		return nil
 	}

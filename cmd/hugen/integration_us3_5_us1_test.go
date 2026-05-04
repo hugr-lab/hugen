@@ -59,7 +59,7 @@ func TestUS3_5_US1_DuckDBSQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { _, _ = core.manager.Close(ctx, sess.ID(), "test") })
+	t.Cleanup(func() { _ = core.manager.Terminate(ctx, sess.ID(), "user:/end") })
 
 	snap, err := core.tools.Snapshot(ctx, sess.ID())
 	if err != nil {
@@ -142,7 +142,7 @@ func TestUS3_5_US1_DuckDBSQL(t *testing.T) {
 	duckScratch := filepath.Join(sessDir, ".duckdb")
 	// .duckdb may or may not exist (DuckDB creates tmp/secrets lazily);
 	// existence isn't required, only "gone after close".
-	if _, err := core.manager.Close(ctx, sess.ID(), "test"); err != nil {
+	if core.manager.Terminate(ctx, sess.ID(), "user:/end"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if _, err := os.Stat(sessDir); !os.IsNotExist(err) {

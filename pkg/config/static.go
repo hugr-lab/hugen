@@ -15,6 +15,18 @@ var (
 	_ AuthView          = (*StaticService)(nil)
 	_ PermissionsView   = (*StaticService)(nil)
 	_ ToolProvidersView = (*StaticService)(nil)
+	_ SubagentsView     = (*StaticService)(nil)
+)
+
+// Subagent runtime defaults — applied in NewStaticService when the
+// caller omits a SubagentsConfig field. Numbers anchor to phase-4-spec
+// §3 step 10.
+const (
+	defaultSubagentMaxDepth                  = 5
+	defaultSubagentMaxTurns                  = 15
+	defaultStuckRepeatedHash                 = 3
+	defaultStuckTightDensityCount            = 3
+	defaultStuckTightDensityWindow           = 2 * time.Second
 )
 
 // StaticService is the phase-3 implementation of Service. It is
@@ -33,6 +45,7 @@ type StaticService struct {
 	permissions    []PermissionRule
 	permSettings   PermissionSettings
 	toolProviders  []ToolProviderSpec
+	subagents      SubagentsConfig
 }
 
 // StaticInput aggregates everything NewStaticService needs from
@@ -46,6 +59,7 @@ type StaticInput struct {
 	Permissions    []PermissionRule
 	PermSettings   PermissionSettings
 	ToolProviders  []ToolProviderSpec
+	Subagents      SubagentsConfig
 }
 
 // NewStaticService captures the input snapshot. The caller still
@@ -58,6 +72,22 @@ func NewStaticService(in StaticInput) *StaticService {
 	if in.PermSettings.HardExpiry <= 0 {
 		in.PermSettings.HardExpiry = 3 * in.PermSettings.RefreshInterval
 	}
+	subagents := in.Subagents
+	if subagents.MaxDepth <= 0 {
+		subagents.MaxDepth = defaultSubagentMaxDepth
+	}
+	if subagents.MaxTurns <= 0 {
+		subagents.MaxTurns = defaultSubagentMaxTurns
+	}
+	if subagents.StuckDetection.RepeatedHash <= 0 {
+		subagents.StuckDetection.RepeatedHash = defaultStuckRepeatedHash
+	}
+	if subagents.StuckDetection.TightDensityCount <= 0 {
+		subagents.StuckDetection.TightDensityCount = defaultStuckTightDensityCount
+	}
+	if subagents.StuckDetection.TightDensityWindow <= 0 {
+		subagents.StuckDetection.TightDensityWindow = defaultStuckTightDensityWindow
+	}
 	return &StaticService{
 		localDB:        in.LocalDB,
 		localDBEnabled: in.LocalDBEnabled,
@@ -67,6 +97,7 @@ func NewStaticService(in StaticInput) *StaticService {
 		permissions:    append([]PermissionRule(nil), in.Permissions...),
 		permSettings:   in.PermSettings,
 		toolProviders:  append([]ToolProviderSpec(nil), in.ToolProviders...),
+		subagents:      subagents,
 	}
 }
 
@@ -78,6 +109,7 @@ func (s *StaticService) Embedding() EmbeddingView         { return s }
 func (s *StaticService) Auth() AuthView                   { return s }
 func (s *StaticService) Permissions() PermissionsView     { return s }
 func (s *StaticService) ToolProviders() ToolProvidersView { return s }
+func (s *StaticService) Subagents() SubagentsView         { return s }
 
 // Subscribe returns a never-firing, never-closed channel. Phase-3
 // callers can wire it without special-casing; phase-6+ live
@@ -134,6 +166,14 @@ func (s *StaticService) Providers() []ToolProviderSpec {
 	out := make([]ToolProviderSpec, len(s.toolProviders))
 	copy(out, s.toolProviders)
 	return out
+}
+
+// --- SubagentsView ---
+
+func (s *StaticService) DefaultMaxDepth() int           { return s.subagents.MaxDepth }
+func (s *StaticService) DefaultMaxTurns() int           { return s.subagents.MaxTurns }
+func (s *StaticService) DefaultStuckDetection() StuckPolicy {
+	return s.subagents.StuckDetection
 }
 
 // --- OnUpdate (shared no-op) ---

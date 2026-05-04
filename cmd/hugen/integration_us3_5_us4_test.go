@@ -106,7 +106,7 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { _, _ = mgr.Close(ctx, sess.ID(), "test") })
+	t.Cleanup(func() { _ = mgr.Terminate(ctx, sess.ID(), "user:/end") })
 
 	// Load duckdb-data into the session.
 	if err := skills.Load(ctx, sess.ID(), "duckdb-data"); err != nil {

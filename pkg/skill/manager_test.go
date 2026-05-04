@@ -123,6 +123,44 @@ allowed-tools:
 	}
 }
 
+// TestManager_LoadResolvesRequiresSkills_PhaseFour mirrors the
+// transitive-deps coverage above using the phase-4 canonical
+// `requires_skills` key — proves the closure resolver consumes the
+// new key alongside the legacy `requires`.
+func TestManager_LoadResolvesRequiresSkills_PhaseFour(t *testing.T) {
+	m := newTestManager(t, map[string][]byte{
+		"top": []byte(`---
+name: top
+description: top
+license: MIT
+metadata:
+  hugen:
+    requires_skills: [base]
+---
+`),
+		"base": []byte(`---
+name: base
+description: base
+license: MIT
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.read_file]
+---
+`),
+	})
+
+	if err := m.Load(context.Background(), "s", "top"); err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	b, err := m.Bindings(context.Background(), "s")
+	if err != nil {
+		t.Fatalf("Bindings: %v", err)
+	}
+	if len(b.AllowedTools) != 1 {
+		t.Errorf("AllowedTools = %+v, want one entry from base via requires_skills", b.AllowedTools)
+	}
+}
+
 func TestManager_LoadMissingSkill(t *testing.T) {
 	m := newTestManager(t, nil)
 	err := m.Load(context.Background(), "s", "ghost")
@@ -269,6 +307,83 @@ license: MIT
 		}
 	default:
 		t.Fatal("Publish event not delivered")
+	}
+}
+
+// TestManager_BindingsCeilingFields covers the phase-4-spec §8 ceiling
+// surface on Bindings: MaxTurnsHard takes the max across loaded skills;
+// StuckDetectionDisabled flips when ANY skill explicitly opts out, so
+// the loosest skill (an analyst that legitimately loops) silences the
+// detectors for the whole session.
+func TestManager_BindingsCeilingFields(t *testing.T) {
+	m := newTestManager(t, map[string][]byte{
+		"explorer": []byte(`---
+name: explorer
+description: explorer
+license: MIT
+metadata:
+  hugen:
+    max_turns: 5
+    max_turns_hard: 12
+    stuck_detection:
+      enabled: false
+---
+`),
+		"helper": []byte(`---
+name: helper
+description: helper
+license: MIT
+metadata:
+  hugen:
+    max_turns: 3
+    max_turns_hard: 7
+---
+`),
+	})
+	ctx := context.Background()
+	if err := m.Load(ctx, "s", "explorer"); err != nil {
+		t.Fatalf("Load explorer: %v", err)
+	}
+	if err := m.Load(ctx, "s", "helper"); err != nil {
+		t.Fatalf("Load helper: %v", err)
+	}
+	b, err := m.Bindings(ctx, "s")
+	if err != nil {
+		t.Fatalf("Bindings: %v", err)
+	}
+	if b.MaxTurns != 5 {
+		t.Errorf("MaxTurns = %d, want max(5,3)=5", b.MaxTurns)
+	}
+	if b.MaxTurnsHard != 12 {
+		t.Errorf("MaxTurnsHard = %d, want max(12,7)=12", b.MaxTurnsHard)
+	}
+	if !b.StuckDetectionDisabled {
+		t.Errorf("StuckDetectionDisabled = false, want true (explorer opted out)")
+	}
+}
+
+// TestManager_BindingsStuckDetection_AllOptedIn pins the conservative
+// default: when no loaded skill flips Enabled to false, the detectors
+// stay active (Disabled stays false).
+func TestManager_BindingsStuckDetection_AllOptedIn(t *testing.T) {
+	m := newTestManager(t, map[string][]byte{
+		"plain": []byte(`---
+name: plain
+description: plain
+license: MIT
+metadata:
+  hugen:
+    max_turns: 3
+---
+`),
+	})
+	ctx := context.Background()
+	if err := m.Load(ctx, "s", "plain"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	b, _ := m.Bindings(ctx, "s")
+	if b.StuckDetectionDisabled {
+		t.Errorf("StuckDetectionDisabled = true on default config, want false")
 	}
 }
 

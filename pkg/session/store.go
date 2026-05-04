@@ -22,10 +22,32 @@ var (
 )
 
 // Session lifecycle states. Stored on `sessions.status`.
+//
+// Phase-4 makes `sessions.status` informational only: every session
+// is written as `StatusActive` once at create and never updated
+// afterwards. Liveness is derived from the presence/absence of a
+// `session_terminated` event; the legacy column is kept for one
+// release for adapter list filters that still read it.
 const (
 	StatusActive    = "active"
-	StatusSuspended = "suspended"
-	StatusClosed    = "closed"
+	StatusSuspended = "suspended" // legacy; phase-4 never writes
+	StatusClosed    = "closed"    // legacy; phase-4 never writes
+)
+
+// EventTypeRoutingOp is reserved for phase-5 HITL chain forwarding.
+// Phase-4 declares the constant so the routing layer can reference it
+// but no producer emits it yet.
+const EventTypeRoutingOp = "routing_op"
+
+// EventTypeHumanMessageReceived / EventTypeAssistantMessageSent give
+// `parent_context` (US1) explicit categorisation rows to filter on,
+// independent of the streaming chunk markers `KindUserMessage` /
+// `KindAgentMessage`. Producers wire these in commit 5 (run-loop
+// refactor); this commit only declares the constants so consumers
+// can reference them.
+const (
+	EventTypeHumanMessageReceived = "human_message_received"
+	EventTypeAssistantMessageSent = "assistant_message_sent"
 )
 
 // SessionRow mirrors the hub.db.agent.sessions row layout.
@@ -99,6 +121,11 @@ type RuntimeStore interface {
 	AppendNote(ctx context.Context, note NoteRow) error
 	ListNotes(ctx context.Context, sessionID string, limit int) ([]NoteRow, error)
 	ListSessions(ctx context.Context, agentID, status string) ([]SessionRow, error)
+	// ListChildren returns every session whose parent_session_id equals
+	// parentID. Used by the phase-4 restart BFS walker to traverse
+	// parent→child trees on boot. Returns an empty slice (not an error)
+	// when parentID has no children.
+	ListChildren(ctx context.Context, parentID string) ([]SessionRow, error)
 }
 
 // RuntimeStoreLocal is the DuckDB-backed implementation over
@@ -380,6 +407,32 @@ func (s *RuntimeStoreLocal) ListNotes(ctx context.Context, sessionID string, lim
 	return rows, nil
 }
 
+func (s *RuntimeStoreLocal) ListChildren(ctx context.Context, parentID string) ([]SessionRow, error) {
+	if parentID == "" {
+		return nil, fmt.Errorf("runtime store: ListChildren requires parent id")
+	}
+	filter := map[string]any{"parent_session_id": map[string]any{"eq": parentID}}
+	rows, err := queries.RunQuery[[]SessionRow](ctx, s.querier,
+		`query ($filter: hub_db_sessions_filter) {
+			hub { db { agent {
+				sessions(filter: $filter, order_by: [{field: "created_at", direction: ASC}]) {
+					id agent_id owner_id parent_session_id session_type spawned_from_event_id
+					status mission metadata created_at updated_at
+				}
+			}}}
+		}`,
+		map[string]any{"filter": filter},
+		"hub.db.agent.sessions",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return rows, nil
+}
+
 func (s *RuntimeStoreLocal) ListSessions(ctx context.Context, agentID, status string) ([]SessionRow, error) {
 	filter := map[string]any{"agent_id": map[string]any{"eq": agentID}}
 	if status != "" {
@@ -469,6 +522,33 @@ func FrameToEventRow(f protocol.Frame, agentID string) (EventRow, string, error)
 			b, _ := json.Marshal(v.Payload.Result)
 			row.ToolResult = string(b)
 		}
+	case *protocol.SubagentStarted:
+		row.Content = v.Payload.Task
+	case *protocol.SubagentResult:
+		row.Content = v.Payload.Result
+	case *protocol.PlanOp:
+		row.Content = v.Payload.Text
+	case *protocol.WhiteboardOp:
+		row.Content = v.Payload.Text
+	case *protocol.WhiteboardMessage:
+		row.Content = v.Payload.Text
+	case *protocol.SessionTerminated:
+		row.Content = v.Payload.Reason
+	case *protocol.SystemMessage:
+		row.Content = v.Payload.Content
+	}
+	// Phase-4 envelope additions: persist the cross-session sender id
+	// in Metadata so EventRowToFrame can re-hydrate it precisely. The
+	// other two reserved fields (FromParticipant, RequestID) ride
+	// the same Metadata map when set.
+	if from := f.FromSessionID(); from != "" && row.Metadata != nil {
+		row.Metadata["__from_session"] = from
+	}
+	if from := f.FromParticipantID(); from != "" && row.Metadata != nil {
+		row.Metadata["__from_participant"] = from
+	}
+	if req := f.RequestIDValue(); req != "" && row.Metadata != nil {
+		row.Metadata["__request_id"] = req
 	}
 	return row, summary, nil
 }
@@ -477,6 +557,12 @@ func FrameToEventRow(f protocol.Frame, agentID string) (EventRow, string, error)
 // Metadata column (full JSON payload) to reconstruct the variant
 // payload precisely, falling back to columnar fields when Metadata
 // is absent (older rows / minimal callers).
+//
+// Phase-4 envelope additions (FromSession, FromParticipant,
+// RequestID) ride the Metadata map under reserved keys (__from_session,
+// __from_participant, __request_id). The codec ignores unknown keys
+// when unmarshalling into the typed payload, so the overlay does not
+// need to be stripped from the payload bytes.
 func EventRowToFrame(row EventRow) (protocol.Frame, error) {
 	base := protocol.BaseFrame{
 		ID:      row.ID,
@@ -488,6 +574,17 @@ func EventRowToFrame(row EventRow) (protocol.Frame, error) {
 		},
 		At: row.CreatedAt,
 		S:  row.Seq,
+	}
+	if row.Metadata != nil {
+		if v, ok := row.Metadata["__from_session"].(string); ok {
+			base.FromSession = v
+		}
+		if v, ok := row.Metadata["__from_participant"].(string); ok {
+			base.FromParticipant = v
+		}
+		if v, ok := row.Metadata["__request_id"].(string); ok {
+			base.RequestID = v
+		}
 	}
 	codec := protocol.NewCodec()
 	var payload []byte
@@ -508,6 +605,10 @@ func EventRowToFrame(row EventRow) (protocol.Frame, error) {
 			payload = []byte(fmt.Sprintf(`{"subject":%q}`, row.Content))
 		case protocol.KindSessionClosed, protocol.KindCancel:
 			payload = []byte(fmt.Sprintf(`{"reason":%q}`, row.Content))
+		case protocol.KindSessionTerminated:
+			payload = []byte(fmt.Sprintf(`{"reason":%q}`, row.Content))
+		case protocol.KindSystemMessage:
+			payload = []byte(fmt.Sprintf(`{"kind":"unknown","content":%q}`, row.Content))
 		default:
 			payload = []byte(`{}`)
 		}
