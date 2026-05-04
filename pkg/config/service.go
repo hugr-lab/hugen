@@ -12,6 +12,7 @@ type Service interface {
 	Auth() AuthView
 	Permissions() PermissionsView
 	ToolProviders() ToolProvidersView
+	Subagents() SubagentsView
 
 	// Subscribe streams coarse "config changed" events for any
 	// caller that wants a single signal across all domains. Per-

@@ -49,6 +49,9 @@ func LoadStaticInput(raw map[string]any, localDBEnabled bool) (StaticInput, erro
 	if err := decodeKey(raw, "tool_providers", &in.ToolProviders); err != nil {
 		return in, err
 	}
+	if err := decodeKey(raw, "subagents", &in.Subagents); err != nil {
+		return in, err
+	}
 
 	expandEnvInPlace(&in)
 	anchorProviderCommands(in.ToolProviders)

@@ -142,3 +142,62 @@ func TestStaticService_SubscribeClosesOnContextCancel(t *testing.T) {
 		t.Fatal("Subscribe channel did not close after context cancel")
 	}
 }
+
+// TestStaticService_SubagentsView_Defaults verifies the runtime
+// defaults from phase-4-spec §3 step 10: max_depth=5, max_turns=15,
+// repeated_hash=3, tight_density_count=3, tight_density_window=2s,
+// stuck-detection enabled.
+func TestStaticService_SubagentsView_Defaults(t *testing.T) {
+	s := NewStaticService(StaticInput{})
+	v := s.Subagents()
+	if got := v.DefaultMaxDepth(); got != 5 {
+		t.Errorf("DefaultMaxDepth = %d, want 5", got)
+	}
+	if got := v.DefaultMaxTurns(); got != 15 {
+		t.Errorf("DefaultMaxTurns = %d, want 15", got)
+	}
+	sd := v.DefaultStuckDetection()
+	if sd.RepeatedHash != 3 {
+		t.Errorf("RepeatedHash = %d, want 3", sd.RepeatedHash)
+	}
+	if sd.TightDensityCount != 3 {
+		t.Errorf("TightDensityCount = %d, want 3", sd.TightDensityCount)
+	}
+	if sd.TightDensityWindow != 2*time.Second {
+		t.Errorf("TightDensityWindow = %v, want 2s", sd.TightDensityWindow)
+	}
+	if !sd.IsEnabled() {
+		t.Error("IsEnabled() = false on default; want true")
+	}
+}
+
+// TestStaticService_SubagentsView_Override verifies operator-supplied
+// values flow through unmodified, and an explicit Enabled=&false
+// disables the heuristics.
+func TestStaticService_SubagentsView_Override(t *testing.T) {
+	off := false
+	s := NewStaticService(StaticInput{
+		Subagents: SubagentsConfig{
+			MaxDepth: 8,
+			MaxTurns: 25,
+			StuckDetection: StuckPolicy{
+				RepeatedHash:       4,
+				TightDensityCount:  6,
+				TightDensityWindow: 5 * time.Second,
+				Enabled:            &off,
+			},
+		},
+	})
+	v := s.Subagents()
+	if v.DefaultMaxDepth() != 8 || v.DefaultMaxTurns() != 25 {
+		t.Errorf("MaxDepth/MaxTurns = (%d,%d), want (8,25)",
+			v.DefaultMaxDepth(), v.DefaultMaxTurns())
+	}
+	sd := v.DefaultStuckDetection()
+	if sd.RepeatedHash != 4 || sd.TightDensityCount != 6 || sd.TightDensityWindow != 5*time.Second {
+		t.Errorf("StuckDetection = %+v, want overrides applied", sd)
+	}
+	if sd.IsEnabled() {
+		t.Error("IsEnabled() = true with explicit Enabled=&false; want false")
+	}
+}

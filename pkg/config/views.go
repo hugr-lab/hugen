@@ -100,3 +100,76 @@ type ToolProvidersView interface {
 	Providers() []ToolProviderSpec
 	OnUpdate(fn func()) (cancel func())
 }
+
+// SubagentsView is the operator-config surface for phase-4 sub-
+// agent runtime defaults. Per phase-4-spec §3 step 10. Lives next
+// to ToolProvidersView / PermissionsView so cmd/hugen can wire the
+// session Manager from a single Service handle without per-domain
+// fan-out.
+//
+// The runtime overlays per-skill values from
+// skill.HugenMetadata.MaxTurns / MaxTurnsHard / StuckDetection on
+// top of these defaults; this view supplies the values when no
+// skill is loaded.
+type SubagentsView interface {
+	// DefaultMaxDepth caps how deep the sub-agent tree can grow
+	// from any root. Default 5 if absent. spawn_subagent surfaces
+	// ErrDepthExceeded when a request would exceed this ceiling
+	// AND no per-spawn override raised it.
+	DefaultMaxDepth() int
+
+	// DefaultMaxTurns is the per-Turn cap on the model→tool→model
+	// loop when no loaded skill specifies a higher MaxTurns.
+	// Default 15.
+	DefaultMaxTurns() int
+
+	// DefaultStuckDetection supplies the runtime's stuck-detection
+	// tunables when no loaded skill overrides them. Implementations
+	// return a value with sensible runtime defaults when the field
+	// is absent in YAML — see static.go.
+	DefaultStuckDetection() StuckPolicy
+
+	OnUpdate(fn func()) (cancel func())
+}
+
+// StuckPolicy is the operator-config shape mirroring the per-skill
+// skill.StuckDetectionPolicy. Kept as a separate type at the
+// pkg/config layer so the dependency arrow stays config → skill,
+// not the other way: pkg/skill never imports pkg/config. The
+// runtime (pkg/session) reconciles the two when picking effective
+// values for a turn.
+//
+// Field semantics match phase-4-spec §4.4 exactly:
+//   - RepeatedHash: N consecutive identical tool-call hashes
+//     before the rising-edge nudge fires.
+//   - TightDensityCount / TightDensityWindow: M same-hash calls
+//     within W triggering a density nudge.
+//   - Enabled (tri-state): nil = default on, &false = disabled,
+//     &true = explicit on. The pointer keeps a missing-key from
+//     being conflated with an explicit "enabled: false".
+type StuckPolicy struct {
+	RepeatedHash       int           `mapstructure:"repeated_hash"        yaml:"repeated_hash,omitempty"`
+	TightDensityCount  int           `mapstructure:"tight_density_count"  yaml:"tight_density_count,omitempty"`
+	TightDensityWindow time.Duration `mapstructure:"tight_density_window" yaml:"tight_density_window,omitempty"`
+	Enabled            *bool         `mapstructure:"enabled"              yaml:"enabled,omitempty"`
+}
+
+// IsEnabled resolves the tri-state Enabled to the boolean callers
+// actually need. Default true — only an explicit Enabled=&false
+// turns the heuristics off.
+func (p StuckPolicy) IsEnabled() bool {
+	if p.Enabled == nil {
+		return true
+	}
+	return *p.Enabled
+}
+
+// SubagentsConfig is the data shape NewStaticService receives via
+// StaticInput. Optional in YAML; absent fields take the runtime
+// defaults declared in static.go (MaxDepth=5, MaxTurns=15,
+// StuckDetection runtime defaults).
+type SubagentsConfig struct {
+	MaxDepth       int         `mapstructure:"max_depth"        yaml:"max_depth,omitempty"`
+	MaxTurns       int         `mapstructure:"max_turns"        yaml:"max_turns,omitempty"`
+	StuckDetection StuckPolicy `mapstructure:"stuck_detection"  yaml:"stuck_detection,omitempty"`
+}
