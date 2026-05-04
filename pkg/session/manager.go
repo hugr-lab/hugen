@@ -88,15 +88,26 @@ type Manager struct {
 	sessionOpts []SessionOption
 	lifecycle   Lifecycle
 
+	// deps mirrors the per-session dependency bundle passed by
+	// reference to every Session in this Manager's tree (root +
+	// subagents). Populated by NewManager from the same arguments
+	// that fill the explicit fields above; both views point at the
+	// same wg / rootCtx / RuntimeStore so existing manager.go code
+	// can continue to read m.store / m.agent / ... without a churn,
+	// while newSession / newSessionRestore can take m.deps
+	// monolithically.
+	deps *sessionDeps
+
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
 
 	mu   sync.RWMutex
 	live map[string]*Session
 	// cancels keys per-session ctx cancellation by session id, set by
-	// spawn(). Used by Terminate to cancel one session without
-	// affecting siblings; by ShutdownAll only via rootCancel
-	// (which propagates to every per-session ctx via context derivation).
+	// spawn(). Pivot 3 of the tree-ctx-routing ADR removes this in
+	// favour of routing through m.live[id].terminate; pivot 2 keeps
+	// the field so the existing Manager.Terminate code path keeps
+	// working unchanged for now.
 	cancels map[string]context.CancelCauseFunc
 	// wg tracks every spawned session goroutine. ShutdownAll uses
 	// it to wait for every goroutine to finish exiting BEFORE the
@@ -182,8 +193,30 @@ func NewManager(
 	for _, o := range opts {
 		o(m)
 	}
+	// Build the shared sessionDeps view AFTER the options ran, so
+	// Lifecycle and SessionOption updates picked up by m.lifecycle /
+	// m.sessionOpts are reflected in the bundle that newSession /
+	// newSessionRestore see.
+	m.deps = &sessionDeps{
+		store:     m.store,
+		agent:     m.agent,
+		models:    m.models,
+		commands:  m.commands,
+		codec:     m.codec,
+		logger:    m.logger,
+		lifecycle: m.lifecycle,
+		opts:      m.sessionOpts,
+		rootCtx:   m.rootCtx,
+		wg:        &m.wg,
+		maxDepth:  defaultMaxDepth,
+	}
 	return m
 }
+
+// defaultMaxDepth is the phase-4 fallback for sessionDeps.maxDepth
+// until commit 9 wires cfg.Subagents().DefaultMaxDepth. Matches
+// `phase-4-spec.md §5.7` Layer 2 default.
+const defaultMaxDepth = 5
 
 // Open creates a fresh session row, builds an in-memory *Session,
 // starts its goroutine, and emits a session_opened frame. Returns
@@ -258,7 +291,7 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if isSessionTerminated(ctx, m.store, id) {
+	if hasTerminated(ctx, m.store, id) {
 		return nil, ErrSessionClosed
 	}
 	m.mu.RLock()
@@ -551,23 +584,6 @@ func (m *Manager) spawn(_ context.Context, id string) *Session {
 		}
 	}()
 	return s
-}
-
-// isSessionTerminated reports whether the session id has a
-// session_terminated event in its events. Phase-4 liveness is
-// event-derived (FR-027); the legacy `sessions.status` column is
-// pinned to 'active' at create and never updated.
-func isSessionTerminated(ctx context.Context, store RuntimeStore, id string) bool {
-	events, err := store.ListEvents(ctx, id, ListEventsOpts{Limit: 1000})
-	if err != nil {
-		return false
-	}
-	for _, ev := range events {
-		if ev.EventType == string(protocol.KindSessionTerminated) {
-			return true
-		}
-	}
-	return false
 }
 
 // SessionsLive returns the IDs of currently live sessions.

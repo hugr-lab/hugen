@@ -21,8 +21,19 @@ import (
 // Session is one long-lived conversation. Phase 1: one user, one
 // agent. The session goroutine is started by Manager.spawn; clients
 // only interact through Inbox / Outbox.
+//
+// Phase-4 tree-ctx-routing pivot (ADR
+// `design/001-agent-runtime/phase-4-tree-ctx-routing.md`) extends
+// Session with parent/children/depth/ctx/cancel/explicitTerminate so
+// sub-agents can be owned by their parent Session rather than by
+// Manager. The legacy fields (agent/store/models/codec/cmds/...)
+// remain for back-compat with existing call sites; deps points at
+// the same shared bundle so new constructors can inject everything
+// in one go.
 type Session struct {
 	id           string
+	depth        int                 // 0 for root; parent.depth+1 for subagent
+	deps         *sessionDeps        // shared bundle; nil only in legacy NewSession callers
 	agent        *Agent
 	store        RuntimeStore
 	models       *model.ModelRouter
@@ -33,6 +44,31 @@ type Session struct {
 	skills       *skill.SkillManager // optional; consulted for per-skill max_turns
 	maxToolIters int                 // 0 → defaultMaxToolIterations
 	logger       *slog.Logger
+
+	// Tree links (phase-4 pivot). parent is nil for root; children is
+	// always non-nil so callers can lock+iterate without a nil-check.
+	parent   *Session
+	childMu  sync.Mutex
+	children map[string]*Session
+
+	// Per-session ctx + cancel. Set by newSession / newSessionRestore
+	// before the goroutine launches; nil only for legacy NewSession
+	// callers that haven't migrated. The goroutine reads ctx via the
+	// argument to Run, so Session.ctx is just the canonical handle for
+	// derivation in parent.Spawn (child.ctx = WithCancelCause(parent.ctx)).
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+
+	// openedAt mirrors the persisted SessionRow.CreatedAt (or, on
+	// resume / restore, the original CreatedAt loaded from store).
+	// Set by newSession / newSessionRestore so Manager.Open / Resume
+	// can echo it back to the caller without an extra LoadSession.
+	openedAt time.Time
+	// explicitTerminate distinguishes "I called s.terminate(cause)"
+	// from "my parent's ctx was cancelled and I'm cascading down".
+	// Pivot 7 wires the read site in handleExit; pivot 2 just declares
+	// the field.
+	explicitTerminate atomic.Bool
 
 	// Per-session model overrides. /model use mutates this.
 	overridesMu sync.RWMutex
@@ -64,6 +100,11 @@ type Session struct {
 	//
 	// Nil only for Sessions constructed directly by tests without a
 	// Manager (rare); guards in handleSlashCommand check for nil.
+	//
+	// Phase-4 pivot: this is the public face of s.cancel — pivot 7
+	// will wrap it with explicitTerminate flag set. For pivot 2, kept
+	// as the bare CancelCauseFunc to preserve handleSlashCommand
+	// call site without churn.
 	terminate context.CancelCauseFunc
 }
 
