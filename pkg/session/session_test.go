@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -11,54 +12,74 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
-// fakeStore is a minimal in-memory RuntimeStore.
+// fakeStore is a minimal in-memory RuntimeStore. It supports multiple
+// sessions so phase-4 spawn / restart tests can build small parent /
+// child trees against it.
+//
+// Single-session tests still work: the legacy `session` field aliases
+// the first OpenSession call so any test that opens one session and
+// reads via LoadSession/UpdateSessionStatus continues to behave as
+// before (for backward compatibility with phase 1-3.5 test cases).
 type fakeStore struct {
-	mu      sync.Mutex
-	events  []EventRow
-	notes   []NoteRow
-	session SessionRow
-	seq     int
+	mu       sync.Mutex
+	events   map[string][]EventRow // by sessionID
+	notes    []NoteRow
+	sessions map[string]SessionRow // by sessionID
+	seq      map[string]int        // per-session seq cursor
 }
 
-func newFakeStore() *fakeStore { return &fakeStore{} }
+func newFakeStore() *fakeStore {
+	return &fakeStore{
+		events:   make(map[string][]EventRow),
+		sessions: make(map[string]SessionRow),
+		seq:      make(map[string]int),
+	}
+}
 
 func (s *fakeStore) OpenSession(_ context.Context, row SessionRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.session = row
+	s.sessions[row.ID] = row
 	return nil
 }
 
 func (s *fakeStore) LoadSession(_ context.Context, id string) (SessionRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.session.ID != id {
+	row, ok := s.sessions[id]
+	if !ok {
 		return SessionRow{}, ErrSessionNotFound
 	}
-	return s.session, nil
+	return row, nil
 }
 
-func (s *fakeStore) UpdateSessionStatus(_ context.Context, _, status string) error {
+func (s *fakeStore) UpdateSessionStatus(_ context.Context, id, status string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.session.Status = status
+	row, ok := s.sessions[id]
+	if !ok {
+		return ErrSessionNotFound
+	}
+	row.Status = status
+	s.sessions[id] = row
 	return nil
 }
 
 func (s *fakeStore) AppendEvent(_ context.Context, ev EventRow, _ string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.seq++
-	ev.Seq = s.seq
-	s.events = append(s.events, ev)
+	s.seq[ev.SessionID]++
+	ev.Seq = s.seq[ev.SessionID]
+	s.events[ev.SessionID] = append(s.events[ev.SessionID], ev)
 	return nil
 }
 
-func (s *fakeStore) ListEvents(_ context.Context, _ string, opts ListEventsOpts) ([]EventRow, error) {
+func (s *fakeStore) ListEvents(_ context.Context, sessionID string, opts ListEventsOpts) ([]EventRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]EventRow, 0, len(s.events))
-	for _, ev := range s.events {
+	src := s.events[sessionID]
+	out := make([]EventRow, 0, len(src))
+	for _, ev := range src {
 		if opts.MinSeq > 0 && ev.Seq <= opts.MinSeq {
 			continue
 		}
@@ -70,10 +91,10 @@ func (s *fakeStore) ListEvents(_ context.Context, _ string, opts ListEventsOpts)
 	return out, nil
 }
 
-func (s *fakeStore) NextSeq(_ context.Context, _ string) (int, error) {
+func (s *fakeStore) NextSeq(_ context.Context, sessionID string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.seq + 1, nil
+	return s.seq[sessionID] + 1, nil
 }
 
 func (s *fakeStore) AppendNote(_ context.Context, n NoteRow) error {
@@ -92,18 +113,53 @@ func (s *fakeStore) ListNotes(_ context.Context, _ string, _ int) ([]NoteRow, er
 func (s *fakeStore) ListSessions(_ context.Context, _, _ string) ([]SessionRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.session.ID == "" {
+	if len(s.sessions) == 0 {
 		return nil, nil
 	}
-	return []SessionRow{s.session}, nil
+	out := make([]SessionRow, 0, len(s.sessions))
+	for _, row := range s.sessions {
+		out = append(out, row)
+	}
+	return out, nil
+}
+
+func (s *fakeStore) ListChildren(_ context.Context, parentID string) ([]SessionRow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]SessionRow, 0)
+	for _, row := range s.sessions {
+		if row.ParentSessionID == parentID {
+			out = append(out, row)
+		}
+	}
+	return out, nil
 }
 
 func (s *fakeStore) recordedKinds() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]string, 0, len(s.events))
-	for _, e := range s.events {
-		out = append(out, e.EventType)
+	// Existing single-session callers expect a flat list of event types
+	// in arrival order. With the map backing, sort by sessionID + seq
+	// to keep the output deterministic across runs.
+	type rec struct {
+		sid string
+		ev  EventRow
+	}
+	all := make([]rec, 0)
+	for sid, evs := range s.events {
+		for _, e := range evs {
+			all = append(all, rec{sid: sid, ev: e})
+		}
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].sid != all[j].sid {
+			return all[i].sid < all[j].sid
+		}
+		return all[i].ev.Seq < all[j].ev.Seq
+	})
+	out := make([]string, 0, len(all))
+	for _, r := range all {
+		out = append(out, r.ev.EventType)
 	}
 	return out
 }
