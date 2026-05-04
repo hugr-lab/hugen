@@ -101,14 +101,13 @@ type Manager struct {
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
 
-	mu   sync.RWMutex
+	mu sync.RWMutex
+	// live maps session id → *Session. Pivot 4 narrows this to
+	// root-only; pivot 3 still registers every session that goes
+	// through Manager.Open / Resume / Spawn here so that
+	// Manager.Terminate / Get / Deliver lookups keep working
+	// unchanged.
 	live map[string]*Session
-	// cancels keys per-session ctx cancellation by session id, set by
-	// spawn(). Pivot 3 of the tree-ctx-routing ADR removes this in
-	// favour of routing through m.live[id].terminate; pivot 2 keeps
-	// the field so the existing Manager.Terminate code path keeps
-	// working unchanged for now.
-	cancels map[string]context.CancelCauseFunc
 	// wg tracks every spawned session goroutine. ShutdownAll uses
 	// it to wait for every goroutine to finish exiting BEFORE the
 	// local DuckDB engine closes — without this guarantee an
@@ -188,7 +187,6 @@ func NewManager(
 		rootCtx:    rootCtx,
 		rootCancel: rootCancel,
 		live:       make(map[string]*Session),
-		cancels:    make(map[string]context.CancelCauseFunc),
 	}
 	for _, o := range opts {
 		o(m)
@@ -218,111 +216,63 @@ func NewManager(
 // `phase-4-spec.md §5.7` Layer 2 default.
 const defaultMaxDepth = 5
 
-// Open creates a fresh session row, builds an in-memory *Session,
-// starts its goroutine, and emits a session_opened frame. Returns
-// the session and the row's CreatedAt timestamp so callers can
-// echo the persisted opened_at without an extra LoadSession.
+// Open creates a fresh root session via newSession, registers it in
+// m.live, and starts its goroutine. Returns the session and the row's
+// CreatedAt timestamp so callers can echo the persisted opened_at
+// without an extra LoadSession.
 //
-// Phase 4: req.ParentSessionID/Depth/SessionType/SpawnedFromEventID
-// are written to the row when set. Sub-agents reach this code path
-// via Manager.Spawn; root sessions leave those fields zero so
-// SessionType defaults to "root".
+// Phase 4: only roots reach this path. Sub-agents go through
+// Manager.Spawn → newSession(ctx, parent, ...) which bypasses Open.
 func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, time.Time, error) {
-	id := newSessionID()
-	now := time.Now().UTC()
-	sessionType := req.SessionType
-	if sessionType == "" {
-		sessionType = "root"
+	s, err := newSession(ctx, nil, m.deps, req)
+	if err != nil {
+		return nil, time.Time{}, err
 	}
-	row := SessionRow{
-		ID:                 id,
-		AgentID:            m.agent.ID(),
-		OwnerID:            req.OwnerID,
-		ParentSessionID:    req.ParentSessionID,
-		SessionType:        sessionType,
-		SpawnedFromEventID: req.SpawnedFromEventID,
-		Status:             StatusActive,
-		Metadata:           req.Metadata,
-		CreatedAt:          now,
-		UpdatedAt:          now,
+	m.mu.Lock()
+	if existing, ok := m.live[s.id]; ok {
+		// Race is theoretical for roots (id is random); keep the
+		// branch defensive so a duplicate id can't leak goroutines.
+		m.mu.Unlock()
+		s.cancel(nil)
+		return existing, existing.openedAt, nil
 	}
-	if err := m.store.OpenSession(ctx, row); err != nil {
-		return nil, time.Time{}, fmt.Errorf("manager: open session: %w", err)
-	}
-	if m.lifecycle != nil {
-		if err := m.lifecycle.Acquire(ctx, id); err != nil {
-			// Phase-4 strict event-sourcing: the sessions row is
-			// immutable after create. Mark the orphaned session
-			// terminal via a session_terminated event so the restart
-			// walker on next boot doesn't try to resume it.
-			terminal := protocol.NewSessionTerminated(id, m.agent.Participant(), protocol.SessionTerminatedPayload{
-				Reason: "acquire_failed",
-			})
-			if termRow, summary, perr := FrameToEventRow(terminal, m.agent.ID()); perr == nil {
-				_ = m.store.AppendEvent(ctx, termRow, summary)
-			}
-			return nil, time.Time{}, fmt.Errorf("manager: open session lifecycle: %w", err)
-		}
-	}
-	s := m.spawn(ctx, id)
-	// Mark the new session as "materialised already" — there's no
-	// prior history to walk.
-	s.materialised.Store(true)
-
-	parts := req.Participants
-	if len(parts) == 0 {
-		parts = []protocol.ParticipantInfo{m.agent.Participant()}
-	}
-	opened := protocol.NewSessionOpened(id, m.agent.Participant(), parts)
-	if err := s.emit(ctx, opened); err != nil {
-		m.logger.Error("manager: emit session_opened", "session", id, "err", err)
-	}
-	return s, now, nil
+	m.live[s.id] = s
+	m.mu.Unlock()
+	s.start(m.deregisterFn(s.id, s))
+	return s, s.openedAt, nil
 }
 
-// Resume reattaches to an existing session row. Materialisation is
-// deferred to the first inbound Frame after resume.
+// Resume reattaches to an existing root session row via
+// newSessionRestore. Materialisation is deferred to the first inbound
+// Frame after resume.
 //
-// Concurrent calls for the same id will share the same *Session —
-// the spawn-side double-check guarantees no orphan goroutine. Only
-// the first caller observes the session_resumed marker.
+// Concurrent calls on the same id are made safe by a post-construction
+// double-check on m.live; the loser cancels its freshly-built ctx and
+// returns the winner's *Session. (The loser may already have appended
+// a session_resumed marker — same hazard as the pre-pivot code path,
+// rare in practice.)
 func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
-	row, err := m.store.LoadSession(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if hasTerminated(ctx, m.store, id) {
-		return nil, ErrSessionClosed
-	}
 	m.mu.RLock()
 	if existing, ok := m.live[id]; ok {
 		m.mu.RUnlock()
 		return existing, nil
 	}
 	m.mu.RUnlock()
-	// Re-run Acquire so per-session resources reattach after a
-	// process restart: per_session MCPs are respawned, autoload
-	// skills re-bound, workspace dir re-prepared. Resources.Acquire
-	// is idempotent (MkdirAll, autoload-Load and AddSessionProvider
-	// all tolerate a no-op when state is already correct).
-	if m.lifecycle != nil {
-		if err := m.lifecycle.Acquire(ctx, id); err != nil {
-			m.logger.Warn("manager: resume lifecycle", "session", id, "err", err)
-		}
+
+	s, err := newSessionRestore(ctx, id, nil, m.deps)
+	if err != nil {
+		return nil, err
 	}
-	s := m.spawn(ctx, id)
-	// Only emit the resume marker if spawn actually created a fresh
-	// goroutine (i.e. we won the race). Compare by pointer identity.
-	m.mu.RLock()
-	current := m.live[id]
-	m.mu.RUnlock()
-	if current == s {
-		marker := protocol.NewSystemMarker(id, m.agent.Participant(), "session_resumed",
-			map[string]any{"prior_status": row.Status})
-		if err := s.emit(ctx, marker); err != nil {
-			m.logger.Warn("manager: emit session_resumed marker", "session", id, "err", err)
-		}
+
+	m.mu.Lock()
+	if existing, ok := m.live[id]; ok {
+		m.mu.Unlock()
+		s.cancel(nil)
+		return existing, nil
 	}
+	m.live[id] = s
+	m.mu.Unlock()
+	s.start(m.deregisterFn(id, s))
 	return s, nil
 }
 
@@ -342,20 +292,14 @@ func (m *Manager) Spawn(ctx context.Context, parent *Session, spec SpawnSpec) (*
 	if parent == nil {
 		return nil, fmt.Errorf("manager: spawn requires parent session")
 	}
-	// Load parent row to read depth + owner. Cheap because the row
-	// is hot in the local store; phase-4 makes the row immutable so
-	// caching is also safe but unnecessary for spawn.
+	// Load parent row to read owner. Depth is taken from parent.depth
+	// (the in-memory authoritative value); the row read is here only
+	// because subagent inherits the parent's owner.
 	parentRow, err := m.store.LoadSession(ctx, parent.ID())
 	if err != nil {
 		return nil, fmt.Errorf("manager: spawn load parent: %w", err)
 	}
-	parentDepth := 0
-	if d, ok := parentRow.Metadata["depth"].(int); ok {
-		parentDepth = d
-	} else if df, ok := parentRow.Metadata["depth"].(float64); ok {
-		parentDepth = int(df)
-	}
-	childDepth := parentDepth + 1
+	childDepth := parent.depth + 1
 	childMeta := map[string]any{
 		"depth":       childDepth,
 		"spawn_role":  spec.Role,
@@ -364,17 +308,37 @@ func (m *Manager) Spawn(ctx context.Context, parent *Session, spec SpawnSpec) (*
 	for k, v := range spec.Metadata {
 		childMeta[k] = v
 	}
-	child, openedAt, err := m.Open(ctx, OpenRequest{
+	req := OpenRequest{
 		OwnerID:            parentRow.OwnerID,
 		ParentSessionID:    parent.ID(),
-		Depth:              childDepth,
-		SessionType:        "subagent",
 		SpawnedFromEventID: spec.EventID,
 		Metadata:           childMeta,
-	})
+	}
+	child, err := newSession(ctx, parent, m.deps, req)
 	if err != nil {
 		return nil, fmt.Errorf("manager: spawn open: %w", err)
 	}
+	m.mu.Lock()
+	if existing, ok := m.live[child.id]; ok {
+		// Defensive: id collision is statistically impossible for
+		// fresh ids, but mirror the Open guard so a future bug can't
+		// leak a goroutine.
+		m.mu.Unlock()
+		child.cancel(nil)
+		return existing, nil
+	}
+	m.live[child.id] = child
+	m.mu.Unlock()
+	// Track in parent.children too so cancel cascade / SubagentsView
+	// can walk the tree without scanning the whole live map. Pivot 4
+	// makes parent.children authoritative (m.live narrows to roots).
+	parent.childMu.Lock()
+	if parent.children == nil {
+		parent.children = make(map[string]*Session)
+	}
+	parent.children[child.id] = child
+	parent.childMu.Unlock()
+	child.start(m.deregisterChildFn(parent, child))
 	// Append subagent_started to the parent's events. parent.emit
 	// allocates the next per-session seq + persists, like every other
 	// frame. The frame is also fanned out to parent.out so adapters
@@ -385,7 +349,7 @@ func (m *Manager) Spawn(ctx context.Context, parent *Session, spec SpawnSpec) (*
 		Role:                   spec.Role,
 		Task:                   spec.Task,
 		Depth:                  childDepth,
-		StartedAt:              openedAt,
+		StartedAt:              child.openedAt,
 		Inputs:                 spec.Inputs,
 		ParentWhiteboardActive: spec.ParentWhiteboardActive,
 	})
@@ -448,11 +412,10 @@ func (m *Manager) Terminate(ctx context.Context, id, reason string) error {
 	}
 	m.mu.RLock()
 	s, live := m.live[id]
-	cancel, hasCancel := m.cancels[id]
 	m.mu.RUnlock()
-	if live && hasCancel {
+	if live && s.terminate != nil {
 		if !s.closed.Load() {
-			cancel(&terminationCause{reason: reason, emitClose: true})
+			s.terminate(&terminationCause{reason: reason, emitClose: true})
 		}
 		select {
 		case <-s.Done():
@@ -542,48 +505,41 @@ func (m *Manager) ShutdownAll(ctx context.Context) {
 	m.wg.Wait()
 }
 
-// spawn registers a new live Session and starts its goroutine.
-// Each session runs against a per-session ctx derived from m.rootCtx
-// via WithCancelCause, so Terminate can cancel one session in
-// isolation while ShutdownAll cancels every session at once via
-// rootCancel.
-//
-// Re-checks live[id] under the write lock so concurrent Open/Resume
-// callers can't double-spawn an orphan goroutine.
-func (m *Manager) spawn(_ context.Context, id string) *Session {
-	s := NewSession(id, m.agent, m.store, m.models, m.commands, m.codec, m.logger, m.sessionOpts...)
-	sessCtx, cancel := context.WithCancelCause(m.rootCtx)
-	m.mu.Lock()
-	if existing, ok := m.live[id]; ok {
-		m.mu.Unlock()
-		cancel(nil) // race lost; release the ctx we created
-		return existing
-	}
-	m.live[id] = s
-	m.cancels[id] = cancel
-	s.terminate = cancel
-	m.wg.Add(1)
-	m.mu.Unlock()
-	go func() {
-		defer m.wg.Done()
-		// Self-deregister on exit so Manager.Get reflects the live
-		// state without an external write. Done strictly after the
-		// Run loop returns, so by the time another goroutine looks
-		// up id == not-live, any session_terminated event is
-		// already in the store.
-		defer func() {
-			m.mu.Lock()
-			if cur, ok := m.live[id]; ok && cur == s {
-				delete(m.live, id)
-			}
-			delete(m.cancels, id)
-			m.mu.Unlock()
-		}()
-		if err := s.Run(sessCtx); err != nil && !errors.Is(err, context.Canceled) {
-			m.logger.Warn("session loop exited", "session", id, "err", err)
+// deregisterFn returns the onExit callback used by root sessions
+// (Manager.Open / Manager.Resume) to remove themselves from m.live
+// when their goroutine exits. The cur == s identity check guards
+// against a re-Open race that registered a fresh session under the
+// same id between this session's Run() return and the deregister
+// callback firing.
+func (m *Manager) deregisterFn(id string, s *Session) func() {
+	return func() {
+		m.mu.Lock()
+		if cur, ok := m.live[id]; ok && cur == s {
+			delete(m.live, id)
 		}
-	}()
-	return s
+		m.mu.Unlock()
+	}
+}
+
+// deregisterChildFn is the onExit callback for sub-agent sessions.
+// In addition to the m.live deregister (still needed in pivot 3 since
+// every session is in m.live), it removes the child from
+// parent.children so cancel-cascade and tree-walk lookups stay tidy.
+// Pivot 4 narrows m.live to roots only; this helper continues to be
+// the right exit hook for subagents.
+func (m *Manager) deregisterChildFn(parent *Session, child *Session) func() {
+	return func() {
+		parent.childMu.Lock()
+		if cur, ok := parent.children[child.id]; ok && cur == child {
+			delete(parent.children, child.id)
+		}
+		parent.childMu.Unlock()
+		m.mu.Lock()
+		if cur, ok := m.live[child.id]; ok && cur == child {
+			delete(m.live, child.id)
+		}
+		m.mu.Unlock()
+	}
 }
 
 // SessionsLive returns the IDs of currently live sessions.
