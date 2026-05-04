@@ -67,8 +67,13 @@ type Session struct {
 	openedAt time.Time
 	// explicitTerminate distinguishes "I called s.terminate(cause)"
 	// from "my parent's ctx was cancelled and I'm cascading down".
-	// Pivot 7 wires the read site in handleExit; pivot 2 just declares
-	// the field.
+	// Set by s.terminate() before s.cancel() fires; read by
+	// handleExit to pick the session_terminated reason:
+	//
+	//   - explicitTerminate=true  → write tc.reason verbatim ("user:/end",
+	//     "subagent_cancel: ...", "completed", etc.)
+	//   - explicitTerminate=false → write protocol.TerminationCancelCascade
+	//     (the parent's terminate caused our ctx to fire).
 	explicitTerminate atomic.Bool
 
 	// Per-session model overrides. /model use mutates this.
@@ -94,19 +99,24 @@ type Session struct {
 	// event append.
 	done chan struct{}
 
-	// terminate cancels the per-session ctx with a terminationCause.
-	// Set by Manager.spawn; called from /end (cause carries
-	// emitClose=false because the handler already emitted the
-	// SessionClosed Frame for the transcript).
-	//
-	// Nil only for Sessions constructed directly by tests without a
-	// Manager (rare); guards in handleSlashCommand check for nil.
-	//
-	// Phase-4 pivot: this is the public face of s.cancel — pivot 7
-	// will wrap it with explicitTerminate flag set. For pivot 2, kept
-	// as the bare CancelCauseFunc to preserve handleSlashCommand
-	// call site without churn.
-	terminate context.CancelCauseFunc
+}
+
+// terminate is the explicit-cancel path: called from Manager.Terminate
+// and from handleSlashCommand on /end. It sets explicitTerminate=true
+// before cancelling so handleExit knows to write the caller's reason
+// verbatim instead of falling back to "cancel_cascade".
+//
+// No-op for Sessions constructed via legacy NewSession that haven't
+// run buildSessionShell (no s.cancel wired up). Idempotent: a second
+// call after the ctx is already cancelled is harmless — the first
+// cause wins per context semantics, and explicitTerminate just stays
+// true.
+func (s *Session) terminate(cause *terminationCause) {
+	if s == nil || s.cancel == nil {
+		return
+	}
+	s.explicitTerminate.Store(true)
+	s.cancel(cause)
 }
 
 // modelSwitch records a pending /model use until the next turn so
@@ -346,10 +356,24 @@ func (s *Session) Run(ctx context.Context) error {
 	}
 }
 
-// handleExit runs when the per-session ctx fires. It distinguishes
-// Manager.Terminate / /end (terminationCause attached) from graceful
-// Manager.ShutdownAll (no cause): only the former path appends a
-// session_terminated event.
+// handleExit runs when the per-session ctx fires. Three cases:
+//
+//   - graceful (Manager.ShutdownAll → rootCancel with no cause):
+//     ctx.Cause is nil. Write nothing — phase-4 promise (FR-028 +
+//     FR-029) is "no terminal event ⇒ this session is the
+//     restart-walker's responsibility on next boot".
+//
+//   - explicit (s.terminate(cause) — from Manager.Terminate or /end):
+//     explicitTerminate=true, ctx.Cause is *terminationCause. Write
+//     session_terminated{tc.reason}; optionally emit SessionClosed
+//     for adapter back-compat (tc.emitClose=true).
+//
+//   - cascade (parent's ctx was cancelled with cause; ours derives
+//     from parent.ctx so we see the same cause but never set our
+//     own explicit flag): explicitTerminate=false, ctx.Cause is
+//     *terminationCause. Write session_terminated{cancel_cascade}
+//     and suppress SessionClosed — cascade is an internal lifecycle
+//     event, not a transcript message.
 //
 // Persistence uses a fresh context.Background() because the session
 // ctx is already cancelled at this point — the underlying store
@@ -366,20 +390,62 @@ func (s *Session) handleExit(runCtx context.Context) {
 	if s.closed.Load() {
 		return
 	}
-	s.closed.Store(true)
+	reason := tc.reason
+	emitClose := tc.emitClose
+	if !s.explicitTerminate.Load() {
+		// Cascade from a terminated parent. Override the inherited
+		// cause so the persisted reason names the actual mechanism.
+		reason = protocol.TerminationCancelCascade
+		emitClose = false
+	}
 	persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// Persist session_terminated directly through the store: emit()
+	// short-circuits on s.closed (guarding against post-exit writes
+	// from racing handlers), but the terminal event IS the close
+	// signal — it has to land before we set s.closed=true. After this
+	// point any concurrent emit returns ErrSessionClosed cleanly.
 	terminal := protocol.NewSessionTerminated(s.id, s.agent.Participant(), protocol.SessionTerminatedPayload{
-		Reason: tc.reason,
+		Reason: reason,
 	})
-	if err := s.emit(persistCtx, terminal); err != nil {
-		s.logger.Warn("session: append session_terminated", "session", s.id, "err", err)
-	}
-	if tc.emitClose {
-		closed := protocol.NewSessionClosed(s.id, s.agent.Participant(), tc.reason)
-		if err := s.emit(persistCtx, closed); err != nil {
-			s.logger.Warn("session: emit SessionClosed marker", "session", s.id, "err", err)
+	if termRow, summary, perr := FrameToEventRow(terminal, s.agent.ID()); perr == nil {
+		if nextSeq, serr := s.store.NextSeq(persistCtx, s.id); serr == nil {
+			termRow.Seq = nextSeq
+			if setter, ok := any(terminal).(protocol.SeqSetter); ok {
+				setter.SetSeq(nextSeq)
+			}
 		}
+		if err := s.store.AppendEvent(persistCtx, termRow, summary); err != nil {
+			s.logger.Warn("session: append session_terminated", "session", s.id, "err", err)
+		}
+	} else {
+		s.logger.Warn("session: project session_terminated", "session", s.id, "err", perr)
+	}
+	s.closed.Store(true)
+	// SessionClosed is the model-/adapter-visible counterpart;
+	// best-effort outbox push is fine since closed=true is now set
+	// and emit will recover-safely panic on a closed outbox.
+	if emitClose {
+		closed := protocol.NewSessionClosed(s.id, s.agent.Participant(), reason)
+		if cRow, cSum, perr := FrameToEventRow(closed, s.agent.ID()); perr == nil {
+			if nextSeq, serr := s.store.NextSeq(persistCtx, s.id); serr == nil {
+				cRow.Seq = nextSeq
+				if setter, ok := any(closed).(protocol.SeqSetter); ok {
+					setter.SetSeq(nextSeq)
+				}
+			}
+			if err := s.store.AppendEvent(persistCtx, cRow, cSum); err != nil {
+				s.logger.Warn("session: append session_closed", "session", s.id, "err", err)
+			}
+		}
+		// Outbox push: defer-recover on a closed outbox.
+		func() {
+			defer func() { _ = recover() }()
+			select {
+			case s.out <- closed:
+			default:
+			}
+		}()
 	}
 }
 
@@ -456,7 +522,7 @@ func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashComma
 	// emitClose=false: the handler already emitted the SessionClosed
 	// Frame for the transcript; the exit handler must NOT emit a
 	// duplicate.
-	if sawClose && s.terminate != nil {
+	if sawClose {
 		s.terminate(&terminationCause{
 			reason:    "user:" + f.Payload.Name + " " + closeReason,
 			emitClose: false,

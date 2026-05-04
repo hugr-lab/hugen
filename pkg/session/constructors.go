@@ -179,7 +179,6 @@ func buildSessionShell(id string, depth int, parent *Session, deps *sessionDeps,
 	s.children = make(map[string]*Session)
 	s.ctx = sessCtx
 	s.cancel = cancel
-	s.terminate = cancel // back-compat: handleSlashCommand still calls s.terminate(cause); pivot 7 wraps with the explicit-flag method.
 	return s
 }
 

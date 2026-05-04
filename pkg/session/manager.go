@@ -329,7 +329,7 @@ func (m *Manager) Terminate(ctx context.Context, id, reason string) error {
 	m.mu.RLock()
 	s, live := m.live[id]
 	m.mu.RUnlock()
-	if live && s.terminate != nil {
+	if live {
 		if !s.closed.Load() {
 			s.terminate(&terminationCause{reason: reason, emitClose: true})
 		}
