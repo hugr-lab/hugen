@@ -372,9 +372,11 @@ func (m *Manager) Terminate(ctx context.Context, id, reason string) error {
 	return nil
 }
 
-// List returns lightweight summaries of every session row for this
-// agent.
-func (m *Manager) List(ctx context.Context, status string) ([]SessionSummary, error) {
+// ListSessions returns lightweight summaries of every session row
+// for this agent. Renamed from Manager.List in phase-4 step 6 to free
+// the unqualified List slot for the tool.ToolProvider interface
+// implementation in pkg/session/manager_tool_provider.go.
+func (m *Manager) ListSessions(ctx context.Context, status string) ([]SessionSummary, error) {
 	rows, err := m.store.ListSessions(ctx, m.agent.ID(), status)
 	if err != nil {
 		return nil, err

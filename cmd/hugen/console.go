@@ -45,7 +45,7 @@ func runConsole(ctx context.Context, core *RuntimeCore) int {
 }
 
 func tryFindResumableSession(ctx context.Context, m *session.Manager, logger *slog.Logger) string {
-	rows, err := m.List(ctx, session.StatusActive)
+	rows, err := m.ListSessions(ctx, session.StatusActive)
 	if err != nil {
 		logger.Warn("list active sessions", "err", err)
 		return ""

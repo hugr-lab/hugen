@@ -210,7 +210,7 @@ func (h *adapterHost) CloseSession(ctx context.Context, id, reason string) (time
 }
 
 func (h *adapterHost) ListSessions(ctx context.Context, status string) ([]SessionSummary, error) {
-	return h.rt.manager.List(ctx, status)
+	return h.rt.manager.ListSessions(ctx, status)
 }
 
 func (h *adapterHost) Logger() *slog.Logger { return h.rt.logger }
