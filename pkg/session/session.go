@@ -14,6 +14,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/plan"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -137,6 +138,16 @@ type Session struct {
 	materialised atomic.Bool
 	matOnce      sync.Once
 	history      []model.Message
+
+	// plan is the projection of plan_op events for this session
+	// (US2). Built once at materialise and updated incrementally
+	// by the four plan_* tool handlers. planMu serialises the
+	// emit-then-Apply sequence so concurrent tool handlers can't
+	// race the in-memory mirror; the persisted events remain the
+	// source of truth so a desync (handler crashed mid-update,
+	// say) self-heals on the next materialise / restart.
+	planMu sync.Mutex
+	plan   plan.Plan
 
 	in     chan protocol.Frame
 	out    chan protocol.Frame
@@ -965,15 +976,22 @@ func (s *Session) buildMessages(ctx context.Context) []model.Message {
 
 // systemPrompt assembles the system-prompt body for the next
 // model.Generate call. Order:
-//  1. Agent constitution (universal rules).
-//  2. Body of every skill currently loaded into the session
+//  1. Active plan block (when set; renders body + current-step
+//     pointer at the top so it survives history truncation —
+//     phase-4 spec §6.5 + contracts/tools-plan.md "Prompt-rendering
+//     contract").
+//  2. Agent constitution (universal rules).
+//  3. Body of every skill currently loaded into the session
 //     (concrete tool-usage instructions for the active toolset).
-//  3. Catalogue of every skill the agent can reach — both loaded
+//  4. Catalogue of every skill the agent can reach — both loaded
 //     and unloaded — so the model picks the right one and calls
 //     skill_load without a separate discovery tool round-trip.
 //     Loaded skills are tagged so the model doesn't reload them.
 func (s *Session) systemPrompt(ctx context.Context) string {
 	var parts []string
+	if block := s.renderPlanBlock(); block != "" {
+		parts = append(parts, block)
+	}
 	if s.agent != nil {
 		if c := s.agent.Constitution(); c != "" {
 			parts = append(parts, c)
@@ -991,6 +1009,16 @@ func (s *Session) systemPrompt(ctx context.Context) string {
 		return ""
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// renderPlanBlock returns the system-prompt-friendly rendering of
+// this session's plan projection — empty when no plan is active.
+// Holding planMu briefly ensures the read sees a consistent
+// snapshot even if a tool handler is mid-Apply on another goroutine.
+func (s *Session) renderPlanBlock() string {
+	s.planMu.Lock()
+	defer s.planMu.Unlock()
+	return plan.Render(s.plan)
 }
 
 // skillCatalogue renders one bullet per skill in the store using
