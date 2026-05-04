@@ -2,7 +2,7 @@ package session
 
 import (
 	"context"
-	"fmt"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -20,10 +20,14 @@ type turnState struct {
 	historyBaseline int
 
 	// iter is the current model→tools→model iteration index (0-based).
-	// cap is the per-turn ceiling resolved once at startTurn from
-	// resolveToolIterCap.
-	iter int
-	cap  int
+	// cap is the per-turn soft ceiling resolved once at startTurn
+	// from resolveToolIterCap; capHard is the matching hard ceiling
+	// from resolveHardCeiling. Sampled together so the soft / hard
+	// pair stays coherent through the loop even if a tool call
+	// mutates the loaded skills mid-turn.
+	iter    int
+	cap     int
+	capHard int
 
 	// mdl is the resolved Model bound for this turn. Cached so iter
 	// loops don't re-resolve (Resolve is cheap but emitting a fresh
@@ -75,6 +79,11 @@ type modelChunkEvent struct {
 type toolResultEvent struct {
 	callID  string
 	payload string
+	// errored is true when the dispatch path surfaced a tool_error
+	// frame (permission deny, not_found, io failure, provider returned
+	// error). Routed through the event so the Run goroutine can update
+	// stuck-detection state without racing the dispatcher.
+	errored bool
 }
 
 // ToolFeed reserves the slot a phase-4 blocking system tool (the
@@ -138,9 +147,11 @@ func (s *Session) startTurn(runCtx context.Context, f *protocol.UserMessage) {
 		Role:    model.RoleUser,
 		Content: f.Payload.Text,
 	})
+	softCap := s.resolveToolIterCap(runCtx)
 	s.turnState = &turnState{
 		historyBaseline:  historyBaseline,
-		cap:              s.resolveToolIterCap(runCtx),
+		cap:              softCap,
+		capHard:          s.resolveHardCeiling(runCtx, softCap),
 		mdl:              mdl,
 		pendingToolCalls: map[string]model.ChunkToolCall{},
 	}
@@ -311,9 +322,9 @@ func (s *Session) runToolDispatcher(turnCtx, runCtx context.Context, calls []mod
 			return
 		default:
 		}
-		result := s.dispatchToolCall(turnCtx, runCtx, tc)
+		result, errored := s.dispatchToolCall(turnCtx, runCtx, tc)
 		select {
-		case ch <- toolResultEvent{callID: tc.ID, payload: result}:
+		case ch <- toolResultEvent{callID: tc.ID, payload: result, errored: errored}:
 		case <-turnCtx.Done():
 			return
 		}
@@ -336,6 +347,11 @@ func (s *Session) handleToolResult(runCtx context.Context, ev toolResultEvent) {
 		return
 	}
 	delete(st.pendingToolCalls, ev.callID)
+	// Propagate the error flag to the stuck-detection trailing window
+	// (no_progress detector reads recentErrored). Run-goroutine-only
+	// access — the dispatcher already exited the per-call critical
+	// section by the time this event arrives.
+	s.stuckObserveResult(ev.errored)
 	s.history = append(s.history, model.Message{
 		Role:       model.RoleTool,
 		Content:    ev.payload,
@@ -410,19 +426,33 @@ func (s *Session) advanceOrFinish(runCtx context.Context) {
 
 	// Re-entry after the tool dispatcher exited. handleToolResult has
 	// already trimmed pendingToolCalls and appended each tool message
-	// to s.history. Advance to the next iteration (or hit the cap).
+	// to s.history. Advance to the next iteration (or hit the ceiling).
 	st.iter++
-	if st.iter >= st.cap {
-		s.logger.Warn("session: tool re-call cap hit", "session", s.id, "max", st.cap)
-		limitFrame := protocol.NewError(s.id, s.agent.Participant(),
-			"tool_iteration_limit",
-			fmt.Sprintf("max tool re-call iterations (%d) reached", st.cap),
-			false)
-		_ = s.emit(runCtx, limitFrame)
+
+	// Hard ceiling (phase-4-spec §8.2): terminate the session via the
+	// explicit-cancel teardown path. The deferred handleExit writes
+	// session_terminated{reason:"hard_ceiling"} and (for sub-agents)
+	// surfaces a clean subagent_result to the parent.
+	if st.capHard > 0 && st.iter >= st.capHard {
+		s.logger.Warn("session: tool re-call hard ceiling hit",
+			"session", s.id, "max_hard", st.capHard, "iter", st.iter)
+		s.triggerHardCeiling(runCtx, st.iter)
 		s.retireTurn()
 		return
 	}
+
+	// Drain pendingInbound BEFORE injecting the soft warning / stuck
+	// nudges so any runtime-buffered Frames (subagent_result, …) land
+	// in s.history first; then layer the local nudges on top.
 	s.drainPendingInbound(runCtx)
+	// Soft warning (§8.1) — fired exactly once per session when the
+	// model crosses st.cap. Subsequent boundaries no-op via softWarningDone.
+	s.maybeInjectSoftWarning(runCtx)
+	// Stuck-detection rising-edge nudges (§8.3) — independent of the
+	// soft/hard caps, fire on inactive→active transitions of each
+	// pattern detector.
+	s.stuckEvaluate(runCtx)
+
 	s.startModelIteration(runCtx)
 }
 
@@ -464,6 +494,18 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 		s.drainPendingInbound(runCtx)
 		s.retireTurn()
 		return
+	}
+
+	// Observe each dispatched call for stuck-detection BEFORE the
+	// dispatcher fires (so the trailing window's last entry exists by
+	// the time handleToolResult flips its errored flag). We sample
+	// here, NOT inside dispatchToolCall, because a model emits its
+	// tool_calls as a batch — sampling per-batch keeps the timestamps
+	// honest and avoids a per-call timer write inside the dispatch hot
+	// path.
+	now := time.Now()
+	for _, tc := range st.toolCalls {
+		s.stuckObserveCall(tc.Name, tc.Args, tc.Hash, now)
 	}
 
 	// Dispatch the tool calls. Each lands a toolResultEvent on
@@ -513,32 +555,28 @@ func (s *Session) retireTurn() {
 }
 
 // drainPendingInbound runs at every turn boundary. Buffered frames
-// land in s.history so the next prompt sees them. C5 keeps the
-// projection dumb: persist already happened on Submit-side (or at
-// the route-handler level in C6); here we only fold into history.
+// are persisted (event-source rule §4.3) and — when allow-listed by
+// the §11 frame-visibility filter — projected into s.history so the
+// next prompt build sees them. Default deny: frames not in the
+// allow-list pass through to the outbox + event log but stay out of
+// the model's view (e.g. a sub-agent's own tool_call frame if it ever
+// reached the parent inbox; not part of the parent's conversation).
 //
-// Phase-4 step 12 (frame-visibility filter) refines this — for now,
-// buffered frames are emitted as-is into s.history with a best-effort
-// role mapping. UserMessage / AgentMessage / system_message land as
-// their natural roles; everything else is squelched (no LLM-visible
-// projection until §11 visibility filter lands).
+// emit handles persistence + outbox push together; we layer the
+// history projection on top using projectFrameToHistory (§11).
 func (s *Session) drainPendingInbound(runCtx context.Context) {
 	if len(s.pendingInbound) == 0 {
 		return
 	}
 	for _, f := range s.pendingInbound {
-		switch v := f.(type) {
-		case *protocol.UserMessage:
-			s.history = append(s.history, model.Message{
-				Role:    model.RoleUser,
-				Content: v.Payload.Text,
-			})
-		default:
-			// Buffered but no projection yet — phase-4 step 12 fills
-			// this in. Keep best-effort emit so transcript stays
-			// chronologically consistent.
-			_ = s.emit(runCtx, f)
+		if msg, ok := projectFrameToHistory(f); ok {
+			s.history = append(s.history, msg)
 		}
+		// Persist + push to outbox so the event log captures the
+		// arrival even when the visibility filter excluded the frame
+		// from s.history. emit short-circuits cleanly when the session
+		// is mid-shutdown.
+		_ = s.emit(runCtx, f)
 	}
 	s.pendingInbound = s.pendingInbound[:0]
 }

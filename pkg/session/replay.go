@@ -52,6 +52,10 @@ func (s *Session) materialise(ctx context.Context) error {
 		s.whiteboard = whiteboard.Project(whiteboardEventsFrom(rows))
 		s.whiteboardMu.Unlock()
 
+		// Soft-warning idempotency derives from the event log so a
+		// restart that loses in-memory state still skips re-emission.
+		s.reloadSoftWarningFlag(rows)
+
 		s.materialised.Store(true)
 	})
 	return firstErr

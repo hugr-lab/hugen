@@ -45,7 +45,8 @@ type Session struct {
 	notepad      *Notepad
 	tools        *tool.ToolManager   // optional; nil disables tool dispatch
 	skills       *skill.SkillManager // optional; consulted for per-skill max_turns
-	maxToolIters int                 // 0 → defaultMaxToolIterations
+	maxToolIters     int             // 0 → defaultMaxToolIterations
+	maxToolItersHard int             // 0 → 2 × resolved soft cap
 	logger       *slog.Logger
 
 	// Tree links (phase-4 pivot). parent is nil for root; children is
@@ -162,6 +163,22 @@ type Session struct {
 	whiteboardMu sync.Mutex
 	whiteboard   whiteboard.Whiteboard
 
+	// stuck is the in-memory rising-edge state for the three stuck-
+	// detection heuristics (phase-4-spec §8.3). Owned by Run; mutated
+	// only by handleToolResult / drainPendingInbound on the same
+	// goroutine. Restart resets the flags to zero — phase-4 keeps the
+	// detection state in-memory by design (spec §8.3 "in-memory only").
+	stuck stuckState
+
+	// softWarningDone caches "we already injected the soft-warning
+	// nudge for this session". Loaded once at materialise from the
+	// session's events (event-source as truth) and flipped at the
+	// moment the runtime emits the system_message{kind:"soft_warning"}
+	// frame so the loop skips re-emit on every subsequent turn
+	// boundary. Restart-safe: a fresh boot reads the flag back from
+	// session_events on materialise.
+	softWarningDone atomic.Bool
+
 	in     chan protocol.Frame
 	out    chan protocol.Frame
 	closed atomic.Bool
@@ -258,6 +275,19 @@ func WithMaxToolIterations(n int) SessionOption {
 	return func(s *Session) {
 		if n > 0 {
 			s.maxToolIters = n
+		}
+	}
+}
+
+// WithMaxToolIterationsHard overrides the per-Turn HARD ceiling on
+// model→tool→model loops (phase-4-spec §8.2). Precedence: per-skill
+// metadata.hugen.max_turns_hard > this option > 2 × resolved soft cap.
+// Tests use this to drive narrow ceilings without provisioning a
+// SkillManager.
+func WithMaxToolIterationsHard(n int) SessionOption {
+	return func(s *Session) {
+		if n > 0 {
+			s.maxToolItersHard = n
 		}
 	}
 }
@@ -972,6 +1002,42 @@ func (s *Session) resolveToolIterCap(ctx context.Context) int {
 	return defaultMaxToolIterations
 }
 
+// resolveHardCeiling picks the per-Turn hard ceiling at which the
+// session terminates with reason "hard_ceiling" (phase-4-spec §8.2).
+// Precedence: loaded skills' max(metadata.hugen.max_turns_hard) →
+// 2 × resolved soft cap (the spec's documented default). Sampled
+// once at the top of the user turn alongside the soft cap so the
+// two stay coherent through the loop.
+func (s *Session) resolveHardCeiling(ctx context.Context, softCap int) int {
+	if s.skills != nil {
+		if b, err := s.skills.Bindings(ctx, s.id); err == nil && b.MaxTurnsHard > 0 {
+			return b.MaxTurnsHard
+		}
+	}
+	if s.maxToolItersHard > 0 {
+		return s.maxToolItersHard
+	}
+	if softCap > 0 {
+		return softCap * 2
+	}
+	return defaultMaxToolIterations * 2
+}
+
+// stuckDetectionEnabled reports whether the heuristic stuck-detection
+// nudges are active for this session. Returns false only when a loaded
+// skill explicitly disables them (Bindings.StuckDetectionDisabled).
+// Sessions without a SkillManager keep the conservative default ON.
+func (s *Session) stuckDetectionEnabled(ctx context.Context) bool {
+	if s.skills == nil {
+		return true
+	}
+	b, err := s.skills.Bindings(ctx, s.id)
+	if err != nil {
+		return true
+	}
+	return !b.StuckDetectionDisabled
+}
+
 // buildMessages prepends the per-Turn system message (agent
 // constitution + concatenated skill instructions) to the chat
 // history. Rebuilt every Turn because skill bindings can change
@@ -1108,8 +1174,10 @@ const defaultMaxToolIterations = 20
 // dispatches the call (success path) or surfaces a tool_error
 // frame plus a tool_denied marker (deny path). Returns the JSON
 // payload that should be fed back to the model as a tool-role
-// message; "" when the dispatch failed and there's nothing
-// useful to feed back beyond the error already on the wire.
+// message and a flag distinguishing success from "an error frame
+// just landed instead". The flag drives the stuck-detection
+// no_progress detector via toolResultEvent; "" + errored=true is
+// the canonical dispatch-failure shape.
 //
 // Two contexts:
 //   - dispatchCtx (turnCtx): threaded into permission resolve and
@@ -1117,11 +1185,11 @@ const defaultMaxToolIterations = 20
 //   - emitCtx (runCtx): used for s.emit so transcript frames keep
 //     landing even if the user is mid-cancellation; emit's own ctx
 //     is the session's run ctx, never cancelled until process shutdown.
-func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.ChunkToolCall) string {
+func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.ChunkToolCall) (string, bool) {
 	if s.tools == nil {
 		s.emitToolError(emitCtx, tc.ID, tc.Name, protocol.ToolErrorNotFound,
 			"tool dispatch not configured for this session", "")
-		return ""
+		return "", true
 	}
 	dispatchCtx := perm.WithSession(turnCtx, perm.SessionContext{SessionID: s.id})
 	// Wire the live *Session into the dispatch ctx so session-scoped
@@ -1180,7 +1248,7 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 			"available", available)
 		s.emitToolError(emitCtx, tc.ID, tc.Name, protocol.ToolErrorNotFound,
 			fmt.Sprintf("tool %q not in current snapshot", tc.Name), "")
-		return ""
+		return "", true
 	}
 
 	p, effective, err := s.tools.Resolve(dispatchCtx, theTool, rawArgs)
@@ -1195,10 +1263,10 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 			s.emitToolError(emitCtx, tc.ID, tc.Name, protocol.ToolErrorPermissionDenied,
 				fmt.Sprintf("tool %q denied by %s tier", tc.Name, tier), tier)
 			s.emitToolDeniedMarker(emitCtx, tc.Name, tier)
-			return ""
+			return "", true
 		}
 		s.emitToolError(emitCtx, tc.ID, tc.Name, "io", err.Error(), "")
-		return ""
+		return "", true
 	}
 
 	result, err := s.tools.Dispatch(dispatchCtx, theTool, effective)
@@ -1213,7 +1281,7 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 		s.logger.Warn("tool result error",
 			"session", s.id, "tool", tc.Name, "code", code, "err", err)
 		s.emitToolError(emitCtx, tc.ID, tc.Name, code, err.Error(), "")
-		return ""
+		return "", true
 	}
 	// Log result AFTER the call so the operator sees the same
 	// dispatch/result pairing in chronological order. Truncated
@@ -1228,7 +1296,7 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 	if err := s.emit(emitCtx, resultFrame); err != nil {
 		s.logger.Warn("emit tool_result", "err", err)
 	}
-	return string(result)
+	return string(result), false
 }
 
 // truncatePayload caps a tool's raw JSON result for log lines so a

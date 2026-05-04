@@ -198,6 +198,18 @@ func (m *SkillManager) Bindings(ctx context.Context, sessionID string) (Bindings
 		if s.Manifest.Hugen.MaxTurns > out.MaxTurns {
 			out.MaxTurns = s.Manifest.Hugen.MaxTurns
 		}
+		if s.Manifest.Hugen.MaxTurnsHard > out.MaxTurnsHard {
+			out.MaxTurnsHard = s.Manifest.Hugen.MaxTurnsHard
+		}
+		// Stuck detection: a single skill explicitly disabling the
+		// detectors is enough to silence them for the session — the
+		// loosest setting wins by intent, not by max(N). Phase-4
+		// commit-8 only surfaces the Enabled tri-state; per-pattern
+		// tuning (RepeatedHash, TightDensityCount, …) lands when an
+		// operator actually needs to override defaults.
+		if !s.Manifest.Hugen.StuckDetection.IsEnabled() {
+			out.StuckDetectionDisabled = true
+		}
 		for k, v := range s.Manifest.Hugen.Memory {
 			memCats[k] = v
 		}
@@ -240,6 +252,19 @@ type Bindings struct {
 	// raising the budget shouldn't be undone by a co-loaded
 	// utility skill keeping the default.
 	MaxTurns int
+
+	// MaxTurnsHard is the largest metadata.hugen.max_turns_hard
+	// across loaded skills. 0 → runtime falls back to MaxTurns*2
+	// (or defaultMaxToolIterations*2 when neither is set). See
+	// phase-4-spec §8.2.
+	MaxTurnsHard int
+
+	// StuckDetectionDisabled is true when at least one loaded skill
+	// explicitly sets metadata.hugen.stuck_detection.enabled=false.
+	// The loosest skill wins so an analyst skill that legitimately
+	// loops can opt the whole session out of nudges. Default
+	// (no manifest opinion) keeps detectors active.
+	StuckDetectionDisabled bool
 }
 
 // LoadedSkill returns the Skill named `name` if loaded into
