@@ -213,6 +213,49 @@ func projectHistory(rows []EventRow, window int) []model.Message {
 				Role:    model.RoleUser,
 				Content: fmt.Sprintf("[system: %s] %s", kind, r.Content),
 			})
+		case protocol.KindSubagentStarted:
+			cid, _ := r.Metadata["child_session_id"].(string)
+			role, _ := r.Metadata["role"].(string)
+			depthStr := ""
+			switch v := r.Metadata["depth"].(type) {
+			case float64:
+				depthStr = fmt.Sprintf("%d", int(v))
+			case int:
+				depthStr = fmt.Sprintf("%d", v)
+			case int64:
+				depthStr = fmt.Sprintf("%d", v)
+			}
+			all = append(all, model.Message{
+				Role: model.RoleUser,
+				Content: fmt.Sprintf("[system: %s] spawned %s (role: %s) at depth %s",
+					protocol.SystemMessageSpawnedNote, cid, role, depthStr),
+			})
+		case protocol.KindSubagentResult:
+			cid, _ := r.Metadata["session_id"].(string)
+			reason, _ := r.Metadata["reason"].(string)
+			turns := 0
+			switch v := r.Metadata["turns_used"].(type) {
+			case float64:
+				turns = int(v)
+			case int:
+				turns = v
+			case int64:
+				turns = int(v)
+			}
+			body := r.Content
+			if body == "" {
+				if v, ok := r.Metadata["result"].(string); ok {
+					body = v
+				}
+			}
+			if body == "" {
+				body = fmt.Sprintf("(no result; reason: %s)", reason)
+			}
+			all = append(all, model.Message{
+				Role: model.RoleUser,
+				Content: fmt.Sprintf("[system: subagent_result] %s reason=%s turns=%d\n%s",
+					cid, reason, turns, body),
+			})
 		}
 	}
 	if len(all) <= window {

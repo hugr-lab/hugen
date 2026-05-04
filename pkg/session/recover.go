@@ -7,183 +7,180 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
-// Recover settles every sub-agent session that did not append a
-// session_terminated event before the previous process exited.
+// settleDanglingSubagents reconciles a parent session's child set with
+// its events at restore time. For every row in
+// `store.ListChildren(parentID)` whose corresponding `subagent_result`
+// is missing on the parent's events, this function:
 //
-// Phase-4 promise: sub-agents do NOT survive process restart in their
-// original sessions — instead, dangling sub-agent rows are settled with
-// reason "restart_died" and a synthetic subagent_result is appended to
-// the parent's events so the parent — when later resumed — sees the
-// child as gone instead of waiting for a result that will never come.
+//   - if the child has its own `session_terminated` event already
+//     (clean exit whose result frame was lost in flight): writes a
+//     synthetic `subagent_result` on the parent carrying the child's
+//     real terminal reason (so we don't fake `restart_died` for a child
+//     that completed cleanly).
+//   - if the child is non-terminal (subagent process died with parent
+//     on `kill -9`): appends `session_terminated{reason:"restart_died"}`
+//     to the child's events first, then writes the synthetic
+//     `subagent_result{reason:"restart_died"}` on the parent.
 //
-// In addition to the settle work, Recover collects a danglingRespawn
-// per dead sub-agent whose original spawn spec (skill / role / task /
-// inputs) can be recovered from the parent's subagent_started event.
-// Manager.RestoreActive uses the returned slice to fire fresh
-// parent.Spawn calls AFTER each root is alive, so the model sees a
-// brand-new child session running the same task instead of having to
-// re-spawn manually. Specs are captured BEFORE the synthetic events
-// are written so a partial Recover crash doesn't leave the auto-
-// respawn pass guessing.
+// Either branch surfaces a clear `Result` text so the parent's model,
+// when it next materialises, sees an explicit instruction rather than
+// an opaque terminal row. The model decides on its next turn whether
+// to re-spawn — the runtime never auto-spawns.
 //
-// Recover is idempotent: a second call after a successful first one
-// is a no-op (every subagent is already terminal) and returns no
-// respawns. Safe to call before the manager opens any session, and
-// safe to call from a recovery test that re-uses the same store.
+// Idempotent: a second call after a successful first pass observes the
+// `subagent_result` rows already on the parent, finds nothing to write,
+// and returns 0. Safe to call from `Resume` (per adapter re-attach)
+// and from `RestoreActive` (per boot) — the latter uses the return
+// value as the active/idle signal (written > 0 → active; 0 → idle, no
+// goroutine needed).
 //
-// Recover does not start any goroutine and does not touch m.live —
-// it only writes events. The matching root-restart loop + auto-respawn
-// dispatch live in Manager.RestoreActive.
-func Recover(ctx context.Context, deps *sessionDeps) ([]danglingRespawn, error) {
+// `written` counts the number of `subagent_result` rows persisted on
+// the parent in this pass — exactly the count of children that needed
+// settle, regardless of whether the child was clean-terminated or not.
+// Callers use it as boot-time activity probe.
+func settleDanglingSubagents(ctx context.Context, deps *sessionDeps, parentID string) (int, error) {
 	if deps == nil {
-		return nil, fmt.Errorf("session: recover requires deps")
+		return 0, fmt.Errorf("session: settle requires deps")
 	}
-	rows, err := deps.store.ListSessions(ctx, deps.agent.ID(), "")
+	children, err := deps.store.ListChildren(ctx, parentID)
 	if err != nil {
-		return nil, fmt.Errorf("session: recover list: %w", err)
+		return 0, fmt.Errorf("session: settle list-children: %w", err)
 	}
-	var respawns []danglingRespawn
-	for _, row := range rows {
-		if row.SessionType != "subagent" {
+	if len(children) == 0 {
+		return 0, nil
+	}
+
+	parentEvents, err := deps.store.ListEvents(ctx, parentID, ListEventsOpts{})
+	if err != nil {
+		return 0, fmt.Errorf("session: settle list-events: %w", err)
+	}
+	settled := make(map[string]struct{})
+	for _, ev := range parentEvents {
+		if ev.EventType != string(protocol.KindSubagentResult) {
 			continue
 		}
-		if hasTerminated(ctx, deps.store, row.ID) {
+		cid, _ := ev.Metadata["session_id"].(string)
+		if cid == "" {
 			continue
 		}
-		// Capture the original spawn spec from the parent's
-		// subagent_started event BEFORE we write the synthetic
-		// terminations. Missing parent or missing source event → no
-		// auto-respawn for this row; settle still runs.
-		if row.ParentSessionID != "" {
-			if spec, ok := lookupSpawnSpec(ctx, deps.store, row.ParentSessionID, row.ID); ok {
-				respawns = append(respawns, danglingRespawn{
-					parentID: row.ParentSessionID,
-					oldID:    row.ID,
-					spec:     spec,
-				})
-			}
-		}
-		// Mark the sub-agent terminal first so a re-run that crashes
-		// before posting subagent_result still leaves the child in a
-		// well-defined state.
-		terminal := protocol.NewSessionTerminated(row.ID, deps.agent.Participant(), protocol.SessionTerminatedPayload{
-			Reason: protocol.TerminationRestartDied,
-		})
-		if termRow, summary, perr := FrameToEventRow(terminal, deps.agent.ID()); perr == nil {
-			if err := deps.store.AppendEvent(ctx, termRow, summary); err != nil {
-				deps.logger.Warn("session: recover append terminal", "session", row.ID, "err", err)
-			}
-		} else {
-			deps.logger.Warn("session: recover project terminal", "session", row.ID, "err", perr)
-		}
-		// Synthetic subagent_result on the parent's events. fromSession
-		// = child id (per NewSubagentResult convention); reason mirrors
-		// the child's terminal reason.
-		if row.ParentSessionID == "" {
-			// Subagent without parent_session_id is a data-shape bug,
-			// not a recovery concern — log and skip the parent emit.
-			deps.logger.Warn("session: recover subagent missing parent_session_id", "session", row.ID)
+		settled[cid] = struct{}{}
+	}
+
+	written := 0
+	for _, child := range children {
+		if _, ok := settled[child.ID]; ok {
 			continue
 		}
-		result := protocol.NewSubagentResult(row.ParentSessionID, row.ID, deps.agent.Participant(),
-			protocol.SubagentResultPayload{
-				SessionID: row.ID,
-				Reason:    protocol.TerminationRestartDied,
-			})
-		if resRow, summary, perr := FrameToEventRow(result, deps.agent.ID()); perr == nil {
-			if err := deps.store.AppendEvent(ctx, resRow, summary); err != nil {
-				deps.logger.Warn("session: recover append subagent_result",
-					"parent", row.ParentSessionID, "child", row.ID, "err", err)
-			}
-		} else {
-			deps.logger.Warn("session: recover project subagent_result",
-				"parent", row.ParentSessionID, "child", row.ID, "err", perr)
+		reason := lookupChildTerminationReason(ctx, deps.store, child.ID)
+		if reason == "" {
+			// Non-terminal child — bury it with restart_died first so a
+			// future read sees a coherent "child gone" state regardless
+			// of whether the parent's row gets written below.
+			reason = protocol.TerminationRestartDied
+			appendChildTerminal(ctx, deps, child.ID, protocol.TerminationRestartDied)
+		}
+		if appendParentSubagentResult(ctx, deps, parentID, child.ID, reason) {
+			written++
 		}
 	}
-	return respawns, nil
+	return written, nil
 }
 
-// danglingRespawn is one auto-respawn directive harvested from a
-// dangling sub-agent row. Manager.RestoreActive consumes the slice
-// after every root is alive: for each entry whose parentID is in
-// m.live (i.e. a directly-restored root), it calls parent.Spawn(spec)
-// to create a fresh sub-agent with the same task. Sub-agents whose
-// parent is NOT a root (grandchildren whose parent was itself a
-// dangling sub-agent) intentionally stay dead — their parent was not
-// restored, so there is nobody to re-own them.
-type danglingRespawn struct {
-	parentID string
-	oldID    string
-	spec     SpawnSpec
-}
-
-// lookupSpawnSpec rebuilds a SpawnSpec from the parent's
-// subagent_started event for childID. Returns ok=false if the parent
-// has no event log, no matching subagent_started row, or the row's
-// payload can't be decoded. Best-effort — a missing source event is
-// treated as "skip auto-respawn for this child", not an error.
-func lookupSpawnSpec(ctx context.Context, store RuntimeStore, parentID, childID string) (SpawnSpec, bool) {
-	rows, err := store.ListEvents(ctx, parentID, ListEventsOpts{})
+// lookupChildTerminationReason returns the reason field of the child's
+// own `session_terminated` event, or "" if the child has no terminal
+// event yet (i.e. it never exited gracefully). Reads only — no writes.
+func lookupChildTerminationReason(ctx context.Context, store RuntimeStore, childID string) string {
+	rows, err := store.ListEvents(ctx, childID, ListEventsOpts{Limit: 1000})
 	if err != nil {
-		return SpawnSpec{}, false
+		return ""
 	}
 	for _, r := range rows {
-		if r.EventType != string(protocol.KindSubagentStarted) {
+		if r.EventType != string(protocol.KindSessionTerminated) {
 			continue
 		}
-		f, err := EventRowToFrame(r)
-		if err != nil {
-			continue
+		if reason, _ := r.Metadata["reason"].(string); reason != "" {
+			return reason
 		}
-		st, ok := f.(*protocol.SubagentStarted)
-		if !ok {
-			continue
+		// Fallback: store.go FrameToEventRow stashes the reason in
+		// row.Content for SessionTerminated frames.
+		if r.Content != "" {
+			return r.Content
 		}
-		if st.Payload.ChildSessionID != childID {
-			continue
-		}
-		return SpawnSpec{
-			Skill:                  st.Payload.Skill,
-			Role:                   st.Payload.Role,
-			Task:                   st.Payload.Task,
-			Inputs:                 st.Payload.Inputs,
-			ParentWhiteboardActive: st.Payload.ParentWhiteboardActive,
-		}, true
 	}
-	return SpawnSpec{}, false
+	return ""
 }
 
-// RestoreActive runs at process boot to reattach goroutines for every
-// non-terminal root session belonging to this agent. Order:
-//
-//  1. Recover — settle orphan sub-agents (idempotent) and harvest
-//     auto-respawn specs.
-//  2. List rows where session_type="root"; for each non-terminal row,
-//     call Manager.Resume(ctx, id). Resume re-runs lifecycle.Acquire,
-//     emits a session_resumed marker, and starts the goroutine.
-//  3. Auto-respawn: for each respawn whose parent_id matches a live
-//     root in m.live, call parent.Spawn(spec) creating a brand-new
-//     sub-agent session with the original (skill, role, task, inputs).
-//     The fresh sub-agent gets the original Task as its first
-//     UserMessage, mirroring callSpawnSubagent's contract. A
-//     SystemMessage{kind:"spawned_note"} is also emitted on the
-//     parent's events so the parent's model — when it next
-//     materialises — sees a clean narrative line ("X died, Y respawned
-//     for the same task") rather than just an opaque
-//     subagent_result{restart_died}.
-//
-// Sub-agents whose parent is itself a sub-agent (grandchildren) are
-// NOT auto-respawned — their parent isn't in m.live. Recover already
-// wrote their terminal events; they stay dead.
-//
-// Errors from individual Resume / Spawn calls are logged but do not
-// abort the loop — one corrupt row should not block the rest of the
-// agent's sessions from coming back online.
-func (m *Manager) RestoreActive(ctx context.Context) error {
-	respawns, err := Recover(ctx, m.deps)
+// appendChildTerminal best-effort writes session_terminated{reason} on
+// the child's events. Errors are logged; callers continue regardless
+// (the parent-side subagent_result still gets written, which is the
+// load-bearing piece for the parent's view).
+func appendChildTerminal(ctx context.Context, deps *sessionDeps, childID, reason string) {
+	terminal := protocol.NewSessionTerminated(childID, deps.agent.Participant(),
+		protocol.SessionTerminatedPayload{Reason: reason})
+	row, summary, err := FrameToEventRow(terminal, deps.agent.ID())
 	if err != nil {
-		return err
+		deps.logger.Warn("session: settle project child terminal",
+			"child", childID, "err", err)
+		return
 	}
+	if err := deps.store.AppendEvent(ctx, row, summary); err != nil {
+		deps.logger.Warn("session: settle append child terminal",
+			"child", childID, "err", err)
+	}
+}
+
+// appendParentSubagentResult writes the synthetic subagent_result on
+// the parent's events. Reason is propagated from the child's terminal
+// (or "restart_died" for non-terminal children). Result text is
+// generic — "did not deliver, re-spawn if relevant" — so the model
+// gets a clear instruction without runtime needing to know skill /
+// role / task. Returns true on a successful append.
+func appendParentSubagentResult(ctx context.Context, deps *sessionDeps, parentID, childID, reason string) bool {
+	body := fmt.Sprintf(
+		"Sub-agent %s did not deliver a result before the previous process exited (reason: %s). If the work is still relevant, re-spawn a fresh sub-agent for it.",
+		childID, reason,
+	)
+	result := protocol.NewSubagentResult(parentID, childID, deps.agent.Participant(),
+		protocol.SubagentResultPayload{
+			SessionID: childID,
+			Reason:    reason,
+			Result:    body,
+		})
+	row, summary, err := FrameToEventRow(result, deps.agent.ID())
+	if err != nil {
+		deps.logger.Warn("session: settle project subagent_result",
+			"parent", parentID, "child", childID, "err", err)
+		return false
+	}
+	if err := deps.store.AppendEvent(ctx, row, summary); err != nil {
+		deps.logger.Warn("session: settle append subagent_result",
+			"parent", parentID, "child", childID, "err", err)
+		return false
+	}
+	return true
+}
+
+// RestoreActive runs at process boot. For every non-terminal root
+// session belonging to this agent it:
+//
+//  1. Calls settleDanglingSubagents — synthesises a subagent_result
+//     on the parent for any child whose result didn't make it to
+//     parent.events on the previous run (and writes a session_terminated
+//     {restart_died} on non-terminal children before doing so).
+//  2. If settle wrote anything (active root) → calls Manager.Resume to
+//     reattach a goroutine. If it wrote nothing (idle root) → skips;
+//     the session stays dormant in DB and an adapter that asks for it
+//     later will trigger Manager.Resume on demand. Same code path,
+//     same `newSessionRestore`, same lifecycle.Acquire — boot is just
+//     the eager case.
+//
+// Sub-agents are NOT restored — the synthetic subagent_result on the
+// parent is the contract. The model decides whether to spawn a fresh
+// sub-agent for the same task on its next turn (no runtime auto-
+// spawn). Phase-4 spec §12.
+//
+// Errors from individual roots are logged but do not abort the loop.
+func (m *Manager) RestoreActive(ctx context.Context) error {
 	rows, err := m.store.ListSessions(ctx, m.agent.ID(), "")
 	if err != nil {
 		return fmt.Errorf("manager: restore-active list: %w", err)
@@ -195,63 +192,22 @@ func (m *Manager) RestoreActive(ctx context.Context) error {
 		if hasTerminated(ctx, m.store, row.ID) {
 			continue
 		}
-		if _, err := m.Resume(ctx, row.ID); err != nil {
-			m.logger.Warn("manager: restore-active resume", "session", row.ID, "err", err)
-		}
-	}
-	m.fireAutoRespawns(ctx, respawns)
-	return nil
-}
-
-// fireAutoRespawns walks the danglingRespawn list returned by Recover
-// and, for every entry whose parent is a live root, creates a fresh
-// sub-agent via parent.Spawn + Submit-the-task pattern (mirrors the
-// live spawn_subagent tool path). Best-effort per entry — a Spawn
-// failure surfaces as a Warn log; the rest of the list still gets
-// processed. Subagents whose parent was itself a dangling sub-agent
-// (grandchildren) are skipped here because their parent isn't in
-// m.live.
-func (m *Manager) fireAutoRespawns(ctx context.Context, respawns []danglingRespawn) {
-	for _, rs := range respawns {
-		m.mu.RLock()
-		parent, ok := m.live[rs.parentID]
-		m.mu.RUnlock()
-		if !ok || parent == nil {
-			continue
-		}
-		child, err := parent.Spawn(ctx, rs.spec)
+		written, err := settleDanglingSubagents(ctx, m.deps, row.ID)
 		if err != nil {
-			m.logger.Warn("manager: restore-active auto-respawn",
-				"parent", rs.parentID, "old_child", rs.oldID, "err", err)
+			m.logger.Warn("manager: restore-active settle",
+				"session", row.ID, "err", err)
 			continue
 		}
-		// Surface a system_message on the parent's events so the model
-		// sees the maneuver in narrative form on its next materialise.
-		// The transcript-visible projection lives in
-		// pkg/session/replay.go::projectHistory which projects
-		// system_message rows into history under "[system: <kind>]"
-		// formatting (matching the live visibility filter).
-		notice := fmt.Sprintf(
-			"sub-agent %s died on process restart (reason: %s); a fresh sub-agent %s was started with the same task.",
-			rs.oldID, protocol.TerminationRestartDied, child.ID(),
-		)
-		sm := protocol.NewSystemMessage(parent.id, parent.agent.Participant(),
-			protocol.SystemMessageSpawnedNote, notice)
-		if err := parent.emit(ctx, sm); err != nil {
-			m.logger.Warn("manager: restore-active respawn system_message",
-				"parent", rs.parentID, "old_child", rs.oldID,
-				"new_child", child.ID(), "err", err)
+		if written == 0 {
+			// Idle root — no dangling sub-agents, no eager goroutine.
+			// Adapter Resume will rebuild on demand using the same
+			// newSessionRestore path.
+			continue
 		}
-		// Deliver the original Task as the new sub-agent's first user
-		// message so its run-loop has something to drive a turn off of.
-		// Mirrors callSpawnSubagent's behaviour. Empty-task case: skip
-		// the Submit so we don't push a pointless empty message.
-		if rs.spec.Task != "" {
-			first := protocol.NewUserMessage(child.ID(), parent.agent.Participant(), rs.spec.Task)
-			if !child.Submit(ctx, first) {
-				m.logger.Warn("manager: restore-active auto-respawn first-message rejected",
-					"parent", rs.parentID, "child", child.ID())
-			}
+		if _, err := m.Resume(ctx, row.ID); err != nil {
+			m.logger.Warn("manager: restore-active resume",
+				"session", row.ID, "err", err)
 		}
 	}
+	return nil
 }

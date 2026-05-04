@@ -115,10 +115,12 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 // Manager.RestoreActive (boot recovery for non-terminal roots).
 //
 // Phase 4: only roots use this path. Sub-agents do not survive
-// process restart — Recover() in pkg/session/recover.go appends
+// process restart — settleDanglingSubagents (called below) appends
 // session_terminated{reason="restart_died"} to every non-terminal
-// subagent and a synthetic subagent_result to the parent's events
-// before RestoreActive runs.
+// child of this session and a synthetic subagent_result to this
+// session's own events so the model, when it next materialises, sees
+// each abandoned child as terminal with a clear instruction. The
+// model decides whether to re-spawn — the runtime never auto-spawns.
 //
 // Returns ErrSessionClosed if the session has a session_terminated
 // event already (caller handles as "session is gone, no resume").
@@ -129,6 +131,17 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 	}
 	if hasTerminated(ctx, deps.store, id) {
 		return nil, ErrSessionClosed
+	}
+
+	// Settle any dangling sub-agents BEFORE bringing up the goroutine
+	// so a) the synthetic subagent_result rows are persisted regardless
+	// of whether lifecycle.Acquire / start succeed, and b) materialise
+	// (called lazily on first inbound) sees a coherent parent.events.
+	// Idempotent — second call (e.g. RestoreActive then Resume on the
+	// same root) finds the rows already there and writes nothing.
+	if _, err := settleDanglingSubagents(ctx, deps, id); err != nil {
+		deps.logger.Warn("session: restore settle dangling",
+			"session", id, "err", err)
 	}
 
 	depth := depthFromRow(row)
