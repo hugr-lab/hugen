@@ -28,19 +28,82 @@ We are mid-execution of **design 001 — Hugr Agent Runtime**
 | 2. HTTP/SSE + webui + ADK eviction | shipped |
 | 3. Action layer (skills + tools + 3-tier permissions + bash/hugr-mcp) | shipped |
 | 3.5. Analyst toolkit (duckdb-mcp + python-mcp + analyst skills) | shipped |
-| **4. Sub-agents + missions** | **spec drafting** (`phase-4-spec.md` v0, under discussion) |
-| 4.1. Analyst mega-skill + role sub-agents + `skill_builder` + community-skill onboarding (empty `allowed-tools` semantics, `system:tool_catalog`) | follows 4 |
-| 5. HITL: approvals + clarifications + compactor | open |
-| 6. Workspaces + PeerGroups | open |
+| **4. Sub-agents + plan + whiteboard + event-driven session loop** | **spec drafted v2** (`phase-4-spec.md`, ready for `/speckit.specify`); architecture decisions in `phase-4-architecture.md` |
+| 4.1. Scenario test harness (port `../agent/tests/scenarios/` pattern; stub LLM + mock tools + virtual clock + record/replay; ~30 scenarios) | spec drafted v0 (`phase-4.1-spec.md`); follows 4, gates 4.2 |
+| 4.2. Analyst mega-skill + role sub-agents + `skill_builder` + community-skill enablement (tri-state `allowed-tools`, `system:tool_catalog`) | spec drafted v0 (`phase-4.2-spec.md`); follows 4.1 |
+| 4.3. System tools refactor (retire `SystemProvider` / `SystemDeps`; tools onto domain `ToolProvider`s) | spec drafted v0 (`phase-4.3-spec.md`); follows 4.2 |
+| 5. Compactor + HITL: approvals + clarifications (compactor first within the phase; replaces the phase-3 `defaultHistoryWindow=50` stop-gap) | open |
+| 6. Cron + scheduler | open |
 | 7. Memory pipeline + LLM Wiki (short + long-term) | open |
-| 8. Cron + scheduler | open |
-| 9. Artifacts | open |
-| 10. A2A adapter | open (defer until needed) |
+| 8. Artifacts | open |
+| 9. A2A adapter | open (defer until needed) |
+| 10. Multi-party Workspaces (human + agent) | open — external interaction surface; lands after A2A so participant model is shaken out |
+| Backlog. PeerGroup mesh / pipeline | deferred — whiteboard (phase 4) covers broadcast; mesh / pipeline re-introduce when a real workload demands it |
 
 Goal: finish design-001 cleanly, then move to **hub integration**
 (container packaging, deployment story, hub-spawned mode). Hub work is
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
+
+## Active focus — phase 4
+
+Implementation starts via `/speckit.specify` against
+`design/001-agent-runtime/phase-4-spec.md`.
+
+**Document set for phase 4 work** (in order of authority for an
+implementer):
+
+1. **`design/001-agent-runtime/phase-4-spec.md`** — the contract.
+   §1 Goal (7 deliverables), §3 Scope (11 work items), §4 Data /
+   schema / manifest changes (§4.1 strict event-sourcing, §4.2 no
+   migration — `metadata.depth` lives in JSON), §10 Three-route
+   inbound, §13 Build/test plan + 21 acceptance scenarios, §14
+   Resolved questions Q1-Q19, §15 Implementation order (16 commits,
+   single PR).
+2. **`design/001-agent-runtime/phase-4-architecture.md`** — locked
+   architectural decisions and rationale. §1 spec → existing-code
+   mapping, §2 Manager as `tool.ToolProvider` pattern, §3 select-
+   loop refactor, §4 per-file delta (`pkg/protocol`, `pkg/session/*`,
+   `pkg/skill`, `pkg/tool/reconnect.go`, `cmd/hugen` four-line
+   delta), §6 commit sequence.
+3. **`design/001-agent-runtime/design.md §19`** — architectural
+   foundations to honour. Phase 4 lands Foundation 2
+   (`Frame.FromParticipant` reserved field). Foundations 1, 3, 4
+   land in phase 5; 5 in phase 8; 6 in phase 9. Don't accidentally
+   bake single-user-only assumptions.
+
+**Key locked decisions** (full list in spec §14):
+
+- No `pkg/subagent` package — sub-agent = `Session` with
+  `parent_session_id` + `metadata.depth`; spawn lives on
+  `*session.Manager`.
+- `Manager` implements `tool.ToolProvider` for the 13 new
+  session-scoped tools — no callbacks via `SystemDeps`.
+- Strict event-sourcing — `sessions` row immutable after create;
+  no schema migration in phase 4.
+- Unified `Manager.Terminate(id, reason)` replaces Suspend / Close;
+  graceful shutdown writes nothing.
+- Three-route inbound (`RouteInternal` / `RouteToolFeed` /
+  `RouteBuffered`) with `pkg/session/routes.go` `kindRoutes` table.
+- `system_message` is a separate Frame kind (model-visible);
+  `system_marker` stays UI-only.
+- `Cancel.Cascade bool` — `/cancel` (turn-only) vs `/cancel all`
+  (cascade-terminate sub-agent subtree).
+- `requires_skills` manifest field with transitive resolve at
+  `SkillManager.Load`.
+- Phase 4 ships with the existing `defaultHistoryWindow=50`
+  window-truncation as an acknowledged stop-gap; full compactor
+  lands at the start of phase 5. Plan body anchors across the cut.
+
+**Phase 4.1 / 4.2 / 4.3 are separate specs, follow phase 4** —
+`phase-4.1-spec.md` (scenario test harness — gates 4.2),
+`phase-4.2-spec.md` (analyst mega-skill + community-skill
+enablement), `phase-4.3-spec.md` (system tools refactor) are
+drafted at v0 but **not** in scope for the active phase 4 PR.
+
+Phase 4 is **one PR**. Internal commit order in spec §15 is
+prescriptive for the author / reviewer; not enforced as separate
+PRs.
 
 ## Project structure
 
@@ -138,3 +201,10 @@ slot is `.specify/feature.json`. Outputs are gitignored by design
 
 <!-- MANUAL ADDITIONS START -->
 <!-- MANUAL ADDITIONS END -->
+
+## Active Technologies
+- Go 1.23.x (project uses generics, `slices`, `maps`, (005-phase-4-agent-runtime)
+- DuckDB local store via `pkg/store/local`; append-only on (005-phase-4-agent-runtime)
+
+## Recent Changes
+- 005-phase-4-agent-runtime: Added Go 1.23.x (project uses generics, `slices`, `maps`,
