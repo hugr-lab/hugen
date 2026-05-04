@@ -109,6 +109,15 @@ type Session struct {
 	// detector even when defer-recover masks the runtime panic.
 	turnWG sync.WaitGroup
 
+	// childWG tracks this session's direct children (sub-agent
+	// goroutines). Each Spawn does Add(1); the deregister callback
+	// invoked on child Run exit does Done(). Run's ctx.Done teardown
+	// waits on childWG so sequential teardown is "subagents fully
+	// exit, then we run our own lifecycle.Release + handleExit". A
+	// session never tree-walks descendants — children own their own
+	// sub-trees the same way.
+	childWG sync.WaitGroup
+
 	// pendingInbound buffers RouteBuffered Frames received mid-turn.
 	// Drained at every turn boundary into s.history. C5 buffers
 	// non-Cancel/non-SlashCommand frames received while a turn is in
@@ -139,6 +148,40 @@ type Session struct {
 	done chan struct{}
 
 }
+
+// terminationCause is the cancel cause attached to a per-session ctx
+// when Manager.Terminate, the /end slash command, /cancel cascade, or
+// callSubagentCancel wants the session goroutine to append a
+// `session_terminated` event on exit. Graceful process shutdown
+// (rootCancel without cause) attaches nothing, so the goroutine
+// distinguishes the two paths via context.Cause(ctx) and writes
+// nothing on graceful shutdown (FR-028 / FR-029).
+//
+// Fields:
+//
+//   - reason — written verbatim into session_terminated.reason (or
+//     overridden to TerminationCancelCascade by handleExit when
+//     explicitTerminate is false: a parent terminated us through ctx
+//     cascade, so the concrete mechanism is "cancel_cascade", not the
+//     parent's caller-supplied reason).
+//   - emitClose — when true the goroutine also pushes a SessionClosed
+//     Frame to its outbox. /end leaves this false because the slash-
+//     command handler already emitted SessionClosed for the transcript;
+//     Manager.Terminate sets it true so adapters waiting on the outbox
+//     see a clean close.
+//   - writeCtx — the caller's ctx used for every store write inside
+//     the teardown sequence (persist pending inbound, lifecycle
+//     Release, append session_terminated, optional SessionClosed
+//     append, parent Submit / fallback append). Threaded through so
+//     a still-honest deadline reaches the store; never replaced with
+//     context.Background — if the caller cancelled, we cancel.
+type terminationCause struct {
+	reason    string
+	emitClose bool
+	writeCtx  context.Context
+}
+
+func (c *terminationCause) Error() string { return "session terminated: " + c.reason }
 
 // terminate is the explicit-cancel path: called from Manager.Terminate
 // and from handleSlashCommand on /end. It sets explicitTerminate=true
@@ -387,22 +430,34 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 //     with the caller's reason.
 //   - cascade (parent terminated): handleExit appends with reason
 //     "cancel_cascade".
+//
+// Sequential teardown on ctx.Done (cause attached or not):
+//
+//  1. cancel any in-flight turn and wait for the per-turn goroutines
+//     (model streamer + tool dispatcher) to drain. No timeout —
+//     bounded turn-runners are the model/tool layer's job; pinning
+//     here would mask leaks.
+//  2. wait for direct children's goroutines to exit (their ctx is
+//     derived from ours, so they already started cancelling). Drain
+//     s.in concurrently so a child's last Submit (subagent_result,
+//     etc.) doesn't deadlock against a full buffer.
+//  3. persist anything we captured in the drain into our event log
+//     (no outbox push; outbox is shutting down).
+//  4. release per-session resources via lifecycle.Release.
+//  5. run handleExit which appends session_terminated and emits the
+//     parent-bound subagent_result if applicable.
+//  6. close s.out + s.done so external waiters unblock.
+//
+// All store writes thread the caller's writeCtx (carried on the
+// terminationCause) — never context.Background, never a side-band
+// timeout. Graceful shutdown (cause==nil) skips steps 3–5.
 func (s *Session) Run(ctx context.Context) error {
 	defer close(s.done) // signal external waiters BEFORE outbox closes
 	defer close(s.out)
 	for {
 		select {
 		case <-ctx.Done():
-			// Cancel any in-flight turn so the model + tool goroutines
-			// see turnCtx.Done and exit, then wait for them. Without
-			// the wait, dispatcher emits race with the deferred
-			// close(s.out) below; -race flags it even though
-			// defer-recover masks the runtime panic.
-			if s.turnCancel != nil {
-				s.turnCancel()
-			}
-			s.waitTurnGoroutines(5 * time.Second)
-			s.handleExit(ctx)
+			s.teardown(ctx)
 			return ctx.Err()
 		case f, ok := <-s.in:
 			if !ok {
@@ -430,35 +485,161 @@ func (s *Session) Run(ctx context.Context) error {
 	}
 }
 
-// handleExit runs when the per-session ctx fires. Three cases:
+// teardown is the ordered shutdown sequence run when the per-session
+// ctx fires. See Run for the prose contract.
 //
-//   - graceful (Manager.ShutdownAll → rootCancel with no cause):
-//     ctx.Cause is nil. Write nothing — phase-4 promise (FR-028 +
-//     FR-029) is "no terminal event ⇒ this session is the
-//     restart-walker's responsibility on next boot".
+// Two paths:
 //
-//   - explicit (s.terminate(cause) — from Manager.Terminate or /end):
-//     explicitTerminate=true, ctx.Cause is *terminationCause. Write
+//   - graceful (cause==nil): step 1 (turn cancel + wait) and step 2
+//     (children exit + inbox drain) still run because every running
+//     goroutine must release its slot before the binary can exit, but
+//     no events are persisted and no Release is called. This matches
+//     the phase-4 promise that graceful shutdown writes nothing —
+//     orphaned sessions are the restart-walker's job on next boot.
+//   - explicit (cause is *terminationCause): every step runs. Steps
+//     3–5 use tc.writeCtx so a still-honest deadline reaches the
+//     store; cancellation of the writeCtx aborts the persist, which
+//     is the caller's choice.
+func (s *Session) teardown(runCtx context.Context) {
+	// 1) Stop the in-flight turn.
+	if s.turnCancel != nil {
+		s.turnCancel()
+	}
+	s.turnWG.Wait()
+
+	cause := context.Cause(runCtx)
+	tc, _ := cause.(*terminationCause)
+
+	// 2) Wait for direct children, draining inbox concurrently so a
+	// child's last Submit (subagent_result, etc.) lands on us instead
+	// of blocking forever on a full buffer.
+	s.drainOnTeardown()
+
+	if tc == nil {
+		// Graceful: nothing else to do. handleExit early-returns on a
+		// nil cause; replicate that here without the store writes.
+		return
+	}
+
+	// 3) Persist anything we caught in the drain. emit() short-circuits
+	// once s.closed is set, but here closed is still false — we use
+	// persistOnly to skip the outbox push (it's about to close anyway).
+	for _, f := range s.pendingInbound {
+		if err := s.persistOnly(tc.writeCtx, f); err != nil {
+			s.logger.Warn("session: persist pending inbound on teardown",
+				"session", s.id, "kind", string(f.Kind()), "err", err)
+		}
+	}
+	s.pendingInbound = nil
+
+	// 4) Release per-session resources before we write the terminal
+	// event so a future restart-walker reading session_terminated
+	// doesn't see a row whose resources are still alive.
+	if s.deps != nil && s.deps.lifecycle != nil {
+		if err := s.deps.lifecycle.Release(tc.writeCtx, s.id); err != nil {
+			s.logger.Warn("session: lifecycle release on teardown",
+				"session", s.id, "err", err)
+		}
+	}
+
+	// 5) handleExit appends session_terminated, emits subagent_result
+	// to the parent (if any), and (optionally) the SessionClosed
+	// outbox frame.
+	s.handleExit(runCtx)
+}
+
+// drainOnTeardown blocks until s.childWG fires (every direct child's
+// goroutine has exited and run its deregister callback), draining
+// s.in into pendingInbound concurrently so a child's last Submit on
+// us doesn't deadlock the tree.
+//
+// After childWG is observed done we drain whatever Frames raced into
+// s.in between Submit and childWG.Done — the Submit happens before
+// the deregister callback, but Submit returns immediately on a buffer
+// hit so the Frame is in s.in well before Done.
+func (s *Session) drainOnTeardown() {
+	childrenDone := make(chan struct{})
+	go func() {
+		s.childWG.Wait()
+		close(childrenDone)
+	}()
+	for {
+		select {
+		case f, ok := <-s.in:
+			if !ok {
+				// Inbox closed (only happens via s.in close, which
+				// nobody does today). Treat as drained.
+				return
+			}
+			s.pendingInbound = append(s.pendingInbound, f)
+		case <-childrenDone:
+			// Children gone; drain everything that's already in the
+			// buffer and exit. Use a non-blocking select so we don't
+			// hang waiting for never-arriving frames.
+			for {
+				select {
+				case f, ok := <-s.in:
+					if !ok {
+						return
+					}
+					s.pendingInbound = append(s.pendingInbound, f)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// persistOnly appends a Frame to the session's event log without
+// pushing it to the outbox. Used by teardown to flush
+// pendingInbound after the outbox close path is committed but
+// before handleExit writes the terminal row. Mirrors emit's seq
+// allocation so seq monotonicity holds across the boundary.
+func (s *Session) persistOnly(ctx context.Context, f protocol.Frame) error {
+	row, summary, err := FrameToEventRow(f, s.agent.ID())
+	if err != nil {
+		return fmt.Errorf("session %s: project frame on teardown: %w", s.id, err)
+	}
+	nextSeq, err := s.store.NextSeq(ctx, s.id)
+	if err != nil {
+		return fmt.Errorf("session %s: next seq on teardown: %w", s.id, err)
+	}
+	row.Seq = nextSeq
+	if setter, ok := f.(protocol.SeqSetter); ok {
+		setter.SetSeq(nextSeq)
+	}
+	if err := s.store.AppendEvent(ctx, row, summary); err != nil {
+		return fmt.Errorf("session %s: append frame on teardown: %w", s.id, err)
+	}
+	return nil
+}
+
+// handleExit runs as the final step of teardown when the per-session
+// ctx fires with a terminationCause. Two reason cases:
+//
+//   - explicit (s.terminate(cause) — Manager.Terminate, /end,
+//     callSubagentCancel): explicitTerminate=true. Write
 //     session_terminated{tc.reason}; optionally emit SessionClosed
 //     for adapter back-compat (tc.emitClose=true).
 //
 //   - cascade (parent's ctx was cancelled with cause; ours derives
 //     from parent.ctx so we see the same cause but never set our
-//     own explicit flag): explicitTerminate=false, ctx.Cause is
-//     *terminationCause. Write session_terminated{cancel_cascade}
-//     and suppress SessionClosed — cascade is an internal lifecycle
-//     event, not a transcript message.
+//     own explicit flag): explicitTerminate=false. Write
+//     session_terminated{cancel_cascade} and suppress SessionClosed
+//     — cascade is an internal lifecycle event, not a transcript
+//     message.
 //
-// Persistence uses a fresh context.Background() because the session
-// ctx is already cancelled at this point — the underlying store
-// queries would fail to round-trip via a cancelled ctx. Persistence
-// is bounded by an explicit deadline so a stuck store can't pin
-// shutdown.
+// Graceful shutdown (cause==nil) never reaches here — teardown
+// short-circuits before calling handleExit.
+//
+// All store writes use tc.writeCtx (the caller's ctx threaded
+// through terminate). A cancelled writeCtx aborts the persist; that
+// is the caller's choice and we honour it.
 func (s *Session) handleExit(runCtx context.Context) {
 	cause := context.Cause(runCtx)
 	tc, ok := cause.(*terminationCause)
 	if !ok {
-		// Graceful shutdown — write nothing.
 		return
 	}
 	if s.closed.Load() {
@@ -472,8 +653,7 @@ func (s *Session) handleExit(runCtx context.Context) {
 		reason = protocol.TerminationCancelCascade
 		emitClose = false
 	}
-	persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	writeCtx := tc.writeCtx
 	// Persist session_terminated directly through the store: emit()
 	// short-circuits on s.closed (guarding against post-exit writes
 	// from racing handlers), but the terminal event IS the close
@@ -483,13 +663,13 @@ func (s *Session) handleExit(runCtx context.Context) {
 		Reason: reason,
 	})
 	if termRow, summary, perr := FrameToEventRow(terminal, s.agent.ID()); perr == nil {
-		if nextSeq, serr := s.store.NextSeq(persistCtx, s.id); serr == nil {
+		if nextSeq, serr := s.store.NextSeq(writeCtx, s.id); serr == nil {
 			termRow.Seq = nextSeq
 			if setter, ok := any(terminal).(protocol.SeqSetter); ok {
 				setter.SetSeq(nextSeq)
 			}
 		}
-		if err := s.store.AppendEvent(persistCtx, termRow, summary); err != nil {
+		if err := s.store.AppendEvent(writeCtx, termRow, summary); err != nil {
 			s.logger.Warn("session: append session_terminated", "session", s.id, "err", err)
 		}
 	} else {
@@ -509,7 +689,7 @@ func (s *Session) handleExit(runCtx context.Context) {
 	// every other terminate path (subagent_cancel, /end, parent
 	// cascade).
 	if s.parent != nil {
-		s.emitSubagentResultToParent(persistCtx, reason)
+		s.emitSubagentResultToParent(writeCtx, reason)
 	}
 	// SessionClosed is the model-/adapter-visible counterpart;
 	// best-effort outbox push is fine since closed=true is now set
@@ -517,13 +697,13 @@ func (s *Session) handleExit(runCtx context.Context) {
 	if emitClose {
 		closed := protocol.NewSessionClosed(s.id, s.agent.Participant(), reason)
 		if cRow, cSum, perr := FrameToEventRow(closed, s.agent.ID()); perr == nil {
-			if nextSeq, serr := s.store.NextSeq(persistCtx, s.id); serr == nil {
+			if nextSeq, serr := s.store.NextSeq(writeCtx, s.id); serr == nil {
 				cRow.Seq = nextSeq
 				if setter, ok := any(closed).(protocol.SeqSetter); ok {
 					setter.SetSeq(nextSeq)
 				}
 			}
-			if err := s.store.AppendEvent(persistCtx, cRow, cSum); err != nil {
+			if err := s.store.AppendEvent(writeCtx, cRow, cSum); err != nil {
 				s.logger.Warn("session: append session_closed", "session", s.id, "err", err)
 			}
 		}
@@ -666,7 +846,7 @@ func (s *Session) handleCancel(ctx context.Context, f *protocol.Cancel) error {
 		s.turnCancel()
 	}
 	if f.Payload.Cascade {
-		s.cascadeCancelChildren()
+		s.cascadeCancelChildren(ctx)
 	}
 	return s.emit(ctx, f)
 }
@@ -675,7 +855,12 @@ func (s *Session) handleCancel(ctx context.Context, f *protocol.Cancel) error {
 // terminate on each. Idempotent on already-closed children. A child
 // that's mid-spawn (registered but goroutine not yet running its first
 // select) sees turnCtx.Done immediately on entry into Run.
-func (s *Session) cascadeCancelChildren() {
+//
+// ctx is threaded into each child's terminationCause.writeCtx so the
+// child's teardown store writes inherit the cancelling caller's
+// deadline / cancellation. Children of children inherit again the
+// same way when the cascade rolls through their own handleCancel.
+func (s *Session) cascadeCancelChildren(ctx context.Context) {
 	s.childMu.Lock()
 	children := make([]*Session, 0, len(s.children))
 	for _, c := range s.children {
@@ -689,6 +874,7 @@ func (s *Session) cascadeCancelChildren() {
 		c.terminate(&terminationCause{
 			reason:    protocol.TerminationCancelCascade,
 			emitClose: false,
+			writeCtx:  ctx,
 		})
 	}
 }
@@ -738,6 +924,7 @@ func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashComma
 		s.terminate(&terminationCause{
 			reason:    "user:" + f.Payload.Name + " " + closeReason,
 			emitClose: false,
+			writeCtx:  ctx,
 		})
 	}
 	return nil
@@ -1065,29 +1252,6 @@ func (s *Session) emitPendingSwitch(ctx context.Context) error {
 	marker := protocol.NewSystemMarker(s.id, s.agent.Participant(), "model_switched",
 		map[string]any{"from": switch_.from.String(), "to": switch_.to.String()})
 	return s.emit(ctx, marker)
-}
-
-// waitTurnGoroutines blocks until all per-turn goroutines (model
-// streamer + tool dispatcher) finish, or the timeout elapses.
-// Bounded so a stuck tool can't pin shutdown — beyond the deadline
-// we drop into the close path with goroutines still running, and
-// their writes hit defer-recover on a closed s.out.
-func (s *Session) waitTurnGoroutines(timeout time.Duration) {
-	if timeout <= 0 {
-		s.turnWG.Wait()
-		return
-	}
-	done := make(chan struct{})
-	go func() {
-		s.turnWG.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		s.logger.Warn("session: turn goroutines did not exit within deadline",
-			"session", s.id, "deadline", timeout)
-	}
 }
 
 // IsClosed reports whether the session has been closed.

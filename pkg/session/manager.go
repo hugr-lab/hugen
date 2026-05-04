@@ -114,30 +114,6 @@ type Manager struct {
 	wg sync.WaitGroup
 }
 
-// terminationCause is the cancel cause attached to a per-session ctx
-// when Manager.Terminate (or the /end slash command) wants the session
-// goroutine to append a `session_terminated` event on exit. Graceful
-// process shutdown (rootCancel) uses no cause, so the goroutine
-// distinguishes the two paths via context.Cause(ctx) and writes
-// nothing on graceful shutdown.
-//
-// emitClose controls whether the goroutine's exit handler emits a
-// SessionClosed Frame to the outbox in addition to appending the
-// session_terminated event:
-//
-//   - emitClose=true  → the caller (Manager.Terminate) hasn't already
-//     surfaced a SessionClosed; the goroutine emits one for adapter
-//     back-compat.
-//   - emitClose=false → the caller already emitted SessionClosed (the
-//     /end slash command path); the goroutine writes the event but
-//     suppresses a duplicate frame.
-type terminationCause struct {
-	reason    string
-	emitClose bool
-}
-
-func (c *terminationCause) Error() string { return "session terminated: " + c.reason }
-
 // ManagerOption configures a Manager at construction.
 type ManagerOption func(*Manager)
 
@@ -302,72 +278,44 @@ func (m *Manager) Deliver(ctx context.Context, to string, f protocol.Frame) erro
 // be delivered.
 var ErrSessionGone = errors.New("manager: session goroutine exited")
 
-// Terminate is the unified session-termination path for phase 4 and
-// onward. It cancels the target session's ctx with a terminationCause
+// Terminate cancels a *root* session's ctx with a terminationCause
 // carrying the caller-supplied reason and waits for the goroutine to
-// append its session_terminated event and exit.
+// run its sequential teardown (turn cancel → children wait → persist
+// pending inbound → lifecycle.Release → session_terminated +
+// SessionClosed → close). The session's own goroutine owns the
+// terminal write — Manager just signals and waits.
 //
-// Mechanism:
+// Manager only knows roots: m.live[id] is the lookup. Sub-agents are
+// owned by their parent's children map; sub-agent termination goes
+// through callSubagentCancel (caller.children[id] direct lookup +
+// child.terminate). Calling Terminate with a sub-agent id surfaces
+// ErrSessionNotFound — by design, not a bug.
 //
-//   - Live session: cancel per-session ctx via CancelCauseFunc;
-//     goroutine's ctx.Done handler reads context.Cause(ctx) →
-//     appends session_terminated{reason} → emits SessionClosed Frame
-//     for adapter back-compat → exits. Then Manager waits on s.Done()
-//     and runs lifecycle.Release.
-//
-//   - Not live (process restart edge case, /end during shutdown,
-//     subagent already terminal): append a session_terminated event
-//     directly via the store. The sessions row is NOT updated —
-//     liveness is event-derived (FR-027).
-//
-// Idempotent: calling Terminate on a session that already has a
-// session_terminated event is a no-op (skipped silently).
+// Idempotent: a second call after the goroutine has exited returns
+// ErrSessionNotFound (the deregister callback already removed the
+// entry from m.live). The first call's terminationCause is the one
+// honoured — context.Cause semantics.
 func (m *Manager) Terminate(ctx context.Context, id, reason string) error {
 	if reason == "" {
 		reason = "terminated"
 	}
 	m.mu.RLock()
-	s, live := m.live[id]
+	s, ok := m.live[id]
 	m.mu.RUnlock()
-	if live {
-		if !s.closed.Load() {
-			s.terminate(&terminationCause{reason: reason, emitClose: true})
-		}
-		select {
-		case <-s.Done():
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		if m.lifecycle != nil {
-			if err := m.lifecycle.Release(ctx, id); err != nil {
-				m.logger.Warn("manager: terminate session lifecycle", "session", id, "err", err)
-			}
-		}
-		return nil
+	if !ok {
+		return ErrSessionNotFound
 	}
-	// Not-live path: append the terminal event ourselves so the
-	// session is unambiguously terminated on next boot.
-	if existing, err := m.store.ListEvents(ctx, id, ListEventsOpts{Limit: 1000}); err == nil {
-		for _, ev := range existing {
-			if ev.EventType == string(protocol.KindSessionTerminated) {
-				return nil // already terminal
-			}
-		}
+	if !s.closed.Load() {
+		s.terminate(&terminationCause{
+			reason:    reason,
+			emitClose: true,
+			writeCtx:  ctx,
+		})
 	}
-	terminal := protocol.NewSessionTerminated(id, m.agent.Participant(), protocol.SessionTerminatedPayload{
-		Reason: reason,
-	})
-	row, summary, err := FrameToEventRow(terminal, m.agent.ID())
-	if err != nil {
-		return fmt.Errorf("manager: terminate (offline) project frame: %w", err)
-	}
-	if err := m.store.AppendEvent(ctx, row, summary); err != nil {
-		return fmt.Errorf("manager: terminate (offline) append: %w", err)
-	}
-	if m.lifecycle != nil {
-		if err := m.lifecycle.Release(ctx, id); err != nil {
-			m.logger.Warn("manager: terminate (offline) lifecycle", "session", id, "err", err)
-		}
+	select {
+	case <-s.Done():
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	return nil
 }

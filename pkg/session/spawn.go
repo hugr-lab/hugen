@@ -63,12 +63,22 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	s.children[child.id] = child
 	s.childMu.Unlock()
 
+	// Track the child on parent's childWG so parent's ctx.Done
+	// teardown can wait specifically for ITS direct children to exit
+	// before running its own lifecycle.Release / handleExit. The
+	// shared deps.wg in Manager waits for every goroutine in the
+	// forest; childWG narrows the wait to one tree level so the
+	// "deepest leaves finish first, then their parent" ordering is
+	// natural.
+	s.childWG.Add(1)
+
 	child.start(func() {
 		s.childMu.Lock()
 		if cur, ok := s.children[child.id]; ok && cur == child {
 			delete(s.children, child.id)
 		}
 		s.childMu.Unlock()
+		s.childWG.Done()
 	})
 
 	started := protocol.NewSubagentStarted(s.id, s.deps.agent.Participant(), protocol.SubagentStartedPayload{
@@ -88,27 +98,3 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	return child, nil
 }
 
-// FindDescendant walks the children tree breadth-first and returns
-// the *Session whose id matches target, or nil if none. Used by
-// session-scoped tools (session:cancel_subagent etc.) that need to
-// reach a sub-agent without going through the (root-only) Manager.
-func (s *Session) FindDescendant(target string) *Session {
-	if target == "" {
-		return nil
-	}
-	queue := []*Session{s}
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		cur.childMu.Lock()
-		for id, child := range cur.children {
-			if id == target {
-				cur.childMu.Unlock()
-				return child
-			}
-			queue = append(queue, child)
-		}
-		cur.childMu.Unlock()
-	}
-	return nil
-}

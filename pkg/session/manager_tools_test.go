@@ -54,9 +54,13 @@ func TestCallSpawnSubagent_Happy(t *testing.T) {
 	if got[0].SessionID == "" || got[0].Depth != 1 {
 		t.Errorf("unexpected entry %+v", got[0])
 	}
-	// Child should be in parent.children.
-	if parent.FindDescendant(got[0].SessionID) == nil {
-		t.Errorf("spawned child %q not in parent's tree", got[0].SessionID)
+	// Child should be in parent.children — direct lookup, never a
+	// tree walk: each session knows only its own immediate children.
+	parent.childMu.Lock()
+	_, inChildren := parent.children[got[0].SessionID]
+	parent.childMu.Unlock()
+	if !inChildren {
+		t.Errorf("spawned child %q not in parent.children", got[0].SessionID)
 	}
 }
 

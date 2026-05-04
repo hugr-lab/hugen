@@ -631,20 +631,25 @@ func callSubagentCancel(ctx context.Context, m *Manager, args json.RawMessage) (
 		return toolErr("bad_request", "session_id is required")
 	}
 
-	if errFrame := assertChildOf(ctx, m, parent.id, in.SessionID); errFrame != nil {
-		return errFrame, nil
-	}
+	// Direct child lookup — Manager is root-only post-pivot 4 and a
+	// session only ever cancels its OWN immediate children. Walking
+	// the descendant tree is forbidden: each session is the source of
+	// truth for its direct sub-tree and any deeper cancel must travel
+	// through that owner.
+	parent.childMu.Lock()
+	child, live := parent.children[in.SessionID]
+	parent.childMu.Unlock()
 
-	reason := protocol.TerminationSubagentCancelPrefix + strings.TrimSpace(in.Reason)
-	// The descendant may live anywhere in the parent's tree (Manager
-	// is root-only post-pivot 4). Walk parent's children for an exact
-	// match; fall back to the not-live store-only path for sessions
-	// whose goroutines have already exited.
-	if child := parent.FindDescendant(in.SessionID); child != nil {
+	if live {
 		if child.IsClosed() {
 			return json.Marshal(subagentCancelOutput{OK: true})
 		}
-		child.terminate(&terminationCause{reason: reason, emitClose: false})
+		reason := protocol.TerminationSubagentCancelPrefix + strings.TrimSpace(in.Reason)
+		child.terminate(&terminationCause{
+			reason:    reason,
+			emitClose: false,
+			writeCtx:  ctx,
+		})
 		select {
 		case <-child.Done():
 		case <-ctx.Done():
@@ -653,12 +658,13 @@ func callSubagentCancel(ctx context.Context, m *Manager, args json.RawMessage) (
 		return json.Marshal(subagentCancelOutput{OK: true})
 	}
 
-	// Not in the in-memory tree — already-terminal or a sibling tree.
-	// Manager.Terminate handles the not-live path by appending a
-	// terminal event directly through the store; idempotent on
-	// already-terminal targets.
-	if err := m.Terminate(ctx, in.SessionID, reason); err != nil {
-		return toolErr("io", err.Error())
+	// Not in the live children map — either already-terminal (the
+	// goroutine exited and the deregister callback removed it) or
+	// not a child of caller at all. Confirm direct parentage in the
+	// store; not_a_child / session_not_found surface the wiring error,
+	// otherwise the cancel is idempotent ok=true.
+	if errFrame := assertChildOf(ctx, m, parent.id, in.SessionID); errFrame != nil {
+		return errFrame, nil
 	}
 	return json.Marshal(subagentCancelOutput{OK: true})
 }

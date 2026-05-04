@@ -157,7 +157,7 @@ func TestUS1_WaitSubagents_NaturalTermination(t *testing.T) {
 	// Drive the cancel through the public sub-agent API. mgr.Terminate
 	// addresses live-roots only post pivot 4 — sub-agents belong to
 	// their parent's children map, so callSubagentCancel is the right
-	// path (it goes through parent.FindDescendant + child.terminate).
+	// path (direct caller.children[id] lookup + child.terminate).
 	go func() {
 		args, _ := json.Marshal(subagentCancelInput{
 			SessionID: child.id, Reason: "natural-test-cancel",
