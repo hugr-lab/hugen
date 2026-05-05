@@ -17,23 +17,13 @@ const (
 	systemPermObject   = "hugen:tool:system"
 )
 
-// MCPAddSpec carries the args of mcp_add_server. Caller wires it
-// through to the configured registrar; SystemProvider only
-// validates JSON shape.
-type MCPAddSpec struct {
-	Name    string            `json:"name"`
-	Command string            `json:"command"`
-	Args    []string          `json:"args,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-}
-
 // SystemDeps wires the system-tools provider to the surrounding
-// runtime. Every callback may be nil — the corresponding tool then
+// runtime. The Reload callback may be nil — runtime_reload then
 // surfaces ErrSystemUnavailable on dispatch (Tier-1 may also strip
 // it from the catalogue).
 //
-// AgentID is the agent the provider belongs to; downstream
-// callbacks read it from SystemDeps once per dispatch.
+// AgentID is the agent the provider belongs to; downstream callbacks
+// read it from SystemDeps once per dispatch.
 type SystemDeps struct {
 	AgentID string
 
@@ -42,16 +32,21 @@ type SystemDeps struct {
 	// no-gate behaviour (allow) — used in tests.
 	Perms perm.Service
 
-	AddMCP    func(ctx context.Context, spec MCPAddSpec) error
-	RemoveMCP func(ctx context.Context, name string) error
-	ReloadMCP func(ctx context.Context, name string) error
-
+	// Reload runs the per-target reload pipeline. nil disables
+	// runtime_reload (surfaces ErrSystemUnavailable).
 	Reload func(ctx context.Context, target string) error
 }
 
 // SystemProvider exposes the runtime's built-in tools as a
 // ToolProvider so the catalogue and permission machinery treat
 // them uniformly with MCP-backed tools. Lifetime is per-agent.
+//
+// Phase 4.1a steps 20-24 thinned this provider down: skill_*,
+// notepad_append, tool_catalog, policy_*, and mcp_* migrated to
+// dedicated providers (`session`, `policy`, `tool`). All that
+// remains here is `system:runtime_reload`; phase 4.1a step 25
+// pulls that one out into a `runtime` provider before SystemProvider
+// itself is deleted (step 27).
 type SystemProvider struct {
 	deps SystemDeps
 }
@@ -64,8 +59,7 @@ func NewSystemProvider(deps SystemDeps) *SystemProvider {
 
 // ErrSystemUnavailable is returned by SystemProvider.Call when the
 // requested system tool's underlying capability was not wired
-// in by the runtime (e.g. a no-Hugr deployment registers the
-// provider without ReloadMCP).
+// in by the runtime.
 var ErrSystemUnavailable = errors.New("tool: system tool unavailable in this runtime")
 
 func (p *SystemProvider) Name() string       { return systemProviderName }
@@ -85,44 +79,6 @@ func (p *SystemProvider) List(ctx context.Context) ([]Tool, error) {
   }
 }`),
 		},
-		{
-			Name:             "system:mcp_add_server",
-			Description:      "Spawn and register an MCP server (admin path).",
-			Provider:         systemProviderName,
-			PermissionObject: systemPermObject,
-			ArgSchema: json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "name": {"type": "string"},
-    "command": {"type": "string"},
-    "args": {"type": "array", "items": {"type": "string"}},
-    "env": {"type": "object", "description": "Environment variables as a flat string→string map."}
-  },
-  "required": ["name", "command"]
-}`),
-		},
-		{
-			Name:             "system:mcp_remove_server",
-			Description:      "Drain and remove an MCP server.",
-			Provider:         systemProviderName,
-			PermissionObject: systemPermObject,
-			ArgSchema: json.RawMessage(`{
-  "type": "object",
-  "properties": {"name": {"type": "string"}},
-  "required": ["name"]
-}`),
-		},
-		{
-			Name:             "system:mcp_reload_server",
-			Description:      "Restart a registered MCP server.",
-			Provider:         systemProviderName,
-			PermissionObject: systemPermObject,
-			ArgSchema: json.RawMessage(`{
-  "type": "object",
-  "properties": {"name": {"type": "string"}},
-  "required": ["name"]
-}`),
-		},
 	}
 	for i := range tools {
 		if err := ValidateLLMSchema(tools[i].ArgSchema); err != nil {
@@ -136,12 +92,6 @@ func (p *SystemProvider) Call(ctx context.Context, name string, args json.RawMes
 	switch name {
 	case "runtime_reload":
 		return p.callRuntimeReload(ctx, args)
-	case "mcp_add_server":
-		return p.callMCPAdd(ctx, args)
-	case "mcp_remove_server":
-		return p.callMCPRemove(ctx, args)
-	case "mcp_reload_server":
-		return p.callMCPReload(ctx, args)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnknownTool, name)
 	}
@@ -198,59 +148,4 @@ func (p *SystemProvider) gateRuntimeReload(ctx context.Context, target string) e
 			ErrPermissionDenied, target, deniedTier(got))
 	}
 	return nil
-}
-
-func (p *SystemProvider) callMCPAdd(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-	if p.deps.AddMCP == nil {
-		return nil, ErrSystemUnavailable
-	}
-	var spec MCPAddSpec
-	if err := json.Unmarshal(args, &spec); err != nil {
-		return nil, fmt.Errorf("%w: mcp_add_server: %v", ErrArgValidation, err)
-	}
-	if spec.Name == "" || spec.Command == "" {
-		return nil, fmt.Errorf("%w: mcp_add_server: name and command required", ErrArgValidation)
-	}
-	if err := p.deps.AddMCP(ctx, spec); err != nil {
-		return nil, err
-	}
-	return json.Marshal(map[string]string{"added": spec.Name})
-}
-
-func (p *SystemProvider) callMCPRemove(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-	if p.deps.RemoveMCP == nil {
-		return nil, ErrSystemUnavailable
-	}
-	var in struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return nil, fmt.Errorf("%w: mcp_remove_server: %v", ErrArgValidation, err)
-	}
-	if in.Name == "" {
-		return nil, fmt.Errorf("%w: mcp_remove_server: name required", ErrArgValidation)
-	}
-	if err := p.deps.RemoveMCP(ctx, in.Name); err != nil {
-		return nil, err
-	}
-	return json.Marshal(map[string]string{"removed": in.Name})
-}
-
-func (p *SystemProvider) callMCPReload(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-	if p.deps.ReloadMCP == nil {
-		return nil, ErrSystemUnavailable
-	}
-	var in struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return nil, fmt.Errorf("%w: mcp_reload_server: %v", ErrArgValidation, err)
-	}
-	if in.Name == "" {
-		return nil, fmt.Errorf("%w: mcp_reload_server: name required", ErrArgValidation)
-	}
-	if err := p.deps.ReloadMCP(ctx, in.Name); err != nil {
-		return nil, err
-	}
-	return json.Marshal(map[string]string{"reloaded": in.Name})
 }

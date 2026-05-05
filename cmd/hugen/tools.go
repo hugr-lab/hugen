@@ -10,6 +10,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/hugen/pkg/tool/providers"
+	"github.com/hugr-lab/hugen/pkg/tool/providers/admin"
 	"github.com/hugr-lab/hugen/pkg/tool/providers/policies"
 )
 
@@ -56,6 +57,12 @@ func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillMa
 	})
 	if err := tm.AddProvider(sys); err != nil {
 		return nil, fmt.Errorf("buildToolStack: register system provider: %w", err)
+	}
+
+	// Registry-mutation surface: tool:provider_add /
+	// tool:provider_remove. Mirrors pkg/runtime/tools.go.
+	if err := tm.AddProvider(admin.New(tm)); err != nil {
+		return nil, fmt.Errorf("buildToolStack: register admin provider: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

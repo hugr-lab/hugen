@@ -22,12 +22,13 @@ allowed-tools:
     tools:
       - save
       - revoke
+  - provider: tool
+    tools:
+      - provider_add
+      - provider_remove
   - provider: system
     tools:
       - runtime_reload
-      - mcp_add_server
-      - mcp_remove_server
-      - mcp_reload_server
 metadata:
   hugen:
     requires: []
@@ -115,9 +116,10 @@ shell tools and file tools see exactly the same paths.
   `permissions` (re-fetch Hugr role rules), `skills` (rescan
   skill stores), `mcp` (re-spawn per-agent MCP providers), or
   `all`. Use only when the user explicitly asks to refresh.
-- `mcp_add_server` / `mcp_remove_server` / `mcp_reload_server`
-  — admin path to attach or detach an MCP server at runtime.
-  Operator-only; the call may be denied by policy.
+- `tool:provider_add` / `tool:provider_remove` — admin path to
+  register or drop a tool provider at runtime. Operator-only; the
+  call may be denied by policy. Use `runtime_reload(target=mcp)`
+  to restart already-registered MCP providers.
 
 ## Discovering skill contents
 

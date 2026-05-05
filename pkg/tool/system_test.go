@@ -22,8 +22,8 @@ func TestSystemProvider_NameAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(tools) != 4 {
-		t.Errorf("len(tools) = %d, want 4", len(tools))
+	if len(tools) != 1 {
+		t.Errorf("len(tools) = %d, want 1", len(tools))
 	}
 	for _, tt := range tools {
 		if tt.Provider != "system" {
@@ -109,76 +109,32 @@ func TestSystemProvider_RuntimeReload_GateDenied(t *testing.T) {
 	}
 }
 
-func TestSystemProvider_MCPAdd_RoutesSpec(t *testing.T) {
-	var captured MCPAddSpec
-	p := NewSystemProvider(SystemDeps{
-		AddMCP: func(ctx context.Context, spec MCPAddSpec) error {
-			captured = spec
-			return nil
-		},
-	})
-	args := json.RawMessage(`{"name":"web","command":"web-mcp","args":["--port","9000"],"env":{"K":"v"}}`)
-	if _, err := p.Call(context.Background(), "mcp_add_server", args); err != nil {
-		t.Fatalf("Call: %v", err)
-	}
-	if captured.Name != "web" || captured.Command != "web-mcp" {
-		t.Errorf("spec = %+v", captured)
-	}
-	if len(captured.Args) != 2 || captured.Env["K"] != "v" {
-		t.Errorf("spec args/env = %+v", captured)
-	}
-}
-
-func TestSystemProvider_MCPAdd_MissingFields(t *testing.T) {
-	p := NewSystemProvider(SystemDeps{AddMCP: func(ctx context.Context, spec MCPAddSpec) error { return nil }})
-	_, err := p.Call(context.Background(), "mcp_add_server", json.RawMessage(`{"name":"web"}`))
-	if !errors.Is(err, ErrArgValidation) {
-		t.Errorf("err = %v, want ErrArgValidation", err)
-	}
-}
-
-func TestSystemProvider_MCPRemove_RoutesName(t *testing.T) {
-	got := ""
-	p := NewSystemProvider(SystemDeps{
-		RemoveMCP: func(ctx context.Context, name string) error {
-			got = name
-			return nil
-		},
-	})
-	if _, err := p.Call(context.Background(), "mcp_remove_server", json.RawMessage(`{"name":"web"}`)); err != nil {
-		t.Fatalf("Call: %v", err)
-	}
-	if got != "web" {
-		t.Errorf("name = %q", got)
-	}
-}
-
 func TestSystemProvider_PermissionGate_DispatchedThroughManager(t *testing.T) {
-	// Tier-1 floor disables system:mcp_add_server. ToolManager.Resolve
+	// Tier-1 floor disables system:runtime_reload. ToolManager.Resolve
 	// must surface ErrPermissionDenied; SystemProvider.Call is never
 	// reached.
-	deps := SystemDeps{
-		AddMCP: func(ctx context.Context, spec MCPAddSpec) error {
-			t.Errorf("AddMCP must not be invoked when permission denies")
-			return nil
-		},
-	}
-	sp := NewSystemProvider(deps)
+	called := 0
+	sp := NewSystemProvider(SystemDeps{
+		Reload: func(context.Context, string) error { called++; return nil },
+	})
 	perms := &fakePerms{rules: map[string]perm.Permission{
-		"hugen:tool:system:mcp_add_server": {Disabled: true, FromConfig: true},
+		"hugen:tool:system:runtime_reload": {Disabled: true, FromConfig: true},
 	}}
 	m := NewToolManager(perms, nil, nil)
 	if err := m.AddProvider(sp); err != nil {
 		t.Fatalf("AddProvider: %v", err)
 	}
 	tool := Tool{
-		Name:             "system:mcp_add_server",
+		Name:             "system:runtime_reload",
 		Provider:         "system",
 		PermissionObject: "hugen:tool:system",
 	}
-	_, _, err := m.Resolve(context.Background(), tool, json.RawMessage(`{"name":"x","command":"y"}`))
+	_, _, err := m.Resolve(context.Background(), tool, json.RawMessage(`{}`))
 	if !errors.Is(err, ErrPermissionDenied) {
 		t.Errorf("err = %v, want ErrPermissionDenied", err)
+	}
+	if called != 0 {
+		t.Errorf("Reload invoked %d times despite Tier-1 floor", called)
 	}
 }
 
