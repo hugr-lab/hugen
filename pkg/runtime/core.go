@@ -10,6 +10,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
 
 	hugr "github.com/hugr-lab/query-engine"
@@ -46,6 +47,11 @@ type Core struct {
 
 	// Phase 5 (models).
 	Models *model.ModelRouter
+
+	// Phase 6 (agent).
+	Agent    *session.Agent
+	Commands *session.CommandRegistry
+	Codec    *protocol.Codec
 
 	// cleanups stacks per-phase teardown closures in registration
 	// order. cleanupPartial (failure path) and Shutdown (success

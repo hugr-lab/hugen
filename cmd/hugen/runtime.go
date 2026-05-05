@@ -175,7 +175,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	if err != nil {
 		return nil, failed("identity", err)
 	}
-	constitution, err := loadConstitution(boot.StateDir, core.Logger)
+	constitution, err := runtime.LoadConstitution(boot.StateDir, core.Logger)
 	if err != nil {
 		return nil, failed("constitution", err)
 	}
@@ -186,7 +186,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	core.Agent = agent
 
 	cmds := session.NewCommandRegistry()
-	if err := registerBuiltinCommands(cmds, core.Logger); err != nil {
+	if err := runtime.RegisterBuiltinCommands(cmds, core.Logger); err != nil {
 		return nil, failed("commands", err)
 	}
 	core.Commands = cmds

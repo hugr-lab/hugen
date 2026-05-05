@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"testing"
@@ -8,7 +8,7 @@ import (
 
 func TestRegisterBuiltinCommands(t *testing.T) {
 	reg := session.NewCommandRegistry()
-	if err := registerBuiltinCommands(reg, nil); err != nil {
+	if err := RegisterBuiltinCommands(reg, nil); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	want := []string{"cancel", "end", "help", "model", "note"}
@@ -22,7 +22,7 @@ func TestRegisterBuiltinCommands(t *testing.T) {
 		}
 	}
 	// Re-registration must fail (already registered).
-	if err := registerBuiltinCommands(reg, nil); err == nil {
+	if err := RegisterBuiltinCommands(reg, nil); err == nil {
 		t.Fatal("re-register expected to fail")
 	}
 }
