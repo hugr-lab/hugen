@@ -62,6 +62,19 @@ func phaseTools(ctx context.Context, core *Core) error {
 		return fmt.Errorf("register admin provider: %w", err)
 	}
 
+	// ReloadProvider hosts runtime:reload (target ∈ permissions /
+	// skills / mcp / all). Replaces the legacy system:runtime_reload
+	// callback wired through SystemDeps.Reload.
+	reloadP := NewReloadProvider(ReloadDeps{
+		Perms:  core.Permissions,
+		Skills: core.Skills,
+		Tools:  tm,
+		Logger: core.Logger,
+	})
+	if err := tm.AddProvider(reloadP); err != nil {
+		return fmt.Errorf("register reload provider: %w", err)
+	}
+
 	// Init starts the reconnector loop and loads per_agent providers
 	// from cfg.ToolProviders() via the builder (LoadConfig).
 	initCtx, cancel := context.WithTimeout(ctx, 60*time.Second)

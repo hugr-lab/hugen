@@ -1,7 +1,6 @@
 package tool
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -144,21 +143,3 @@ func TestSanitizeLLMSchema_Idempotent(t *testing.T) {
 	}
 }
 
-// Asserts every static schema baked into SystemProvider passes the
-// validator. SystemProvider.List itself is fail-fast, so this gives
-// a clean error message on regression rather than runtime panics.
-func TestSystemProvider_AllSchemasValid(t *testing.T) {
-	prov := NewSystemProvider(SystemDeps{AgentID: "agt-test"})
-	tools, err := prov.List(context.Background())
-	if err != nil {
-		t.Fatalf("SystemProvider.List: %v", err)
-	}
-	if len(tools) == 0 {
-		t.Fatal("SystemProvider.List returned no tools")
-	}
-	for _, tl := range tools {
-		if err := ValidateLLMSchema(tl.ArgSchema); err != nil {
-			t.Errorf("tool %q schema invalid: %v\nschema: %s", tl.Name, err, tl.ArgSchema)
-		}
-	}
-}
