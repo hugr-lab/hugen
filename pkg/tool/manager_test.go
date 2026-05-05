@@ -555,3 +555,99 @@ func TestToolManager_SetPolicies_RaceFreeWithResolve(t *testing.T) {
 	}
 	<-done
 }
+
+func TestToolManager_NewChild_DispatchWalksToParent(t *testing.T) {
+	parent := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
+	root := &fakeProvider{name: "bash-mcp", callFunc: func(name string, _ json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`"root"`), nil
+	}}
+	if err := parent.AddProvider(root); err != nil {
+		t.Fatalf("parent.AddProvider: %v", err)
+	}
+
+	child := parent.NewChild()
+	own := &fakeProvider{name: "py-mcp", callFunc: func(name string, _ json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`"child"`), nil
+	}}
+	if err := child.AddProvider(own); err != nil {
+		t.Fatalf("child.AddProvider: %v", err)
+	}
+
+	// Lookup hits child's own providers first.
+	out, err := child.Dispatch(context.Background(),
+		Tool{Name: "py-mcp:run", Provider: "py-mcp", PermissionObject: "hugen:tool:py-mcp"},
+		json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("child Dispatch own: %v", err)
+	}
+	if string(out) != `"child"` {
+		t.Errorf("child own dispatch = %s, want %q", out, `"child"`)
+	}
+
+	// Miss on child → walks to parent.
+	out, err = child.Dispatch(context.Background(),
+		Tool{Name: "bash-mcp:run", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"},
+		json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("child Dispatch parent fallback: %v", err)
+	}
+	if string(out) != `"root"` {
+		t.Errorf("parent fallback dispatch = %s, want %q", out, `"root"`)
+	}
+
+	// Unknown in both: ErrUnknownProvider, no panics.
+	_, err = child.Dispatch(context.Background(),
+		Tool{Name: "ghost:run", Provider: "ghost"}, nil)
+	if !errors.Is(err, ErrUnknownProvider) {
+		t.Errorf("child unknown dispatch = %v, want ErrUnknownProvider", err)
+	}
+}
+
+func TestToolManager_NewChild_CloseDropsOwnOnly(t *testing.T) {
+	parent := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
+	rootProv := &fakeProvider{name: "bash-mcp"}
+	if err := parent.AddProvider(rootProv); err != nil {
+		t.Fatalf("parent.AddProvider: %v", err)
+	}
+
+	child := parent.NewChild()
+	childProv := &fakeProvider{name: "py-mcp"}
+	if err := child.AddProvider(childProv); err != nil {
+		t.Fatalf("child.AddProvider: %v", err)
+	}
+
+	if err := child.Close(); err != nil {
+		t.Fatalf("child.Close: %v", err)
+	}
+	if !childProv.closed.Load() {
+		t.Errorf("child.Close did not Close child's provider")
+	}
+	if rootProv.closed.Load() {
+		t.Errorf("child.Close cascaded into parent's provider — must not")
+	}
+	if got := parent.Providers(); len(got) != 1 || got[0] != "bash-mcp" {
+		t.Errorf("parent.Providers after child.Close = %v, want [bash-mcp]", got)
+	}
+}
+
+func TestToolManager_NewChild_PoliciesInheritedFromParent(t *testing.T) {
+	parent := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
+	pol := &Policies{}
+	parent.SetPolicies(pol)
+
+	child := parent.NewChild()
+	if got := child.policiesSnapshot(); got != pol {
+		t.Errorf("child.policiesSnapshot = %p, want parent's %p", got, pol)
+	}
+}
+
+func TestToolManager_Reconnector_InheritedFromParent(t *testing.T) {
+	parent := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
+	if parent.Reconnector() == nil {
+		t.Fatal("parent.Reconnector should be non-nil after NewToolManager")
+	}
+	child := parent.NewChild()
+	if child.Reconnector() != parent.Reconnector() {
+		t.Errorf("child.Reconnector should walk to parent")
+	}
+}
