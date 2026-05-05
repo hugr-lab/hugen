@@ -49,9 +49,11 @@ func Build(ctx context.Context, cfg Config) (*Core, error) {
 	if err := phaseSkillsAndPerms(ctx, core); err != nil {
 		return nil, failed("skills_perms", err)
 	}
+	if err := phaseTools(ctx, core); err != nil {
+		return nil, failed("tools", err)
+	}
 
-	// Remaining phases (tools → session_manager) land in
-	// steps 22-26.
+	// Remaining phase (session_manager) lands in step 26.
 
 	return core, nil
 }

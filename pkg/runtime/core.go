@@ -14,6 +14,8 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
+	"github.com/hugr-lab/hugen/pkg/tool"
+	"github.com/hugr-lab/hugen/pkg/tool/providers/policies"
 
 	hugr "github.com/hugr-lab/query-engine"
 	"github.com/hugr-lab/query-engine/client"
@@ -59,6 +61,11 @@ type Core struct {
 	Skills      *skill.SkillManager
 	SkillStore  skill.SkillStore
 	Permissions perm.Service
+
+	// Phase 8 (tools).
+	Workspace *session.Workspace
+	Tools     *tool.ToolManager
+	Policies  *policies.Policies
 
 	// cleanups stacks per-phase teardown closures in registration
 	// order. cleanupPartial (failure path) and Shutdown (success
