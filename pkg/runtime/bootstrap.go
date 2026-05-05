@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"crypto/sha256"
@@ -19,7 +19,7 @@ import (
 // via the system:// backend.
 const systemSkillsSubdir = "skills/system"
 
-// installBundledSkills copies every top-level entry under
+// InstallBundledSkills copies every top-level entry under
 // assets/skills/ onto disk at ${stateDir}/skills/system/<name>/.
 //
 // Idempotency: each skill directory writes a sentinel
@@ -27,7 +27,7 @@ const systemSkillsSubdir = "skills/system"
 // contents. Re-running the installer is a no-op when the checksum
 // matches; a mismatch (binary upgraded, payload changed) replaces
 // the existing tree.
-func installBundledSkills(stateDir string, log *slog.Logger) error {
+func InstallBundledSkills(stateDir string, log *slog.Logger) error {
 	if stateDir == "" {
 		return fmt.Errorf("install bundled skills: empty state dir")
 	}
@@ -129,4 +129,12 @@ func embedChecksum(files []embeddedFile) string {
 		_, _ = h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// phaseBundledSkills runs the bundled-skill installer (phase 1).
+// Reads cfg.StateDir; writes <StateDir>/skills/system/<name>/ on
+// disk. Adds no resource to Core — the SkillStore mounts this path
+// in phase 7.
+func phaseBundledSkills(core *Core) error {
+	return InstallBundledSkills(core.Cfg.StateDir, core.Logger)
 }

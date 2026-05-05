@@ -29,10 +29,14 @@ func Build(ctx context.Context, cfg Config) (*Core, error) {
 	}
 
 	_ = ctx
-	_ = failed
 
-	// Phase calls land in steps 11-15 (Stage B) and 16-26 (Stage
-	// C-E). Each phase reads fields populated by prior phases.
+	if err := phaseBundledSkills(core); err != nil {
+		return nil, failed("bundled_skills", err)
+	}
+
+	// Remaining phases (http_auth → identity → storage → models →
+	// agent → skills_perms → tools → session_manager) land in
+	// steps 12-26.
 
 	return core, nil
 }

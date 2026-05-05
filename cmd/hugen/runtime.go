@@ -19,6 +19,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/models"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
@@ -104,7 +105,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	core.Logger = newLogger(boot.LogLevel)
 	core.Logger.Info("starting hugen", "info", boot.Info())
 
-	if err := installBundledSkills(boot.StateDir, core.Logger); err != nil {
+	if err := runtime.InstallBundledSkills(boot.StateDir, core.Logger); err != nil {
 		return nil, fmt.Errorf("buildRuntimeCore: install bundled skills: %w", err)
 	}
 

@@ -13,16 +13,17 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func validConfig() Config {
+func validConfig(t *testing.T) Config {
+	t.Helper()
 	return Config{
 		Logger:   discardLogger(),
 		Mode:     "local",
-		StateDir: "/tmp/state",
+		StateDir: t.TempDir(),
 	}
 }
 
 func TestConfig_Validate_OK(t *testing.T) {
-	if err := validConfig().Validate(); err != nil {
+	if err := validConfig(t).Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 }
@@ -40,7 +41,7 @@ func TestConfig_Validate_Errors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := validConfig()
+			cfg := validConfig(t)
 			tc.mod(&cfg)
 			err := cfg.Validate()
 			if err == nil {
@@ -57,7 +58,7 @@ func TestConfig_Validate_Errors(t *testing.T) {
 }
 
 func TestBuild_SkeletonReturnsCore(t *testing.T) {
-	core, err := Build(context.Background(), validConfig())
+	core, err := Build(context.Background(), validConfig(t))
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -80,7 +81,7 @@ func TestBuild_RejectsInvalidConfig(t *testing.T) {
 }
 
 func TestCore_Shutdown_Idempotent(t *testing.T) {
-	core, err := Build(context.Background(), validConfig())
+	core, err := Build(context.Background(), validConfig(t))
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

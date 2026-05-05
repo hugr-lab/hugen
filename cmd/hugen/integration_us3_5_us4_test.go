@@ -22,6 +22,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
@@ -48,8 +49,8 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	// `_system` (autoload requirement of analyst skills) and
 	// `duckdb-data`.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	if err := installBundledSkills(stateDir, logger); err != nil {
-		t.Fatalf("installBundledSkills: %v", err)
+	if err := runtime.InstallBundledSkills(stateDir, logger); err != nil {
+		t.Fatalf("InstallBundledSkills: %v", err)
 	}
 
 	cfgSvc := config.NewStaticService(config.StaticInput{

@@ -1,21 +1,16 @@
-package main
+package runtime
 
 import (
-	"io"
-	"log/slog"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func newTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
-
 func TestInstallBundledSkills_FreshInstall(t *testing.T) {
 	state := t.TempDir()
-	if err := installBundledSkills(state, newTestLogger()); err != nil {
+	if err := InstallBundledSkills(state, discardLogger()); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	manifest := filepath.Join(state, "skills/system/_system/SKILL.md")
@@ -33,7 +28,7 @@ func TestInstallBundledSkills_FreshInstall(t *testing.T) {
 
 func TestInstallBundledSkills_Idempotent(t *testing.T) {
 	state := t.TempDir()
-	if err := installBundledSkills(state, newTestLogger()); err != nil {
+	if err := InstallBundledSkills(state, discardLogger()); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 	manifest := filepath.Join(state, "skills/system/_system/SKILL.md")
@@ -42,7 +37,7 @@ func TestInstallBundledSkills_Idempotent(t *testing.T) {
 		t.Fatalf("first stat: %v", err)
 	}
 
-	if err := installBundledSkills(state, newTestLogger()); err != nil {
+	if err := InstallBundledSkills(state, discardLogger()); err != nil {
 		t.Fatalf("second install: %v", err)
 	}
 	second, err := os.Stat(manifest)
@@ -56,20 +51,18 @@ func TestInstallBundledSkills_Idempotent(t *testing.T) {
 
 func TestInstallBundledSkills_ChecksumMismatchReplaces(t *testing.T) {
 	state := t.TempDir()
-	if err := installBundledSkills(state, newTestLogger()); err != nil {
+	if err := InstallBundledSkills(state, discardLogger()); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	checksumPath := filepath.Join(state, "skills/system/_system/.hugen-checksum")
 	if err := os.WriteFile(checksumPath, []byte("stale\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Drop a stray file that survived from a prior install — the
-	// installer should wipe the directory before re-materialising.
 	stray := filepath.Join(state, "skills/system/_system/leftover.txt")
 	if err := os.WriteFile(stray, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := installBundledSkills(state, newTestLogger()); err != nil {
+	if err := InstallBundledSkills(state, discardLogger()); err != nil {
 		t.Fatalf("re-install: %v", err)
 	}
 	if _, err := os.Stat(stray); !os.IsNotExist(err) {
@@ -81,5 +74,29 @@ func TestInstallBundledSkills_ChecksumMismatchReplaces(t *testing.T) {
 	}
 	if strings.TrimSpace(string(body)) == "stale" {
 		t.Errorf("checksum not refreshed: %q", body)
+	}
+}
+
+func TestInstallBundledSkills_EmptyStateDir(t *testing.T) {
+	if err := InstallBundledSkills("", discardLogger()); err == nil {
+		t.Fatal("expected error for empty state dir")
+	}
+}
+
+func TestPhaseBundledSkills_RunsViaBuild(t *testing.T) {
+	state := t.TempDir()
+	core, err := Build(context.Background(), Config{
+		Logger:   discardLogger(),
+		Mode:     "local",
+		StateDir: state,
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	defer core.Shutdown(context.Background())
+
+	manifest := filepath.Join(state, "skills/system/_system/SKILL.md")
+	if _, err := os.Stat(manifest); err != nil {
+		t.Errorf("phase did not install bundled skill: %v", err)
 	}
 }
