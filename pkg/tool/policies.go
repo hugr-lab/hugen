@@ -364,6 +364,16 @@ func policyID(agentID, toolName, scope string) string {
 }
 
 func parsePolicyID(id string) (agentID, toolName, scope string, err error) {
+	return ParsePolicyID(id)
+}
+
+// ParsePolicyID splits the composite key produced by policyID into
+// (agentID, toolName, scope). Exported for subpackage callers
+// (today: pkg/tool/providers/policies) that need to gate revoke
+// operations on the row's tool_name without reaching into the
+// row directly. Stage A step 7 retires the inner alias when the
+// implementation moves into the subpackage.
+func ParsePolicyID(id string) (agentID, toolName, scope string, err error) {
 	parts := strings.SplitN(id, "|", 3)
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
 		return "", "", "", fmt.Errorf("tool: malformed policy id %q (want agent|tool|scope)", id)
