@@ -143,8 +143,48 @@ type fakeProvidersView struct{ specs []config.ToolProviderSpec }
 func (v *fakeProvidersView) Providers() []config.ToolProviderSpec { return v.specs }
 func (v *fakeProvidersView) OnUpdate(func()) (cancel func())      { return func() {} }
 
+// testMCPBuilder is the in-package ProviderBuilder used by Init
+// tests. It mirrors what pkg/tool/providers.Builder does for
+// type=mcp specs but stays in pkg/tool to avoid the import cycle
+// (pkg/tool cannot import pkg/tool/providers). Production wiring
+// uses providers.NewBuilder via cmd/hugen / pkg/runtime.
+type testMCPBuilder struct {
+	auth          *auth.Service
+	workspaceRoot string
+	log           *slog.Logger
+}
+
+func (b *testMCPBuilder) Build(ctx context.Context, spec Spec) (ToolProvider, error) {
+	cfg := config.ToolProviderSpec{
+		Name:      spec.Name,
+		Type:      spec.Type,
+		Transport: spec.Transport,
+		Lifetime:  spec.Lifetime.String(),
+		Command:   spec.Command,
+		Args:      spec.Args,
+		Env:       spec.Env,
+		Endpoint:  spec.Endpoint,
+		Headers:   spec.Headers,
+		Auth:      spec.Auth,
+	}
+	legacy, cleanups, err := BuildMCPProviderSpec(cfg, b.auth, b.workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	if spec.Cwd != "" {
+		legacy.Cwd = spec.Cwd
+	}
+	p, err := NewMCPProvider(ctx, legacy, b.log)
+	if err != nil {
+		runCleanups(cleanups)
+		return nil, err
+	}
+	p.SetOnClose(cleanups)
+	return p, nil
+}
+
 func TestInit_NilView(t *testing.T) {
-	tm := NewToolManager(nil, nil, nil, discardLogger())
+	tm := NewToolManager(nil, nil, discardLogger())
 	t.Cleanup(func() { _ = tm.Close() })
 	if err := tm.Init(context.Background()); err != nil {
 		t.Fatalf("expected no-op, got %v", err)
@@ -162,7 +202,8 @@ func TestInit_DegradesOnBadConfig(t *testing.T) {
 		// Endpoint deliberately empty — BuildMCPProviderSpec rejects
 		// it; Init must skip + warn instead of aborting.
 	}}}
-	tm := NewToolManager(nil, view, nil, discardLogger())
+	tm := NewToolManager(nil, view, discardLogger(),
+		WithBuilder(&testMCPBuilder{log: discardLogger()}))
 	t.Cleanup(func() { _ = tm.Close() })
 	if err := tm.Init(context.Background()); err != nil {
 		t.Fatalf("Init aborted on bad config: %v", err)
@@ -183,7 +224,8 @@ func TestInit_DegradesOnConnectFailure(t *testing.T) {
 		// 127.0.0.1:1 — no listener; connect will fail.
 		Endpoint: "http://127.0.0.1:1/mcp",
 	}}}
-	tm := NewToolManager(nil, view, nil, discardLogger())
+	tm := NewToolManager(nil, view, discardLogger(),
+		WithBuilder(&testMCPBuilder{log: discardLogger()}))
 	t.Cleanup(func() { _ = tm.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -207,7 +249,8 @@ func TestInit_HTTPLive(t *testing.T) {
 		Endpoint:  srv.URL,
 		Auth:      "hugr",
 	}}}
-	tm := NewToolManager(nil, view, svc, discardLogger())
+	tm := NewToolManager(nil, view, discardLogger(),
+		WithBuilder(&testMCPBuilder{auth: svc, log: discardLogger()}))
 	t.Cleanup(func() { _ = tm.Close() })
 
 	if err := tm.Init(context.Background()); err != nil {
@@ -225,7 +268,7 @@ func TestInit_SkipsPerSession(t *testing.T) {
 		Command:  "bash-mcp",
 		Lifetime: "per_session",
 	}}}
-	tm := NewToolManager(nil, view, nil, discardLogger())
+	tm := NewToolManager(nil, view, discardLogger())
 	t.Cleanup(func() { _ = tm.Close() })
 	if err := tm.Init(context.Background()); err != nil {
 		t.Fatalf("expected per_session entries skipped, got %v", err)

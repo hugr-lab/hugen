@@ -33,6 +33,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
+	"github.com/hugr-lab/hugen/pkg/tool/providers"
 )
 
 // Cached across subtests in this file: the python-mcp binary built
@@ -255,8 +256,8 @@ func newPythonIntegrationCore(t *testing.T, pyBin, tmpl string) *integrationCore
 	// WithWorkspaceRoot is critical here — python-mcp reads
 	// WORKSPACES_ROOT to compute <sid>/.venv per call, and the
 	// runtime is the only thing that should pin it.
-	tools := tool.NewToolManager(perms, cfgSvc.ToolProviders(), nil, nil,
-		tool.WithWorkspaceRoot(workspaceDir))
+	tools := tool.NewToolManager(perms, cfgSvc.ToolProviders(), nil,
+		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, nil)))
 	t.Cleanup(func() { _ = tools.Close() })
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))

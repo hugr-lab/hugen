@@ -143,7 +143,7 @@ func newDuckDBCoreWithInitSQL(t *testing.T, vendorPath, initSQL string) *integra
 	view := &permsView{rules: nil}
 	perms := perm.NewLocalPermissions(view, staticIdentity{id: "agent-it"})
 	t.Cleanup(perms.Close)
-	tools := tool.NewToolManager(perms, nil, nil, nil)
+	tools := tool.NewToolManager(perms, nil, nil)
 	t.Cleanup(func() { _ = tools.Close() })
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))

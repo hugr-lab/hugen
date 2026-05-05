@@ -60,7 +60,7 @@ func (f *fakePerms) Refresh(ctx context.Context) error                          
 func (f *fakePerms) Subscribe(ctx context.Context) (<-chan perm.RefreshEvent, error) { return nil, nil }
 
 func TestToolManager_AddRemoveProvider(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 
 	p := &fakeProvider{name: "bash-mcp", tools: []Tool{
 		{Name: "bash-mcp:bash.read_file", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"},
@@ -86,7 +86,7 @@ func TestToolManager_AddRemoveProvider(t *testing.T) {
 }
 
 func TestToolManager_Snapshot_NoSkillsAllProvidersExposed(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil) // skills=nil → no filter
+	m := NewToolManager(&fakePerms{}, nil, nil) // skills=nil → no filter
 	p := &fakeProvider{name: "bash-mcp", tools: []Tool{
 		{Name: "bash-mcp:bash.read_file", Provider: "bash-mcp"},
 		{Name: "bash-mcp:bash.write_file", Provider: "bash-mcp"},
@@ -110,7 +110,7 @@ func TestToolManager_Snapshot_NoSkillsAllProvidersExposed(t *testing.T) {
 // filters per-session via the loaded skill bindings.
 
 func TestToolManager_Snapshot_RebuildOnGenerationMove(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 	p1 := &fakeProvider{name: "p1", tools: []Tool{{Name: "p1:a", Provider: "p1"}}}
 	if err := m.AddProvider(p1); err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestToolManager_Snapshot_RebuildOnGenerationMove(t *testing.T) {
 }
 
 func TestToolManager_Snapshot_StableWithinGeneration(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 	if err := m.AddProvider(&fakeProvider{name: "p", tools: []Tool{{Name: "p:t", Provider: "p"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestToolManager_Resolve_Denied(t *testing.T) {
 	perms := &fakePerms{rules: map[string]perm.Permission{
 		"hugen:tool:bash-mcp:bash.write_file": {Disabled: true, FromConfig: true},
 	}}
-	m := NewToolManager(perms, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	tool := Tool{Name: "bash-mcp:bash.write_file", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"}
 	_, _, err := m.Resolve(context.Background(), tool, json.RawMessage(`{}`))
 	if !errors.Is(err, ErrPermissionDenied) {
@@ -166,7 +166,7 @@ func TestToolManager_Resolve_DataMergedRuleWins(t *testing.T) {
 			Data:       json.RawMessage(`{"workspace":"/var/agents/x"}`),
 		},
 	}}
-	m := NewToolManager(perms, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	tool := Tool{Name: "bash-mcp:bash.run", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"}
 	args := json.RawMessage(`{"cmd":"ls","workspace":"/tmp/llm-supplied"}`)
 	_, eff, err := m.Resolve(context.Background(), tool, args)
@@ -197,7 +197,7 @@ func TestToolManager_Dispatch_RoutesToProvider(t *testing.T) {
 			return json.RawMessage(`{"out":"ok"}`), nil
 		},
 	}
-	m := NewToolManager(&fakePerms{}, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 	if err := m.AddProvider(p); err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestToolManager_Dispatch_RoutesToProvider(t *testing.T) {
 }
 
 func TestToolManager_Dispatch_UnknownProvider(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 	tool := Tool{Name: "ghost:tool", Provider: "ghost"}
 	_, err := m.Dispatch(context.Background(), tool, nil)
 	if !errors.Is(err, ErrUnknownProvider) {
@@ -224,7 +224,7 @@ func TestToolManager_Dispatch_UnknownProvider(t *testing.T) {
 }
 
 func TestToolManager_BumpPolicyGen_InvalidatesCache(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 	if err := m.AddProvider(&fakeProvider{name: "p", tools: []Tool{{Name: "p:t", Provider: "p"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestToolManager_BumpPolicyGen_InvalidatesCache(t *testing.T) {
 }
 
 func TestToolManager_SessionProvider_VisibleOnlyToOwningSession(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 	global := &fakeProvider{name: "system", tools: []Tool{{Name: "system:notepad", Provider: "system"}}}
 	if err := m.AddProvider(global); err != nil {
 		t.Fatal(err)
@@ -258,7 +258,7 @@ func TestToolManager_SessionProvider_VisibleOnlyToOwningSession(t *testing.T) {
 }
 
 func TestToolManager_SessionProvider_ShadowsGlobalOnDispatch(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 	global := &fakeProvider{name: "bash-mcp", callFunc: func(name string, args json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`{"from":"global"}`), nil
 	}}
@@ -289,7 +289,7 @@ func TestToolManager_SessionProvider_ShadowsGlobalOnDispatch(t *testing.T) {
 }
 
 func TestToolManager_CloseSession_TearsDownProviders(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 	p := &fakeProvider{name: "bash-mcp"}
 	if err := m.AddSessionProvider("s1", p); err != nil {
 		t.Fatal(err)
@@ -331,7 +331,7 @@ func TestToolManager_Resolve_Tier3DenyBlocks(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 	perms := &fakePermsWithAgent{agentID: "ag01"}
-	m := NewToolManager(perms, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	m.SetPolicies(pol)
 
 	tl := Tool{
@@ -358,7 +358,7 @@ func TestToolManager_Resolve_Tier3AllowMarksFromUser(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 	perms := &fakePermsWithAgent{agentID: "ag01"}
-	m := NewToolManager(perms, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	m.SetPolicies(pol)
 
 	tl := Tool{
@@ -390,7 +390,7 @@ func TestToolManager_Resolve_Tier1FloorBeatsTier3Allow(t *testing.T) {
 		}},
 		agentID: "ag01",
 	}
-	m := NewToolManager(perms, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	m.SetPolicies(pol)
 
 	tl := Tool{
@@ -412,7 +412,7 @@ func TestToolManager_Resolve_Tier1FloorBeatsTier3Allow(t *testing.T) {
 
 func TestToolManager_Resolve_NoPoliciesSkipsTier3(t *testing.T) {
 	perms := &fakePermsWithAgent{agentID: "ag01"}
-	m := NewToolManager(perms, nil, nil, nil) // no SetPolicies
+	m := NewToolManager(perms, nil, nil) // no SetPolicies
 	tl := Tool{
 		Name:             "bash-mcp:read_file",
 		Provider:         "bash-mcp",
@@ -431,7 +431,7 @@ func TestToolManager_Resolve_AskFallsThrough(t *testing.T) {
 	pol, _ := newPoliciesForTest(t)
 	// no row → Decide returns Ask; Resolve should not mark FromUser.
 	perms := &fakePermsWithAgent{agentID: "ag01"}
-	m := NewToolManager(perms, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	m.SetPolicies(pol)
 	tl := Tool{
 		Name:             "bash-mcp:read_file",
@@ -456,7 +456,7 @@ func TestToolManager_Resolve_AskFallsThrough(t *testing.T) {
 func TestToolManager_SetPolicies_RaceFreeWithResolve(t *testing.T) {
 	pol, _ := newPoliciesForTest(t)
 	perms := &fakePermsWithAgent{agentID: "ag01"}
-	m := NewToolManager(perms, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	tl := Tool{
 		Name:             "bash-mcp:read_file",
 		Provider:         "bash-mcp",
@@ -483,7 +483,7 @@ func TestToolManager_SetPolicies_RaceFreeWithResolve(t *testing.T) {
 }
 
 func TestToolManager_NewChild_DispatchWalksToParent(t *testing.T) {
-	parent := NewToolManager(&fakePerms{}, nil, nil, nil)
+	parent := NewToolManager(&fakePerms{}, nil, nil)
 	root := &fakeProvider{name: "bash-mcp", callFunc: func(name string, _ json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`"root"`), nil
 	}}
@@ -530,7 +530,7 @@ func TestToolManager_NewChild_DispatchWalksToParent(t *testing.T) {
 }
 
 func TestToolManager_NewChild_CloseDropsOwnOnly(t *testing.T) {
-	parent := NewToolManager(&fakePerms{}, nil, nil, nil)
+	parent := NewToolManager(&fakePerms{}, nil, nil)
 	rootProv := &fakeProvider{name: "bash-mcp"}
 	if err := parent.AddProvider(rootProv); err != nil {
 		t.Fatalf("parent.AddProvider: %v", err)
@@ -557,7 +557,7 @@ func TestToolManager_NewChild_CloseDropsOwnOnly(t *testing.T) {
 }
 
 func TestToolManager_NewChild_PoliciesInheritedFromParent(t *testing.T) {
-	parent := NewToolManager(&fakePerms{}, nil, nil, nil)
+	parent := NewToolManager(&fakePerms{}, nil, nil)
 	pol := &Policies{}
 	parent.SetPolicies(pol)
 
@@ -568,7 +568,7 @@ func TestToolManager_NewChild_PoliciesInheritedFromParent(t *testing.T) {
 }
 
 func TestToolManager_Reconnector_InheritedFromParent(t *testing.T) {
-	parent := NewToolManager(&fakePerms{}, nil, nil, nil)
+	parent := NewToolManager(&fakePerms{}, nil, nil)
 	if parent.Reconnector() == nil {
 		t.Fatal("parent.Reconnector should be non-nil after NewToolManager")
 	}

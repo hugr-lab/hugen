@@ -11,6 +11,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
+	"github.com/hugr-lab/hugen/pkg/tool/providers"
 	"github.com/hugr-lab/query-engine/types"
 )
 
@@ -95,8 +96,9 @@ func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillMa
 		}
 		wsRoot = root
 	}
-	tm := tool.NewToolManager(perms, core.Config.ToolProviders(),
-		core.Auth, core.Logger, tool.WithWorkspaceRoot(wsRoot))
+	builder := providers.NewBuilder(core.Auth, perms, wsRoot, core.Logger)
+	tm := tool.NewToolManager(perms, core.Config.ToolProviders(), core.Logger,
+		tool.WithBuilder(builder))
 
 	var policies *tool.Policies
 	if core.LocalQuerier != nil {

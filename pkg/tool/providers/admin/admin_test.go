@@ -49,7 +49,7 @@ func (b *fakeBuilder) Build(_ context.Context, spec tool.Spec) (tool.ToolProvide
 
 func newManager(t *testing.T, b tool.ProviderBuilder) *tool.ToolManager {
 	t.Helper()
-	return tool.NewToolManager(&fakePerms{}, nil, nil,
+	return tool.NewToolManager(&fakePerms{}, nil,
 		slog.New(slog.DiscardHandler), tool.WithBuilder(b))
 }
 
@@ -140,7 +140,7 @@ func TestAdminProvider_UnknownToolReturnsError(t *testing.T) {
 func TestAdminProvider_AddBySpec_ErrorPropagates(t *testing.T) {
 	// Manager without a wired Builder returns ErrBuilderNotConfigured
 	// from AddBySpec — admin must propagate it verbatim.
-	m := tool.NewToolManager(&fakePerms{}, nil, nil,
+	m := tool.NewToolManager(&fakePerms{}, nil,
 		slog.New(slog.DiscardHandler))
 	a := New(m)
 	_, err := a.Call(context.Background(), "provider_add",

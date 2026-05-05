@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
 )
@@ -41,18 +40,17 @@ type ToolManager struct {
 	policies atomic.Pointer[Policies]
 	log      *slog.Logger
 
-	providersView  config.ToolProvidersView
-	auth           *auth.Service
-	workspaceRoot  string
-	connectTimeout time.Duration
+	// view is the per_agent provider catalogue. Init / LoadConfig
+	// iterate it and dispatch through the wired ProviderBuilder.
+	// nil disables config-driven loading (children, tests, deployments
+	// without per_agent specs).
+	view config.ToolProvidersView
 
-	builders map[string]legacyProviderBuilder
-	// builder is the new Spec-driven dispatcher introduced by phase
-	// 4.1a stage A step 4. Non-nil enables AddBySpec; the legacy
-	// `builders` map keeps the phase-3 Init path alive in parallel
-	// until stage A step 7 retires it. Children inherit the field
-	// from their parent so per_session AddBySpec routes through the
-	// same dispatcher as per_agent.
+	// builder is the Spec-driven dispatcher every AddBySpec call
+	// goes through. Non-nil enables AddBySpec / LoadConfig; nil
+	// disables them with ErrBuilderNotConfigured. Children inherit
+	// the field from their parent so per_session AddBySpec routes
+	// through the same dispatcher as per_agent.
 	builder ProviderBuilder
 
 	mu               sync.RWMutex
@@ -95,36 +93,31 @@ type Generations struct {
 	Policy int64
 }
 
-const (
-	defaultDrainTimeout   = 5 * time.Second
-	defaultConnectTimeout = 30 * time.Second
-)
+const defaultDrainTimeout = 5 * time.Second
 
 // NewToolManager constructs the manager. Construction is cheap —
 // no providers are connected here; call Init(ctx) when ready to
-// open the configured MCP connections.
+// start the background reconnector and load per_agent providers
+// from the wired view (if any).
 //
 // Args:
 //   - perms: permission service consulted on every Dispatch.
-//   - providers: per_agent MCP catalogue view. Read on Init()
-//     (and, in phase 6+, again on view.OnUpdate). Per_session
-//     entries are skipped (registered via AddSessionProvider).
-//     Pass nil if no MCP entries are configured.
-//   - authSvc: auth.Service consulted whenever a provider declares
-//     `auth: <name>`. HTTP providers receive a bearer-injecting
-//     RoundTripper; stdio providers receive a per-spawn StdioAuth
-//     bootstrap. Required only when some provider asks for auth;
-//     pass nil if none does.
+//   - view: per_agent MCP catalogue view. Read on Init().
+//     Per_session entries are skipped (per-session children call
+//     AddBySpec directly). Pass nil if no MCP entries are
+//     configured (tests / deployments without config-driven
+//     loading).
 //   - log: structured logger; nil falls back to a discard handler.
+//   - opts: WithBuilder wires the Spec-driven ProviderBuilder
+//     AddBySpec dispatches through. Without it, AddBySpec /
+//     LoadConfig surface ErrBuilderNotConfigured.
 //
-// Phase 4.1a stage A step 7c removed the skills parameter — skill
-// filtering is now a pkg/session concern (see
-// pkg/session/snapshot_cache.go). Manager returns the unfiltered
-// union from Snapshot; callers cache + filter externally.
+// Phase 4.1a stage A step 7d removed the auth.Service parameter —
+// auth handling now lives inside providers.Builder, constructed
+// at boot in pkg/runtime / cmd/hugen.
 func NewToolManager(
 	perms perm.Service,
-	providers config.ToolProvidersView,
-	authSvc *auth.Service,
+	view config.ToolProvidersView,
 	log *slog.Logger,
 	opts ...ToolManagerOption,
 ) *ToolManager {
@@ -134,9 +127,7 @@ func NewToolManager(
 	tm := &ToolManager{
 		perms:            perms,
 		log:              log,
-		providersView:    providers,
-		auth:             authSvc,
-		connectTimeout:   defaultConnectTimeout,
+		view:             view,
 		providers:        make(map[string]ToolProvider),
 		sessionProviders: make(map[string]map[string]ToolProvider),
 		drainTimeout:     defaultDrainTimeout,
@@ -185,9 +176,6 @@ func (m *ToolManager) NewChild() *ToolManager {
 	child := &ToolManager{
 		perms:            m.perms,
 		log:              m.log,
-		auth:             m.auth,
-		workspaceRoot:    m.workspaceRoot,
-		connectTimeout:   m.connectTimeout,
 		drainTimeout:     m.drainTimeout,
 		builder:          m.builder, // share dispatcher with root
 		providers:        make(map[string]ToolProvider),
@@ -252,21 +240,6 @@ func (m *ToolManager) policiesSnapshot() *Policies {
 	return nil
 }
 
-// WithWorkspaceRoot pins the absolute on-disk root every stdio MCP
-// provider should write under. The manager injects it into each
-// stdio child's env as WORKSPACES_ROOT, overriding any operator-
-// supplied value — workspaces are a runtime concern, like
-// SESSION_DIR, and operators must not be able to point per_agent
-// children at a tree the per_session children don't share.
-//
-// Empty string disables injection (tests; deployments without
-// session.Workspace wired in).
-func WithWorkspaceRoot(root string) ToolManagerOption {
-	return func(tm *ToolManager) {
-		tm.workspaceRoot = root
-	}
-}
-
 // WithBuilder pins the new Spec-driven ProviderBuilder consumed by
 // AddBySpec. Boot wiring (pkg/runtime in stage B) constructs a
 // providers.Builder and passes it via this option; AddBySpec on the
@@ -279,30 +252,6 @@ func WithBuilder(b ProviderBuilder) ToolManagerOption {
 	}
 }
 
-// WithLegacyProviderBuilder registers a phase-3-era builder for a
-// non-MCP provider type. Init dispatches each tool_providers entry
-// by `type` to its builder; entries with `type: mcp` (or empty)
-// use the built-in MCP path. cmd/hugen registers `hugr-query`,
-// `python-sandbox` etc. — runtime-managed kinds that need access
-// to listener URL, agent token store, workspaces root, and similar
-// facts pkg/tool has no business knowing.
-//
-// A builder may return cleanup callbacks alongside the provider;
-// ToolManager runs them on RemoveProvider/Close. Use this for
-// runtime-minted secrets that must be revoked when the provider
-// goes away (e.g. agent_token bootstrap).
-//
-// Deprecated: phase 4.1a replaces this with the new
-// ProviderBuilder interface (see builder.go) consumed via
-// pkg/tool/providers. Removed once every caller has migrated.
-func WithLegacyProviderBuilder(typeName string, builder legacyProviderBuilder) ToolManagerOption {
-	return func(tm *ToolManager) {
-		if tm.builders == nil {
-			tm.builders = make(map[string]legacyProviderBuilder)
-		}
-		tm.builders[strings.ToLower(typeName)] = builder
-	}
-}
 
 // AddSessionProvider registers a provider scoped to one session.
 // Used for MCPs whose lifecycle is tied to the session (e.g.

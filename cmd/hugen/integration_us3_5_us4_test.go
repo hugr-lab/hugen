@@ -25,6 +25,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
+	"github.com/hugr-lab/hugen/pkg/tool/providers"
 )
 
 func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
@@ -69,8 +70,8 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	view := &permsView{rules: nil}
 	perms := perm.NewLocalPermissions(view, staticIdentity{id: "agent-it"})
 	t.Cleanup(perms.Close)
-	tools := tool.NewToolManager(perms, cfgSvc.ToolProviders(), nil, nil,
-		tool.WithWorkspaceRoot(workspaceDir))
+	tools := tool.NewToolManager(perms, cfgSvc.ToolProviders(), nil,
+		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, nil)))
 	t.Cleanup(func() { _ = tools.Close() })
 
 	// Register the SystemProvider so `system:skill_files` is callable.

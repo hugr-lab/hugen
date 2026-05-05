@@ -4,141 +4,101 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/config"
 )
 
-// legacyProviderBuilder is the phase-3-era construction interface.
-// It turns a config.ToolProviderSpec into a live ToolProvider plus
-// a slice of teardown callbacks. Phase 4.1a replaces it with the
-// runtime-side ProviderBuilder (see builder.go) that consumes a
-// type-agnostic tool.Spec; this interface stays internal until the
-// drop in stage A.7.
-//
-// Operators register additional builders at boot for non-MCP
-// runtime-managed kinds. Each builder owns its own knowledge of
-// listener URL, secrets, paths — pkg/tool does not need to know.
-//
-// The cleanups slice is run on RemoveProvider/Close. Use it to
-// revoke runtime-minted secrets, free temp dirs, etc.
-type legacyProviderBuilder interface {
-	Build(ctx context.Context, spec config.ToolProviderSpec) (provider ToolProvider, cleanups []func(), err error)
-}
-
-// legacyProviderBuilderFunc adapts a plain function into a
-// legacyProviderBuilder. Convenient for in-line registration.
-type legacyProviderBuilderFunc func(ctx context.Context, spec config.ToolProviderSpec) (ToolProvider, []func(), error)
-
-// Build implements legacyProviderBuilder.
-func (f legacyProviderBuilderFunc) Build(ctx context.Context, spec config.ToolProviderSpec) (ToolProvider, []func(), error) {
-	return f(ctx, spec)
-}
-
-// Init opens the per_agent MCP entries from the configuration
-// passed to NewToolManager and registers them as global providers.
-// Per_session entries are skipped — they are spawned in the
+// Init starts the background reconnector loop and, when a view +
+// builder are wired, loads the per_agent providers from
+// configuration via the new Spec-driven AddBySpec dispatch.
+// Per-session entries are skipped — they are spawned in the
 // session.Resources.Acquire path (bash-mcp pattern).
 //
 // A per-provider failure (bad config, unreachable endpoint,
 // initialise error) is logged and the provider is skipped — Init
 // never aborts boot for a single misconfigured / down provider.
-// Tools from skipped providers stay unavailable until the operator
-// fixes config and restarts (periodic reconnect is a future hook).
 // Init returns an error only for caller-supplied conditions
 // (e.g. ctx cancelled).
+//
+// Phase 4.1a stage A step 7d retired the legacy ProviderBuilder
+// machinery — Init now dispatches exclusively through the
+// providers.Builder injected via WithBuilder. The view's OnUpdate
+// hook is wired with a placeholder warn log; live config reload
+// of tool_providers lands in a future phase.
 func (m *ToolManager) Init(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if m.reconnector != nil {
+	if m.parent == nil && m.reconnector != nil {
 		// Use the caller's ctx as the cancel root so a process-shutdown
 		// ctx cleanly exits the reconnector loop alongside everything
 		// else. Close() also calls Stop() as belt-and-braces.
 		m.reconnector.Start(ctx)
 	}
-	if m.providersView == nil {
+	if m.view == nil {
 		return nil
 	}
-	m.providersView.OnUpdate(func() {
+	m.view.OnUpdate(func() {
 		m.log.Warn("tool: live reload of tool_providers not implemented; restart hugen to apply changes")
 	})
-	for _, spec := range m.providersView.Providers() {
-		if EffectiveLifetime(spec) != LifetimePerAgent {
+	return m.LoadConfig(ctx)
+}
+
+// LoadConfig iterates the wired view's per_agent entries and
+// registers each via AddBySpec. Per-spec failures are logged and
+// skipped — the loop continues so a single broken provider does
+// not block others. nil view → no-op. The builder is consulted
+// per-spec; specs that filter out (per_session) never reach
+// AddBySpec, so a Manager configured with only per_session
+// entries is OK without a wired Builder.
+func (m *ToolManager) LoadConfig(ctx context.Context) error {
+	if m.view == nil {
+		return nil
+	}
+	for _, p := range m.view.Providers() {
+		if EffectiveLifetime(p) != LifetimePerAgent {
 			continue
 		}
-		builder := m.builderFor(spec.Type)
-		if builder == nil {
-			m.log.Warn("provider disabled: unknown type",
-				"provider", spec.Name, "type", spec.Type)
+		if m.builder == nil {
+			m.log.Warn("provider disabled: no ProviderBuilder configured",
+				"provider", p.Name, "type", p.Type)
 			continue
 		}
-		connectCtx, cancel := context.WithTimeout(ctx, m.connectTimeout)
-		prov, cleanups, err := builder.Build(connectCtx, spec)
+		spec := SpecFromConfig(p)
+		connectCtx, cancel := context.WithTimeout(ctx, defaultConnectTimeout)
+		err := m.AddBySpec(connectCtx, spec)
 		cancel()
 		if err != nil {
-			m.log.Warn("provider disabled: build failed",
-				"provider", spec.Name, "type", spec.Type, "err", err)
-			runCleanups(cleanups)
+			m.log.Warn("provider disabled",
+				"provider", p.Name, "type", p.Type, "err", err)
 			continue
-		}
-		if err := m.AddProvider(prov); err != nil {
-			_ = prov.Close()
-			runCleanups(cleanups)
-			m.log.Warn("provider disabled: register failed",
-				"provider", spec.Name, "err", err)
-			continue
-		}
-		// Phase 4.1a stage A step 7a: cleanups are owned by the
-		// provider, not the manager. The legacy MCPProvider grew an
-		// onClose slice; setting it here lands the revoke callbacks
-		// on Close. Non-MCP legacy providers built via
-		// WithLegacyProviderBuilder must implement the same setter
-		// (or accept that their cleanups don't run on RemoveProvider).
-		if mp, ok := prov.(*MCPProvider); ok {
-			mp.SetOnClose(cleanups)
-		} else if len(cleanups) > 0 {
-			m.log.Warn("provider cleanups dropped: type does not implement SetOnClose",
-				"provider", spec.Name, "count", len(cleanups))
 		}
 		m.log.Info("provider ready",
-			"provider", spec.Name, "type", spec.Type)
+			"provider", p.Name, "type", p.Type)
 	}
 	return nil
 }
 
-// builderFor returns the legacyProviderBuilder registered for
-// typeName. The empty type and `mcp` both map to the built-in MCP
-// builder. nil indicates no builder registered.
-func (m *ToolManager) builderFor(typeName string) legacyProviderBuilder {
-	t := strings.ToLower(typeName)
-	if t == "" {
-		t = "mcp"
+// SpecFromConfig projects a config.ToolProviderSpec (operator-
+// authored YAML) into the runtime-side tool.Spec consumed by
+// ProviderBuilder. Field-by-field copy; Lifetime is resolved via
+// EffectiveLifetime so the projection matches the pre-7d Init
+// behaviour for stdio / HTTP defaults.
+func SpecFromConfig(p config.ToolProviderSpec) Spec {
+	return Spec{
+		Name:      p.Name,
+		Type:      p.Type,
+		Transport: p.Transport,
+		Lifetime:  EffectiveLifetime(p),
+		Command:   p.Command,
+		Args:      p.Args,
+		Env:       p.Env,
+		Endpoint:  p.Endpoint,
+		Headers:   p.Headers,
+		Auth:      p.Auth,
 	}
-	if b, ok := m.builders[t]; ok {
-		return b
-	}
-	if t == "mcp" {
-		return defaultMCPBuilder{m: m}
-	}
-	return nil
-}
-
-// defaultMCPBuilder is the built-in handler for `type: mcp`. It
-// reuses BuildMCPProviderSpec + NewMCPProvider — same path as
-// before the builder abstraction landed.
-type defaultMCPBuilder struct{ m *ToolManager }
-
-func (b defaultMCPBuilder) Build(ctx context.Context, spec config.ToolProviderSpec) (ToolProvider, []func(), error) {
-	mcpSpec, cleanups, err := BuildMCPProviderSpec(spec, b.m.auth, b.m.workspaceRoot)
-	if err != nil {
-		return nil, nil, err
-	}
-	prov, err := NewMCPProvider(ctx, mcpSpec, b.m.log)
-	if err != nil {
-		return nil, cleanups, err
-	}
-	return prov, cleanups, nil
 }
 
 // BuildMCPProviderSpec turns a config.ToolProviderSpec into the
@@ -161,8 +121,8 @@ func (b defaultMCPBuilder) Build(ctx context.Context, spec config.ToolProviderSp
 // supplied value. Empty string disables injection (tests; deployments
 // without session.Workspace).
 //
-// Exported so admin paths (`mcp_add_server`) and tests can build a
-// single spec without going through the full Init loop.
+// Exported so admin paths and tests can build a single spec
+// without going through the full Init loop.
 func BuildMCPProviderSpec(spec config.ToolProviderSpec, authSvc *auth.Service, workspaceRoot string) (MCPProviderSpec, []func(), error) {
 	out := MCPProviderSpec{
 		Name:       spec.Name,
@@ -265,3 +225,8 @@ func parseLifetime(s string, httpDefault bool) Lifetime {
 	}
 	return LifetimePerSession
 }
+
+// defaultConnectTimeout caps a single per_agent provider Build
+// call. Per-provider so a hung dial does not block sibling
+// providers from loading.
+const defaultConnectTimeout = 30 * time.Second
