@@ -61,7 +61,6 @@ type ToolManager struct {
 	providers        map[string]ToolProvider
 	sessionProviders map[string]map[string]ToolProvider // sessionID → name → provider
 	cache            map[string]*cachedSnapshot
-	cleanups         map[string][]func() // provider name → cleanup callbacks (e.g. revoke a minted secret)
 
 	toolGen   atomic.Int64
 	policyGen atomic.Int64
@@ -148,7 +147,6 @@ func NewToolManager(
 		providers:        make(map[string]ToolProvider),
 		sessionProviders: make(map[string]map[string]ToolProvider),
 		cache:            make(map[string]*cachedSnapshot),
-		cleanups:         make(map[string][]func()),
 		drainTimeout:     defaultDrainTimeout,
 		reconnector:      NewReconnector(log),
 	}
@@ -204,7 +202,6 @@ func (m *ToolManager) NewChild() *ToolManager {
 		providers:        make(map[string]ToolProvider),
 		sessionProviders: nil, // children never host other children
 		cache:            nil, // snapshot caching is agent-level
-		cleanups:         make(map[string][]func()),
 		parent:           m,
 	}
 	return child
@@ -418,7 +415,6 @@ func (m *ToolManager) Close() error {
 	m.mu.Lock()
 	globals := m.providers
 	scoped := m.sessionProviders
-	cleanups := m.cleanups
 	m.providers = make(map[string]ToolProvider)
 	if m.sessionProviders != nil {
 		m.sessionProviders = make(map[string]map[string]ToolProvider)
@@ -426,16 +422,12 @@ func (m *ToolManager) Close() error {
 	if m.cache != nil {
 		m.cache = make(map[string]*cachedSnapshot)
 	}
-	if m.cleanups != nil {
-		m.cleanups = make(map[string][]func())
-	}
 	m.mu.Unlock()
 	var errs []error
 	for name, p := range globals {
 		if err := p.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close %s: %w", name, err))
 		}
-		runCleanups(cleanups[name])
 	}
 	for sid, by := range scoped {
 		for name, p := range by {
@@ -493,8 +485,6 @@ func (m *ToolManager) RemoveProvider(ctx context.Context, name string) error {
 		return ErrUnknownProvider
 	}
 	delete(m.providers, name)
-	cleanups := m.cleanups[name]
-	delete(m.cleanups, name)
 	m.toolGen.Add(1)
 	m.invalidateAllSnapshots()
 	m.mu.Unlock()
@@ -512,25 +502,15 @@ func (m *ToolManager) RemoveProvider(ctx context.Context, name string) error {
 	if m.reconnector != nil {
 		m.reconnector.Forget(name)
 	}
-	closeErr := p.Close()
-	runCleanups(cleanups)
-	if closeErr != nil {
-		return fmt.Errorf("tool: close %s: %w", name, closeErr)
+	if err := p.Close(); err != nil {
+		return fmt.Errorf("tool: close %s: %w", name, err)
 	}
 	return nil
 }
 
-// recordCleanups associates teardown callbacks with a provider
-// name so RemoveProvider/Close can run them.
-func (m *ToolManager) recordCleanups(providerName string, cleanups []func()) {
-	if len(cleanups) == 0 {
-		return
-	}
-	m.mu.Lock()
-	m.cleanups[providerName] = append(m.cleanups[providerName], cleanups...)
-	m.mu.Unlock()
-}
-
+// runCleanups runs a slice of teardown callbacks. Kept here as a
+// helper because Init still calls it on the failure path before
+// the provider is registered.
 func runCleanups(fns []func()) {
 	for _, fn := range fns {
 		if fn != nil {

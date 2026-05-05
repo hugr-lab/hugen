@@ -89,7 +89,18 @@ func (m *ToolManager) Init(ctx context.Context) error {
 				"provider", spec.Name, "err", err)
 			continue
 		}
-		m.recordCleanups(spec.Name, cleanups)
+		// Phase 4.1a stage A step 7a: cleanups are owned by the
+		// provider, not the manager. The legacy MCPProvider grew an
+		// onClose slice; setting it here lands the revoke callbacks
+		// on Close. Non-MCP legacy providers built via
+		// WithLegacyProviderBuilder must implement the same setter
+		// (or accept that their cleanups don't run on RemoveProvider).
+		if mp, ok := prov.(*MCPProvider); ok {
+			mp.SetOnClose(cleanups)
+		} else if len(cleanups) > 0 {
+			m.log.Warn("provider cleanups dropped: type does not implement SetOnClose",
+				"provider", spec.Name, "count", len(cleanups))
+		}
 		m.log.Info("provider ready",
 			"provider", spec.Name, "type", spec.Type)
 	}

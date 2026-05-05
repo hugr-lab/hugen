@@ -82,6 +82,31 @@ type MCPProvider struct {
 
 	subsMu sync.Mutex
 	subs   []chan ProviderEvent
+
+	// onClose holds teardown callbacks (revoke a minted stdio-auth
+	// bootstrap, drop a temp dir, etc.) the provider runs on Close.
+	// Phase 4.1a stage A step 7a moved this responsibility off the
+	// Manager (cleanups map) onto the provider so the registry surface
+	// stays free of side state.
+	onClose []func()
+}
+
+// SetOnClose registers teardown callbacks that fire on Close.
+// Idempotent and additive — subsequent calls append. Callers are
+// responsible for not registering nil functions; nils are skipped
+// at run time but waste a slot.
+//
+// Used by the Init path to attach the cleanups slice the legacy
+// builder returned (today: stdio-auth revoke). The new
+// pkg/tool/providers/mcp.Provider owns its own onClose; this
+// setter retires when the wrapper goes away.
+func (p *MCPProvider) SetOnClose(fns []func()) {
+	if len(fns) == 0 {
+		return
+	}
+	p.mu.Lock()
+	p.onClose = append(p.onClose, fns...)
+	p.mu.Unlock()
 }
 
 // NewMCPProvider spawns the MCP server, runs the protocol handshake,
@@ -501,11 +526,20 @@ func (p *MCPProvider) Close() error {
 	p.closed = true
 	cli := p.client
 	p.client = nil
+	teardown := p.onClose
+	p.onClose = nil
 	p.mu.Unlock()
+
+	var err error
 	if cli != nil {
-		return cli.Close()
+		err = cli.Close()
 	}
-	return nil
+	for _, fn := range teardown {
+		if fn != nil {
+			fn()
+		}
+	}
+	return err
 }
 
 // maybeReconnect re-spawns the underlying stdio client if the
