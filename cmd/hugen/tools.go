@@ -10,6 +10,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/hugen/pkg/tool/providers"
+	"github.com/hugr-lab/hugen/pkg/tool/providers/policies"
 )
 
 // buildToolStack wires SkillManager + PermissionService + ToolManager
@@ -34,17 +35,24 @@ func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillMa
 	tm := tool.NewToolManager(perms, core.Config.ToolProviders(), core.Logger,
 		tool.WithBuilder(builder))
 
-	var policies *tool.Policies
+	var legacyPolicies *tool.Policies
 	if core.LocalQuerier != nil {
-		policies = tool.NewPolicies(core.LocalQuerier)
-		tm.SetPolicies(policies)
+		legacyPolicies = tool.NewPolicies(core.LocalQuerier)
+		tm.SetPolicies(legacyPolicies)
+		// Tier-3 management surface: policy:save / policy:revoke
+		// land on the new policies.Policies provider in the
+		// pkg/tool/providers/policies subpackage. SystemProvider no
+		// longer hosts these tools.
+		pol := policies.New(legacyPolicies, perms, core.Logger)
+		if err := tm.AddProvider(pol); err != nil {
+			return nil, fmt.Errorf("buildToolStack: register policies provider: %w", err)
+		}
 	}
 
 	sys := tool.NewSystemProvider(tool.SystemDeps{
-		AgentID:  core.Agent.ID(),
-		Policies: policies,
-		Perms:    perms,
-		Reload:   newRuntimeReloadFunc(core, perms, skills, tm),
+		AgentID: core.Agent.ID(),
+		Perms:   perms,
+		Reload:  newRuntimeReloadFunc(core, perms, skills, tm),
 	})
 	if err := tm.AddProvider(sys); err != nil {
 		return nil, fmt.Errorf("buildToolStack: register system provider: %w", err)

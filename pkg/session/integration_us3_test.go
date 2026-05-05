@@ -12,6 +12,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/tool"
+	"github.com/hugr-lab/hugen/pkg/tool/providers/policies"
 	"github.com/hugr-lab/query-engine/types"
 )
 
@@ -211,7 +212,7 @@ func us3NewSession(t *testing.T, mdl model.Model, perms perm.Service, agentID st
 // tier). This exercises exit-criterion-11 step 1.
 func TestUS3_AlwaysAllow_NextCallSkipsPromptPath(t *testing.T) {
 	q := newFakeUS3Querier()
-	policies := tool.NewPolicies(q)
+	policiesLegacy := tool.NewPolicies(q)
 
 	provider := &us3Stub{
 		tools: []tool.Tool{{
@@ -227,7 +228,7 @@ func TestUS3_AlwaysAllow_NextCallSkipsPromptPath(t *testing.T) {
 			{
 				{ToolCall: &model.ChunkToolCall{
 					ID:   "tc-allow",
-					Name: "system:policy_save",
+					Name: "policy:save",
 					Args: map[string]any{
 						"tool_name": "fake:do",
 						"decision":  "allow",
@@ -245,15 +246,11 @@ func TestUS3_AlwaysAllow_NextCallSkipsPromptPath(t *testing.T) {
 
 	perms := &us3Perms{agentID: "ag01"}
 
-	sysProvider := tool.NewSystemProvider(tool.SystemDeps{
-		AgentID:  "ag01",
-		Policies: policies,
-		Perms:    perms,
-	})
+	policiesProv := policies.New(policiesLegacy, perms, nil)
 
-	sess, tm, cancel := us3NewSession(t, mdl, perms, "ag01", provider, sysProvider)
+	sess, tm, cancel := us3NewSession(t, mdl, perms, "ag01", provider, policiesProv)
 	defer cancel()
-	tm.SetPolicies(policies)
+	tm.SetPolicies(policiesLegacy)
 
 	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
 	sess.Inbox() <- protocol.NewUserMessage("s1", user, "go")
@@ -415,14 +412,14 @@ func TestUS3_PerAgentIsolation(t *testing.T) {
 // Exit-criterion-11 step 4.
 func TestUS3_PolicyPersistGateBlocksSave(t *testing.T) {
 	q := newFakeUS3Querier()
-	policies := tool.NewPolicies(q)
+	policiesLegacy := tool.NewPolicies(q)
 
 	mdl := &scriptedToolModel{
 		turns: [][]model.Chunk{
 			{
 				{ToolCall: &model.ChunkToolCall{
 					ID:   "tc-save",
-					Name: "system:policy_save",
+					Name: "policy:save",
 					Args: map[string]any{
 						"tool_name": "fake:do",
 						"decision":  "allow",
@@ -442,15 +439,11 @@ func TestUS3_PolicyPersistGateBlocksSave(t *testing.T) {
 		},
 	}
 
-	sysProvider := tool.NewSystemProvider(tool.SystemDeps{
-		AgentID:  "ag01",
-		Policies: policies,
-		Perms:    perms,
-	})
+	policiesProv := policies.New(policiesLegacy, perms, nil)
 
-	sess, tm, cancel := us3NewSession(t, mdl, perms, "ag01", sysProvider)
+	sess, tm, cancel := us3NewSession(t, mdl, perms, "ag01", policiesProv)
 	defer cancel()
-	tm.SetPolicies(policies)
+	tm.SetPolicies(policiesLegacy)
 
 	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
 	sess.Inbox() <- protocol.NewUserMessage("s1", user, "go")
@@ -466,13 +459,13 @@ func TestUS3_PolicyPersistGateBlocksSave(t *testing.T) {
 	for _, f := range frames {
 		if tr, ok := f.(*protocol.ToolResult); ok && tr.Payload.IsError {
 			body, _ := json.Marshal(tr.Payload.Result)
-			if strings.Contains(string(body), "permission_denied") || strings.Contains(string(body), "policy_save") {
+			if strings.Contains(string(body), "permission_denied") || strings.Contains(string(body), "policy:save") {
 				sawDenied = true
 			}
 		}
 	}
 	if !sawDenied {
-		t.Errorf("missing denied tool_result for blocked policy_save: %v", kindNames(frames))
+		t.Errorf("missing denied tool_result for blocked policy:save: %v", kindNames(frames))
 	}
 	if got := len(q.rows); got != 0 {
 		t.Errorf("policy rows after blocked save = %d, want 0", got)

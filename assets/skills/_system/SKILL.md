@@ -18,10 +18,12 @@ allowed-tools:
       - skill_unload
       - skill_ref
       - skill_files
+  - provider: policy
+    tools:
+      - save
+      - revoke
   - provider: system
     tools:
-      - policy_save
-      - policy_revoke
       - runtime_reload
       - mcp_add_server
       - mcp_remove_server
@@ -101,7 +103,7 @@ shell tools and file tools see exactly the same paths.
   `python-mcp:run_script`, `duckdb-mcp:execute_query`) can address
   them directly. Optional `subdir` / `glob` filters narrow the
   listing.
-- `policy_save` / `policy_revoke` — persist or remove a personal
+- `policy:save` / `policy:revoke` — persist or remove a personal
   Tier-3 tool policy ("always allow" / "always deny") for the
   caller. Args: `tool_name` (`<provider>:<field>`, glob `*`
   suffix accepted), `decision` (`allow|deny|ask`), optional
