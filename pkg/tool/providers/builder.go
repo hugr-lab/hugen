@@ -10,6 +10,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/hugen/pkg/tool/providers/mcp"
+	"github.com/hugr-lab/hugen/pkg/tool/providers/recovery"
 )
 
 // Builder is the concrete tool.ProviderBuilder implementation.
@@ -57,6 +58,14 @@ func NewBuilder(authSvc *auth.Service, perms perm.Service, workspaceRoot string,
 // (back-compat with the original tool_providers schema). Adding
 // a new provider type is two lines: import the subpackage at
 // the top of this file and add a case below.
+//
+// MCP providers are wrapped with recovery.Wrap (design-001
+// §6.7b): the inner *mcp.Provider implements tool.Recoverable
+// via TryReconnect, and the recovery decorator drives the retry
+// loop on failed Call/List. Other provider types choose to wrap
+// or not at the case level — system providers (admin, policies,
+// runtime:reload, session:*) skip the wrap because they have
+// nothing to reconnect.
 func (b *Builder) Build(ctx context.Context, spec tool.Spec) (tool.ToolProvider, error) {
 	t := strings.ToLower(spec.Type)
 	if t == "" {
@@ -64,7 +73,11 @@ func (b *Builder) Build(ctx context.Context, spec tool.Spec) (tool.ToolProvider,
 	}
 	switch t {
 	case "mcp":
-		return mcp.New(ctx, spec, b.auth, b.workspaceRoot, b.logger)
+		prov, err := mcp.New(ctx, spec, b.auth, b.workspaceRoot, b.logger)
+		if err != nil {
+			return nil, err
+		}
+		return recovery.Wrap(prov, recovery.WithLogger(b.logger)), nil
 	default:
 		return nil, fmt.Errorf("providers: unknown type %q", spec.Type)
 	}

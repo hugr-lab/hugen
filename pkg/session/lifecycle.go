@@ -12,6 +12,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	mcpprov "github.com/hugr-lab/hugen/pkg/tool/providers/mcp"
+	"github.com/hugr-lab/hugen/pkg/tool/providers/recovery"
 )
 
 // Lifecycle is the contract Manager calls on Open and Close. The
@@ -191,11 +192,17 @@ func (r *Resources) Acquire(ctx context.Context, sessionID string) error {
 			Description: "session-scoped " + cfg.Name,
 			Transport:   mcpprov.TransportStdio,
 		}
-		prov, err := mcpprov.NewWithSpec(ctx, spec, r.deps.Logger)
+		inner, err := mcpprov.NewWithSpec(ctx, spec, r.deps.Logger)
 		if err != nil {
 			rollback()
 			return fmt.Errorf("session %s: provider %q spawn: %w", sessionID, cfg.Name, err)
 		}
+		// Wrap with the lazy retry decorator so per_session MCPs
+		// recover transparently from EOF / closed-pipe failures.
+		// The decorator delegates to the inner provider's
+		// TryReconnect; recovery is driven by the next failed
+		// Call/List, not a background goroutine.
+		prov := recovery.Wrap(inner, recovery.WithLogger(r.deps.Logger))
 		if err := child.AddProvider(prov); err != nil {
 			_ = prov.Close()
 			rollback()

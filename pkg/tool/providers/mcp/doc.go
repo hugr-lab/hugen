@@ -1,11 +1,13 @@
 // Package mcp implements the MCP-protocol ToolProvider.
 //
 // One Provider struct owns the mark3labs/mcp-go client and
-// implements both tool.ToolProvider and tool.MCPLifecycle so
-// ToolManager can dispatch tool calls and Reconnector can drive
-// background recovery. Phase 4.1c retired the Inner-wrapper
-// pattern that previously wrapped a legacy pkg/tool.MCPProvider —
-// the implementation now lives natively here.
+// implements both tool.ToolProvider (so ToolManager can dispatch
+// tool calls) and tool.Recoverable (so pkg/tool/providers/recovery
+// can rebuild the client on failure). There is no background
+// goroutine, no central scheduler, no callbacks — recovery is
+// lazy: a failed Call/List propagates upstream through the
+// recovery wrapper, which then walks a backoff schedule calling
+// Provider.TryReconnect between attempts.
 //
 // Two construction entry points coexist:
 //

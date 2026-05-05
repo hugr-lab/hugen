@@ -56,13 +56,6 @@ type ToolManager struct {
 
 	drainTimeout time.Duration
 
-	// reconnector picks up MCPProviders that transition to stale
-	// (after a synchronous maybeReconnect failure) and retries
-	// connect with exponential backoff in the background. Created
-	// by NewToolManager; Init starts its goroutine; Close stops it.
-	// Nil-tolerant — providers without an MCP runtime keep working.
-	reconnector *Reconnector
-
 	// parent is non-nil on a child Manager (built via NewChild).
 	// Child Managers walk to parent on provider-lookup miss so a
 	// session can transparently see agent-level (root) providers
@@ -89,8 +82,7 @@ const defaultDrainTimeout = 5 * time.Second
 
 // NewToolManager constructs the manager. Construction is cheap —
 // no providers are connected here; call Init(ctx) when ready to
-// start the background reconnector and load per_agent providers
-// from the wired view (if any).
+// load per_agent providers from the wired view (if any).
 //
 // Args:
 //   - perms: permission service consulted on every Dispatch.
@@ -106,7 +98,9 @@ const defaultDrainTimeout = 5 * time.Second
 //
 // Phase 4.1a stage A step 7d removed the auth.Service parameter —
 // auth handling now lives inside providers.Builder, constructed
-// at boot in pkg/runtime / cmd/hugen.
+// at boot in pkg/runtime / cmd/hugen. Phase 4.1c step 34 retired
+// the background Reconnector — recovery is now lazy, driven by
+// pkg/tool/providers/recovery.Wrap on the next failed Call/List.
 func NewToolManager(
 	perms perm.Service,
 	view config.ToolProvidersView,
@@ -122,27 +116,11 @@ func NewToolManager(
 		view:         view,
 		providers:    make(map[string]ToolProvider),
 		drainTimeout: defaultDrainTimeout,
-		reconnector:  NewReconnector(log),
 	}
 	for _, opt := range opts {
 		opt(tm)
 	}
 	return tm
-}
-
-// Reconnector returns the manager's MCP background reconnector, used
-// by callers (cmd/hugen) that want to wire OnRecover callbacks for
-// session-level system_marker broadcasts. Children inherit via
-// the parent reference — calling Reconnector() on a child walks
-// to the root.
-func (m *ToolManager) Reconnector() *Reconnector {
-	if m.reconnector != nil {
-		return m.reconnector
-	}
-	if m.parent != nil {
-		return m.parent.Reconnector()
-	}
-	return nil
 }
 
 // NewChild builds a session-scoped Manager that inherits the
@@ -251,20 +229,16 @@ func WithBuilder(b ProviderBuilder) ToolManagerOption {
 }
 
 
-// Close tears down the providers owned by this Manager. On the
-// root Manager it stops the background reconnector. On a child
-// Manager (parent != nil) it closes only the child's own
-// providers — parent state is untouched and the reconnector
-// belongs to the root. Idempotent on both paths.
+// Close tears down the providers owned by this Manager. On a
+// child Manager (parent != nil) it closes only the child's own
+// providers — parent state is untouched. Idempotent on both
+// paths.
 //
 // Phase 4.1a stage A step 9 retired the legacy sessionProviders
 // map: per-session providers now live on a child ToolManager
 // owned by pkg/session.Resources, and Resources.Release calls
 // child.Close() to drop them.
 func (m *ToolManager) Close() error {
-	if m.parent == nil && m.reconnector != nil {
-		m.reconnector.Stop()
-	}
 	m.mu.Lock()
 	globals := m.providers
 	m.providers = make(map[string]ToolProvider)
@@ -281,35 +255,27 @@ func (m *ToolManager) Close() error {
 // AddProvider registers a ToolProvider. Constitution exception
 // for plug-in registries (II.1).
 //
-// Providers that implement Reconnectable (today: every
-// providers/mcp.Provider) get a stale-hook wired to the manager's
-// Reconnector so a mid-flight EOF that fails an inline reconnect
-// surfaces as a background retry instead of silently leaving the
-// provider dead until process restart.
+// Recovery for failure-prone providers (MCP) lives in
+// pkg/tool/providers/recovery.Wrap, applied at construction time
+// inside the runtime / session lifecycle code — Manager itself
+// has no opinion on recovery and does not need to know whether
+// a provider is wrapped.
 func (m *ToolManager) AddProvider(p ToolProvider) error {
 	if p == nil {
 		return errors.New("tool: nil provider")
 	}
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	name := p.Name()
 	if name == "" {
-		m.mu.Unlock()
 		return errors.New("tool: provider with empty name")
 	}
 	if _, exists := m.providers[name]; exists {
-		m.mu.Unlock()
 		return fmt.Errorf("tool: provider %q already registered", name)
 	}
 	m.providers[name] = p
 	m.toolGen.Add(1)
 	m.invalidateAllSnapshots()
-	m.mu.Unlock()
-
-	if rp, ok := p.(Reconnectable); ok {
-		if rec := m.Reconnector(); rec != nil {
-			rp.SetStaleHook(rec.Track)
-		}
-	}
 	return nil
 }
 
@@ -339,9 +305,6 @@ func (m *ToolManager) RemoveProvider(ctx context.Context, name string) error {
 	dctx, cancel := context.WithTimeout(ctx, m.drainTimeout)
 	defer cancel()
 	<-dctx.Done()
-	if m.reconnector != nil {
-		m.reconnector.Forget(name)
-	}
 	if err := p.Close(); err != nil {
 		return fmt.Errorf("tool: close %s: %w", name, err)
 	}

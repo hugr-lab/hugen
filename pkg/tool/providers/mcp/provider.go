@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -56,24 +55,20 @@ type Spec struct {
 }
 
 // Provider speaks MCP through mark3labs/mcp-go's Client and
-// satisfies tool.ToolProvider so ToolManager can route calls
-// through it. One instance per registered MCP server.
+// satisfies tool.ToolProvider so ToolManager can dispatch tool
+// calls through it. One instance per registered MCP server.
 //
-// Stale-state contract (phase-4 US7):
+// Recovery contract (phase-4 US7, design-001 §6.7b):
 //
-//   - "stale" means the underlying client is gone (EOF / closed
-//     pipe / failed reconnect) but the provider object is still
-//     alive and registered in ToolManager. Calls return
-//     tool.ErrProviderRemoved until a successful Reconnect clears
-//     the flag.
-//   - The transition stale=true is announced via a registered
-//     stale-hook (see SetStaleHook) so the Reconnector can pick
-//     the provider up. Without a hook the provider just sits
-//     stale, reconnect-able only by an inline maybeReconnect on
-//     the next tool call.
-//   - Reconnect() is the public entry point the Reconnector loop
-//     calls every backoff tick. It is also called inline by
-//     maybeReconnect on EOF — the same primitive serves both paths.
+//   - List / Call surface upstream errors verbatim. The provider
+//     does NOT loop, retry, or classify errors — recovery is the
+//     decorator's job (see pkg/tool/providers/recovery).
+//   - Provider implements tool.Recoverable. recovery.Wrap consults
+//     it on Call/List error: TryReconnect rebuilds the underlying
+//     client and the wrapper re-issues the original call.
+//   - Close marks the provider as removed; subsequent calls return
+//     tool.ErrProviderRemoved. Close is final — TryReconnect on a
+//     closed provider returns ErrProviderRemoved.
 type Provider struct {
 	spec Spec
 	log  *slog.Logger
@@ -81,11 +76,6 @@ type Provider struct {
 	mu     sync.Mutex
 	client *mcpcli.Client
 	closed bool
-	// stale is set when the client is gone but the provider object
-	// is still registered. While stale is true, every call returns
-	// tool.ErrProviderRemoved until Reconnect succeeds.
-	stale     bool
-	staleHook func(tool.MCPLifecycle) // optional; called once on each healthy → stale transition
 
 	subsMu sync.Mutex
 	subs   []chan tool.ProviderEvent
@@ -283,85 +273,27 @@ func (p *Provider) currentClient() (*mcpcli.Client, error) {
 	if p.closed {
 		return nil, tool.ErrProviderRemoved
 	}
-	if p.stale {
-		return nil, tool.ErrProviderRemoved
-	}
 	if p.client == nil {
 		return nil, fmt.Errorf("mcp: %s not connected", p.spec.Name)
 	}
 	return p.client, nil
 }
 
-// IsStale reports whether the provider's underlying client is gone
-// pending a Reconnect. Callers that don't want to issue a tool call
-// just to probe state (e.g. the Reconnector loop) read this directly.
-func (p *Provider) IsStale() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.stale
-}
-
-// IsClosed reports whether the provider has been Close()'d. Used
-// by the Reconnector to skip-and-untrack a provider that was
-// removed externally between Track and the next tick.
-func (p *Provider) IsClosed() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.closed
-}
-
-// SetStaleHook installs a callback fired once each time the
-// provider transitions healthy → stale. ToolManager wires this to
-// its Reconnector.Track on AddProvider so a stale provider
-// self-registers for background reconnect attempts. Passing nil
-// clears the hook. Idempotent.
-func (p *Provider) SetStaleHook(fn func(tool.MCPLifecycle)) {
-	p.mu.Lock()
-	p.staleHook = fn
-	p.mu.Unlock()
-}
-
-// markStale transitions healthy → stale and fires the stale hook
-// outside the lock. Idempotent: a second markStale on an
-// already-stale provider is a no-op (no double-trigger of the
-// hook). Caller is responsible for closing the dead client first.
-func (p *Provider) markStale() {
-	p.mu.Lock()
-	if p.closed || p.stale {
-		p.mu.Unlock()
-		return
-	}
-	p.stale = true
-	hook := p.staleHook
-	p.mu.Unlock()
-	p.emit(tool.ProviderEvent{Kind: tool.ProviderHealthChanged, Data: tool.HealthDead})
-	if hook != nil {
-		hook(p)
-	}
-}
-
-// Reconnect rebuilds the underlying mcp-go client and re-runs
-// Initialize. On success it clears the stale flag and emits
-// ProviderHealthChanged{Healthy}. On failure the provider remains
-// stale and the caller (typically the Reconnector loop) is expected
-// to retry with backoff.
+// TryReconnect rebuilds the underlying mcp-go client and re-runs
+// Initialize. Implements tool.Recoverable so recovery.Wrap can
+// drive the retry loop.
 //
-// Closed providers cannot be reconnected — Reconnect returns
-// tool.ErrProviderRemoved without attempting anything.
-// Already-healthy providers (the Reconnector observed someone else
-// recovered them inline) return nil.
-func (p *Provider) Reconnect(ctx context.Context) error {
+// Closed providers cannot be reconnected — TryReconnect returns
+// tool.ErrProviderRemoved without attempting anything. On any
+// other state TryReconnect drops the old client (close errors
+// ignored — the connection is presumed dead) and dials a fresh
+// one. Returns nil on success; the original error otherwise.
+func (p *Provider) TryReconnect(ctx context.Context) error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		return tool.ErrProviderRemoved
 	}
-	if !p.stale {
-		p.mu.Unlock()
-		return nil
-	}
-	// Drop any old client handle before re-dialling. Close errors
-	// are ignored — the connection's already presumed dead.
 	if p.client != nil {
 		_ = p.client.Close()
 		p.client = nil
@@ -370,9 +302,6 @@ func (p *Provider) Reconnect(ctx context.Context) error {
 	if err := p.connect(ctx); err != nil {
 		return err
 	}
-	p.mu.Lock()
-	p.stale = false
-	p.mu.Unlock()
 	p.emit(tool.ProviderEvent{Kind: tool.ProviderHealthChanged, Data: tool.HealthHealthy})
 	return nil
 }
@@ -387,13 +316,7 @@ func (p *Provider) List(ctx context.Context) ([]tool.Tool, error) {
 	}
 	res, err := cli.ListTools(ctx, mcp.ListToolsRequest{})
 	if err != nil {
-		if reconnErr := p.maybeReconnect(ctx, err); reconnErr == nil {
-			cli, _ = p.currentClient()
-			res, err = cli.ListTools(ctx, mcp.ListToolsRequest{})
-		}
-		if err != nil {
-			return nil, fmt.Errorf("mcp: list %s: %w", p.spec.Name, err)
-		}
+		return nil, fmt.Errorf("mcp: list %s: %w", p.spec.Name, err)
 	}
 	out := make([]tool.Tool, 0, len(res.Tools))
 	for _, t := range res.Tools {
@@ -427,7 +350,8 @@ func (p *Provider) List(ctx context.Context) ([]tool.Tool, error) {
 
 // Call dispatches a tool call. Args are passed verbatim; the
 // caller (ToolManager) has already merged Tier-1/2 Data into
-// effective args.
+// effective args. Errors surface verbatim — the recovery decorator
+// (pkg/tool/providers/recovery) drives any retry loop.
 func (p *Provider) Call(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
 	cli, err := p.currentClient()
 	if err != nil {
@@ -455,13 +379,7 @@ func (p *Provider) Call(ctx context.Context, name string, args json.RawMessage) 
 
 	res, err := cli.CallTool(ctx, req)
 	if err != nil {
-		if reconnErr := p.maybeReconnect(ctx, err); reconnErr == nil {
-			cli, _ = p.currentClient()
-			res, err = cli.CallTool(ctx, req)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("mcp: call %s.%s: %w", p.spec.Name, name, err)
-		}
+		return nil, fmt.Errorf("mcp: call %s.%s: %w", p.spec.Name, name, err)
 	}
 	return marshalCallResult(res)
 }
@@ -545,52 +463,6 @@ func (p *Provider) Close() error {
 	return err
 }
 
-// maybeReconnect re-spawns the underlying stdio client if the
-// returned error looks like an EOF / closed-pipe condition. One
-// inline retry is attempted; on failure the provider transitions
-// to stale (markStale) and the registered Reconnector — if any —
-// picks it up for background retries. Returns nil on a successful
-// inline reconnect, the original error otherwise.
-func (p *Provider) maybeReconnect(ctx context.Context, callErr error) error {
-	if callErr == nil {
-		return nil
-	}
-	if !isEOF(callErr) {
-		return callErr
-	}
-	p.log.Warn("mcp: reconnecting after EOF", "provider", p.spec.Name, "err", callErr)
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return tool.ErrProviderRemoved
-	}
-	if p.client != nil {
-		_ = p.client.Close()
-		p.client = nil
-	}
-	p.mu.Unlock()
-	if err := p.connect(ctx); err != nil {
-		// Inline recovery failed — degrade to stale and let the
-		// background Reconnector keep trying. Caller still sees
-		// the original call error.
-		p.markStale()
-		return err
-	}
-	p.emit(tool.ProviderEvent{Kind: tool.ProviderHealthChanged, Data: tool.HealthHealthy})
-	return nil
-}
-
-func isEOF(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "EOF") || strings.Contains(msg, "closed pipe") || strings.Contains(msg, "broken pipe")
-}
-
 // envSlice produces the env slice handed to a stdio MCP child.
 // The child inherits hugen's own os.Environ (PATH, locale, HOME,
 // etc.) so common shell binaries (sh, bash, du, ls) and language
@@ -625,6 +497,5 @@ func envSlice(env map[string]string) []string {
 // ensure Provider satisfies the contracts declared in pkg/tool.
 var (
 	_ tool.ToolProvider = (*Provider)(nil)
-	_ tool.MCPLifecycle = (*Provider)(nil)
-	_ tool.Reconnectable = (*Provider)(nil)
+	_ tool.Recoverable  = (*Provider)(nil)
 )

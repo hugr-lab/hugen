@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -177,26 +175,6 @@ func TestMarshalCallResult_IsErrorPropagates(t *testing.T) {
 	}
 }
 
-func TestIsEOF(t *testing.T) {
-	cases := []struct {
-		err  error
-		want bool
-	}{
-		{nil, false},
-		{io.EOF, true},
-		{io.ErrClosedPipe, true},
-		{io.ErrUnexpectedEOF, true},
-		{errors.New("read |0: file already closed"), false},
-		{errors.New("EOF received"), true},
-		{errors.New("write: broken pipe"), true},
-	}
-	for _, c := range cases {
-		if got := isEOF(c.err); got != c.want {
-			t.Errorf("isEOF(%v) = %v, want %v", c.err, got, c.want)
-		}
-	}
-}
-
 func TestEnvSlice(t *testing.T) {
 	// Pin a unique parent var so we can spot inheritance without
 	// caring about the rest of the parent environment.
@@ -232,12 +210,11 @@ func envContains(env []string, want string) bool {
 	return false
 }
 
-// TestProvider_MaybeReconnectMarksStale exercises the inline EOF
-// path: when connect() fails after EOF, the provider must
-// transition to stale, fire its hook, and report
-// tool.ErrProviderRemoved on subsequent currentClient calls.
-func TestProvider_MaybeReconnectMarksStale(t *testing.T) {
-	hookFires := atomic.Int32{}
+// TestProvider_TryReconnectFailurePropagates: a failed
+// connect() during TryReconnect must surface the error verbatim.
+// recovery.Wrap drives the retry loop; the provider does not
+// classify or persist failure state.
+func TestProvider_TryReconnectFailurePropagates(t *testing.T) {
 	p := &Provider{
 		spec: Spec{
 			Name:      "broken",
@@ -245,39 +222,21 @@ func TestProvider_MaybeReconnectMarksStale(t *testing.T) {
 		},
 		log: slog.New(slog.DiscardHandler),
 	}
-	p.SetStaleHook(func(tool.MCPLifecycle) { hookFires.Add(1) })
-
-	err := p.maybeReconnect(context.Background(), io.EOF)
-	if err == nil {
-		t.Fatal("maybeReconnect returned nil after failed reconnect")
-	}
-	if !p.IsStale() {
-		t.Errorf("provider not marked stale after failed reconnect")
-	}
-	if got := hookFires.Load(); got != 1 {
-		t.Errorf("stale hook fire count = %d, want 1", got)
-	}
-	// Stale providers refuse calls until Reconnect succeeds.
-	_, err = p.currentClient()
-	if !errors.Is(err, tool.ErrProviderRemoved) {
-		t.Errorf("currentClient on stale provider err = %v, want ErrProviderRemoved", err)
+	if err := p.TryReconnect(context.Background()); err == nil {
+		t.Fatal("TryReconnect should return the connect error verbatim")
 	}
 }
 
-// TestProvider_MarkStaleIdempotent: a second markStale call on an
-// already-stale provider must NOT re-fire the hook (single-track
-// per stale transition).
-func TestProvider_MarkStaleIdempotent(t *testing.T) {
-	hookFires := atomic.Int32{}
+// TestProvider_TryReconnectAfterCloseRefused: TryReconnect on a
+// closed provider returns tool.ErrProviderRemoved without
+// attempting a reconnect — Close is final.
+func TestProvider_TryReconnectAfterCloseRefused(t *testing.T) {
 	p := &Provider{
 		spec: Spec{Name: "p", Transport: TransportStdio},
 		log:  slog.New(slog.DiscardHandler),
 	}
-	p.SetStaleHook(func(tool.MCPLifecycle) { hookFires.Add(1) })
-
-	p.markStale()
-	p.markStale()
-	if got := hookFires.Load(); got != 1 {
-		t.Errorf("hook fired %d times across two markStale calls, want 1", got)
+	p.closed = true
+	if err := p.TryReconnect(context.Background()); !errors.Is(err, tool.ErrProviderRemoved) {
+		t.Errorf("TryReconnect after Close = %v, want ErrProviderRemoved", err)
 	}
 }

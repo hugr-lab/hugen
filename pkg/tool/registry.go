@@ -8,9 +8,8 @@ import (
 	"github.com/hugr-lab/hugen/pkg/config"
 )
 
-// Init starts the background reconnector loop and, when a view +
-// builder are wired, loads the per_agent providers from
-// configuration via the new Spec-driven AddBySpec dispatch.
+// Init loads the per_agent providers from configuration via the
+// Spec-driven AddBySpec dispatch when a view + builder are wired.
 // Per-session entries are skipped — they are spawned in the
 // session.Resources.Acquire path (bash-mcp pattern).
 //
@@ -25,15 +24,14 @@ import (
 // providers.Builder injected via WithBuilder. The view's OnUpdate
 // hook is wired with a placeholder warn log; live config reload
 // of tool_providers lands in a future phase.
+//
+// Phase 4.1c step 34 retired the background Reconnector loop;
+// recovery is lazy via pkg/tool/providers/recovery.Wrap, applied
+// when the provider is built (providers.Builder /
+// pkg/session/lifecycle).
 func (m *ToolManager) Init(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
-	}
-	if m.parent == nil && m.reconnector != nil {
-		// Use the caller's ctx as the cancel root so a process-shutdown
-		// ctx cleanly exits the reconnector loop alongside everything
-		// else. Close() also calls Stop() as belt-and-braces.
-		m.reconnector.Start(ctx)
 	}
 	if m.view == nil {
 		return nil

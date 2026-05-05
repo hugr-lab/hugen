@@ -52,22 +52,12 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 		return fmt.Errorf("register session provider: %w", err)
 	}
 
-	// Reconnector OnRecover hook (phase-4 US7): when a per_agent
-	// provider crawls back from stale to healthy, broadcast a
-	// system_marker{mcp_recovered, provider} into every live root
-	// session's inbox so the model on each root sees the recovery
-	// in its transcript and can retry tools that previously
-	// surfaced as `provider_removed`.
-	if rc := core.Tools.Reconnector(); rc != nil {
-		logger := core.Logger
-		rc.OnRecover(func(name string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			mgr.BroadcastSystemMarker(ctx, "mcp_recovered",
-				map[string]any{"provider": name})
-			logger.Info("mcp reconnect: marker broadcast", "provider", name)
-		})
-	}
+	// Phase 4.1c step 34 retired the central Reconnector and its
+	// OnRecover hook — recovery is now lazy via
+	// pkg/tool/providers/recovery.Wrap on the next failed
+	// Call/List. The mcp_recovered system_marker broadcast is
+	// re-introduced in a later phase if observability still wants
+	// per-session visibility into provider transitions.
 
 	core.addCleanup(func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

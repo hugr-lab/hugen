@@ -588,13 +588,8 @@ func TestToolManager_NewChild_PoliciesInheritedFromParent(t *testing.T) {
 	}
 }
 
-func TestToolManager_Reconnector_InheritedFromParent(t *testing.T) {
-	parent := NewToolManager(&fakePerms{}, nil, nil)
-	if parent.Reconnector() == nil {
-		t.Fatal("parent.Reconnector should be non-nil after NewToolManager")
-	}
-	child := parent.NewChild()
-	if child.Reconnector() != parent.Reconnector() {
-		t.Errorf("child.Reconnector should walk to parent")
-	}
-}
+// TestToolManager_Reconnector_InheritedFromParent retired in
+// step 34: ToolManager no longer owns a Reconnector. Recovery is
+// the recovery.Wrap decorator's job, applied at provider
+// construction time. Manager has no per-tier recovery state to
+// propagate parent → child.
