@@ -86,7 +86,7 @@ func newToolSession(t *testing.T, mdl model.Model, perms perm.Service, providers
 	store := newFakeStore()
 	_ = store.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
 
-	tm := tool.NewToolManager(perms, nil, nil, nil, nil)
+	tm := tool.NewToolManager(perms, nil, nil, nil)
 	for _, p := range providers {
 		if err := tm.AddProvider(p); err != nil {
 			t.Fatalf("AddProvider: %v", err)

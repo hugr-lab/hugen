@@ -255,7 +255,7 @@ func newPythonIntegrationCore(t *testing.T, pyBin, tmpl string) *integrationCore
 	// WithWorkspaceRoot is critical here — python-mcp reads
 	// WORKSPACES_ROOT to compute <sid>/.venv per call, and the
 	// runtime is the only thing that should pin it.
-	tools := tool.NewToolManager(perms, nil, cfgSvc.ToolProviders(), nil, nil,
+	tools := tool.NewToolManager(perms, cfgSvc.ToolProviders(), nil, nil,
 		tool.WithWorkspaceRoot(workspaceDir))
 	t.Cleanup(func() { _ = tools.Close() })
 

@@ -69,7 +69,7 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	view := &permsView{rules: nil}
 	perms := perm.NewLocalPermissions(view, staticIdentity{id: "agent-it"})
 	t.Cleanup(perms.Close)
-	tools := tool.NewToolManager(perms, skills, cfgSvc.ToolProviders(), nil, nil,
+	tools := tool.NewToolManager(perms, cfgSvc.ToolProviders(), nil, nil,
 		tool.WithWorkspaceRoot(workspaceDir))
 	t.Cleanup(func() { _ = tools.Close() })
 

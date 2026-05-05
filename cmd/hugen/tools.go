@@ -95,7 +95,7 @@ func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillMa
 		}
 		wsRoot = root
 	}
-	tm := tool.NewToolManager(perms, skills, core.Config.ToolProviders(),
+	tm := tool.NewToolManager(perms, core.Config.ToolProviders(),
 		core.Auth, core.Logger, tool.WithWorkspaceRoot(wsRoot))
 
 	var policies *tool.Policies

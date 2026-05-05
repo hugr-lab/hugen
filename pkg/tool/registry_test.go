@@ -144,7 +144,7 @@ func (v *fakeProvidersView) Providers() []config.ToolProviderSpec { return v.spe
 func (v *fakeProvidersView) OnUpdate(func()) (cancel func())      { return func() {} }
 
 func TestInit_NilView(t *testing.T) {
-	tm := NewToolManager(nil, nil, nil, nil, discardLogger())
+	tm := NewToolManager(nil, nil, nil, discardLogger())
 	t.Cleanup(func() { _ = tm.Close() })
 	if err := tm.Init(context.Background()); err != nil {
 		t.Fatalf("expected no-op, got %v", err)
@@ -162,7 +162,7 @@ func TestInit_DegradesOnBadConfig(t *testing.T) {
 		// Endpoint deliberately empty — BuildMCPProviderSpec rejects
 		// it; Init must skip + warn instead of aborting.
 	}}}
-	tm := NewToolManager(nil, nil, view, nil, discardLogger())
+	tm := NewToolManager(nil, view, nil, discardLogger())
 	t.Cleanup(func() { _ = tm.Close() })
 	if err := tm.Init(context.Background()); err != nil {
 		t.Fatalf("Init aborted on bad config: %v", err)
@@ -183,7 +183,7 @@ func TestInit_DegradesOnConnectFailure(t *testing.T) {
 		// 127.0.0.1:1 — no listener; connect will fail.
 		Endpoint: "http://127.0.0.1:1/mcp",
 	}}}
-	tm := NewToolManager(nil, nil, view, nil, discardLogger())
+	tm := NewToolManager(nil, view, nil, discardLogger())
 	t.Cleanup(func() { _ = tm.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -207,7 +207,7 @@ func TestInit_HTTPLive(t *testing.T) {
 		Endpoint:  srv.URL,
 		Auth:      "hugr",
 	}}}
-	tm := NewToolManager(nil, nil, view, svc, discardLogger())
+	tm := NewToolManager(nil, view, svc, discardLogger())
 	t.Cleanup(func() { _ = tm.Close() })
 
 	if err := tm.Init(context.Background()); err != nil {
@@ -225,7 +225,7 @@ func TestInit_SkipsPerSession(t *testing.T) {
 		Command:  "bash-mcp",
 		Lifetime: "per_session",
 	}}}
-	tm := NewToolManager(nil, nil, view, nil, discardLogger())
+	tm := NewToolManager(nil, view, nil, discardLogger())
 	t.Cleanup(func() { _ = tm.Close() })
 	if err := tm.Init(context.Background()); err != nil {
 		t.Fatalf("expected per_session entries skipped, got %v", err)

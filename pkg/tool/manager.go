@@ -15,7 +15,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
-	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // ToolManager dispatches tool calls through the three permission
@@ -40,7 +39,6 @@ type ToolManager struct {
 	// data-racing. nil pointer disables Tier-3 (IsConfigured is
 	// nil-safe on the value side).
 	policies atomic.Pointer[Policies]
-	skills   *skill.SkillManager
 	log      *slog.Logger
 
 	providersView  config.ToolProvidersView
@@ -108,8 +106,6 @@ const (
 //
 // Args:
 //   - perms: permission service consulted on every Dispatch.
-//   - skills: skill manager consulted to filter the per-Turn tool
-//     catalogue (nil disables filtering — used by tests).
 //   - providers: per_agent MCP catalogue view. Read on Init()
 //     (and, in phase 6+, again on view.OnUpdate). Per_session
 //     entries are skipped (registered via AddSessionProvider).
@@ -120,9 +116,13 @@ const (
 //     bootstrap. Required only when some provider asks for auth;
 //     pass nil if none does.
 //   - log: structured logger; nil falls back to a discard handler.
+//
+// Phase 4.1a stage A step 7c removed the skills parameter — skill
+// filtering is now a pkg/session concern (see
+// pkg/session/snapshot_cache.go). Manager returns the unfiltered
+// union from Snapshot; callers cache + filter externally.
 func NewToolManager(
 	perms perm.Service,
-	skills *skill.SkillManager,
 	providers config.ToolProvidersView,
 	authSvc *auth.Service,
 	log *slog.Logger,
@@ -133,7 +133,6 @@ func NewToolManager(
 	}
 	tm := &ToolManager{
 		perms:            perms,
-		skills:           skills,
 		log:              log,
 		providersView:    providers,
 		auth:             authSvc,
@@ -185,7 +184,6 @@ func (m *ToolManager) Reconnector() *Reconnector {
 func (m *ToolManager) NewChild() *ToolManager {
 	child := &ToolManager{
 		perms:            m.perms,
-		skills:           m.skills,
 		log:              m.log,
 		auth:             m.auth,
 		workspaceRoot:    m.workspaceRoot,
@@ -548,24 +546,18 @@ func (m *ToolManager) ToolGen() int64 { return m.toolGen.Load() }
 // caller's cache invalidation logic.
 func (m *ToolManager) PolicyGen() int64 { return m.policyGen.Load() }
 
-func (m *ToolManager) currentGenerations(ctx context.Context, sessionID string) (Generations, error) {
-	gens := Generations{
+func (m *ToolManager) currentGenerations(_ context.Context, _ string) (Generations, error) {
+	// Phase 4.1a stage A step 7c moved skill-bindings reading to
+	// pkg/session — Manager only owns Tool / Policy gens. The
+	// Skill field stays on the struct for caller-side cache keys
+	// (pkg/session populates it) but Manager always returns 0.
+	return Generations{
 		Tool:   m.toolGen.Load(),
 		Policy: m.policyGen.Load(),
-	}
-	if m.skills != nil {
-		b, err := m.skills.Bindings(ctx, sessionID)
-		if err != nil {
-			return gens, err
-		}
-		gens.Skill = b.Generation
-	}
-	return gens, nil
+	}, nil
 }
 
 func (m *ToolManager) rebuildSnapshot(ctx context.Context, sessionID string, gens Generations) (Snapshot, error) {
-	allowed := allowedFromBindings(ctx, m.skills, sessionID)
-
 	m.mu.RLock()
 	// Session-scoped providers shadow globals by name on collision —
 	// a session can override "bash-mcp" with its own subprocess.
@@ -586,73 +578,11 @@ func (m *ToolManager) rebuildSnapshot(ctx context.Context, sessionID string, gen
 			errs = append(errs, fmt.Errorf("%s: %w", p.Name(), err))
 			continue
 		}
-		for _, t := range got {
-			if allowed != nil && !allowed.match(t.Name) {
-				continue
-			}
-			tools = append(tools, t)
-		}
+		tools = append(tools, got...)
 	}
 	slices.SortFunc(tools, func(a, b Tool) int { return strings.Compare(a.Name, b.Name) })
 
 	return Snapshot{Generations: gens, Tools: tools}, errors.Join(errs...)
-}
-
-// allowedSet is the per-session compiled allow-list. Holds both
-// exact names and `provider:prefix*` glob patterns so a skill
-// granting `discovery-*` against the `hugr-main` provider matches
-// every `hugr-main:discovery-<anything>` tool.
-//
-// nil ⇒ no filter (skill manager not wired in tests).
-// empty (non-nil) ⇒ no skills loaded → empty catalogue.
-type allowedSet struct {
-	exact    map[string]bool
-	patterns []string // each is "provider:prefix" with the trailing * stripped
-}
-
-// match reports whether the fully-qualified tool name (e.g.
-// "hugr-main:discovery-search_data_sources") is allowed by any
-// rule in the set.
-func (a *allowedSet) match(name string) bool {
-	if a == nil {
-		return true
-	}
-	if a.exact[name] {
-		return true
-	}
-	for _, p := range a.patterns {
-		if strings.HasPrefix(name, p) {
-			return true
-		}
-	}
-	return false
-}
-
-func allowedFromBindings(ctx context.Context, skills *skill.SkillManager, sessionID string) *allowedSet {
-	if skills == nil {
-		return nil // no filter; expose every registered tool
-	}
-	b, err := skills.Bindings(ctx, sessionID)
-	if err != nil || len(b.AllowedTools) == 0 {
-		// No allowed-tools means no skills loaded — empty
-		// catalogue. Distinguishes "no skills loaded" from "no
-		// SkillManager configured" (the nil case above).
-		return &allowedSet{exact: map[string]bool{}}
-	}
-	out := &allowedSet{exact: map[string]bool{}}
-	for _, g := range b.AllowedTools {
-		for _, t := range g.Tools {
-			full := g.Provider + ":" + t
-			if strings.HasSuffix(t, "*") {
-				// glob pattern → prefix match. Strip the trailing
-				// star; the prefix kept is "<provider>:<head>".
-				out.patterns = append(out.patterns, strings.TrimSuffix(full, "*"))
-				continue
-			}
-			out.exact[full] = true
-		}
-	}
-	return out
 }
 
 // Resolve gates a single tool call. Returns the merged

@@ -90,7 +90,7 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 	view := &permsView{rules: ruleSet}
 	perms := perm.NewLocalPermissions(view, staticIdentity{id: "agent-it"})
 	t.Cleanup(perms.Close)
-	tools := tool.NewToolManager(perms, nil, nil, nil, nil)
+	tools := tool.NewToolManager(perms, nil, nil, nil)
 	t.Cleanup(func() { _ = tools.Close() })
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))

@@ -233,7 +233,7 @@ func newAnalystIntegrationCore(t *testing.T, pyBin, tmpl, vendor string) *integr
 	view := &permsView{rules: nil}
 	perms := perm.NewLocalPermissions(view, staticIdentity{id: "agent-it"})
 	t.Cleanup(perms.Close)
-	tools := tool.NewToolManager(perms, nil, cfgSvc.ToolProviders(), nil, nil,
+	tools := tool.NewToolManager(perms, cfgSvc.ToolProviders(), nil, nil,
 		tool.WithWorkspaceRoot(workspaceDir))
 	t.Cleanup(func() { _ = tools.Close() })
 
