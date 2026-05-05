@@ -9,6 +9,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/identity"
+	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/session"
 
 	hugr "github.com/hugr-lab/query-engine"
@@ -42,6 +43,9 @@ type Core struct {
 	LocalEngine  *hugr.Service
 	LocalQuerier types.Querier
 	Store        session.RuntimeStore
+
+	// Phase 5 (models).
+	Models *model.ModelRouter
 
 	// cleanups stacks per-phase teardown closures in registration
 	// order. cleanupPartial (failure path) and Shutdown (success
