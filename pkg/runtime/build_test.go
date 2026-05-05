@@ -62,6 +62,7 @@ func TestBuild_SkeletonReturnsCore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
+	defer core.Shutdown(context.Background())
 	if core == nil {
 		t.Fatal("core is nil")
 	}
@@ -70,6 +71,10 @@ func TestBuild_SkeletonReturnsCore(t *testing.T) {
 	}
 	if core.Cfg.Mode != "local" {
 		t.Errorf("Cfg not stored: %+v", core.Cfg)
+	}
+	if core.HTTPSrv == nil || core.Mux == nil || core.Auth == nil {
+		t.Errorf("phase 2 outputs missing: srv=%v mux=%v auth=%v",
+			core.HTTPSrv != nil, core.Mux != nil, core.Auth != nil)
 	}
 }
 
@@ -91,8 +96,11 @@ func TestCore_Shutdown_Idempotent(t *testing.T) {
 	core.Shutdown(context.Background())
 	core.Shutdown(context.Background())
 
+	// First Shutdown drains the registered cleanups exactly once
+	// (HTTP server drain + the test counter); second Shutdown is a
+	// no-op via shutdownOnce.
 	if calls != 1 {
-		t.Errorf("cleanup ran %d times, want 1", calls)
+		t.Errorf("test cleanup ran %d times, want 1", calls)
 	}
 }
 

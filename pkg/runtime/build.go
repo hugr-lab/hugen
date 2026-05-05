@@ -28,15 +28,15 @@ func Build(ctx context.Context, cfg Config) (*Core, error) {
 		return fmt.Errorf("runtime: %s: %w", step, err)
 	}
 
-	_ = ctx
-
 	if err := phaseBundledSkills(core); err != nil {
 		return nil, failed("bundled_skills", err)
 	}
+	if err := phaseHTTPAuth(ctx, core); err != nil {
+		return nil, failed("http_auth", err)
+	}
 
-	// Remaining phases (http_auth → identity → storage → models →
-	// agent → skills_perms → tools → session_manager) land in
-	// steps 12-26.
+	// Remaining phases (identity → storage → models → agent →
+	// skills_perms → tools → session_manager) land in steps 13-26.
 
 	return core, nil
 }

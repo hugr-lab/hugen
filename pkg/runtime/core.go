@@ -3,7 +3,10 @@ package runtime
 import (
 	"context"
 	"log/slog"
+	stdhttp "net/http"
 	"sync"
+
+	"github.com/hugr-lab/hugen/pkg/auth"
 )
 
 // Core aggregates every dependency a subcommand handler needs.
@@ -17,6 +20,11 @@ import (
 type Core struct {
 	Cfg    Config
 	Logger *slog.Logger
+
+	// Phase 2 (http_auth).
+	HTTPSrv *stdhttp.Server
+	Mux     *stdhttp.ServeMux
+	Auth    *auth.Service
 
 	// cleanups stacks per-phase teardown closures in registration
 	// order. cleanupPartial (failure path) and Shutdown (success

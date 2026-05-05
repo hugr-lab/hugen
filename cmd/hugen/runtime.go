@@ -109,14 +109,15 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 		return nil, fmt.Errorf("buildRuntimeCore: install bundled skills: %w", err)
 	}
 
-	httpSrv, mux, err := startHTTPServer(ctx, boot, core.Logger)
+	rtCfg := bootHTTPConfig(boot)
+	httpSrv, mux, err := runtime.StartHTTPServer(rtCfg.HTTP, core.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("buildRuntimeCore: auth http: %w", err)
 	}
 	core.HTTPSrv = httpSrv
 	core.Mux = mux
 
-	authSvc, err := buildAuthService(ctx, boot, mux, core.Logger)
+	authSvc, err := runtime.BuildAuthService(ctx, rtCfg, mux, core.Logger)
 	if err != nil {
 		return nil, failed("auth", err)
 	}
@@ -281,7 +282,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 // the same per-resource nil checks Shutdown uses.
 func (c *RuntimeCore) cleanupPartial() {
 	if c.HTTPSrv != nil {
-		shutdownHTTPServer(c.HTTPSrv, c.Logger)
+		runtime.ShutdownHTTPServer(c.HTTPSrv, c.Logger)
 	}
 	if c.LocalEngine != nil {
 		if err := c.LocalEngine.Close(); err != nil {
@@ -309,7 +310,7 @@ func (c *RuntimeCore) Shutdown(ctx context.Context) {
 	c.shutdownOnce.Do(func() {
 		if c.HTTPSrv != nil {
 			c.Logger.Info("shutdown: stop accepting new HTTP connections")
-			shutdownHTTPServer(c.HTTPSrv, c.Logger)
+			runtime.ShutdownHTTPServer(c.HTTPSrv, c.Logger)
 		}
 		if c.Manager != nil {
 			c.Logger.Info("shutdown: suspending sessions")
@@ -333,4 +334,32 @@ func (c *RuntimeCore) Shutdown(ctx context.Context) {
 		}
 		c.Logger.Info("shutdown: complete")
 	})
+}
+
+// bootHTTPConfig projects the HTTP + Hugr fields of BootstrapConfig
+// onto runtime.Config — the subset phase 2 (http_auth) reads. Full
+// projection (BootstrapConfig → runtime.Config) lands in step 29
+// (cmd/hugen/bootstrap.go); this stub keeps phase 2 wired during
+// the shim window.
+func bootHTTPConfig(boot *BootstrapConfig) runtime.Config {
+	mode := "local"
+	if boot.IsRemoteMode() {
+		mode = "remote"
+	}
+	return runtime.Config{
+		Mode: mode,
+		HTTP: runtime.HTTPConfig{
+			Port:    boot.Port,
+			BaseURI: boot.BaseURI,
+		},
+		Hugr: runtime.HugrConfig{
+			URL:         boot.Hugr.URL,
+			RedirectURI: boot.Hugr.RedirectURI,
+			AccessToken: boot.Hugr.AccessToken,
+			TokenURL:    boot.Hugr.TokenURL,
+			Issuer:      boot.Hugr.Issuer,
+			ClientID:    boot.Hugr.ClientID,
+			Timeout:     boot.Hugr.Timeout,
+		},
+	}
 }
