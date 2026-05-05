@@ -9,27 +9,29 @@ import (
 	"github.com/hugr-lab/hugen/pkg/config"
 )
 
-// ProviderBuilder turns a config.ToolProviderSpec into a live
-// ToolProvider. Different `type` values get different builders.
+// legacyProviderBuilder is the phase-3-era construction interface.
+// It turns a config.ToolProviderSpec into a live ToolProvider plus
+// a slice of teardown callbacks. Phase 4.1a replaces it with the
+// runtime-side ProviderBuilder (see builder.go) that consumes a
+// type-agnostic tool.Spec; this interface stays internal until the
+// drop in stage A.7.
 //
-// Built-in: `type: mcp` is handled by the default MCP builder
-// (see Init). Operators register additional builders at boot for
-// non-MCP runtime-managed kinds. Each builder owns its own
-// knowledge of listener URL, secrets, paths — pkg/tool does not
-// need to know.
+// Operators register additional builders at boot for non-MCP
+// runtime-managed kinds. Each builder owns its own knowledge of
+// listener URL, secrets, paths — pkg/tool does not need to know.
 //
 // The cleanups slice is run on RemoveProvider/Close. Use it to
 // revoke runtime-minted secrets, free temp dirs, etc.
-type ProviderBuilder interface {
+type legacyProviderBuilder interface {
 	Build(ctx context.Context, spec config.ToolProviderSpec) (provider ToolProvider, cleanups []func(), err error)
 }
 
-// ProviderBuilderFunc adapts a plain function into a
-// ProviderBuilder. Convenient for in-line registration.
-type ProviderBuilderFunc func(ctx context.Context, spec config.ToolProviderSpec) (ToolProvider, []func(), error)
+// legacyProviderBuilderFunc adapts a plain function into a
+// legacyProviderBuilder. Convenient for in-line registration.
+type legacyProviderBuilderFunc func(ctx context.Context, spec config.ToolProviderSpec) (ToolProvider, []func(), error)
 
-// Build implements ProviderBuilder.
-func (f ProviderBuilderFunc) Build(ctx context.Context, spec config.ToolProviderSpec) (ToolProvider, []func(), error) {
+// Build implements legacyProviderBuilder.
+func (f legacyProviderBuilderFunc) Build(ctx context.Context, spec config.ToolProviderSpec) (ToolProvider, []func(), error) {
 	return f(ctx, spec)
 }
 
@@ -94,10 +96,10 @@ func (m *ToolManager) Init(ctx context.Context) error {
 	return nil
 }
 
-// builderFor returns the ProviderBuilder registered for typeName.
-// The empty type and `mcp` both map to the built-in MCP builder.
-// nil indicates no builder registered.
-func (m *ToolManager) builderFor(typeName string) ProviderBuilder {
+// builderFor returns the legacyProviderBuilder registered for
+// typeName. The empty type and `mcp` both map to the built-in MCP
+// builder. nil indicates no builder registered.
+func (m *ToolManager) builderFor(typeName string) legacyProviderBuilder {
 	t := strings.ToLower(typeName)
 	if t == "" {
 		t = "mcp"

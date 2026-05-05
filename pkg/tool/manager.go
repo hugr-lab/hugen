@@ -48,7 +48,7 @@ type ToolManager struct {
 	workspaceRoot  string
 	connectTimeout time.Duration
 
-	builders map[string]ProviderBuilder
+	builders map[string]legacyProviderBuilder
 
 	mu               sync.RWMutex
 	providers        map[string]ToolProvider
@@ -184,22 +184,26 @@ func WithWorkspaceRoot(root string) ToolManagerOption {
 	}
 }
 
-// WithProviderBuilder registers a builder for a non-MCP provider
-// type. Init dispatches each tool_providers entry by `type` to its
-// builder; entries with `type: mcp` (or empty) use the built-in
-// MCP path. cmd/hugen registers `hugr-query`, `python-sandbox`
-// etc. — runtime-managed kinds that need access to listener URL,
-// agent token store, workspaces root, and similar facts pkg/tool
-// has no business knowing.
+// WithLegacyProviderBuilder registers a phase-3-era builder for a
+// non-MCP provider type. Init dispatches each tool_providers entry
+// by `type` to its builder; entries with `type: mcp` (or empty)
+// use the built-in MCP path. cmd/hugen registers `hugr-query`,
+// `python-sandbox` etc. — runtime-managed kinds that need access
+// to listener URL, agent token store, workspaces root, and similar
+// facts pkg/tool has no business knowing.
 //
 // A builder may return cleanup callbacks alongside the provider;
 // ToolManager runs them on RemoveProvider/Close. Use this for
 // runtime-minted secrets that must be revoked when the provider
 // goes away (e.g. agent_token bootstrap).
-func WithProviderBuilder(typeName string, builder ProviderBuilder) ToolManagerOption {
+//
+// Deprecated: phase 4.1a replaces this with the new
+// ProviderBuilder interface (see builder.go) consumed via
+// pkg/tool/providers. Removed once every caller has migrated.
+func WithLegacyProviderBuilder(typeName string, builder legacyProviderBuilder) ToolManagerOption {
 	return func(tm *ToolManager) {
 		if tm.builders == nil {
-			tm.builders = make(map[string]ProviderBuilder)
+			tm.builders = make(map[string]legacyProviderBuilder)
 		}
 		tm.builders[strings.ToLower(typeName)] = builder
 	}
