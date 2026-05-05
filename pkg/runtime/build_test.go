@@ -30,9 +30,9 @@ func TestConfig_Validate_OK(t *testing.T) {
 
 func TestConfig_Validate_Errors(t *testing.T) {
 	cases := []struct {
-		name  string
-		mod   func(*Config)
-		want  string
+		name string
+		mod  func(*Config)
+		want string
 	}{
 		{"nil-logger", func(c *Config) { c.Logger = nil }, "logger is nil"},
 		{"empty-state-dir", func(c *Config) { c.StateDir = "" }, "state dir is empty"},
@@ -57,27 +57,6 @@ func TestConfig_Validate_Errors(t *testing.T) {
 	}
 }
 
-func TestBuild_SkeletonReturnsCore(t *testing.T) {
-	core, err := Build(context.Background(), validConfig(t))
-	if err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	defer core.Shutdown(context.Background())
-	if core == nil {
-		t.Fatal("core is nil")
-	}
-	if core.Logger == nil {
-		t.Fatal("core.Logger not set")
-	}
-	if core.Cfg.Mode != "local" {
-		t.Errorf("Cfg not stored: %+v", core.Cfg)
-	}
-	if core.HTTPSrv == nil || core.Mux == nil || core.Auth == nil {
-		t.Errorf("phase 2 outputs missing: srv=%v mux=%v auth=%v",
-			core.HTTPSrv != nil, core.Mux != nil, core.Auth != nil)
-	}
-}
-
 func TestBuild_RejectsInvalidConfig(t *testing.T) {
 	_, err := Build(context.Background(), Config{})
 	if !errors.Is(err, ErrInvalidConfig) {
@@ -85,22 +64,30 @@ func TestBuild_RejectsInvalidConfig(t *testing.T) {
 	}
 }
 
-func TestCore_Shutdown_Idempotent(t *testing.T) {
-	core, err := Build(context.Background(), validConfig(t))
-	if err != nil {
-		t.Fatalf("build: %v", err)
+func TestBuild_WrapsPhaseError(t *testing.T) {
+	// Local mode + valid skeleton fields but no AgentConfigPath →
+	// phase 4 (storage) fails when BuildConfigService cannot find
+	// models.model. The wrapper should prefix "runtime: storage:".
+	cfg := validConfig(t)
+	_, err := Build(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected phase error, got nil")
 	}
+	if !strings.Contains(err.Error(), "runtime: storage:") {
+		t.Errorf("missing phase wrap in %v", err)
+	}
+}
+
+func TestCore_Shutdown_Idempotent(t *testing.T) {
+	core := &Core{Logger: discardLogger()}
 	calls := 0
 	core.addCleanup(func() { calls++ })
 
 	core.Shutdown(context.Background())
 	core.Shutdown(context.Background())
 
-	// First Shutdown drains the registered cleanups exactly once
-	// (HTTP server drain + the test counter); second Shutdown is a
-	// no-op via shutdownOnce.
 	if calls != 1 {
-		t.Errorf("test cleanup ran %d times, want 1", calls)
+		t.Errorf("cleanup ran %d times, want 1", calls)
 	}
 }
 

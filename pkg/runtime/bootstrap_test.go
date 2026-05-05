@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,18 +82,15 @@ func TestInstallBundledSkills_EmptyStateDir(t *testing.T) {
 	}
 }
 
-func TestPhaseBundledSkills_RunsViaBuild(t *testing.T) {
+func TestPhaseBundledSkills_Direct(t *testing.T) {
 	state := t.TempDir()
-	core, err := Build(context.Background(), Config{
-		Logger:   discardLogger(),
-		Mode:     "local",
-		StateDir: state,
-	})
-	if err != nil {
-		t.Fatalf("build: %v", err)
+	core := &Core{
+		Cfg:    Config{StateDir: state},
+		Logger: discardLogger(),
 	}
-	defer core.Shutdown(context.Background())
-
+	if err := phaseBundledSkills(core); err != nil {
+		t.Fatalf("phase: %v", err)
+	}
 	manifest := filepath.Join(state, "skills/system/_system/SKILL.md")
 	if _, err := os.Stat(manifest); err != nil {
 		t.Errorf("phase did not install bundled skill: %v", err)

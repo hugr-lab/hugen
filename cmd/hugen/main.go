@@ -24,11 +24,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hugr-lab/query-engine/types"
-
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/identity"
-	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 const (
@@ -94,31 +91,6 @@ func run(args []string, errOut io.Writer) int {
 	default:
 		return runConsole(ctx, core)
 	}
-}
-
-// chooseStore picks the querier the runtime store talks to. The
-// agent runs in exactly one of two modes:
-//
-//   - local mode (BootstrapConfig.IsLocalMode + LocalDBEnabled):
-//     localQ is the embedded DuckDB. All sessions, events, notes,
-//     and memory live inside the agent process.
-//   - remote mode: remoteQ is the upstream hugr GraphQL endpoint;
-//     localQ is nil. Sessions/memory/artifacts persist in the
-//     shared hub DB and the agent identifies itself by the bearer
-//     token its identity source supplies. The schema is the same —
-//     session.NewRuntimeStoreLocal is mode-agnostic; the "local"
-//     in its name refers to the Go-side facade, not the DB.
-//
-// Mixing the two queriers would split state across stores and is
-// not supported.
-func chooseStore(localQ, remoteQ types.Querier, embedderEnabled bool) session.RuntimeStore {
-	if localQ != nil {
-		return session.NewRuntimeStoreLocal(localQ, embedderEnabled)
-	}
-	if remoteQ != nil {
-		return session.NewRuntimeStoreLocal(remoteQ, embedderEnabled)
-	}
-	return nil
 }
 
 func newLogger(level string) *slog.Logger {

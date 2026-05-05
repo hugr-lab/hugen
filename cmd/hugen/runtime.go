@@ -128,7 +128,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	}
 	core.Identity = runtime.BuildIdentity(rtCfg, core.RemoteQuerier)
 
-	cfgSvc, err := buildConfigService(ctx, boot, core.Identity)
+	cfgSvc, err := runtime.BuildConfigService(ctx, core.Identity, boot.IsLocalMode())
 	if err != nil {
 		return nil, failed("config", err)
 	}
@@ -143,7 +143,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	modelsView := core.Config.Models()
 
 	if localView.LocalDBEnabled() {
-		eng, err := buildLocalEngine(ctx, localView, embedView, core.Identity, core.Logger)
+		eng, err := runtime.BuildLocalEngine(ctx, localView, embedView, core.Identity, core.Logger)
 		if err != nil {
 			return nil, failed("local_engine", err)
 		}
@@ -153,7 +153,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 
 	embed := embedView.EmbeddingConfig()
 	embedderEnabled := embed.Mode != "" && embed.Model != ""
-	store := chooseStore(core.LocalQuerier, core.RemoteQuerier, embedderEnabled)
+	store := runtime.ChooseStore(core.LocalQuerier, core.RemoteQuerier, embedderEnabled)
 	if store == nil {
 		return nil, failed("store", fmt.Errorf("no querier available (need local engine or remote hub)"))
 	}

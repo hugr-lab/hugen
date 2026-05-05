@@ -1,15 +1,11 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/hugr-lab/hugen/pkg/config"
-	"github.com/hugr-lab/hugen/pkg/identity"
 
 	"github.com/spf13/viper"
 )
@@ -199,25 +195,4 @@ func (c *BootstrapConfig) Info() string {
 		}
 	}
 	return w.String()
-}
-
-// buildConfigService loads the YAML config aggregate (carried via
-// identity.Agent.Config) and returns the phase-3 *config.StaticService.
-// Every domain consumer reads through narrow Views off this Service —
-// no other config aggregate lives in cmd/hugen. The runtime agent
-// identity stays a separate live dependency (identity.Source) — it
-// is not snapshotted here.
-func buildConfigService(ctx context.Context, boot *BootstrapConfig, src identity.Source) (*config.StaticService, error) {
-	agent, err := src.Agent(ctx)
-	if err != nil {
-		return nil, err
-	}
-	in, err := config.LoadStaticInput(agent.Config, boot.IsLocalMode())
-	if err != nil {
-		return nil, err
-	}
-	if in.Models.Model == "" {
-		return nil, fmt.Errorf("config: models.model is empty (set in config.yaml)")
-	}
-	return config.NewStaticService(in), nil
 }

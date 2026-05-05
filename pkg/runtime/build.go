@@ -37,9 +37,12 @@ func Build(ctx context.Context, cfg Config) (*Core, error) {
 	if err := phaseIdentity(ctx, core); err != nil {
 		return nil, failed("identity", err)
 	}
+	if err := phaseStorage(ctx, core); err != nil {
+		return nil, failed("storage", err)
+	}
 
-	// Remaining phases (storage → models → agent → skills_perms →
-	// tools → session_manager) land in steps 14-26.
+	// Remaining phases (models → agent → skills_perms → tools →
+	// session_manager) land in steps 15-26.
 
 	return core, nil
 }
