@@ -11,9 +11,11 @@ allowed-tools:
       - bash.write_file
       - bash.list_dir
       - bash.sed
-  - provider: system
+  - provider: session
     tools:
       - notepad_append
+  - provider: system
+    tools:
       - skill_load
       - skill_unload
       - skill_ref

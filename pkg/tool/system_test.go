@@ -27,8 +27,8 @@ func TestSystemProvider_NameAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(tools) != 12 {
-		t.Errorf("len(tools) = %d, want 12", len(tools))
+	if len(tools) != 11 {
+		t.Errorf("len(tools) = %d, want 11", len(tools))
 	}
 	for _, tt := range tools {
 		if tt.Provider != "system" {
@@ -40,50 +40,6 @@ func TestSystemProvider_NameAndList(t *testing.T) {
 		if !strings.HasPrefix(tt.Name, "system:") {
 			t.Errorf("Tool %s missing prefix", tt.Name)
 		}
-	}
-}
-
-func TestSystemProvider_NotepadAppend(t *testing.T) {
-	called := false
-	deps := SystemDeps{
-		Notepad: func(ctx context.Context, agentID, sessionID, authorID, text string) (string, error) {
-			called = true
-			if sessionID != "s1" {
-				t.Errorf("sessionID = %q, want s1", sessionID)
-			}
-			if agentID != "a1" {
-				t.Errorf("agentID = %q, want a1", agentID)
-			}
-			if text != "hello" {
-				t.Errorf("text = %q", text)
-			}
-			return "note-xyz", nil
-		},
-	}
-	deps.AgentID = "a1"
-	p := NewSystemProvider(deps)
-	ctx := perm.WithSession(context.Background(), perm.SessionContext{SessionID: "s1"})
-	out, err := p.Call(ctx, "notepad_append", json.RawMessage(`{"text":"hello"}`))
-	if err != nil {
-		t.Fatalf("Call: %v", err)
-	}
-	if !called {
-		t.Errorf("notepad func not invoked")
-	}
-	var got map[string]string
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got["id"] != "note-xyz" {
-		t.Errorf("id = %q", got["id"])
-	}
-}
-
-func TestSystemProvider_NotepadAppend_NotWired(t *testing.T) {
-	p := NewSystemProvider(SystemDeps{})
-	_, err := p.Call(context.Background(), "notepad_append", json.RawMessage(`{"text":"x"}`))
-	if !errors.Is(err, ErrSystemUnavailable) {
-		t.Errorf("err = %v, want ErrSystemUnavailable", err)
 	}
 }
 

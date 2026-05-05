@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
-	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/hugen/pkg/tool/providers"
@@ -108,7 +107,6 @@ func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillMa
 
 	sys := tool.NewSystemProvider(tool.SystemDeps{
 		AgentID:  core.Agent.ID(),
-		Notepad:  newNotepadFunc(core.Store),
 		Skills:   skills,
 		Policies: policies,
 		Perms:    perms,
@@ -198,13 +196,3 @@ func joinErrs(errs []error) error {
 	return fmt.Errorf("runtime_reload: %w", errors.Join(errs...))
 }
 
-// newNotepadFunc adapts session.Notepad to tool.NotepadFunc.
-// AgentID and SessionID are forwarded verbatim from the
-// IdentityFromContext-supplied values; the Notepad itself is
-// constructed per-call against the shared RuntimeStore.
-func newNotepadFunc(store session.RuntimeStore) tool.NotepadFunc {
-	return func(ctx context.Context, agentID, sessionID, authorID, text string) (string, error) {
-		np := session.NewNotepad(store, agentID, sessionID)
-		return np.Append(ctx, authorID, text)
-	}
-}

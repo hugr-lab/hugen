@@ -24,11 +24,6 @@ const (
 	systemSkillsPermObj = "hugen:tool:system" // grouped under one Tier-1 floor
 )
 
-// NotepadFunc appends text to the caller's notepad and returns
-// the new note id. SystemProvider supplies its own agentID (from
-// SystemDeps) and pulls sessionID from perm.SessionFromContext.
-type NotepadFunc func(ctx context.Context, agentID, sessionID, authorID, text string) (string, error)
-
 // MCPAddSpec carries the args of mcp_add_server. Caller wires it
 // through to the configured registrar; SystemProvider only
 // validates JSON shape.
@@ -44,13 +39,10 @@ type MCPAddSpec struct {
 // surfaces ErrSystemUnavailable on dispatch (Tier-1 may also strip
 // it from the catalogue).
 //
-// AgentID is the agent the provider belongs to; SystemProvider
-// passes it to NotepadFunc on every call without re-resolving the
-// identity per dispatch.
+// AgentID is the agent the provider belongs to; downstream
+// callbacks read it from SystemDeps once per dispatch.
 type SystemDeps struct {
 	AgentID string
-
-	Notepad NotepadFunc
 
 	Skills *skill.SkillManager
 
@@ -95,20 +87,6 @@ func (p *SystemProvider) Lifetime() Lifetime { return LifetimePerAgent }
 
 func (p *SystemProvider) List(ctx context.Context) ([]Tool, error) {
 	tools := []Tool{
-		{
-			Name:             "system:notepad_append",
-			Description:      "Append a note to the caller's session notepad.",
-			Provider:         systemProviderName,
-			PermissionObject: systemPermObject,
-			ArgSchema: json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "text": {"type": "string", "description": "Note body."},
-    "author_id": {"type": "string", "description": "Optional author tag; defaults to the calling identity."}
-  },
-  "required": ["text"]
-}`),
-		},
 		{
 			Name:             "system:skill_load",
 			Description:      "Load a skill (and transitive requires) into the caller's session. Use the catalogue from your system prompt to discover available skills.",
@@ -268,8 +246,6 @@ func (p *SystemProvider) List(ctx context.Context) ([]Tool, error) {
 
 func (p *SystemProvider) Call(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
 	switch name {
-	case "notepad_append":
-		return p.callNotepadAppend(ctx, args)
 	case "skill_load":
 		return p.callSkillLoad(ctx, args)
 	case "skill_unload":
@@ -302,25 +278,6 @@ func (p *SystemProvider) Subscribe(ctx context.Context) (<-chan ProviderEvent, e
 }
 
 func (p *SystemProvider) Close() error { return nil }
-
-func (p *SystemProvider) callNotepadAppend(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-	if p.deps.Notepad == nil {
-		return nil, ErrSystemUnavailable
-	}
-	var in struct {
-		Text     string `json:"text"`
-		AuthorID string `json:"author_id,omitempty"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
-		return nil, fmt.Errorf("%w: notepad_append: %v", ErrArgValidation, err)
-	}
-	sc, _ := perm.SessionFromContext(ctx)
-	id, err := p.deps.Notepad(ctx, p.deps.AgentID, sc.SessionID, in.AuthorID, in.Text)
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(map[string]string{"id": id})
-}
 
 func (p *SystemProvider) callSkillLoad(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	if p.deps.Skills == nil {
