@@ -67,6 +67,9 @@ type Core struct {
 	Tools     *tool.ToolManager
 	Policies  *policies.Policies
 
+	// Phase 9 (session_manager).
+	Manager *session.Manager
+
 	// cleanups stacks per-phase teardown closures in registration
 	// order. cleanupPartial (failure path) and Shutdown (success
 	// path) iterate it in reverse so resources unwind in the

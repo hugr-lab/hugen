@@ -52,8 +52,9 @@ func Build(ctx context.Context, cfg Config) (*Core, error) {
 	if err := phaseTools(ctx, core); err != nil {
 		return nil, failed("tools", err)
 	}
-
-	// Remaining phase (session_manager) lands in step 26.
+	if err := phaseSessionManager(ctx, core); err != nil {
+		return nil, failed("session_manager", err)
+	}
 
 	return core, nil
 }
