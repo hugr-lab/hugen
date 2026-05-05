@@ -461,8 +461,35 @@ func (m *Manifest) validate() error {
 		if g.Provider == "" {
 			return fmt.Errorf("allowed-tools[%d].provider is required", i)
 		}
+		if g.Provider == "system" {
+			for _, t := range g.Tools {
+				if migrated, ok := legacySystemRename[t]; ok {
+					return fmt.Errorf("allowed-tools[%d]: %q has moved off the legacy `system` provider — use `%s` instead (phase 4.1a §6.1 rename map)", i, "system:"+t, migrated)
+				}
+			}
+		}
 	}
 	return nil
+}
+
+// legacySystemRename maps every tool that lived on the phase-3
+// `system` provider to its phase-4.1a owner:tool name. The
+// validator surfaces a helpful error pointing manifest authors at
+// the new path when they reference an old name.
+var legacySystemRename = map[string]string{
+	"notepad_append":    "session:notepad_append",
+	"skill_load":        "session:skill_load",
+	"skill_unload":      "session:skill_unload",
+	"skill_ref":         "session:skill_ref",
+	"skill_files":       "session:skill_files",
+	"skill_publish":     "session:skill_publish",
+	"tool_catalog":      "session:tool_catalog",
+	"policy_save":       "policy:save",
+	"policy_revoke":     "policy:revoke",
+	"mcp_add_server":    "tool:provider_add",
+	"mcp_remove_server": "tool:provider_remove",
+	"mcp_reload_server": "runtime:reload (target=mcp)",
+	"runtime_reload":    "runtime:reload",
 }
 
 // extractHugen pulls metadata.hugen.* into a typed HugenMetadata
