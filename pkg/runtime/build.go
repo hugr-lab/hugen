@@ -34,9 +34,12 @@ func Build(ctx context.Context, cfg Config) (*Core, error) {
 	if err := phaseHTTPAuth(ctx, core); err != nil {
 		return nil, failed("http_auth", err)
 	}
+	if err := phaseIdentity(ctx, core); err != nil {
+		return nil, failed("identity", err)
+	}
 
-	// Remaining phases (identity → storage → models → agent →
-	// skills_perms → tools → session_manager) land in steps 13-26.
+	// Remaining phases (storage → models → agent → skills_perms →
+	// tools → session_manager) land in steps 14-26.
 
 	return core, nil
 }

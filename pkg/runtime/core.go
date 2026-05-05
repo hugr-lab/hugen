@@ -7,6 +7,9 @@ import (
 	"sync"
 
 	"github.com/hugr-lab/hugen/pkg/auth"
+	"github.com/hugr-lab/hugen/pkg/identity"
+
+	"github.com/hugr-lab/query-engine/client"
 )
 
 // Core aggregates every dependency a subcommand handler needs.
@@ -25,6 +28,10 @@ type Core struct {
 	HTTPSrv *stdhttp.Server
 	Mux     *stdhttp.ServeMux
 	Auth    *auth.Service
+
+	// Phase 3 (identity).
+	RemoteQuerier *client.Client
+	Identity      identity.Source
 
 	// cleanups stacks per-phase teardown closures in registration
 	// order. cleanupPartial (failure path) and Shutdown (success

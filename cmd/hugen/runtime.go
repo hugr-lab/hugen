@@ -109,7 +109,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 		return nil, fmt.Errorf("buildRuntimeCore: install bundled skills: %w", err)
 	}
 
-	rtCfg := bootHTTPConfig(boot)
+	rtCfg := bootRuntimeConfig(boot)
 	httpSrv, mux, err := runtime.StartHTTPServer(rtCfg.HTTP, core.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("buildRuntimeCore: auth http: %w", err)
@@ -124,9 +124,9 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	core.Auth = authSvc
 
 	if boot.Hugr.URL != "" && boot.IsRemoteMode() {
-		core.RemoteQuerier = connectRemote(boot, authSvc, core.Logger)
+		core.RemoteQuerier = runtime.ConnectRemote(rtCfg.Hugr, authSvc, core.Logger)
 	}
-	core.Identity = buildIdentity(boot, core.RemoteQuerier)
+	core.Identity = runtime.BuildIdentity(rtCfg, core.RemoteQuerier)
 
 	cfgSvc, err := buildConfigService(ctx, boot, core.Identity)
 	if err != nil {
@@ -336,18 +336,18 @@ func (c *RuntimeCore) Shutdown(ctx context.Context) {
 	})
 }
 
-// bootHTTPConfig projects the HTTP + Hugr fields of BootstrapConfig
-// onto runtime.Config — the subset phase 2 (http_auth) reads. Full
-// projection (BootstrapConfig → runtime.Config) lands in step 29
-// (cmd/hugen/bootstrap.go); this stub keeps phase 2 wired during
-// the shim window.
-func bootHTTPConfig(boot *BootstrapConfig) runtime.Config {
+// bootRuntimeConfig projects BootstrapConfig onto runtime.Config —
+// the subset phases 2-3 (and forward, as more phases extract) read.
+// Full projection lands in step 29 (cmd/hugen/bootstrap.go); this
+// stub keeps the shim window working.
+func bootRuntimeConfig(boot *BootstrapConfig) runtime.Config {
 	mode := "local"
 	if boot.IsRemoteMode() {
 		mode = "remote"
 	}
 	return runtime.Config{
-		Mode: mode,
+		Mode:            mode,
+		AgentConfigPath: boot.ConfigPath,
 		HTTP: runtime.HTTPConfig{
 			Port:    boot.Port,
 			BaseURI: boot.BaseURI,
