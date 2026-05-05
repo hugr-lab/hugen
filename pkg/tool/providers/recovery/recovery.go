@@ -104,10 +104,6 @@ func (p *Provider) Call(ctx context.Context, name string, args json.RawMessage) 
 	})
 }
 
-// Inner exposes the wrapped ToolProvider — convenient for tests
-// and integrations that need to introspect past the decorator.
-func (p *Provider) Inner() tool.ToolProvider { return p.inner }
-
 // tryWithRecovery: try inner once; on error, if inner is
 // Recoverable, walk the backoff calling TryReconnect + retry.
 // Returns the last error after exhaustion.

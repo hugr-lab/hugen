@@ -187,7 +187,4 @@ func TestProvider_PassthroughMethods(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Errorf("Close: %v", err)
 	}
-	if p.Inner() != inner {
-		t.Errorf("Inner did not return wrapped provider")
-	}
 }
