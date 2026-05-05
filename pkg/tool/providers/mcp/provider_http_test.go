@@ -1,4 +1,4 @@
-package tool
+package mcp
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpsrv "github.com/mark3labs/mcp-go/server"
 )
@@ -67,7 +68,7 @@ func newAuthedHTTPMCP(t *testing.T, wantToken string, rejectFirst bool) (*httpte
 
 // fixedTokenRoundTripper is a tiny http.RoundTripper that injects a
 // static Bearer token. Used in tests to exercise the
-// MCPProviderSpec.RoundTripper field without pulling in pkg/auth.
+// Spec.RoundTripper field without pulling in pkg/auth.
 type fixedTokenRoundTripper struct {
 	token string
 	base  http.RoundTripper
@@ -89,16 +90,16 @@ func TestMCPProvider_HTTP_BearerInjection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	prov, err := NewMCPProvider(ctx, MCPProviderSpec{
+	prov, err := NewWithSpec(ctx, Spec{
 		Name:         "hugr-main",
 		Transport:    TransportStreamableHTTP,
 		Endpoint:     srv.URL,
 		RoundTripper: &fixedTokenRoundTripper{token: "ok-token"},
-		Lifetime:     LifetimePerAgent,
+		Lifetime:     tool.LifetimePerAgent,
 		PermObject:   "hugen:tool:hugr-main",
 	}, slog.New(slog.DiscardHandler))
 	if err != nil {
-		t.Fatalf("NewMCPProvider: %v", err)
+		t.Fatalf("NewWithSpec: %v", err)
 	}
 	defer prov.Close()
 
@@ -133,7 +134,7 @@ func TestMCPProvider_HTTP_BearerInjection(t *testing.T) {
 }
 
 func TestMCPProvider_HTTP_MissingEndpoint(t *testing.T) {
-	_, err := NewMCPProvider(context.Background(), MCPProviderSpec{
+	_, err := NewWithSpec(context.Background(), Spec{
 		Name:      "broken",
 		Transport: TransportStreamableHTTP,
 	}, slog.New(slog.DiscardHandler))
@@ -148,7 +149,7 @@ func TestMCPProvider_HTTP_BadBearerFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := NewMCPProvider(ctx, MCPProviderSpec{
+	_, err := NewWithSpec(ctx, Spec{
 		Name:         "hugr-main",
 		Transport:    TransportStreamableHTTP,
 		Endpoint:     srv.URL,
@@ -183,14 +184,14 @@ func TestMCPProvider_HTTP_StaticHeaders(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	prov, err := NewMCPProvider(ctx, MCPProviderSpec{
+	prov, err := NewWithSpec(ctx, Spec{
 		Name:      "h",
 		Transport: TransportStreamableHTTP,
 		Endpoint:  srv.URL,
 		Headers:   map[string]string{"X-Api-Key": "secret-123"},
 	}, slog.New(slog.DiscardHandler))
 	if err != nil {
-		t.Fatalf("NewMCPProvider: %v", err)
+		t.Fatalf("NewWithSpec: %v", err)
 	}
 	defer prov.Close()
 
@@ -223,14 +224,14 @@ func TestMCPProvider_HTTP_DynamicTokenViaRoundTripper(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	prov, err := NewMCPProvider(ctx, MCPProviderSpec{
+	prov, err := NewWithSpec(ctx, Spec{
 		Name:         "hugr-main",
 		Transport:    TransportStreamableHTTP,
 		Endpoint:     srv.URL,
 		RoundTripper: rt,
 	}, slog.New(slog.DiscardHandler))
 	if err != nil {
-		t.Fatalf("NewMCPProvider: %v", err)
+		t.Fatalf("NewWithSpec: %v", err)
 	}
 	defer prov.Close()
 

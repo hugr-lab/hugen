@@ -54,7 +54,7 @@ type Reconnector struct {
 
 // reconnectTarget is the per-provider state held by the loop.
 type reconnectTarget struct {
-	provider *MCPProvider
+	provider MCPLifecycle
 	backoff  time.Duration
 	nextTry  time.Time
 	attempts int
@@ -153,7 +153,7 @@ func (r *Reconnector) Stop() {
 // attempt. Idempotent — re-Track of an already-tracked provider
 // keeps its existing backoff/attempt state. Called by the provider's
 // own stale-hook.
-func (r *Reconnector) Track(p *MCPProvider) {
+func (r *Reconnector) Track(p MCPLifecycle) {
 	if p == nil {
 		return
 	}

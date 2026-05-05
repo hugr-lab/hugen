@@ -3,7 +3,6 @@ package tool
 import (
 	"context"
 	"errors"
-	"io"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -212,55 +211,11 @@ func TestReconnectorSkipsClosedProvider(t *testing.T) {
 	}
 }
 
-// TestMCPProviderMaybeReconnectMarksStale exercises the inline EOF
-// path: when connect() fails after EOF, the provider must transition
-// to stale, fire its hook, and report ErrProviderRemoved on
-// subsequent currentClient calls.
-func TestMCPProviderMaybeReconnectMarksStale(t *testing.T) {
-	hookFires := atomic.Int32{}
-	p := &MCPProvider{
-		spec: MCPProviderSpec{
-			Name:      "broken",
-			Transport: "unsupported", // makes connect() fail deterministically
-		},
-		log: discardLogger(),
-	}
-	p.SetStaleHook(func(*MCPProvider) { hookFires.Add(1) })
-
-	err := p.maybeReconnect(context.Background(), io.EOF)
-	if err == nil {
-		t.Fatal("maybeReconnect returned nil after failed reconnect")
-	}
-	if !p.IsStale() {
-		t.Errorf("provider not marked stale after failed reconnect")
-	}
-	if got := hookFires.Load(); got != 1 {
-		t.Errorf("stale hook fire count = %d, want 1", got)
-	}
-	// Stale providers refuse calls until Reconnect succeeds.
-	_, err = p.currentClient()
-	if !errors.Is(err, ErrProviderRemoved) {
-		t.Errorf("currentClient on stale provider err = %v, want ErrProviderRemoved", err)
-	}
-}
-
-// TestMCPProviderMarkStaleIdempotent: a second markStale call on an
-// already-stale provider must NOT re-fire the hook (single-track per
-// stale transition).
-func TestMCPProviderMarkStaleIdempotent(t *testing.T) {
-	hookFires := atomic.Int32{}
-	p := &MCPProvider{
-		spec: MCPProviderSpec{Name: "p", Transport: TransportStdio},
-		log:  discardLogger(),
-	}
-	p.SetStaleHook(func(*MCPProvider) { hookFires.Add(1) })
-
-	p.markStale()
-	p.markStale()
-	if got := hookFires.Load(); got != 1 {
-		t.Errorf("hook fired %d times across two markStale calls, want 1", got)
-	}
-}
+// Phase 4.1c moved the *MCPProvider-specific tests (markStale,
+// maybeReconnect inline path) into pkg/tool/providers/mcp where the
+// concrete type now lives. The interface-level loop semantics
+// covered above stay here because they exercise Reconnector
+// directly via fakeReconnectable.
 
 // ----------------------------------------------------------------
 // test-only adapter for fakeReconnectable

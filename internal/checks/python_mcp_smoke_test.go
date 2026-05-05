@@ -21,6 +21,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/tool"
+	mcpprov "github.com/hugr-lab/hugen/pkg/tool/providers/mcp"
 )
 
 func TestPythonMCPSmoke(t *testing.T) {
@@ -76,9 +77,9 @@ func TestPythonMCPSmoke(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	prov, err := tool.NewMCPProvider(ctx, tool.MCPProviderSpec{
+	prov, err := mcpprov.NewWithSpec(ctx, mcpprov.Spec{
 		Name:      "python-mcp",
-		Transport: tool.TransportStdio,
+		Transport: mcpprov.TransportStdio,
 		Command:   bin,
 		Args:      []string{"--template", templateDir},
 		Env: map[string]string{
@@ -90,7 +91,7 @@ func TestPythonMCPSmoke(t *testing.T) {
 		PermObject: "hugen:tool:python-mcp",
 	}, slog.New(slog.DiscardHandler))
 	if err != nil {
-		t.Fatalf("NewMCPProvider: %v", err)
+		t.Fatalf("NewWithSpec: %v", err)
 	}
 	t.Cleanup(func() { _ = prov.Close() })
 

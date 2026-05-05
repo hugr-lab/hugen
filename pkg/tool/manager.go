@@ -281,10 +281,11 @@ func (m *ToolManager) Close() error {
 // AddProvider registers a ToolProvider. Constitution exception
 // for plug-in registries (II.1).
 //
-// MCPProviders get a stale-hook wired to the manager's Reconnector
-// so a mid-flight EOF that fails an inline reconnect surfaces as a
-// background retry instead of silently leaving the provider dead
-// until process restart.
+// Providers that implement Reconnectable (today: every
+// providers/mcp.Provider) get a stale-hook wired to the manager's
+// Reconnector so a mid-flight EOF that fails an inline reconnect
+// surfaces as a background retry instead of silently leaving the
+// provider dead until process restart.
 func (m *ToolManager) AddProvider(p ToolProvider) error {
 	if p == nil {
 		return errors.New("tool: nil provider")
@@ -304,9 +305,9 @@ func (m *ToolManager) AddProvider(p ToolProvider) error {
 	m.invalidateAllSnapshots()
 	m.mu.Unlock()
 
-	if mp, ok := p.(*MCPProvider); ok {
+	if rp, ok := p.(Reconnectable); ok {
 		if rec := m.Reconnector(); rec != nil {
-			mp.SetStaleHook(rec.Track)
+			rp.SetStaleHook(rec.Track)
 		}
 	}
 	return nil
@@ -345,17 +346,6 @@ func (m *ToolManager) RemoveProvider(ctx context.Context, name string) error {
 		return fmt.Errorf("tool: close %s: %w", name, err)
 	}
 	return nil
-}
-
-// runCleanups runs a slice of teardown callbacks. Kept here as a
-// helper because Init still calls it on the failure path before
-// the provider is registered.
-func runCleanups(fns []func()) {
-	for _, fn := range fns {
-		if fn != nil {
-			fn()
-		}
-	}
 }
 
 // Providers returns the names of every registered provider.

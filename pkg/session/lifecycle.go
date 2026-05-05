@@ -11,6 +11,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
+	mcpprov "github.com/hugr-lab/hugen/pkg/tool/providers/mcp"
 )
 
 // Lifecycle is the contract Manager calls on Open and Close. The
@@ -179,7 +180,7 @@ func (r *Resources) Acquire(ctx context.Context, sessionID string) error {
 		env["SESSION_DIR"] = sessDir
 		env["WORKSPACES_ROOT"] = root
 
-		spec := tool.MCPProviderSpec{
+		spec := mcpprov.Spec{
 			Name:        cfg.Name,
 			Command:     cfg.Command,
 			Args:        cfg.Args,
@@ -188,9 +189,9 @@ func (r *Resources) Acquire(ctx context.Context, sessionID string) error {
 			Lifetime:    tool.LifetimePerSession,
 			PermObject:  "hugen:tool:" + cfg.Name,
 			Description: "session-scoped " + cfg.Name,
-			Transport:   tool.TransportStdio,
+			Transport:   mcpprov.TransportStdio,
 		}
-		prov, err := tool.NewMCPProvider(ctx, spec, r.deps.Logger)
+		prov, err := mcpprov.NewWithSpec(ctx, spec, r.deps.Logger)
 		if err != nil {
 			rollback()
 			return fmt.Errorf("session %s: provider %q spawn: %w", sessionID, cfg.Name, err)

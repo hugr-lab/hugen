@@ -1,15 +1,21 @@
 // Package mcp implements the MCP-protocol ToolProvider.
 //
-// Phase 4.1a stage A step 3 introduces this subpackage as the
-// new home for MCP-aware provider construction; subsequent
-// stages migrate callers off the legacy pkg/tool.MCPProvider /
-// tool.NewMCPProvider entry points and finally relocate the
-// implementation here. During the interim the package wraps
-// the existing *tool.MCPProvider — its onClose slice owns
-// revoke callbacks (replacing the manager-side cleanups map),
-// and Inner() exposes the underlying provider so external
-// integration (stale-hook wiring) can reach it.
+// One Provider struct owns the mark3labs/mcp-go client and
+// implements both tool.ToolProvider and tool.MCPLifecycle so
+// ToolManager can dispatch tool calls and Reconnector can drive
+// background recovery. Phase 4.1c retired the Inner-wrapper
+// pattern that previously wrapped a legacy pkg/tool.MCPProvider —
+// the implementation now lives natively here.
 //
-// Imports: pkg/auth, pkg/config, pkg/tool. Does NOT import
-// sibling packages under pkg/tool/providers.
+// Two construction entry points coexist:
+//
+//   - New(ctx, tool.Spec, authSvc, workspaceRoot, log) — runtime
+//     entry consumed by providers.Builder. Folds auth injection
+//     (HTTP RoundTripper or stdio bootstrap mint) and stdio
+//     workspace-root injection in via the unexported buildSpec.
+//   - NewWithSpec(ctx, Spec, log) — direct entry for tests and
+//     pkg/session.Resources.Acquire (per-session bash-mcp etc.).
+//
+// Imports: pkg/auth, pkg/auth/perm, pkg/config, pkg/tool,
+// mark3labs/mcp-go.
 package mcp

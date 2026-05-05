@@ -2,102 +2,137 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
-// Provider is the MCP ToolProvider as exposed by the new
-// pkg/tool.Spec-driven API. During phase 4.1a stage A it wraps
-// the existing *tool.MCPProvider; the actual MCP wire logic is
-// relocated into this subpackage in a later stage. The
-// observable contract — Name, Lifetime, List, Call, Subscribe,
-// Close — matches tool.ToolProvider.
-//
-// Lifecycle:
-//   - New constructs the provider, opens the MCP transport, and
-//     records any teardown callbacks the construction returned
-//     (today: stdio-auth revoke for spec.Auth-bound providers).
-//   - Close drops the underlying client and runs every onClose
-//     callback. Idempotent.
-//
-// onClose ownership replaces the phase-3 ToolManager.cleanups
-// map: each provider stores its own teardown so the manager
-// surface stays free of side state. Future steps remove the
-// manager-level map; for now both paths coexist.
-type Provider struct {
-	inner   *tool.MCPProvider
-	onClose []func()
-}
-
-// New constructs a Provider from a runtime-side tool.Spec. The
-// auth.Service handles spec.Auth (HTTP RoundTripper or stdio
-// bootstrap mint); workspaceRoot pins the WORKSPACES_ROOT env
-// stdio children land under. log captures connection-level
-// events; pass slog.New(slog.DiscardHandler) for a silent build.
+// New builds a Provider from a runtime-side tool.Spec — the entry
+// point providers.Builder dispatches to. The auth.Service handles
+// spec.Auth (HTTP RoundTripper or stdio bootstrap mint);
+// workspaceRoot pins the WORKSPACES_ROOT env stdio children land
+// under. log captures connection-level events; pass
+// slog.New(slog.DiscardHandler) for a silent build.
 //
 // New does NOT register the provider with any ToolManager — the
 // caller decides where it lives (root or per-session child).
+//
+// Tests that build the wire-level Spec directly use NewWithSpec.
 func New(ctx context.Context, spec tool.Spec, authSvc *auth.Service, workspaceRoot string, log *slog.Logger) (*Provider, error) {
 	cfgSpec := toConfigSpec(spec)
-	legacySpec, cleanups, err := tool.BuildMCPProviderSpec(cfgSpec, authSvc, workspaceRoot)
+	wireSpec, cleanups, err := buildSpec(cfgSpec, authSvc, workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
 	if spec.Cwd != "" {
-		legacySpec.Cwd = spec.Cwd
+		wireSpec.Cwd = spec.Cwd
 	}
-	inner, err := tool.NewMCPProvider(ctx, legacySpec, log)
+	prov, err := NewWithSpec(ctx, wireSpec, log)
 	if err != nil {
 		runCleanups(cleanups)
 		return nil, err
 	}
-	return &Provider{inner: inner, onClose: cleanups}, nil
+	prov.SetOnClose(cleanups)
+	return prov, nil
 }
 
-// Name reports the provider short name (matches the prefix of
-// every Tool.Name it exposes).
-func (p *Provider) Name() string { return p.inner.Name() }
+// buildSpec turns a config.ToolProviderSpec (operator-authored
+// YAML) into the wire-level Spec consumed by NewWithSpec. The
+// `auth:` field on the spec drives credential injection through
+// one mechanism and two transports:
+//
+//   - HTTP/SSE: the auth.Service issues a bearer-injecting
+//     RoundTripper via auth.Transport(authSvc.TokenStore(name), ...).
+//   - stdio: the auth.Service mints a per-spawn StdioAuth — a
+//     loopback bootstrap token + token URL — and the env keys it
+//     contributes (HUGR_TOKEN_URL, HUGR_ACCESS_TOKEN) are merged
+//     into the spawn env. The returned cleanups slice carries the
+//     RevokeFunc so RemoveProvider/Close drops the spawn from the
+//     loopback store.
+//
+// workspaceRoot is the runtime-managed parent directory every
+// stdio child must write under — when non-empty, the spec's env
+// gets a WORKSPACES_ROOT entry pointing at it, overriding any
+// operator-supplied value. Empty string disables injection
+// (tests; deployments without session.Workspace).
+func buildSpec(spec config.ToolProviderSpec, authSvc *auth.Service, workspaceRoot string) (Spec, []func(), error) {
+	out := Spec{
+		Name:       spec.Name,
+		Lifetime:   parseLifetime(spec.Lifetime, isHTTPTransport(spec.Transport)),
+		PermObject: "hugen:tool:" + spec.Name,
+	}
 
-// Lifetime tags the provider as per_agent / per_session / external.
-func (p *Provider) Lifetime() tool.Lifetime { return p.inner.Lifetime() }
+	if isHTTPTransport(spec.Transport) {
+		if spec.Endpoint == "" {
+			return out, nil, fmt.Errorf("missing endpoint for transport %q", spec.Transport)
+		}
+		switch strings.ToLower(spec.Transport) {
+		case "http", "streamable-http":
+			out.Transport = TransportStreamableHTTP
+		case "sse":
+			out.Transport = TransportSSE
+		}
+		out.Endpoint = spec.Endpoint
+		out.Headers = spec.Headers
+		if spec.Auth != "" {
+			if authSvc == nil {
+				return out, nil, fmt.Errorf("auth %q requested but no auth.Service supplied", spec.Auth)
+			}
+			ts, ok := authSvc.TokenStore(spec.Auth)
+			if !ok {
+				return out, nil, fmt.Errorf("auth source %q not registered", spec.Auth)
+			}
+			out.RoundTripper = auth.Transport(ts, nil)
+		}
+		return out, nil, nil
+	}
 
-// List returns the provider's current tool catalogue.
-func (p *Provider) List(ctx context.Context) ([]tool.Tool, error) { return p.inner.List(ctx) }
+	// stdio per_agent (e.g. hugr-query, python-mcp): inherits the
+	// existing spawn shape used by bash-mcp. The runtime injects
+	// WORKSPACES_ROOT here so per_agent children land in the same
+	// on-disk tree as per_session bash-mcp; spec.Auth flips on the
+	// loopback bootstrap injection.
+	out.Transport = TransportStdio
+	out.Command = spec.Command
+	out.Args = spec.Args
+	if spec.Command == "" {
+		return out, nil, fmt.Errorf("stdio provider missing command")
+	}
+	merged := make(map[string]string, len(spec.Env)+3)
+	for k, v := range spec.Env {
+		merged[k] = v
+	}
+	if workspaceRoot != "" {
+		merged["WORKSPACES_ROOT"] = workspaceRoot
+	}
 
-// Call dispatches a single tool call; args MUST be the substituted
-// payload returned by tool.ToolManager.Resolve.
-func (p *Provider) Call(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
-	return p.inner.Call(ctx, name, args)
+	if spec.Auth == "" {
+		out.Env = merged
+		return out, nil, nil
+	}
+	if authSvc == nil {
+		return out, nil, fmt.Errorf("auth %q requested but no auth.Service supplied", spec.Auth)
+	}
+	sa, err := authSvc.NewStdioAuth(context.Background(), spec.Auth)
+	if err != nil {
+		return out, nil, fmt.Errorf("auth %q: %w", spec.Auth, err)
+	}
+	for k, v := range sa.Env() {
+		merged[k] = v
+	}
+	out.Env = merged
+	return out, []func(){sa.RevokeFunc}, nil
 }
 
-// Subscribe streams provider events (tool-list changes, health,
-// terminations). Returns nil when the underlying MCP client has
-// no event stream.
-func (p *Provider) Subscribe(ctx context.Context) (<-chan tool.ProviderEvent, error) {
-	return p.inner.Subscribe(ctx)
-}
-
-// Close drops the underlying MCP client and runs every onClose
-// callback (revoke minted stdio-auth, etc.). Idempotent.
-func (p *Provider) Close() error {
-	closeErr := p.inner.Close()
-	runCleanups(p.onClose)
-	p.onClose = nil
-	return closeErr
-}
-
-// Inner returns the wrapped *tool.MCPProvider so external code
-// can wire integration that still depends on the legacy type
-// (today: ToolManager.AddProvider stale-hook setup). The shortcut
-// retires once the implementation lives natively in this
-// subpackage and the public surface no longer references the
-// legacy provider.
-func (p *Provider) Inner() *tool.MCPProvider { return p.inner }
-
+// toConfigSpec projects a runtime-side tool.Spec back into the
+// operator-shaped config.ToolProviderSpec — the input shape
+// buildSpec consumes. Pure field-by-field copy; pinned by
+// TestToConfigSpec_FieldByField so future refactors can't silently
+// drop a field.
 func toConfigSpec(spec tool.Spec) config.ToolProviderSpec {
 	return config.ToolProviderSpec{
 		Name:      spec.Name,
@@ -111,6 +146,34 @@ func toConfigSpec(spec tool.Spec) config.ToolProviderSpec {
 		Headers:   spec.Headers,
 		Auth:      spec.Auth,
 	}
+}
+
+// isHTTPTransport reports whether the transport label denotes an
+// HTTP-family wire protocol. Mirrors tool.IsHTTPTransport but
+// kept package-private here so the projection stays self-contained.
+func isHTTPTransport(t string) bool {
+	switch strings.ToLower(t) {
+	case "http", "streamable-http", "sse":
+		return true
+	default:
+		return false
+	}
+}
+
+// parseLifetime applies the default rule: HTTP/SSE → per_agent
+// (one connection for the whole process); stdio → per_session
+// (the bash-mcp pattern). Explicit cfg.Lifetime always wins.
+func parseLifetime(s string, httpDefault bool) tool.Lifetime {
+	switch strings.ToLower(s) {
+	case "per_session":
+		return tool.LifetimePerSession
+	case "per_agent":
+		return tool.LifetimePerAgent
+	}
+	if httpDefault {
+		return tool.LifetimePerAgent
+	}
+	return tool.LifetimePerSession
 }
 
 func runCleanups(fns []func()) {

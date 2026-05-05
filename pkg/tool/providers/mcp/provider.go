@@ -1,4 +1,4 @@
-package tool
+package mcp
 
 import (
 	"context"
@@ -14,28 +14,34 @@ import (
 	"sync"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
+	"github.com/hugr-lab/hugen/pkg/tool"
 	mcpcli "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
-// MCPTransport selects the wire protocol an MCPProvider talks. Empty
-// is treated as TransportStdio for back-compat.
-type MCPTransport string
+// Transport selects the wire protocol a Provider talks. Empty is
+// treated as TransportStdio for back-compat.
+type Transport string
 
 const (
-	TransportStdio          MCPTransport = "stdio"
-	TransportStreamableHTTP MCPTransport = "http"
-	TransportSSE            MCPTransport = "sse"
+	TransportStdio          Transport = "stdio"
+	TransportStreamableHTTP Transport = "http"
+	TransportSSE            Transport = "sse"
 )
 
-// MCPProviderSpec describes how to reach an MCP server. Stdio servers
-// are spawned as subprocesses (Command/Args/Env/Cwd); http/sse servers
-// are connected over HTTP at Endpoint with optional auth applied via a
+// Spec is the wire-level provider description. Stdio servers are
+// spawned as subprocesses (Command/Args/Env/Cwd); http/sse servers
+// connect over HTTP at Endpoint with optional auth applied via a
 // shared http.Client RoundTripper.
-type MCPProviderSpec struct {
+//
+// Spec is the post-projection shape — runtime callers usually start
+// from tool.Spec and let New() fill the missing wire-level fields
+// (RoundTripper, env additions, etc.). Tests construct Spec
+// directly via NewWithSpec.
+type Spec struct {
 	Name        string            // provider short name (e.g. "bash-mcp", "hugr-main")
-	Transport   MCPTransport      // "" → stdio (default); "http" → streamable HTTP; "sse" → SSE
+	Transport   Transport         // "" → stdio (default); "http" → streamable HTTP; "sse" → SSE
 	Command     string            // stdio: executable path
 	Args        []string          // stdio: command args
 	Env         map[string]string // stdio: child-process env additions
@@ -44,31 +50,32 @@ type MCPProviderSpec struct {
 	HTTPClient  *http.Client      // http/sse: optional pre-built client (wins over RoundTripper)
 	RoundTripper http.RoundTripper // http/sse: wraps http.DefaultTransport (e.g. auth.Transport(store, base))
 	Headers     map[string]string // http/sse: static headers (e.g. X-API-Key); injected on every request
-	Lifetime    Lifetime          // honoured for catalogue; spawning/connecting is up to the caller
+	Lifetime    tool.Lifetime     // honoured for catalogue; spawning/connecting is up to the caller
 	PermObject  string            // shared permission_object for every tool ("hugen:tool:bash-mcp")
 	Description string            // optional, surfaced as provider description
 }
 
-// MCPProvider wraps mark3labs/mcp-go's stdio Client and conforms to
-// ToolProvider so ToolManager can route calls through it. One
-// instance per registered MCP server.
+// Provider speaks MCP through mark3labs/mcp-go's Client and
+// satisfies tool.ToolProvider so ToolManager can route calls
+// through it. One instance per registered MCP server.
 //
 // Stale-state contract (phase-4 US7):
 //
-//   - "stale" means the underlying client is gone (EOF / closed pipe
-//     / failed reconnect) but the provider object is still alive and
-//     registered in ToolManager. Calls return ErrProviderRemoved
-//     until a successful Reconnect clears the flag.
+//   - "stale" means the underlying client is gone (EOF / closed
+//     pipe / failed reconnect) but the provider object is still
+//     alive and registered in ToolManager. Calls return
+//     tool.ErrProviderRemoved until a successful Reconnect clears
+//     the flag.
 //   - The transition stale=true is announced via a registered
-//     stale-hook (see SetStaleHook) so the Reconnector can pick the
-//     provider up. Without a hook the provider just sits stale,
-//     reconnect-able only by an inline maybeReconnect on the next
-//     tool call.
+//     stale-hook (see SetStaleHook) so the Reconnector can pick
+//     the provider up. Without a hook the provider just sits
+//     stale, reconnect-able only by an inline maybeReconnect on
+//     the next tool call.
 //   - Reconnect() is the public entry point the Reconnector loop
 //     calls every backoff tick. It is also called inline by
 //     maybeReconnect on EOF — the same primitive serves both paths.
-type MCPProvider struct {
-	spec MCPProviderSpec
+type Provider struct {
+	spec Spec
 	log  *slog.Logger
 
 	mu     sync.Mutex
@@ -76,18 +83,18 @@ type MCPProvider struct {
 	closed bool
 	// stale is set when the client is gone but the provider object
 	// is still registered. While stale is true, every call returns
-	// ErrProviderRemoved until Reconnect succeeds.
+	// tool.ErrProviderRemoved until Reconnect succeeds.
 	stale     bool
-	staleHook func(*MCPProvider) // optional; called once on each healthy → stale transition
+	staleHook func(tool.MCPLifecycle) // optional; called once on each healthy → stale transition
 
 	subsMu sync.Mutex
-	subs   []chan ProviderEvent
+	subs   []chan tool.ProviderEvent
 
 	// onClose holds teardown callbacks (revoke a minted stdio-auth
 	// bootstrap, drop a temp dir, etc.) the provider runs on Close.
-	// Phase 4.1a stage A step 7a moved this responsibility off the
-	// Manager (cleanups map) onto the provider so the registry surface
-	// stays free of side state.
+	// Phase 4.1c folded the legacy ToolManager.cleanups map into
+	// each provider so the registry surface stays free of side
+	// state.
 	onClose []func()
 }
 
@@ -95,12 +102,7 @@ type MCPProvider struct {
 // Idempotent and additive — subsequent calls append. Callers are
 // responsible for not registering nil functions; nils are skipped
 // at run time but waste a slot.
-//
-// Used by the Init path to attach the cleanups slice the legacy
-// builder returned (today: stdio-auth revoke). The new
-// pkg/tool/providers/mcp.Provider owns its own onClose; this
-// setter retires when the wrapper goes away.
-func (p *MCPProvider) SetOnClose(fns []func()) {
+func (p *Provider) SetOnClose(fns []func()) {
 	if len(fns) == 0 {
 		return
 	}
@@ -109,49 +111,50 @@ func (p *MCPProvider) SetOnClose(fns []func()) {
 	p.mu.Unlock()
 }
 
-// NewMCPProvider spawns the MCP server, runs the protocol handshake,
-// and registers tools/list_changed notifier. Caller is responsible
-// for calling Close on shutdown.
-func NewMCPProvider(ctx context.Context, spec MCPProviderSpec, log *slog.Logger) (*MCPProvider, error) {
+// NewWithSpec spawns the MCP server, runs the protocol handshake,
+// and registers the tools/list_changed notifier. Caller is
+// responsible for calling Close on shutdown. Tests use this entry
+// point directly; runtime callers go through New(tool.Spec).
+func NewWithSpec(ctx context.Context, spec Spec, log *slog.Logger) (*Provider, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 	if spec.Name == "" {
-		return nil, errors.New("tool: mcp spec missing name")
+		return nil, errors.New("mcp: spec missing name")
 	}
 	switch spec.Transport {
 	case "", TransportStdio:
 		spec.Transport = TransportStdio
 		if spec.Command == "" {
-			return nil, errors.New("tool: stdio mcp spec missing command")
+			return nil, errors.New("mcp: stdio spec missing command")
 		}
 	case TransportStreamableHTTP, TransportSSE:
 		if spec.Endpoint == "" {
-			return nil, fmt.Errorf("tool: %s mcp spec missing endpoint", spec.Transport)
+			return nil, fmt.Errorf("mcp: %s spec missing endpoint", spec.Transport)
 		}
 	default:
-		return nil, fmt.Errorf("tool: unsupported mcp transport %q (want stdio|http|sse)", spec.Transport)
+		return nil, fmt.Errorf("mcp: unsupported transport %q (want stdio|http|sse)", spec.Transport)
 	}
-	p := &MCPProvider{spec: spec, log: log}
+	p := &Provider{spec: spec, log: log}
 	if err := p.connect(ctx); err != nil {
 		return nil, err
 	}
 	return p, nil
 }
 
-// newMCPProviderWithClient is the test-only entry point that
-// adopts an externally-constructed mcp-go Client (typically the
-// in-process variant). It registers the tools/list_changed
-// handler and runs Initialize, mirroring what NewMCPProvider does
-// after spawning the stdio subprocess.
-func newMCPProviderWithClient(ctx context.Context, spec MCPProviderSpec, cli *mcpcli.Client, log *slog.Logger) (*MCPProvider, error) {
+// newWithClient is the test-only entry point that adopts an
+// externally-constructed mcp-go Client (typically the in-process
+// variant). It registers the tools/list_changed handler and runs
+// Initialize, mirroring what NewWithSpec does after spawning the
+// stdio subprocess.
+func newWithClient(ctx context.Context, spec Spec, cli *mcpcli.Client, log *slog.Logger) (*Provider, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	p := &MCPProvider{spec: spec, log: log}
+	p := &Provider{spec: spec, log: log}
 	cli.OnNotification(func(n mcp.JSONRPCNotification) {
 		if n.Method == mcp.MethodNotificationToolsListChanged {
-			p.emit(ProviderEvent{Kind: ProviderToolsChanged})
+			p.emit(tool.ProviderEvent{Kind: tool.ProviderToolsChanged})
 		}
 	})
 	if _, err := cli.Initialize(ctx, mcp.InitializeRequest{
@@ -164,26 +167,26 @@ func newMCPProviderWithClient(ctx context.Context, spec MCPProviderSpec, cli *mc
 		},
 	}); err != nil {
 		_ = cli.Close()
-		return nil, fmt.Errorf("tool: initialize %s: %w", spec.Name, err)
+		return nil, fmt.Errorf("mcp: initialize %s: %w", spec.Name, err)
 	}
 	p.client = cli
 	return p, nil
 }
 
-func (p *MCPProvider) connect(ctx context.Context) error {
+func (p *Provider) connect(ctx context.Context) error {
 	cli, needsStart, err := p.newClient()
 	if err != nil {
 		return err
 	}
 	cli.OnNotification(func(n mcp.JSONRPCNotification) {
 		if n.Method == mcp.MethodNotificationToolsListChanged {
-			p.emit(ProviderEvent{Kind: ProviderToolsChanged})
+			p.emit(tool.ProviderEvent{Kind: tool.ProviderToolsChanged})
 		}
 	})
 	if needsStart {
 		if err := cli.Start(ctx); err != nil {
 			_ = cli.Close()
-			return fmt.Errorf("tool: start %s: %w", p.spec.Name, err)
+			return fmt.Errorf("mcp: start %s: %w", p.spec.Name, err)
 		}
 	}
 	if _, err := cli.Initialize(ctx, mcp.InitializeRequest{
@@ -196,7 +199,7 @@ func (p *MCPProvider) connect(ctx context.Context) error {
 		},
 	}); err != nil {
 		_ = cli.Close()
-		return fmt.Errorf("tool: initialize %s: %w", p.spec.Name, err)
+		return fmt.Errorf("mcp: initialize %s: %w", p.spec.Name, err)
 	}
 	p.mu.Lock()
 	p.client = cli
@@ -208,7 +211,7 @@ func (p *MCPProvider) connect(ctx context.Context) error {
 // transport. The stdio client auto-starts inside its constructor;
 // http/sse clients return needsStart=true so the caller can call
 // Start before Initialize.
-func (p *MCPProvider) newClient() (cli *mcpcli.Client, needsStart bool, err error) {
+func (p *Provider) newClient() (cli *mcpcli.Client, needsStart bool, err error) {
 	switch p.spec.Transport {
 	case TransportStdio:
 		env := envSlice(p.spec.Env)
@@ -224,7 +227,7 @@ func (p *MCPProvider) newClient() (cli *mcpcli.Client, needsStart bool, err erro
 		}
 		cli, err = mcpcli.NewStdioMCPClientWithOptions(p.spec.Command, env, p.spec.Args, opts...)
 		if err != nil {
-			return nil, false, fmt.Errorf("tool: spawn %s: %w", p.spec.Name, err)
+			return nil, false, fmt.Errorf("mcp: spawn %s: %w", p.spec.Name, err)
 		}
 		return cli, false, nil
 
@@ -238,7 +241,7 @@ func (p *MCPProvider) newClient() (cli *mcpcli.Client, needsStart bool, err erro
 		}
 		cli, err = mcpcli.NewStreamableHttpClient(p.spec.Endpoint, opts...)
 		if err != nil {
-			return nil, false, fmt.Errorf("tool: connect %s: %w", p.spec.Name, err)
+			return nil, false, fmt.Errorf("mcp: connect %s: %w", p.spec.Name, err)
 		}
 		return cli, true, nil
 
@@ -252,19 +255,19 @@ func (p *MCPProvider) newClient() (cli *mcpcli.Client, needsStart bool, err erro
 		}
 		cli, err = mcpcli.NewSSEMCPClient(p.spec.Endpoint, opts...)
 		if err != nil {
-			return nil, false, fmt.Errorf("tool: connect %s: %w", p.spec.Name, err)
+			return nil, false, fmt.Errorf("mcp: connect %s: %w", p.spec.Name, err)
 		}
 		return cli, true, nil
 
 	default:
-		return nil, false, fmt.Errorf("tool: unsupported mcp transport %q", p.spec.Transport)
+		return nil, false, fmt.Errorf("mcp: unsupported transport %q", p.spec.Transport)
 	}
 }
 
 // httpClient resolves the *http.Client passed to mark3labs's HTTP
-// transports. Order: explicit HTTPClient > RoundTripper-wrapped client
-// > nil (mark3labs uses its default).
-func (p *MCPProvider) httpClient() *http.Client {
+// transports. Order: explicit HTTPClient > RoundTripper-wrapped
+// client > nil (mark3labs uses its default).
+func (p *Provider) httpClient() *http.Client {
 	if p.spec.HTTPClient != nil {
 		return p.spec.HTTPClient
 	}
@@ -274,17 +277,17 @@ func (p *MCPProvider) httpClient() *http.Client {
 	return nil
 }
 
-func (p *MCPProvider) currentClient() (*mcpcli.Client, error) {
+func (p *Provider) currentClient() (*mcpcli.Client, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
-		return nil, ErrProviderRemoved
+		return nil, tool.ErrProviderRemoved
 	}
 	if p.stale {
-		return nil, ErrProviderRemoved
+		return nil, tool.ErrProviderRemoved
 	}
 	if p.client == nil {
-		return nil, fmt.Errorf("tool: %s not connected", p.spec.Name)
+		return nil, fmt.Errorf("mcp: %s not connected", p.spec.Name)
 	}
 	return p.client, nil
 }
@@ -292,37 +295,37 @@ func (p *MCPProvider) currentClient() (*mcpcli.Client, error) {
 // IsStale reports whether the provider's underlying client is gone
 // pending a Reconnect. Callers that don't want to issue a tool call
 // just to probe state (e.g. the Reconnector loop) read this directly.
-func (p *MCPProvider) IsStale() bool {
+func (p *Provider) IsStale() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.stale
 }
 
-// IsClosed reports whether the provider has been Close()'d. Used by
-// the Reconnector to skip-and-untrack a provider that was removed
-// externally between Track and the next tick.
-func (p *MCPProvider) IsClosed() bool {
+// IsClosed reports whether the provider has been Close()'d. Used
+// by the Reconnector to skip-and-untrack a provider that was
+// removed externally between Track and the next tick.
+func (p *Provider) IsClosed() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.closed
 }
 
-// SetStaleHook installs a callback fired once each time the provider
-// transitions healthy → stale. ToolManager wires this to its
-// Reconnector.Track on AddProvider so a stale provider self-registers
-// for background reconnect attempts. Passing nil clears the hook.
-// Idempotent.
-func (p *MCPProvider) SetStaleHook(fn func(*MCPProvider)) {
+// SetStaleHook installs a callback fired once each time the
+// provider transitions healthy → stale. ToolManager wires this to
+// its Reconnector.Track on AddProvider so a stale provider
+// self-registers for background reconnect attempts. Passing nil
+// clears the hook. Idempotent.
+func (p *Provider) SetStaleHook(fn func(tool.MCPLifecycle)) {
 	p.mu.Lock()
 	p.staleHook = fn
 	p.mu.Unlock()
 }
 
 // markStale transitions healthy → stale and fires the stale hook
-// outside the lock. Idempotent: a second markStale on an already-stale
-// provider is a no-op (no double-trigger of the hook). Caller is
-// responsible for closing the dead client first.
-func (p *MCPProvider) markStale() {
+// outside the lock. Idempotent: a second markStale on an
+// already-stale provider is a no-op (no double-trigger of the
+// hook). Caller is responsible for closing the dead client first.
+func (p *Provider) markStale() {
 	p.mu.Lock()
 	if p.closed || p.stale {
 		p.mu.Unlock()
@@ -331,7 +334,7 @@ func (p *MCPProvider) markStale() {
 	p.stale = true
 	hook := p.staleHook
 	p.mu.Unlock()
-	p.emit(ProviderEvent{Kind: ProviderHealthChanged, Data: HealthDead})
+	p.emit(tool.ProviderEvent{Kind: tool.ProviderHealthChanged, Data: tool.HealthDead})
 	if hook != nil {
 		hook(p)
 	}
@@ -344,21 +347,21 @@ func (p *MCPProvider) markStale() {
 // to retry with backoff.
 //
 // Closed providers cannot be reconnected — Reconnect returns
-// ErrProviderRemoved without attempting anything. Already-healthy
-// providers (the Reconnector observed someone else recovered them
-// inline) return nil.
-func (p *MCPProvider) Reconnect(ctx context.Context) error {
+// tool.ErrProviderRemoved without attempting anything.
+// Already-healthy providers (the Reconnector observed someone else
+// recovered them inline) return nil.
+func (p *Provider) Reconnect(ctx context.Context) error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
-		return ErrProviderRemoved
+		return tool.ErrProviderRemoved
 	}
 	if !p.stale {
 		p.mu.Unlock()
 		return nil
 	}
-	// Drop any old client handle before re-dialling. Close errors are
-	// ignored — the connection's already presumed dead.
+	// Drop any old client handle before re-dialling. Close errors
+	// are ignored — the connection's already presumed dead.
 	if p.client != nil {
 		_ = p.client.Close()
 		p.client = nil
@@ -370,14 +373,14 @@ func (p *MCPProvider) Reconnect(ctx context.Context) error {
 	p.mu.Lock()
 	p.stale = false
 	p.mu.Unlock()
-	p.emit(ProviderEvent{Kind: ProviderHealthChanged, Data: HealthHealthy})
+	p.emit(tool.ProviderEvent{Kind: tool.ProviderHealthChanged, Data: tool.HealthHealthy})
 	return nil
 }
 
-func (p *MCPProvider) Name() string       { return p.spec.Name }
-func (p *MCPProvider) Lifetime() Lifetime { return p.spec.Lifetime }
+func (p *Provider) Name() string            { return p.spec.Name }
+func (p *Provider) Lifetime() tool.Lifetime { return p.spec.Lifetime }
 
-func (p *MCPProvider) List(ctx context.Context) ([]Tool, error) {
+func (p *Provider) List(ctx context.Context) ([]tool.Tool, error) {
 	cli, err := p.currentClient()
 	if err != nil {
 		return nil, err
@@ -389,29 +392,29 @@ func (p *MCPProvider) List(ctx context.Context) ([]Tool, error) {
 			res, err = cli.ListTools(ctx, mcp.ListToolsRequest{})
 		}
 		if err != nil {
-			return nil, fmt.Errorf("tool: list %s: %w", p.spec.Name, err)
+			return nil, fmt.Errorf("mcp: list %s: %w", p.spec.Name, err)
 		}
 	}
-	out := make([]Tool, 0, len(res.Tools))
+	out := make([]tool.Tool, 0, len(res.Tools))
 	for _, t := range res.Tools {
 		schema, _ := json.Marshal(t.InputSchema)
 		fqName := p.spec.Name + ":" + t.Name
 		// Vendored MCP tools (motherduck, etc.) routinely emit
 		// `additionalProperties` or arrays without `items` — that
-		// fails downstream at the chat-completion provider. Sanitise
-		// in-place; if anything changed, log once so operators can
-		// see it.
-		cleaned, notes, err := SanitizeLLMSchema(schema)
+		// fails downstream at the chat-completion provider.
+		// Sanitise in-place; if anything changed, log once so
+		// operators can see it.
+		cleaned, notes, err := tool.SanitizeLLMSchema(schema)
 		if err != nil {
-			p.log.Warn("tool: invalid schema, dropping tool",
+			p.log.Warn("mcp: invalid schema, dropping tool",
 				"provider", p.spec.Name, "tool", fqName, "err", err)
 			continue
 		}
 		if len(notes) > 0 {
-			p.log.Warn("tool: schema sanitised",
+			p.log.Warn("mcp: schema sanitised",
 				"provider", p.spec.Name, "tool", fqName, "repairs", notes)
 		}
-		out = append(out, Tool{
+		out = append(out, tool.Tool{
 			Name:             fqName,
 			Description:      t.Description,
 			ArgSchema:        cleaned,
@@ -425,7 +428,7 @@ func (p *MCPProvider) List(ctx context.Context) ([]Tool, error) {
 // Call dispatches a tool call. Args are passed verbatim; the
 // caller (ToolManager) has already merged Tier-1/2 Data into
 // effective args.
-func (p *MCPProvider) Call(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+func (p *Provider) Call(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
 	cli, err := p.currentClient()
 	if err != nil {
 		return nil, err
@@ -457,7 +460,7 @@ func (p *MCPProvider) Call(ctx context.Context, name string, args json.RawMessag
 			res, err = cli.CallTool(ctx, req)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("tool: call %s.%s: %w", p.spec.Name, name, err)
+			return nil, fmt.Errorf("mcp: call %s.%s: %w", p.spec.Name, name, err)
 		}
 	}
 	return marshalCallResult(res)
@@ -483,8 +486,8 @@ func marshalCallResult(res *mcp.CallToolResult) (json.RawMessage, error) {
 	return json.Marshal(map[string]any{"text": sb.String()})
 }
 
-func (p *MCPProvider) Subscribe(ctx context.Context) (<-chan ProviderEvent, error) {
-	ch := make(chan ProviderEvent, 8)
+func (p *Provider) Subscribe(ctx context.Context) (<-chan tool.ProviderEvent, error) {
+	ch := make(chan tool.ProviderEvent, 8)
 	p.subsMu.Lock()
 	p.subs = append(p.subs, ch)
 	p.subsMu.Unlock()
@@ -503,7 +506,7 @@ func (p *MCPProvider) Subscribe(ctx context.Context) (<-chan ProviderEvent, erro
 	return ch, nil
 }
 
-func (p *MCPProvider) emit(ev ProviderEvent) {
+func (p *Provider) emit(ev tool.ProviderEvent) {
 	p.subsMu.Lock()
 	defer p.subsMu.Unlock()
 	for _, ch := range p.subs {
@@ -517,7 +520,7 @@ func (p *MCPProvider) emit(ev ProviderEvent) {
 
 // Close terminates the underlying client and marks the provider
 // as removed. Idempotent.
-func (p *MCPProvider) Close() error {
+func (p *Provider) Close() error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -544,22 +547,22 @@ func (p *MCPProvider) Close() error {
 
 // maybeReconnect re-spawns the underlying stdio client if the
 // returned error looks like an EOF / closed-pipe condition. One
-// inline retry is attempted; on failure the provider transitions to
-// stale (markStale) and the registered Reconnector — if any — picks
-// it up for background retries. Returns nil on a successful inline
-// reconnect, the original error otherwise.
-func (p *MCPProvider) maybeReconnect(ctx context.Context, callErr error) error {
+// inline retry is attempted; on failure the provider transitions
+// to stale (markStale) and the registered Reconnector — if any —
+// picks it up for background retries. Returns nil on a successful
+// inline reconnect, the original error otherwise.
+func (p *Provider) maybeReconnect(ctx context.Context, callErr error) error {
 	if callErr == nil {
 		return nil
 	}
 	if !isEOF(callErr) {
 		return callErr
 	}
-	p.log.Warn("mcp_provider: reconnecting after EOF", "provider", p.spec.Name, "err", callErr)
+	p.log.Warn("mcp: reconnecting after EOF", "provider", p.spec.Name, "err", callErr)
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
-		return ErrProviderRemoved
+		return tool.ErrProviderRemoved
 	}
 	if p.client != nil {
 		_ = p.client.Close()
@@ -568,12 +571,12 @@ func (p *MCPProvider) maybeReconnect(ctx context.Context, callErr error) error {
 	p.mu.Unlock()
 	if err := p.connect(ctx); err != nil {
 		// Inline recovery failed — degrade to stale and let the
-		// background Reconnector keep trying. Caller still sees the
-		// original call error.
+		// background Reconnector keep trying. Caller still sees
+		// the original call error.
 		p.markStale()
 		return err
 	}
-	p.emit(ProviderEvent{Kind: ProviderHealthChanged, Data: HealthHealthy})
+	p.emit(tool.ProviderEvent{Kind: tool.ProviderHealthChanged, Data: tool.HealthHealthy})
 	return nil
 }
 
@@ -618,3 +621,10 @@ func envSlice(env map[string]string) []string {
 	}
 	return out
 }
+
+// ensure Provider satisfies the contracts declared in pkg/tool.
+var (
+	_ tool.ToolProvider = (*Provider)(nil)
+	_ tool.MCPLifecycle = (*Provider)(nil)
+	_ tool.Reconnectable = (*Provider)(nil)
+)
