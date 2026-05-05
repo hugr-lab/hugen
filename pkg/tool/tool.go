@@ -125,14 +125,15 @@ const (
 
 // Errors. Sentinel values, errors.Is-comparable.
 var (
-	ErrUnknownTool      = errors.New("tool: unknown")
-	ErrUnknownProvider  = errors.New("tool: unknown provider")
-	ErrPermissionDenied = errors.New("tool: permission denied")
-	ErrProviderRemoved  = errors.New("tool: provider removed mid-call")
-	ErrSnapshotStale    = errors.New("tool: snapshot stale (rebuild needed)")
-	ErrArgValidation    = errors.New("tool: args failed schema validation")
-	ErrNotFound         = errors.New("tool: not found")
-	ErrPathEscape       = errors.New("tool: path escapes allowed root")
-	ErrIO               = errors.New("tool: io")
+	ErrUnknownTool         = errors.New("tool: unknown")
+	ErrUnknownProvider     = errors.New("tool: unknown provider")
+	ErrPermissionDenied    = errors.New("tool: permission denied")
+	ErrProviderRemoved     = errors.New("tool: provider removed mid-call")
+	ErrSnapshotStale       = errors.New("tool: snapshot stale (rebuild needed)")
+	ErrArgValidation       = errors.New("tool: args failed schema validation")
+	ErrNotFound            = errors.New("tool: not found")
+	ErrPathEscape          = errors.New("tool: path escapes allowed root")
+	ErrIO                  = errors.New("tool: io")
+	ErrBuilderNotConfigured = errors.New("tool: ProviderBuilder not configured (call WithBuilder)")
 )
 

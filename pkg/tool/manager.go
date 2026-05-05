@@ -49,6 +49,13 @@ type ToolManager struct {
 	connectTimeout time.Duration
 
 	builders map[string]legacyProviderBuilder
+	// builder is the new Spec-driven dispatcher introduced by phase
+	// 4.1a stage A step 4. Non-nil enables AddBySpec; the legacy
+	// `builders` map keeps the phase-3 Init path alive in parallel
+	// until stage A step 7 retires it. Children inherit the field
+	// from their parent so per_session AddBySpec routes through the
+	// same dispatcher as per_agent.
+	builder ProviderBuilder
 
 	mu               sync.RWMutex
 	providers        map[string]ToolProvider
@@ -193,6 +200,7 @@ func (m *ToolManager) NewChild() *ToolManager {
 		workspaceRoot:    m.workspaceRoot,
 		connectTimeout:   m.connectTimeout,
 		drainTimeout:     m.drainTimeout,
+		builder:          m.builder, // share dispatcher with root
 		providers:        make(map[string]ToolProvider),
 		sessionProviders: nil, // children never host other children
 		cache:            nil, // snapshot caching is agent-level
@@ -200,6 +208,31 @@ func (m *ToolManager) NewChild() *ToolManager {
 		parent:           m,
 	}
 	return child
+}
+
+// AddBySpec dispatches a tool.Spec through the wired
+// ProviderBuilder (see WithBuilder) and registers the resulting
+// provider. Returns ErrBuilderNotConfigured when no builder is
+// wired — root Managers built before pkg/runtime injects one
+// stay on the legacy Init path. Children inherit the builder
+// from their parent.
+//
+// Failure inside Build does not register anything; the returned
+// error is the Builder's verbatim. AddProvider failure (name
+// collision) closes the freshly-built provider before returning.
+func (m *ToolManager) AddBySpec(ctx context.Context, spec Spec) error {
+	if m.builder == nil {
+		return ErrBuilderNotConfigured
+	}
+	prov, err := m.builder.Build(ctx, spec)
+	if err != nil {
+		return err
+	}
+	if err := m.AddProvider(prov); err != nil {
+		_ = prov.Close()
+		return err
+	}
+	return nil
 }
 
 // ToolManagerOption configures optional dependencies on a
@@ -244,6 +277,18 @@ func (m *ToolManager) policiesSnapshot() *Policies {
 func WithWorkspaceRoot(root string) ToolManagerOption {
 	return func(tm *ToolManager) {
 		tm.workspaceRoot = root
+	}
+}
+
+// WithBuilder pins the new Spec-driven ProviderBuilder consumed by
+// AddBySpec. Boot wiring (pkg/runtime in stage B) constructs a
+// providers.Builder and passes it via this option; AddBySpec on the
+// resulting Manager (and on every child built from it) dispatches
+// through the same instance. nil leaves AddBySpec disabled — calls
+// surface ErrBuilderNotConfigured.
+func WithBuilder(b ProviderBuilder) ToolManagerOption {
+	return func(tm *ToolManager) {
+		tm.builder = b
 	}
 }
 
