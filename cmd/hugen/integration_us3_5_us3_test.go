@@ -71,7 +71,7 @@ func TestUS3_5_US3_AnalystLoop(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = core.manager.Terminate(ctx, sess.ID(), "user:/end") })
 
-	snap, err := core.tools.Snapshot(ctx, sess.ID())
+	snap, err := sess.Tools().Snapshot(ctx, sess.ID())
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -91,11 +91,11 @@ func TestUS3_5_US3_AnalystLoop(t *testing.T) {
 	dispatch := func(label string, tl tool.Tool, args any) string {
 		t.Helper()
 		raw, _ := json.Marshal(args)
-		_, eff, err := core.tools.Resolve(dispatchCtx, tl, raw)
+		_, eff, err := sess.Tools().Resolve(dispatchCtx, tl, raw)
 		if err != nil {
 			t.Fatalf("%s: Resolve: %v", label, err)
 		}
-		out, err := core.tools.Dispatch(dispatchCtx, tl, eff)
+		out, err := sess.Tools().Dispatch(dispatchCtx, tl, eff)
 		if err != nil {
 			t.Fatalf("%s: Dispatch: %v", label, err)
 		}

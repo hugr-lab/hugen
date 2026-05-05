@@ -236,44 +236,51 @@ func TestToolManager_BumpPolicyGen_InvalidatesCache(t *testing.T) {
 	}
 }
 
-func TestToolManager_SessionProvider_VisibleOnlyToOwningSession(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil)
+// Phase 4.1a stage A step 9: per-session providers now live on
+// a child Manager built via NewChild — the tests below pin the
+// equivalent semantics through that surface (replacing the
+// retired AddSessionProvider / CloseSession path).
+
+func TestToolManager_Child_VisibleOnlyToOwningSession(t *testing.T) {
+	root := NewToolManager(&fakePerms{}, nil, nil)
 	global := &fakeProvider{name: "system", tools: []Tool{{Name: "system:notepad", Provider: "system"}}}
-	if err := m.AddProvider(global); err != nil {
+	if err := root.AddProvider(global); err != nil {
 		t.Fatal(err)
 	}
+	s1Tools := root.NewChild()
 	scoped := &fakeProvider{name: "bash-mcp", tools: []Tool{{Name: "bash-mcp:bash.run", Provider: "bash-mcp"}}}
-	if err := m.AddSessionProvider("s1", scoped); err != nil {
+	if err := s1Tools.AddProvider(scoped); err != nil {
 		t.Fatal(err)
 	}
 
-	s1, _ := m.Snapshot(context.Background(), "s1")
+	s1, _ := s1Tools.Snapshot(context.Background(), "s1")
 	if len(s1.Tools) != 2 {
-		t.Errorf("s1 tools = %d, want 2 (global + scoped)", len(s1.Tools))
+		t.Errorf("s1 tools = %d, want 2 (global walked from parent + scoped on child)", len(s1.Tools))
 	}
-	s2, _ := m.Snapshot(context.Background(), "s2")
+	// Sibling session has its own (empty) child — root shows global only.
+	s2, _ := root.Snapshot(context.Background(), "s2")
 	if len(s2.Tools) != 1 {
 		t.Errorf("s2 tools = %d, want 1 (global only)", len(s2.Tools))
 	}
 }
 
-func TestToolManager_SessionProvider_ShadowsGlobalOnDispatch(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil)
+func TestToolManager_Child_ShadowsGlobalOnDispatch(t *testing.T) {
+	root := NewToolManager(&fakePerms{}, nil, nil)
 	global := &fakeProvider{name: "bash-mcp", callFunc: func(name string, args json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`{"from":"global"}`), nil
 	}}
 	scoped := &fakeProvider{name: "bash-mcp", callFunc: func(name string, args json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`{"from":"scoped"}`), nil
 	}}
-	if err := m.AddProvider(global); err != nil {
+	if err := root.AddProvider(global); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.AddSessionProvider("s1", scoped); err != nil {
+	s1Tools := root.NewChild()
+	if err := s1Tools.AddProvider(scoped); err != nil {
 		t.Fatal(err)
 	}
 	tool := Tool{Name: "bash-mcp:bash.run", Provider: "bash-mcp"}
-	ctx := perm.WithSession(context.Background(), perm.SessionContext{SessionID: "s1"})
-	out, err := m.Dispatch(ctx, tool, json.RawMessage(`{}`))
+	out, err := s1Tools.Dispatch(context.Background(), tool, json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
@@ -281,26 +288,28 @@ func TestToolManager_SessionProvider_ShadowsGlobalOnDispatch(t *testing.T) {
 		t.Errorf("got %s, want scoped result", out)
 	}
 
-	ctx2 := perm.WithSession(context.Background(), perm.SessionContext{SessionID: "s2"})
-	out2, _ := m.Dispatch(ctx2, tool, json.RawMessage(`{}`))
+	// Sibling session uses its own child (no override) — sees the global.
+	s2Tools := root.NewChild()
+	out2, _ := s2Tools.Dispatch(context.Background(), tool, json.RawMessage(`{}`))
 	if string(out2) != `{"from":"global"}` {
 		t.Errorf("got %s, want global result for s2", out2)
 	}
 }
 
-func TestToolManager_CloseSession_TearsDownProviders(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil)
+func TestToolManager_Child_CloseTearsDownProviders(t *testing.T) {
+	root := NewToolManager(&fakePerms{}, nil, nil)
+	child := root.NewChild()
 	p := &fakeProvider{name: "bash-mcp"}
-	if err := m.AddSessionProvider("s1", p); err != nil {
+	if err := child.AddProvider(p); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.CloseSession(context.Background(), "s1"); err != nil {
-		t.Fatalf("CloseSession: %v", err)
+	if err := child.Close(); err != nil {
+		t.Fatalf("child.Close: %v", err)
 	}
 	if !p.closed.Load() {
 		t.Errorf("provider not closed")
 	}
-	snap, _ := m.Snapshot(context.Background(), "s1")
+	snap, _ := child.Snapshot(context.Background(), "s1")
 	if len(snap.Tools) != 0 {
 		t.Errorf("tools after close = %d, want 0", len(snap.Tools))
 	}

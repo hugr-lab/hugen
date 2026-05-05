@@ -395,6 +395,14 @@ func (s *Session) Submit(ctx context.Context, f protocol.Frame) (ok bool) {
 // Notepad returns the session's notepad handle.
 func (s *Session) Notepad() *Notepad { return s.notepad }
 
+// Tools exposes the per-session ToolManager. After phase 4.1a
+// stage A step 9 this is a child Manager owned by Lifecycle —
+// per_session providers register on the child; child.Resolve /
+// Dispatch / Snapshot walk to the agent-level root for unknown
+// providers. nil → no tools wired (legacy NewSession callers /
+// tests that disabled dispatch).
+func (s *Session) Tools() *tool.ToolManager { return s.tools }
+
 // SetModelOverride records a per-session model preference. The next
 // turn will route through it and emit a system_marker.
 func (s *Session) SetModelOverride(intent model.Intent, spec model.ModelSpec) {

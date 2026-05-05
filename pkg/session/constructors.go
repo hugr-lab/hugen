@@ -85,6 +85,15 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 			cancel(nil)
 			return nil, fmt.Errorf("session: acquire: %w", err)
 		}
+		// Phase 4.1a stage A step 9: per_session providers now live
+		// on a child ToolManager owned by Lifecycle. Swap the
+		// session's tools to that child so Dispatch / Snapshot walk
+		// child→root for unknown-provider lookups. Lifecycle
+		// implementations without per-session scoping return nil —
+		// the constructor-time tools (root) stay in place.
+		if child := deps.lifecycle.SessionTools(id); child != nil {
+			s.tools = child
+		}
 	}
 
 	// 4. Emit SessionOpened so adapters / event log carry the live-cycle
@@ -175,6 +184,9 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 		if err := deps.lifecycle.Acquire(ctx, id); err != nil {
 			cancel(nil)
 			return nil, fmt.Errorf("session: re-acquire: %w", err)
+		}
+		if child := deps.lifecycle.SessionTools(id); child != nil {
+			s.tools = child
 		}
 	}
 

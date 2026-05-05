@@ -132,7 +132,7 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	}
 
 	// bash-mcp tools still work end-to-end.
-	snap, err := tools.Snapshot(ctx, sess.ID())
+	snap, err := sess.Tools().Snapshot(ctx, sess.ID())
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -147,20 +147,20 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
 	args, _ := json.Marshal(map[string]string{"path": "hello.txt", "content": "ok"})
-	_, eff, err := tools.Resolve(dispatchCtx, writeFile, args)
+	_, eff, err := sess.Tools().Resolve(dispatchCtx, writeFile, args)
 	if err != nil {
 		t.Fatalf("Resolve write_file: %v", err)
 	}
-	if _, err := tools.Dispatch(dispatchCtx, writeFile, eff); err != nil {
+	if _, err := sess.Tools().Dispatch(dispatchCtx, writeFile, eff); err != nil {
 		t.Fatalf("Dispatch write_file: %v", err)
 	}
 
 	sfArgs, _ := json.Marshal(map[string]string{"name": "duckdb-data"})
-	_, eff, err = tools.Resolve(dispatchCtx, skillFiles, sfArgs)
+	_, eff, err = sess.Tools().Resolve(dispatchCtx, skillFiles, sfArgs)
 	if err != nil {
 		t.Fatalf("Resolve skill_files: %v", err)
 	}
-	out, err := tools.Dispatch(dispatchCtx, skillFiles, eff)
+	out, err := sess.Tools().Dispatch(dispatchCtx, skillFiles, eff)
 	if err != nil {
 		t.Fatalf("Dispatch skill_files: %v", err)
 	}

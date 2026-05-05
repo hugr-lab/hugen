@@ -114,7 +114,7 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 		t.Fatalf("Load duckdb-data: %v", err)
 	}
 
-	snap, err := tools.Snapshot(ctx, sess.ID())
+	snap, err := sess.Tools().Snapshot(ctx, sess.ID())
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -130,11 +130,11 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
 
 	args, _ := json.Marshal(map[string]string{"name": "duckdb-data"})
-	_, eff, err := tools.Resolve(dispatchCtx, skillFiles, args)
+	_, eff, err := sess.Tools().Resolve(dispatchCtx, skillFiles, args)
 	if err != nil {
 		t.Fatalf("Resolve skill_files: %v", err)
 	}
-	out, err := tools.Dispatch(dispatchCtx, skillFiles, eff)
+	out, err := sess.Tools().Dispatch(dispatchCtx, skillFiles, eff)
 	if err != nil {
 		t.Fatalf("Dispatch skill_files: %v", err)
 	}
@@ -179,11 +179,11 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	// SC-010 cross-check: read the absolute path via bash.read_file
 	// and confirm bytes match the bundled file on disk.
 	readArgs, _ := json.Marshal(map[string]string{"path": workspaceFile})
-	_, eff2, err := tools.Resolve(dispatchCtx, readFile, readArgs)
+	_, eff2, err := sess.Tools().Resolve(dispatchCtx, readFile, readArgs)
 	if err != nil {
 		t.Fatalf("Resolve read_file: %v", err)
 	}
-	bashOut, err := tools.Dispatch(dispatchCtx, readFile, eff2)
+	bashOut, err := sess.Tools().Dispatch(dispatchCtx, readFile, eff2)
 	if err != nil {
 		t.Fatalf("Dispatch read_file: %v", err)
 	}

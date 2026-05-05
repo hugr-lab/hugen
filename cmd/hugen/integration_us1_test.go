@@ -220,7 +220,7 @@ func TestUS1_BashMCP_WriteRead(t *testing.T) {
 	}
 	defer core.manager.Terminate(ctx, sess.ID(), "user:/end")
 
-	snap, err := core.tools.Snapshot(ctx, sess.ID())
+	snap, err := sess.Tools().Snapshot(ctx, sess.ID())
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -231,11 +231,11 @@ func TestUS1_BashMCP_WriteRead(t *testing.T) {
 	readTool, _ := findTool(snap.Tools, "bash-mcp:bash.read_file")
 
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
-	_, eff, err := core.tools.Resolve(dispatchCtx, writeTool, json.RawMessage(`{"path":"out.txt","content":"hello world"}`))
+	_, eff, err := sess.Tools().Resolve(dispatchCtx, writeTool, json.RawMessage(`{"path":"out.txt","content":"hello world"}`))
 	if err != nil {
 		t.Fatalf("Resolve write: %v", err)
 	}
-	if _, err := core.tools.Dispatch(dispatchCtx, writeTool, eff); err != nil {
+	if _, err := sess.Tools().Dispatch(dispatchCtx, writeTool, eff); err != nil {
 		t.Fatalf("Dispatch write: %v", err)
 	}
 	content, err := os.ReadFile(filepath.Join(core.workspaceDir, sess.ID(), "out.txt"))
@@ -246,11 +246,11 @@ func TestUS1_BashMCP_WriteRead(t *testing.T) {
 		t.Errorf("file content = %q, want %q", content, "hello world")
 	}
 
-	_, eff2, err := core.tools.Resolve(dispatchCtx, readTool, json.RawMessage(`{"path":"out.txt"}`))
+	_, eff2, err := sess.Tools().Resolve(dispatchCtx, readTool, json.RawMessage(`{"path":"out.txt"}`))
 	if err != nil {
 		t.Fatalf("Resolve read: %v", err)
 	}
-	res, err := core.tools.Dispatch(dispatchCtx, readTool, eff2)
+	res, err := sess.Tools().Dispatch(dispatchCtx, readTool, eff2)
 	if err != nil {
 		t.Fatalf("Dispatch read: %v", err)
 	}
@@ -276,13 +276,13 @@ func TestUS1_BashMCP_PermissionDenied(t *testing.T) {
 	}
 	defer core.manager.Terminate(ctx, sess.ID(), "user:/end")
 
-	snap, _ := core.tools.Snapshot(ctx, sess.ID())
+	snap, _ := sess.Tools().Snapshot(ctx, sess.ID())
 	writeTool, ok := findTool(snap.Tools, "bash-mcp:bash.write_file")
 	if !ok {
 		t.Fatalf("bash.write_file missing")
 	}
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
-	_, _, err = core.tools.Resolve(dispatchCtx, writeTool, json.RawMessage(`{"path":"x","content":"y"}`))
+	_, _, err = sess.Tools().Resolve(dispatchCtx, writeTool, json.RawMessage(`{"path":"x","content":"y"}`))
 	if !errors.Is(err, tool.ErrPermissionDenied) {
 		t.Errorf("err = %v, want ErrPermissionDenied", err)
 	}
@@ -326,7 +326,7 @@ func TestUS1_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	snap, _ := core.tools.Snapshot(ctx, sess.ID())
+	snap, _ := sess.Tools().Snapshot(ctx, sess.ID())
 	writeTool, ok := findTool(snap.Tools, "bash-mcp:bash.write_file")
 	if !ok {
 		t.Fatalf("bash.write_file missing")
@@ -337,11 +337,11 @@ func TestUS1_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
 		"path":    sharedFile,
 		"content": "k,v\na,1\n",
 	})
-	_, eff, err := core.tools.Resolve(dispatchCtx, writeTool, writeArgs)
+	_, eff, err := sess.Tools().Resolve(dispatchCtx, writeTool, writeArgs)
 	if err != nil {
 		t.Fatalf("Resolve write shared: %v", err)
 	}
-	if _, err := core.tools.Dispatch(dispatchCtx, writeTool, eff); err != nil {
+	if _, err := sess.Tools().Dispatch(dispatchCtx, writeTool, eff); err != nil {
 		t.Fatalf("Dispatch write shared: %v", err)
 	}
 

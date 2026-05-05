@@ -59,7 +59,7 @@ func TestUS3_5_US5_InitSQLReload(t *testing.T) {
 		}
 		defer core.manager.Terminate(ctx, sess.ID(), "user:/end")
 
-		snap, err := core.tools.Snapshot(ctx, sess.ID())
+		snap, err := sess.Tools().Snapshot(ctx, sess.ID())
 		if err != nil {
 			t.Fatalf("Snapshot: %v", err)
 		}
@@ -71,11 +71,11 @@ func TestUS3_5_US5_InitSQLReload(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{
 			"sql": "SELECT current_setting('memory_limit') AS m;",
 		})
-		_, eff, err := core.tools.Resolve(dispatchCtx, exTool, args)
+		_, eff, err := sess.Tools().Resolve(dispatchCtx, exTool, args)
 		if err != nil {
 			t.Fatalf("Resolve: %v", err)
 		}
-		out, err := core.tools.Dispatch(dispatchCtx, exTool, eff)
+		out, err := sess.Tools().Dispatch(dispatchCtx, exTool, eff)
 		if err != nil {
 			t.Fatalf("Dispatch: %v", err)
 		}

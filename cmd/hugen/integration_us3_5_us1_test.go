@@ -61,7 +61,7 @@ func TestUS3_5_US1_DuckDBSQL(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = core.manager.Terminate(ctx, sess.ID(), "user:/end") })
 
-	snap, err := core.tools.Snapshot(ctx, sess.ID())
+	snap, err := sess.Tools().Snapshot(ctx, sess.ID())
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -76,11 +76,11 @@ func TestUS3_5_US1_DuckDBSQL(t *testing.T) {
 	run := func(label, sql string) string {
 		t.Helper()
 		args, _ := json.Marshal(map[string]string{"sql": sql})
-		_, eff, err := core.tools.Resolve(dispatchCtx, exec, args)
+		_, eff, err := sess.Tools().Resolve(dispatchCtx, exec, args)
 		if err != nil {
 			t.Fatalf("%s: Resolve: %v", label, err)
 		}
-		out, err := core.tools.Dispatch(dispatchCtx, exec, eff)
+		out, err := sess.Tools().Dispatch(dispatchCtx, exec, eff)
 		if err != nil {
 			t.Fatalf("%s: Dispatch: %v", label, err)
 		}

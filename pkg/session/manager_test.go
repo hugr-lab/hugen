@@ -10,6 +10,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
 // stubLifecycle is a function-bag Lifecycle for tests that just
@@ -33,6 +34,11 @@ func (s stubLifecycle) Release(ctx context.Context, sessionID string) error {
 	}
 	return s.release(ctx, sessionID)
 }
+
+// SessionTools satisfies the Lifecycle interface — stubLifecycle
+// has no per-session tool scoping, so it always returns nil and
+// the session keeps its constructor-time tools.
+func (s stubLifecycle) SessionTools(string) *tool.ToolManager { return nil }
 
 // instrumentedStore wraps fakeStore with call counters used by the
 // lazy-materialisation tests.
