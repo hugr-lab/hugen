@@ -84,16 +84,6 @@ type EventRow struct {
 	CreatedAt  time.Time      `json:"created_at"`
 }
 
-// NoteRow mirrors hub.db.agent.session_notes.
-type NoteRow struct {
-	ID              string    `json:"id"`
-	AgentID         string    `json:"agent_id"`
-	SessionID       string    `json:"session_id"`
-	AuthorSessionID string    `json:"author_session_id"`
-	Content         string    `json:"content"`
-	CreatedAt       time.Time `json:"created_at"`
-}
-
 // ListEventsOpts is the parameter bundle for RuntimeStore.ListEvents.
 //
 //   - MinSeq=0 returns events from the start of the session (phase-1
