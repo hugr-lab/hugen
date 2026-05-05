@@ -8,7 +8,7 @@
 //     allowed-tools grants are flagged unavailable via
 //     skill.AnnotateUnavailable (existing phase-3 mechanism);
 //   - bash-mcp tools still resolve and dispatch;
-//   - system:skill_files still works (does not depend on the analyst
+//   - session:skill_files still works (does not depend on the analyst
 //     providers).
 package main
 
@@ -70,7 +70,6 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 
 	sys := tool.NewSystemProvider(tool.SystemDeps{
 		AgentID: "agent-it",
-		Skills:  skills,
 		Perms:   perms,
 	})
 	if err := tools.AddProvider(sys); err != nil {
@@ -92,8 +91,15 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), nil,
 		session.WithLifecycle(resources),
-		session.WithSessionOptions(session.WithTools(tools)),
+		session.WithPerms(perms),
+		session.WithSessionOptions(
+			session.WithTools(tools),
+			session.WithSkills(skills),
+		),
 	)
+	if err := tools.AddProvider(mgr); err != nil {
+		t.Fatalf("AddProvider session: %v", err)
+	}
 
 	ctx := context.Background()
 	sess, _, err := mgr.Open(ctx, session.OpenRequest{OwnerID: "u"})
@@ -119,7 +125,7 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Bindings: %v", err)
 	}
-	registered := []string{"bash-mcp", "system"}
+	registered := []string{"bash-mcp", "system", "session"}
 	annotated := skill.AnnotateUnavailable(b, registered)
 	foundDuckdb := false
 	for _, u := range annotated.Unavailable {
@@ -141,12 +147,13 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	if !ok {
 		t.Fatalf("bash.write_file missing")
 	}
-	skillFiles, ok := findTool(snap.Tools, "system:skill_files")
+	skillFiles, ok := findTool(snap.Tools, "session:skill_files")
 	if !ok {
-		t.Fatalf("system:skill_files missing")
+		t.Fatalf("session:skill_files missing")
 	}
 
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
+	dispatchCtx = session.WithSession(dispatchCtx, sess)
 	args, _ := json.Marshal(map[string]string{"path": "hello.txt", "content": "ok"})
 	_, eff, err := sess.Tools().Resolve(dispatchCtx, writeFile, args)
 	if err != nil {

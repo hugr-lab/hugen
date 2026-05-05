@@ -4,7 +4,7 @@
 //
 //   - install bundled `duckdb-data` skill on disk;
 //   - load it into a session;
-//   - call system:skill_files("duckdb-data") through the full
+//   - call session:skill_files("duckdb-data") through the full
 //     ToolManager + SystemProvider pipeline;
 //   - read one absolute path from the envelope via bash.read_file
 //     and confirm bytes match the bundled file (SC-010 cross-check).
@@ -75,10 +75,9 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, nil)))
 	t.Cleanup(func() { _ = tools.Close() })
 
-	// Register the SystemProvider so `system:skill_files` is callable.
+	// SystemProvider still hosts the runtime / mcp / policy tools.
 	sys := tool.NewSystemProvider(tool.SystemDeps{
 		AgentID: "agent-it",
-		Skills:  skills,
 		Perms:   perms,
 	})
 	if err := tools.AddProvider(sys); err != nil {
@@ -100,8 +99,17 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), nil,
 		session.WithLifecycle(resources),
-		session.WithSessionOptions(session.WithTools(tools)),
+		session.WithPerms(perms),
+		session.WithSessionOptions(
+			session.WithTools(tools),
+			session.WithSkills(skills),
+		),
 	)
+	// Register Manager as the session ToolProvider so `session:skill_files`
+	// is callable through the ToolManager pipeline.
+	if err := tools.AddProvider(mgr); err != nil {
+		t.Fatalf("AddProvider session: %v", err)
+	}
 
 	ctx := context.Background()
 	sess, _, err := mgr.Open(ctx, session.OpenRequest{OwnerID: "u"})
@@ -119,9 +127,9 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
-	skillFiles, ok := findTool(snap.Tools, "system:skill_files")
+	skillFiles, ok := findTool(snap.Tools, "session:skill_files")
 	if !ok {
-		t.Fatalf("system:skill_files missing: %v", toolNames(snap.Tools))
+		t.Fatalf("session:skill_files missing: %v", toolNames(snap.Tools))
 	}
 	readFile, ok := findTool(snap.Tools, "bash-mcp:bash.read_file")
 	if !ok {
@@ -129,6 +137,11 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	}
 
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
+	// session-scoped tools (session:skill_files) recover their *Session
+	// via session.WithSession; the live dispatcher does this implicitly
+	// in session.Run, the integration test bypasses Run so we wire it
+	// here.
+	dispatchCtx = session.WithSession(dispatchCtx, sess)
 
 	args, _ := json.Marshal(map[string]string{"name": "duckdb-data"})
 	_, eff, err := sess.Tools().Resolve(dispatchCtx, skillFiles, args)

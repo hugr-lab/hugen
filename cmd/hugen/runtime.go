@@ -246,6 +246,7 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 	core.Manager = session.NewManager(
 		core.Store, agent, router, cmds, core.Codec, core.Logger,
 		session.WithLifecycle(resources),
+		session.WithPerms(core.Permissions),
 		session.WithSessionOptions(
 			session.WithTools(core.Tools),
 			session.WithSkills(core.Skills),

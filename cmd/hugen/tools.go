@@ -42,7 +42,6 @@ func buildToolStack(core *RuntimeCore, perms perm.Service, skills *skill.SkillMa
 
 	sys := tool.NewSystemProvider(tool.SystemDeps{
 		AgentID:  core.Agent.ID(),
-		Skills:   skills,
 		Policies: policies,
 		Perms:    perms,
 		Reload:   newRuntimeReloadFunc(core, perms, skills, tm),

@@ -14,12 +14,12 @@ allowed-tools:
   - provider: session
     tools:
       - notepad_append
-  - provider: system
-    tools:
       - skill_load
       - skill_unload
       - skill_ref
       - skill_files
+  - provider: system
+    tools:
       - policy_save
       - policy_revoke
       - runtime_reload
