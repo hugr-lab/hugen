@@ -8,14 +8,14 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/adapter/console"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session"
 )
 
-// runConsole attaches the console adapter to a shared *RuntimeCore
-// and runs the runtime until ctx cancels. Per
-// contracts/runtime-core.md, the handler MUST NOT re-bootstrap any
-// dependency already produced by buildRuntimeCore.
-func runConsole(ctx context.Context, core *RuntimeCore) int {
+// runConsole attaches the console adapter to a shared *runtime.Core
+// and runs the runtime until ctx cancels. The handler MUST NOT
+// re-bootstrap any dependency already produced by bootRuntime.
+func runConsole(ctx context.Context, core *runtime.Core) int {
 	resumeID := tryFindResumableSession(ctx, core.Manager, core.Logger)
 
 	consoleAdapter := console.New(
@@ -69,4 +69,3 @@ func operatorParticipant() protocol.ParticipantInfo {
 	}
 	return protocol.ParticipantInfo{ID: id, Kind: protocol.ParticipantUser, Name: id}
 }
-

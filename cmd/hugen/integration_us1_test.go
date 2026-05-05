@@ -44,7 +44,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// integrationCore is the minimal RuntimeCore-shaped harness the
+// integrationCore is the minimal runtime.Core-shaped harness the
 // integration tests share. It owns the workspace dir, ToolManager,
 // SkillManager, SessionManager wired with the bash-mcp lifecycle.
 type integrationCore struct {

@@ -7,12 +7,13 @@ import (
 
 	httpadapter "github.com/hugr-lab/hugen/pkg/adapter/http"
 	"github.com/hugr-lab/hugen/pkg/adapter/webui"
+	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session"
 )
 
-// runWebUI attaches the HTTP and web-UI adapters to *RuntimeCore.
-// Per contracts/runtime-core.md, the handler MUST NOT re-bootstrap
-// any dependency already produced by buildRuntimeCore.
+// runWebUI attaches the HTTP and web-UI adapters to *runtime.Core.
+// The handler MUST NOT re-bootstrap any dependency already produced
+// by bootRuntime.
 //
 // Two adapters share the run-loop:
 //
@@ -20,7 +21,10 @@ import (
 //     that hosts /auth/login and /auth/callback).
 //   - webui.Adapter binds a separate loopback listener and serves
 //     embedded static assets.
-func runWebUI(ctx context.Context, core *RuntimeCore) int {
+//
+// boot supplies the WebUIPort + BaseURI + Port — env-driven values
+// the adapters need but Build does not consume.
+func runWebUI(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) int {
 	devToken, err := httpadapter.NewDevTokenStore()
 	if err != nil {
 		core.Logger.Error("dev-token mint failed", "err", err)
@@ -34,8 +38,8 @@ func runWebUI(ctx context.Context, core *RuntimeCore) int {
 		return 1
 	}
 
-	webuiOriginIP := fmt.Sprintf("http://127.0.0.1:%d", core.Boot.WebUIPort)
-	webuiOriginHost := fmt.Sprintf("http://localhost:%d", core.Boot.WebUIPort)
+	webuiOriginIP := fmt.Sprintf("http://127.0.0.1:%d", boot.WebUIPort)
+	webuiOriginHost := fmt.Sprintf("http://localhost:%d", boot.WebUIPort)
 	httpAd, err := httpadapter.NewAdapter(httpadapter.Options{
 		Mux:                core.Mux,
 		Auth:               devToken,
@@ -49,19 +53,17 @@ func runWebUI(ctx context.Context, core *RuntimeCore) int {
 		core.Logger.Error("build http adapter", "err", err)
 		return 1
 	}
-	// buildRuntimeCore has already produced every dep the API
-	// needs by this point — flip the gate so /api/v1/* stops
-	// returning 503 runtime_starting. (Phase 2 mounts the http
-	// adapter after boot completes; the gate exists so a future
-	// boot-time mount path doesn't silently expose half-built
-	// state.)
+	// bootRuntime has already produced every dep the API needs by
+	// this point — flip the gate so /api/v1/* stops returning 503
+	// runtime_starting. (The gate exists so a future boot-time mount
+	// path doesn't silently expose half-built state.)
 	httpAd.MarkReady()
 
-	apiBase := core.Boot.BaseURI
+	apiBase := boot.BaseURI
 	if apiBase == "" {
-		apiBase = fmt.Sprintf("http://127.0.0.1:%d", core.Boot.Port)
+		apiBase = fmt.Sprintf("http://127.0.0.1:%d", boot.Port)
 	}
-	webuiAd := webui.NewAdapter("127.0.0.1", core.Boot.WebUIPort, apiBase,
+	webuiAd := webui.NewAdapter("127.0.0.1", boot.WebUIPort, apiBase,
 		core.Logger.With("adapter", "webui"))
 
 	rt := session.NewRuntime(core.Manager,
@@ -73,8 +75,8 @@ func runWebUI(ctx context.Context, core *RuntimeCore) int {
 	}()
 
 	core.Logger.Info("webui ready",
-		"api", fmt.Sprintf("http://127.0.0.1:%d/api/v1", core.Boot.Port),
-		"ui", fmt.Sprintf("http://127.0.0.1:%d/", core.Boot.WebUIPort))
+		"api", fmt.Sprintf("http://127.0.0.1:%d/api/v1", boot.Port),
+		"ui", fmt.Sprintf("http://127.0.0.1:%d/", boot.WebUIPort))
 
 	if err := rt.Start(ctx); err != nil {
 		if ctx.Err() != nil {

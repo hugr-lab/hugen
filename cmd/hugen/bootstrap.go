@@ -2,12 +2,15 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/viper"
+
+	"github.com/hugr-lab/hugen/pkg/runtime"
 )
 
 // upperEnv normalises a viper key (lowercased, dot-separated) to an
@@ -101,12 +104,12 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 	}
 
 	config := &BootstrapConfig{
-		Mode:         v.GetString("HUGEN_MODE"),
-		LogLevel:     v.GetString("HUGEN_LOG_LEVEL"),
-		ConfigPath:   v.GetString("HUGEN_CONFIG_FILE"),
-		Port:         v.GetInt("HUGEN_PORT"),
-		WebUIPort:    v.GetInt("HUGEN_WEBUI_PORT"),
-		BaseURI:      v.GetString("HUGEN_BASE_URL"),
+		Mode:           v.GetString("HUGEN_MODE"),
+		LogLevel:       v.GetString("HUGEN_LOG_LEVEL"),
+		ConfigPath:     v.GetString("HUGEN_CONFIG_FILE"),
+		Port:           v.GetInt("HUGEN_PORT"),
+		WebUIPort:      v.GetInt("HUGEN_WEBUI_PORT"),
+		BaseURI:        v.GetString("HUGEN_BASE_URL"),
 		StateDir:       v.GetString("HUGEN_STATE"),
 		WorkspaceDir:   v.GetString("HUGEN_WORKSPACE_DIR"),
 		CleanupOnClose: v.GetBool("HUGEN_WORKSPACE_CLEANUP_ON_CLOSE"),
@@ -195,4 +198,39 @@ func (c *BootstrapConfig) Info() string {
 		}
 	}
 	return w.String()
+}
+
+// projectRuntimeConfig converts BootstrapConfig (env-driven boot
+// surface) into the env-pure runtime.Config Build consumes. Every
+// runtime.Config field is populated here; runtime.Build does not
+// read os.Environ, parse .env files, or expand ${VAR} placeholders
+// — projection is the sole entry point for that.
+func projectRuntimeConfig(boot *BootstrapConfig, logger *slog.Logger) runtime.Config {
+	mode := "local"
+	if boot.IsRemoteMode() {
+		mode = "remote"
+	}
+	return runtime.Config{
+		Logger:          logger,
+		Mode:            mode,
+		AgentConfigPath: boot.ConfigPath,
+		StateDir:        boot.StateDir,
+		Workspace: runtime.WorkspaceConfig{
+			Dir:            boot.WorkspaceDir,
+			CleanupOnClose: boot.CleanupOnClose,
+		},
+		HTTP: runtime.HTTPConfig{
+			Port:    boot.Port,
+			BaseURI: boot.BaseURI,
+		},
+		Hugr: runtime.HugrConfig{
+			URL:         boot.Hugr.URL,
+			RedirectURI: boot.Hugr.RedirectURI,
+			AccessToken: boot.Hugr.AccessToken,
+			TokenURL:    boot.Hugr.TokenURL,
+			Issuer:      boot.Hugr.Issuer,
+			ClientID:    boot.Hugr.ClientID,
+			Timeout:     boot.Hugr.Timeout,
+		},
+	}
 }

@@ -1,14 +1,14 @@
 // Package main is the entry point for the hugen session.
 //
-// Phase-2 startup flow:
+// Startup flow:
 //
-//  1. buildRuntimeCore brings up auth, identity, model router,
-//     session manager, codec, command registry, and the auth HTTP
-//     server. This is done exactly once per process and is owned by
-//     main; subcommand handlers never re-bootstrap.
+//  1. bootRuntime brings up auth, identity, model router, session
+//     manager, codec, command registry, and the auth HTTP server via
+//     pkg/runtime.Build. This runs exactly once per process and is
+//     owned by main; subcommand handlers never re-bootstrap.
 //  2. Dispatch on os.Args[1]:
-//     console — attaches the console adapter (phase 1 default).
-//     webui  — attaches http + webui adapters (phase 2; pending US1+US2).
+//     console — attaches the console adapter (default).
+//     webui  — attaches http + webui adapters.
 //     a2a    — refused (returns in phase 10).
 //  3. Block on ctx until SIGINT/SIGTERM, then defer-shutdown core.
 package main
@@ -23,9 +23,6 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
-
-	"github.com/hugr-lab/hugen/pkg/auth"
-	"github.com/hugr-lab/hugen/pkg/identity"
 )
 
 const (
@@ -74,7 +71,7 @@ func run(args []string, errOut io.Writer) int {
 		return exitUsage
 	}
 
-	core, err := buildRuntimeCore(ctx)
+	core, boot, err := bootRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(errOut, "%v\n", err)
 		return 1
@@ -87,7 +84,7 @@ func run(args []string, errOut io.Writer) int {
 
 	switch sub {
 	case "webui":
-		return runWebUI(ctx, core)
+		return runWebUI(ctx, core, boot)
 	default:
 		return runConsole(ctx, core)
 	}
@@ -100,7 +97,3 @@ func newLogger(level string) *slog.Logger {
 	}
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lv}))
 }
-
-// silence unused import warnings if main grows lean.
-var _ identity.Source = (identity.Source)(nil)
-var _ *auth.Service

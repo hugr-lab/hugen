@@ -114,7 +114,7 @@ func (m *Manager) Subscribe(_ context.Context) (<-chan tool.ProviderEvent, error
 }
 
 // Close implements tool.ToolProvider. Manager has no provider-owned
-// resources to release — its lifecycle is driven by RuntimeCore.Shutdown,
+// resources to release — its lifecycle is driven by runtime.Core.Shutdown,
 // which calls ShutdownAll separately. Returns nil so ToolManager.Close
 // chains cleanly.
 //
