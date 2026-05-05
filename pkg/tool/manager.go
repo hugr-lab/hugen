@@ -360,6 +360,24 @@ func (m *ToolManager) Providers() []string {
 	return out
 }
 
+// ProviderLifetime returns the Lifetime declared by the provider
+// registered under name. Walks parent on miss so children inherit
+// agent-scoped providers from the root manager. Returns (0, false)
+// when no provider is registered under that name on either tier.
+func (m *ToolManager) ProviderLifetime(name string) (Lifetime, bool) {
+	m.mu.RLock()
+	if p, ok := m.providers[name]; ok {
+		m.mu.RUnlock()
+		return p.Lifetime(), true
+	}
+	parent := m.parent
+	m.mu.RUnlock()
+	if parent != nil {
+		return parent.ProviderLifetime(name)
+	}
+	return 0, false
+}
+
 // Snapshot returns the per-Turn frozen catalogue for a session.
 // The catalogue is cached per session keyed by Generations; a
 // generation mismatch in the caller's cache triggers a rebuild
