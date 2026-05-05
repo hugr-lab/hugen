@@ -95,6 +95,24 @@ type ToolProvider interface {
 	Close() error
 }
 
+// Recoverable is implemented by providers whose underlying
+// resource (subprocess, HTTP client, persistent connection) can
+// be re-established after failure. The recovery wrapper
+// (pkg/tool/providers/recovery) consults this interface on
+// Call/List error: if the inner provider is Recoverable, the
+// wrapper asks it to TryReconnect, then retries the failed
+// operation. Implementations are NOT required to classify errors
+// as transient vs permanent — the wrapper drives retries via
+// backoff exhaustion.
+//
+// Return nil from TryReconnect when the resource is healthy and
+// ready for another attempt; return non-nil when reconnect itself
+// failed (upstream still down, auth revoked, etc.) so the wrapper
+// can backoff or give up.
+type Recoverable interface {
+	TryReconnect(ctx context.Context) error
+}
+
 // ProviderEvent is what Subscribe streams.
 type ProviderEvent struct {
 	Kind ProviderEventKind
