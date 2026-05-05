@@ -1,18 +1,19 @@
 // Package policies hosts Tier-3 personal-policy storage and the
 // `policy:save` / `policy:revoke` tool surface.
 //
-// Phase 4.1a stage A step 5 introduces this subpackage as the
-// new home for Policies; the legacy *tool.Policies stays in
-// pkg/tool until stage A step 7 dissolves the deps. During the
-// interim, *Policies in this package wraps the legacy type via
-// composition — Inner() exposes it for callers (today:
-// ToolManager.SetPolicies) that still expect the legacy shape.
+// One Policies struct implements both tool.PolicyService (consulted
+// by ToolManager.Resolve) and tool.ToolProvider (exposes the LLM
+// tools). The struct owns its types.Querier directly — phase 4.1c
+// retired the legacy *tool.Policies wrapper that used to live in
+// pkg/tool, closing the pkg/store/queries import gate on pkg/tool.
 //
-// The Store interface (store.go) decouples Policies from the
-// persistence layer; the DuckDB-backed implementation lives in
-// pkg/store/queries and is wired by pkg/runtime once the rest
-// of the refactor lands.
+// pkg/runtime constructs Policies once per agent against the local
+// store and registers it via ToolManager.SetPolicies +
+// ToolManager.AddProvider; deployments without a local store skip
+// the wiring and Tier-3 stays disabled (Decide returns PolicyAsk,
+// IsConfigured false → policy:save / policy:revoke surface
+// ErrSystemUnavailable).
 //
-// Imports: pkg/auth/perm, pkg/tool. Does NOT import pkg/config
-// or pkg/store directly — the boundary is the Store interface.
+// Imports: pkg/auth/perm, pkg/store/queries, pkg/tool,
+// query-engine/types.
 package policies

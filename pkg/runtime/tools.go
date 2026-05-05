@@ -46,9 +46,8 @@ func phaseTools(ctx context.Context, core *Core) error {
 	// PolicyAsk, IsConfigured false → policy:save / policy:revoke
 	// surface ErrSystemUnavailable).
 	if core.LocalQuerier != nil {
-		legacy := tool.NewPolicies(core.LocalQuerier)
-		tm.SetPolicies(legacy)
-		pol := policies.New(legacy, core.Permissions, core.Logger)
+		pol := policies.New(core.LocalQuerier, core.Permissions, core.Logger)
+		tm.SetPolicies(pol)
 		if err := tm.AddProvider(pol); err != nil {
 			return fmt.Errorf("register policies provider: %w", err)
 		}

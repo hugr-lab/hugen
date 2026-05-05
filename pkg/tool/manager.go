@@ -29,9 +29,10 @@ type ToolManager struct {
 	// policies is the Tier-3 store. Lock-free read in Resolve via
 	// atomic.Pointer — SetPolicies (and runtime_reload) can swap
 	// the store concurrently with in-flight dispatches without
-	// data-racing. nil pointer disables Tier-3 (IsConfigured is
-	// nil-safe on the value side).
-	policies atomic.Pointer[Policies]
+	// data-racing. The slot wraps a PolicyService interface so the
+	// manager stays free of the impl's persistence-layer imports;
+	// nil slot (zero load) disables Tier-3.
+	policies atomic.Pointer[policySlot]
 	log      *slog.Logger
 
 	// view is the per_agent provider catalogue. Init / LoadConfig
@@ -203,24 +204,33 @@ func (m *ToolManager) AddBySpec(ctx context.Context, spec Spec) error {
 // keeps the common case (no options) at the existing arity.
 type ToolManagerOption func(*ToolManager)
 
+// policySlot wraps the PolicyService stored in the manager's
+// atomic.Pointer. atomic.Pointer requires a concrete element
+// type, so we tunnel the interface through a tiny struct.
+type policySlot struct{ svc PolicyService }
+
 // SetPolicies wires the Tier-3 store. Pass nil to disable Tier-3
 // consultation (no-Hugr / no-local-DB deployments). Bumps the
 // policy generation so the next Snapshot rebuild picks up the
 // change. Safe to call any time — typical wiring is right after
 // NewToolManager and before Init.
-func (m *ToolManager) SetPolicies(p *Policies) {
-	m.policies.Store(p)
+func (m *ToolManager) SetPolicies(p PolicyService) {
+	if p == nil {
+		m.policies.Store(nil)
+	} else {
+		m.policies.Store(&policySlot{svc: p})
+	}
 	m.BumpPolicyGen()
 }
 
-// policiesSnapshot returns the current Tier-3 store pointer.
-// nil-safe — callers can call IsConfigured on the result. On a
-// child Manager whose own pointer is unset (children inherit
-// rather than re-host), the call walks to parent so Tier-3
-// gating uses the agent-level store.
-func (m *ToolManager) policiesSnapshot() *Policies {
-	if p := m.policies.Load(); p != nil {
-		return p
+// policiesSnapshot returns the current Tier-3 store interface.
+// nil result means Tier-3 is unconfigured. On a child Manager
+// whose own slot is unset (children inherit rather than re-host),
+// the call walks to parent so Tier-3 gating uses the agent-level
+// store.
+func (m *ToolManager) policiesSnapshot() PolicyService {
+	if slot := m.policies.Load(); slot != nil {
+		return slot.svc
 	}
 	if m.parent != nil {
 		return m.parent.policiesSnapshot()
@@ -486,7 +496,7 @@ func (m *ToolManager) Resolve(ctx context.Context, t Tool, args json.RawMessage)
 	// RemotePermissions with its own AgentID accessor we read
 	// identity off the SessionContext for tests and fall back to
 	// the perm.Service when available.
-	if pol := m.policiesSnapshot(); pol.IsConfigured() {
+	if pol := m.policiesSnapshot(); pol != nil && pol.IsConfigured() {
 		agentID, scope := tier3LookupKey(ctx, m.perms)
 		dec, derr := pol.Decide(ctx, agentID, t.Name, scope)
 		if derr != nil {
@@ -516,7 +526,7 @@ func (m *ToolManager) Resolve(ctx context.Context, t Tool, args json.RawMessage)
 // both will, after US4); otherwise it falls back to the agent id
 // pinned on the SessionContext metadata under the conventional
 // "agent_id" key, and finally to the empty string. Scope is left
-// at PolicyScopeGlobal in phase-3; skill/role scoping is a
+// at "global" in phase-3; skill/role scoping is a
 // later refinement.
 func tier3LookupKey(ctx context.Context, perms perm.Service) (string, string) {
 	agentID := ""
@@ -533,7 +543,9 @@ func tier3LookupKey(ctx context.Context, perms perm.Service) (string, string) {
 			}
 		}
 	}
-	return agentID, PolicyScopeGlobal
+	// "global" mirrors policies.ScopeGlobal — kept inline so pkg/tool
+	// stays free of the providers/policies import.
+	return agentID, "global"
 }
 
 // Dispatch executes a tool call. Args MUST be the substituted

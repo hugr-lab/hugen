@@ -212,7 +212,6 @@ func us3NewSession(t *testing.T, mdl model.Model, perms perm.Service, agentID st
 // tier). This exercises exit-criterion-11 step 1.
 func TestUS3_AlwaysAllow_NextCallSkipsPromptPath(t *testing.T) {
 	q := newFakeUS3Querier()
-	policiesLegacy := tool.NewPolicies(q)
 
 	provider := &us3Stub{
 		tools: []tool.Tool{{
@@ -246,11 +245,11 @@ func TestUS3_AlwaysAllow_NextCallSkipsPromptPath(t *testing.T) {
 
 	perms := &us3Perms{agentID: "ag01"}
 
-	policiesProv := policies.New(policiesLegacy, perms, nil)
+	policiesProv := policies.New(q, perms, nil)
 
 	sess, tm, cancel := us3NewSession(t, mdl, perms, "ag01", provider, policiesProv)
 	defer cancel()
-	tm.SetPolicies(policiesLegacy)
+	tm.SetPolicies(policiesProv)
 
 	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
 	sess.Inbox() <- protocol.NewUserMessage("s1", user, "go")
@@ -285,8 +284,8 @@ func TestUS3_AlwaysAllow_NextCallSkipsPromptPath(t *testing.T) {
 // Tier-3 allow row cannot relax it. Exit-criterion-11 step 2.
 func TestUS3_FloorBeatsTier3(t *testing.T) {
 	q := newFakeUS3Querier()
-	policies := tool.NewPolicies(q)
-	if _, err := policies.Save(context.Background(), tool.PolicyInput{
+	pol := policies.New(q, nil, nil)
+	if _, err := pol.Save(context.Background(), policies.Input{
 		AgentID:  "ag01",
 		ToolName: "fake:do",
 		Decision: tool.PolicyAllow,
@@ -321,7 +320,7 @@ func TestUS3_FloorBeatsTier3(t *testing.T) {
 
 	sess, tm, cancel := us3NewSession(t, mdl, perms, "ag01", provider)
 	defer cancel()
-	tm.SetPolicies(policies)
+	tm.SetPolicies(pol)
 
 	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
 	sess.Inbox() <- protocol.NewUserMessage("s1", user, "go")
@@ -354,8 +353,8 @@ func TestUS3_FloorBeatsTier3(t *testing.T) {
 // effect on a session running as ag02. Exit-criterion-11 step 3.
 func TestUS3_PerAgentIsolation(t *testing.T) {
 	q := newFakeUS3Querier()
-	policies := tool.NewPolicies(q)
-	if _, err := policies.Save(context.Background(), tool.PolicyInput{
+	pol := policies.New(q, nil, nil)
+	if _, err := pol.Save(context.Background(), policies.Input{
 		AgentID:  "ag01",
 		ToolName: "fake:do",
 		Decision: tool.PolicyDeny,
@@ -385,7 +384,7 @@ func TestUS3_PerAgentIsolation(t *testing.T) {
 
 	sess, tm, cancel := us3NewSession(t, mdl, perms, "ag02", provider)
 	defer cancel()
-	tm.SetPolicies(policies)
+	tm.SetPolicies(pol)
 
 	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
 	sess.Inbox() <- protocol.NewUserMessage("s1", user, "go")
@@ -412,7 +411,6 @@ func TestUS3_PerAgentIsolation(t *testing.T) {
 // Exit-criterion-11 step 4.
 func TestUS3_PolicyPersistGateBlocksSave(t *testing.T) {
 	q := newFakeUS3Querier()
-	policiesLegacy := tool.NewPolicies(q)
 
 	mdl := &scriptedToolModel{
 		turns: [][]model.Chunk{
@@ -439,11 +437,11 @@ func TestUS3_PolicyPersistGateBlocksSave(t *testing.T) {
 		},
 	}
 
-	policiesProv := policies.New(policiesLegacy, perms, nil)
+	policiesProv := policies.New(q, perms, nil)
 
 	sess, tm, cancel := us3NewSession(t, mdl, perms, "ag01", policiesProv)
 	defer cancel()
-	tm.SetPolicies(policiesLegacy)
+	tm.SetPolicies(policiesProv)
 
 	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
 	sess.Inbox() <- protocol.NewUserMessage("s1", user, "go")

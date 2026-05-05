@@ -1,4 +1,4 @@
-package tool
+package policies
 
 import (
 	"context"
@@ -6,13 +6,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/query-engine/types"
 )
 
 // fakePolicyStore is a thin in-memory backing for a `types.Querier`
 // that recognises the small handful of GraphQL operations
-// pkg/tool/policies.go runs against the local store. Other engine
-// methods panic — they're never touched in these tests.
+// Policies.Save / Revoke / Decide run against the local store.
+// Other engine methods panic — they're never touched in these tests.
 type fakePolicyStore struct {
 	rows map[string]map[string]string // composite key → projection
 }
@@ -102,18 +103,18 @@ func (f *fakePolicyQuerier) list(vars map[string]any) (*types.Response, error) {
 func (f *fakePolicyQuerier) insert(vars map[string]any) (*types.Response, error) {
 	data, _ := vars["data"].(map[string]any)
 	agent, _ := data["agent_id"].(string)
-	tool, _ := data["tool_name"].(string)
+	toolName, _ := data["tool_name"].(string)
 	scope, _ := data["scope"].(string)
 	policy, _ := data["policy"].(string)
 	note, _ := data["note"].(string)
 	createdBy, _ := data["created_by"].(string)
-	k := keyOf(agent, tool, scope)
+	k := keyOf(agent, toolName, scope)
 	if _, ok := f.store.rows[k]; ok {
 		return nil, errors.New("fakePolicyQuerier: duplicate insert")
 	}
 	f.store.rows[k] = map[string]string{
 		"agent_id":   agent,
-		"tool_name":  tool,
+		"tool_name":  toolName,
 		"scope":      scope,
 		"policy":     policy,
 		"note":       note,
@@ -124,10 +125,10 @@ func (f *fakePolicyQuerier) insert(vars map[string]any) (*types.Response, error)
 
 func (f *fakePolicyQuerier) update(vars map[string]any) (*types.Response, error) {
 	agent, _ := vars["agent"].(string)
-	tool, _ := vars["tool"].(string)
+	toolName, _ := vars["tool"].(string)
 	scope, _ := vars["scope"].(string)
 	data, _ := vars["data"].(map[string]any)
-	k := keyOf(agent, tool, scope)
+	k := keyOf(agent, toolName, scope)
 	r, ok := f.store.rows[k]
 	if !ok {
 		return &types.Response{Data: map[string]any{
@@ -159,22 +160,27 @@ func (f *fakePolicyQuerier) update(vars map[string]any) (*types.Response, error)
 
 func (f *fakePolicyQuerier) delete(vars map[string]any) (*types.Response, error) {
 	agent, _ := vars["agent"].(string)
-	tool, _ := vars["tool"].(string)
+	toolName, _ := vars["tool"].(string)
 	scope, _ := vars["scope"].(string)
-	delete(f.store.rows, keyOf(agent, tool, scope))
+	delete(f.store.rows, keyOf(agent, toolName, scope))
 	return &types.Response{Data: map[string]any{}}, nil
 }
 
-func TestPolicies_SaveRoundTrip(t *testing.T) {
+func newPoliciesForTest(t *testing.T) (*Policies, *fakePolicyStore) {
+	t.Helper()
 	store := newFakePolicyStore()
-	p := NewPolicies(newFakePolicyQuerier(store))
+	return New(newFakePolicyQuerier(store), nil, nil), store
+}
+
+func TestPoliciesStore_SaveRoundTrip(t *testing.T) {
+	p, store := newPoliciesForTest(t)
 	ctx := context.Background()
 
-	id, err := p.Save(ctx, PolicyInput{
+	id, err := p.Save(ctx, Input{
 		AgentID:   "ag01",
 		ToolName:  "bash-mcp:read_file",
-		Decision:  PolicyAllow,
-		CreatedBy: PolicyCreatorUser,
+		Decision:  tool.PolicyAllow,
+		CreatedBy: CreatorUser,
 	})
 	if err != nil {
 		t.Fatalf("save: %v", err)
@@ -189,20 +195,19 @@ func TestPolicies_SaveRoundTrip(t *testing.T) {
 	if row["policy"] != "always_allowed" {
 		t.Fatalf("policy = %q, want always_allowed", row["policy"])
 	}
-	if row["scope"] != PolicyScopeGlobal {
-		t.Fatalf("scope = %q, want %q", row["scope"], PolicyScopeGlobal)
+	if row["scope"] != ScopeGlobal {
+		t.Fatalf("scope = %q, want %q", row["scope"], ScopeGlobal)
 	}
 }
 
-func TestPolicies_SaveUpsertsExisting(t *testing.T) {
-	store := newFakePolicyStore()
-	p := NewPolicies(newFakePolicyQuerier(store))
+func TestPoliciesStore_SaveUpsertsExisting(t *testing.T) {
+	p, store := newPoliciesForTest(t)
 	ctx := context.Background()
 
-	in := PolicyInput{
+	in := Input{
 		AgentID:  "ag01",
 		ToolName: "bash-mcp:read_file",
-		Decision: PolicyAllow,
+		Decision: tool.PolicyAllow,
 		Note:     "initial",
 	}
 	if _, err := p.Save(ctx, in); err != nil {
@@ -211,7 +216,7 @@ func TestPolicies_SaveUpsertsExisting(t *testing.T) {
 	if got := len(store.rows); got != 1 {
 		t.Fatalf("rows after first = %d", got)
 	}
-	in.Decision = PolicyDeny
+	in.Decision = tool.PolicyDeny
 	in.Note = "second"
 	id, err := p.Save(ctx, in)
 	if err != nil {
@@ -229,14 +234,13 @@ func TestPolicies_SaveUpsertsExisting(t *testing.T) {
 	}
 }
 
-func TestPolicies_RevokeDeletesRow(t *testing.T) {
-	store := newFakePolicyStore()
-	p := NewPolicies(newFakePolicyQuerier(store))
+func TestPoliciesStore_RevokeDeletesRow(t *testing.T) {
+	p, store := newPoliciesForTest(t)
 	ctx := context.Background()
-	id, err := p.Save(ctx, PolicyInput{
+	id, err := p.Save(ctx, Input{
 		AgentID:  "ag01",
 		ToolName: "bash-mcp:read_file",
-		Decision: PolicyAllow,
+		Decision: tool.PolicyAllow,
 	})
 	if err != nil {
 		t.Fatalf("save: %v", err)
@@ -253,21 +257,20 @@ func TestPolicies_RevokeDeletesRow(t *testing.T) {
 	}
 }
 
-func TestPolicies_RevokeMalformedID(t *testing.T) {
-	p := NewPolicies(newFakePolicyQuerier(newFakePolicyStore()))
+func TestPoliciesStore_RevokeMalformedID(t *testing.T) {
+	p, _ := newPoliciesForTest(t)
 	if err := p.Revoke(context.Background(), "not-a-composite"); err == nil {
 		t.Fatalf("expected error for malformed id")
 	}
 }
 
-func TestPolicies_DecideAllowExact(t *testing.T) {
-	store := newFakePolicyStore()
-	p := NewPolicies(newFakePolicyQuerier(store))
+func TestPoliciesStore_DecideAllowExact(t *testing.T) {
+	p, _ := newPoliciesForTest(t)
 	ctx := context.Background()
-	if _, err := p.Save(ctx, PolicyInput{
+	if _, err := p.Save(ctx, Input{
 		AgentID:  "ag01",
 		ToolName: "bash-mcp:read_file",
-		Decision: PolicyAllow,
+		Decision: tool.PolicyAllow,
 	}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -275,25 +278,24 @@ func TestPolicies_DecideAllowExact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	if got.Outcome != PolicyAllow {
+	if got.Outcome != tool.PolicyAllow {
 		t.Fatalf("outcome = %v, want PolicyAllow", got.Outcome)
 	}
 	if got.ToolName != "bash-mcp:read_file" {
 		t.Fatalf("tool = %q", got.ToolName)
 	}
-	if got.Scope != PolicyScopeGlobal {
+	if got.Scope != ScopeGlobal {
 		t.Fatalf("scope = %q", got.Scope)
 	}
 }
 
-func TestPolicies_DecideDenyWins(t *testing.T) {
-	store := newFakePolicyStore()
-	p := NewPolicies(newFakePolicyQuerier(store))
+func TestPoliciesStore_DecideDenyWins(t *testing.T) {
+	p, _ := newPoliciesForTest(t)
 	ctx := context.Background()
-	if _, err := p.Save(ctx, PolicyInput{
+	if _, err := p.Save(ctx, Input{
 		AgentID:  "ag01",
 		ToolName: "bash-mcp:write_file",
-		Decision: PolicyDeny,
+		Decision: tool.PolicyDeny,
 	}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -301,43 +303,40 @@ func TestPolicies_DecideDenyWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	if got.Outcome != PolicyDeny {
+	if got.Outcome != tool.PolicyDeny {
 		t.Fatalf("outcome = %v, want PolicyDeny", got.Outcome)
 	}
 }
 
-func TestPolicies_DecideAskOnNoMatch(t *testing.T) {
-	store := newFakePolicyStore()
-	p := NewPolicies(newFakePolicyQuerier(store))
-	ctx := context.Background()
-	got, err := p.Decide(ctx, "ag01", "bash-mcp:write_file", "")
+func TestPoliciesStore_DecideAskOnNoMatch(t *testing.T) {
+	p, _ := newPoliciesForTest(t)
+	got, err := p.Decide(context.Background(), "ag01", "bash-mcp:write_file", "")
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	if got.Outcome != PolicyAsk {
+	if got.Outcome != tool.PolicyAsk {
 		t.Fatalf("outcome = %v, want PolicyAsk", got.Outcome)
 	}
 }
 
-func TestPolicies_DecidePrefixGlob(t *testing.T) {
-	store := newFakePolicyStore()
-	p := NewPolicies(newFakePolicyQuerier(store))
+func TestPoliciesStore_DecidePrefixGlob(t *testing.T) {
+	p, _ := newPoliciesForTest(t)
 	ctx := context.Background()
-	if _, err := p.Save(ctx, PolicyInput{
+	if _, err := p.Save(ctx, Input{
 		AgentID:  "ag01",
 		ToolName: "hugr-main:data-*",
-		Decision: PolicyAllow,
+		Decision: tool.PolicyAllow,
 	}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	for _, tc := range []struct {
 		name string
 		full string
-		want PolicyOutcome
+		want tool.PolicyOutcome
 	}{
-		{"data prefix", "hugr-main:data-execute_query", PolicyAllow},
-		{"different prefix", "hugr-main:discovery-search_data_sources", PolicyAsk},
-		{"other provider", "bash-mcp:data-execute_query", PolicyAsk},
+		{"data prefix", "hugr-main:data-execute_query", tool.PolicyAllow},
+		{"different prefix", "hugr-main:discovery-search_data_sources", tool.PolicyAsk},
+		{"other provider", "bash-mcp:data-execute_query", tool.PolicyAsk},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := p.Decide(ctx, "ag01", tc.full, "")
@@ -351,21 +350,20 @@ func TestPolicies_DecidePrefixGlob(t *testing.T) {
 	}
 }
 
-func TestPolicies_DecideExactBeatsPrefix(t *testing.T) {
-	store := newFakePolicyStore()
-	p := NewPolicies(newFakePolicyQuerier(store))
+func TestPoliciesStore_DecideExactBeatsPrefix(t *testing.T) {
+	p, _ := newPoliciesForTest(t)
 	ctx := context.Background()
-	if _, err := p.Save(ctx, PolicyInput{
+	if _, err := p.Save(ctx, Input{
 		AgentID:  "ag01",
 		ToolName: "hugr-main:data-*",
-		Decision: PolicyAllow,
+		Decision: tool.PolicyAllow,
 	}); err != nil {
 		t.Fatalf("save prefix: %v", err)
 	}
-	if _, err := p.Save(ctx, PolicyInput{
+	if _, err := p.Save(ctx, Input{
 		AgentID:  "ag01",
 		ToolName: "hugr-main:data-execute_query",
-		Decision: PolicyDeny,
+		Decision: tool.PolicyDeny,
 	}); err != nil {
 		t.Fatalf("save exact: %v", err)
 	}
@@ -373,19 +371,18 @@ func TestPolicies_DecideExactBeatsPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	if got.Outcome != PolicyDeny {
+	if got.Outcome != tool.PolicyDeny {
 		t.Fatalf("exact deny should win, got %v", got.Outcome)
 	}
 }
 
-func TestPolicies_DecidePerAgentIsolation(t *testing.T) {
-	store := newFakePolicyStore()
-	p := NewPolicies(newFakePolicyQuerier(store))
+func TestPoliciesStore_DecidePerAgentIsolation(t *testing.T) {
+	p, _ := newPoliciesForTest(t)
 	ctx := context.Background()
-	if _, err := p.Save(ctx, PolicyInput{
+	if _, err := p.Save(ctx, Input{
 		AgentID:  "ag01",
 		ToolName: "bash-mcp:read_file",
-		Decision: PolicyAllow,
+		Decision: tool.PolicyAllow,
 	}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -393,29 +390,28 @@ func TestPolicies_DecidePerAgentIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
-	if got.Outcome != PolicyAsk {
+	if got.Outcome != tool.PolicyAsk {
 		t.Fatalf("expected Ask for other agent, got %v", got.Outcome)
 	}
 }
 
-func TestPolicies_DecideScopeChain(t *testing.T) {
-	store := newFakePolicyStore()
-	p := NewPolicies(newFakePolicyQuerier(store))
+func TestPoliciesStore_DecideScopeChain(t *testing.T) {
+	p, _ := newPoliciesForTest(t)
 	ctx := context.Background()
 	// global says deny, role says allow.
-	if _, err := p.Save(ctx, PolicyInput{
+	if _, err := p.Save(ctx, Input{
 		AgentID:  "ag01",
 		ToolName: "bash-mcp:read_file",
-		Scope:    PolicyScopeGlobal,
-		Decision: PolicyDeny,
+		Scope:    ScopeGlobal,
+		Decision: tool.PolicyDeny,
 	}); err != nil {
 		t.Fatalf("global save: %v", err)
 	}
-	if _, err := p.Save(ctx, PolicyInput{
+	if _, err := p.Save(ctx, Input{
 		AgentID:  "ag01",
 		ToolName: "bash-mcp:read_file",
 		Scope:    "role:hugr-data:analyst",
-		Decision: PolicyAllow,
+		Decision: tool.PolicyAllow,
 	}); err != nil {
 		t.Fatalf("role save: %v", err)
 	}
@@ -423,7 +419,7 @@ func TestPolicies_DecideScopeChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide role: %v", err)
 	}
-	if got.Outcome != PolicyAllow {
+	if got.Outcome != tool.PolicyAllow {
 		t.Fatalf("role-scoped should win, got %v", got.Outcome)
 	}
 	// Global-scoped lookup ignores the role row.
@@ -431,12 +427,12 @@ func TestPolicies_DecideScopeChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide global: %v", err)
 	}
-	if got.Outcome != PolicyDeny {
+	if got.Outcome != tool.PolicyDeny {
 		t.Fatalf("global-scoped should deny, got %v", got.Outcome)
 	}
 }
 
-func TestPolicies_NilStoreNoop(t *testing.T) {
+func TestPoliciesStore_NilStoreNoop(t *testing.T) {
 	var p *Policies
 	if p.IsConfigured() {
 		t.Fatalf("nil receiver should not be configured")
@@ -445,20 +441,20 @@ func TestPolicies_NilStoreNoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide on nil: %v", err)
 	}
-	if got.Outcome != PolicyAsk {
+	if got.Outcome != tool.PolicyAsk {
 		t.Fatalf("nil decide should return Ask, got %v", got.Outcome)
 	}
 }
 
-func TestPolicies_DecideUnknownPolicyValueErrors(t *testing.T) {
+func TestPoliciesStore_DecideUnknownPolicyValueErrors(t *testing.T) {
 	store := newFakePolicyStore()
-	store.rows[keyOf("ag01", "bash-mcp:read_file", PolicyScopeGlobal)] = map[string]string{
+	store.rows[keyOf("ag01", "bash-mcp:read_file", ScopeGlobal)] = map[string]string{
 		"agent_id":  "ag01",
 		"tool_name": "bash-mcp:read_file",
-		"scope":     PolicyScopeGlobal,
+		"scope":     ScopeGlobal,
 		"policy":    "garbage",
 	}
-	p := NewPolicies(newFakePolicyQuerier(store))
+	p := New(newFakePolicyQuerier(store), nil, nil)
 	if _, err := p.Decide(context.Background(), "ag01", "bash-mcp:read_file", ""); err == nil {
 		t.Fatalf("expected error on garbage policy value")
 	}

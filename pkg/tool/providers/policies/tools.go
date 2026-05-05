@@ -93,13 +93,13 @@ func (p *Policies) callSave(ctx context.Context, args json.RawMessage) (json.Raw
 	if err := p.gatePersist(ctx, in.ToolName); err != nil {
 		return nil, err
 	}
-	id, err := p.inner.Save(ctx, Input{
+	id, err := p.Save(ctx, Input{
 		AgentID:   p.agentID(ctx),
 		ToolName:  in.ToolName,
 		Scope:     in.Scope,
 		Decision:  out,
 		Note:      in.Note,
-		CreatedBy: tool.PolicyCreatorLLM,
+		CreatedBy: CreatorLLM,
 	})
 	if err != nil {
 		return nil, err
@@ -128,14 +128,14 @@ func (p *Policies) callRevoke(ctx context.Context, args json.RawMessage) (json.R
 	// Tier-1/2 can forbid revoke of policies on sensitive tools
 	// (otherwise an LLM with revoke access could just delete a
 	// pinned deny). Composite id shape: agentID|toolName|scope.
-	_, toolName, _, perr := tool.ParsePolicyID(in.ID)
+	_, toolName, _, perr := ParsePolicyID(in.ID)
 	if perr != nil {
 		return nil, fmt.Errorf("%w: policy:revoke: %v", tool.ErrArgValidation, perr)
 	}
 	if err := p.gatePersist(ctx, toolName); err != nil {
 		return nil, err
 	}
-	if err := p.inner.Revoke(ctx, in.ID); err != nil {
+	if err := p.Revoke(ctx, in.ID); err != nil {
 		return nil, err
 	}
 	return json.Marshal(map[string]string{"revoked": in.ID})
@@ -179,7 +179,7 @@ func (p *Policies) agentID(ctx context.Context) string {
 	return ""
 }
 
-func decodeDecision(s string) (Outcome, error) {
+func decodeDecision(s string) (tool.PolicyOutcome, error) {
 	switch s {
 	case "allow", "always_allowed":
 		return tool.PolicyAllow, nil

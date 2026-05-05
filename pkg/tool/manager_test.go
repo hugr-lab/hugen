@@ -324,21 +324,45 @@ type fakePermsWithAgent struct {
 
 func (f *fakePermsWithAgent) AgentID() string { return f.agentID }
 
-func newPoliciesForTest(t *testing.T) (*Policies, *fakePolicyStore) {
-	t.Helper()
-	store := newFakePolicyStore()
-	return NewPolicies(newFakePolicyQuerier(store)), store
+// stubPolicyService is a tiny in-memory PolicyService used by the
+// manager-level Tier-3 tests. It avoids pulling pkg/tool back onto
+// the persistence layer (pkg/store/queries) — the real impl lives
+// in pkg/tool/providers/policies and is exercised in that package's
+// own tests.
+type stubPolicyService struct {
+	rows       map[string]PolicyOutcome
+	configured bool
+}
+
+func newStubPolicies() *stubPolicyService {
+	return &stubPolicyService{
+		rows:       map[string]PolicyOutcome{},
+		configured: true,
+	}
+}
+
+func (s *stubPolicyService) Set(agentID, toolName string, out PolicyOutcome) {
+	s.rows[agentID+"|"+toolName] = out
+}
+
+func (s *stubPolicyService) IsConfigured() bool {
+	return s != nil && s.configured
+}
+
+func (s *stubPolicyService) Decide(_ context.Context, agentID, toolName, scope string) (PolicyDecision, error) {
+	if !s.IsConfigured() {
+		return PolicyDecision{}, nil
+	}
+	out, ok := s.rows[agentID+"|"+toolName]
+	if !ok {
+		return PolicyDecision{}, nil
+	}
+	return PolicyDecision{Outcome: out, ToolName: toolName, Scope: scope}, nil
 }
 
 func TestToolManager_Resolve_Tier3DenyBlocks(t *testing.T) {
-	pol, _ := newPoliciesForTest(t)
-	if _, err := pol.Save(context.Background(), PolicyInput{
-		AgentID:  "ag01",
-		ToolName: "bash-mcp:read_file",
-		Decision: PolicyDeny,
-	}); err != nil {
-		t.Fatalf("save: %v", err)
-	}
+	pol := newStubPolicies()
+	pol.Set("ag01", "bash-mcp:read_file", PolicyDeny)
 	perms := &fakePermsWithAgent{agentID: "ag01"}
 	m := NewToolManager(perms, nil, nil)
 	m.SetPolicies(pol)
@@ -358,14 +382,8 @@ func TestToolManager_Resolve_Tier3DenyBlocks(t *testing.T) {
 }
 
 func TestToolManager_Resolve_Tier3AllowMarksFromUser(t *testing.T) {
-	pol, _ := newPoliciesForTest(t)
-	if _, err := pol.Save(context.Background(), PolicyInput{
-		AgentID:  "ag01",
-		ToolName: "bash-mcp:read_file",
-		Decision: PolicyAllow,
-	}); err != nil {
-		t.Fatalf("save: %v", err)
-	}
+	pol := newStubPolicies()
+	pol.Set("ag01", "bash-mcp:read_file", PolicyAllow)
 	perms := &fakePermsWithAgent{agentID: "ag01"}
 	m := NewToolManager(perms, nil, nil)
 	m.SetPolicies(pol)
@@ -385,14 +403,8 @@ func TestToolManager_Resolve_Tier3AllowMarksFromUser(t *testing.T) {
 }
 
 func TestToolManager_Resolve_Tier1FloorBeatsTier3Allow(t *testing.T) {
-	pol, _ := newPoliciesForTest(t)
-	if _, err := pol.Save(context.Background(), PolicyInput{
-		AgentID:  "ag01",
-		ToolName: "bash-mcp:write_file",
-		Decision: PolicyAllow,
-	}); err != nil {
-		t.Fatalf("save: %v", err)
-	}
+	pol := newStubPolicies()
+	pol.Set("ag01", "bash-mcp:write_file", PolicyAllow)
 	perms := &fakePermsWithAgent{
 		fakePerms: fakePerms{rules: map[string]perm.Permission{
 			"hugen:tool:bash-mcp:*": {Disabled: true, FromConfig: true},
@@ -437,7 +449,7 @@ func TestToolManager_Resolve_NoPoliciesSkipsTier3(t *testing.T) {
 }
 
 func TestToolManager_Resolve_AskFallsThrough(t *testing.T) {
-	pol, _ := newPoliciesForTest(t)
+	pol := newStubPolicies()
 	// no row → Decide returns Ask; Resolve should not mark FromUser.
 	perms := &fakePermsWithAgent{agentID: "ag01"}
 	m := NewToolManager(perms, nil, nil)
@@ -463,7 +475,7 @@ func TestToolManager_Resolve_AskFallsThrough(t *testing.T) {
 // the fix m.policies was protected by m.mu only on the write path;
 // Resolve dereferenced it lock-free.
 func TestToolManager_SetPolicies_RaceFreeWithResolve(t *testing.T) {
-	pol, _ := newPoliciesForTest(t)
+	pol := newStubPolicies()
 	perms := &fakePermsWithAgent{agentID: "ag01"}
 	m := NewToolManager(perms, nil, nil)
 	tl := Tool{
@@ -567,12 +579,12 @@ func TestToolManager_NewChild_CloseDropsOwnOnly(t *testing.T) {
 
 func TestToolManager_NewChild_PoliciesInheritedFromParent(t *testing.T) {
 	parent := NewToolManager(&fakePerms{}, nil, nil)
-	pol := &Policies{}
+	pol := newStubPolicies()
 	parent.SetPolicies(pol)
 
 	child := parent.NewChild()
 	if got := child.policiesSnapshot(); got != pol {
-		t.Errorf("child.policiesSnapshot = %p, want parent's %p", got, pol)
+		t.Errorf("child.policiesSnapshot = %v, want parent's %v", got, pol)
 	}
 }
 

@@ -65,7 +65,7 @@ func TestPolicies_Call_UnknownToolReturnsError(t *testing.T) {
 }
 
 func TestDecodeDecision_Aliases(t *testing.T) {
-	cases := map[string]Outcome{
+	cases := map[string]tool.PolicyOutcome{
 		"allow":           tool.PolicyAllow,
 		"always_allowed":  tool.PolicyAllow,
 		"deny":            tool.PolicyDeny,
