@@ -193,14 +193,25 @@ func buildRuntimeCore(ctx context.Context) (*RuntimeCore, error) {
 
 	core.Codec = protocol.NewCodec()
 
-	skills, skillStore, err := buildSkillStack(core)
+	skills, skillStore, err := runtime.BuildSkillStack(boot.StateDir, core.Logger)
 	if err != nil {
 		return nil, failed("skills", err)
 	}
 	core.Skills = skills
 	core.SkillStore = skillStore
 
-	core.Permissions = buildPermissionService(core)
+	authHasHugr := false
+	if core.Auth != nil {
+		_, authHasHugr = core.Auth.TokenStore("hugr")
+	}
+	core.Permissions = runtime.BuildPermissionService(
+		core.Config.Permissions(),
+		core.Identity,
+		authHasHugr,
+		core.RemoteQuerier,
+		core.LocalQuerier,
+		core.Logger,
+	)
 
 	// Workspace must exist before buildToolStack so per_agent stdio
 	// MCPs can be told where to write — the runtime injects

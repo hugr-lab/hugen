@@ -7,11 +7,13 @@ import (
 	"sync"
 
 	"github.com/hugr-lab/hugen/pkg/auth"
+	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/skill"
 
 	hugr "github.com/hugr-lab/query-engine"
 	"github.com/hugr-lab/query-engine/client"
@@ -52,6 +54,11 @@ type Core struct {
 	Agent    *session.Agent
 	Commands *session.CommandRegistry
 	Codec    *protocol.Codec
+
+	// Phase 7 (skills_perms).
+	Skills      *skill.SkillManager
+	SkillStore  skill.SkillStore
+	Permissions perm.Service
 
 	// cleanups stacks per-phase teardown closures in registration
 	// order. cleanupPartial (failure path) and Shutdown (success

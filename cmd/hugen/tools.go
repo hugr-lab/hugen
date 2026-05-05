@@ -4,78 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/hugen/pkg/tool/providers"
-	"github.com/hugr-lab/query-engine/types"
 )
-
-// buildSkillStack constructs the SkillStore + SkillManager from the
-// installed bundled skills. system tier reads from
-// ${StateDir}/skills/system/, local from ${StateDir}/skills/local/.
-// CommunityRoot is left empty for now — operator-pinned community
-// roots are a config-time extension that lands later.
-func buildSkillStack(core *RuntimeCore) (*skill.SkillManager, skill.SkillStore, error) {
-	stateDir := core.Boot.StateDir
-	if stateDir == "" {
-		return nil, nil, fmt.Errorf("buildSkillStack: empty state dir")
-	}
-	store := skill.NewSkillStore(skill.Options{
-		SystemRoot: filepath.Join(stateDir, "skills/system"),
-		LocalRoot:  filepath.Join(stateDir, "skills/local"),
-	})
-	mgr := skill.NewSkillManager(store, core.Logger)
-	return mgr, store, nil
-}
-
-// buildPermissionService constructs the perm.Service used by the
-// ToolManager and consulted by every tool dispatch.
-//
-// The selector picks Tier-2-aware RemotePermissions when:
-//
-//   - the deployment opts in via cfg.Permissions().RemoteEnabled();
-//     and
-//   - a hugr auth source is registered (TokenStore("hugr") works);
-//     and
-//   - some types.Querier is available to run
-//     function.core.auth.my_permissions against. RemoteQuerier is
-//     preferred (the Hugr hub is the source of truth for role
-//     rules); the local engine falls back when the deployment
-//     bundles its own engine.
-//
-// Otherwise LocalPermissions stays as the Tier-1-only floor — no
-// Hugr round-trip on Resolve, no role rules layered on top. The
-// permission stack still consults Tier-3 (tool_policies) inside
-// ToolManager regardless of which service flavour is wired here.
-func buildPermissionService(core *RuntimeCore) perm.Service {
-	view := core.Config.Permissions()
-	local := perm.NewLocalPermissions(view, core.Identity)
-
-	if !view.RemoteEnabled() {
-		return local
-	}
-	if core.Auth == nil {
-		return local
-	}
-	if _, ok := core.Auth.TokenStore("hugr"); !ok {
-		return local
-	}
-	var q types.Querier
-	if core.RemoteQuerier != nil {
-		q = core.RemoteQuerier
-	} else if core.LocalQuerier != nil {
-		q = core.LocalQuerier
-	}
-	if q == nil {
-		return local
-	}
-	core.Logger.Info("permissions: remote tier enabled (function.core.auth.my_permissions)")
-	return perm.NewRemotePermissions(view, core.Identity, perm.NewRemoteQuerier(q))
-}
 
 // buildToolStack wires SkillManager + PermissionService + ToolManager
 // + SystemProvider, then asks the manager to open every per_agent
