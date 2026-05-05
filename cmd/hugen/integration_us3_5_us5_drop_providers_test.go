@@ -68,7 +68,6 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, nil)))
 	t.Cleanup(func() { _ = tools.Close() })
 
-	// SystemProvider is empty post-step-25; left out of the wiring.
 
 	ws := session.NewWorkspace(workspaceDir, true)
 	resources := session.NewResources(session.ResourceDeps{

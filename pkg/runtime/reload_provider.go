@@ -31,9 +31,8 @@ type ReloadDeps struct {
 
 // ReloadProvider owns the runtime:reload tool — the LLM-callable
 // surface that re-reads live runtime state without restarting the
-// process. It replaces SystemProvider's runtime_reload callback;
-// dispatch lives natively in pkg/runtime so cmd/hugen no longer
-// has to assemble a per-target switch by hand.
+// process. Dispatch lives natively in pkg/runtime so cmd/hugen has
+// no per-target switch to assemble.
 type ReloadProvider struct {
 	deps ReloadDeps
 }

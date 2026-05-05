@@ -5,7 +5,7 @@
 //   - install bundled `duckdb-data` skill on disk;
 //   - load it into a session;
 //   - call session:skill_files("duckdb-data") through the full
-//     ToolManager + SystemProvider pipeline;
+//     ToolManager pipeline;
 //   - read one absolute path from the envelope via bash.read_file
 //     and confirm bytes match the bundled file (SC-010 cross-check).
 package main
@@ -75,7 +75,6 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, nil)))
 	t.Cleanup(func() { _ = tools.Close() })
 
-	// SystemProvider is empty post-step-25; left out of the wiring.
 
 	ws := session.NewWorkspace(workspaceDir, true)
 	resources := session.NewResources(session.ResourceDeps{

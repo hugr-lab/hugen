@@ -63,8 +63,7 @@ func phaseTools(ctx context.Context, core *Core) error {
 	}
 
 	// ReloadProvider hosts runtime:reload (target ∈ permissions /
-	// skills / mcp / all). Replaces the legacy system:runtime_reload
-	// callback wired through SystemDeps.Reload.
+	// skills / mcp / all).
 	reloadP := NewReloadProvider(ReloadDeps{
 		Perms:  core.Permissions,
 		Skills: core.Skills,

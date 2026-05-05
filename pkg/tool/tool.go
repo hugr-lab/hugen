@@ -62,9 +62,12 @@ func (l Lifetime) String() string {
 
 // ToolProvider exposes a group of tools and dispatches calls.
 //
-// Implementations live alongside this package: SystemProvider
-// (built-in), MCPProvider (mark3labs/mcp-go client). Other
-// implementations satisfy the contract structurally.
+// Implementations live alongside this package: MCPProvider
+// (mark3labs/mcp-go client). pkg/tool/providers/{admin,policies}
+// host the agent-level admin / Tier-3 surfaces; pkg/runtime hosts
+// runtime:reload; pkg/session.Manager itself implements the
+// "session:*" provider. Other implementations satisfy the contract
+// structurally.
 type ToolProvider interface {
 	// Name returns the provider's short name; matches the prefix
 	// of every Tool the provider exposes (e.g. "bash-mcp").
@@ -152,6 +155,13 @@ var (
 	ErrNotFound            = errors.New("tool: not found")
 	ErrPathEscape          = errors.New("tool: path escapes allowed root")
 	ErrIO                  = errors.New("tool: io")
+	// ErrSystemUnavailable is the well-known sentinel a provider returns
+	// when its underlying capability is not wired in this deployment
+	// (e.g. policy:save without a Tier-3 store, session:skill_load
+	// without a SkillManager). Callers errors.Is-test for it to decide
+	// whether to retry, escalate, or surface a graceful "not configured"
+	// result.
+	ErrSystemUnavailable = errors.New("tool: capability unavailable in this runtime")
 	ErrBuilderNotConfigured = errors.New("tool: ProviderBuilder not configured (call WithBuilder)")
 )
 
