@@ -60,7 +60,6 @@ type ToolManager struct {
 	mu               sync.RWMutex
 	providers        map[string]ToolProvider
 	sessionProviders map[string]map[string]ToolProvider // sessionID → name → provider
-	cache            map[string]*cachedSnapshot
 
 	toolGen   atomic.Int64
 	policyGen atomic.Int64
@@ -81,11 +80,6 @@ type ToolManager struct {
 	// step 2 introduces the surface; the legacy sessionProviders
 	// path stays alongside until stage A step 9.
 	parent *ToolManager
-}
-
-type cachedSnapshot struct {
-	gens Generations
-	snap Snapshot
 }
 
 // Snapshot is the per-Turn frozen catalogue for a session.
@@ -146,7 +140,6 @@ func NewToolManager(
 		connectTimeout:   defaultConnectTimeout,
 		providers:        make(map[string]ToolProvider),
 		sessionProviders: make(map[string]map[string]ToolProvider),
-		cache:            make(map[string]*cachedSnapshot),
 		drainTimeout:     defaultDrainTimeout,
 		reconnector:      NewReconnector(log),
 	}
@@ -201,7 +194,6 @@ func (m *ToolManager) NewChild() *ToolManager {
 		builder:          m.builder, // share dispatcher with root
 		providers:        make(map[string]ToolProvider),
 		sessionProviders: nil, // children never host other children
-		cache:            nil, // snapshot caching is agent-level
 		parent:           m,
 	}
 	return child
@@ -341,7 +333,7 @@ func (m *ToolManager) AddSessionProvider(sessionID string, p ToolProvider) error
 		return fmt.Errorf("tool: provider %q already registered for session %s", name, sessionID)
 	}
 	scoped[name] = p
-	delete(m.cache, sessionID) // force rebuild for this session
+	m.toolGen.Add(1) // bump so caller-side caches rebuild
 	return nil
 }
 
@@ -372,7 +364,7 @@ func (m *ToolManager) RemoveSessionProvider(ctx context.Context, sessionID, name
 	if len(scoped) == 0 {
 		delete(m.sessionProviders, sessionID)
 	}
-	delete(m.cache, sessionID)
+	m.toolGen.Add(1) // bump so caller-side caches rebuild
 	m.mu.Unlock()
 
 	dctx, cancel := context.WithTimeout(ctx, m.drainTimeout)
@@ -391,7 +383,9 @@ func (m *ToolManager) CloseSession(ctx context.Context, sessionID string) error 
 	m.mu.Lock()
 	scoped := m.sessionProviders[sessionID]
 	delete(m.sessionProviders, sessionID)
-	delete(m.cache, sessionID)
+	if len(scoped) > 0 {
+		m.toolGen.Add(1) // bump so caller-side caches rebuild
+	}
 	m.mu.Unlock()
 	var errs []error
 	for name, p := range scoped {
@@ -418,9 +412,6 @@ func (m *ToolManager) Close() error {
 	m.providers = make(map[string]ToolProvider)
 	if m.sessionProviders != nil {
 		m.sessionProviders = make(map[string]map[string]ToolProvider)
-	}
-	if m.cache != nil {
-		m.cache = make(map[string]*cachedSnapshot)
 	}
 	m.mu.Unlock()
 	var errs []error
@@ -533,21 +524,29 @@ func (m *ToolManager) Providers() []string {
 
 // Snapshot returns the per-Turn frozen catalogue for a session.
 // The catalogue is cached per session keyed by Generations; a
-// generation mismatch triggers a rebuild that filters every
-// provider's tools by the session's loaded skills' allowed-tools.
+// generation mismatch in the caller's cache triggers a rebuild
+// that filters every provider's tools by the session's loaded
+// skills' allowed-tools. Phase 4.1a stage A step 7b moved the
+// per-session caching to the caller (pkg/session) — Manager's
+// Snapshot rebuilds every call. Generations come back keyed for
+// caller cache invalidation.
 func (m *ToolManager) Snapshot(ctx context.Context, sessionID string) (Snapshot, error) {
 	gens, err := m.currentGenerations(ctx, sessionID)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	m.mu.RLock()
-	cached, ok := m.cache[sessionID]
-	m.mu.RUnlock()
-	if ok && cached.gens == gens {
-		return cached.snap, nil
-	}
 	return m.rebuildSnapshot(ctx, sessionID, gens)
 }
+
+// ToolGen exposes the current tool generation. Bumped on
+// AddProvider / RemoveProvider; used by per-session snapshot
+// caches in pkg/session to detect when a rebuild is needed.
+func (m *ToolManager) ToolGen() int64 { return m.toolGen.Load() }
+
+// PolicyGen exposes the current policy generation. Bumped on
+// SetPolicies / BumpPolicyGen; same role as ToolGen for the
+// caller's cache invalidation logic.
+func (m *ToolManager) PolicyGen() int64 { return m.policyGen.Load() }
 
 func (m *ToolManager) currentGenerations(ctx context.Context, sessionID string) (Generations, error) {
 	gens := Generations{
@@ -596,13 +595,7 @@ func (m *ToolManager) rebuildSnapshot(ctx context.Context, sessionID string, gen
 	}
 	slices.SortFunc(tools, func(a, b Tool) int { return strings.Compare(a.Name, b.Name) })
 
-	snap := Snapshot{Generations: gens, Tools: tools}
-
-	m.mu.Lock()
-	m.cache[sessionID] = &cachedSnapshot{gens: gens, snap: snap}
-	m.mu.Unlock()
-
-	return snap, errors.Join(errs...)
+	return Snapshot{Generations: gens, Tools: tools}, errors.Join(errs...)
 }
 
 // allowedSet is the per-session compiled allow-list. Holds both
@@ -784,15 +777,14 @@ func (m *ToolManager) BumpPolicyGen() {
 	m.invalidateAllSnapshots()
 }
 
-// invalidateAllSnapshots clears the per-session cache so the
-// next Snapshot call rebuilds. Caller MUST hold m.mu (Lock — not
-// RLock) when this runs alongside provider mutation; safe to
-// call without the lock when it's the only mutation in flight.
-func (m *ToolManager) invalidateAllSnapshots() {
-	for k := range m.cache {
-		delete(m.cache, k)
-	}
-}
+// invalidateAllSnapshots is a no-op since stage A step 7b moved
+// snapshot caching to the caller (pkg/session). The function
+// stays as a named call site so AddProvider / RemoveProvider /
+// BumpPolicyGen documentation continues to read coherently —
+// callers consult ToolGen() / PolicyGen() directly to detect
+// invalidation. Removed in step 9 alongside the legacy
+// session-providers surface.
+func (m *ToolManager) invalidateAllSnapshots() {}
 
 // toolField extracts the field portion from a fully-qualified
 // tool name "<provider>:<field>". When no colon is present the
