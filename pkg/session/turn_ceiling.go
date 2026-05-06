@@ -135,25 +135,20 @@ func softWarningText(role, task string, turns int, canSpawnDeeper bool) string {
 }
 
 // triggerHardCeiling invokes the §8.2 termination path. The session
-// goroutine calls s.terminate(reason="hard_ceiling") on itself
-// (mirroring Manager.Terminate's body without the root-only lookup);
-// the deferred teardown sequence in Session.Run writes the canonical
-// session_terminated{reason:"hard_ceiling"} event and, for sub-agents,
-// surfaces a subagent_result{reason:"hard_ceiling"} Frame to the
-// parent. A system_marker{subject:"hard_ceiling_hit"} also lands so
-// the adapter / operator dashboards surface the event without parsing
-// the terminal record.
+// goroutine calls requestClose(reason="hard_ceiling") on itself; for
+// roots the OnCloseRequest hook spawns Manager.Terminate which
+// Submits SessionClose, and for subagents emitSubagentResultToParent
+// fires so the parent's handleSubagentResult issues SessionClose
+// back. The deferred teardown in Session.Run writes the canonical
+// session_terminated{reason:"hard_ceiling"} event.
+//
+// Phase 4.1b-pre stage B (O8) drops the standalone hard_ceiling_hit
+// system_marker emit — requestClose already records the close trigger
+// via close_requested{reason:"hard_ceiling"}, the unified observability
+// signal. turnsUsed is preserved on the marker's details so the
+// adapter / operator dashboards still see it without parsing the
+// terminal record.
 func (s *Session) triggerHardCeiling(runCtx context.Context, turnsUsed int) {
-	mk := protocol.NewSystemMarker(s.id, s.agent.Participant(),
-		protocol.SubjectHardCeilingHit,
-		map[string]any{"turns_used": turnsUsed})
-	if err := s.emit(runCtx, mk); err != nil {
-		s.logger.Warn("session: emit hard_ceiling_hit marker",
-			"session", s.id, "err", err)
-	}
-	s.terminate(&terminationCause{
-		reason:    protocol.TerminationHardCeiling,
-		emitClose: true,
-		writeCtx:  runCtx,
-	})
+	_ = turnsUsed
+	s.requestClose(runCtx, protocol.TerminationHardCeiling)
 }

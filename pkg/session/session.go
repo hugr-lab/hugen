@@ -76,17 +76,6 @@ type Session struct {
 	// Set by newSession / newSessionRestore so Manager.Open / Resume
 	// can echo it back to the caller without an extra LoadSession.
 	openedAt time.Time
-	// explicitTerminate distinguishes "I called s.terminate(cause)"
-	// from "my parent's ctx was cancelled and I'm cascading down".
-	// Set by s.terminate() before s.cancel() fires; read by
-	// handleExit to pick the session_terminated reason:
-	//
-	//   - explicitTerminate=true  → write tc.reason verbatim ("user:/end",
-	//     "subagent_cancel: ...", "completed", etc.)
-	//   - explicitTerminate=false → write protocol.TerminationCancelCascade
-	//     (the parent's terminate caused our ctx to fire).
-	explicitTerminate atomic.Bool
-
 	// Per-session model overrides. /model use mutates this. The
 	// overridesMu lock survives the C5 select-loop refactor because
 	// SetModelOverride is reachable from CommandEnv handlers and from
@@ -225,38 +214,20 @@ type Session struct {
 }
 
 // terminationCause is the cancel cause attached to a per-session ctx
-// when Manager.Terminate, the /end slash command, /cancel cascade, or
-// callSubagentCancel wants the session goroutine to append a
-// `session_terminated` event on exit. Graceful process shutdown
-// (rootCancel without cause) attaches nothing, so the goroutine
-// distinguishes the two paths via context.Cause(ctx) and writes
-// nothing on graceful shutdown (FR-028 / FR-029).
+// when teardown wants to write a `session_terminated` event on exit.
+// Phase 4.1b-pre stage B replaces the old s.terminate(cancel-with-cause)
+// path with the SessionClose Frame protocol; the only remaining
+// producer of *terminationCause is teardown itself, synthesising one
+// from s.closeReason so handleExit's existing logic (write reason,
+// optional SessionClosed) continues to work.
 //
-// Fields:
-//
-//   - reason — written verbatim into session_terminated.reason (or
-//     overridden to TerminationCancelCascade by handleExit when
-//     explicitTerminate is false: a parent terminated us through ctx
-//     cascade, so the concrete mechanism is "cancel_cascade", not the
-//     parent's caller-supplied reason).
-//   - emitClose — when true the goroutine also pushes a SessionClosed
-//     Frame to its outbox. /end leaves this false because the slash-
-//     command handler already emitted SessionClosed for the transcript;
-//     Manager.Terminate sets it true so adapters waiting on the outbox
-//     see a clean close.
-//   - writeCtx — the caller's ctx used for every store write inside
-//     the teardown sequence (persist pending inbound, lifecycle
-//     Release, append session_terminated, optional SessionClosed
-//     append, parent Submit / fallback append). Threaded through so
-//     a still-honest deadline reaches the store; never replaced with
-//     context.Background — if the caller cancelled, we cancel.
+// Graceful shutdown (rootCancel without cause AND no closeReason)
+// leaves tc nil so the goroutine writes nothing (FR-028 / FR-029).
 type terminationCause struct {
 	reason    string
 	emitClose bool
 	writeCtx  context.Context
 }
-
-func (c *terminationCause) Error() string { return "session terminated: " + c.reason }
 
 // sessionCloseSignal is the sentinel error routeInbound returns when
 // it observes an inbound *protocol.SessionClose. The Run loop catches
@@ -269,24 +240,6 @@ type sessionCloseSignal struct {
 
 func (e *sessionCloseSignal) Error() string {
 	return "session: SessionClose received: " + e.reason
-}
-
-// terminate is the explicit-cancel path: called from Manager.Terminate
-// and from handleSlashCommand on /end. It sets explicitTerminate=true
-// before cancelling so handleExit knows to write the caller's reason
-// verbatim instead of falling back to "cancel_cascade".
-//
-// No-op for Sessions constructed via legacy NewSession that haven't
-// run buildSessionShell (no s.cancel wired up). Idempotent: a second
-// call after the ctx is already cancelled is harmless — the first
-// cause wins per context semantics, and explicitTerminate just stays
-// true.
-func (s *Session) terminate(cause *terminationCause) {
-	if s == nil || s.cancel == nil {
-		return
-	}
-	s.explicitTerminate.Store(true)
-	s.cancel(cause)
 }
 
 // modelSwitch records a pending /model use until the next turn so
@@ -637,21 +590,18 @@ func (s *Session) teardown(runCtx context.Context) {
 	}
 	s.turnWG.Wait()
 
-	cause := context.Cause(runCtx)
-	tc, _ := cause.(*terminationCause)
-
-	// Phase 4.1b-pre stage B: event-driven SessionClose path. If
-	// routeInbound stashed a closeReason, synthesise a terminationCause
-	// so the existing teardown / handleExit machinery treats this as
-	// an explicit close. The Run loop did NOT cancel runCtx; writes
-	// thread runCtx (carrying request-scoped values from the caller).
-	if tc == nil && s.closeReason != "" {
+	// Phase 4.1b-pre stage B: explicit close is signalled by an
+	// inbound SessionClose Frame whose reason routeInbound stashed in
+	// s.closeReason. Synthesise a terminationCause so handleExit's
+	// existing reason-handling logic stays unchanged. Graceful
+	// shutdown leaves closeReason empty → tc nil → no terminal write.
+	var tc *terminationCause
+	if s.closeReason != "" {
 		tc = &terminationCause{
 			reason:    s.closeReason,
 			emitClose: emitSessionClosedForReason(s.closeReason),
 			writeCtx:  runCtx,
 		}
-		s.explicitTerminate.Store(true)
 	}
 
 	// Cascade: forward SessionClose to every direct child so their
@@ -852,6 +802,7 @@ func (s *Session) persistOnly(ctx context.Context, f protocol.Frame) error {
 // legacy s.terminate path still attaches *terminationCause via
 // context.WithCancelCause. teardown unifies both into the tc param.
 func (s *Session) handleExit(runCtx context.Context, tc *terminationCause) {
+	_ = runCtx
 	if tc == nil {
 		return
 	}
@@ -860,12 +811,6 @@ func (s *Session) handleExit(runCtx context.Context, tc *terminationCause) {
 	}
 	reason := tc.reason
 	emitClose := tc.emitClose
-	if !s.explicitTerminate.Load() {
-		// Cascade from a terminated parent. Override the inherited
-		// cause so the persisted reason names the actual mechanism.
-		reason = protocol.TerminationCancelCascade
-		emitClose = false
-	}
 	writeCtx := tc.writeCtx
 	// Persist session_terminated directly through the store: emit()
 	// short-circuits on s.closed (guarding against post-exit writes
@@ -1168,11 +1113,9 @@ func (s *Session) cascadeCancelChildren(ctx context.Context) {
 		if c.IsClosed() {
 			continue
 		}
-		c.terminate(&terminationCause{
-			reason:    protocol.TerminationCancelCascade,
-			emitClose: false,
-			writeCtx:  ctx,
-		})
+		f := protocol.NewSessionClose(c.id, s.agent.Participant(),
+			protocol.TerminationCancelCascade)
+		c.Submit(ctx, f)
 	}
 }
 
@@ -1212,17 +1155,15 @@ func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashComma
 		}
 	}
 	// If a handler emitted SessionClosed (e.g. /end), trigger the
-	// per-session ctx-cancel via s.terminate so the Run loop's
-	// handleExit appends a session_terminated event and exits.
-	// emitClose=false: the handler already emitted the SessionClosed
-	// Frame for the transcript; the exit handler must NOT emit a
-	// duplicate.
+	// event-driven teardown via requestClose. For roots the OnCloseRequest
+	// hook spawns a goroutine that Submits SessionClose back through
+	// Manager.Terminate; for subagents requestClose surfaces
+	// subagent_result to the parent so handleSubagentResult issues
+	// SessionClose. handleExit will skip the duplicate SessionClosed
+	// emit because the reason starts with "user:" — emitSessionClosedForReason
+	// suppresses it.
 	if sawClose {
-		s.terminate(&terminationCause{
-			reason:    "user:" + f.Payload.Name + " " + closeReason,
-			emitClose: false,
-			writeCtx:  ctx,
-		})
+		s.requestClose(ctx, "user:"+f.Payload.Name+" "+closeReason)
 	}
 	return nil
 }

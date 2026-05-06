@@ -599,16 +599,26 @@ func callSubagentCancel(ctx context.Context, parent *Session, host SessionToolHo
 			return json.Marshal(subagentCancelOutput{OK: true})
 		}
 		reason := protocol.TerminationSubagentCancelPrefix + strings.TrimSpace(in.Reason)
-		child.terminate(&terminationCause{
-			reason:    reason,
-			emitClose: false,
-			writeCtx:  ctx,
-		})
+		// Phase 4.1b-pre stage B: cancel travels through the
+		// SessionClose Frame so the child's Run loop drives its own
+		// teardown (writes session_terminated with the prefixed
+		// reason; emits subagent_result back to parent via handleExit's
+		// subagentResultSent gate).
+		closeFrame := protocol.NewSessionClose(child.id, parent.agent.Participant(), reason)
+		child.Submit(ctx, closeFrame)
 		select {
 		case <-child.Done():
 		case <-ctx.Done():
 			return toolErr("cancelled", ctx.Err().Error())
 		}
+		// parent.children cleanup: handleSubagentResult won't fire for
+		// the cancel-path subagent_result (it arrived during parent's
+		// teardown? no — parent is alive). Actually parent's Run loop
+		// will receive the subagent_result triggered by child.handleExit
+		// and run handleSubagentResult naturally; that will see the
+		// child entry already gone if we delete it here. To keep the
+		// invariant simple we let handleSubagentResult do the cleanup
+		// when the result arrives.
 		return json.Marshal(subagentCancelOutput{OK: true})
 	}
 

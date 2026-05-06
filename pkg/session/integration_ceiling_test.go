@@ -187,7 +187,12 @@ done:
 	for _, ev := range events {
 		switch ev.EventType {
 		case string(protocol.KindSystemMarker):
-			if subj, _ := ev.Metadata["subject"].(string); subj == protocol.SubjectHardCeilingHit {
+			subj, _ := ev.Metadata["subject"].(string)
+			if subj != "close_requested" {
+				continue
+			}
+			details, _ := ev.Metadata["details"].(map[string]any)
+			if r, _ := details["reason"].(string); r == protocol.TerminationHardCeiling {
 				sawCeilingMarker = true
 			}
 		case string(protocol.KindSessionTerminated):
@@ -197,7 +202,7 @@ done:
 		}
 	}
 	if !sawCeilingMarker {
-		t.Errorf("no hard_ceiling_hit system_marker in events; events=%v", kindsOnly(events))
+		t.Errorf("no close_requested{hard_ceiling} system_marker in events; events=%v", kindsOnly(events))
 	}
 	if !sawTerminated {
 		t.Errorf("no session_terminated{hard_ceiling}; events=%v", kindsOnly(events))
