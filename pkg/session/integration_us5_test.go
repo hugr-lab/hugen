@@ -85,7 +85,7 @@ func TestUS5_NoHugr_BashFlowWorks(t *testing.T) {
 
 	store := newFakeStore()
 	_ = store.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "ag01", Status: StatusActive})
-	tm := tool.NewToolManager(permsAllow{}, nil, nil, nil, nil)
+	tm := tool.NewToolManager(permsAllow{}, nil, nil)
 	if err := tm.AddProvider(files); err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ Hugr data skill body.
 // hugr-main:* but no provider is registered, dispatching the
 // tool surfaces ErrUnknownProvider rather than a panic.
 func TestUS5_HugrAbsentToolDispatchFails(t *testing.T) {
-	tm := tool.NewToolManager(permsAllow{}, nil, nil, nil, nil)
+	tm := tool.NewToolManager(permsAllow{}, nil, nil)
 	tl := tool.Tool{
 		Name:             "hugr-main:data-execute_query",
 		Provider:         "hugr-main",

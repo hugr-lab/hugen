@@ -49,6 +49,14 @@ type Session struct {
 	maxToolItersHard int             // 0 → 2 × resolved soft cap
 	logger       *slog.Logger
 
+	// Per-session tool snapshot cache. Phase 4.1a stage A step 8
+	// moved skill-bindings filtering and per-session caching out
+	// of pkg/tool — Manager returns the unfiltered union, Session
+	// caches the filtered view here keyed by (toolGen, skillGen,
+	// policyGen). See snapshot_cache.go.
+	snapMu    sync.Mutex
+	snapCache snapshotCache
+
 	// Tree links (phase-4 pivot). parent is nil for root; children is
 	// always non-nil so callers can lock+iterate without a nil-check.
 	parent   *Session
@@ -386,6 +394,14 @@ func (s *Session) Submit(ctx context.Context, f protocol.Frame) (ok bool) {
 
 // Notepad returns the session's notepad handle.
 func (s *Session) Notepad() *Notepad { return s.notepad }
+
+// Tools exposes the per-session ToolManager. After phase 4.1a
+// stage A step 9 this is a child Manager owned by Lifecycle —
+// per_session providers register on the child; child.Resolve /
+// Dispatch / Snapshot walk to the agent-level root for unknown
+// providers. nil → no tools wired (legacy NewSession callers /
+// tests that disabled dispatch).
+func (s *Session) Tools() *tool.ToolManager { return s.tools }
 
 // SetModelOverride records a per-session model preference. The next
 // turn will route through it and emit a system_marker.
@@ -1151,7 +1167,7 @@ func (s *Session) modelToolsForSession(ctx context.Context) ([]model.Tool, error
 	if s.tools == nil {
 		return nil, nil
 	}
-	snap, err := s.tools.Snapshot(ctx, s.id)
+	snap, err := s.fetchSnapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1230,7 +1246,7 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 	// Look up the Tool by fully-qualified name in the per-session
 	// snapshot. The snapshot already filters by skill bindings so
 	// an unbound provider won't appear here.
-	snap, snapErr := s.tools.Snapshot(dispatchCtx, s.id)
+	snap, snapErr := s.fetchSnapshot(dispatchCtx)
 	if snapErr != nil {
 		s.logger.Warn("tool snapshot failed", "err", snapErr)
 	}

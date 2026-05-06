@@ -61,7 +61,7 @@ func TestUS3_5_US1_DuckDBSQL(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = core.manager.Terminate(ctx, sess.ID(), "user:/end") })
 
-	snap, err := core.tools.Snapshot(ctx, sess.ID())
+	snap, err := sess.Tools().Snapshot(ctx, sess.ID())
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -76,11 +76,11 @@ func TestUS3_5_US1_DuckDBSQL(t *testing.T) {
 	run := func(label, sql string) string {
 		t.Helper()
 		args, _ := json.Marshal(map[string]string{"sql": sql})
-		_, eff, err := core.tools.Resolve(dispatchCtx, exec, args)
+		_, eff, err := sess.Tools().Resolve(dispatchCtx, exec, args)
 		if err != nil {
 			t.Fatalf("%s: Resolve: %v", label, err)
 		}
-		out, err := core.tools.Dispatch(dispatchCtx, exec, eff)
+		out, err := sess.Tools().Dispatch(dispatchCtx, exec, eff)
 		if err != nil {
 			t.Fatalf("%s: Dispatch: %v", label, err)
 		}
@@ -142,7 +142,7 @@ func TestUS3_5_US1_DuckDBSQL(t *testing.T) {
 	duckScratch := filepath.Join(sessDir, ".duckdb")
 	// .duckdb may or may not exist (DuckDB creates tmp/secrets lazily);
 	// existence isn't required, only "gone after close".
-	if core.manager.Terminate(ctx, sess.ID(), "user:/end"); err != nil {
+	if err := core.manager.Terminate(ctx, sess.ID(), "user:/end"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if _, err := os.Stat(sessDir); !os.IsNotExist(err) {
@@ -213,7 +213,7 @@ func newDuckDBIntegrationCore(t *testing.T, vendorPath string) *integrationCore 
 	view := &permsView{rules: nil}
 	perms := perm.NewLocalPermissions(view, staticIdentity{id: "agent-it"})
 	t.Cleanup(perms.Close)
-	tools := tool.NewToolManager(perms, nil, nil, nil, nil)
+	tools := tool.NewToolManager(perms, nil, nil)
 	t.Cleanup(func() { _ = tools.Close() })
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))

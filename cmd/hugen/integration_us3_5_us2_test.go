@@ -33,6 +33,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
+	"github.com/hugr-lab/hugen/pkg/tool/providers"
 )
 
 // Cached across subtests in this file: the python-mcp binary built
@@ -117,7 +118,7 @@ func TestUS3_5_US2_Python(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = core.manager.Terminate(ctx, sess.ID(), "user:/end") })
 
-	snap, err := core.tools.Snapshot(ctx, sess.ID())
+	snap, err := sess.Tools().Snapshot(ctx, sess.ID())
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -136,11 +137,11 @@ func TestUS3_5_US2_Python(t *testing.T) {
 	dispatch := func(label string, tl tool.Tool, args any) string {
 		t.Helper()
 		raw, _ := json.Marshal(args)
-		_, eff, err := core.tools.Resolve(dispatchCtx, tl, raw)
+		_, eff, err := sess.Tools().Resolve(dispatchCtx, tl, raw)
 		if err != nil {
 			t.Fatalf("%s: Resolve: %v", label, err)
 		}
-		out, err := core.tools.Dispatch(dispatchCtx, tl, eff)
+		out, err := sess.Tools().Dispatch(dispatchCtx, tl, eff)
 		if err != nil {
 			t.Fatalf("%s: Dispatch: %v", label, err)
 		}
@@ -198,7 +199,7 @@ func TestUS3_5_US2_Python(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(sessDir, ".venv")); err != nil {
 		t.Fatalf("session venv missing before close: %v", err)
 	}
-	if core.manager.Terminate(ctx, sess.ID(), "user:/end"); err != nil {
+	if err := core.manager.Terminate(ctx, sess.ID(), "user:/end"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if _, err := os.Stat(sessDir); !os.IsNotExist(err) {
@@ -255,8 +256,8 @@ func newPythonIntegrationCore(t *testing.T, pyBin, tmpl string) *integrationCore
 	// WithWorkspaceRoot is critical here — python-mcp reads
 	// WORKSPACES_ROOT to compute <sid>/.venv per call, and the
 	// runtime is the only thing that should pin it.
-	tools := tool.NewToolManager(perms, nil, cfgSvc.ToolProviders(), nil, nil,
-		tool.WithWorkspaceRoot(workspaceDir))
+	tools := tool.NewToolManager(perms, cfgSvc.ToolProviders(), nil,
+		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, nil)))
 	t.Cleanup(func() { _ = tools.Close() })
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))

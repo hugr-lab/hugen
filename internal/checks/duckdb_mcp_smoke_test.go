@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/tool"
+	mcpprov "github.com/hugr-lab/hugen/pkg/tool/providers/mcp"
 )
 
 func TestDuckDBMCPSmoke(t *testing.T) {
@@ -44,9 +45,9 @@ func TestDuckDBMCPSmoke(t *testing.T) {
 	defer cancel()
 
 	tmp := t.TempDir()
-	prov, err := tool.NewMCPProvider(ctx, tool.MCPProviderSpec{
+	prov, err := mcpprov.NewWithSpec(ctx, mcpprov.Spec{
 		Name:      "duckdb-mcp",
-		Transport: tool.TransportStdio,
+		Transport: mcpprov.TransportStdio,
 		Command:   "uvx",
 		Args: []string{
 			"--from", vendor,
@@ -59,7 +60,7 @@ func TestDuckDBMCPSmoke(t *testing.T) {
 		PermObject: "hugen:tool:duckdb-mcp",
 	}, slog.New(slog.DiscardHandler))
 	if err != nil {
-		t.Fatalf("NewMCPProvider: %v", err)
+		t.Fatalf("NewWithSpec: %v", err)
 	}
 	t.Cleanup(func() { _ = prov.Close() })
 

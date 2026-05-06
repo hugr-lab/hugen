@@ -12,66 +12,55 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
-	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // ToolManager dispatches tool calls through the three permission
-// tiers and the registered providers. One instance per agent;
-// per-session catalogue is materialised via Snapshot.
+// tiers and the registered providers. One instance per agent at
+// the root; per-session children built via NewChild own their own
+// providers map and walk to root for unknown-provider lookups.
 //
-// Two scopes of providers are supported:
-//   - global: registered via AddProvider, visible to every session.
-//     System tools and remote-shared MCPs (e.g. hugr-main) live here.
-//   - session: registered via AddSessionProvider for a specific
-//     sessionID. Per-session bash-mcp / python-mcp / duckdb-mcp
-//     live here so each session has its own subprocess scoped to
-//     its own workspace directory. Session-scoped providers
-//     shadow global providers on Dispatch (a session can override
-//     a global "bash-mcp" with its own); for Snapshot they are
-//     merged by name (session wins on collision).
+// Per-session providers (bash-mcp, python-mcp, duckdb-mcp) live
+// on the child Manager owned by pkg/session.Resources; child
+// providers shadow root providers by name on collision.
 type ToolManager struct {
 	perms perm.Service
 	// policies is the Tier-3 store. Lock-free read in Resolve via
 	// atomic.Pointer — SetPolicies (and runtime_reload) can swap
 	// the store concurrently with in-flight dispatches without
-	// data-racing. nil pointer disables Tier-3 (IsConfigured is
-	// nil-safe on the value side).
-	policies atomic.Pointer[Policies]
-	skills   *skill.SkillManager
+	// data-racing. The slot wraps a PolicyService interface so the
+	// manager stays free of the impl's persistence-layer imports;
+	// nil slot (zero load) disables Tier-3.
+	policies atomic.Pointer[policySlot]
 	log      *slog.Logger
 
-	providersView  config.ToolProvidersView
-	auth           *auth.Service
-	workspaceRoot  string
-	connectTimeout time.Duration
+	// view is the per_agent provider catalogue. Init / LoadConfig
+	// iterate it and dispatch through the wired ProviderBuilder.
+	// nil disables config-driven loading (children, tests, deployments
+	// without per_agent specs).
+	view config.ToolProvidersView
 
-	builders map[string]ProviderBuilder
+	// builder is the Spec-driven dispatcher every AddBySpec call
+	// goes through. Non-nil enables AddBySpec / LoadConfig; nil
+	// disables them with ErrBuilderNotConfigured. Children inherit
+	// the field from their parent so per_session AddBySpec routes
+	// through the same dispatcher as per_agent.
+	builder ProviderBuilder
 
-	mu               sync.RWMutex
-	providers        map[string]ToolProvider
-	sessionProviders map[string]map[string]ToolProvider // sessionID → name → provider
-	cache            map[string]*cachedSnapshot
-	cleanups         map[string][]func() // provider name → cleanup callbacks (e.g. revoke a minted secret)
+	mu        sync.RWMutex
+	providers map[string]ToolProvider
 
 	toolGen   atomic.Int64
 	policyGen atomic.Int64
 
 	drainTimeout time.Duration
 
-	// reconnector picks up MCPProviders that transition to stale
-	// (after a synchronous maybeReconnect failure) and retries
-	// connect with exponential backoff in the background. Created
-	// by NewToolManager; Init starts its goroutine; Close stops it.
-	// Nil-tolerant — providers without an MCP runtime keep working.
-	reconnector *Reconnector
-}
-
-type cachedSnapshot struct {
-	gens Generations
-	snap Snapshot
+	// parent is non-nil on a child Manager (built via NewChild).
+	// Child Managers walk to parent on provider-lookup miss so a
+	// session can transparently see agent-level (root) providers
+	// while owning its own per-session subset.
+	parent *ToolManager
 }
 
 // Snapshot is the per-Turn frozen catalogue for a session.
@@ -89,34 +78,32 @@ type Generations struct {
 	Policy int64
 }
 
-const (
-	defaultDrainTimeout   = 5 * time.Second
-	defaultConnectTimeout = 30 * time.Second
-)
+const defaultDrainTimeout = 5 * time.Second
 
 // NewToolManager constructs the manager. Construction is cheap —
 // no providers are connected here; call Init(ctx) when ready to
-// open the configured MCP connections.
+// load per_agent providers from the wired view (if any).
 //
 // Args:
 //   - perms: permission service consulted on every Dispatch.
-//   - skills: skill manager consulted to filter the per-Turn tool
-//     catalogue (nil disables filtering — used by tests).
-//   - providers: per_agent MCP catalogue view. Read on Init()
-//     (and, in phase 6+, again on view.OnUpdate). Per_session
-//     entries are skipped (registered via AddSessionProvider).
-//     Pass nil if no MCP entries are configured.
-//   - authSvc: auth.Service consulted whenever a provider declares
-//     `auth: <name>`. HTTP providers receive a bearer-injecting
-//     RoundTripper; stdio providers receive a per-spawn StdioAuth
-//     bootstrap. Required only when some provider asks for auth;
-//     pass nil if none does.
+//   - view: per_agent MCP catalogue view. Read on Init().
+//     Per_session entries are skipped (per-session children call
+//     AddBySpec directly). Pass nil if no MCP entries are
+//     configured (tests / deployments without config-driven
+//     loading).
 //   - log: structured logger; nil falls back to a discard handler.
+//   - opts: WithBuilder wires the Spec-driven ProviderBuilder
+//     AddBySpec dispatches through. Without it, AddBySpec /
+//     LoadConfig surface ErrBuilderNotConfigured.
+//
+// Phase 4.1a stage A step 7d removed the auth.Service parameter —
+// auth handling now lives inside providers.Builder, constructed
+// at boot in pkg/runtime / cmd/hugen. Phase 4.1c step 34 retired
+// the background Reconnector — recovery is now lazy, driven by
+// pkg/tool/providers/recovery.Wrap on the next failed Call/List.
 func NewToolManager(
 	perms perm.Service,
-	skills *skill.SkillManager,
-	providers config.ToolProvidersView,
-	authSvc *auth.Service,
+	view config.ToolProvidersView,
 	log *slog.Logger,
 	opts ...ToolManagerOption,
 ) *ToolManager {
@@ -124,18 +111,11 @@ func NewToolManager(
 		log = slog.New(slog.DiscardHandler)
 	}
 	tm := &ToolManager{
-		perms:            perms,
-		skills:           skills,
-		log:              log,
-		providersView:    providers,
-		auth:             authSvc,
-		connectTimeout:   defaultConnectTimeout,
-		providers:        make(map[string]ToolProvider),
-		sessionProviders: make(map[string]map[string]ToolProvider),
-		cache:            make(map[string]*cachedSnapshot),
-		cleanups:         make(map[string][]func()),
-		drainTimeout:     defaultDrainTimeout,
-		reconnector:      NewReconnector(log),
+		perms:        perms,
+		log:          log,
+		view:         view,
+		providers:    make(map[string]ToolProvider),
+		drainTimeout: defaultDrainTimeout,
 	}
 	for _, opt := range opts {
 		opt(tm)
@@ -143,181 +123,130 @@ func NewToolManager(
 	return tm
 }
 
-// Reconnector returns the manager's MCP background reconnector, used
-// by callers (cmd/hugen) that want to wire OnRecover callbacks for
-// session-level system_marker broadcasts.
-func (m *ToolManager) Reconnector() *Reconnector { return m.reconnector }
+// NewChild builds a session-scoped Manager that inherits the
+// agent-level dependency surface (perm.Service, skills,
+// reconnector, log) and walks to its parent on provider-lookup
+// miss. Each child owns its own providers map; children do NOT
+// hold their own sessionProviders or cache state — those are
+// agent-level concerns.
+//
+// The caller (today: pkg/session.Resources.Acquire — wired in
+// stage A step 9 onward) is responsible for the child's lifecycle:
+// child.AddProvider / child.AddBySpec to register per-session
+// providers, child.Close on session release. Parent.Close()
+// does NOT cascade into children — the parent has no registry of
+// its children, only children hold a parent reference (one-way).
+//
+// On lookup, child.Dispatch / child.Resolve consults its own
+// providers first; on miss the call walks to parent. Tier-3
+// policies live on the root atomic.Pointer; child's
+// policiesSnapshot walks to parent on nil load.
+func (m *ToolManager) NewChild() *ToolManager {
+	return &ToolManager{
+		perms:        m.perms,
+		log:          m.log,
+		drainTimeout: m.drainTimeout,
+		builder:      m.builder, // share dispatcher with root
+		providers:    make(map[string]ToolProvider),
+		parent:       m,
+	}
+}
+
+// AddBySpec dispatches a tool.Spec through the wired
+// ProviderBuilder (see WithBuilder) and registers the resulting
+// provider. Returns ErrBuilderNotConfigured when no builder is
+// wired — root Managers built before pkg/runtime injects one
+// stay on the legacy Init path. Children inherit the builder
+// from their parent.
+//
+// Failure inside Build does not register anything; the returned
+// error is the Builder's verbatim. AddProvider failure (name
+// collision) closes the freshly-built provider before returning.
+func (m *ToolManager) AddBySpec(ctx context.Context, spec Spec) error {
+	if m.builder == nil {
+		return ErrBuilderNotConfigured
+	}
+	prov, err := m.builder.Build(ctx, spec)
+	if err != nil {
+		return err
+	}
+	if err := m.AddProvider(prov); err != nil {
+		_ = prov.Close()
+		return err
+	}
+	return nil
+}
 
 // ToolManagerOption configures optional dependencies on a
 // freshly-built ToolManager. Variadic at the end of NewToolManager
 // keeps the common case (no options) at the existing arity.
 type ToolManagerOption func(*ToolManager)
 
+// policySlot wraps the PolicyService stored in the manager's
+// atomic.Pointer. atomic.Pointer requires a concrete element
+// type, so we tunnel the interface through a tiny struct.
+type policySlot struct{ svc PolicyService }
+
 // SetPolicies wires the Tier-3 store. Pass nil to disable Tier-3
 // consultation (no-Hugr / no-local-DB deployments). Bumps the
 // policy generation so the next Snapshot rebuild picks up the
 // change. Safe to call any time — typical wiring is right after
 // NewToolManager and before Init.
-func (m *ToolManager) SetPolicies(p *Policies) {
-	m.policies.Store(p)
+func (m *ToolManager) SetPolicies(p PolicyService) {
+	if p == nil {
+		m.policies.Store(nil)
+	} else {
+		m.policies.Store(&policySlot{svc: p})
+	}
 	m.BumpPolicyGen()
 }
 
-// policiesSnapshot returns the current Tier-3 store pointer.
-// nil-safe — callers can call IsConfigured on the result.
-func (m *ToolManager) policiesSnapshot() *Policies {
-	return m.policies.Load()
-}
-
-// WithWorkspaceRoot pins the absolute on-disk root every stdio MCP
-// provider should write under. The manager injects it into each
-// stdio child's env as WORKSPACES_ROOT, overriding any operator-
-// supplied value — workspaces are a runtime concern, like
-// SESSION_DIR, and operators must not be able to point per_agent
-// children at a tree the per_session children don't share.
-//
-// Empty string disables injection (tests; deployments without
-// session.Workspace wired in).
-func WithWorkspaceRoot(root string) ToolManagerOption {
-	return func(tm *ToolManager) {
-		tm.workspaceRoot = root
+// policiesSnapshot returns the current Tier-3 store interface.
+// nil result means Tier-3 is unconfigured. On a child Manager
+// whose own slot is unset (children inherit rather than re-host),
+// the call walks to parent so Tier-3 gating uses the agent-level
+// store.
+func (m *ToolManager) policiesSnapshot() PolicyService {
+	if slot := m.policies.Load(); slot != nil {
+		return slot.svc
 	}
-}
-
-// WithProviderBuilder registers a builder for a non-MCP provider
-// type. Init dispatches each tool_providers entry by `type` to its
-// builder; entries with `type: mcp` (or empty) use the built-in
-// MCP path. cmd/hugen registers `hugr-query`, `python-sandbox`
-// etc. — runtime-managed kinds that need access to listener URL,
-// agent token store, workspaces root, and similar facts pkg/tool
-// has no business knowing.
-//
-// A builder may return cleanup callbacks alongside the provider;
-// ToolManager runs them on RemoveProvider/Close. Use this for
-// runtime-minted secrets that must be revoked when the provider
-// goes away (e.g. agent_token bootstrap).
-func WithProviderBuilder(typeName string, builder ProviderBuilder) ToolManagerOption {
-	return func(tm *ToolManager) {
-		if tm.builders == nil {
-			tm.builders = make(map[string]ProviderBuilder)
-		}
-		tm.builders[strings.ToLower(typeName)] = builder
-	}
-}
-
-// AddSessionProvider registers a provider scoped to one session.
-// Used for MCPs whose lifecycle is tied to the session (e.g.
-// per-session bash-mcp running in the session's workspace dir).
-// Returns an error if a session-scoped provider with the same
-// name is already registered for that session.
-func (m *ToolManager) AddSessionProvider(sessionID string, p ToolProvider) error {
-	if sessionID == "" {
-		return errors.New("tool: empty session id")
-	}
-	if p == nil {
-		return errors.New("tool: nil provider")
-	}
-	name := p.Name()
-	if name == "" {
-		return errors.New("tool: provider with empty name")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	scoped, ok := m.sessionProviders[sessionID]
-	if !ok {
-		scoped = make(map[string]ToolProvider)
-		m.sessionProviders[sessionID] = scoped
-	}
-	if _, exists := scoped[name]; exists {
-		return fmt.Errorf("tool: provider %q already registered for session %s", name, sessionID)
-	}
-	scoped[name] = p
-	delete(m.cache, sessionID) // force rebuild for this session
-	return nil
-}
-
-// RemoveSessionProvider drains in-flight calls before disposing
-// the named provider for one session. Idempotent: returns nil if
-// nothing is registered. Other sessions and global providers are
-// untouched.
-//
-// The drain is a fixed-budget grace period (m.drainTimeout) — it
-// always sleeps the full window before Close, regardless of how
-// many calls are in flight. Providers that need synchronous "wait
-// until last call returns" semantics should expose their own
-// inflight wait-group on Close; the manager keeps the simple
-// budget so a buggy provider can't block shutdown indefinitely.
-func (m *ToolManager) RemoveSessionProvider(ctx context.Context, sessionID, name string) error {
-	m.mu.Lock()
-	scoped, ok := m.sessionProviders[sessionID]
-	if !ok {
-		m.mu.Unlock()
-		return nil
-	}
-	p, ok := scoped[name]
-	if !ok {
-		m.mu.Unlock()
-		return nil
-	}
-	delete(scoped, name)
-	if len(scoped) == 0 {
-		delete(m.sessionProviders, sessionID)
-	}
-	delete(m.cache, sessionID)
-	m.mu.Unlock()
-
-	dctx, cancel := context.WithTimeout(ctx, m.drainTimeout)
-	defer cancel()
-	<-dctx.Done()
-	if err := p.Close(); err != nil {
-		return fmt.Errorf("tool: close session %s/%s: %w", sessionID, name, err)
+	if m.parent != nil {
+		return m.parent.policiesSnapshot()
 	}
 	return nil
 }
 
-// CloseSession tears down every provider registered for sessionID.
-// Returns the joined errors from each Close call. Used by the
-// session lifecycle on Close.
-func (m *ToolManager) CloseSession(ctx context.Context, sessionID string) error {
-	m.mu.Lock()
-	scoped := m.sessionProviders[sessionID]
-	delete(m.sessionProviders, sessionID)
-	delete(m.cache, sessionID)
-	m.mu.Unlock()
-	var errs []error
-	for name, p := range scoped {
-		if err := p.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close %s: %w", name, err))
-		}
+// WithBuilder pins the new Spec-driven ProviderBuilder consumed by
+// AddBySpec. Boot wiring (pkg/runtime in stage B) constructs a
+// providers.Builder and passes it via this option; AddBySpec on the
+// resulting Manager (and on every child built from it) dispatches
+// through the same instance. nil leaves AddBySpec disabled — calls
+// surface ErrBuilderNotConfigured.
+func WithBuilder(b ProviderBuilder) ToolManagerOption {
+	return func(tm *ToolManager) {
+		tm.builder = b
 	}
-	return errors.Join(errs...)
 }
 
-// Close tears down every provider — global and session-scoped.
-// Used on RuntimeCore.Shutdown to ensure no MCP subprocesses
-// outlive the parent process. Idempotent.
+
+// Close tears down the providers owned by this Manager. On a
+// child Manager (parent != nil) it closes only the child's own
+// providers — parent state is untouched. Idempotent on both
+// paths.
+//
+// Phase 4.1a stage A step 9 retired the legacy sessionProviders
+// map: per-session providers now live on a child ToolManager
+// owned by pkg/session.Resources, and Resources.Release calls
+// child.Close() to drop them.
 func (m *ToolManager) Close() error {
-	if m.reconnector != nil {
-		m.reconnector.Stop()
-	}
 	m.mu.Lock()
 	globals := m.providers
-	scoped := m.sessionProviders
 	m.providers = make(map[string]ToolProvider)
-	m.sessionProviders = make(map[string]map[string]ToolProvider)
-	m.cache = make(map[string]*cachedSnapshot)
 	m.mu.Unlock()
 	var errs []error
 	for name, p := range globals {
 		if err := p.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close %s: %w", name, err))
-		}
-	}
-	for sid, by := range scoped {
-		for name, p := range by {
-			if err := p.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("close session %s/%s: %w", sid, name, err))
-			}
 		}
 	}
 	return errors.Join(errs...)
@@ -326,32 +255,27 @@ func (m *ToolManager) Close() error {
 // AddProvider registers a ToolProvider. Constitution exception
 // for plug-in registries (II.1).
 //
-// MCPProviders get a stale-hook wired to the manager's Reconnector
-// so a mid-flight EOF that fails an inline reconnect surfaces as a
-// background retry instead of silently leaving the provider dead
-// until process restart.
+// Recovery for failure-prone providers (MCP) lives in
+// pkg/tool/providers/recovery.Wrap, applied at construction time
+// inside the runtime / session lifecycle code — Manager itself
+// has no opinion on recovery and does not need to know whether
+// a provider is wrapped.
 func (m *ToolManager) AddProvider(p ToolProvider) error {
 	if p == nil {
 		return errors.New("tool: nil provider")
 	}
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	name := p.Name()
 	if name == "" {
-		m.mu.Unlock()
 		return errors.New("tool: provider with empty name")
 	}
 	if _, exists := m.providers[name]; exists {
-		m.mu.Unlock()
 		return fmt.Errorf("tool: provider %q already registered", name)
 	}
 	m.providers[name] = p
 	m.toolGen.Add(1)
 	m.invalidateAllSnapshots()
-	m.mu.Unlock()
-
-	if mp, ok := p.(*MCPProvider); ok && m.reconnector != nil {
-		mp.SetStaleHook(m.reconnector.Track)
-	}
 	return nil
 }
 
@@ -367,8 +291,6 @@ func (m *ToolManager) RemoveProvider(ctx context.Context, name string) error {
 		return ErrUnknownProvider
 	}
 	delete(m.providers, name)
-	cleanups := m.cleanups[name]
-	delete(m.cleanups, name)
 	m.toolGen.Add(1)
 	m.invalidateAllSnapshots()
 	m.mu.Unlock()
@@ -383,34 +305,10 @@ func (m *ToolManager) RemoveProvider(ctx context.Context, name string) error {
 	dctx, cancel := context.WithTimeout(ctx, m.drainTimeout)
 	defer cancel()
 	<-dctx.Done()
-	if m.reconnector != nil {
-		m.reconnector.Forget(name)
-	}
-	closeErr := p.Close()
-	runCleanups(cleanups)
-	if closeErr != nil {
-		return fmt.Errorf("tool: close %s: %w", name, closeErr)
+	if err := p.Close(); err != nil {
+		return fmt.Errorf("tool: close %s: %w", name, err)
 	}
 	return nil
-}
-
-// recordCleanups associates teardown callbacks with a provider
-// name so RemoveProvider/Close can run them.
-func (m *ToolManager) recordCleanups(providerName string, cleanups []func()) {
-	if len(cleanups) == 0 {
-		return
-	}
-	m.mu.Lock()
-	m.cleanups[providerName] = append(m.cleanups[providerName], cleanups...)
-	m.mu.Unlock()
-}
-
-func runCleanups(fns []func()) {
-	for _, fn := range fns {
-		if fn != nil {
-			fn()
-		}
-	}
 }
 
 // Providers returns the names of every registered provider.
@@ -425,53 +323,63 @@ func (m *ToolManager) Providers() []string {
 	return out
 }
 
+// ProviderLifetime returns the Lifetime declared by the provider
+// registered under name. Walks parent on miss so children inherit
+// agent-scoped providers from the root manager. Returns (0, false)
+// when no provider is registered under that name on either tier.
+func (m *ToolManager) ProviderLifetime(name string) (Lifetime, bool) {
+	m.mu.RLock()
+	if p, ok := m.providers[name]; ok {
+		m.mu.RUnlock()
+		return p.Lifetime(), true
+	}
+	parent := m.parent
+	m.mu.RUnlock()
+	if parent != nil {
+		return parent.ProviderLifetime(name)
+	}
+	return 0, false
+}
+
 // Snapshot returns the per-Turn frozen catalogue for a session.
 // The catalogue is cached per session keyed by Generations; a
-// generation mismatch triggers a rebuild that filters every
-// provider's tools by the session's loaded skills' allowed-tools.
+// generation mismatch in the caller's cache triggers a rebuild
+// that filters every provider's tools by the session's loaded
+// skills' allowed-tools. Phase 4.1a stage A step 7b moved the
+// per-session caching to the caller (pkg/session) — Manager's
+// Snapshot rebuilds every call. Generations come back keyed for
+// caller cache invalidation.
 func (m *ToolManager) Snapshot(ctx context.Context, sessionID string) (Snapshot, error) {
 	gens, err := m.currentGenerations(ctx, sessionID)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	m.mu.RLock()
-	cached, ok := m.cache[sessionID]
-	m.mu.RUnlock()
-	if ok && cached.gens == gens {
-		return cached.snap, nil
-	}
 	return m.rebuildSnapshot(ctx, sessionID, gens)
 }
 
-func (m *ToolManager) currentGenerations(ctx context.Context, sessionID string) (Generations, error) {
-	gens := Generations{
+// ToolGen exposes the current tool generation. Bumped on
+// AddProvider / RemoveProvider; used by per-session snapshot
+// caches in pkg/session to detect when a rebuild is needed.
+func (m *ToolManager) ToolGen() int64 { return m.toolGen.Load() }
+
+// PolicyGen exposes the current policy generation. Bumped on
+// SetPolicies / BumpPolicyGen; same role as ToolGen for the
+// caller's cache invalidation logic.
+func (m *ToolManager) PolicyGen() int64 { return m.policyGen.Load() }
+
+func (m *ToolManager) currentGenerations(_ context.Context, _ string) (Generations, error) {
+	// Phase 4.1a stage A step 7c moved skill-bindings reading to
+	// pkg/session — Manager only owns Tool / Policy gens. The
+	// Skill field stays on the struct for caller-side cache keys
+	// (pkg/session populates it) but Manager always returns 0.
+	return Generations{
 		Tool:   m.toolGen.Load(),
 		Policy: m.policyGen.Load(),
-	}
-	if m.skills != nil {
-		b, err := m.skills.Bindings(ctx, sessionID)
-		if err != nil {
-			return gens, err
-		}
-		gens.Skill = b.Generation
-	}
-	return gens, nil
+	}, nil
 }
 
 func (m *ToolManager) rebuildSnapshot(ctx context.Context, sessionID string, gens Generations) (Snapshot, error) {
-	allowed := allowedFromBindings(ctx, m.skills, sessionID)
-
-	m.mu.RLock()
-	// Session-scoped providers shadow globals by name on collision —
-	// a session can override "bash-mcp" with its own subprocess.
-	merged := make(map[string]ToolProvider, len(m.providers))
-	for n, p := range m.providers {
-		merged[n] = p
-	}
-	for n, p := range m.sessionProviders[sessionID] {
-		merged[n] = p
-	}
-	m.mu.RUnlock()
+	merged := m.collectMergedProviders(sessionID)
 
 	var tools []Tool
 	var errs []error
@@ -481,79 +389,32 @@ func (m *ToolManager) rebuildSnapshot(ctx context.Context, sessionID string, gen
 			errs = append(errs, fmt.Errorf("%s: %w", p.Name(), err))
 			continue
 		}
-		for _, t := range got {
-			if allowed != nil && !allowed.match(t.Name) {
-				continue
-			}
-			tools = append(tools, t)
-		}
+		tools = append(tools, got...)
 	}
 	slices.SortFunc(tools, func(a, b Tool) int { return strings.Compare(a.Name, b.Name) })
 
-	snap := Snapshot{Generations: gens, Tools: tools}
-
-	m.mu.Lock()
-	m.cache[sessionID] = &cachedSnapshot{gens: gens, snap: snap}
-	m.mu.Unlock()
-
-	return snap, errors.Join(errs...)
+	return Snapshot{Generations: gens, Tools: tools}, errors.Join(errs...)
 }
 
-// allowedSet is the per-session compiled allow-list. Holds both
-// exact names and `provider:prefix*` glob patterns so a skill
-// granting `discovery-*` against the `hugr-main` provider matches
-// every `hugr-main:discovery-<anything>` tool.
-//
-// nil ⇒ no filter (skill manager not wired in tests).
-// empty (non-nil) ⇒ no skills loaded → empty catalogue.
-type allowedSet struct {
-	exact    map[string]bool
-	patterns []string // each is "provider:prefix" with the trailing * stripped
-}
-
-// match reports whether the fully-qualified tool name (e.g.
-// "hugr-main:discovery-search_data_sources") is allowed by any
-// rule in the set.
-func (a *allowedSet) match(name string) bool {
-	if a == nil {
-		return true
-	}
-	if a.exact[name] {
-		return true
-	}
-	for _, p := range a.patterns {
-		if strings.HasPrefix(name, p) {
-			return true
+// collectMergedProviders returns the effective provider set
+// visible from this Manager: own providers + (legacy)
+// sessionProviders[sessionID] + parent's set walked recursively.
+// Child shadows parent on name collision (per spec §6.4a) — a
+// session can override a global provider by registering its own
+// under the same name on its child Manager.
+func (m *ToolManager) collectMergedProviders(sessionID string) map[string]ToolProvider {
+	merged := map[string]ToolProvider{}
+	if m.parent != nil {
+		for n, p := range m.parent.collectMergedProviders(sessionID) {
+			merged[n] = p
 		}
 	}
-	return false
-}
-
-func allowedFromBindings(ctx context.Context, skills *skill.SkillManager, sessionID string) *allowedSet {
-	if skills == nil {
-		return nil // no filter; expose every registered tool
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for n, p := range m.providers {
+		merged[n] = p
 	}
-	b, err := skills.Bindings(ctx, sessionID)
-	if err != nil || len(b.AllowedTools) == 0 {
-		// No allowed-tools means no skills loaded — empty
-		// catalogue. Distinguishes "no skills loaded" from "no
-		// SkillManager configured" (the nil case above).
-		return &allowedSet{exact: map[string]bool{}}
-	}
-	out := &allowedSet{exact: map[string]bool{}}
-	for _, g := range b.AllowedTools {
-		for _, t := range g.Tools {
-			full := g.Provider + ":" + t
-			if strings.HasSuffix(t, "*") {
-				// glob pattern → prefix match. Strip the trailing
-				// star; the prefix kept is "<provider>:<head>".
-				out.patterns = append(out.patterns, strings.TrimSuffix(full, "*"))
-				continue
-			}
-			out.exact[full] = true
-		}
-	}
-	return out
+	return merged
 }
 
 // Resolve gates a single tool call. Returns the merged
@@ -588,7 +449,7 @@ func (m *ToolManager) Resolve(ctx context.Context, t Tool, args json.RawMessage)
 	// RemotePermissions with its own AgentID accessor we read
 	// identity off the SessionContext for tests and fall back to
 	// the perm.Service when available.
-	if pol := m.policiesSnapshot(); pol.IsConfigured() {
+	if pol := m.policiesSnapshot(); pol != nil && pol.IsConfigured() {
 		agentID, scope := tier3LookupKey(ctx, m.perms)
 		dec, derr := pol.Decide(ctx, agentID, t.Name, scope)
 		if derr != nil {
@@ -618,7 +479,7 @@ func (m *ToolManager) Resolve(ctx context.Context, t Tool, args json.RawMessage)
 // both will, after US4); otherwise it falls back to the agent id
 // pinned on the SessionContext metadata under the conventional
 // "agent_id" key, and finally to the empty string. Scope is left
-// at PolicyScopeGlobal in phase-3; skill/role scoping is a
+// at "global" in phase-3; skill/role scoping is a
 // later refinement.
 func tier3LookupKey(ctx context.Context, perms perm.Service) (string, string) {
 	agentID := ""
@@ -635,29 +496,24 @@ func tier3LookupKey(ctx context.Context, perms perm.Service) (string, string) {
 			}
 		}
 	}
-	return agentID, PolicyScopeGlobal
+	// "global" mirrors policies.ScopeGlobal — kept inline so pkg/tool
+	// stays free of the providers/policies import.
+	return agentID, "global"
 }
 
 // Dispatch executes a tool call. Args MUST be the substituted
-// payload returned by Resolve, not the LLM's raw args. Session-
-// scoped providers (via the SessionContext on ctx) shadow global
-// providers of the same name on dispatch — used by per-session
-// bash-mcp / python-mcp.
+// payload returned by Resolve, not the LLM's raw args. On a
+// child Manager (built via NewChild), Dispatch consults the
+// child's own providers first and walks to parent on miss — the
+// per_session providers shadow root providers by name.
 func (m *ToolManager) Dispatch(ctx context.Context, t Tool, effectiveArgs json.RawMessage) (json.RawMessage, error) {
-	sc, _ := perm.SessionFromContext(ctx)
 	m.mu.RLock()
-	var p ToolProvider
-	var ok bool
-	if sc.SessionID != "" {
-		if scoped, hasScope := m.sessionProviders[sc.SessionID]; hasScope {
-			p, ok = scoped[t.Provider]
-		}
-	}
-	if !ok {
-		p, ok = m.providers[t.Provider]
-	}
+	p, ok := m.providers[t.Provider]
 	m.mu.RUnlock()
 	if !ok {
+		if m.parent != nil {
+			return m.parent.Dispatch(ctx, t, effectiveArgs)
+		}
 		return nil, fmt.Errorf("%w: %s", ErrUnknownProvider, t.Provider)
 	}
 	short := toolField(t.Name)
@@ -673,15 +529,14 @@ func (m *ToolManager) BumpPolicyGen() {
 	m.invalidateAllSnapshots()
 }
 
-// invalidateAllSnapshots clears the per-session cache so the
-// next Snapshot call rebuilds. Caller MUST hold m.mu (Lock — not
-// RLock) when this runs alongside provider mutation; safe to
-// call without the lock when it's the only mutation in flight.
-func (m *ToolManager) invalidateAllSnapshots() {
-	for k := range m.cache {
-		delete(m.cache, k)
-	}
-}
+// invalidateAllSnapshots is a no-op since stage A step 7b moved
+// snapshot caching to the caller (pkg/session). The function
+// stays as a named call site so AddProvider / RemoveProvider /
+// BumpPolicyGen documentation continues to read coherently —
+// callers consult ToolGen() / PolicyGen() directly to detect
+// invalidation. Removed in step 9 alongside the legacy
+// session-providers surface.
+func (m *ToolManager) invalidateAllSnapshots() {}
 
 // toolField extracts the field portion from a fully-qualified
 // tool name "<provider>:<field>". When no colon is present the

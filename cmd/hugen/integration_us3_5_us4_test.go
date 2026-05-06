@@ -4,8 +4,8 @@
 //
 //   - install bundled `duckdb-data` skill on disk;
 //   - load it into a session;
-//   - call system:skill_files("duckdb-data") through the full
-//     ToolManager + SystemProvider pipeline;
+//   - call session:skill_files("duckdb-data") through the full
+//     ToolManager pipeline;
 //   - read one absolute path from the envelope via bash.read_file
 //     and confirm bytes match the bundled file (SC-010 cross-check).
 package main
@@ -22,9 +22,11 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
+	"github.com/hugr-lab/hugen/pkg/tool/providers"
 )
 
 func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
@@ -47,8 +49,8 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	// `_system` (autoload requirement of analyst skills) and
 	// `duckdb-data`.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	if err := installBundledSkills(stateDir, logger); err != nil {
-		t.Fatalf("installBundledSkills: %v", err)
+	if err := runtime.InstallBundledSkills(stateDir, logger); err != nil {
+		t.Fatalf("InstallBundledSkills: %v", err)
 	}
 
 	cfgSvc := config.NewStaticService(config.StaticInput{
@@ -69,19 +71,10 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	view := &permsView{rules: nil}
 	perms := perm.NewLocalPermissions(view, staticIdentity{id: "agent-it"})
 	t.Cleanup(perms.Close)
-	tools := tool.NewToolManager(perms, skills, cfgSvc.ToolProviders(), nil, nil,
-		tool.WithWorkspaceRoot(workspaceDir))
+	tools := tool.NewToolManager(perms, cfgSvc.ToolProviders(), nil,
+		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, nil)))
 	t.Cleanup(func() { _ = tools.Close() })
 
-	// Register the SystemProvider so `system:skill_files` is callable.
-	sys := tool.NewSystemProvider(tool.SystemDeps{
-		AgentID: "agent-it",
-		Skills:  skills,
-		Perms:   perms,
-	})
-	if err := tools.AddProvider(sys); err != nil {
-		t.Fatalf("AddProvider system: %v", err)
-	}
 
 	ws := session.NewWorkspace(workspaceDir, true)
 	resources := session.NewResources(session.ResourceDeps{
@@ -98,8 +91,17 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), nil,
 		session.WithLifecycle(resources),
-		session.WithSessionOptions(session.WithTools(tools)),
+		session.WithPerms(perms),
+		session.WithSessionOptions(
+			session.WithTools(tools),
+			session.WithSkills(skills),
+		),
 	)
+	// Register Manager as the session ToolProvider so `session:skill_files`
+	// is callable through the ToolManager pipeline.
+	if err := tools.AddProvider(mgr); err != nil {
+		t.Fatalf("AddProvider session: %v", err)
+	}
 
 	ctx := context.Background()
 	sess, _, err := mgr.Open(ctx, session.OpenRequest{OwnerID: "u"})
@@ -113,13 +115,13 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 		t.Fatalf("Load duckdb-data: %v", err)
 	}
 
-	snap, err := tools.Snapshot(ctx, sess.ID())
+	snap, err := sess.Tools().Snapshot(ctx, sess.ID())
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
-	skillFiles, ok := findTool(snap.Tools, "system:skill_files")
+	skillFiles, ok := findTool(snap.Tools, "session:skill_files")
 	if !ok {
-		t.Fatalf("system:skill_files missing: %v", toolNames(snap.Tools))
+		t.Fatalf("session:skill_files missing: %v", toolNames(snap.Tools))
 	}
 	readFile, ok := findTool(snap.Tools, "bash-mcp:bash.read_file")
 	if !ok {
@@ -127,13 +129,18 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	}
 
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
+	// session-scoped tools (session:skill_files) recover their *Session
+	// via session.WithSession; the live dispatcher does this implicitly
+	// in session.Run, the integration test bypasses Run so we wire it
+	// here.
+	dispatchCtx = session.WithSession(dispatchCtx, sess)
 
 	args, _ := json.Marshal(map[string]string{"name": "duckdb-data"})
-	_, eff, err := tools.Resolve(dispatchCtx, skillFiles, args)
+	_, eff, err := sess.Tools().Resolve(dispatchCtx, skillFiles, args)
 	if err != nil {
 		t.Fatalf("Resolve skill_files: %v", err)
 	}
-	out, err := tools.Dispatch(dispatchCtx, skillFiles, eff)
+	out, err := sess.Tools().Dispatch(dispatchCtx, skillFiles, eff)
 	if err != nil {
 		t.Fatalf("Dispatch skill_files: %v", err)
 	}
@@ -178,11 +185,11 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	// SC-010 cross-check: read the absolute path via bash.read_file
 	// and confirm bytes match the bundled file on disk.
 	readArgs, _ := json.Marshal(map[string]string{"path": workspaceFile})
-	_, eff2, err := tools.Resolve(dispatchCtx, readFile, readArgs)
+	_, eff2, err := sess.Tools().Resolve(dispatchCtx, readFile, readArgs)
 	if err != nil {
 		t.Fatalf("Resolve read_file: %v", err)
 	}
-	bashOut, err := tools.Dispatch(dispatchCtx, readFile, eff2)
+	bashOut, err := sess.Tools().Dispatch(dispatchCtx, readFile, eff2)
 	if err != nil {
 		t.Fatalf("Dispatch read_file: %v", err)
 	}

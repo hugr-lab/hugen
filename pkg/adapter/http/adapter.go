@@ -77,7 +77,7 @@ var ErrUnauthenticated = errors.New("http: unauthenticated")
 //
 // It is a session.Adapter — Run blocks until ctx is done, returning
 // the ctx error. Run does not own a *http.Server; the listener is
-// owned by cmd/hugen via RuntimeCore.HTTPSrv.
+// owned by cmd/hugen via runtime.Core.HTTPSrv.
 type Adapter struct {
 	mux         *stdhttp.ServeMux
 	auth        Authenticator
@@ -182,7 +182,7 @@ func (a *Adapter) Mounted() <-chan struct{} { return a.mountedCh }
 
 // MarkReady flips the readiness gate so /api/v1/* requests stop
 // returning 503 runtime_starting and start dispatching to handlers.
-// cmd/hugen calls this once buildRuntimeCore has produced every
+// cmd/hugen calls this once bootRuntime has produced every
 // dependency the API depends on.
 func (a *Adapter) MarkReady() { a.ready.Store(true) }
 

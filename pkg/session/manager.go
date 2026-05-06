@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
@@ -88,6 +89,11 @@ type Manager struct {
 	sessionOpts []SessionOption
 	lifecycle   Lifecycle
 
+	// perms is consulted by session-scoped tool handlers that gate
+	// dispatch on a side permission object (e.g. skill_files reads
+	// hugen:command:skill_files). Optional — handlers tolerate nil.
+	perms perm.Service
+
 	// deps mirrors the per-session dependency bundle passed by
 	// reference to every Session in this Manager's tree (root +
 	// subagents). Populated by NewManager from the same arguments
@@ -124,6 +130,14 @@ type ManagerOption func(*Manager)
 // (used by tests that don't wire a workspace or tool stack).
 func WithLifecycle(l Lifecycle) ManagerOption {
 	return func(m *Manager) { m.lifecycle = l }
+}
+
+// WithPerms attaches a perm.Service to the manager so session-scoped
+// tool handlers can consult Tier-1 / Tier-2 rules (e.g. skill_files'
+// hugen:command:skill_files gate). nil leaves handlers in the
+// allow-everything mode used by tests.
+func WithPerms(p perm.Service) ManagerOption {
+	return func(m *Manager) { m.perms = p }
 }
 
 // WithSessionOptions threads SessionOption values through every

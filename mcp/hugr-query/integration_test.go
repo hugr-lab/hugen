@@ -20,6 +20,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/tool"
+	mcpprov "github.com/hugr-lab/hugen/pkg/tool/providers/mcp"
 )
 
 // staticPrimary is a sources.Source + ttlAware impl that returns a
@@ -145,11 +146,11 @@ func TestHugrQuery_BootstrapAuthFlow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	spec := tool.MCPProviderSpec{
+	spec := mcpprov.Spec{
 		Name:      "hugr-query",
 		Command:   bin,
 		Lifetime:  tool.LifetimePerAgent,
-		Transport: tool.TransportStdio,
+		Transport: mcpprov.TransportStdio,
 		Env: map[string]string{
 			"HUGR_URL":          hugrSrv.srv.URL,
 			"HUGR_TOKEN_URL":    tokenSrv.URL + "/api/auth/agent-token",
@@ -157,9 +158,9 @@ func TestHugrQuery_BootstrapAuthFlow(t *testing.T) {
 			"WORKSPACES_ROOT":   wsRoot,
 		},
 	}
-	prov, err := tool.NewMCPProvider(ctx, spec, slog.New(slog.DiscardHandler))
+	prov, err := mcpprov.NewWithSpec(ctx, spec, slog.New(slog.DiscardHandler))
 	if err != nil {
-		t.Fatalf("NewMCPProvider: %v", err)
+		t.Fatalf("NewWithSpec: %v", err)
 	}
 	t.Cleanup(func() { _ = prov.Close() })
 

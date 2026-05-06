@@ -73,7 +73,7 @@ func idxID(i int) string { return "tc-" + string(rune('A'+i%26)) }
 // need.
 func newCeilingTestManager(t *testing.T, store RuntimeStore, mdl model.Model, provider tool.ToolProvider, softCap, hardCap int) *Manager {
 	t.Helper()
-	tm := tool.NewToolManager(permsAllow{}, nil, nil, nil, nil)
+	tm := tool.NewToolManager(permsAllow{}, nil, nil)
 	if provider != nil {
 		if err := tm.AddProvider(provider); err != nil {
 			t.Fatalf("AddProvider: %v", err)

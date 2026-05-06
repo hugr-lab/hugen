@@ -62,9 +62,12 @@ func (l Lifetime) String() string {
 
 // ToolProvider exposes a group of tools and dispatches calls.
 //
-// Implementations live alongside this package: SystemProvider
-// (built-in), MCPProvider (mark3labs/mcp-go client). Other
-// implementations satisfy the contract structurally.
+// Implementations live alongside this package: MCPProvider
+// (mark3labs/mcp-go client). pkg/tool/providers/{admin,policies}
+// host the agent-level admin / Tier-3 surfaces; pkg/runtime hosts
+// runtime:reload; pkg/session.Manager itself implements the
+// "session:*" provider. Other implementations satisfy the contract
+// structurally.
 type ToolProvider interface {
 	// Name returns the provider's short name; matches the prefix
 	// of every Tool the provider exposes (e.g. "bash-mcp").
@@ -93,6 +96,24 @@ type ToolProvider interface {
 	// Close releases the provider's resources (close the MCP
 	// client, terminate the spawned subprocess, etc.). Idempotent.
 	Close() error
+}
+
+// Recoverable is implemented by providers whose underlying
+// resource (subprocess, HTTP client, persistent connection) can
+// be re-established after failure. The recovery wrapper
+// (pkg/tool/providers/recovery) consults this interface on
+// Call/List error: if the inner provider is Recoverable, the
+// wrapper asks it to TryReconnect, then retries the failed
+// operation. Implementations are NOT required to classify errors
+// as transient vs permanent — the wrapper drives retries via
+// backoff exhaustion.
+//
+// Return nil from TryReconnect when the resource is healthy and
+// ready for another attempt; return non-nil when reconnect itself
+// failed (upstream still down, auth revoked, etc.) so the wrapper
+// can backoff or give up.
+type Recoverable interface {
+	TryReconnect(ctx context.Context) error
 }
 
 // ProviderEvent is what Subscribe streams.
@@ -125,14 +146,22 @@ const (
 
 // Errors. Sentinel values, errors.Is-comparable.
 var (
-	ErrUnknownTool      = errors.New("tool: unknown")
-	ErrUnknownProvider  = errors.New("tool: unknown provider")
-	ErrPermissionDenied = errors.New("tool: permission denied")
-	ErrProviderRemoved  = errors.New("tool: provider removed mid-call")
-	ErrSnapshotStale    = errors.New("tool: snapshot stale (rebuild needed)")
-	ErrArgValidation    = errors.New("tool: args failed schema validation")
-	ErrNotFound         = errors.New("tool: not found")
-	ErrPathEscape       = errors.New("tool: path escapes allowed root")
-	ErrIO               = errors.New("tool: io")
+	ErrUnknownTool         = errors.New("tool: unknown")
+	ErrUnknownProvider     = errors.New("tool: unknown provider")
+	ErrPermissionDenied    = errors.New("tool: permission denied")
+	ErrProviderRemoved     = errors.New("tool: provider removed mid-call")
+	ErrSnapshotStale       = errors.New("tool: snapshot stale (rebuild needed)")
+	ErrArgValidation       = errors.New("tool: args failed schema validation")
+	ErrNotFound            = errors.New("tool: not found")
+	ErrPathEscape          = errors.New("tool: path escapes allowed root")
+	ErrIO                  = errors.New("tool: io")
+	// ErrSystemUnavailable is the well-known sentinel a provider returns
+	// when its underlying capability is not wired in this deployment
+	// (e.g. policy:save without a Tier-3 store, session:skill_load
+	// without a SkillManager). Callers errors.Is-test for it to decide
+	// whether to retry, escalate, or surface a graceful "not configured"
+	// result.
+	ErrSystemUnavailable = errors.New("tool: capability unavailable in this runtime")
+	ErrBuilderNotConfigured = errors.New("tool: ProviderBuilder not configured (call WithBuilder)")
 )
 

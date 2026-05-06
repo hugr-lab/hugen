@@ -29,9 +29,9 @@ We are mid-execution of **design 001 — Hugr Agent Runtime**
 | 3. Action layer (skills + tools + 3-tier permissions + bash/hugr-mcp) | shipped |
 | 3.5. Analyst toolkit (duckdb-mcp + python-mcp + analyst skills) | shipped |
 | **4. Sub-agents + plan + whiteboard + event-driven session loop** | **spec drafted v2** (`phase-4-spec.md`, ready for `/speckit.specify`); architecture decisions in `phase-4-architecture.md` |
-| 4.1. Scenario test harness (port `../agent/tests/scenarios/` pattern; stub LLM + mock tools + virtual clock + record/replay; ~30 scenarios) | spec drafted v0 (`phase-4.1-spec.md`); follows 4, gates 4.2 |
-| 4.2. Analyst mega-skill + role sub-agents + `skill_builder` + community-skill enablement (tri-state `allowed-tools`, `system:tool_catalog`) | spec drafted v0 (`phase-4.2-spec.md`); follows 4.1 |
-| 4.3. System tools refactor (retire `SystemProvider` / `SystemDeps`; tools onto domain `ToolProvider`s) | spec drafted v0 (`phase-4.3-spec.md`); follows 4.2 |
+| 4.1a. Extract `pkg/runtime` + dissolve `SystemProvider` (tools onto domain `ToolProvider`s; absorbs ex-4.3) | spec drafted v1 (`phase-4.1a-spec.md`); follows 4, gates 4.1b |
+| 4.1b. Observational scenario harness (port `../agent/tests/scenarios/` pattern; live LLM + real Hugr; ~8 scenarios v1) | spec drafted v1 (`phase-4.1b-spec.md`); follows 4.1a, gates 4.2 |
+| 4.2. Analyst mega-skill + role sub-agents + `skill_builder` + community-skill enablement (tri-state `allowed-tools`, `system:tool_catalog`) | spec drafted v0 (`phase-4.2-spec.md`); follows 4.1b |
 | 5. Compactor + HITL: approvals + clarifications (compactor first within the phase; replaces the phase-3 `defaultHistoryWindow=50` stop-gap) | open |
 | 6. Cron + scheduler | open |
 | 7. Memory pipeline + LLM Wiki (short + long-term) | open |
@@ -45,65 +45,61 @@ Goal: finish design-001 cleanly, then move to **hub integration**
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
 
-## Active focus — phase 4
+## Active focus — phase 4.1a
 
-Implementation starts via `/speckit.specify` against
-`design/001-agent-runtime/phase-4-spec.md`.
+Phase 4 shipped to `main` as `ba003c0` (PR #6). Active focus
+moves to **phase 4.1a — extract `pkg/runtime` + dissolve
+`SystemProvider`** before the observational harness (4.1b)
+and the analyst mega-skill (4.2) can land on a clean wiring
+surface.
 
-**Document set for phase 4 work** (in order of authority for an
-implementer):
+**Document set for phase 4.1a work** (in order of authority for
+an implementer):
 
-1. **`design/001-agent-runtime/phase-4-spec.md`** — the contract.
-   §1 Goal (7 deliverables), §3 Scope (11 work items), §4 Data /
-   schema / manifest changes (§4.1 strict event-sourcing, §4.2 no
-   migration — `metadata.depth` lives in JSON), §10 Three-route
-   inbound, §13 Build/test plan + 21 acceptance scenarios, §14
-   Resolved questions Q1-Q19, §15 Implementation order (16 commits,
-   single PR).
-2. **`design/001-agent-runtime/phase-4-architecture.md`** — locked
-   architectural decisions and rationale. §1 spec → existing-code
-   mapping, §2 Manager as `tool.ToolProvider` pattern, §3 select-
-   loop refactor, §4 per-file delta (`pkg/protocol`, `pkg/session/*`,
-   `pkg/skill`, `pkg/tool/reconnect.go`, `cmd/hugen` four-line
-   delta), §6 commit sequence.
-3. **`design/001-agent-runtime/design.md §19`** — architectural
-   foundations to honour. Phase 4 lands Foundation 2
-   (`Frame.FromParticipant` reserved field). Foundations 1, 3, 4
-   land in phase 5; 5 in phase 8; 6 in phase 9. Don't accidentally
-   bake single-user-only assumptions.
+1. **`design/001-agent-runtime/phase-4.1a-spec.md`** — the
+   contract. §1 Why bundle two refactors, §2 Goal, §3 Boundary
+   contract, §4 Two config types (BootstrapConfig vs
+   runtime.Config — env-pure), §5 Nine phases of `Build`, §6
+   System-tools refactor (absorbed from ex-4.3), §7 File
+   layout, §8 Migration / risk, §9 Implementation order (19
+   commits, single PR), §10 What 4.1a does NOT include.
+2. **`design/001-agent-runtime/phase-4.3-spec.md`** —
+   superseded by 4.1a §6, kept for historical context. Tool
+   ownership map and rename rationale carry over verbatim.
+3. **`design/001-agent-runtime/design.md §19`** —
+   architectural foundations to honour. 4.1a is a refactor —
+   no foundation lands here; existing decisions stay.
 
-**Key locked decisions** (full list in spec §14):
+**Key locked decisions for 4.1a**:
 
-- No `pkg/subagent` package — sub-agent = `Session` with
-  `parent_session_id` + `metadata.depth`; spawn lives on
-  `*session.Manager`.
-- `Manager` implements `tool.ToolProvider` for the 13 new
-  session-scoped tools — no callbacks via `SystemDeps`.
-- Strict event-sourcing — `sessions` row immutable after create;
-  no schema migration in phase 4.
-- Unified `Manager.Terminate(id, reason)` replaces Suspend / Close;
-  graceful shutdown writes nothing.
-- Three-route inbound (`RouteInternal` / `RouteToolFeed` /
-  `RouteBuffered`) with `pkg/session/routes.go` `kindRoutes` table.
-- `system_message` is a separate Frame kind (model-visible);
-  `system_marker` stays UI-only.
-- `Cancel.Cascade bool` — `/cancel` (turn-only) vs `/cancel all`
-  (cascade-terminate sub-agent subtree).
-- `requires_skills` manifest field with transitive resolve at
-  `SkillManager.Load`.
-- Phase 4 ships with the existing `defaultHistoryWindow=50`
-  window-truncation as an acknowledged stop-gap; full compactor
-  lands at the start of phase 5. Plan body anchors across the cut.
+- `pkg/runtime.Build(ctx, runtime.Config) (*Core, error)` is
+  the single boot-path entry point. Both `cmd/hugen` and the
+  4.1b harness call it.
+- `runtime.Config` is **env-pure** — no `os.Getenv` inside
+  Build. Caller projects from `BootstrapConfig` (cmd/hugen) or
+  scenario-bootstrap (harness).
+- Build runs **9 named phases** sequentially; each phase reads
+  fields populated by prior ones. No cross-cutting helpers.
+- `pkg/tool/system.go` is **deleted**. Every system tool lives
+  next to its state owner via `tool.ToolProvider`:
+  `*skill.SkillManager`, `*tool.ToolManager` (self-hosting),
+  `*tool.Policies`, `*session.Manager` (`notepad_append`),
+  `cmd/hugen.reloadProvider` (`runtime:reload`).
+- **Strict rename** for tool names (`system:foo` →
+  `<owner>:foo`). Bundled skill manifests under
+  `assets/skills/` update in the same PR; manifest validator
+  emits a helpful migration error for stale `system:*`
+  references in `allowed-tools`.
+- 4.1a is a **pure refactor** — no behaviour change visible to
+  the model, no new flags / env vars / tools.
 
-**Phase 4.1 / 4.2 / 4.3 are separate specs, follow phase 4** —
-`phase-4.1-spec.md` (scenario test harness — gates 4.2),
-`phase-4.2-spec.md` (analyst mega-skill + community-skill
-enablement), `phase-4.3-spec.md` (system tools refactor) are
-drafted at v0 but **not** in scope for the active phase 4 PR.
+Phase 4.1a is **one PR** on branch `007-runtime-extract`.
+Internal commit order in spec §9 (19 commits) is prescriptive
+for the author / reviewer; not enforced as separate PRs.
 
-Phase 4 is **one PR**. Internal commit order in spec §15 is
-prescriptive for the author / reviewer; not enforced as separate
-PRs.
+Phase 4.1b (harness; `phase-4.1b-spec.md`) and phase 4.2
+(`phase-4.2-spec.md`) follow sequentially; both consume the
+clean `pkg/runtime` surface 4.1a establishes.
 
 ## Project structure
 

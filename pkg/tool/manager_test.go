@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
-	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // fakeProvider is a configurable ToolProvider for tests.
@@ -61,7 +60,7 @@ func (f *fakePerms) Refresh(ctx context.Context) error                          
 func (f *fakePerms) Subscribe(ctx context.Context) (<-chan perm.RefreshEvent, error) { return nil, nil }
 
 func TestToolManager_AddRemoveProvider(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 
 	p := &fakeProvider{name: "bash-mcp", tools: []Tool{
 		{Name: "bash-mcp:bash.read_file", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"},
@@ -87,7 +86,7 @@ func TestToolManager_AddRemoveProvider(t *testing.T) {
 }
 
 func TestToolManager_Snapshot_NoSkillsAllProvidersExposed(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil) // skills=nil → no filter
+	m := NewToolManager(&fakePerms{}, nil, nil) // skills=nil → no filter
 	p := &fakeProvider{name: "bash-mcp", tools: []Tool{
 		{Name: "bash-mcp:bash.read_file", Provider: "bash-mcp"},
 		{Name: "bash-mcp:bash.write_file", Provider: "bash-mcp"},
@@ -104,87 +103,14 @@ func TestToolManager_Snapshot_NoSkillsAllProvidersExposed(t *testing.T) {
 	}
 }
 
-// Wildcard grants in a skill manifest must expand at snapshot time
-// against the live tool list. Regression: an exact-match filter
-// silently dropped every tool whose grant was a wildcard
-// ("discovery-*", "schema-*", "data-*"), leaving the catalogue
-// missing exactly the tools the skill was supposed to expose.
-func TestToolManager_Snapshot_AllowedToolsWildcardMatches(t *testing.T) {
-	ctx := context.Background()
-
-	manifest := []byte(`---
-name: dataset
-description: minimal skill granting wildcards.
-allowed-tools:
-  - provider: hugr-main
-    tools:
-      - discovery-*
-      - schema-*
-  - provider: hugr-query
-    tools:
-      - query
-compatibility:
-  model: any
-  runtime: hugen-phase-3
----
-
-body
-`)
-	store := skill.NewSkillStore(skill.Options{Inline: map[string][]byte{"dataset": manifest}})
-	skills := skill.NewSkillManager(store, nil)
-	if err := skills.Load(ctx, "s1", "dataset"); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	m := NewToolManager(&fakePerms{}, skills, nil, nil, nil)
-	main := &fakeProvider{name: "hugr-main", tools: []Tool{
-		{Name: "hugr-main:discovery-search_modules", Provider: "hugr-main"},
-		{Name: "hugr-main:discovery-search_data_sources", Provider: "hugr-main"},
-		{Name: "hugr-main:schema-type_fields", Provider: "hugr-main"},
-		{Name: "hugr-main:data-validate_graphql_query", Provider: "hugr-main"},
-	}}
-	query := &fakeProvider{name: "hugr-query", tools: []Tool{
-		{Name: "hugr-query:query", Provider: "hugr-query"},
-		{Name: "hugr-query:query_jq", Provider: "hugr-query"},
-	}}
-	if err := m.AddProvider(main); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.AddProvider(query); err != nil {
-		t.Fatal(err)
-	}
-
-	snap, err := m.Snapshot(ctx, "s1")
-	if err != nil {
-		t.Fatalf("Snapshot: %v", err)
-	}
-	got := map[string]bool{}
-	for _, t := range snap.Tools {
-		got[t.Name] = true
-	}
-	want := []string{
-		"hugr-main:discovery-search_modules",
-		"hugr-main:discovery-search_data_sources",
-		"hugr-main:schema-type_fields",
-		"hugr-query:query", // exact name, granted directly
-	}
-	for _, w := range want {
-		if !got[w] {
-			t.Errorf("missing tool %q in snapshot; got %v", w, got)
-		}
-	}
-	// data-* was NOT granted; data-validate must NOT appear.
-	if got["hugr-main:data-validate_graphql_query"] {
-		t.Errorf("data-validate_graphql_query leaked into snapshot — wildcard scope is wrong")
-	}
-	// query_jq was NOT granted; must NOT appear.
-	if got["hugr-query:query_jq"] {
-		t.Errorf("query_jq leaked into snapshot — exact-match grant should not include siblings")
-	}
-}
+// NOTE: The phase-3 wildcard-grant filtering test moved to
+// pkg/session (snapshot_cache_test.go) when stage A step 7c+8
+// extracted skill-bindings filtering out of ToolManager. Manager
+// now returns the unfiltered union; pkg/session caches and
+// filters per-session via the loaded skill bindings.
 
 func TestToolManager_Snapshot_RebuildOnGenerationMove(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 	p1 := &fakeProvider{name: "p1", tools: []Tool{{Name: "p1:a", Provider: "p1"}}}
 	if err := m.AddProvider(p1); err != nil {
 		t.Fatal(err)
@@ -210,7 +136,7 @@ func TestToolManager_Snapshot_RebuildOnGenerationMove(t *testing.T) {
 }
 
 func TestToolManager_Snapshot_StableWithinGeneration(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 	if err := m.AddProvider(&fakeProvider{name: "p", tools: []Tool{{Name: "p:t", Provider: "p"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +151,7 @@ func TestToolManager_Resolve_Denied(t *testing.T) {
 	perms := &fakePerms{rules: map[string]perm.Permission{
 		"hugen:tool:bash-mcp:bash.write_file": {Disabled: true, FromConfig: true},
 	}}
-	m := NewToolManager(perms, nil, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	tool := Tool{Name: "bash-mcp:bash.write_file", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"}
 	_, _, err := m.Resolve(context.Background(), tool, json.RawMessage(`{}`))
 	if !errors.Is(err, ErrPermissionDenied) {
@@ -240,7 +166,7 @@ func TestToolManager_Resolve_DataMergedRuleWins(t *testing.T) {
 			Data:       json.RawMessage(`{"workspace":"/var/agents/x"}`),
 		},
 	}}
-	m := NewToolManager(perms, nil, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	tool := Tool{Name: "bash-mcp:bash.run", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"}
 	args := json.RawMessage(`{"cmd":"ls","workspace":"/tmp/llm-supplied"}`)
 	_, eff, err := m.Resolve(context.Background(), tool, args)
@@ -271,7 +197,7 @@ func TestToolManager_Dispatch_RoutesToProvider(t *testing.T) {
 			return json.RawMessage(`{"out":"ok"}`), nil
 		},
 	}
-	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 	if err := m.AddProvider(p); err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +215,7 @@ func TestToolManager_Dispatch_RoutesToProvider(t *testing.T) {
 }
 
 func TestToolManager_Dispatch_UnknownProvider(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 	tool := Tool{Name: "ghost:tool", Provider: "ghost"}
 	_, err := m.Dispatch(context.Background(), tool, nil)
 	if !errors.Is(err, ErrUnknownProvider) {
@@ -298,7 +224,7 @@ func TestToolManager_Dispatch_UnknownProvider(t *testing.T) {
 }
 
 func TestToolManager_BumpPolicyGen_InvalidatesCache(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
+	m := NewToolManager(&fakePerms{}, nil, nil)
 	if err := m.AddProvider(&fakeProvider{name: "p", tools: []Tool{{Name: "p:t", Provider: "p"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -310,44 +236,51 @@ func TestToolManager_BumpPolicyGen_InvalidatesCache(t *testing.T) {
 	}
 }
 
-func TestToolManager_SessionProvider_VisibleOnlyToOwningSession(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
+// Phase 4.1a stage A step 9: per-session providers now live on
+// a child Manager built via NewChild — the tests below pin the
+// equivalent semantics through that surface (replacing the
+// retired AddSessionProvider / CloseSession path).
+
+func TestToolManager_Child_VisibleOnlyToOwningSession(t *testing.T) {
+	root := NewToolManager(&fakePerms{}, nil, nil)
 	global := &fakeProvider{name: "system", tools: []Tool{{Name: "system:notepad", Provider: "system"}}}
-	if err := m.AddProvider(global); err != nil {
+	if err := root.AddProvider(global); err != nil {
 		t.Fatal(err)
 	}
+	s1Tools := root.NewChild()
 	scoped := &fakeProvider{name: "bash-mcp", tools: []Tool{{Name: "bash-mcp:bash.run", Provider: "bash-mcp"}}}
-	if err := m.AddSessionProvider("s1", scoped); err != nil {
+	if err := s1Tools.AddProvider(scoped); err != nil {
 		t.Fatal(err)
 	}
 
-	s1, _ := m.Snapshot(context.Background(), "s1")
+	s1, _ := s1Tools.Snapshot(context.Background(), "s1")
 	if len(s1.Tools) != 2 {
-		t.Errorf("s1 tools = %d, want 2 (global + scoped)", len(s1.Tools))
+		t.Errorf("s1 tools = %d, want 2 (global walked from parent + scoped on child)", len(s1.Tools))
 	}
-	s2, _ := m.Snapshot(context.Background(), "s2")
+	// Sibling session has its own (empty) child — root shows global only.
+	s2, _ := root.Snapshot(context.Background(), "s2")
 	if len(s2.Tools) != 1 {
 		t.Errorf("s2 tools = %d, want 1 (global only)", len(s2.Tools))
 	}
 }
 
-func TestToolManager_SessionProvider_ShadowsGlobalOnDispatch(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
+func TestToolManager_Child_ShadowsGlobalOnDispatch(t *testing.T) {
+	root := NewToolManager(&fakePerms{}, nil, nil)
 	global := &fakeProvider{name: "bash-mcp", callFunc: func(name string, args json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`{"from":"global"}`), nil
 	}}
 	scoped := &fakeProvider{name: "bash-mcp", callFunc: func(name string, args json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`{"from":"scoped"}`), nil
 	}}
-	if err := m.AddProvider(global); err != nil {
+	if err := root.AddProvider(global); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.AddSessionProvider("s1", scoped); err != nil {
+	s1Tools := root.NewChild()
+	if err := s1Tools.AddProvider(scoped); err != nil {
 		t.Fatal(err)
 	}
 	tool := Tool{Name: "bash-mcp:bash.run", Provider: "bash-mcp"}
-	ctx := perm.WithSession(context.Background(), perm.SessionContext{SessionID: "s1"})
-	out, err := m.Dispatch(ctx, tool, json.RawMessage(`{}`))
+	out, err := s1Tools.Dispatch(context.Background(), tool, json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
@@ -355,26 +288,28 @@ func TestToolManager_SessionProvider_ShadowsGlobalOnDispatch(t *testing.T) {
 		t.Errorf("got %s, want scoped result", out)
 	}
 
-	ctx2 := perm.WithSession(context.Background(), perm.SessionContext{SessionID: "s2"})
-	out2, _ := m.Dispatch(ctx2, tool, json.RawMessage(`{}`))
+	// Sibling session uses its own child (no override) — sees the global.
+	s2Tools := root.NewChild()
+	out2, _ := s2Tools.Dispatch(context.Background(), tool, json.RawMessage(`{}`))
 	if string(out2) != `{"from":"global"}` {
 		t.Errorf("got %s, want global result for s2", out2)
 	}
 }
 
-func TestToolManager_CloseSession_TearsDownProviders(t *testing.T) {
-	m := NewToolManager(&fakePerms{}, nil, nil, nil, nil)
+func TestToolManager_Child_CloseTearsDownProviders(t *testing.T) {
+	root := NewToolManager(&fakePerms{}, nil, nil)
+	child := root.NewChild()
 	p := &fakeProvider{name: "bash-mcp"}
-	if err := m.AddSessionProvider("s1", p); err != nil {
+	if err := child.AddProvider(p); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.CloseSession(context.Background(), "s1"); err != nil {
-		t.Fatalf("CloseSession: %v", err)
+	if err := child.Close(); err != nil {
+		t.Fatalf("child.Close: %v", err)
 	}
 	if !p.closed.Load() {
 		t.Errorf("provider not closed")
 	}
-	snap, _ := m.Snapshot(context.Background(), "s1")
+	snap, _ := child.Snapshot(context.Background(), "s1")
 	if len(snap.Tools) != 0 {
 		t.Errorf("tools after close = %d, want 0", len(snap.Tools))
 	}
@@ -389,23 +324,47 @@ type fakePermsWithAgent struct {
 
 func (f *fakePermsWithAgent) AgentID() string { return f.agentID }
 
-func newPoliciesForTest(t *testing.T) (*Policies, *fakePolicyStore) {
-	t.Helper()
-	store := newFakePolicyStore()
-	return NewPolicies(newFakePolicyQuerier(store)), store
+// stubPolicyService is a tiny in-memory PolicyService used by the
+// manager-level Tier-3 tests. It avoids pulling pkg/tool back onto
+// the persistence layer (pkg/store/queries) — the real impl lives
+// in pkg/tool/providers/policies and is exercised in that package's
+// own tests.
+type stubPolicyService struct {
+	rows       map[string]PolicyOutcome
+	configured bool
+}
+
+func newStubPolicies() *stubPolicyService {
+	return &stubPolicyService{
+		rows:       map[string]PolicyOutcome{},
+		configured: true,
+	}
+}
+
+func (s *stubPolicyService) Set(agentID, toolName string, out PolicyOutcome) {
+	s.rows[agentID+"|"+toolName] = out
+}
+
+func (s *stubPolicyService) IsConfigured() bool {
+	return s != nil && s.configured
+}
+
+func (s *stubPolicyService) Decide(_ context.Context, agentID, toolName, scope string) (PolicyDecision, error) {
+	if !s.IsConfigured() {
+		return PolicyDecision{}, nil
+	}
+	out, ok := s.rows[agentID+"|"+toolName]
+	if !ok {
+		return PolicyDecision{}, nil
+	}
+	return PolicyDecision{Outcome: out, ToolName: toolName, Scope: scope}, nil
 }
 
 func TestToolManager_Resolve_Tier3DenyBlocks(t *testing.T) {
-	pol, _ := newPoliciesForTest(t)
-	if _, err := pol.Save(context.Background(), PolicyInput{
-		AgentID:  "ag01",
-		ToolName: "bash-mcp:read_file",
-		Decision: PolicyDeny,
-	}); err != nil {
-		t.Fatalf("save: %v", err)
-	}
+	pol := newStubPolicies()
+	pol.Set("ag01", "bash-mcp:read_file", PolicyDeny)
 	perms := &fakePermsWithAgent{agentID: "ag01"}
-	m := NewToolManager(perms, nil, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	m.SetPolicies(pol)
 
 	tl := Tool{
@@ -423,16 +382,10 @@ func TestToolManager_Resolve_Tier3DenyBlocks(t *testing.T) {
 }
 
 func TestToolManager_Resolve_Tier3AllowMarksFromUser(t *testing.T) {
-	pol, _ := newPoliciesForTest(t)
-	if _, err := pol.Save(context.Background(), PolicyInput{
-		AgentID:  "ag01",
-		ToolName: "bash-mcp:read_file",
-		Decision: PolicyAllow,
-	}); err != nil {
-		t.Fatalf("save: %v", err)
-	}
+	pol := newStubPolicies()
+	pol.Set("ag01", "bash-mcp:read_file", PolicyAllow)
 	perms := &fakePermsWithAgent{agentID: "ag01"}
-	m := NewToolManager(perms, nil, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	m.SetPolicies(pol)
 
 	tl := Tool{
@@ -450,21 +403,15 @@ func TestToolManager_Resolve_Tier3AllowMarksFromUser(t *testing.T) {
 }
 
 func TestToolManager_Resolve_Tier1FloorBeatsTier3Allow(t *testing.T) {
-	pol, _ := newPoliciesForTest(t)
-	if _, err := pol.Save(context.Background(), PolicyInput{
-		AgentID:  "ag01",
-		ToolName: "bash-mcp:write_file",
-		Decision: PolicyAllow,
-	}); err != nil {
-		t.Fatalf("save: %v", err)
-	}
+	pol := newStubPolicies()
+	pol.Set("ag01", "bash-mcp:write_file", PolicyAllow)
 	perms := &fakePermsWithAgent{
 		fakePerms: fakePerms{rules: map[string]perm.Permission{
 			"hugen:tool:bash-mcp:*": {Disabled: true, FromConfig: true},
 		}},
 		agentID: "ag01",
 	}
-	m := NewToolManager(perms, nil, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	m.SetPolicies(pol)
 
 	tl := Tool{
@@ -486,7 +433,7 @@ func TestToolManager_Resolve_Tier1FloorBeatsTier3Allow(t *testing.T) {
 
 func TestToolManager_Resolve_NoPoliciesSkipsTier3(t *testing.T) {
 	perms := &fakePermsWithAgent{agentID: "ag01"}
-	m := NewToolManager(perms, nil, nil, nil, nil) // no SetPolicies
+	m := NewToolManager(perms, nil, nil) // no SetPolicies
 	tl := Tool{
 		Name:             "bash-mcp:read_file",
 		Provider:         "bash-mcp",
@@ -502,10 +449,10 @@ func TestToolManager_Resolve_NoPoliciesSkipsTier3(t *testing.T) {
 }
 
 func TestToolManager_Resolve_AskFallsThrough(t *testing.T) {
-	pol, _ := newPoliciesForTest(t)
+	pol := newStubPolicies()
 	// no row → Decide returns Ask; Resolve should not mark FromUser.
 	perms := &fakePermsWithAgent{agentID: "ag01"}
-	m := NewToolManager(perms, nil, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	m.SetPolicies(pol)
 	tl := Tool{
 		Name:             "bash-mcp:read_file",
@@ -528,9 +475,9 @@ func TestToolManager_Resolve_AskFallsThrough(t *testing.T) {
 // the fix m.policies was protected by m.mu only on the write path;
 // Resolve dereferenced it lock-free.
 func TestToolManager_SetPolicies_RaceFreeWithResolve(t *testing.T) {
-	pol, _ := newPoliciesForTest(t)
+	pol := newStubPolicies()
 	perms := &fakePermsWithAgent{agentID: "ag01"}
-	m := NewToolManager(perms, nil, nil, nil, nil)
+	m := NewToolManager(perms, nil, nil)
 	tl := Tool{
 		Name:             "bash-mcp:read_file",
 		Provider:         "bash-mcp",
@@ -555,3 +502,94 @@ func TestToolManager_SetPolicies_RaceFreeWithResolve(t *testing.T) {
 	}
 	<-done
 }
+
+func TestToolManager_NewChild_DispatchWalksToParent(t *testing.T) {
+	parent := NewToolManager(&fakePerms{}, nil, nil)
+	root := &fakeProvider{name: "bash-mcp", callFunc: func(name string, _ json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`"root"`), nil
+	}}
+	if err := parent.AddProvider(root); err != nil {
+		t.Fatalf("parent.AddProvider: %v", err)
+	}
+
+	child := parent.NewChild()
+	own := &fakeProvider{name: "py-mcp", callFunc: func(name string, _ json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`"child"`), nil
+	}}
+	if err := child.AddProvider(own); err != nil {
+		t.Fatalf("child.AddProvider: %v", err)
+	}
+
+	// Lookup hits child's own providers first.
+	out, err := child.Dispatch(context.Background(),
+		Tool{Name: "py-mcp:run", Provider: "py-mcp", PermissionObject: "hugen:tool:py-mcp"},
+		json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("child Dispatch own: %v", err)
+	}
+	if string(out) != `"child"` {
+		t.Errorf("child own dispatch = %s, want %q", out, `"child"`)
+	}
+
+	// Miss on child → walks to parent.
+	out, err = child.Dispatch(context.Background(),
+		Tool{Name: "bash-mcp:run", Provider: "bash-mcp", PermissionObject: "hugen:tool:bash-mcp"},
+		json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("child Dispatch parent fallback: %v", err)
+	}
+	if string(out) != `"root"` {
+		t.Errorf("parent fallback dispatch = %s, want %q", out, `"root"`)
+	}
+
+	// Unknown in both: ErrUnknownProvider, no panics.
+	_, err = child.Dispatch(context.Background(),
+		Tool{Name: "ghost:run", Provider: "ghost"}, nil)
+	if !errors.Is(err, ErrUnknownProvider) {
+		t.Errorf("child unknown dispatch = %v, want ErrUnknownProvider", err)
+	}
+}
+
+func TestToolManager_NewChild_CloseDropsOwnOnly(t *testing.T) {
+	parent := NewToolManager(&fakePerms{}, nil, nil)
+	rootProv := &fakeProvider{name: "bash-mcp"}
+	if err := parent.AddProvider(rootProv); err != nil {
+		t.Fatalf("parent.AddProvider: %v", err)
+	}
+
+	child := parent.NewChild()
+	childProv := &fakeProvider{name: "py-mcp"}
+	if err := child.AddProvider(childProv); err != nil {
+		t.Fatalf("child.AddProvider: %v", err)
+	}
+
+	if err := child.Close(); err != nil {
+		t.Fatalf("child.Close: %v", err)
+	}
+	if !childProv.closed.Load() {
+		t.Errorf("child.Close did not Close child's provider")
+	}
+	if rootProv.closed.Load() {
+		t.Errorf("child.Close cascaded into parent's provider — must not")
+	}
+	if got := parent.Providers(); len(got) != 1 || got[0] != "bash-mcp" {
+		t.Errorf("parent.Providers after child.Close = %v, want [bash-mcp]", got)
+	}
+}
+
+func TestToolManager_NewChild_PoliciesInheritedFromParent(t *testing.T) {
+	parent := NewToolManager(&fakePerms{}, nil, nil)
+	pol := newStubPolicies()
+	parent.SetPolicies(pol)
+
+	child := parent.NewChild()
+	if got := child.policiesSnapshot(); got != pol {
+		t.Errorf("child.policiesSnapshot = %v, want parent's %v", got, pol)
+	}
+}
+
+// TestToolManager_Reconnector_InheritedFromParent retired in
+// step 34: ToolManager no longer owns a Reconnector. Recovery is
+// the recovery.Wrap decorator's job, applied at provider
+// construction time. Manager has no per-tier recovery state to
+// propagate parent → child.

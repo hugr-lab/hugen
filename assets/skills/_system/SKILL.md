@@ -11,19 +11,24 @@ allowed-tools:
       - bash.write_file
       - bash.list_dir
       - bash.sed
-  - provider: system
+  - provider: session
     tools:
       - notepad_append
       - skill_load
       - skill_unload
       - skill_ref
       - skill_files
-      - policy_save
-      - policy_revoke
-      - runtime_reload
-      - mcp_add_server
-      - mcp_remove_server
-      - mcp_reload_server
+  - provider: policy
+    tools:
+      - save
+      - revoke
+  - provider: tool
+    tools:
+      - provider_add
+      - provider_remove
+  - provider: runtime
+    tools:
+      - reload
 metadata:
   hugen:
     requires: []
@@ -85,7 +90,7 @@ shell tools and file tools see exactly the same paths.
 - When the user asks "what files do you see", check both your
   scratch dir and `$SHARED_DIR` before reporting "empty".
 
-## system — meta tools
+## meta tools
 
 - `notepad_append` — append to the per-session scratchpad. Use it
   to log intermediate findings the user may ask about later.
@@ -99,7 +104,7 @@ shell tools and file tools see exactly the same paths.
   `python-mcp:run_script`, `duckdb-mcp:execute_query`) can address
   them directly. Optional `subdir` / `glob` filters narrow the
   listing.
-- `policy_save` / `policy_revoke` — persist or remove a personal
+- `policy:save` / `policy:revoke` — persist or remove a personal
   Tier-3 tool policy ("always allow" / "always deny") for the
   caller. Args: `tool_name` (`<provider>:<field>`, glob `*`
   suffix accepted), `decision` (`allow|deny|ask`), optional
@@ -107,13 +112,14 @@ shell tools and file tools see exactly the same paths.
   the operator floor or the user's role rules — when the user
   asks "always allow X", call this; if X is later denied by a
   higher tier the call still blocks (that's correct behaviour).
-- `runtime_reload` — re-read live runtime state. `target` ∈
+- `runtime:reload` — re-read live runtime state. `target` ∈
   `permissions` (re-fetch Hugr role rules), `skills` (rescan
   skill stores), `mcp` (re-spawn per-agent MCP providers), or
   `all`. Use only when the user explicitly asks to refresh.
-- `mcp_add_server` / `mcp_remove_server` / `mcp_reload_server`
-  — admin path to attach or detach an MCP server at runtime.
-  Operator-only; the call may be denied by policy.
+- `tool:provider_add` / `tool:provider_remove` — admin path to
+  register or drop a tool provider at runtime. Operator-only; the
+  call may be denied by policy. Use `runtime:reload(target=mcp)`
+  to restart already-registered MCP providers.
 
 ## Discovering skill contents
 

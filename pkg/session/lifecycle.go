@@ -11,14 +11,25 @@ import (
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
+	mcpprov "github.com/hugr-lab/hugen/pkg/tool/providers/mcp"
+	"github.com/hugr-lab/hugen/pkg/tool/providers/recovery"
 )
 
 // Lifecycle is the contract Manager calls on Open and Close. The
 // production implementation is *Resources below; tests usually
 // pass nil (no per-session resources) or their own struct.
+//
+// SessionTools returns the per-session ToolManager produced during
+// Acquire — a child of the agent-level root with per_session
+// providers registered on it. The Session uses this child as its
+// dispatch surface so per_session providers shadow the root in a
+// natural parent/child walk. Returns nil when no per-session
+// scoping happened (no Acquire, lifecycle disabled, etc.) — the
+// session keeps its constructor-time tools (typically the root).
 type Lifecycle interface {
 	Acquire(ctx context.Context, sessionID string) error
 	Release(ctx context.Context, sessionID string) error
+	SessionTools(sessionID string) *tool.ToolManager
 }
 
 // ResourceDeps groups every dependency Resources needs.
@@ -61,6 +72,12 @@ type Resources struct {
 
 	mu       sync.Mutex
 	revokers map[string][]func()
+	// children holds the per-session child *tool.ToolManager built
+	// during Acquire and consulted by SessionTools. Phase 4.1a
+	// stage A step 9 replaced the legacy ToolManager.sessionProviders
+	// map with this caller-side map; each child has the agent-level
+	// root as its parent so unknown-provider lookups walk up.
+	children map[string]*tool.ToolManager
 }
 
 // NewResources constructs a Resources owner from its deps. Every
@@ -77,7 +94,18 @@ func NewResources(deps ResourceDeps) *Resources {
 	return &Resources{
 		deps:     deps,
 		revokers: make(map[string][]func()),
+		children: make(map[string]*tool.ToolManager),
 	}
+}
+
+// SessionTools implements Lifecycle.SessionTools — returns the
+// child ToolManager built during Acquire for sessionID. Returns
+// nil when Acquire has not run (or has been Released) for the id
+// — Session keeps its constructor-time tools in that case.
+func (r *Resources) SessionTools(sessionID string) *tool.ToolManager {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.children[sessionID]
 }
 
 // Validate inspects every per_session entry in tool_providers and
@@ -124,12 +152,17 @@ func (r *Resources) Acquire(ctx context.Context, sessionID string) error {
 	}
 	root, _ := r.deps.Workspace.Root()
 
+	// Per-session child Manager — phase 4.1a stage A step 9. Each
+	// session owns its own child ToolManager whose parent is the
+	// agent-level root. Per_session providers register on the
+	// child; child.Close() in Release drops them without touching
+	// agent-level state.
+	child := r.deps.Tools.NewChild()
+
 	var (
-		opened   []string
+		opened   int
 		rollback = func() {
-			for _, name := range opened {
-				_ = r.deps.Tools.RemoveSessionProvider(ctx, sessionID, name)
-			}
+			_ = child.Close()
 			_, _ = r.deps.Workspace.Release(sessionID)
 		}
 	)
@@ -148,7 +181,7 @@ func (r *Resources) Acquire(ctx context.Context, sessionID string) error {
 		env["SESSION_DIR"] = sessDir
 		env["WORKSPACES_ROOT"] = root
 
-		spec := tool.MCPProviderSpec{
+		spec := mcpprov.Spec{
 			Name:        cfg.Name,
 			Command:     cfg.Command,
 			Args:        cfg.Args,
@@ -157,27 +190,37 @@ func (r *Resources) Acquire(ctx context.Context, sessionID string) error {
 			Lifetime:    tool.LifetimePerSession,
 			PermObject:  "hugen:tool:" + cfg.Name,
 			Description: "session-scoped " + cfg.Name,
-			Transport:   tool.TransportStdio,
+			Transport:   mcpprov.TransportStdio,
 		}
-		prov, err := tool.NewMCPProvider(ctx, spec, r.deps.Logger)
+		inner, err := mcpprov.NewWithSpec(ctx, spec, r.deps.Logger)
 		if err != nil {
 			rollback()
 			return fmt.Errorf("session %s: provider %q spawn: %w", sessionID, cfg.Name, err)
 		}
-		if err := r.deps.Tools.AddSessionProvider(sessionID, prov); err != nil {
+		// Wrap with the lazy retry decorator so per_session MCPs
+		// recover transparently from EOF / closed-pipe failures.
+		// The decorator delegates to the inner provider's
+		// TryReconnect; recovery is driven by the next failed
+		// Call/List, not a background goroutine.
+		prov := recovery.Wrap(inner, recovery.WithLogger(r.deps.Logger))
+		if err := child.AddProvider(prov); err != nil {
 			_ = prov.Close()
 			rollback()
 			return fmt.Errorf("session %s: provider %q register: %w", sessionID, cfg.Name, err)
 		}
-		opened = append(opened, cfg.Name)
+		opened++
 	}
+
+	r.mu.Lock()
+	r.children[sessionID] = child
+	r.mu.Unlock()
 
 	if r.deps.Skills != nil && r.deps.SkillStore != nil {
 		r.autoloadSkills(ctx, sessionID)
 	}
 
 	r.deps.Logger.Info("session resources acquired",
-		"session", sessionID, "dir", sessDir, "providers", len(opened))
+		"session", sessionID, "dir", sessDir, "providers", opened)
 	return nil
 }
 
@@ -185,16 +228,19 @@ func (r *Resources) Acquire(ctx context.Context, sessionID string) error {
 // Errors are logged and swallowed — Close must finish even when
 // individual subsystems misbehave.
 func (r *Resources) Release(ctx context.Context, sessionID string) error {
-	if r.deps.Tools != nil {
-		if err := r.deps.Tools.CloseSession(ctx, sessionID); err != nil {
+	r.mu.Lock()
+	child := r.children[sessionID]
+	delete(r.children, sessionID)
+	revs := r.revokers[sessionID]
+	delete(r.revokers, sessionID)
+	r.mu.Unlock()
+
+	if child != nil {
+		if err := child.Close(); err != nil {
 			r.deps.Logger.Warn("session release: tool teardown",
 				"session", sessionID, "err", err)
 		}
 	}
-	r.mu.Lock()
-	revs := r.revokers[sessionID]
-	delete(r.revokers, sessionID)
-	r.mu.Unlock()
 	for _, rv := range revs {
 		rv()
 	}

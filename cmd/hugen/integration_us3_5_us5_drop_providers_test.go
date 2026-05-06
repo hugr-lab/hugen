@@ -8,7 +8,7 @@
 //     allowed-tools grants are flagged unavailable via
 //     skill.AnnotateUnavailable (existing phase-3 mechanism);
 //   - bash-mcp tools still resolve and dispatch;
-//   - system:skill_files still works (does not depend on the analyst
+//   - session:skill_files still works (does not depend on the analyst
 //     providers).
 package main
 
@@ -23,9 +23,11 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
+	"github.com/hugr-lab/hugen/pkg/tool/providers"
 )
 
 func TestUS3_5_US5_DropProviders(t *testing.T) {
@@ -40,8 +42,8 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	if err := installBundledSkills(stateDir, logger); err != nil {
-		t.Fatalf("installBundledSkills: %v", err)
+	if err := runtime.InstallBundledSkills(stateDir, logger); err != nil {
+		t.Fatalf("InstallBundledSkills: %v", err)
 	}
 
 	cfgSvc := config.NewStaticService(config.StaticInput{
@@ -62,18 +64,10 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	view := &permsView{rules: nil}
 	perms := perm.NewLocalPermissions(view, staticIdentity{id: "agent-it"})
 	t.Cleanup(perms.Close)
-	tools := tool.NewToolManager(perms, skills, cfgSvc.ToolProviders(), nil, nil,
-		tool.WithWorkspaceRoot(workspaceDir))
+	tools := tool.NewToolManager(perms, cfgSvc.ToolProviders(), nil,
+		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, nil)))
 	t.Cleanup(func() { _ = tools.Close() })
 
-	sys := tool.NewSystemProvider(tool.SystemDeps{
-		AgentID: "agent-it",
-		Skills:  skills,
-		Perms:   perms,
-	})
-	if err := tools.AddProvider(sys); err != nil {
-		t.Fatalf("AddProvider system: %v", err)
-	}
 
 	ws := session.NewWorkspace(workspaceDir, true)
 	resources := session.NewResources(session.ResourceDeps{
@@ -90,8 +84,15 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), nil,
 		session.WithLifecycle(resources),
-		session.WithSessionOptions(session.WithTools(tools)),
+		session.WithPerms(perms),
+		session.WithSessionOptions(
+			session.WithTools(tools),
+			session.WithSkills(skills),
+		),
 	)
+	if err := tools.AddProvider(mgr); err != nil {
+		t.Fatalf("AddProvider session: %v", err)
+	}
 
 	ctx := context.Background()
 	sess, _, err := mgr.Open(ctx, session.OpenRequest{OwnerID: "u"})
@@ -117,7 +118,7 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Bindings: %v", err)
 	}
-	registered := []string{"bash-mcp", "system"}
+	registered := []string{"bash-mcp", "system", "session"}
 	annotated := skill.AnnotateUnavailable(b, registered)
 	foundDuckdb := false
 	for _, u := range annotated.Unavailable {
@@ -131,7 +132,7 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	}
 
 	// bash-mcp tools still work end-to-end.
-	snap, err := tools.Snapshot(ctx, sess.ID())
+	snap, err := sess.Tools().Snapshot(ctx, sess.ID())
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -139,27 +140,28 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	if !ok {
 		t.Fatalf("bash.write_file missing")
 	}
-	skillFiles, ok := findTool(snap.Tools, "system:skill_files")
+	skillFiles, ok := findTool(snap.Tools, "session:skill_files")
 	if !ok {
-		t.Fatalf("system:skill_files missing")
+		t.Fatalf("session:skill_files missing")
 	}
 
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
+	dispatchCtx = session.WithSession(dispatchCtx, sess)
 	args, _ := json.Marshal(map[string]string{"path": "hello.txt", "content": "ok"})
-	_, eff, err := tools.Resolve(dispatchCtx, writeFile, args)
+	_, eff, err := sess.Tools().Resolve(dispatchCtx, writeFile, args)
 	if err != nil {
 		t.Fatalf("Resolve write_file: %v", err)
 	}
-	if _, err := tools.Dispatch(dispatchCtx, writeFile, eff); err != nil {
+	if _, err := sess.Tools().Dispatch(dispatchCtx, writeFile, eff); err != nil {
 		t.Fatalf("Dispatch write_file: %v", err)
 	}
 
 	sfArgs, _ := json.Marshal(map[string]string{"name": "duckdb-data"})
-	_, eff, err = tools.Resolve(dispatchCtx, skillFiles, sfArgs)
+	_, eff, err = sess.Tools().Resolve(dispatchCtx, skillFiles, sfArgs)
 	if err != nil {
 		t.Fatalf("Resolve skill_files: %v", err)
 	}
-	out, err := tools.Dispatch(dispatchCtx, skillFiles, eff)
+	out, err := sess.Tools().Dispatch(dispatchCtx, skillFiles, eff)
 	if err != nil {
 		t.Fatalf("Dispatch skill_files: %v", err)
 	}
