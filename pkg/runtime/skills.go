@@ -98,13 +98,11 @@ func phaseSkillsAndPerms(_ context.Context, core *Core) error {
 		core.Logger,
 	)
 
-	if core.Commands != nil {
-		if err := core.Commands.Register("skill", session.CommandSpec{
-			Handler:     skillCommandHandler(core.Skills, core.SkillStore, core.Permissions),
-			Description: "list, load or unload skills: /skill list | /skill load <name> | /skill unload <name>",
-		}); err != nil {
-			return fmt.Errorf("register /skill: %w", err)
-		}
+	if err := core.Commands.Register("skill", session.CommandSpec{
+		Handler:     skillCommandHandler(core.Skills, core.SkillStore, core.Permissions),
+		Description: "list, load or unload skills: /skill list | /skill load <name> | /skill unload <name>",
+	}); err != nil {
+		return fmt.Errorf("register /skill: %w", err)
 	}
 	return nil
 }
