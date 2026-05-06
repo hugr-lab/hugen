@@ -82,7 +82,7 @@ func TestCallSpawnSubagent_DepthExceeded(t *testing.T) {
 	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 	// Force the cap so the next spawn would exceed it.
-	parent.deps.maxDepth = 0
+	parent.deps.MaxDepth = 0
 	parent.depth = 5
 
 	out, err := callSpawnSubagent(us1WithSession(parent), parent, mgrToolHost(mgr),

@@ -96,7 +96,7 @@ type Manager struct {
 	// can continue to read m.store / m.agent / ... without a churn,
 	// while newSession / newSessionRestore can take m.deps
 	// monolithically.
-	deps *sessionDeps
+	deps *Deps
 
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
@@ -166,22 +166,22 @@ func NewManager(
 	for _, o := range opts {
 		o(m)
 	}
-	// Build the shared sessionDeps view AFTER the options ran, so
+	// Build the shared Deps view AFTER the options ran, so
 	// Lifecycle and SessionOption updates picked up by m.lifecycle /
 	// m.sessionOpts are reflected in the bundle that newSession /
 	// newSessionRestore see.
-	m.deps = &sessionDeps{
-		store:     m.store,
-		agent:     m.agent,
-		models:    m.models,
-		commands:  m.commands,
-		codec:     m.codec,
-		logger:    m.logger,
-		lifecycle: m.lifecycle,
-		opts:      m.sessionOpts,
-		rootCtx:   m.rootCtx,
-		wg:        &m.wg,
-		maxDepth:  defaultMaxDepth,
+	m.deps = &Deps{
+		Store:     m.store,
+		Agent:     m.agent,
+		Models:    m.models,
+		Commands:  m.commands,
+		Codec:     m.codec,
+		Logger:    m.logger,
+		Lifecycle: m.lifecycle,
+		Opts:      m.sessionOpts,
+		RootCtx:   m.rootCtx,
+		WG:        &m.wg,
+		MaxDepth:  defaultMaxDepth,
 	}
 	// Phase 4.1b-pre stage B / D6: a root session calling
 	// requestClose hands the close request to Manager via this hook.
@@ -197,7 +197,7 @@ func NewManager(
 	return m
 }
 
-// defaultMaxDepth is the phase-4 fallback for sessionDeps.maxDepth
+// defaultMaxDepth is the phase-4 fallback for Deps.maxDepth
 // until commit 9 wires cfg.Subagents().DefaultMaxDepth. Matches
 // `phase-4-spec.md §5.7` Layer 2 default.
 const defaultMaxDepth = 5

@@ -10,14 +10,14 @@ import (
 )
 
 // ErrDepthExceeded is returned by parent.Spawn when the new
-// sub-agent's depth would exceed deps.maxDepth.
+// sub-agent's depth would exceed deps.MaxDepth.
 var ErrDepthExceeded = errors.New("session: max sub-agent depth exceeded")
 
 // newSession creates a fresh Session (root or sub-agent), writes its
 // initial sessions row, runs lifecycle.Acquire, and emits a
 // SessionOpened frame. The returned Session is ready for s.start.
 //
-//   - parent == nil → root: ctx derived from deps.rootCtx, depth = 0,
+//   - parent == nil → root: ctx derived from deps.RootCtx, depth = 0,
 //     SessionType = "root".
 //   - parent != nil → sub-agent: ctx derived from parent.ctx, depth =
 //     parent.depth + 1, SessionType = "subagent". Caller is
@@ -30,7 +30,7 @@ var ErrDepthExceeded = errors.New("session: max sub-agent depth exceeded")
 // the row was written, newSession appends a session_terminated
 // {reason="acquire_failed"} event so the orphaned row is unambiguously
 // terminal on next boot.
-func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req OpenRequest) (*Session, error) {
+func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenRequest) (*Session, error) {
 	id := newSessionID()
 	depth := 0
 	sessionType := "root"
@@ -40,10 +40,10 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 		sessionType = "subagent"
 		parentCtx = parent.ctx
 	} else {
-		parentCtx = deps.rootCtx
+		parentCtx = deps.RootCtx
 	}
 	if parentCtx == nil {
-		// Defensive: should never happen post-pivot; deps.rootCtx is
+		// Defensive: should never happen post-pivot; deps.RootCtx is
 		// always set by NewManager.
 		parentCtx = context.Background()
 	}
@@ -58,7 +58,7 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 	now := time.Now().UTC()
 	row := SessionRow{
 		ID:                 id,
-		AgentID:            deps.agent.ID(),
+		AgentID:            deps.Agent.ID(),
 		OwnerID:            req.OwnerID,
 		ParentSessionID:    req.ParentSessionID,
 		SessionType:        sessionType,
@@ -68,7 +68,7 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
-	if err := deps.store.OpenSession(ctx, row); err != nil {
+	if err := deps.Store.OpenSession(ctx, row); err != nil {
 		cancel(nil)
 		return nil, fmt.Errorf("session: open row: %w", err)
 	}
@@ -79,8 +79,8 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 	// MCPs). Failure here means the row exists but no goroutine —
 	// mark the row terminal so restart-walker doesn't try to resume
 	// it.
-	if deps.lifecycle != nil {
-		if err := deps.lifecycle.Acquire(ctx, s); err != nil {
+	if deps.Lifecycle != nil {
+		if err := deps.Lifecycle.Acquire(ctx, s); err != nil {
 			s.appendTerminal(ctx, "acquire_failed")
 			cancel(nil)
 			return nil, fmt.Errorf("session: acquire: %w", err)
@@ -91,7 +91,7 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 		// child→root for unknown-provider lookups. Lifecycle
 		// implementations without per-session scoping return nil —
 		// the constructor-time tools (root) stay in place.
-		if child := deps.lifecycle.SessionTools(id); child != nil {
+		if child := deps.Lifecycle.SessionTools(id); child != nil {
 			s.tools = child
 		}
 	}
@@ -103,11 +103,11 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 	if parent == nil {
 		parts := req.Participants
 		if len(parts) == 0 {
-			parts = []protocol.ParticipantInfo{deps.agent.Participant()}
+			parts = []protocol.ParticipantInfo{deps.Agent.Participant()}
 		}
-		opened := protocol.NewSessionOpened(id, deps.agent.Participant(), parts)
+		opened := protocol.NewSessionOpened(id, deps.Agent.Participant(), parts)
 		if err := s.emit(ctx, opened); err != nil && !errors.Is(err, ErrSessionClosed) {
-			deps.logger.Warn("session: emit session_opened", "session", id, "err", err)
+			deps.Logger.Warn("session: emit session_opened", "session", id, "err", err)
 		}
 	}
 
@@ -133,12 +133,12 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 //
 // Returns ErrSessionClosed if the session has a session_terminated
 // event already (caller handles as "session is gone, no resume").
-func newSessionRestore(ctx context.Context, id string, parent *Session, deps *sessionDeps) (*Session, error) {
-	row, err := deps.store.LoadSession(ctx, id)
+func newSessionRestore(ctx context.Context, id string, parent *Session, deps *Deps) (*Session, error) {
+	row, err := deps.Store.LoadSession(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if hasTerminated(ctx, deps.store, id) {
+	if hasTerminated(ctx, deps.Store, id) {
 		return nil, ErrSessionClosed
 	}
 
@@ -149,7 +149,7 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 	// Idempotent — second call (e.g. RestoreActive then Resume on the
 	// same root) finds the rows already there and writes nothing.
 	if _, err := settleDanglingSubagents(ctx, deps, id); err != nil {
-		deps.logger.Warn("session: restore settle dangling",
+		deps.Logger.Warn("session: restore settle dangling",
 			"session", id, "err", err)
 	}
 
@@ -158,7 +158,7 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 	if parent != nil {
 		parentCtx = parent.ctx
 	} else {
-		parentCtx = deps.rootCtx
+		parentCtx = deps.RootCtx
 	}
 	if parentCtx == nil {
 		parentCtx = context.Background()
@@ -180,12 +180,12 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 	// at the end keeps the live tree clean (loser's session is
 	// cancelled), but the brief window during construction is a
 	// known follow-up — see review note L2.
-	if deps.lifecycle != nil {
-		if err := deps.lifecycle.Acquire(ctx, s); err != nil {
+	if deps.Lifecycle != nil {
+		if err := deps.Lifecycle.Acquire(ctx, s); err != nil {
 			cancel(nil)
 			return nil, fmt.Errorf("session: re-acquire: %w", err)
 		}
-		if child := deps.lifecycle.SessionTools(id); child != nil {
+		if child := deps.Lifecycle.SessionTools(id); child != nil {
 			s.tools = child
 		}
 	}
@@ -193,10 +193,10 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 	// Emit a system_marker so adapters can render "session resumed"
 	// in the transcript. Materialisation of in-memory projections
 	// happens lazily on the first inbound Frame via s.materialise().
-	marker := protocol.NewSystemMarker(id, deps.agent.Participant(), "session_resumed",
+	marker := protocol.NewSystemMarker(id, deps.Agent.Participant(), "session_resumed",
 		map[string]any{"prior_status": row.Status})
 	if err := s.emit(ctx, marker); err != nil && !errors.Is(err, ErrSessionClosed) {
-		deps.logger.Warn("session: emit session_resumed marker", "session", id, "err", err)
+		deps.Logger.Warn("session: emit session_resumed marker", "session", id, "err", err)
 	}
 
 	return s, nil
@@ -205,8 +205,8 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 // buildSessionShell constructs the *Session struct populated with the
 // shared deps + tree links + ctx, but performs no IO. Used by both
 // constructors so the field-init pattern stays single-sourced.
-func buildSessionShell(id string, depth int, parent *Session, deps *sessionDeps, sessCtx context.Context, cancel context.CancelCauseFunc) *Session {
-	s := NewSession(id, deps.agent, deps.store, deps.models, deps.commands, deps.codec, deps.logger, deps.opts...)
+func buildSessionShell(id string, depth int, parent *Session, deps *Deps, sessCtx context.Context, cancel context.CancelCauseFunc) *Session {
+	s := NewSession(id, deps.Agent, deps.Store, deps.Models, deps.Commands, deps.Codec, deps.Logger, deps.Opts...)
 	s.depth = depth
 	s.deps = deps
 	s.parent = parent
@@ -221,20 +221,20 @@ func buildSessionShell(id string, depth int, parent *Session, deps *sessionDeps,
 // remove the session from its parent's children map (or from
 // Manager's m.live for roots).
 func (s *Session) start(onExit func()) {
-	if s.deps == nil || s.deps.wg == nil {
+	if s.deps == nil || s.deps.WG == nil {
 		// Legacy NewSession callers that haven't migrated to the
 		// pivot constructors — they manage goroutines themselves.
 		// This path is rare (test fixtures only).
 		return
 	}
-	s.deps.wg.Add(1)
+	s.deps.WG.Add(1)
 	go func() {
-		defer s.deps.wg.Done()
+		defer s.deps.WG.Done()
 		if onExit != nil {
 			defer onExit()
 		}
 		if err := s.Run(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
-			s.deps.logger.Warn("session loop exited", "session", s.id, "err", err)
+			s.deps.Logger.Warn("session loop exited", "session", s.id, "err", err)
 		}
 	}()
 }
@@ -277,16 +277,16 @@ func depthFromRow(row SessionRow) int {
 // errors logged but not returned, since the caller is already
 // returning an error of its own.
 func (s *Session) appendTerminal(ctx context.Context, reason string) {
-	terminal := protocol.NewSessionTerminated(s.id, s.deps.agent.Participant(), protocol.SessionTerminatedPayload{
+	terminal := protocol.NewSessionTerminated(s.id, s.deps.Agent.Participant(), protocol.SessionTerminatedPayload{
 		Reason: reason,
 	})
-	row, summary, err := FrameToEventRow(terminal, s.deps.agent.ID())
+	row, summary, err := FrameToEventRow(terminal, s.deps.Agent.ID())
 	if err != nil {
-		s.deps.logger.Warn("session: project terminal frame", "session", s.id, "err", err)
+		s.deps.Logger.Warn("session: project terminal frame", "session", s.id, "err", err)
 		return
 	}
-	if err := s.deps.store.AppendEvent(ctx, row, summary); err != nil {
-		s.deps.logger.Warn("session: append terminal event", "session", s.id, "err", err)
+	if err := s.deps.Store.AppendEvent(ctx, row, summary); err != nil {
+		s.deps.Logger.Warn("session: append terminal event", "session", s.id, "err", err)
 	}
 }
 

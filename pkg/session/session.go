@@ -36,7 +36,7 @@ type Session struct {
 	id           string
 	ownerID      string              // owner from SessionRow.OwnerID; inherited by subagents
 	depth        int                 // 0 for root; parent.depth+1 for subagent
-	deps         *sessionDeps        // shared bundle; nil only in legacy NewSession callers
+	deps         *Deps        // shared bundle; nil only in legacy NewSession callers
 	agent        *Agent
 	store        RuntimeStore
 	models       *model.ModelRouter
@@ -640,8 +640,8 @@ func (s *Session) teardown(runCtx context.Context) {
 	// 4) Release per-session resources before we write the terminal
 	// event so a future restart-walker reading session_terminated
 	// doesn't see a row whose resources are still alive.
-	if s.deps != nil && s.deps.lifecycle != nil {
-		if err := s.deps.lifecycle.Release(tc.writeCtx, s.id); err != nil {
+	if s.deps != nil && s.deps.Lifecycle != nil {
+		if err := s.deps.Lifecycle.Release(tc.writeCtx, s.id); err != nil {
 			s.logger.Warn("session: lifecycle release on teardown",
 				"session", s.id, "err", err)
 		}

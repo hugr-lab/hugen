@@ -24,7 +24,7 @@ import (
 // onExit callback removes the child from s.children.
 //
 // Errors:
-//   - ErrDepthExceeded — s.depth+1 would exceed s.deps.maxDepth.
+//   - ErrDepthExceeded — s.depth+1 would exceed s.deps.MaxDepth.
 //   - whatever newSession returns on row-write or lifecycle.Acquire
 //     failure (caller surfaces these to the spawning tool).
 //
@@ -34,7 +34,7 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	if s.deps == nil {
 		return nil, fmt.Errorf("session: spawn requires deps (constructed via newSession)")
 	}
-	if s.deps.maxDepth > 0 && s.depth+1 > s.deps.maxDepth {
+	if s.deps.MaxDepth > 0 && s.depth+1 > s.deps.MaxDepth {
 		return nil, ErrDepthExceeded
 	}
 	childDepth := s.depth + 1
@@ -66,7 +66,7 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	// Track the child on parent's childWG so parent's teardown can
 	// wait specifically for ITS direct children to exit before
 	// running its own lifecycle.Release / handleExit. The shared
-	// deps.wg in Manager waits for every goroutine in the forest;
+	// deps.WG in Manager waits for every goroutine in the forest;
 	// childWG narrows the wait to one tree level so the "deepest
 	// leaves finish first, then their parent" ordering is natural.
 	//
@@ -78,7 +78,7 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	s.childWG.Add(1)
 	child.start(func() { s.childWG.Done() })
 
-	started := protocol.NewSubagentStarted(s.id, s.deps.agent.Participant(), protocol.SubagentStartedPayload{
+	started := protocol.NewSubagentStarted(s.id, s.deps.Agent.Participant(), protocol.SubagentStartedPayload{
 		ChildSessionID:         child.ID(),
 		Skill:                  spec.Skill,
 		Role:                   spec.Role,
@@ -89,7 +89,7 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 		ParentWhiteboardActive: spec.ParentWhiteboardActive,
 	})
 	if err := s.emit(ctx, started); err != nil {
-		s.deps.logger.Warn("session: emit subagent_started",
+		s.deps.Logger.Warn("session: emit subagent_started",
 			"parent", s.id, "child", child.ID(), "err", err)
 	}
 	return child, nil

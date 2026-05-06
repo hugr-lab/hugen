@@ -38,11 +38,11 @@ import (
 // the parent in this pass — exactly the count of children that needed
 // settle, regardless of whether the child was clean-terminated or not.
 // Callers use it as boot-time activity probe.
-func settleDanglingSubagents(ctx context.Context, deps *sessionDeps, parentID string) (int, error) {
+func settleDanglingSubagents(ctx context.Context, deps *Deps, parentID string) (int, error) {
 	if deps == nil {
 		return 0, fmt.Errorf("session: settle requires deps")
 	}
-	children, err := deps.store.ListChildren(ctx, parentID)
+	children, err := deps.Store.ListChildren(ctx, parentID)
 	if err != nil {
 		return 0, fmt.Errorf("session: settle list-children: %w", err)
 	}
@@ -50,7 +50,7 @@ func settleDanglingSubagents(ctx context.Context, deps *sessionDeps, parentID st
 		return 0, nil
 	}
 
-	parentEvents, err := deps.store.ListEvents(ctx, parentID, ListEventsOpts{})
+	parentEvents, err := deps.Store.ListEvents(ctx, parentID, ListEventsOpts{})
 	if err != nil {
 		return 0, fmt.Errorf("session: settle list-events: %w", err)
 	}
@@ -71,7 +71,7 @@ func settleDanglingSubagents(ctx context.Context, deps *sessionDeps, parentID st
 		if _, ok := settled[child.ID]; ok {
 			continue
 		}
-		reason := lookupChildTerminationReason(ctx, deps.store, child.ID)
+		reason := lookupChildTerminationReason(ctx, deps.Store, child.ID)
 		if reason == "" {
 			// Non-terminal child — bury it with restart_died first so a
 			// future read sees a coherent "child gone" state regardless
@@ -114,17 +114,17 @@ func lookupChildTerminationReason(ctx context.Context, store RuntimeStore, child
 // the child's events. Errors are logged; callers continue regardless
 // (the parent-side subagent_result still gets written, which is the
 // load-bearing piece for the parent's view).
-func appendChildTerminal(ctx context.Context, deps *sessionDeps, childID, reason string) {
-	terminal := protocol.NewSessionTerminated(childID, deps.agent.Participant(),
+func appendChildTerminal(ctx context.Context, deps *Deps, childID, reason string) {
+	terminal := protocol.NewSessionTerminated(childID, deps.Agent.Participant(),
 		protocol.SessionTerminatedPayload{Reason: reason})
-	row, summary, err := FrameToEventRow(terminal, deps.agent.ID())
+	row, summary, err := FrameToEventRow(terminal, deps.Agent.ID())
 	if err != nil {
-		deps.logger.Warn("session: settle project child terminal",
+		deps.Logger.Warn("session: settle project child terminal",
 			"child", childID, "err", err)
 		return
 	}
-	if err := deps.store.AppendEvent(ctx, row, summary); err != nil {
-		deps.logger.Warn("session: settle append child terminal",
+	if err := deps.Store.AppendEvent(ctx, row, summary); err != nil {
+		deps.Logger.Warn("session: settle append child terminal",
 			"child", childID, "err", err)
 	}
 }
@@ -135,25 +135,25 @@ func appendChildTerminal(ctx context.Context, deps *sessionDeps, childID, reason
 // generic — "did not deliver, re-spawn if relevant" — so the model
 // gets a clear instruction without runtime needing to know skill /
 // role / task. Returns true on a successful append.
-func appendParentSubagentResult(ctx context.Context, deps *sessionDeps, parentID, childID, reason string) bool {
+func appendParentSubagentResult(ctx context.Context, deps *Deps, parentID, childID, reason string) bool {
 	body := fmt.Sprintf(
 		"Sub-agent %s did not deliver a result before the previous process exited (reason: %s). If the work is still relevant, re-spawn a fresh sub-agent for it.",
 		childID, reason,
 	)
-	result := protocol.NewSubagentResult(parentID, childID, deps.agent.Participant(),
+	result := protocol.NewSubagentResult(parentID, childID, deps.Agent.Participant(),
 		protocol.SubagentResultPayload{
 			SessionID: childID,
 			Reason:    reason,
 			Result:    body,
 		})
-	row, summary, err := FrameToEventRow(result, deps.agent.ID())
+	row, summary, err := FrameToEventRow(result, deps.Agent.ID())
 	if err != nil {
-		deps.logger.Warn("session: settle project subagent_result",
+		deps.Logger.Warn("session: settle project subagent_result",
 			"parent", parentID, "child", childID, "err", err)
 		return false
 	}
-	if err := deps.store.AppendEvent(ctx, row, summary); err != nil {
-		deps.logger.Warn("session: settle append subagent_result",
+	if err := deps.Store.AppendEvent(ctx, row, summary); err != nil {
+		deps.Logger.Warn("session: settle append subagent_result",
 			"parent", parentID, "child", childID, "err", err)
 		return false
 	}

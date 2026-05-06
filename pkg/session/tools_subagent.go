@@ -169,8 +169,8 @@ func callSpawnSubagent(ctx context.Context, parent *Session, host SessionToolHos
 	// the parent doesn't see partial spawn state. Per
 	// contracts/tools-subagent.md §spawn_subagent.
 	maxDepth := defaultMaxDepth
-	if parent.deps != nil && parent.deps.maxDepth > 0 {
-		maxDepth = parent.deps.maxDepth
+	if parent.deps != nil && parent.deps.MaxDepth > 0 {
+		maxDepth = parent.deps.MaxDepth
 	}
 	for i, e := range in.Subagents {
 		if strings.TrimSpace(e.Task) == "" {

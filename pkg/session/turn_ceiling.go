@@ -91,8 +91,8 @@ func (s *Session) maybeInjectSoftWarning(runCtx context.Context) {
 		return
 	}
 	role, task := s.roleAndTaskForNudge(runCtx)
-	canSpawnDeeper := s.deps == nil || s.deps.maxDepth <= 0 ||
-		s.depth+1 <= s.deps.maxDepth
+	canSpawnDeeper := s.deps == nil || s.deps.MaxDepth <= 0 ||
+		s.depth+1 <= s.deps.MaxDepth
 	text := softWarningText(role, task, st.iter, canSpawnDeeper)
 	frame := protocol.NewSystemMessage(s.id, s.agent.Participant(),
 		protocol.SystemMessageSoftWarning, text)
