@@ -80,7 +80,7 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 	// mark the row terminal so restart-walker doesn't try to resume
 	// it.
 	if deps.lifecycle != nil {
-		if err := deps.lifecycle.Acquire(ctx, id); err != nil {
+		if err := deps.lifecycle.Acquire(ctx, s); err != nil {
 			s.appendTerminal(ctx, "acquire_failed")
 			cancel(nil)
 			return nil, fmt.Errorf("session: acquire: %w", err)
@@ -181,7 +181,7 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 	// cancelled), but the brief window during construction is a
 	// known follow-up — see review note L2.
 	if deps.lifecycle != nil {
-		if err := deps.lifecycle.Acquire(ctx, id); err != nil {
+		if err := deps.lifecycle.Acquire(ctx, s); err != nil {
 			cancel(nil)
 			return nil, fmt.Errorf("session: re-acquire: %w", err)
 		}

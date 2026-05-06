@@ -27,7 +27,7 @@ import (
 // scoping happened (no Acquire, lifecycle disabled, etc.) — the
 // session keeps its constructor-time tools (typically the root).
 type Lifecycle interface {
-	Acquire(ctx context.Context, sessionID string) error
+	Acquire(ctx context.Context, s *Session) error
 	Release(ctx context.Context, sessionID string) error
 	SessionTools(sessionID string) *tool.ToolManager
 }
@@ -138,7 +138,8 @@ func (r *Resources) Validate() error {
 //
 // On any failure, the partial state is unwound: spawned providers
 // are removed, the workspace is released.
-func (r *Resources) Acquire(ctx context.Context, sessionID string) error {
+func (r *Resources) Acquire(ctx context.Context, s *Session) error {
+	sessionID := s.id
 	if r.deps.Workspace == nil {
 		return fmt.Errorf("session %s: workspace not configured", sessionID)
 	}

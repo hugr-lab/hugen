@@ -21,11 +21,11 @@ type stubLifecycle struct {
 	release func(ctx context.Context, sessionID string) error
 }
 
-func (s stubLifecycle) Acquire(ctx context.Context, sessionID string) error {
+func (s stubLifecycle) Acquire(ctx context.Context, sess *Session) error {
 	if s.acquire == nil {
 		return nil
 	}
-	return s.acquire(ctx, sessionID)
+	return s.acquire(ctx, sess.ID())
 }
 
 func (s stubLifecycle) Release(ctx context.Context, sessionID string) error {
