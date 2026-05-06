@@ -85,11 +85,6 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 		SkillStore: skillStore,
 		Workspace:  ws,
 		Logger:     logger,
-		SessionTools: session.SessionToolHost{
-			Store:  store,
-			Logger: logger,
-			Perms:  perms,
-		},
 	})
 
 	router, agent := makeRouter(t)
@@ -100,6 +95,7 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 		session.WithSessionOptions(
 			session.WithTools(tools),
 			session.WithSkills(skills),
+			session.WithPerms(perms),
 		),
 	)
 

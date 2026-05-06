@@ -16,7 +16,7 @@ func init() {
 		Description:      "Append a note to the caller's session notepad.",
 		PermissionObject: permObjectNotepadAppend,
 		ArgSchema:        json.RawMessage(notepadAppendSchema),
-		Handler:          callNotepadAppend,
+		Handler:          (*Session).callNotepadAppend,
 	}
 }
 
@@ -36,7 +36,7 @@ type notepadAppendInput struct {
 	AuthorID string `json:"author_id,omitempty"`
 }
 
-func callNotepadAppend(ctx context.Context, s *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+func (s *Session) callNotepadAppend(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	if s.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}

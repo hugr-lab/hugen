@@ -26,28 +26,28 @@ func init() {
 		Description:      "Write or replace the plan body. Wipes the in-memory comment log; events are not deleted.",
 		PermissionObject: permObjectPlanWrite,
 		ArgSchema:        json.RawMessage(planSetSchema),
-		Handler:          callPlanSet,
+		Handler:          (*Session).callPlanSet,
 	}
 	sessionTools["plan_comment"] = sessionToolDescriptor{
 		Name:             "plan_comment",
 		Description:      "Append a progress comment. Optionally moves the current-step pointer.",
 		PermissionObject: permObjectPlanWrite,
 		ArgSchema:        json.RawMessage(planCommentSchema),
-		Handler:          callPlanComment,
+		Handler:          (*Session).callPlanComment,
 	}
 	sessionTools["plan_show"] = sessionToolDescriptor{
 		Name:             "plan_show",
 		Description:      "Return the full plan state — body + pointer + every retained comment since the last set.",
 		PermissionObject: permObjectPlanRead,
 		ArgSchema:        json.RawMessage(planShowSchema),
-		Handler:          callPlanShow,
+		Handler:          (*Session).callPlanShow,
 	}
 	sessionTools["plan_clear"] = sessionToolDescriptor{
 		Name:             "plan_clear",
 		Description:      "Drop the plan entirely. Body and pointer no longer render in the system prompt.",
 		PermissionObject: permObjectPlanWrite,
 		ArgSchema:        json.RawMessage(planClearSchema),
-		Handler:          callPlanClear,
+		Handler:          (*Session).callPlanClear,
 	}
 }
 
@@ -102,7 +102,7 @@ type planOKOutput struct {
 	OK bool `json:"ok"`
 }
 
-func callPlanSet(ctx context.Context, caller *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+func (caller *Session) callPlanSet(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	if caller.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}
@@ -123,7 +123,7 @@ type planCommentInput struct {
 	CurrentStep string `json:"current_step,omitempty"`
 }
 
-func callPlanComment(ctx context.Context, caller *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+func (caller *Session) callPlanComment(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	if caller.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}
@@ -165,7 +165,7 @@ type planShowCommentRow struct {
 	Text        string `json:"text"`
 }
 
-func callPlanShow(_ context.Context, caller *Session, _ SessionToolHost, _ json.RawMessage) (json.RawMessage, error) {
+func (caller *Session) callPlanShow(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
 	if caller.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}
@@ -197,7 +197,7 @@ func callPlanShow(_ context.Context, caller *Session, _ SessionToolHost, _ json.
 
 // ---------- plan_clear ----------
 
-func callPlanClear(ctx context.Context, caller *Session, _ SessionToolHost, _ json.RawMessage) (json.RawMessage, error) {
+func (caller *Session) callPlanClear(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
 	if caller.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}

@@ -29,15 +29,6 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 		SkillStore: core.SkillStore,
 		Workspace:  core.Workspace,
 		Logger:     core.Logger,
-		// SessionTools is the leaf-deps bag the per-session
-		// SessionToolProvider closes over. Constructed once here so
-		// every spawned session's Provider sees the same store /
-		// logger / permission service.
-		SessionTools: session.SessionToolHost{
-			Store:  core.Store,
-			Logger: core.Logger,
-			Perms:  core.Permissions,
-		},
 	})
 	if err := resources.Validate(); err != nil {
 		return fmt.Errorf("session resources: %w", err)
@@ -49,6 +40,7 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 		session.WithSessionOptions(
 			session.WithTools(core.Tools),
 			session.WithSkills(core.Skills),
+			session.WithPerms(core.Permissions),
 		),
 	)
 	core.Manager = mgr

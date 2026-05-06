@@ -47,10 +47,10 @@ body
 `),
 	}})
 	skills := skill.NewSkillManager(store, nil)
-	parent, host, cleanup := newTestParent(t, withTestSkills(skills))
+	parent, cleanup := newTestParent(t, withTestSkills(skills))
 	defer cleanup()
 
-	out, err := callSkillLoad(us1WithSession(parent), parent, host, json.RawMessage(`{"name":"alpha"}`))
+	out, err := parent.callSkillLoad(us1WithSession(parent), json.RawMessage(`{"name":"alpha"}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -64,10 +64,10 @@ body
 
 func TestSkillLoad_NameRequired(t *testing.T) {
 	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
-	parent, host, cleanup := newTestParent(t, withTestSkills(skills))
+	parent, cleanup := newTestParent(t, withTestSkills(skills))
 	defer cleanup()
 
-	_, err := callSkillLoad(us1WithSession(parent), parent, host, json.RawMessage(`{}`))
+	_, err := parent.callSkillLoad(us1WithSession(parent), json.RawMessage(`{}`))
 	if !errors.Is(err, tool.ErrArgValidation) {
 		t.Errorf("err = %v, want ErrArgValidation", err)
 	}
@@ -77,10 +77,10 @@ func TestSkillLoad_NameRequired(t *testing.T) {
 
 func TestSkillUnload_Idempotent(t *testing.T) {
 	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
-	parent, host, cleanup := newTestParent(t, withTestSkills(skills))
+	parent, cleanup := newTestParent(t, withTestSkills(skills))
 	defer cleanup()
 
-	if _, err := callSkillUnload(us1WithSession(parent), parent, host, json.RawMessage(`{"name":"missing"}`)); err != nil {
+	if _, err := parent.callSkillUnload(us1WithSession(parent), json.RawMessage(`{"name":"missing"}`)); err != nil {
 		t.Errorf("Call: %v", err)
 	}
 }
@@ -88,7 +88,7 @@ func TestSkillUnload_Idempotent(t *testing.T) {
 // ---------- skill_publish ----------
 
 func TestSkillPublish_DeferredStub(t *testing.T) {
-	_, err := callSkillPublish(context.Background(), nil, SessionToolHost{}, json.RawMessage(`{"name":"x","body":"y"}`))
+	_, err := (*Session)(nil).callSkillPublish(context.Background(), json.RawMessage(`{"name":"x","body":"y"}`))
 	if !errors.Is(err, tool.ErrSystemUnavailable) {
 		t.Errorf("err = %v, want ErrSystemUnavailable", err)
 	}
@@ -110,13 +110,13 @@ body
 `),
 	}})
 	skills := skill.NewSkillManager(store, nil)
-	parent, host, cleanup := newTestParent(t, withTestSkills(skills))
+	parent, cleanup := newTestParent(t, withTestSkills(skills))
 	defer cleanup()
 
 	if err := skills.Load(context.Background(), parent.ID(), "alpha"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	_, err := callSkillRef(us1WithSession(parent), parent, host, json.RawMessage(`{"skill":"alpha","ref":"x.md"}`))
+	_, err := parent.callSkillRef(us1WithSession(parent), json.RawMessage(`{"skill":"alpha","ref":"x.md"}`))
 	if err == nil {
 		t.Fatalf("expected error (inline skill has no body fs)")
 	}
@@ -160,29 +160,28 @@ allowed-tools:
 }
 
 // newGammaFixture wires SkillManager around an on-disk `gamma`
-// skill loaded into a fresh test session. Returns the parent
-// session, the SessionToolHost the skill_files handler call should
-// receive (with the supplied perms threaded through Host.Perms),
-// the skill root, and the cleanup func.
-func newGammaFixture(t *testing.T, perms perm.Service) (*Session, SessionToolHost, string, func()) {
+// skill loaded into a fresh test session. The supplied perms are
+// threaded onto the session via WithPerms so skill_files's
+// permission gate sees the fixture's rules.
+func newGammaFixture(t *testing.T, perms perm.Service) (*Session, string, func()) {
 	t.Helper()
 	root := t.TempDir()
 	skillFixtureRoot(t, root)
 	store := skill.NewSkillStore(skill.Options{LocalRoot: root})
 	skills := skill.NewSkillManager(store, nil)
-	parent, host, cleanup := newTestParent(t, withTestSkills(skills), withTestPerms(perms))
+	parent, cleanup := newTestParent(t, withTestSkills(skills), withTestPerms(perms))
 	if err := skills.Load(context.Background(), parent.ID(), "gamma"); err != nil {
 		cleanup()
 		t.Fatalf("Load: %v", err)
 	}
-	return parent, host, root, cleanup
+	return parent, root, cleanup
 }
 
 func TestSkillFiles_HappyPath(t *testing.T) {
-	parent, host, _, cleanup := newGammaFixture(t, nil)
+	parent, _, cleanup := newGammaFixture(t, nil)
 	defer cleanup()
 
-	raw, err := callSkillFiles(us1WithSession(parent), parent, host, json.RawMessage(`{"name":"gamma"}`))
+	raw, err := parent.callSkillFiles(us1WithSession(parent), json.RawMessage(`{"name":"gamma"}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -208,10 +207,10 @@ func TestSkillFiles_HappyPath(t *testing.T) {
 }
 
 func TestSkillFiles_PathEscape(t *testing.T) {
-	parent, host, _, cleanup := newGammaFixture(t, nil)
+	parent, _, cleanup := newGammaFixture(t, nil)
 	defer cleanup()
 
-	_, err := callSkillFiles(us1WithSession(parent), parent, host,
+	_, err := parent.callSkillFiles(us1WithSession(parent),
 		json.RawMessage(`{"name":"gamma","subdir":"../etc"}`))
 	if !errors.Is(err, tool.ErrPathEscape) {
 		t.Fatalf("err = %v, want ErrPathEscape", err)
@@ -222,10 +221,10 @@ func TestSkillFiles_PermissionDenied(t *testing.T) {
 	denied := &fakeSkillsPerms{rules: map[string]perm.Permission{
 		"hugen:command:skill_files:gamma": {Disabled: true, FromConfig: true},
 	}}
-	parent, host, _, cleanup := newGammaFixture(t, denied)
+	parent, _, cleanup := newGammaFixture(t, denied)
 	defer cleanup()
 
-	_, err := callSkillFiles(us1WithSession(parent), parent, host, json.RawMessage(`{"name":"gamma"}`))
+	_, err := parent.callSkillFiles(us1WithSession(parent), json.RawMessage(`{"name":"gamma"}`))
 	if !errors.Is(err, tool.ErrPermissionDenied) {
 		t.Fatalf("err = %v, want ErrPermissionDenied", err)
 	}
@@ -234,21 +233,21 @@ func TestSkillFiles_PermissionDenied(t *testing.T) {
 func TestSkillFiles_NotLoaded(t *testing.T) {
 	store := skill.NewSkillStore(skill.Options{LocalRoot: t.TempDir()})
 	skills := skill.NewSkillManager(store, nil)
-	parent, host, cleanup := newTestParent(t, withTestSkills(skills))
+	parent, cleanup := newTestParent(t, withTestSkills(skills))
 	defer cleanup()
 
 	// gamma is never loaded for this session.
-	_, err := callSkillFiles(us1WithSession(parent), parent, host, json.RawMessage(`{"name":"gamma"}`))
+	_, err := parent.callSkillFiles(us1WithSession(parent), json.RawMessage(`{"name":"gamma"}`))
 	if !errors.Is(err, tool.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
 
 func TestSkillFiles_BadGlob(t *testing.T) {
-	parent, host, _, cleanup := newGammaFixture(t, nil)
+	parent, _, cleanup := newGammaFixture(t, nil)
 	defer cleanup()
 
-	_, err := callSkillFiles(us1WithSession(parent), parent, host,
+	_, err := parent.callSkillFiles(us1WithSession(parent),
 		json.RawMessage(`{"name":"gamma","glob":"["}`))
 	if !errors.Is(err, tool.ErrArgValidation) {
 		t.Fatalf("err = %v, want ErrArgValidation", err)
@@ -258,7 +257,7 @@ func TestSkillFiles_BadGlob(t *testing.T) {
 // ---------- registration ----------
 
 func TestSkillTools_RegisteredOnSessionProvider(t *testing.T) {
-	prov := NewSessionToolProvider(nil, SessionToolHost{})
+	prov := (*Session)(nil)
 	tools, err := prov.List(context.Background())
 	if err != nil {
 		t.Fatalf("list: %v", err)

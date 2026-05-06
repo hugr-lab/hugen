@@ -25,28 +25,28 @@ func init() {
 		Description:      "Open a broadcast whiteboard on this session. Children spawned afterward can write/read.",
 		PermissionObject: permObjectWhiteboardWrite,
 		ArgSchema:        json.RawMessage(whiteboardInitSchema),
-		Handler:          callWhiteboardInit,
+		Handler:          (*Session).callWhiteboardInit,
 	}
 	sessionTools["whiteboard_write"] = sessionToolDescriptor{
 		Name:             "whiteboard_write",
 		Description:      "Append a broadcast to the whiteboard your parent owns. Every member sees it.",
 		PermissionObject: permObjectWhiteboardWrite,
 		ArgSchema:        json.RawMessage(whiteboardWriteSchema),
-		Handler:          callWhiteboardWrite,
+		Handler:          (*Session).callWhiteboardWrite,
 	}
 	sessionTools["whiteboard_read"] = sessionToolDescriptor{
 		Name:             "whiteboard_read",
 		Description:      "Return the retained whiteboard messages — own hosted board if active, else parent's.",
 		PermissionObject: permObjectWhiteboardRead,
 		ArgSchema:        json.RawMessage(whiteboardReadSchema),
-		Handler:          callWhiteboardRead,
+		Handler:          (*Session).callWhiteboardRead,
 	}
 	sessionTools["whiteboard_stop"] = sessionToolDescriptor{
 		Name:             "whiteboard_stop",
 		Description:      "Close the whiteboard hosted on this session. New writes from members surface no_active_whiteboard.",
 		PermissionObject: permObjectWhiteboardWrite,
 		ArgSchema:        json.RawMessage(whiteboardStopSchema),
-		Handler:          callWhiteboardStop,
+		Handler:          (*Session).callWhiteboardStop,
 	}
 }
 
@@ -86,7 +86,7 @@ type whiteboardOKOutput struct {
 	OK bool `json:"ok"`
 }
 
-func callWhiteboardInit(ctx context.Context, caller *Session, _ SessionToolHost, _ json.RawMessage) (json.RawMessage, error) {
+func (caller *Session) callWhiteboardInit(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
 	if caller.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}
@@ -118,7 +118,7 @@ type whiteboardWriteInput struct {
 	Text string `json:"text"`
 }
 
-func callWhiteboardWrite(ctx context.Context, caller *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+func (caller *Session) callWhiteboardWrite(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	if caller.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}
@@ -179,7 +179,7 @@ type whiteboardReadMessageRow struct {
 	Truncated     bool   `json:"truncated,omitempty"`
 }
 
-func callWhiteboardRead(_ context.Context, caller *Session, _ SessionToolHost, _ json.RawMessage) (json.RawMessage, error) {
+func (caller *Session) callWhiteboardRead(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
 	if caller.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}
@@ -227,7 +227,7 @@ func callWhiteboardRead(_ context.Context, caller *Session, _ SessionToolHost, _
 
 // ---------- whiteboard_stop ----------
 
-func callWhiteboardStop(ctx context.Context, caller *Session, _ SessionToolHost, _ json.RawMessage) (json.RawMessage, error) {
+func (caller *Session) callWhiteboardStop(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
 	if caller.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}

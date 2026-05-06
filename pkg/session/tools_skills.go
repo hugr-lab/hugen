@@ -29,35 +29,35 @@ func init() {
 		Description:      "Load a skill (and transitive requires) into the caller's session. Use the catalogue from your system prompt to discover available skills.",
 		PermissionObject: permObjectSkillLoad,
 		ArgSchema:        json.RawMessage(skillLoadSchema),
-		Handler:          callSkillLoad,
+		Handler:          (*Session).callSkillLoad,
 	}
 	sessionTools["skill_unload"] = sessionToolDescriptor{
 		Name:             "skill_unload",
 		Description:      "Unload a skill from the caller's session.",
 		PermissionObject: permObjectSkillUnload,
 		ArgSchema:        json.RawMessage(skillUnloadSchema),
-		Handler:          callSkillUnload,
+		Handler:          (*Session).callSkillUnload,
 	}
 	sessionTools["skill_publish"] = sessionToolDescriptor{
 		Name:             "skill_publish",
 		Description:      "Publish a skill manifest+body into the local store.",
 		PermissionObject: permObjectSkillPublish,
 		ArgSchema:        json.RawMessage(skillPublishSchema),
-		Handler:          callSkillPublish,
+		Handler:          (*Session).callSkillPublish,
 	}
 	sessionTools["skill_files"] = sessionToolDescriptor{
 		Name:             "skill_files",
 		Description:      "List on-disk files of a loaded skill with relative + absolute paths so other tools (bash.read_file, python.run_script) can read them. Optional subdir narrows the listing; optional glob filters by path pattern.",
 		PermissionObject: permObjectSkillFiles,
 		ArgSchema:        json.RawMessage(skillFilesSchema),
-		Handler:          callSkillFiles,
+		Handler:          (*Session).callSkillFiles,
 	}
 	sessionTools["skill_ref"] = sessionToolDescriptor{
 		Name:             "skill_ref",
 		Description:      "Read a reference document (references/<ref>.md) from a loaded skill. References are listed in the skill's SKILL.md body.",
 		PermissionObject: permObjectSkillRef,
 		ArgSchema:        json.RawMessage(skillRefSchema),
-		Handler:          callSkillRef,
+		Handler:          (*Session).callSkillRef,
 	}
 }
 
@@ -139,7 +139,7 @@ type skillFilesResult struct {
 
 // ---------- skill_load ----------
 
-func callSkillLoad(ctx context.Context, s *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+func (s *Session) callSkillLoad(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	if s.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}
@@ -163,7 +163,7 @@ func callSkillLoad(ctx context.Context, s *Session, _ SessionToolHost, args json
 
 // ---------- skill_unload ----------
 
-func callSkillUnload(ctx context.Context, s *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+func (s *Session) callSkillUnload(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	if s.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}
@@ -188,13 +188,13 @@ func callSkillUnload(ctx context.Context, s *Session, _ SessionToolHost, args js
 // inline-body wiring is still pending (deferred to T039 in the
 // original phase-3 spec). Returning ErrSystemUnavailable keeps
 // callers' UX unchanged across the move.
-func callSkillPublish(_ context.Context, _ *Session, _ SessionToolHost, _ json.RawMessage) (json.RawMessage, error) {
+func (_ *Session) callSkillPublish(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
 	return nil, fmt.Errorf("%w: skill_publish requires inline body wiring (deferred to T039)", tool.ErrSystemUnavailable)
 }
 
 // ---------- skill_ref ----------
 
-func callSkillRef(ctx context.Context, s *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+func (s *Session) callSkillRef(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	if s.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}
@@ -240,7 +240,7 @@ func callSkillRef(ctx context.Context, s *Session, _ SessionToolHost, args json.
 
 // ---------- skill_files ----------
 
-func callSkillFiles(ctx context.Context, s *Session, host SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+func (s *Session) callSkillFiles(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	if s.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}
@@ -265,7 +265,7 @@ func callSkillFiles(ctx context.Context, s *Session, host SessionToolHost, args 
 			return nil, fmt.Errorf("%w: skill_files: bad glob %q: %v", tool.ErrArgValidation, in.Glob, err)
 		}
 	}
-	if err := gateSkillFiles(ctx, host.Perms, in.Name); err != nil {
+	if err := gateSkillFiles(ctx, s.perms, in.Name); err != nil {
 		return nil, err
 	}
 	loaded, err := s.skills.LoadedSkill(ctx, s.id, in.Name)

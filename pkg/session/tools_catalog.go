@@ -33,7 +33,7 @@ func init() {
 		Description:      "Returns the catalogue of every provider and tool the agent process has registered. `granted_to_session` reflects whether the calling session's loaded skills admit each tool. Optional filters: `provider` (exact name) + `pattern` (case-insensitive substring on tool name).",
 		PermissionObject: permObjectToolCatalog,
 		ArgSchema:        json.RawMessage(toolCatalogSchema),
-		Handler:          callToolCatalog,
+		Handler:          (*Session).callToolCatalog,
 	}
 }
 
@@ -69,7 +69,7 @@ type toolCatalogResult struct {
 	Providers []toolCatalogProvider `json:"providers"`
 }
 
-func callToolCatalog(ctx context.Context, s *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+func (s *Session) callToolCatalog(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	if s.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}

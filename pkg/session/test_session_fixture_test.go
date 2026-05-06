@@ -60,11 +60,14 @@ func withTestTools(tm *tool.ToolManager) testParentOpt {
 	}
 }
 
-// withTestPerms populates the SessionToolHost.Perms field returned
-// by newTestParent. Tests that don't exercise the permission gate
-// can leave Perms nil.
+// withTestPerms attaches a perm.Service to the session via
+// WithPerms. Tests that don't exercise the permission gate can
+// skip this option.
 func withTestPerms(p perm.Service) testParentOpt {
-	return func(c *testParentCfg) { c.perms = p }
+	return func(c *testParentCfg) {
+		c.perms = p
+		c.sessOpts = append(c.sessOpts, WithPerms(p))
+	}
 }
 
 // withTestRunLoop starts the parent's Run goroutine. Tests that
@@ -77,18 +80,14 @@ func withTestRunLoop() testParentOpt {
 }
 
 // newTestParent builds a *Session ready for tool-handler tests
-// without spinning up a Manager. Replaces the prior
-// `newTestManager(...) + us1OpenParent(t, mgr)` pattern: white-box
-// tests in `package session` cannot import the manager subpackage
-// (cycle), so the fixture constructs the Session directly via
-// session.New using a hand-rolled Deps bundle that mirrors what
-// NewManager populates.
+// without spinning up a Manager. Tool tests then call
+// `parent.callXxx(ctx, args)` directly — Session implements
+// tool.ToolProvider, and the handlers are methods on Session.
 //
-// Returns: parent session, a SessionToolHost suitable for direct
-// tool-handler dispatch, and a cleanup function the test must
+// Returns: parent session and a cleanup function the test must
 // defer (cancels the root ctx and waits for any goroutines spawned
 // via parent.Spawn).
-func newTestParent(t *testing.T, opts ...testParentOpt) (*Session, SessionToolHost, func()) {
+func newTestParent(t *testing.T, opts ...testParentOpt) (*Session, func()) {
 	t.Helper()
 	cfg := &testParentCfg{}
 	for _, opt := range opts {
@@ -125,14 +124,9 @@ func newTestParent(t *testing.T, opts ...testParentOpt) (*Session, SessionToolHo
 	if cfg.runLoop {
 		parent.Start(context.Background())
 	}
-	host := SessionToolHost{
-		Store:  cfg.store,
-		Logger: slog.Default(),
-		Perms:  cfg.perms,
-	}
 	cleanup := func() {
 		cancel()
 		wg.Wait()
 	}
-	return parent, host, cleanup
+	return parent, cleanup
 }

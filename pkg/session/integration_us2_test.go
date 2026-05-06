@@ -29,12 +29,12 @@ func TestUS2_PlanSurvivesRestart(t *testing.T) {
 	drainOutboxOnce(parent.Outbox())
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "investigate latency", CurrentStep: "scope"})
-	if _, err := callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr1), setArgs); err != nil {
+	if _, err := parent.callPlanSet(us1WithSession(parent), setArgs); err != nil {
 		t.Fatalf("plan_set: %v", err)
 	}
 	for _, txt := range []string{"checked headers", "instrumented handler"} {
 		args, _ := json.Marshal(planCommentInput{Text: txt})
-		if _, err := callPlanComment(us1WithSession(parent), parent, mgrToolHost(mgr1), args); err != nil {
+		if _, err := parent.callPlanComment(us1WithSession(parent), args); err != nil {
 			t.Fatalf("plan_comment: %v", err)
 		}
 	}
@@ -66,7 +66,7 @@ func TestUS2_PlanSurvivesRestart(t *testing.T) {
 	}
 
 	// plan_show returns body + both retained comments.
-	out, err := callPlanShow(us1WithSession(resumed), resumed, mgrToolHost(mgr2), json.RawMessage(`{}`))
+	out, err := resumed.callPlanShow(us1WithSession(resumed), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("plan_show: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestUS2_PlanSurvivesHistoryWindow(t *testing.T) {
 	parent := us1OpenParent(t, mgr)
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "anchor body", CurrentStep: "step-1"})
-	if _, err := callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr), setArgs); err != nil {
+	if _, err := parent.callPlanSet(us1WithSession(parent), setArgs); err != nil {
 		t.Fatalf("plan_set: %v", err)
 	}
 
@@ -159,26 +159,26 @@ func TestUS2_PlanEndToEnd(t *testing.T) {
 
 	// 1. Set the plan.
 	setArgs, _ := json.Marshal(planSetInput{Text: "fan-out and merge", CurrentStep: "spawn"})
-	if _, err := callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr), setArgs); err != nil {
+	if _, err := parent.callPlanSet(us1WithSession(parent), setArgs); err != nil {
 		t.Fatalf("plan_set: %v", err)
 	}
 
 	// 2. Spawn a sub-agent (we don't need it to produce a real
 	// result — just confirm tool composition works).
 	spawnArgs, _ := json.Marshal(spawnSubagentInput{Subagents: []spawnEntry{{Task: "scout"}}})
-	if _, err := callSpawnSubagent(us1WithSession(parent), parent, mgrToolHost(mgr), spawnArgs); err != nil {
+	if _, err := parent.callSpawnSubagent(us1WithSession(parent), spawnArgs); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
 	drainOutboxOnce(parent.Outbox()) // subagent_started
 
 	// 3. Comment after the spawn.
 	cArgs, _ := json.Marshal(planCommentInput{Text: "scout dispatched", CurrentStep: "wait"})
-	if _, err := callPlanComment(us1WithSession(parent), parent, mgrToolHost(mgr), cArgs); err != nil {
+	if _, err := parent.callPlanComment(us1WithSession(parent), cArgs); err != nil {
 		t.Fatalf("plan_comment: %v", err)
 	}
 
 	// 4. Show; both ops landed.
-	out, _ := callPlanShow(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
+	out, _ := parent.callPlanShow(us1WithSession(parent), json.RawMessage(`{}`))
 	var got planShowOutput
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)

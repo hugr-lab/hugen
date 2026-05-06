@@ -45,6 +45,7 @@ type Session struct {
 	notepad      *Notepad
 	tools        *tool.ToolManager   // optional; nil disables tool dispatch
 	skills       *skill.SkillManager // optional; consulted for per-skill max_turns
+	perms        perm.Service        // optional; consulted by tool handlers (skill_files etc.)
 	maxToolIters     int             // 0 → defaultMaxToolIterations
 	maxToolItersHard int             // 0 → 2 × resolved soft cap
 	logger       *slog.Logger
@@ -299,6 +300,15 @@ func WithMaxToolIterationsHard(n int) SessionOption {
 // caps.
 func WithSkills(sm *skill.SkillManager) SessionOption {
 	return func(s *Session) { s.skills = sm }
+}
+
+// WithPerms attaches a perm.Service the session-scoped tool
+// handlers consult (today only `skill_files` for the per-skill
+// gate). Sessions opened without WithPerms see s.perms == nil and
+// gates that depend on it return ErrPermissionDenied or skip the
+// check, depending on the handler.
+func WithPerms(p perm.Service) SessionOption {
+	return func(s *Session) { s.perms = p }
 }
 
 // NewSession constructs a Session bound to its dependencies.

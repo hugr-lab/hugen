@@ -20,10 +20,10 @@ func us1WithSession(parent *Session) context.Context {
 	return WithSession(context.Background(), parent)
 }
 
-// us1OpenParent is a transitional helper for integration tests that
-// still go through Manager.Open. Removed in the manager-subpackage
-// move that follows this commit; the surviving in-pkg tool tests
-// switched to newTestParent above.
+// us1OpenParent opens a fresh root via Manager.Open and drains the
+// SessionOpened frame. Integration tests that exercise Manager-
+// level scenarios use this; tests of individual tool handlers use
+// newTestParent (Manager-free) instead.
 func us1OpenParent(t *testing.T, mgr *Manager) *Session {
 	t.Helper()
 	parent, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
@@ -34,21 +34,16 @@ func us1OpenParent(t *testing.T, mgr *Manager) *Session {
 	return parent
 }
 
-// mgrToolHost is the Manager-bound counterpart to newTestParent's
-// returned host. Same transitional fate as us1OpenParent.
-func mgrToolHost(m *Manager) SessionToolHost {
-	return SessionToolHost{Store: m.store, Logger: m.logger}
-}
 
 // ---------- spawn_subagent ----------
 
 // TestCallSpawnSubagent_Happy verifies the simplest path: a single
 // child entry succeeds and the result names the new id at depth 1.
 func TestCallSpawnSubagent_Happy(t *testing.T) {
-	parent, host, cleanup := newTestParent(t)
+	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
-	out, err := callSpawnSubagent(us1WithSession(parent), parent, host,
+	out, err := parent.callSpawnSubagent(us1WithSession(parent),
 		json.RawMessage(`{"subagents":[{"task":"explore"}]}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
@@ -78,13 +73,13 @@ func TestCallSpawnSubagent_Happy(t *testing.T) {
 // when parent.depth+1 > max_depth. The handler must return a
 // tool_error JSON and NOT spawn anything.
 func TestCallSpawnSubagent_DepthExceeded(t *testing.T) {
-	parent, host, cleanup := newTestParent(t)
+	parent, cleanup := newTestParent(t)
 	defer cleanup()
 	// Force the cap so the next spawn would exceed it.
 	parent.deps.MaxDepth = 0
 	parent.depth = 5
 
-	out, err := callSpawnSubagent(us1WithSession(parent), parent, host,
+	out, err := parent.callSpawnSubagent(us1WithSession(parent),
 		json.RawMessage(`{"subagents":[{"task":"x"}]}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
@@ -101,14 +96,14 @@ func TestCallSpawnSubagent_DepthExceeded(t *testing.T) {
 // TestCallSpawnSubagent_BadRequest covers the empty-task and empty-
 // batch refusals.
 func TestCallSpawnSubagent_BadRequest(t *testing.T) {
-	parent, host, cleanup := newTestParent(t)
+	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
-	out, _ := callSpawnSubagent(us1WithSession(parent), parent, host,
+	out, _ := parent.callSpawnSubagent(us1WithSession(parent),
 		json.RawMessage(`{"subagents":[]}`))
 	mgr_assertErrorCode(t, out, "bad_request")
 
-	out, _ = callSpawnSubagent(us1WithSession(parent), parent, host,
+	out, _ = parent.callSpawnSubagent(us1WithSession(parent),
 		json.RawMessage(`{"subagents":[{"task":""}]}`))
 	mgr_assertErrorCode(t, out, "bad_request")
 }
@@ -117,10 +112,10 @@ func TestCallSpawnSubagent_BadRequest(t *testing.T) {
 // invalid entry the whole batch fails — earlier entries are not
 // spawned. (Validation runs before any parent.Spawn call.)
 func TestCallSpawnSubagent_BatchFailFast(t *testing.T) {
-	parent, host, cleanup := newTestParent(t)
+	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
-	out, _ := callSpawnSubagent(us1WithSession(parent), parent, host,
+	out, _ := parent.callSpawnSubagent(us1WithSession(parent),
 		json.RawMessage(`{"subagents":[{"task":"good"},{"task":""}]}`))
 	mgr_assertErrorCode(t, out, "bad_request")
 
@@ -137,11 +132,11 @@ func TestCallSpawnSubagent_BatchFailFast(t *testing.T) {
 // has already terminated. The dispatcher will not normally route here
 // after close, but the guard keeps the handler honest.
 func TestCallSpawnSubagent_SessionGone(t *testing.T) {
-	parent, host, cleanup := newTestParent(t)
+	parent, cleanup := newTestParent(t)
 	defer cleanup()
 	parent.MarkClosed()
 
-	out, err := callSpawnSubagent(us1WithSession(parent), parent, host,
+	out, err := parent.callSpawnSubagent(us1WithSession(parent),
 		json.RawMessage(`{"subagents":[{"task":"t"}]}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
@@ -156,12 +151,12 @@ func TestCallSpawnSubagent_SessionGone(t *testing.T) {
 // in a goroutine and feeds the result Frame into the parent's inbox
 // via Submit; the routing layer hands it to activeToolFeed.
 func TestCallWaitSubagents_Happy_LiveResult(t *testing.T) {
-	parent, host, cleanup := newTestParent(t, withTestRunLoop())
+	parent, cleanup := newTestParent(t, withTestRunLoop())
 	defer cleanup()
 
 	// Spawn a real child so the id exists; we'll synthesise a result
 	// for it without waiting for real natural termination.
-	out, err := callSpawnSubagent(us1WithSession(parent), parent, host,
+	out, err := parent.callSpawnSubagent(us1WithSession(parent),
 		json.RawMessage(`{"subagents":[{"task":"t"}]}`))
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
@@ -181,7 +176,7 @@ func TestCallWaitSubagents_Happy_LiveResult(t *testing.T) {
 	done := make(chan res, 1)
 	args, _ := json.Marshal(waitSubagentsInput{IDs: []string{childID}})
 	go func() {
-		out, err := callWaitSubagents(us1WithSession(parent), parent, host, args)
+		out, err := parent.callWaitSubagents(us1WithSession(parent), args)
 		done <- res{out: out, err: err}
 	}()
 
@@ -233,7 +228,7 @@ func TestCallWaitSubagents_Happy_LiveResult(t *testing.T) {
 // registering an activeToolFeed.
 func TestCallWaitSubagents_CachedShortCircuit(t *testing.T) {
 	store := newFakeStore()
-	parent, host, cleanup := newTestParent(t, withTestStore(store))
+	parent, cleanup := newTestParent(t, withTestStore(store))
 	defer cleanup()
 
 	cached := protocol.NewSubagentResult(parent.ID(), "child-cached", parent.agent.Participant(),
@@ -248,7 +243,7 @@ func TestCallWaitSubagents_CachedShortCircuit(t *testing.T) {
 	}
 
 	args, _ := json.Marshal(waitSubagentsInput{IDs: []string{"child-cached"}})
-	out, err := callWaitSubagents(us1WithSession(parent), parent, host, args)
+	out, err := parent.callWaitSubagents(us1WithSession(parent), args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -266,10 +261,10 @@ func TestCallWaitSubagents_CachedShortCircuit(t *testing.T) {
 
 // TestCallWaitSubagents_BadRequest covers the empty-ids guard.
 func TestCallWaitSubagents_BadRequest(t *testing.T) {
-	parent, host, cleanup := newTestParent(t)
+	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
-	out, _ := callWaitSubagents(us1WithSession(parent), parent, host,
+	out, _ := parent.callWaitSubagents(us1WithSession(parent),
 		json.RawMessage(`{"ids":[]}`))
 	mgr_assertErrorCode(t, out, "bad_request")
 }
@@ -280,7 +275,7 @@ func TestCallWaitSubagents_BadRequest(t *testing.T) {
 // pagination + next_since_seq cursor.
 func TestCallSubagentRuns_Happy(t *testing.T) {
 	store := newFakeStore()
-	parent, host, cleanup := newTestParent(t, withTestStore(store))
+	parent, cleanup := newTestParent(t, withTestStore(store))
 	defer cleanup()
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -304,7 +299,7 @@ func TestCallSubagentRuns_Happy(t *testing.T) {
 		SessionID: child.ID(),
 		Limit:     3,
 	})
-	out, err := callSubagentRuns(us1WithSession(parent), parent, host, args)
+	out, err := parent.callSubagentRuns(us1WithSession(parent), args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -325,7 +320,7 @@ func TestCallSubagentRuns_Happy(t *testing.T) {
 // not_a_child even when it exists.
 func TestCallSubagentRuns_NotAChild(t *testing.T) {
 	store := newFakeStore()
-	parent, host, cleanup := newTestParent(t, withTestStore(store))
+	parent, cleanup := newTestParent(t, withTestStore(store))
 	defer cleanup()
 
 	// Create a row that's not a child of parent.
@@ -334,12 +329,12 @@ func TestCallSubagentRuns_NotAChild(t *testing.T) {
 	_ = store.OpenSession(context.Background(), other)
 
 	args, _ := json.Marshal(subagentRunsInput{SessionID: "ses-other"})
-	out, _ := callSubagentRuns(us1WithSession(parent), parent, host, args)
+	out, _ := parent.callSubagentRuns(us1WithSession(parent), args)
 	mgr_assertErrorCode(t, out, "not_a_child")
 
 	// Unknown session also rejected.
 	args, _ = json.Marshal(subagentRunsInput{SessionID: "ses-unknown"})
-	out, _ = callSubagentRuns(us1WithSession(parent), parent, host, args)
+	out, _ = parent.callSubagentRuns(us1WithSession(parent), args)
 	mgr_assertErrorCode(t, out, "session_not_found")
 }
 
@@ -348,7 +343,7 @@ func TestCallSubagentRuns_NotAChild(t *testing.T) {
 // sending limit > cap and asserting the call doesn't panic / err
 // — pagination correctness is covered above.
 func TestCallSubagentRuns_HardCap(t *testing.T) {
-	parent, host, cleanup := newTestParent(t)
+	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -359,7 +354,7 @@ func TestCallSubagentRuns_HardCap(t *testing.T) {
 		SessionID: child.ID(),
 		Limit:     5000, // request beyond cap
 	})
-	out, err := callSubagentRuns(us1WithSession(parent), parent, host, args)
+	out, err := parent.callSubagentRuns(us1WithSession(parent), args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -374,7 +369,7 @@ func TestCallSubagentRuns_HardCap(t *testing.T) {
 // asserts the child's goroutine exits with the expected reason.
 func TestCallSubagentCancel_Happy(t *testing.T) {
 	store := newFakeStore()
-	parent, host, cleanup := newTestParent(t, withTestStore(store))
+	parent, cleanup := newTestParent(t, withTestStore(store))
 	defer cleanup()
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -387,7 +382,7 @@ func TestCallSubagentCancel_Happy(t *testing.T) {
 		SessionID: child.ID(),
 		Reason:    "user wants out",
 	})
-	out, err := callSubagentCancel(us1WithSession(parent), parent, host, args)
+	out, err := parent.callSubagentCancel(us1WithSession(parent), args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -418,13 +413,13 @@ func TestCallSubagentCancel_Happy(t *testing.T) {
 // surface session_not_found before the cross-tree check fires).
 func TestCallSubagentCancel_NotAChild(t *testing.T) {
 	store := newFakeStore()
-	parent, host, cleanup := newTestParent(t, withTestStore(store))
+	parent, cleanup := newTestParent(t, withTestStore(store))
 	defer cleanup()
-	other, _, otherCleanup := newTestParent(t, withTestStore(store))
+	other, otherCleanup := newTestParent(t, withTestStore(store))
 	defer otherCleanup()
 
 	args, _ := json.Marshal(subagentCancelInput{SessionID: other.ID()})
-	out, _ := callSubagentCancel(us1WithSession(parent), parent, host, args)
+	out, _ := parent.callSubagentCancel(us1WithSession(parent), args)
 	mgr_assertErrorCode(t, out, "not_a_child")
 }
 
@@ -432,7 +427,7 @@ func TestCallSubagentCancel_NotAChild(t *testing.T) {
 // should still return ok=true even though the child has already
 // exited.
 func TestCallSubagentCancel_Idempotent(t *testing.T) {
-	parent, host, cleanup := newTestParent(t)
+	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -443,12 +438,12 @@ func TestCallSubagentCancel_Idempotent(t *testing.T) {
 		SessionID: child.ID(),
 		Reason:    "first",
 	})
-	if _, err := callSubagentCancel(us1WithSession(parent), parent, host, args); err != nil {
+	if _, err := parent.callSubagentCancel(us1WithSession(parent), args); err != nil {
 		t.Fatalf("first cancel: %v", err)
 	}
 	<-child.Done()
 
-	out, err := callSubagentCancel(us1WithSession(parent), parent, host, args)
+	out, err := parent.callSubagentCancel(us1WithSession(parent), args)
 	if err != nil {
 		t.Fatalf("second cancel: %v", err)
 	}
@@ -465,7 +460,7 @@ func TestCallSubagentCancel_Idempotent(t *testing.T) {
 // of types and asserts only user/assistant messages flow through.
 func TestCallParentContext_Filtering(t *testing.T) {
 	store := newFakeStore()
-	parent, host, cleanup := newTestParent(t, withTestStore(store))
+	parent, cleanup := newTestParent(t, withTestStore(store))
 	defer cleanup()
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -497,7 +492,7 @@ func TestCallParentContext_Filtering(t *testing.T) {
 	mustAppend(string(protocol.KindAgentMessage), "assistant-mid", map[string]any{"final": false})
 
 	args, _ := json.Marshal(parentContextInput{Limit: 20})
-	out, err := callParentContext(WithSession(context.Background(), child), child, host, args)
+	out, err := child.callParentContext(WithSession(context.Background(), child), args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -526,7 +521,7 @@ func TestCallParentContext_Filtering(t *testing.T) {
 // filter.
 func TestCallParentContext_QueryAndTimeWindow(t *testing.T) {
 	store := newFakeStore()
-	parent, host, cleanup := newTestParent(t, withTestStore(store))
+	parent, cleanup := newTestParent(t, withTestStore(store))
 	defer cleanup()
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -556,7 +551,7 @@ func TestCallParentContext_QueryAndTimeWindow(t *testing.T) {
 		Query: "BANANA",
 		From:  from,
 	})
-	out, err := callParentContext(WithSession(context.Background(), child), child, host, args)
+	out, err := child.callParentContext(WithSession(context.Background(), child), args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -570,10 +565,10 @@ func TestCallParentContext_QueryAndTimeWindow(t *testing.T) {
 // TestCallParentContext_NoParentForRoot — root sessions surface
 // no_parent.
 func TestCallParentContext_NoParentForRoot(t *testing.T) {
-	root, host, cleanup := newTestParent(t)
+	root, cleanup := newTestParent(t)
 	defer cleanup()
 
-	out, err := callParentContext(WithSession(context.Background(), root), root, host,
+	out, err := root.callParentContext(WithSession(context.Background(), root),
 		json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
