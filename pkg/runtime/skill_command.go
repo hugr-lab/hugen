@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"context"
@@ -20,7 +20,7 @@ const permObjectSkill = "hugen:skill"
 
 // skillCommandHandler dispatches the /skill subcommands. Built as
 // a closure over the SkillManager + perm.Service so the runtime
-// CommandRegistry stays in pkg/runtime without growing extra deps.
+// CommandRegistry stays thin.
 //
 // Subcommands:
 //   - /skill list                — show available + loaded skills
@@ -34,8 +34,6 @@ func skillCommandHandler(skills *skill.SkillManager, store skill.SkillStore, per
 					"usage: /skill list | /skill load <name> | /skill unload <name>", false),
 			}, nil
 		}
-		// Resolve calls run under the session's own context so any
-		// SessionID-scoped substitutions kick in.
 		ctx = perm.WithSession(ctx, perm.SessionContext{SessionID: env.Session.ID()})
 		switch args[0] {
 		case "list":
@@ -61,10 +59,8 @@ func skillListHandler(ctx context.Context, env session.CommandEnv, skills *skill
 				fmt.Sprintf("list skills: %v", err), true),
 		}, nil
 	}
-	loaded := loadedNames(ctx, skills, env.Session.ID())
+	loaded := loadedSkillNames(ctx, skills, env.Session.ID())
 
-	// Group available skills by Origin for a stable, scannable
-	// rendering. Inside each group we sort by name lexically.
 	type entry struct {
 		name   string
 		origin string
@@ -111,9 +107,6 @@ func skillLoadHandler(ctx context.Context, env session.CommandEnv, args []string
 	}
 	name := args[0]
 
-	// Tier-1 permission gate: hugen:skill / load:<name>. The
-	// Tier-1 floor wins on conflict; default-allow when no rule
-	// matches.
 	p, err := perms.Resolve(ctx, permObjectSkill, "load:"+name)
 	if err != nil {
 		return []protocol.Frame{
@@ -177,9 +170,7 @@ func skillUnloadHandler(ctx context.Context, env session.CommandEnv, args []stri
 	}, nil
 }
 
-// loadedNames returns the set of skill names currently loaded for
-// sessionID. Empty when nothing is loaded.
-func loadedNames(ctx context.Context, skills *skill.SkillManager, sessionID string) map[string]bool {
+func loadedSkillNames(ctx context.Context, skills *skill.SkillManager, sessionID string) map[string]bool {
 	out := map[string]bool{}
 	if skills == nil {
 		return out
