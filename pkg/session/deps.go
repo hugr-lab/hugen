@@ -55,7 +55,8 @@ type Deps struct {
 	// MaxDepth is the runtime cap enforced at parent.Spawn(spec)
 	// (commit 9 wires this from cfg.Subagents().DefaultMaxDepth();
 	// pivot 2 sets a hard-coded default of 5 so existing call sites
-	// keep working before the config view lands).
+	// keep working before the config view lands). Constructors
+	// without a configured value fall back to DefaultMaxDepth.
 	MaxDepth int
 
 	// OnCloseRequest is the optional outbound hook a root session
@@ -69,3 +70,10 @@ type Deps struct {
 	// Frame directly.
 	OnCloseRequest func(ctx context.Context, sessionID, reason string)
 }
+
+// DefaultMaxDepth is the phase-4 fallback for Deps.MaxDepth until
+// commit 9 wires cfg.Subagents().DefaultMaxDepth. Matches
+// `phase-4-spec.md §5.7` Layer 2 default. Exported so the manager
+// subpackage can populate Deps.MaxDepth at NewManager time without
+// duplicating the constant.
+const DefaultMaxDepth = 5

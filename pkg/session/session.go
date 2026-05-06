@@ -395,6 +395,73 @@ func (s *Session) Notepad() *Notepad { return s.notepad }
 // tests that disabled dispatch).
 func (s *Session) Tools() *tool.ToolManager { return s.tools }
 
+// OpenedAt returns the timestamp the session row was first written
+// (CreatedAt on SessionRow). Useful for callers that want to echo
+// the persisted opened_at without an extra LoadSession.
+func (s *Session) OpenedAt() time.Time { return s.openedAt }
+
+// Depth returns the sub-agent depth: 0 for roots, parent.Depth()+1
+// for children. Read-only; depth is set at construction and never
+// mutated.
+func (s *Session) Depth() int { return s.depth }
+
+// Discard cancels the session's per-session ctx without writing
+// any terminal event. Used for race-loser disposal of a freshly-
+// built session whose registration in Manager.live lost to an
+// existing entry — the row is on disk and the SessionOpened frame
+// was emitted, but no goroutine is running for this loser instance.
+// Don't call after Start; Run owns the cancel after that point.
+func (s *Session) Discard() {
+	if s.cancel != nil {
+		s.cancel(nil)
+	}
+}
+
+// Materialise lazily reconstructs the session's working window
+// from session_events on the first inbound Frame after open or
+// resume. Idempotent — second call observes the materialised flag
+// and returns nil. Tests that need to bring a freshly-resumed
+// session into a model-visible state can call this directly
+// instead of routing a frame through Submit.
+func (s *Session) Materialise(ctx context.Context) error {
+	return s.materialise(ctx)
+}
+
+// MarkMaterialised sets the in-memory materialised flag without
+// running the event walk. Useful for tests that want to skip
+// projection rebuilding for a session whose history doesn't matter
+// for the assertion under test.
+func (s *Session) MarkMaterialised() { s.materialised.Store(true) }
+
+// SystemPrompt renders the system prompt the session would feed
+// into the next turn given its current state (skills, plan,
+// whiteboard projection, identity). The result is the same string
+// the model sees on its next turn — tests can assert prompt
+// composition without driving a full turn.
+func (s *Session) SystemPrompt(ctx context.Context) string {
+	return s.systemPrompt(ctx)
+}
+
+// WhiteboardSnapshot returns a copy of the whiteboard projection's
+// messages list, taken under the projection mutex. Tests use this
+// to assert host vs. member projections without poking the
+// internal mutex/field directly.
+func (s *Session) WhiteboardSnapshot() []whiteboard.Message {
+	s.whiteboardMu.Lock()
+	defer s.whiteboardMu.Unlock()
+	out := make([]whiteboard.Message, len(s.whiteboard.Messages))
+	copy(out, s.whiteboard.Messages)
+	return out
+}
+
+// ActiveToolFeed returns the currently-registered ToolFeed for the
+// session, or nil if no blocking system tool is in flight. Tests
+// poll this to observe the activeToolFeed slot transition without
+// reaching into the atomic pointer field.
+func (s *Session) ActiveToolFeed() *ToolFeed {
+	return s.activeToolFeed.Load()
+}
+
 // SetModelOverride records a per-session model preference. The next
 // turn will route through it and emit a system_marker.
 func (s *Session) SetModelOverride(intent model.Intent, spec model.ModelSpec) {

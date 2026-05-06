@@ -181,7 +181,7 @@ func NewManager(
 		Opts:      m.sessionOpts,
 		RootCtx:   m.rootCtx,
 		WG:        &m.wg,
-		MaxDepth:  defaultMaxDepth,
+		MaxDepth:  DefaultMaxDepth,
 	}
 	// Phase 4.1b-pre stage B / D6: a root session calling
 	// requestClose hands the close request to Manager via this hook.
@@ -196,11 +196,6 @@ func NewManager(
 	}
 	return m
 }
-
-// defaultMaxDepth is the phase-4 fallback for Deps.maxDepth
-// until commit 9 wires cfg.Subagents().DefaultMaxDepth. Matches
-// `phase-4-spec.md §5.7` Layer 2 default.
-const defaultMaxDepth = 5
 
 // Open creates a fresh root session via newSession, registers it in
 // m.live, and starts its goroutine. Returns the session and the row's

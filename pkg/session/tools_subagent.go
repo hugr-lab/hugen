@@ -168,7 +168,7 @@ func callSpawnSubagent(ctx context.Context, parent *Session, host SessionToolHos
 	// Atomic batch validation — fail-fast on the first violation so
 	// the parent doesn't see partial spawn state. Per
 	// contracts/tools-subagent.md §spawn_subagent.
-	maxDepth := defaultMaxDepth
+	maxDepth := DefaultMaxDepth
 	if parent.deps != nil && parent.deps.MaxDepth > 0 {
 		maxDepth = parent.deps.MaxDepth
 	}
