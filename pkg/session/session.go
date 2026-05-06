@@ -654,6 +654,17 @@ func (s *Session) teardown(runCtx context.Context) {
 		s.explicitTerminate.Store(true)
 	}
 
+	// Cascade: forward SessionClose to every direct child so their
+	// Run loops exit teardown via the same event path. Without this
+	// the SessionClose-driven teardown deadlocks waiting on childWG —
+	// children's ctx is no longer the cascade signal under D6.
+	// Graceful (tc==nil) path skips forwarding: rootCtx cancellation
+	// already propagates through every session ctx so children see
+	// their own ctx.Done and run a graceful (write-nothing) teardown.
+	if tc != nil {
+		s.cascadeSessionCloseToChildren(tc.writeCtx, tc.reason)
+	}
+
 	// 2) Wait for direct children, draining inbox concurrently so a
 	// child's last Submit (subagent_result, etc.) lands on us instead
 	// of blocking forever on a full buffer.
@@ -690,6 +701,34 @@ func (s *Session) teardown(runCtx context.Context) {
 	// to the parent (if any), and (optionally) the SessionClosed
 	// outbox frame.
 	s.handleExit(runCtx, tc)
+}
+
+// cascadeSessionCloseToChildren forwards a SessionClose Frame to
+// every direct child so the cascade flows through the event path
+// (phase-4.1b-pre stage B / D6 step 22). Each child's Run loop
+// receives the Frame, runs teardown with reason="parent_cascade",
+// writes its own session_terminated row, and exits — childWG.Done
+// fires through the spawn closure regardless of cascade origin.
+//
+// Idempotent at the child level: a child already in teardown (its
+// goroutine has begun closing the Done channel) accepts the Submit
+// as a no-op. The Submit's defer-recover handles the brief window
+// where s.in is closed but Done has not yet been signalled.
+func (s *Session) cascadeSessionCloseToChildren(ctx context.Context, _ string) {
+	s.childMu.Lock()
+	children := make([]*Session, 0, len(s.children))
+	for _, c := range s.children {
+		children = append(children, c)
+	}
+	s.childMu.Unlock()
+	for _, c := range children {
+		if c.IsClosed() {
+			continue
+		}
+		f := protocol.NewSessionClose(c.id, s.agent.Participant(),
+			protocol.TerminationCancelCascade)
+		c.Submit(ctx, f)
+	}
 }
 
 // emitSessionClosedForReason maps a SessionClose reason to whether the
@@ -946,6 +985,52 @@ func (s *Session) emitSubagentResultToParent(persistCtx context.Context, reason 
 	}
 }
 
+// handleSubagentResult is the parent-side reaction to a child's
+// terminal result (phase-4.1b-pre stage B / D6). The child has
+// already called requestClose, emitting subagent_result and
+// markClosing — its Run loop is idle waiting for the SessionClose
+// trigger. Parent issues that trigger here, waits for the child's
+// goroutine to exit (instant teardown since the child is already
+// idle), and deregisters from s.children before returning.
+//
+// Subsequent routing of the SubagentResult Frame itself happens in
+// routeInbound's RouteToolFeed / RouteBuffered fallthrough so
+// wait_subagents (or the next turn boundary's drain) still observes
+// the frame.
+//
+// Idempotent: a second result for the same childID after the first
+// has cleaned up the child entry is a no-op (lookup misses).
+func (s *Session) handleSubagentResult(ctx context.Context, f *protocol.SubagentResult) {
+	childID := f.Payload.SessionID
+	if childID == "" {
+		childID = f.FromSessionID()
+	}
+	s.childMu.Lock()
+	child, ok := s.children[childID]
+	s.childMu.Unlock()
+	if !ok {
+		return
+	}
+	closeFrame := protocol.NewSessionClose(child.id, s.agent.Participant(), "subagent_done")
+	if !child.Submit(ctx, closeFrame) {
+		// Child goroutine already exited (Done channel closed) — its
+		// teardown wrote session_terminated; we just need to clean
+		// the child entry below.
+	}
+	select {
+	case <-child.Done():
+	case <-ctx.Done():
+		// Caller cancelled — leave the entry; another routeInbound
+		// pass (or graceful shutdown) will mop up.
+		return
+	}
+	s.childMu.Lock()
+	if cur, ok := s.children[childID]; ok && cur == child {
+		delete(s.children, childID)
+	}
+	s.childMu.Unlock()
+}
+
 // routeInbound dispatches a single inbound Frame.
 //
 // Control frames (Cancel, SlashCommand, UserMessage) handle inline:
@@ -985,6 +1070,13 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 	case *protocol.SessionClose:
 		s.markClosing()
 		return &sessionCloseSignal{reason: v.Payload.Reason}
+	case *protocol.SubagentResult:
+		// Phase 4.1b-pre stage B: parent issues SessionClose back to
+		// the child + waits for its goroutine to exit + deregisters
+		// from s.children. The frame itself then continues through the
+		// normal RouteToolFeed / RouteBuffered path so wait_subagents
+		// (or the next turn's drainPendingInbound) sees it.
+		s.handleSubagentResult(ctx, v)
 	case *protocol.Cancel:
 		return s.handleCancel(ctx, v)
 	case *protocol.SlashCommand:

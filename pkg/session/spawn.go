@@ -63,23 +63,20 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	s.children[child.id] = child
 	s.childMu.Unlock()
 
-	// Track the child on parent's childWG so parent's ctx.Done
-	// teardown can wait specifically for ITS direct children to exit
-	// before running its own lifecycle.Release / handleExit. The
-	// shared deps.wg in Manager waits for every goroutine in the
-	// forest; childWG narrows the wait to one tree level so the
-	// "deepest leaves finish first, then their parent" ordering is
-	// natural.
+	// Track the child on parent's childWG so parent's teardown can
+	// wait specifically for ITS direct children to exit before
+	// running its own lifecycle.Release / handleExit. The shared
+	// deps.wg in Manager waits for every goroutine in the forest;
+	// childWG narrows the wait to one tree level so the "deepest
+	// leaves finish first, then their parent" ordering is natural.
+	//
+	// Phase 4.1b-pre stage B: parent.children deregistration moves
+	// to parent.handleSubagentResult (the SessionClose-driven path).
+	// The closure here only signals childWG.Done so the cascade /
+	// graceful-shutdown paths — which never go through
+	// handleSubagentResult — still drain the WG.
 	s.childWG.Add(1)
-
-	child.start(func() {
-		s.childMu.Lock()
-		if cur, ok := s.children[child.id]; ok && cur == child {
-			delete(s.children, child.id)
-		}
-		s.childMu.Unlock()
-		s.childWG.Done()
-	})
+	child.start(func() { s.childWG.Done() })
 
 	started := protocol.NewSubagentStarted(s.id, s.deps.agent.Participant(), protocol.SubagentStartedPayload{
 		ChildSessionID:         child.ID(),

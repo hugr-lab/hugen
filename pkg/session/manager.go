@@ -183,6 +183,17 @@ func NewManager(
 		wg:        &m.wg,
 		maxDepth:  defaultMaxDepth,
 	}
+	// Phase 4.1b-pre stage B / D6: a root session calling
+	// requestClose hands the close request to Manager via this hook.
+	// We spawn a goroutine because Terminate Submits SessionClose +
+	// blocks on the session's Done channel — running it inline would
+	// deadlock the requesting Run loop. context.WithoutCancel preserves
+	// tracing/identity values from the caller's ctx while detaching
+	// from its cancel chain so Terminate survives the Run loop's own
+	// teardown that follows.
+	m.deps.OnCloseRequest = func(ctx context.Context, id, reason string) {
+		go func() { _ = m.Terminate(context.WithoutCancel(ctx), id, reason) }()
+	}
 	return m
 }
 
@@ -213,7 +224,11 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, time.Tim
 	}
 	m.live[s.id] = s
 	m.mu.Unlock()
-	s.start(m.deregisterFn(s.id, s))
+	// Phase 4.1b-pre stage B: roots are removed from m.live by
+	// Manager.Terminate after the session's Done channel closes.
+	// Graceful shutdown leaves stale entries until the next process
+	// boot — m.live is in-memory only and the binary is exiting.
+	s.start(nil)
 	return s, s.openedAt, nil
 }
 
@@ -262,7 +277,7 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
 	}
 	m.live[id] = s
 	m.mu.Unlock()
-	s.start(m.deregisterFn(id, s))
+	s.start(nil)
 	return s, nil
 }
 
@@ -326,23 +341,23 @@ func (m *Manager) BroadcastSystemMarker(ctx context.Context, subject string, met
 	}
 }
 
-// Terminate cancels a *root* session's ctx with a terminationCause
-// carrying the caller-supplied reason and waits for the goroutine to
-// run its sequential teardown (turn cancel → children wait → persist
-// pending inbound → lifecycle.Release → session_terminated +
-// SessionClosed → close). The session's own goroutine owns the
-// terminal write — Manager just signals and waits.
+// Terminate Submits a SessionClose Frame to the addressed *root*
+// session and waits for the goroutine to run its sequential teardown
+// (turn cancel → children wait → persist pending inbound →
+// lifecycle.Release → session_terminated + SessionClosed → close).
+// The session's own goroutine owns the terminal write — Manager just
+// triggers and waits, then removes the entry from m.live.
 //
 // Manager only knows roots: m.live[id] is the lookup. Sub-agents are
 // owned by their parent's children map; sub-agent termination goes
-// through callSubagentCancel (caller.children[id] direct lookup +
-// child.terminate). Calling Terminate with a sub-agent id surfaces
-// ErrSessionNotFound — by design, not a bug.
+// through callSubagentCancel + handleSubagentResult, never Manager.
+// Calling Terminate with a sub-agent id surfaces ErrSessionNotFound
+// — by design, not a bug.
 //
 // Idempotent: a second call after the goroutine has exited returns
-// ErrSessionNotFound (the deregister callback already removed the
-// entry from m.live). The first call's terminationCause is the one
-// honoured — context.Cause semantics.
+// ErrSessionNotFound (the first call's deregister already removed
+// the entry). The Run loop dedups concurrent SessionClose Frames via
+// the closing flag — only the first reason wins.
 func (m *Manager) Terminate(ctx context.Context, id, reason string) error {
 	if reason == "" {
 		reason = "terminated"
@@ -353,18 +368,18 @@ func (m *Manager) Terminate(ctx context.Context, id, reason string) error {
 	if !ok {
 		return ErrSessionNotFound
 	}
-	if !s.closed.Load() {
-		s.terminate(&terminationCause{
-			reason:    reason,
-			emitClose: true,
-			writeCtx:  ctx,
-		})
-	}
+	closeFrame := protocol.NewSessionClose(s.id, m.agent.Participant(), reason)
+	s.Submit(ctx, closeFrame)
 	select {
 	case <-s.Done():
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	m.mu.Lock()
+	if cur, exists := m.live[id]; exists && cur == s {
+		delete(m.live, id)
+	}
+	m.mu.Unlock()
 	return nil
 }
 
@@ -418,23 +433,6 @@ func (m *Manager) ShutdownAll(ctx context.Context) {
 	m.rootCancel()
 	m.wg.Wait()
 }
-
-// deregisterFn returns the onExit callback used by root sessions
-// (Manager.Open / Manager.Resume) to remove themselves from m.live
-// when their goroutine exits. The cur == s identity check guards
-// against a re-Open race that registered a fresh session under the
-// same id between this session's Run() return and the deregister
-// callback firing.
-func (m *Manager) deregisterFn(id string, s *Session) func() {
-	return func() {
-		m.mu.Lock()
-		if cur, ok := m.live[id]; ok && cur == s {
-			delete(m.live, id)
-		}
-		m.mu.Unlock()
-	}
-}
-
 
 // SessionsLive returns the IDs of currently live sessions.
 func (m *Manager) SessionsLive() []string {
