@@ -40,6 +40,14 @@ const (
 	KindWhiteboardMessage  Kind = "whiteboard_message"
 	KindSessionTerminated  Kind = "session_terminated"
 	KindSystemMessage      Kind = "system_message"
+
+	// Phase-4.1b-pre kind: SessionClose is the internal frame the
+	// session loop receives to begin teardown. It is NOT a transcript
+	// event — handleExit translates it into the persisted
+	// session_terminated row, optionally followed by SessionClosed for
+	// adapter back-compat. Producers: Manager.Terminate (root),
+	// parent.handleSubagentResult (subagent), parent.teardown (cascade).
+	KindSessionClose       Kind = "session_close"
 )
 
 // ParticipantInfo identifies who emitted (or is addressed by) a Frame.
@@ -209,6 +217,16 @@ type SessionOpenedPayload struct {
 }
 
 type SessionClosedPayload struct {
+	Reason string `json:"reason"`
+}
+
+// SessionClosePayload is the trigger Frame for the session goroutine
+// to begin teardown. Reason is the verbatim string written into the
+// persisted session_terminated event when the Run loop exits in
+// response. SessionClose is internal control plane: producers are
+// Manager.Terminate, parent.handleSubagentResult, parent.teardown,
+// and self-close paths via Session.requestClose.
+type SessionClosePayload struct {
 	Reason string `json:"reason"`
 }
 
@@ -484,6 +502,14 @@ type SessionTerminated struct {
 	Payload SessionTerminatedPayload
 }
 
+// SessionClose is the trigger Frame for session teardown. See
+// SessionClosePayload. The receiving session's Run loop translates
+// SessionClose into a persisted session_terminated row.
+type SessionClose struct {
+	BaseFrame
+	Payload SessionClosePayload
+}
+
 type SystemMessage struct {
 	BaseFrame
 	Payload SystemMessagePayload
@@ -524,6 +550,7 @@ func (f PlanOp) payload() any            { return f.Payload }
 func (f WhiteboardOp) payload() any      { return f.Payload }
 func (f WhiteboardMessage) payload() any { return f.Payload }
 func (f SessionTerminated) payload() any { return f.Payload }
+func (f SessionClose) payload() any      { return f.Payload }
 func (f SystemMessage) payload() any     { return f.Payload }
 func (f OpaqueFrame) payload() any       { return f.RawPayload }
 
@@ -693,6 +720,18 @@ func NewSessionTerminated(sessionID string, author ParticipantInfo, p SessionTer
 	}
 }
 
+// NewSessionClose builds the internal teardown trigger Frame.
+// Producers: Manager.Terminate, parent.handleSubagentResult,
+// parent.teardown (cascade). The receiving session's Run loop
+// translates this into a persisted session_terminated row with the
+// supplied reason and exits.
+func NewSessionClose(sessionID string, author ParticipantInfo, reason string) *SessionClose {
+	return &SessionClose{
+		BaseFrame: newBase(sessionID, KindSessionClose, author),
+		Payload:   SessionClosePayload{Reason: reason},
+	}
+}
+
 func NewSystemMessage(sessionID string, author ParticipantInfo, kind, content string) *SystemMessage {
 	return &SystemMessage{
 		BaseFrame: newBase(sessionID, KindSystemMessage, author),
@@ -766,6 +805,10 @@ func Validate(f Frame) error {
 	case *SessionTerminated:
 		if v.Payload.Reason == "" {
 			return fmt.Errorf("protocol: session_terminated missing reason")
+		}
+	case *SessionClose:
+		if v.Payload.Reason == "" {
+			return fmt.Errorf("protocol: session_close missing reason")
 		}
 	case *SystemMessage:
 		if v.Payload.Kind == "" {

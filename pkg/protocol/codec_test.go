@@ -53,6 +53,7 @@ func TestCodec_RoundTrip(t *testing.T) {
 		{"session_terminated", NewSessionTerminated("s1", testAgent, SessionTerminatedPayload{
 			Reason: TerminationHardCeiling, TurnsUsed: 30,
 		})},
+		{"session_close", NewSessionClose("s1", testAgent, TerminationHardCeiling)},
 		{"system_message_soft_warning", NewSystemMessage("s1", testAgent,
 			SystemMessageSoftWarning, "you have used N turns")},
 		{"system_message_whiteboard", NewSystemMessage("s1", testAgent,

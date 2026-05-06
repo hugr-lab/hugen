@@ -196,6 +196,12 @@ func (c *Codec) materialise(base BaseFrame, payload []byte) (Frame, error) {
 			return nil, err
 		}
 		return &SessionTerminated{BaseFrame: base, Payload: p}, nil
+	case KindSessionClose:
+		var p SessionClosePayload
+		if err := unmarshalPayload(payload, &p); err != nil {
+			return nil, err
+		}
+		return &SessionClose{BaseFrame: base, Payload: p}, nil
 	case KindSystemMessage:
 		var p SystemMessagePayload
 		if err := unmarshalPayload(payload, &p); err != nil {
