@@ -8,14 +8,11 @@ import (
 )
 
 func TestCallNotepadAppend_Happy(t *testing.T) {
-	store := newFakeStore()
-	mgr := newTestManager(t, store)
-	defer mgr.Stop(context.Background())
-
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
 	args, _ := json.Marshal(notepadAppendInput{Text: "remember this"})
-	out, err := callNotepadAppend(us1WithSession(parent), parent, mgrToolHost(mgr), args)
+	out, err := callNotepadAppend(us1WithSession(parent), parent, host, args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -37,12 +34,10 @@ func TestCallNotepadAppend_Happy(t *testing.T) {
 }
 
 func TestCallNotepadAppend_BadRequest(t *testing.T) {
-	store := newFakeStore()
-	mgr := newTestManager(t, store)
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
-	out, err := callNotepadAppend(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{not-json`))
+	out, err := callNotepadAppend(us1WithSession(parent), parent, host, json.RawMessage(`{not-json`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -52,13 +47,11 @@ func TestCallNotepadAppend_BadRequest(t *testing.T) {
 }
 
 func TestCallNotepadAppend_EmptyText(t *testing.T) {
-	store := newFakeStore()
-	mgr := newTestManager(t, store)
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
 	args, _ := json.Marshal(notepadAppendInput{Text: ""})
-	out, err := callNotepadAppend(us1WithSession(parent), parent, mgrToolHost(mgr), args)
+	out, err := callNotepadAppend(us1WithSession(parent), parent, host, args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}

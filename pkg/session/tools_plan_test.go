@@ -16,12 +16,11 @@ import (
 // event has the right shape.
 func TestCallPlanSet_Happy(t *testing.T) {
 	store := newFakeStore()
-	mgr := newTestManager(t, store)
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t, withTestStore(store))
+	defer cleanup()
 
 	args, _ := json.Marshal(planSetInput{Text: "investigate cache", CurrentStep: "scope"})
-	out, err := callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr), args)
+	out, err := callPlanSet(us1WithSession(parent), parent, host, args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -30,15 +29,13 @@ func TestCallPlanSet_Happy(t *testing.T) {
 		t.Fatalf("plan_set output = %s err=%v", out, err)
 	}
 
-	parent.planMu.Lock()
-	plan := parent.plan
-	parent.planMu.Unlock()
+	plan := parent.PlanSnapshot()
 	if !plan.Active || plan.Text != "investigate cache" || plan.CurrentStep != "scope" {
 		t.Errorf("in-memory plan = %+v, want active body+pointer", plan)
 	}
 
 	// Persisted event check.
-	events, _ := store.ListEvents(context.Background(), parent.id, ListEventsOpts{})
+	events, _ := store.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
 	found := false
 	for _, ev := range events {
 		if ev.EventType == string(protocol.KindPlanOp) {
@@ -58,23 +55,21 @@ func TestCallPlanSet_Happy(t *testing.T) {
 
 // TestCallPlanSet_BadRequest covers missing-text refusal.
 func TestCallPlanSet_BadRequest(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
-	out, _ := callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr),
+	out, _ := callPlanSet(us1WithSession(parent), parent, host,
 		json.RawMessage(`{}`))
 	mgr_assertErrorCode(t, out, "bad_request")
 }
 
 // TestCallPlanSet_SessionGone — closed-session guard.
 func TestCallPlanSet_SessionGone(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
-	parent.closed.Store(true)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
+	parent.MarkClosed()
 
-	out, err := callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr),
+	out, err := callPlanSet(us1WithSession(parent), parent, host,
 		json.RawMessage(`{"text":"x"}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
@@ -87,24 +82,21 @@ func TestCallPlanSet_SessionGone(t *testing.T) {
 // TestCallPlanComment_Happy: after plan_set, plan_comment appends a
 // comment and updates current_step preservation correctly.
 func TestCallPlanComment_Happy(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "body", CurrentStep: "a"})
-	if _, err := callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr), setArgs); err != nil {
+	if _, err := callPlanSet(us1WithSession(parent), parent, host, setArgs); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 
 	// Comment with no current_step → should preserve "a".
 	cArgs, _ := json.Marshal(planCommentInput{Text: "noted"})
-	if _, err := callPlanComment(us1WithSession(parent), parent, mgrToolHost(mgr), cArgs); err != nil {
+	if _, err := callPlanComment(us1WithSession(parent), parent, host, cArgs); err != nil {
 		t.Fatalf("comment: %v", err)
 	}
 
-	parent.planMu.Lock()
-	plan := parent.plan
-	parent.planMu.Unlock()
+	plan := parent.PlanSnapshot()
 	if len(plan.Comments) != 1 || plan.Comments[0].Text != "noted" {
 		t.Errorf("Comments = %+v, want one 'noted'", plan.Comments)
 	}
@@ -114,12 +106,10 @@ func TestCallPlanComment_Happy(t *testing.T) {
 
 	// Second comment with explicit pointer → should move it.
 	cArgs2, _ := json.Marshal(planCommentInput{Text: "moved", CurrentStep: "b"})
-	if _, err := callPlanComment(us1WithSession(parent), parent, mgrToolHost(mgr), cArgs2); err != nil {
+	if _, err := callPlanComment(us1WithSession(parent), parent, host, cArgs2); err != nil {
 		t.Fatalf("comment2: %v", err)
 	}
-	parent.planMu.Lock()
-	plan = parent.plan
-	parent.planMu.Unlock()
+	plan = parent.PlanSnapshot()
 	if plan.CurrentStep != "b" {
 		t.Errorf("CurrentStep = %q, want 'b' (moved)", plan.CurrentStep)
 	}
@@ -131,26 +121,24 @@ func TestCallPlanComment_Happy(t *testing.T) {
 // TestCallPlanComment_NoActivePlan: comment without prior set must
 // surface no_active_plan.
 func TestCallPlanComment_NoActivePlan(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
 	args, _ := json.Marshal(planCommentInput{Text: "x"})
-	out, _ := callPlanComment(us1WithSession(parent), parent, mgrToolHost(mgr), args)
+	out, _ := callPlanComment(us1WithSession(parent), parent, host, args)
 	mgr_assertErrorCode(t, out, "no_active_plan")
 }
 
 // TestCallPlanComment_BadRequest covers missing-text refusal.
 func TestCallPlanComment_BadRequest(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
 	// Without prior set, the bad_request check fires before
 	// no_active_plan since unmarshal fails on missing "text" only
 	// when the JSON decoder sees an empty string. Use a
 	// deliberately-malformed shape to hit the bad_request branch.
-	out, _ := callPlanComment(us1WithSession(parent), parent, mgrToolHost(mgr),
+	out, _ := callPlanComment(us1WithSession(parent), parent, host,
 		json.RawMessage(`{"text":"["`)) // truncated → unmarshal error
 	mgr_assertErrorCode(t, out, "bad_request")
 }
@@ -159,11 +147,10 @@ func TestCallPlanComment_BadRequest(t *testing.T) {
 
 // TestCallPlanShow_Inactive returns active=false on a fresh session.
 func TestCallPlanShow_Inactive(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
-	out, err := callPlanShow(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
+	out, err := callPlanShow(us1WithSession(parent), parent, host, json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("show: %v", err)
 	}
@@ -179,19 +166,18 @@ func TestCallPlanShow_Inactive(t *testing.T) {
 // TestCallPlanShow_Roundtrip: set + 2 comments → show returns body
 // + pointer + both comments.
 func TestCallPlanShow_Roundtrip(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "v1", CurrentStep: "phase-1"})
-	_, _ = callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr), setArgs)
+	_, _ = callPlanSet(us1WithSession(parent), parent, host, setArgs)
 
 	for _, txt := range []string{"first", "second"} {
 		cArgs, _ := json.Marshal(planCommentInput{Text: txt})
-		_, _ = callPlanComment(us1WithSession(parent), parent, mgrToolHost(mgr), cArgs)
+		_, _ = callPlanComment(us1WithSession(parent), parent, host, cArgs)
 	}
 
-	out, _ := callPlanShow(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
+	out, _ := callPlanShow(us1WithSession(parent), parent, host, json.RawMessage(`{}`))
 	var got planShowOutput
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -210,25 +196,21 @@ func TestCallPlanShow_Roundtrip(t *testing.T) {
 // TestCallPlanClear: after clear the projection is inactive and a
 // subsequent show returns active=false.
 func TestCallPlanClear(t *testing.T) {
-	store := newFakeStore()
-	mgr := newTestManager(t, store)
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "tmp"})
-	_, _ = callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr), setArgs)
+	_, _ = callPlanSet(us1WithSession(parent), parent, host, setArgs)
 
-	if _, err := callPlanClear(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`)); err != nil {
+	if _, err := callPlanClear(us1WithSession(parent), parent, host, json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 
-	parent.planMu.Lock()
-	if parent.plan.Active {
-		t.Errorf("plan still active after clear: %+v", parent.plan)
+	if parent.PlanSnapshot().Active {
+		t.Errorf("plan still active after clear: %+v", parent.PlanSnapshot())
 	}
-	parent.planMu.Unlock()
 
-	out, _ := callPlanShow(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
+	out, _ := callPlanShow(us1WithSession(parent), parent, host, json.RawMessage(`{}`))
 	if !strings.Contains(string(out), `"active":false`) {
 		t.Errorf("show after clear = %s, want active:false", out)
 	}
@@ -237,14 +219,13 @@ func TestCallPlanClear(t *testing.T) {
 // TestPlanRendersInSystemPrompt: setting a plan injects the block
 // into the next systemPrompt() call.
 func TestPlanRendersInSystemPrompt(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "investigate latency", CurrentStep: "instrument"})
-	_, _ = callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr), setArgs)
+	_, _ = callPlanSet(us1WithSession(parent), parent, host, setArgs)
 
-	prompt := parent.systemPrompt(context.Background())
+	prompt := parent.SystemPrompt(context.Background())
 	if !strings.Contains(prompt, "## Active plan") {
 		t.Errorf("systemPrompt missing plan block: %q", prompt)
 	}

@@ -511,9 +511,3 @@ func TestManager_Deliver_UnknownSession(t *testing.T) {
 	}
 }
 
-func drainOutboxOnce(out <-chan protocol.Frame) {
-	select {
-	case <-out:
-	case <-time.After(200 * time.Millisecond):
-	}
-}

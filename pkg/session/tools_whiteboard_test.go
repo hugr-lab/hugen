@@ -16,11 +16,10 @@ import (
 // event lands in the store.
 func TestCallWhiteboardInit_Happy(t *testing.T) {
 	store := newFakeStore()
-	mgr := newTestManager(t, store)
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t, withTestStore(store))
+	defer cleanup()
 
-	out, err := callWhiteboardInit(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
+	out, err := callWhiteboardInit(us1WithSession(parent), parent, host, json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -29,14 +28,12 @@ func TestCallWhiteboardInit_Happy(t *testing.T) {
 		t.Fatalf("init output = %s err=%v", out, err)
 	}
 
-	parent.whiteboardMu.Lock()
-	wb := parent.whiteboard
-	parent.whiteboardMu.Unlock()
+	wb := parent.WhiteboardSnapshot()
 	if !wb.Active {
 		t.Errorf("in-memory board not active after init")
 	}
 
-	events, _ := store.ListEvents(context.Background(), parent.id, ListEventsOpts{})
+	events, _ := store.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
 	found := false
 	for _, ev := range events {
 		if ev.EventType == string(protocol.KindWhiteboardOp) && ev.Metadata["op"] == "init" {
@@ -52,17 +49,16 @@ func TestCallWhiteboardInit_Happy(t *testing.T) {
 // returns ok with no second event written.
 func TestCallWhiteboardInit_Idempotent(t *testing.T) {
 	store := newFakeStore()
-	mgr := newTestManager(t, store)
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t, withTestStore(store))
+	defer cleanup()
 
-	if _, err := callWhiteboardInit(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`)); err != nil {
+	if _, err := callWhiteboardInit(us1WithSession(parent), parent, host, json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	if _, err := callWhiteboardInit(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`)); err != nil {
+	if _, err := callWhiteboardInit(us1WithSession(parent), parent, host, json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("second init: %v", err)
 	}
-	events, _ := store.ListEvents(context.Background(), parent.id, ListEventsOpts{})
+	events, _ := store.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
 	count := 0
 	for _, ev := range events {
 		if ev.EventType == string(protocol.KindWhiteboardOp) && ev.Metadata["op"] == "init" {
@@ -79,23 +75,21 @@ func TestCallWhiteboardInit_Idempotent(t *testing.T) {
 // TestCallWhiteboardWrite_NoParent: a root session writing surfaces
 // the no_whiteboard_to_write_to refusal.
 func TestCallWhiteboardWrite_NoParent(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
 	args, _ := json.Marshal(whiteboardWriteInput{Text: "hi"})
-	out, _ := callWhiteboardWrite(us1WithSession(parent), parent, mgrToolHost(mgr), args)
+	out, _ := callWhiteboardWrite(us1WithSession(parent), parent, host, args)
 	mgr_assertErrorCode(t, out, "no_whiteboard_to_write_to")
 }
 
 // TestCallWhiteboardWrite_NoActiveBoard: a sub-agent whose parent has
 // no active board sees no_active_whiteboard.
 func TestCallWhiteboardWrite_NoActiveBoard(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	ctx := context.Background()
-	defer mgr.Stop(ctx)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
-	parent := us1OpenParent(t, mgr)
+	ctx := context.Background()
 	child, err := parent.Spawn(ctx, SpawnSpec{Task: "x"})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
@@ -103,18 +97,17 @@ func TestCallWhiteboardWrite_NoActiveBoard(t *testing.T) {
 	drainOutboxOnce(parent.Outbox())
 
 	args, _ := json.Marshal(whiteboardWriteInput{Text: "ping"})
-	out, _ := callWhiteboardWrite(us1WithSession(child), child, mgrToolHost(mgr), args)
+	out, _ := callWhiteboardWrite(us1WithSession(child), child, host, args)
 	mgr_assertErrorCode(t, out, "no_active_whiteboard")
 }
 
 // TestCallWhiteboardWrite_BadRequest: missing-text refusal fires
 // before the parent-presence / active-board checks.
 func TestCallWhiteboardWrite_BadRequest(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
-	out, _ := callWhiteboardWrite(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
+	out, _ := callWhiteboardWrite(us1WithSession(parent), parent, host, json.RawMessage(`{}`))
 	mgr_assertErrorCode(t, out, "bad_request")
 }
 
@@ -122,11 +115,10 @@ func TestCallWhiteboardWrite_BadRequest(t *testing.T) {
 
 // TestCallWhiteboardRead_Inactive: a fresh session returns active=false.
 func TestCallWhiteboardRead_Inactive(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
-	out, err := callWhiteboardRead(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
+	out, err := callWhiteboardRead(us1WithSession(parent), parent, host, json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -142,14 +134,13 @@ func TestCallWhiteboardRead_Inactive(t *testing.T) {
 // TestCallWhiteboardRead_OwnHostedAfterInit: after init the read
 // returns the host's projection (no messages yet, but Active=true).
 func TestCallWhiteboardRead_OwnHostedAfterInit(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
 
-	if _, err := callWhiteboardInit(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`)); err != nil {
+	if _, err := callWhiteboardInit(us1WithSession(parent), parent, host, json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	out, _ := callWhiteboardRead(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
+	out, _ := callWhiteboardRead(us1WithSession(parent), parent, host, json.RawMessage(`{}`))
 	var got whiteboardReadOutput
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -157,8 +148,8 @@ func TestCallWhiteboardRead_OwnHostedAfterInit(t *testing.T) {
 	if !got.Active {
 		t.Errorf("read should report active=true after init, got %+v", got)
 	}
-	if got.HostID != parent.id {
-		t.Errorf("HostID = %q, want %q (own hosted)", got.HostID, parent.id)
+	if got.HostID != parent.ID() {
+		t.Errorf("HostID = %q, want %q (own hosted)", got.HostID, parent.ID())
 	}
 }
 
@@ -168,22 +159,19 @@ func TestCallWhiteboardRead_OwnHostedAfterInit(t *testing.T) {
 // Active=false and writes a stop event.
 func TestCallWhiteboardStop_DeactivatesProjection(t *testing.T) {
 	store := newFakeStore()
-	mgr := newTestManager(t, store)
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t, withTestStore(store))
+	defer cleanup()
 
-	_, _ = callWhiteboardInit(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
-	if _, err := callWhiteboardStop(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`)); err != nil {
+	_, _ = callWhiteboardInit(us1WithSession(parent), parent, host, json.RawMessage(`{}`))
+	if _, err := callWhiteboardStop(us1WithSession(parent), parent, host, json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 
-	parent.whiteboardMu.Lock()
-	if parent.whiteboard.Active {
-		t.Errorf("board still active after stop: %+v", parent.whiteboard)
+	if parent.WhiteboardSnapshot().Active {
+		t.Errorf("board still active after stop: %+v", parent.WhiteboardSnapshot())
 	}
-	parent.whiteboardMu.Unlock()
 
-	events, _ := store.ListEvents(context.Background(), parent.id, ListEventsOpts{})
+	events, _ := store.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
 	stopFound := false
 	for _, ev := range events {
 		if ev.EventType == string(protocol.KindWhiteboardOp) && ev.Metadata["op"] == "stop" {
@@ -199,14 +187,13 @@ func TestCallWhiteboardStop_DeactivatesProjection(t *testing.T) {
 // no-op success — idempotent, no event.
 func TestCallWhiteboardStop_OnInactive(t *testing.T) {
 	store := newFakeStore()
-	mgr := newTestManager(t, store)
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, cleanup := newTestParent(t, withTestStore(store))
+	defer cleanup()
 
-	if _, err := callWhiteboardStop(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`)); err != nil {
+	if _, err := callWhiteboardStop(us1WithSession(parent), parent, host, json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
-	events, _ := store.ListEvents(context.Background(), parent.id, ListEventsOpts{})
+	events, _ := store.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
 	for _, ev := range events {
 		if ev.EventType == string(protocol.KindWhiteboardOp) {
 			t.Errorf("unexpected whiteboard_op event for stop on inactive board: %+v", ev.Metadata)
@@ -217,10 +204,9 @@ func TestCallWhiteboardStop_OnInactive(t *testing.T) {
 // ---------- closed-session dispatch ----------
 
 func TestCallWhiteboard_SessionGone(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
-	parent.closed.Store(true)
+	parent, host, cleanup := newTestParent(t)
+	defer cleanup()
+	parent.MarkClosed()
 
 	for name, call := range map[string]sessionToolHandler{
 		"init":  callWhiteboardInit,
@@ -228,7 +214,7 @@ func TestCallWhiteboard_SessionGone(t *testing.T) {
 		"read":  callWhiteboardRead,
 		"stop":  callWhiteboardStop,
 	} {
-		out, err := call(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{"text":"x"}`))
+		out, err := call(us1WithSession(parent), parent, host, json.RawMessage(`{"text":"x"}`))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}

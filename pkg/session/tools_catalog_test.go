@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
-	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -47,10 +46,11 @@ func (catalogTestPerms) Subscribe(context.Context) (<-chan perm.RefreshEvent, er
 	return nil, nil
 }
 
-// newCatalogTestManager wires Manager with a ToolManager that
-// already exposes one fake provider ("hugr-main" with two tools).
-// The session opened off it inherits the ToolManager via WithTools.
-func newCatalogTestManager(t *testing.T, skills *skill.SkillManager) (*Manager, *tool.ToolManager) {
+// newCatalogFixture wires a session+ToolManager exposing one fake
+// provider ("hugr-main" with two tools). Returns parent, host, the
+// underlying ToolManager (for tests that need to add more
+// providers), and cleanup.
+func newCatalogFixture(t *testing.T, skills *skill.SkillManager) (*Session, SessionToolHost, *tool.ToolManager, func()) {
 	t.Helper()
 	tm := tool.NewToolManager(catalogTestPerms{}, nil, nil)
 	prov := &fakeCatalogProvider{
@@ -74,18 +74,11 @@ func newCatalogTestManager(t *testing.T, skills *skill.SkillManager) (*Manager, 
 	if err := tm.AddProvider(prov); err != nil {
 		t.Fatalf("AddProvider: %v", err)
 	}
-
-	store := newFakeStore()
-	mdl := &scriptedModel{}
-	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
-	if err != nil {
-		t.Fatalf("agent: %v", err)
-	}
-	mgr := NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil,
-		WithSessionOptions(WithTools(tm), WithSkills(skills)),
+	parent, host, cleanup := newTestParent(t,
+		withTestTools(tm),
+		withTestSkills(skills),
 	)
-	return mgr, tm
+	return parent, host, tm, cleanup
 }
 
 func TestToolCatalog_GroupsAndFlagsGranted(t *testing.T) {
@@ -104,14 +97,13 @@ body
 	}})
 	skills := skill.NewSkillManager(store, nil)
 
-	mgr, _ := newCatalogTestManager(t, skills)
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
-	if err := skills.Load(context.Background(), parent.id, "alpha"); err != nil {
+	parent, host, _, cleanup := newCatalogFixture(t, skills)
+	defer cleanup()
+	if err := skills.Load(context.Background(), parent.ID(), "alpha"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 
-	out, err := callToolCatalog(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
+	out, err := callToolCatalog(us1WithSession(parent), parent, host, json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -140,11 +132,10 @@ body
 
 func TestToolCatalog_ProviderFilter(t *testing.T) {
 	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
-	mgr, _ := newCatalogTestManager(t, skills)
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, _, cleanup := newCatalogFixture(t, skills)
+	defer cleanup()
 
-	out, err := callToolCatalog(us1WithSession(parent), parent, mgrToolHost(mgr),
+	out, err := callToolCatalog(us1WithSession(parent), parent, host,
 		json.RawMessage(`{"provider":"missing"}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -158,11 +149,10 @@ func TestToolCatalog_ProviderFilter(t *testing.T) {
 
 func TestToolCatalog_PatternFilter(t *testing.T) {
 	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
-	mgr, _ := newCatalogTestManager(t, skills)
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, _, cleanup := newCatalogFixture(t, skills)
+	defer cleanup()
 
-	out, err := callToolCatalog(us1WithSession(parent), parent, mgrToolHost(mgr),
+	out, err := callToolCatalog(us1WithSession(parent), parent, host,
 		json.RawMessage(`{"pattern":"DISCOVERY"}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -179,11 +169,10 @@ func TestToolCatalog_PatternFilter(t *testing.T) {
 
 func TestToolCatalog_BadRequest(t *testing.T) {
 	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
-	mgr, _ := newCatalogTestManager(t, skills)
-	defer mgr.Stop(context.Background())
-	parent := us1OpenParent(t, mgr)
+	parent, host, _, cleanup := newCatalogFixture(t, skills)
+	defer cleanup()
 
-	out, err := callToolCatalog(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{not-json`))
+	out, err := callToolCatalog(us1WithSession(parent), parent, host, json.RawMessage(`{not-json`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}

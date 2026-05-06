@@ -442,16 +442,19 @@ func (s *Session) SystemPrompt(ctx context.Context) string {
 	return s.systemPrompt(ctx)
 }
 
-// WhiteboardSnapshot returns a copy of the whiteboard projection's
-// messages list, taken under the projection mutex. Tests use this
-// to assert host vs. member projections without poking the
-// internal mutex/field directly.
-func (s *Session) WhiteboardSnapshot() []whiteboard.Message {
+// WhiteboardSnapshot returns a deep copy of the whiteboard
+// projection taken under the projection mutex. Tests use this to
+// assert host vs. member projections without poking the internal
+// mutex/field directly. The returned struct is independent of the
+// session's live projection — mutations on it do not flow back.
+func (s *Session) WhiteboardSnapshot() whiteboard.Whiteboard {
 	s.whiteboardMu.Lock()
 	defer s.whiteboardMu.Unlock()
-	out := make([]whiteboard.Message, len(s.whiteboard.Messages))
-	copy(out, s.whiteboard.Messages)
-	return out
+	wb := s.whiteboard
+	if len(wb.Messages) > 0 {
+		wb.Messages = append([]whiteboard.Message(nil), wb.Messages...)
+	}
+	return wb
 }
 
 // ActiveToolFeed returns the currently-registered ToolFeed for the
@@ -461,6 +464,21 @@ func (s *Session) WhiteboardSnapshot() []whiteboard.Message {
 func (s *Session) ActiveToolFeed() *ToolFeed {
 	return s.activeToolFeed.Load()
 }
+
+// PlanSnapshot returns a copy of the plan projection taken under
+// the projection mutex. Tests use this to assert plan state without
+// poking the planMu / plan fields directly.
+func (s *Session) PlanSnapshot() plan.Plan {
+	s.planMu.Lock()
+	defer s.planMu.Unlock()
+	return s.plan
+}
+
+// MarkClosed forces the session-closed flag on. Tests use this to
+// drive tool handlers down the `session_gone` branch without
+// running a full teardown. Production code never calls this — Run
+// owns s.closed via teardown.
+func (s *Session) MarkClosed() { s.closed.Store(true) }
 
 // SetModelOverride records a per-session model preference. The next
 // turn will route through it and emit a system_marker.
