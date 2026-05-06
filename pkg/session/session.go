@@ -190,6 +190,25 @@ type Session struct {
 	in     chan protocol.Frame
 	out    chan protocol.Frame
 	closed atomic.Bool
+
+	// closing transitions to true the moment the session decides
+	// (or is told) to terminate, but BEFORE the goroutine has actually
+	// torn down. Phase 4.1b-pre stage B introduces this idle gate so a
+	// session that has emitted close_requested can keep its Run loop
+	// alive (in-flight tool dispatches, subagent_result Submit on
+	// parent, etc.) while rejecting any new UserMessage. closed=true
+	// is the strictly later transition, set in handleExit after the
+	// session_terminated row lands.
+	closing atomic.Bool
+
+	// subagentResultSent is set the first time emitSubagentResultToParent
+	// fires for this session. requestClose on a subagent fires the
+	// emit early so the parent can route SessionClose back; handleExit
+	// on the SessionClose-driven exit must NOT re-emit. Cancel-
+	// initiated paths (parent_cascade, subagent_cancel via SessionClose)
+	// reach handleExit without requestClose having fired locally — so
+	// handleExit emits there, and the flag flips at that point too.
+	subagentResultSent atomic.Bool
 	// done is closed by Run on exit. External callers (Manager.Terminate,
 	// ShutdownAll) wait on it to know the session goroutine has
 	// finished its exit handler — including any session_terminated
@@ -820,6 +839,12 @@ func (s *Session) emitSubagentResultToParent(persistCtx context.Context, reason 
 	if parent == nil {
 		return
 	}
+	if !s.subagentResultSent.CompareAndSwap(false, true) {
+		// Phase 4.1b-pre stage B: requestClose may emit the result
+		// early so the parent's handleSubagentResult can issue
+		// SessionClose back. handleExit must not duplicate the row.
+		return
+	}
 	result := protocol.NewSubagentResult(parent.id, s.id, s.agent.Participant(),
 		protocol.SubagentResultPayload{
 			SessionID: s.id,
@@ -1394,6 +1419,69 @@ func (s *Session) emitPendingSwitch(ctx context.Context) error {
 
 // IsClosed reports whether the session has been closed.
 func (s *Session) IsClosed() bool { return s.closed.Load() }
+
+// IsClosing reports whether the session has begun teardown (a
+// SessionClose Frame has been requested, either by the session
+// itself via requestClose or by an external producer about to
+// Submit one). closing transitions to true strictly before
+// closed; once true, new UserMessage frames are rejected (the
+// session is on its way out).
+func (s *Session) IsClosing() bool { return s.closing.Load() }
+
+// markClosing flips the closing flag. Used by requestClose and by
+// teardown after a SessionClose Frame is observed inbound. Idempotent.
+func (s *Session) markClosing() { s.closing.Store(true) }
+
+// requestClose triggers session teardown through the event-driven
+// SessionClose protocol (phase-4.1b-pre §6 Stage B / D6). It emits a
+// close_requested system_marker for observability, marks the session
+// closing (so subsequent UserMessages are refused), and dispatches
+// the close trigger to whoever owns the session's termination:
+//
+//   - root sessions: deps.OnCloseRequest fires (Manager wiring spawns
+//     a goroutine that Submits SessionClose back to the root via
+//     Manager.Terminate). The hook never blocks the caller.
+//   - subagent sessions: emit subagent_result to the parent's inbox
+//     so the parent's handleSubagentResult issues the SessionClose
+//     trigger back. The Run loop then sits idle until the trigger
+//     arrives.
+//
+// Idempotent: a second call after closing=true is a no-op (Store is
+// already set; OnCloseRequest fires once; subagent_result is gated
+// by subagentResultSent).
+//
+// ctx is the caller's request-scoped context (typically the Run
+// loop's runCtx or a turnCtx). Implementations of OnCloseRequest
+// decide whether to inherit or detach (context.WithoutCancel) from
+// its cancel chain — the hook in pkg/runtime detaches so Manager
+// .Terminate survives the Run loop's own teardown.
+func (s *Session) requestClose(ctx context.Context, reason string) {
+	if s == nil {
+		return
+	}
+	if !s.closing.CompareAndSwap(false, true) {
+		return
+	}
+	marker := protocol.NewSystemMarker(s.id, s.agent.Participant(),
+		"close_requested", map[string]any{"reason": reason})
+	if err := s.emit(ctx, marker); err != nil && !errors.Is(err, ErrSessionClosed) {
+		s.logger.Warn("session: emit close_requested marker",
+			"session", s.id, "reason", reason, "err", err)
+	}
+	if s.parent != nil {
+		// Subagent path: surface the terminal result to the parent so
+		// its handleSubagentResult can issue SessionClose back. The
+		// Run loop stays alive until the SessionClose Frame arrives.
+		s.emitSubagentResultToParent(ctx, reason)
+		return
+	}
+	// Root path: hand the close request to whoever owns this tree's
+	// termination (Manager). Optional — tests with no Manager wiring
+	// must drive teardown via the SessionClose Frame directly.
+	if s.deps != nil && s.deps.OnCloseRequest != nil {
+		s.deps.OnCloseRequest(ctx, s.id, reason)
+	}
+}
 
 // LastActive returns time.Now (placeholder; Phase 4 fills this in
 // from updated_at if needed).

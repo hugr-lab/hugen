@@ -50,4 +50,15 @@ type sessionDeps struct {
 	// pivot 2 sets a hard-coded default of 5 so existing call sites
 	// keep working before the config view lands).
 	maxDepth int
+
+	// OnCloseRequest is the optional outbound hook a root session
+	// fires from requestClose (phase-4.1b-pre stage B / D6). The hook
+	// hands the close request to whoever owns the session's
+	// termination — Manager populates it with a goroutine that calls
+	// Manager.Terminate, which Submits SessionClose back to the root.
+	// Subagents do NOT consult this hook; they emit subagent_result
+	// to their parent and idle until the parent issues SessionClose.
+	// Tests with no Manager wiring drive teardown via the SessionClose
+	// Frame directly.
+	OnCloseRequest func(ctx context.Context, sessionID, reason string)
 }
