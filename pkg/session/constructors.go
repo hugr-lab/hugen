@@ -13,6 +13,37 @@ import (
 // sub-agent's depth would exceed deps.MaxDepth.
 var ErrDepthExceeded = errors.New("session: max sub-agent depth exceeded")
 
+// New creates a fresh root Session. Thin public wrapper over the
+// package-private newSession constructor; exists so the upcoming
+// pkg/session/manager subpackage can construct roots without
+// reaching into package internals.
+//
+// req.ParentSessionID must be empty — pass through NewChild for
+// sub-agents (or use parent.Spawn, which keeps the children-map +
+// SubagentStarted bookkeeping intact).
+func New(ctx context.Context, deps *Deps, req OpenRequest) (*Session, error) {
+	return newSession(ctx, nil, deps, req)
+}
+
+// NewChild creates a sub-agent Session as a child of parent. Public
+// wrapper over newSession with a non-nil parent; the caller is
+// responsible for any side effects Spawn normally performs
+// (children-map registration, SubagentStarted emit, childWG.Add).
+// Most production code should call parent.Spawn instead.
+func NewChild(ctx context.Context, parent *Session, req OpenRequest) (*Session, error) {
+	if parent == nil {
+		return nil, fmt.Errorf("session: NewChild requires a parent")
+	}
+	return newSession(ctx, parent, parent.deps, req)
+}
+
+// NewRestore re-creates a root Session from an existing sessions
+// row. Thin public wrapper over newSessionRestore; phase 4 only
+// restores roots, so parent is implicitly nil.
+func NewRestore(ctx context.Context, id string, deps *Deps) (*Session, error) {
+	return newSessionRestore(ctx, id, nil, deps)
+}
+
 // newSession creates a fresh Session (root or sub-agent), writes its
 // initial sessions row, runs lifecycle.Acquire, and emits a
 // SessionOpened frame. The returned Session is ready for s.start.
@@ -216,22 +247,38 @@ func buildSessionShell(id string, depth int, parent *Session, deps *Deps, sessCt
 	return s
 }
 
-// start launches the session's Run goroutine. onExit (optional) is
-// invoked after Run returns and after wg.Done — the caller uses it to
-// remove the session from its parent's children map (or from
-// Manager's m.live for roots).
-func (s *Session) start(onExit func()) {
+// Start launches the session's Run goroutine. The session's own
+// internal ctx (s.ctx — derived from deps.RootCtx for roots and from
+// parent.ctx for sub-agents) drives Run; the ctx parameter exists for
+// future symmetry with idiomatic Start(ctx) APIs and for short-lived
+// setup hooks. Today it is unused.
+//
+// Bookkeeping handled inline so callers carry no closures (Stage B
+// retired the old `onExit` plumbing — parent.children deregister
+// moves to handleSubagentResult; the only remaining hook was
+// childWG.Done, now folded into the goroutine itself):
+//
+//   - deps.WG accounts for every session goroutine in the forest;
+//     Manager.Stop waits on it.
+//   - For sub-agents (s.parent != nil) the parent's childWG tracks
+//     this child's goroutine so the parent's teardown can wait
+//     specifically for ITS direct children to exit before running
+//     its own lifecycle.Release / handleExit.
+//
+// Sessions built without deps (legacy NewSession test fixtures) do
+// nothing — those callers manage goroutines themselves.
+func (s *Session) Start(_ context.Context) {
 	if s.deps == nil || s.deps.WG == nil {
-		// Legacy NewSession callers that haven't migrated to the
-		// pivot constructors — they manage goroutines themselves.
-		// This path is rare (test fixtures only).
 		return
 	}
 	s.deps.WG.Add(1)
+	if s.parent != nil {
+		s.parent.childWG.Add(1)
+	}
 	go func() {
 		defer s.deps.WG.Done()
-		if onExit != nil {
-			defer onExit()
+		if s.parent != nil {
+			defer s.parent.childWG.Done()
 		}
 		if err := s.Run(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
 			s.deps.Logger.Warn("session loop exited", "session", s.id, "err", err)

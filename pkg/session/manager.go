@@ -228,7 +228,7 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, time.Tim
 	// Manager.Terminate after the session's Done channel closes.
 	// Graceful shutdown leaves stale entries until the next process
 	// boot — m.live is in-memory only and the binary is exiting.
-	s.start(nil)
+	s.Start(ctx)
 	return s, s.openedAt, nil
 }
 
@@ -277,7 +277,7 @@ func (m *Manager) Resume(ctx context.Context, id string) (*Session, error) {
 	}
 	m.live[id] = s
 	m.mu.Unlock()
-	s.start(nil)
+	s.Start(ctx)
 	return s, nil
 }
 
