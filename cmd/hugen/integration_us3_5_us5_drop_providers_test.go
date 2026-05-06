@@ -73,7 +73,6 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	store := &stubStore{}
 	resources := session.NewResources(session.ResourceDeps{
 		Providers:  cfgSvc.ToolProviders(),
-		Tools:      tools,
 		Skills:     skills,
 		SkillStore: skillStore,
 		Workspace:  ws,
@@ -83,10 +82,9 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	router, agent := makeRouter(t)
 	mgr := session.NewManager(
 		store, agent, router,
-		session.NewCommandRegistry(), protocol.NewCodec(), nil,
+		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
 		session.WithLifecycle(resources),
 		session.WithSessionOptions(
-			session.WithTools(tools),
 			session.WithSkills(skills),
 			session.WithPerms(perms),
 		),

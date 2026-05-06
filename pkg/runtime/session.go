@@ -24,7 +24,6 @@ import (
 func phaseSessionManager(_ context.Context, core *Core) error {
 	resources := session.NewResources(session.ResourceDeps{
 		Providers:  core.Config.ToolProviders(),
-		Tools:      core.Tools,
 		Skills:     core.Skills,
 		SkillStore: core.SkillStore,
 		Workspace:  core.Workspace,
@@ -35,10 +34,9 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 	}
 
 	mgr := session.NewManager(
-		core.Store, core.Agent, core.Models, core.Commands, core.Codec, core.Logger,
+		core.Store, core.Agent, core.Models, core.Commands, core.Codec, core.Tools, core.Logger,
 		session.WithLifecycle(resources),
 		session.WithSessionOptions(
-			session.WithTools(core.Tools),
 			session.WithSkills(core.Skills),
 			session.WithPerms(core.Permissions),
 		),

@@ -35,11 +35,6 @@ func (s stubLifecycle) Release(ctx context.Context, sessionID string) error {
 	return s.release(ctx, sessionID)
 }
 
-// SessionTools satisfies the Lifecycle interface — stubLifecycle
-// has no per-session tool scoping, so it always returns nil and
-// the session keeps its constructor-time tools.
-func (s stubLifecycle) SessionTools(string) *tool.ToolManager { return nil }
-
 // instrumentedStore wraps fakeStore with call counters used by the
 // lazy-materialisation tests.
 type instrumentedStore struct {
@@ -60,7 +55,8 @@ func newTestManager(t *testing.T, store RuntimeStore) *Manager {
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
-	return NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil)
+	tm := tool.NewToolManager(permsAllow{}, nil, nil)
+	return NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), tm, nil)
 }
 
 func TestManager_LazyMaterialisation(t *testing.T) {
@@ -333,7 +329,7 @@ func TestManager_LifecycleHooks(t *testing.T) {
 	}
 
 	var openCalled, closeCalled atomic.Int32
-	mgr := NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil,
+	mgr := NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), tool.NewToolManager(permsAllow{}, nil, nil), nil,
 		WithLifecycle(stubLifecycle{
 			acquire: func(ctx context.Context, sessionID string) error {
 				openCalled.Add(1)
@@ -369,7 +365,7 @@ func TestManager_OnOpenErrorRollsBack(t *testing.T) {
 		t.Fatalf("agent: %v", err)
 	}
 	failErr := errors.New("hook fail")
-	mgr := NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil,
+	mgr := NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), tool.NewToolManager(permsAllow{}, nil, nil), nil,
 		WithLifecycle(stubLifecycle{
 			acquire: func(ctx context.Context, sessionID string) error { return failErr },
 		}),

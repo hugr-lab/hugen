@@ -7,6 +7,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
 // Deps is the immutable bundle of shared dependencies every
@@ -45,6 +46,7 @@ type Deps struct {
 	Models    *model.ModelRouter
 	Commands  *CommandRegistry
 	Codec     *protocol.Codec
+	Tools     *tool.ToolManager
 	Logger    *slog.Logger
 	Lifecycle Lifecycle
 	Opts      []SessionOption

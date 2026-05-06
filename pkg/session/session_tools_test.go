@@ -98,7 +98,7 @@ func newToolSession(t *testing.T, mdl model.Model, perms perm.Service, providers
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
-	sess := NewSession("s1", agent, store, router, NewCommandRegistry(), protocol.NewCodec(), nil, WithTools(tm))
+	sess := NewSession("s1", agent, store, router, NewCommandRegistry(), protocol.NewCodec(), tm, nil)
 	sess.materialised.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = sess.Run(ctx) }()

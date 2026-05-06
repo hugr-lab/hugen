@@ -116,15 +116,6 @@ func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenReques
 			cancel(nil)
 			return nil, fmt.Errorf("session: acquire: %w", err)
 		}
-		// Phase 4.1a stage A step 9: per_session providers now live
-		// on a child ToolManager owned by Lifecycle. Swap the
-		// session's tools to that child so Dispatch / Snapshot walk
-		// child→root for unknown-provider lookups. Lifecycle
-		// implementations without per-session scoping return nil —
-		// the constructor-time tools (root) stay in place.
-		if child := deps.Lifecycle.SessionTools(id); child != nil {
-			s.tools = child
-		}
 	}
 
 	// 4. Emit SessionOpened so adapters / event log carry the live-cycle
@@ -216,9 +207,6 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *De
 			cancel(nil)
 			return nil, fmt.Errorf("session: re-acquire: %w", err)
 		}
-		if child := deps.Lifecycle.SessionTools(id); child != nil {
-			s.tools = child
-		}
 	}
 
 	// Emit a system_marker so adapters can render "session resumed"
@@ -237,7 +225,7 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *De
 // shared deps + tree links + ctx, but performs no IO. Used by both
 // constructors so the field-init pattern stays single-sourced.
 func buildSessionShell(id string, depth int, parent *Session, deps *Deps, sessCtx context.Context, cancel context.CancelCauseFunc) *Session {
-	s := NewSession(id, deps.Agent, deps.Store, deps.Models, deps.Commands, deps.Codec, deps.Logger, deps.Opts...)
+	s := NewSession(id, deps.Agent, deps.Store, deps.Models, deps.Commands, deps.Codec, deps.Tools, deps.Logger, deps.Opts...)
 	s.depth = depth
 	s.deps = deps
 	s.parent = parent

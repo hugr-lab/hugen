@@ -12,6 +12,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
 // SessionSummary is a lightweight projection of a session row used
@@ -83,6 +84,7 @@ type Manager struct {
 	models   *model.ModelRouter
 	commands *CommandRegistry
 	codec    *protocol.Codec
+	tools    *tool.ToolManager
 	logger   *slog.Logger
 
 	sessionOpts []SessionOption
@@ -145,11 +147,15 @@ func NewManager(
 	models *model.ModelRouter,
 	commands *CommandRegistry,
 	codec *protocol.Codec,
+	tools *tool.ToolManager,
 	logger *slog.Logger,
 	opts ...ManagerOption,
 ) *Manager {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if tools == nil {
+		panic("session: NewManager requires a non-nil *tool.ToolManager")
 	}
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	m := &Manager{
@@ -158,6 +164,7 @@ func NewManager(
 		models:     models,
 		commands:   commands,
 		codec:      codec,
+		tools:      tools,
 		logger:     logger,
 		rootCtx:    rootCtx,
 		rootCancel: rootCancel,
@@ -176,6 +183,7 @@ func NewManager(
 		Models:    m.models,
 		Commands:  m.commands,
 		Codec:     m.codec,
+		Tools:     m.tools,
 		Logger:    m.logger,
 		Lifecycle: m.lifecycle,
 		Opts:      m.sessionOpts,

@@ -111,12 +111,21 @@ body
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("unmarshal: %v\nout=%s", err, out)
 	}
-	if len(got.Providers) != 1 {
-		t.Fatalf("providers = %d, want 1: %s", len(got.Providers), out)
+	// Two providers — `hugr-main` (the test's fake) plus the
+	// session-scoped `session` provider Session registers on its
+	// own child manager. Locate hugr-main and run the grant
+	// assertions against it.
+	var hugr *toolCatalogProvider
+	for i := range got.Providers {
+		if got.Providers[i].Name == "hugr-main" {
+			hugr = &got.Providers[i]
+		}
 	}
-	hugr := got.Providers[0]
-	if hugr.Name != "hugr-main" || hugr.Lifetime != "per_agent" {
-		t.Errorf("hugr-main provider = %+v", hugr)
+	if hugr == nil {
+		t.Fatalf("hugr-main provider missing: %s", out)
+	}
+	if hugr.Lifetime != "per_agent" {
+		t.Errorf("hugr-main lifetime = %q, want per_agent", hugr.Lifetime)
 	}
 	if len(hugr.Tools) != 2 {
 		t.Fatalf("tools = %d, want 2", len(hugr.Tools))

@@ -10,6 +10,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
 // fakeStore is a minimal in-memory RuntimeStore. It supports multiple
@@ -255,7 +256,8 @@ func newTestSession(t *testing.T, store RuntimeStore, mdl model.Model) (*Session
 		},
 	})
 	codec := protocol.NewCodec()
-	sess := NewSession("s1", agent, store, router, cmds, codec, nil)
+	tm := tool.NewToolManager(permsAllow{}, nil, nil)
+	sess := NewSession("s1", agent, store, router, cmds, codec, tm, nil)
 	sess.materialised.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = sess.Run(ctx) }()

@@ -95,7 +95,7 @@ func TestUS5_NoHugr_BashFlowWorks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess := NewSession("s1", agent, store, router, NewCommandRegistry(), protocol.NewCodec(), nil, WithTools(tm))
+	sess := NewSession("s1", agent, store, router, NewCommandRegistry(), protocol.NewCodec(), tm, nil)
 	sess.materialised.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

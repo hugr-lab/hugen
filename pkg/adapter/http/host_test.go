@@ -6,10 +6,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
+
+// httpHostFakePerms allows everything; only used to satisfy the
+// tool.ToolManager constructor in the host fixture.
+type httpHostFakePerms struct{}
+
+func (httpHostFakePerms) Resolve(_ context.Context, _, _ string) (perm.Permission, error) {
+	return perm.Permission{}, nil
+}
+func (httpHostFakePerms) Refresh(_ context.Context) error { return nil }
+func (httpHostFakePerms) Subscribe(_ context.Context) (<-chan perm.RefreshEvent, error) {
+	return nil, nil
+}
 
 // stubIdentity is the minimal identity.Source the tests need to feed
 // session.NewAgent (which rejects nil sources).
@@ -81,7 +95,7 @@ func (f *fakeHost) OpenSession(_ context.Context, req session.OpenRequest) (*ses
 	// fakeHost returns a non-nil *session.Session so handlers can
 	// call Session.ID(). The session goroutine isn't running; only
 	// the public id surface is read by handlers.
-	return session.NewSession(id, f.agent, nil, nil, nil, nil, f.logger), now, nil
+	return session.NewSession(id, f.agent, nil, nil, nil, nil, tool.NewToolManager(httpHostFakePerms{}, nil, nil), f.logger), now, nil
 }
 
 func (f *fakeHost) ResumeSession(_ context.Context, id string) (*session.Session, error) {
@@ -90,7 +104,7 @@ func (f *fakeHost) ResumeSession(_ context.Context, id string) (*session.Session
 	if _, ok := f.sessions[id]; !ok {
 		return nil, session.ErrSessionNotFound
 	}
-	return session.NewSession(id, f.agent, nil, nil, nil, nil, f.logger), nil
+	return session.NewSession(id, f.agent, nil, nil, nil, nil, tool.NewToolManager(httpHostFakePerms{}, nil, nil), f.logger), nil
 }
 
 func (f *fakeHost) Submit(_ context.Context, frame protocol.Frame) error {

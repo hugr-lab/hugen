@@ -97,7 +97,6 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 	ws := session.NewWorkspace(workspaceDir, true)
 	resources := session.NewResources(session.ResourceDeps{
 		Providers:  cfgSvc.ToolProviders(),
-		Tools:      tools,
 		Skills:     skills,
 		SkillStore: skillStore,
 		Workspace:  ws,
@@ -107,9 +106,8 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 	router, agent := makeRouter(t)
 	mgr := session.NewManager(
 		&stubStore{}, agent, router,
-		session.NewCommandRegistry(), protocol.NewCodec(), nil,
+		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
 		session.WithLifecycle(resources),
-		session.WithSessionOptions(session.WithTools(tools)),
 	)
 
 	return &integrationCore{

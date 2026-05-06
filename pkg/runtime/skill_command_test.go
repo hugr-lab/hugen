@@ -13,7 +13,21 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
+
+// skillCmdAllowAll is the perm stub the in-test session fixture
+// hands to its ToolManager — the skill_command tests don't
+// exercise the permission gate.
+type skillCmdAllowAll struct{}
+
+func (skillCmdAllowAll) Resolve(_ context.Context, _, _ string) (perm.Permission, error) {
+	return perm.Permission{}, nil
+}
+func (skillCmdAllowAll) Refresh(_ context.Context) error { return nil }
+func (skillCmdAllowAll) Subscribe(_ context.Context) (<-chan perm.RefreshEvent, error) {
+	return nil, nil
+}
 
 type staticIdentity struct{ id string }
 
@@ -82,7 +96,8 @@ func newSkillCmdEnv(t *testing.T) session.CommandEnv {
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
-	s := session.NewSession("s1", agent, store, router, session.NewCommandRegistry(), protocol.NewCodec(), nil)
+	tm := tool.NewToolManager(skillCmdAllowAll{}, nil, nil)
+	s := session.NewSession("s1", agent, store, router, session.NewCommandRegistry(), protocol.NewCodec(), tm, nil)
 	return session.CommandEnv{
 		Session:     s,
 		Author:      protocol.ParticipantInfo{ID: "u", Kind: protocol.ParticipantUser},

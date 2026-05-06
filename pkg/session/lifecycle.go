@@ -19,26 +19,25 @@ import (
 // production implementation is *Resources below; tests usually
 // pass nil (no per-session resources) or their own struct.
 //
-// SessionTools returns the per-session ToolManager produced during
-// Acquire — a child of the agent-level root with per_session
-// providers registered on it. The Session uses this child as its
-// dispatch surface so per_session providers shadow the root in a
-// natural parent/child walk. Returns nil when no per-session
-// scoping happened (no Acquire, lifecycle disabled, etc.) — the
-// session keeps its constructor-time tools (typically the root).
+// Acquire receives the freshly-constructed Session. By the time
+// Acquire runs, s.Tools() is already a per-session child manager
+// (NewSession derived it off the root). Acquire's job is to add
+// per_session MCP providers to s.Tools() and any other per-session
+// state (workspace dir, autoloaded skills, …).
 type Lifecycle interface {
 	Acquire(ctx context.Context, s *Session) error
 	Release(ctx context.Context, sessionID string) error
-	SessionTools(sessionID string) *tool.ToolManager
 }
 
 // ResourceDeps groups every dependency Resources needs.
 //
-// Providers / Tools / Workspace are required. Skills and SkillStore
-// may be nil for deployments that disable autoload.
+// Providers and Workspace are required. Skills and SkillStore may
+// be nil for deployments that disable autoload. The agent-level
+// root ToolManager is no longer threaded here — each session
+// brings its own per-session child via s.Tools(), and Acquire
+// adds per_session MCP providers to that child directly.
 type ResourceDeps struct {
 	Providers  config.ToolProvidersView
-	Tools      *tool.ToolManager
 	Skills     *skill.SkillManager
 	SkillStore skill.SkillStore
 	Workspace  *Workspace
@@ -72,11 +71,10 @@ type Resources struct {
 
 	mu       sync.Mutex
 	revokers map[string][]func()
-	// children holds the per-session child *tool.ToolManager built
-	// during Acquire and consulted by SessionTools. Phase 4.1a
-	// stage A step 9 replaced the legacy ToolManager.sessionProviders
-	// map with this caller-side map; each child has the agent-level
-	// root as its parent so unknown-provider lookups walk up.
+	// children records the per-session child ToolManager (= s.Tools())
+	// at Acquire time so Release can close it when the session goes
+	// away. The session itself owns the child via NewSession; this
+	// map is just the lifecycle-side handle for teardown.
 	children map[string]*tool.ToolManager
 }
 
@@ -96,16 +94,6 @@ func NewResources(deps ResourceDeps) *Resources {
 		revokers: make(map[string][]func()),
 		children: make(map[string]*tool.ToolManager),
 	}
-}
-
-// SessionTools implements Lifecycle.SessionTools — returns the
-// child ToolManager built during Acquire for sessionID. Returns
-// nil when Acquire has not run (or has been Released) for the id
-// — Session keeps its constructor-time tools in that case.
-func (r *Resources) SessionTools(sessionID string) *tool.ToolManager {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.children[sessionID]
 }
 
 // Validate inspects every per_session entry in tool_providers and
@@ -143,8 +131,8 @@ func (r *Resources) Acquire(ctx context.Context, s *Session) error {
 	if r.deps.Workspace == nil {
 		return fmt.Errorf("session %s: workspace not configured", sessionID)
 	}
-	if r.deps.Tools == nil {
-		return fmt.Errorf("session %s: tool manager not configured", sessionID)
+	if s.Tools() == nil {
+		return fmt.Errorf("session %s: per-session tool manager not configured", sessionID)
 	}
 
 	sessDir, err := r.deps.Workspace.Acquire(sessionID)
@@ -153,12 +141,11 @@ func (r *Resources) Acquire(ctx context.Context, s *Session) error {
 	}
 	root, _ := r.deps.Workspace.Root()
 
-	// Per-session child Manager — phase 4.1a stage A step 9. Each
-	// session owns its own child ToolManager whose parent is the
-	// agent-level root. Per_session providers register on the
-	// child; child.Close() in Release drops them without touching
-	// agent-level state.
-	child := r.deps.Tools.NewChild()
+	// The session's per-session child ToolManager — derived from
+	// the agent-level root inside NewSession. Per_session providers
+	// register on this child; child.Close() in Release drops them
+	// without touching agent-level state.
+	child := s.Tools()
 
 	var (
 		opened   int
@@ -210,15 +197,6 @@ func (r *Resources) Acquire(ctx context.Context, s *Session) error {
 			return fmt.Errorf("session %s: provider %q register: %w", sessionID, cfg.Name, err)
 		}
 		opened++
-	}
-
-	// Session itself implements tool.ToolProvider — register it on
-	// the session's child ToolManager so session:* tools dispatch
-	// to methods that read s.store / s.logger / s.perms / s.skills
-	// directly.
-	if err := child.AddProvider(s); err != nil {
-		rollback()
-		return fmt.Errorf("session %s: register session provider: %w", sessionID, err)
 	}
 
 	r.mu.Lock()

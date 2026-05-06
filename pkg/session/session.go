@@ -43,7 +43,8 @@ type Session struct {
 	codec        *protocol.Codec
 	cmds         *CommandRegistry
 	notepad      *Notepad
-	tools        *tool.ToolManager   // optional; nil disables tool dispatch
+	tools        *tool.ToolManager   // per-session child manager; required (NewSession derives it)
+	rootTools    *tool.ToolManager   // parent (agent-level) manager; passed to subagents
 	skills       *skill.SkillManager // optional; consulted for per-skill max_turns
 	perms        perm.Service        // optional; consulted by tool handlers (skill_files etc.)
 	maxToolIters     int             // 0 → defaultMaxToolIterations
@@ -258,15 +259,6 @@ func WithSessionLogger(l *slog.Logger) SessionOption {
 	return func(s *Session) { s.logger = l }
 }
 
-// WithTools attaches a ToolManager to the session so the Turn loop
-// can dispatch model-emitted tool calls. Sessions constructed
-// without WithTools simply skip the tool dispatch branch — the
-// model can stream its tool_call chunks but they're surfaced as
-// tool_error{code: not_found} so the LLM gets a clean signal.
-func WithTools(tm *tool.ToolManager) SessionOption {
-	return func(s *Session) { s.tools = tm }
-}
-
 // WithMaxToolIterations overrides the per-Turn cap on
 // model→tool→model loops. Precedence at runtime: per-skill
 // metadata.hugen.max_turns (max across loaded skills) > this
@@ -311,7 +303,14 @@ func WithPerms(p perm.Service) SessionOption {
 	return func(s *Session) { s.perms = p }
 }
 
-// NewSession constructs a Session bound to its dependencies.
+// NewSession constructs a Session bound to its dependencies. The
+// passed *tool.ToolManager is the agent-level (root) manager —
+// NewSession immediately derives a per-session child via
+// tools.NewChild(), registers the session itself as a
+// ToolProvider on that child, and stores both views: the child as
+// s.tools (consumed by Dispatch / Snapshot) and the root as
+// s.rootTools (passed forward when the session spawns sub-agents,
+// each of which derives its own child off the same root).
 func NewSession(
 	id string,
 	agent *Agent,
@@ -319,11 +318,19 @@ func NewSession(
 	models *model.ModelRouter,
 	cmds *CommandRegistry,
 	codec *protocol.Codec,
+	tools *tool.ToolManager,
 	logger *slog.Logger,
 	opts ...SessionOption,
 ) *Session {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if tools == nil {
+		// Tests that need a tool-less session can pass an empty root
+		// (NewToolManager with no providers) — a nil here is a
+		// programming error. Panic so the misuse surfaces at
+		// construction rather than the first dispatch attempt.
+		panic("session: NewSession requires a non-nil *tool.ToolManager")
 	}
 	s := &Session{
 		id:        id,
@@ -333,6 +340,8 @@ func NewSession(
 		codec:     codec,
 		cmds:      cmds,
 		notepad:   NewNotepad(store, agent.ID(), id),
+		rootTools: tools,
+		tools:     tools.NewChild(),
 		logger:    logger,
 		overrides: make(map[model.Intent]model.ModelSpec),
 		in:        make(chan protocol.Frame, 16),
@@ -341,6 +350,17 @@ func NewSession(
 	}
 	for _, o := range opts {
 		o(s)
+	}
+	// Register the session as a ToolProvider on its own child
+	// manager — handlers dispatch back to s.callXxx methods. Done
+	// after options run so any option that flips a field the
+	// provider consumes (perms, skills) sees the final state.
+	if err := s.tools.AddProvider(s); err != nil {
+		// Self-registration failure indicates a name collision in
+		// the parent manager (someone already registered "session").
+		// That's a programming error in the boot wiring; surface it
+		// loudly.
+		panic(fmt.Sprintf("session: register self on child tool manager: %v", err))
 	}
 	return s
 }
@@ -397,13 +417,20 @@ func (s *Session) Submit(ctx context.Context, f protocol.Frame) (ok bool) {
 // Notepad returns the session's notepad handle.
 func (s *Session) Notepad() *Notepad { return s.notepad }
 
-// Tools exposes the per-session ToolManager. After phase 4.1a
-// stage A step 9 this is a child Manager owned by Lifecycle —
+// Tools exposes the per-session ToolManager. This is the child
+// manager NewSession derived off the root passed at construction:
 // per_session providers register on the child; child.Resolve /
 // Dispatch / Snapshot walk to the agent-level root for unknown
-// providers. nil → no tools wired (legacy NewSession callers /
-// tests that disabled dispatch).
+// providers.
 func (s *Session) Tools() *tool.ToolManager { return s.tools }
+
+// RootTools exposes the agent-level (root) ToolManager passed at
+// construction. parent.Spawn passes this to the child session's
+// constructor so each subagent derives its own per-session child
+// off the same root — the per_agent providers (hugr-main,
+// duckdb-mcp, …) stay singletons; per_session providers spawn
+// once per session.
+func (s *Session) RootTools() *tool.ToolManager { return s.rootTools }
 
 // OpenedAt returns the timestamp the session row was first written
 // (CreatedAt on SessionRow). Useful for callers that want to echo

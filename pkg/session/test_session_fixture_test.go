@@ -13,6 +13,19 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
+// permsAllowAll is the default permission service the fixture
+// hands to a freshly-built ToolManager when the test doesn't
+// supply one. Unconditional allow.
+type permsAllowAll struct{}
+
+func (permsAllowAll) Resolve(_ context.Context, _, _ string) (perm.Permission, error) {
+	return perm.Permission{}, nil
+}
+func (permsAllowAll) Refresh(_ context.Context) error { return nil }
+func (permsAllowAll) Subscribe(_ context.Context) (<-chan perm.RefreshEvent, error) {
+	return nil, nil
+}
+
 // drainOutboxOnce reads up to one frame off the outbox or returns
 // after a short timeout. Tests use it to swallow lifecycle frames
 // (SessionOpened, etc.) before driving the actual scenario.
@@ -51,13 +64,11 @@ func withTestSkills(s *skill.SkillManager) testParentOpt {
 	}
 }
 
-// withTestTools attaches a ToolManager to the session via
-// WithTools.
+// withTestTools sets the agent-level (root) ToolManager passed to
+// the session constructor. NewSession derives its own per-session
+// child off this root.
 func withTestTools(tm *tool.ToolManager) testParentOpt {
-	return func(c *testParentCfg) {
-		c.tools = tm
-		c.sessOpts = append(c.sessOpts, WithTools(tm))
-	}
+	return func(c *testParentCfg) { c.tools = tm }
 }
 
 // withTestPerms attaches a perm.Service to the session via
@@ -96,6 +107,9 @@ func newTestParent(t *testing.T, opts ...testParentOpt) (*Session, func()) {
 	if cfg.store == nil {
 		cfg.store = newFakeStore()
 	}
+	if cfg.tools == nil {
+		cfg.tools = tool.NewToolManager(permsAllowAll{}, nil, nil)
+	}
 	mdl := &scriptedModel{}
 	router := newRouterWithModel(t, mdl)
 	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
@@ -110,6 +124,7 @@ func newTestParent(t *testing.T, opts ...testParentOpt) (*Session, func()) {
 		Models:   router,
 		Commands: NewCommandRegistry(),
 		Codec:    protocol.NewCodec(),
+		Tools:    cfg.tools,
 		Logger:   slog.Default(),
 		Opts:     cfg.sessOpts,
 		RootCtx:  rootCtx,
