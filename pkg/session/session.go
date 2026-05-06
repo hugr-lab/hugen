@@ -191,6 +191,13 @@ type Session struct {
 	out    chan protocol.Frame
 	closed atomic.Bool
 
+	// closeReason is the verbatim reason the next SessionClose-driven
+	// teardown writes into the persisted session_terminated row. Set
+	// by routeInbound just before returning the close sentinel; read
+	// by teardown as the event-driven counterpart to context.Cause.
+	// Owned by the Run goroutine — no lock needed.
+	closeReason string
+
 	// closing transitions to true the moment the session decides
 	// (or is told) to terminate, but BEFORE the goroutine has actually
 	// torn down. Phase 4.1b-pre stage B introduces this idle gate so a
@@ -250,6 +257,19 @@ type terminationCause struct {
 }
 
 func (c *terminationCause) Error() string { return "session terminated: " + c.reason }
+
+// sessionCloseSignal is the sentinel error routeInbound returns when
+// it observes an inbound *protocol.SessionClose. The Run loop catches
+// it via errors.As, copies the reason to s.closeReason, and exits
+// the select after running teardown — replacing the historic
+// ctx.Done()-driven exit for explicit terminations.
+type sessionCloseSignal struct {
+	reason string
+}
+
+func (e *sessionCloseSignal) Error() string {
+	return "session: SessionClose received: " + e.reason
+}
 
 // terminate is the explicit-cancel path: called from Manager.Terminate
 // and from handleSlashCommand on /end. It sets explicitTerminate=true
@@ -561,6 +581,16 @@ func (s *Session) Run(ctx context.Context) error {
 				return nil
 			}
 			if err := s.routeInbound(ctx, f); err != nil {
+				var cs *sessionCloseSignal
+				if errors.As(err, &cs) {
+					// Phase 4.1b-pre stage B: event-driven teardown. The
+					// SessionClose Frame is the unified close trigger;
+					// teardown reads s.closeReason as the reason for the
+					// persisted session_terminated row.
+					s.closeReason = cs.reason
+					s.teardown(ctx)
+					return nil
+				}
 				s.logger.Debug("session frame handler", "session", s.id, "err", err)
 			}
 		case ev, ok := <-s.modelChunks:
@@ -583,20 +613,23 @@ func (s *Session) Run(ctx context.Context) error {
 }
 
 // teardown is the ordered shutdown sequence run when the per-session
-// ctx fires. See Run for the prose contract.
+// ctx fires OR a SessionClose Frame is observed inbound. See Run for
+// the prose contract.
 //
 // Two paths:
 //
-//   - graceful (cause==nil): step 1 (turn cancel + wait) and step 2
-//     (children exit + inbox drain) still run because every running
-//     goroutine must release its slot before the binary can exit, but
-//     no events are persisted and no Release is called. This matches
-//     the phase-4 promise that graceful shutdown writes nothing —
-//     orphaned sessions are the restart-walker's job on next boot.
-//   - explicit (cause is *terminationCause): every step runs. Steps
-//     3–5 use tc.writeCtx so a still-honest deadline reaches the
-//     store; cancellation of the writeCtx aborts the persist, which
-//     is the caller's choice.
+//   - graceful (ctx.Done with no cause AND s.closeReason==""): step 1
+//     (turn cancel + wait) and step 2 (children exit + inbox drain)
+//     still run because every running goroutine must release its slot
+//     before the binary can exit, but no events are persisted and no
+//     Release is called. This matches the phase-4 promise that graceful
+//     shutdown writes nothing — orphaned sessions are the restart
+//     walker's job on next boot.
+//   - explicit (s.closeReason set by routeInbound on SessionClose, OR
+//     legacy ctx.Cause(*terminationCause) for sites still using
+//     s.terminate): every step runs. Steps 3–5 use tc.writeCtx so a
+//     still-honest deadline reaches the store; cancellation of the
+//     writeCtx aborts the persist, which is the caller's choice.
 func (s *Session) teardown(runCtx context.Context) {
 	// 1) Stop the in-flight turn.
 	if s.turnCancel != nil {
@@ -606,6 +639,20 @@ func (s *Session) teardown(runCtx context.Context) {
 
 	cause := context.Cause(runCtx)
 	tc, _ := cause.(*terminationCause)
+
+	// Phase 4.1b-pre stage B: event-driven SessionClose path. If
+	// routeInbound stashed a closeReason, synthesise a terminationCause
+	// so the existing teardown / handleExit machinery treats this as
+	// an explicit close. The Run loop did NOT cancel runCtx; writes
+	// thread runCtx (carrying request-scoped values from the caller).
+	if tc == nil && s.closeReason != "" {
+		tc = &terminationCause{
+			reason:    s.closeReason,
+			emitClose: emitSessionClosedForReason(s.closeReason),
+			writeCtx:  runCtx,
+		}
+		s.explicitTerminate.Store(true)
+	}
 
 	// 2) Wait for direct children, draining inbox concurrently so a
 	// child's last Submit (subagent_result, etc.) lands on us instead
@@ -642,7 +689,33 @@ func (s *Session) teardown(runCtx context.Context) {
 	// 5) handleExit appends session_terminated, emits subagent_result
 	// to the parent (if any), and (optionally) the SessionClosed
 	// outbox frame.
-	s.handleExit(runCtx)
+	s.handleExit(runCtx, tc)
+}
+
+// emitSessionClosedForReason maps a SessionClose reason to whether the
+// session should also emit a transcript-visible SessionClosed Frame.
+// Reasons that originate from a transcript-side action (handleSlashCommand
+// /end already emitted SessionClosed; subagent paths surface via
+// subagent_result; cascade is internal lifecycle only) suppress the
+// extra frame; everything else (Manager.Terminate, hard_ceiling,
+// stream_error) emits.
+func emitSessionClosedForReason(reason string) bool {
+	switch {
+	case reason == "":
+		return false
+	case strings.HasPrefix(reason, "user:"):
+		return false
+	case reason == protocol.TerminationCancelCascade:
+		return false
+	case strings.HasPrefix(reason, protocol.TerminationSubagentCancelPrefix):
+		return false
+	case reason == "subagent_done":
+		return false
+	case reason == "parent_cascade":
+		return false
+	default:
+		return true
+	}
 }
 
 // drainOnTeardown blocks until s.childWG fires (every direct child's
@@ -733,10 +806,14 @@ func (s *Session) persistOnly(ctx context.Context, f protocol.Frame) error {
 // All store writes use tc.writeCtx (the caller's ctx threaded
 // through terminate). A cancelled writeCtx aborts the persist; that
 // is the caller's choice and we honour it.
-func (s *Session) handleExit(runCtx context.Context) {
-	cause := context.Cause(runCtx)
-	tc, ok := cause.(*terminationCause)
-	if !ok {
+//
+// Phase 4.1b-pre stage B: tc is now passed in by teardown rather than
+// recovered from context.Cause. The SessionClose-driven path
+// synthesises tc from s.closeReason without cancelling runCtx; the
+// legacy s.terminate path still attaches *terminationCause via
+// context.WithCancelCause. teardown unifies both into the tc param.
+func (s *Session) handleExit(runCtx context.Context, tc *terminationCause) {
+	if tc == nil {
 		return
 	}
 	if s.closed.Load() {
@@ -890,17 +967,37 @@ func (s *Session) emitSubagentResultToParent(persistCtx context.Context, reason 
 //     pass-through so transcript stays consistent (no turn means
 //     no boundary to drain into).
 //
+// SessionClose Frames trigger event-driven teardown (phase-4.1b-pre
+// stage B / D6): the routeInbound contract returns a sentinel
+// errSessionCloseSignal carrying the payload reason; the Run loop
+// stores it on s.closeReason and runs teardown without cancelling
+// runCtx. This replaces the historic ctx.Cause(*terminationCause)
+// path for explicit terminations. Graceful shutdown still flows
+// through ctx.Done with no cause.
+//
 // SessionClosed Frames observed inbound (e.g. legacy /end handler
 // returning a SessionClosed frame directly) flow through the buffered
 // path so adapters still see them in the transcript; the actual
-// termination is triggered by handleSlashCommand calling s.terminate.
+// termination is triggered separately by the SessionClose Frame the
+// /end handler also produces.
 func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 	switch v := f.(type) {
+	case *protocol.SessionClose:
+		s.markClosing()
+		return &sessionCloseSignal{reason: v.Payload.Reason}
 	case *protocol.Cancel:
 		return s.handleCancel(ctx, v)
 	case *protocol.SlashCommand:
 		return s.handleSlashCommand(ctx, v)
 	case *protocol.UserMessage:
+		if s.IsClosing() {
+			// Phase 4.1b-pre stage B: the session is on its way out;
+			// drop new user input on the floor with a transcript-visible
+			// system_marker so the operator sees what happened.
+			marker := protocol.NewSystemMarker(s.id, s.agent.Participant(),
+				"user_message_rejected_closing", map[string]any{"author": v.Author().ID})
+			return s.emit(ctx, marker)
+		}
 		// Concurrent UserMessage during a turn is unusual (UI typically
 		// gates on AgentMessage{Final:true}). Buffer it; advanceOrFinish
 		// will fold it into history at the next turn boundary so the
