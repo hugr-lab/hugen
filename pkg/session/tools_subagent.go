@@ -13,14 +13,11 @@ import (
 )
 
 // init registers the five US1 session-scoped tools into the
-// package-level dispatch table set up in manager_tool_provider.go.
-// Per phase-4-spec §15 step 7 + contracts/tools-subagent.md these are
-// the entries the LLM sees as session:spawn_subagent /
+// package-level dispatch table set up in tools_provider.go. Per
+// phase-4-spec §15 step 7 + contracts/tools-subagent.md these are the
+// entries the LLM sees as session:spawn_subagent /
 // session:wait_subagents / session:subagent_runs /
 // session:subagent_cancel / session:parent_context.
-//
-// Plan and whiteboard primitives land in subsequent commits using the
-// same registration pattern.
 func init() {
 	sessionTools["spawn_subagent"] = sessionToolDescriptor{
 		Name:             "spawn_subagent",
@@ -138,45 +135,6 @@ const (
 }`
 )
 
-// Common per-tool error helpers. Tool errors flow back to the LLM as
-// JSON {"error": {"code": "...", "message": "..."}} so the model can
-// react without conflating them with infrastructure failures.
-type toolError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-type toolErrorResponse struct {
-	Error toolError `json:"error"`
-}
-
-func toolErr(code, msg string) (json.RawMessage, error) {
-	resp, err := json.Marshal(toolErrorResponse{Error: toolError{Code: code, Message: msg}})
-	if err != nil {
-		return nil, err
-	}
-	return resp, nil
-}
-
-// callerSession recovers the *Session attached to ctx by
-// dispatchToolCall. Returns a synthetic tool_error for the two failure
-// modes — the missing-context case is a wiring bug; the gone-session
-// case is a benign post-cancel race.
-func callerSession(ctx context.Context) (*Session, json.RawMessage, error) {
-	s, ok := SessionFromContext(ctx)
-	if !ok {
-		out, err := toolErr("missing_session_context",
-			"session-scoped tool dispatched without a session in ctx")
-		return nil, out, err
-	}
-	if s.IsClosed() {
-		out, err := toolErr("session_gone",
-			"calling session has already terminated")
-		return nil, out, err
-	}
-	return s, nil, nil
-}
-
 // ---------- spawn_subagent ----------
 
 type spawnSubagentInput struct {
@@ -195,10 +153,9 @@ type spawnSubagentResult struct {
 	Depth     int    `json:"depth"`
 }
 
-func callSpawnSubagent(ctx context.Context, m *Manager, args json.RawMessage) (json.RawMessage, error) {
-	parent, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callSpawnSubagent(ctx context.Context, parent *Session, host SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if parent.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	var in spawnSubagentInput
 	if err := json.Unmarshal(args, &in); err != nil {
@@ -273,7 +230,7 @@ func callSpawnSubagent(ctx context.Context, m *Manager, args json.RawMessage) (j
 		// child's goroutine is already started (parent.Spawn).
 		first := protocol.NewUserMessage(child.ID(), parent.agent.Participant(), e.Task)
 		if !child.Submit(ctx, first) {
-			m.logger.Warn("session: spawn_subagent: child rejected initial task",
+			host.Logger.Warn("session: spawn_subagent: child rejected initial task",
 				"parent", parent.id, "child", child.ID())
 		}
 	}
@@ -330,10 +287,9 @@ type waitResultRow struct {
 	TurnsUsed int    `json:"turns_used,omitempty"`
 }
 
-func callWaitSubagents(ctx context.Context, m *Manager, args json.RawMessage) (json.RawMessage, error) {
-	parent, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callWaitSubagents(ctx context.Context, parent *Session, host SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if parent.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	var in waitSubagentsInput
 	if err := json.Unmarshal(args, &in); err != nil {
@@ -348,7 +304,7 @@ func callWaitSubagents(ctx context.Context, m *Manager, args json.RawMessage) (j
 	// before we register a feed. ListEvents lookup runs once per call;
 	// the round-trip is cheap relative to a sub-agent's normal lifetime.
 	collected := make(map[string]waitResultRow, len(in.IDs))
-	if cached, err := drainCachedSubagentResults(ctx, m, parent, in.IDs); err == nil {
+	if cached, err := drainCachedSubagentResults(ctx, host, parent, in.IDs); err == nil {
 		for k, v := range cached {
 			collected[k] = v
 		}
@@ -416,7 +372,7 @@ func callWaitSubagents(ctx context.Context, m *Manager, args json.RawMessage) (j
 			// so subsequent wait_subagents calls (or restart) see the
 			// terminal state without rerunning the child.
 			if err := parent.emit(ctx, sr); err != nil {
-				m.logger.Warn("session: wait_subagents: persist result",
+				host.Logger.Warn("session: wait_subagents: persist result",
 					"parent", parent.id, "child", id, "err", err)
 			}
 		case <-ctx.Done():
@@ -441,12 +397,12 @@ func marshalWaitResults(ids []string, collected map[string]waitResultRow) (json.
 // observed subagent_result rows matching ids. Used to short-circuit
 // wait_subagents when the parent re-asks for ids that already
 // resolved (e.g. polling pattern, restart-replay).
-func drainCachedSubagentResults(ctx context.Context, m *Manager, parent *Session, ids []string) (map[string]waitResultRow, error) {
+func drainCachedSubagentResults(ctx context.Context, host SessionToolHost, parent *Session, ids []string) (map[string]waitResultRow, error) {
 	want := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		want[id] = struct{}{}
 	}
-	rows, err := m.store.ListEvents(ctx, parent.id, ListEventsOpts{Limit: 1000})
+	rows, err := host.Store.ListEvents(ctx, parent.id, ListEventsOpts{Limit: 1000})
 	if err != nil {
 		return nil, err
 	}
@@ -525,10 +481,9 @@ type subagentRunsOutput struct {
 
 const subagentRunsHardCap = 500
 
-func callSubagentRuns(ctx context.Context, m *Manager, args json.RawMessage) (json.RawMessage, error) {
-	parent, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callSubagentRuns(ctx context.Context, parent *Session, host SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if parent.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	var in subagentRunsInput
 	if err := json.Unmarshal(args, &in); err != nil {
@@ -538,7 +493,7 @@ func callSubagentRuns(ctx context.Context, m *Manager, args json.RawMessage) (js
 		return toolErr("bad_request", "session_id is required")
 	}
 
-	if errFrame := assertChildOf(ctx, m, parent.id, in.SessionID); errFrame != nil {
+	if errFrame := assertChildOf(ctx, host, parent.id, in.SessionID); errFrame != nil {
 		return errFrame, nil
 	}
 
@@ -550,7 +505,7 @@ func callSubagentRuns(ctx context.Context, m *Manager, args json.RawMessage) (js
 		limit = subagentRunsHardCap
 	}
 
-	rows, err := m.store.ListEvents(ctx, in.SessionID, ListEventsOpts{
+	rows, err := host.Store.ListEvents(ctx, in.SessionID, ListEventsOpts{
 		MinSeq: in.SinceSeq,
 		Limit:  limit,
 	})
@@ -585,12 +540,12 @@ func callSubagentRuns(ctx context.Context, m *Manager, args json.RawMessage) (js
 // assertChildOf returns a tool_error JSON when sessionID is not a
 // direct child of parentID (or doesn't exist). Used by subagent_runs
 // + subagent_cancel to gate cross-session reads.
-func assertChildOf(ctx context.Context, m *Manager, parentID, sessionID string) json.RawMessage {
+func assertChildOf(ctx context.Context, host SessionToolHost, parentID, sessionID string) json.RawMessage {
 	if sessionID == parentID {
 		out, _ := toolErr("not_a_child", "session_id is the caller itself")
 		return out
 	}
-	row, err := m.store.LoadSession(ctx, sessionID)
+	row, err := host.Store.LoadSession(ctx, sessionID)
 	if err != nil {
 		if errors.Is(err, ErrSessionNotFound) {
 			out, _ := toolErr("session_not_found", fmt.Sprintf("session %q not found", sessionID))
@@ -618,10 +573,9 @@ type subagentCancelOutput struct {
 	OK bool `json:"ok"`
 }
 
-func callSubagentCancel(ctx context.Context, m *Manager, args json.RawMessage) (json.RawMessage, error) {
-	parent, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callSubagentCancel(ctx context.Context, parent *Session, host SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if parent.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	var in subagentCancelInput
 	if err := json.Unmarshal(args, &in); err != nil {
@@ -663,7 +617,7 @@ func callSubagentCancel(ctx context.Context, m *Manager, args json.RawMessage) (
 	// not a child of caller at all. Confirm direct parentage in the
 	// store; not_a_child / session_not_found surface the wiring error,
 	// otherwise the cancel is idempotent ok=true.
-	if errFrame := assertChildOf(ctx, m, parent.id, in.SessionID); errFrame != nil {
+	if errFrame := assertChildOf(ctx, host, parent.id, in.SessionID); errFrame != nil {
 		return errFrame, nil
 	}
 	return json.Marshal(subagentCancelOutput{OK: true})
@@ -691,10 +645,9 @@ type parentContextOutput struct {
 
 const parentContextHardCap = 20
 
-func callParentContext(ctx context.Context, m *Manager, args json.RawMessage) (json.RawMessage, error) {
-	caller, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callParentContext(ctx context.Context, caller *Session, host SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if caller.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	if caller.parent == nil {
 		return toolErr("no_parent", "calling session is a root session")
@@ -735,7 +688,7 @@ func callParentContext(ctx context.Context, m *Manager, args json.RawMessage) (j
 	}
 	q := strings.ToLower(strings.TrimSpace(in.Query))
 
-	rows, err := m.store.ListEvents(ctx, parentID, ListEventsOpts{Limit: 1000})
+	rows, err := host.Store.ListEvents(ctx, parentID, ListEventsOpts{Limit: 1000})
 	if err != nil {
 		return toolErr("io", err.Error())
 	}

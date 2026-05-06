@@ -94,7 +94,7 @@ func TestUS1_SubagentResult_DeliveredToParent(t *testing.T) {
 	args, _ := json.Marshal(subagentCancelInput{
 		SessionID: child.id, Reason: "test bail",
 	})
-	if _, err := callSubagentCancel(us1WithSession(parent), mgr, args); err != nil {
+	if _, err := callSubagentCancel(us1WithSession(parent), parent, mgrToolHost(mgr), args); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	<-child.Done()
@@ -140,7 +140,7 @@ func TestUS1_WaitSubagents_NaturalTermination(t *testing.T) {
 	done := make(chan res, 1)
 	args, _ := json.Marshal(waitSubagentsInput{IDs: []string{child.id}})
 	go func() {
-		out, err := callWaitSubagents(us1WithSession(parent), mgr, args)
+		out, err := callWaitSubagents(us1WithSession(parent), parent, mgrToolHost(mgr), args)
 		done <- res{out: out, err: err}
 	}()
 
@@ -162,7 +162,7 @@ func TestUS1_WaitSubagents_NaturalTermination(t *testing.T) {
 		args, _ := json.Marshal(subagentCancelInput{
 			SessionID: child.id, Reason: "natural-test-cancel",
 		})
-		if _, err := callSubagentCancel(us1WithSession(parent), mgr, args); err != nil {
+		if _, err := callSubagentCancel(us1WithSession(parent), parent, mgrToolHost(mgr), args); err != nil {
 			t.Errorf("cancel: %v", err)
 		}
 	}()

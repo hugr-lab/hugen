@@ -6,10 +6,9 @@ import (
 	"fmt"
 )
 
-// Step 18 of phase-4.1a-spec.md §9 — session:notepad_append moves
-// off SystemProvider onto the Manager. The handler delegates to
-// the caller session's Notepad (per-session state), recovered from
-// ctx via callerSession.
+// session:notepad_append delegates to the caller session's Notepad
+// (per-session state). Handler signature receives *Session directly
+// via SessionToolProvider — no ctx-stash recovery.
 
 func init() {
 	sessionTools["notepad_append"] = sessionToolDescriptor{
@@ -37,10 +36,9 @@ type notepadAppendInput struct {
 	AuthorID string `json:"author_id,omitempty"`
 }
 
-func callNotepadAppend(ctx context.Context, _ *Manager, args json.RawMessage) (json.RawMessage, error) {
-	s, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callNotepadAppend(ctx context.Context, s *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if s.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	var in notepadAppendInput
 	if err := json.Unmarshal(args, &in); err != nil {

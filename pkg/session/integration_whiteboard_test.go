@@ -31,7 +31,7 @@ func TestUS3_Whiteboard_BroadcastEndToEnd(t *testing.T) {
 	parent := us1OpenParent(t, mgr)
 
 	// 1. Host opens the board.
-	if _, err := callWhiteboardInit(us1WithSession(parent), mgr, json.RawMessage(`{}`)); err != nil {
+	if _, err := callWhiteboardInit(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 
@@ -51,7 +51,7 @@ func TestUS3_Whiteboard_BroadcastEndToEnd(t *testing.T) {
 
 	// 3. Child A writes a broadcast.
 	args, _ := json.Marshal(whiteboardWriteInput{Text: "found auth_logs"})
-	out, err := callWhiteboardWrite(us1WithSession(childA), mgr, args)
+	out, err := callWhiteboardWrite(us1WithSession(childA), childA, mgrToolHost(mgr), args)
 	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestUS3_Whiteboard_StopRefusesNewWrites(t *testing.T) {
 	defer mgr.ShutdownAll(ctx)
 
 	parent := us1OpenParent(t, mgr)
-	_, _ = callWhiteboardInit(us1WithSession(parent), mgr, json.RawMessage(`{}`))
+	_, _ = callWhiteboardInit(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
 
 	child, err := parent.Spawn(ctx, SpawnSpec{Task: "x"})
 	if err != nil {
@@ -145,12 +145,12 @@ func TestUS3_Whiteboard_StopRefusesNewWrites(t *testing.T) {
 	}
 	drainOutboxOnce(parent.Outbox())
 
-	if _, err := callWhiteboardStop(us1WithSession(parent), mgr, json.RawMessage(`{}`)); err != nil {
+	if _, err := callWhiteboardStop(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 
 	args, _ := json.Marshal(whiteboardWriteInput{Text: "too late"})
-	out, _ := callWhiteboardWrite(us1WithSession(child), mgr, args)
+	out, _ := callWhiteboardWrite(us1WithSession(child), child, mgrToolHost(mgr), args)
 	mgr_assertErrorCode(t, out, "no_active_whiteboard")
 }
 
@@ -171,7 +171,7 @@ func TestUS3_Whiteboard_SurvivesRestart(t *testing.T) {
 	}
 	drainOutboxOnce(parent1.Outbox())
 
-	if _, err := callWhiteboardInit(us1WithSession(parent1), mgr1, json.RawMessage(`{}`)); err != nil {
+	if _, err := callWhiteboardInit(us1WithSession(parent1), parent1, mgrToolHost(mgr1), json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	child, err := parent1.Spawn(ctx, SpawnSpec{Task: "x"})
@@ -181,7 +181,7 @@ func TestUS3_Whiteboard_SurvivesRestart(t *testing.T) {
 	drainOutboxOnce(parent1.Outbox())
 
 	args, _ := json.Marshal(whiteboardWriteInput{Text: "anchor msg"})
-	if _, err := callWhiteboardWrite(us1WithSession(child), mgr1, args); err != nil {
+	if _, err := callWhiteboardWrite(us1WithSession(child), child, mgrToolHost(mgr1), args); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	// Wait for host RouteInternal to land the canonical write event.

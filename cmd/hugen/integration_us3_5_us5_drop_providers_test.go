@@ -70,6 +70,7 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 
 
 	ws := session.NewWorkspace(workspaceDir, true)
+	store := &stubStore{}
 	resources := session.NewResources(session.ResourceDeps{
 		Providers:  cfgSvc.ToolProviders(),
 		Tools:      tools,
@@ -77,22 +78,23 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 		SkillStore: skillStore,
 		Workspace:  ws,
 		Logger:     logger,
+		SessionTools: session.SessionToolHost{
+			Store:  store,
+			Logger: logger,
+			Perms:  perms,
+		},
 	})
 
 	router, agent := makeRouter(t)
 	mgr := session.NewManager(
-		&stubStore{}, agent, router,
+		store, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), nil,
 		session.WithLifecycle(resources),
-		session.WithPerms(perms),
 		session.WithSessionOptions(
 			session.WithTools(tools),
 			session.WithSkills(skills),
 		),
 	)
-	if err := tools.AddProvider(mgr); err != nil {
-		t.Fatalf("AddProvider session: %v", err)
-	}
 
 	ctx := context.Background()
 	sess, _, err := mgr.Open(ctx, session.OpenRequest{OwnerID: "u"})

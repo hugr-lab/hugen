@@ -111,7 +111,7 @@ body
 		t.Fatalf("Load: %v", err)
 	}
 
-	out, err := callToolCatalog(us1WithSession(parent), mgr, json.RawMessage(`{}`))
+	out, err := callToolCatalog(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestToolCatalog_ProviderFilter(t *testing.T) {
 	defer mgr.ShutdownAll(context.Background())
 	parent := us1OpenParent(t, mgr)
 
-	out, err := callToolCatalog(us1WithSession(parent), mgr,
+	out, err := callToolCatalog(us1WithSession(parent), parent, mgrToolHost(mgr),
 		json.RawMessage(`{"provider":"missing"}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -162,7 +162,7 @@ func TestToolCatalog_PatternFilter(t *testing.T) {
 	defer mgr.ShutdownAll(context.Background())
 	parent := us1OpenParent(t, mgr)
 
-	out, err := callToolCatalog(us1WithSession(parent), mgr,
+	out, err := callToolCatalog(us1WithSession(parent), parent, mgrToolHost(mgr),
 		json.RawMessage(`{"pattern":"DISCOVERY"}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -183,7 +183,7 @@ func TestToolCatalog_BadRequest(t *testing.T) {
 	defer mgr.ShutdownAll(context.Background())
 	parent := us1OpenParent(t, mgr)
 
-	out, err := callToolCatalog(us1WithSession(parent), mgr, json.RawMessage(`{not-json`))
+	out, err := callToolCatalog(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{not-json`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -192,12 +192,9 @@ func TestToolCatalog_BadRequest(t *testing.T) {
 	}
 }
 
-func TestToolCatalog_RegisteredOnManager(t *testing.T) {
-	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
-	mgr, _ := newCatalogTestManager(t, skills)
-	defer mgr.ShutdownAll(context.Background())
-
-	tools, err := mgr.List(context.Background())
+func TestToolCatalog_RegisteredOnSessionProvider(t *testing.T) {
+	prov := NewSessionToolProvider(nil, SessionToolHost{})
+	tools, err := prov.List(context.Background())
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -209,5 +206,5 @@ func TestToolCatalog_RegisteredOnManager(t *testing.T) {
 			return
 		}
 	}
-	t.Errorf("session:tool_catalog not registered on Manager")
+	t.Errorf("session:tool_catalog not registered on SessionToolProvider")
 }

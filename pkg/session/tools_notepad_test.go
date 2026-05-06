@@ -15,7 +15,7 @@ func TestCallNotepadAppend_Happy(t *testing.T) {
 	parent := us1OpenParent(t, mgr)
 
 	args, _ := json.Marshal(notepadAppendInput{Text: "remember this"})
-	out, err := callNotepadAppend(us1WithSession(parent), mgr, args)
+	out, err := callNotepadAppend(us1WithSession(parent), parent, mgrToolHost(mgr), args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestCallNotepadAppend_BadRequest(t *testing.T) {
 	defer mgr.ShutdownAll(context.Background())
 	parent := us1OpenParent(t, mgr)
 
-	out, err := callNotepadAppend(us1WithSession(parent), mgr, json.RawMessage(`{not-json`))
+	out, err := callNotepadAppend(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{not-json`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestCallNotepadAppend_EmptyText(t *testing.T) {
 	parent := us1OpenParent(t, mgr)
 
 	args, _ := json.Marshal(notepadAppendInput{Text: ""})
-	out, err := callNotepadAppend(us1WithSession(parent), mgr, args)
+	out, err := callNotepadAppend(us1WithSession(parent), parent, mgrToolHost(mgr), args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -67,12 +67,9 @@ func TestCallNotepadAppend_EmptyText(t *testing.T) {
 	}
 }
 
-func TestNotepadAppend_RegisteredOnManager(t *testing.T) {
-	store := newFakeStore()
-	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
-
-	tools, err := mgr.List(context.Background())
+func TestNotepadAppend_RegisteredOnSessionProvider(t *testing.T) {
+	prov := NewSessionToolProvider(nil, SessionToolHost{})
+	tools, err := prov.List(context.Background())
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -85,5 +82,5 @@ func TestNotepadAppend_RegisteredOnManager(t *testing.T) {
 	for _, tt := range tools {
 		names = append(names, tt.Name)
 	}
-	t.Errorf("session:notepad_append not registered on Manager (have: %v)", names)
+	t.Errorf("session:notepad_append not registered on SessionToolProvider (have: %v)", names)
 }

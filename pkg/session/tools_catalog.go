@@ -69,10 +69,9 @@ type toolCatalogResult struct {
 	Providers []toolCatalogProvider `json:"providers"`
 }
 
-func callToolCatalog(ctx context.Context, _ *Manager, args json.RawMessage) (json.RawMessage, error) {
-	s, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callToolCatalog(ctx context.Context, s *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if s.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	if s.tools == nil {
 		return nil, tool.ErrSystemUnavailable

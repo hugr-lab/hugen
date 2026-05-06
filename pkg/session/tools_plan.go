@@ -102,10 +102,9 @@ type planOKOutput struct {
 	OK bool `json:"ok"`
 }
 
-func callPlanSet(ctx context.Context, _ *Manager, args json.RawMessage) (json.RawMessage, error) {
-	caller, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callPlanSet(ctx context.Context, caller *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if caller.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	var in planSetInput
 	if err := json.Unmarshal(args, &in); err != nil {
@@ -124,10 +123,9 @@ type planCommentInput struct {
 	CurrentStep string `json:"current_step,omitempty"`
 }
 
-func callPlanComment(ctx context.Context, _ *Manager, args json.RawMessage) (json.RawMessage, error) {
-	caller, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callPlanComment(ctx context.Context, caller *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if caller.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	var in planCommentInput
 	if err := json.Unmarshal(args, &in); err != nil {
@@ -167,10 +165,9 @@ type planShowCommentRow struct {
 	Text        string `json:"text"`
 }
 
-func callPlanShow(ctx context.Context, _ *Manager, _ json.RawMessage) (json.RawMessage, error) {
-	caller, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callPlanShow(_ context.Context, caller *Session, _ SessionToolHost, _ json.RawMessage) (json.RawMessage, error) {
+	if caller.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	caller.planMu.Lock()
 	p := caller.plan
@@ -200,10 +197,9 @@ func callPlanShow(ctx context.Context, _ *Manager, _ json.RawMessage) (json.RawM
 
 // ---------- plan_clear ----------
 
-func callPlanClear(ctx context.Context, _ *Manager, _ json.RawMessage) (json.RawMessage, error) {
-	caller, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callPlanClear(ctx context.Context, caller *Session, _ SessionToolHost, _ json.RawMessage) (json.RawMessage, error) {
+	if caller.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	return persistAndApplyPlanOp(ctx, caller, plan.OpClear, "", "", false)
 }

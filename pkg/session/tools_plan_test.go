@@ -21,7 +21,7 @@ func TestCallPlanSet_Happy(t *testing.T) {
 	parent := us1OpenParent(t, mgr)
 
 	args, _ := json.Marshal(planSetInput{Text: "investigate cache", CurrentStep: "scope"})
-	out, err := callPlanSet(us1WithSession(parent), mgr, args)
+	out, err := callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr), args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -62,22 +62,24 @@ func TestCallPlanSet_BadRequest(t *testing.T) {
 	defer mgr.ShutdownAll(context.Background())
 	parent := us1OpenParent(t, mgr)
 
-	out, _ := callPlanSet(us1WithSession(parent), mgr,
+	out, _ := callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr),
 		json.RawMessage(`{}`))
 	mgr_assertErrorCode(t, out, "bad_request")
 }
 
-// TestCallPlanSet_MissingSessionContext — wiring guard.
-func TestCallPlanSet_MissingSessionContext(t *testing.T) {
+// TestCallPlanSet_SessionGone — closed-session guard.
+func TestCallPlanSet_SessionGone(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
 	defer mgr.ShutdownAll(context.Background())
+	parent := us1OpenParent(t, mgr)
+	parent.closed.Store(true)
 
-	out, err := callPlanSet(context.Background(), mgr,
+	out, err := callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr),
 		json.RawMessage(`{"text":"x"}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
-	mgr_assertErrorCode(t, out, "missing_session_context")
+	mgr_assertErrorCode(t, out, "session_gone")
 }
 
 // ---------- plan_comment ----------
@@ -90,13 +92,13 @@ func TestCallPlanComment_Happy(t *testing.T) {
 	parent := us1OpenParent(t, mgr)
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "body", CurrentStep: "a"})
-	if _, err := callPlanSet(us1WithSession(parent), mgr, setArgs); err != nil {
+	if _, err := callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr), setArgs); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 
 	// Comment with no current_step → should preserve "a".
 	cArgs, _ := json.Marshal(planCommentInput{Text: "noted"})
-	if _, err := callPlanComment(us1WithSession(parent), mgr, cArgs); err != nil {
+	if _, err := callPlanComment(us1WithSession(parent), parent, mgrToolHost(mgr), cArgs); err != nil {
 		t.Fatalf("comment: %v", err)
 	}
 
@@ -112,7 +114,7 @@ func TestCallPlanComment_Happy(t *testing.T) {
 
 	// Second comment with explicit pointer → should move it.
 	cArgs2, _ := json.Marshal(planCommentInput{Text: "moved", CurrentStep: "b"})
-	if _, err := callPlanComment(us1WithSession(parent), mgr, cArgs2); err != nil {
+	if _, err := callPlanComment(us1WithSession(parent), parent, mgrToolHost(mgr), cArgs2); err != nil {
 		t.Fatalf("comment2: %v", err)
 	}
 	parent.planMu.Lock()
@@ -134,7 +136,7 @@ func TestCallPlanComment_NoActivePlan(t *testing.T) {
 	parent := us1OpenParent(t, mgr)
 
 	args, _ := json.Marshal(planCommentInput{Text: "x"})
-	out, _ := callPlanComment(us1WithSession(parent), mgr, args)
+	out, _ := callPlanComment(us1WithSession(parent), parent, mgrToolHost(mgr), args)
 	mgr_assertErrorCode(t, out, "no_active_plan")
 }
 
@@ -148,7 +150,7 @@ func TestCallPlanComment_BadRequest(t *testing.T) {
 	// no_active_plan since unmarshal fails on missing "text" only
 	// when the JSON decoder sees an empty string. Use a
 	// deliberately-malformed shape to hit the bad_request branch.
-	out, _ := callPlanComment(us1WithSession(parent), mgr,
+	out, _ := callPlanComment(us1WithSession(parent), parent, mgrToolHost(mgr),
 		json.RawMessage(`{"text":"["`)) // truncated → unmarshal error
 	mgr_assertErrorCode(t, out, "bad_request")
 }
@@ -161,7 +163,7 @@ func TestCallPlanShow_Inactive(t *testing.T) {
 	defer mgr.ShutdownAll(context.Background())
 	parent := us1OpenParent(t, mgr)
 
-	out, err := callPlanShow(us1WithSession(parent), mgr, json.RawMessage(`{}`))
+	out, err := callPlanShow(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("show: %v", err)
 	}
@@ -182,14 +184,14 @@ func TestCallPlanShow_Roundtrip(t *testing.T) {
 	parent := us1OpenParent(t, mgr)
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "v1", CurrentStep: "phase-1"})
-	_, _ = callPlanSet(us1WithSession(parent), mgr, setArgs)
+	_, _ = callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr), setArgs)
 
 	for _, txt := range []string{"first", "second"} {
 		cArgs, _ := json.Marshal(planCommentInput{Text: txt})
-		_, _ = callPlanComment(us1WithSession(parent), mgr, cArgs)
+		_, _ = callPlanComment(us1WithSession(parent), parent, mgrToolHost(mgr), cArgs)
 	}
 
-	out, _ := callPlanShow(us1WithSession(parent), mgr, json.RawMessage(`{}`))
+	out, _ := callPlanShow(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
 	var got planShowOutput
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -214,9 +216,9 @@ func TestCallPlanClear(t *testing.T) {
 	parent := us1OpenParent(t, mgr)
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "tmp"})
-	_, _ = callPlanSet(us1WithSession(parent), mgr, setArgs)
+	_, _ = callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr), setArgs)
 
-	if _, err := callPlanClear(us1WithSession(parent), mgr, json.RawMessage(`{}`)); err != nil {
+	if _, err := callPlanClear(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 
@@ -226,7 +228,7 @@ func TestCallPlanClear(t *testing.T) {
 	}
 	parent.planMu.Unlock()
 
-	out, _ := callPlanShow(us1WithSession(parent), mgr, json.RawMessage(`{}`))
+	out, _ := callPlanShow(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
 	if !strings.Contains(string(out), `"active":false`) {
 		t.Errorf("show after clear = %s, want active:false", out)
 	}
@@ -240,7 +242,7 @@ func TestPlanRendersInSystemPrompt(t *testing.T) {
 	parent := us1OpenParent(t, mgr)
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "investigate latency", CurrentStep: "instrument"})
-	_, _ = callPlanSet(us1WithSession(parent), mgr, setArgs)
+	_, _ = callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr), setArgs)
 
 	prompt := parent.systemPrompt(context.Background())
 	if !strings.Contains(prompt, "## Active plan") {

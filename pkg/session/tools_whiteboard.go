@@ -86,10 +86,9 @@ type whiteboardOKOutput struct {
 	OK bool `json:"ok"`
 }
 
-func callWhiteboardInit(ctx context.Context, _ *Manager, _ json.RawMessage) (json.RawMessage, error) {
-	caller, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callWhiteboardInit(ctx context.Context, caller *Session, _ SessionToolHost, _ json.RawMessage) (json.RawMessage, error) {
+	if caller.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	caller.whiteboardMu.Lock()
 	already := caller.whiteboard.Active
@@ -119,10 +118,9 @@ type whiteboardWriteInput struct {
 	Text string `json:"text"`
 }
 
-func callWhiteboardWrite(ctx context.Context, _ *Manager, args json.RawMessage) (json.RawMessage, error) {
-	caller, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callWhiteboardWrite(ctx context.Context, caller *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if caller.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	var in whiteboardWriteInput
 	if err := json.Unmarshal(args, &in); err != nil {
@@ -132,31 +130,31 @@ func callWhiteboardWrite(ctx context.Context, _ *Manager, args json.RawMessage) 
 		return toolErr("bad_request", "text is required")
 	}
 
-	host := caller.parent
-	if host == nil {
+	target := caller.parent
+	if target == nil {
 		// Root sessions write only to their own hosted board if they
 		// want to. Per contracts/tools-whiteboard.md, write authors a
 		// member-board entry; a root has no parent → no member-board.
 		return toolErr("no_whiteboard_to_write_to",
 			"root sessions cannot whiteboard_write; only sub-agents broadcast to their parent's board")
 	}
-	host.whiteboardMu.Lock()
-	hostActive := host.whiteboard.Active
-	host.whiteboardMu.Unlock()
+	target.whiteboardMu.Lock()
+	hostActive := target.whiteboard.Active
+	target.whiteboardMu.Unlock()
 	if !hostActive {
 		return toolErr("no_active_whiteboard",
 			"parent session has no active whiteboard to write to")
 	}
 
 	role := callerRoleFor(caller)
-	frame := protocol.NewWhiteboardOp(host.id, caller.id, caller.agent.Participant(),
+	frame := protocol.NewWhiteboardOp(target.id, caller.id, caller.agent.Participant(),
 		protocol.WhiteboardOpPayload{
 			Op:            whiteboard.OpWrite,
 			FromSessionID: caller.id,
 			FromRole:      role,
 			Text:          in.Text,
 		})
-	if !host.Submit(ctx, frame) {
+	if !target.Submit(ctx, frame) {
 		return toolErr("io", "host session inbox closed")
 	}
 	return json.Marshal(whiteboardOKOutput{OK: true})
@@ -181,10 +179,9 @@ type whiteboardReadMessageRow struct {
 	Truncated     bool   `json:"truncated,omitempty"`
 }
 
-func callWhiteboardRead(ctx context.Context, _ *Manager, _ json.RawMessage) (json.RawMessage, error) {
-	caller, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callWhiteboardRead(_ context.Context, caller *Session, _ SessionToolHost, _ json.RawMessage) (json.RawMessage, error) {
+	if caller.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 
 	// Per phase-4-spec §7.5: own hosted board takes precedence; if no
@@ -230,10 +227,9 @@ func callWhiteboardRead(ctx context.Context, _ *Manager, _ json.RawMessage) (jso
 
 // ---------- whiteboard_stop ----------
 
-func callWhiteboardStop(ctx context.Context, _ *Manager, _ json.RawMessage) (json.RawMessage, error) {
-	caller, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callWhiteboardStop(ctx context.Context, caller *Session, _ SessionToolHost, _ json.RawMessage) (json.RawMessage, error) {
+	if caller.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	caller.whiteboardMu.Lock()
 	active := caller.whiteboard.Active

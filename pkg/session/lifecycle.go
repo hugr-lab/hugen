@@ -44,6 +44,15 @@ type ResourceDeps struct {
 	Workspace  *Workspace
 	Logger     *slog.Logger
 
+	// SessionTools is the leaf-deps bag every per-session
+	// SessionToolProvider closes over (store / logger / permission
+	// service). Phase 4.1b-pre stage A: Manager stopped being a
+	// ToolProvider; instead Resources.Acquire registers a
+	// per-session SessionToolProvider on the session's child
+	// ToolManager and that Provider needs these deps directly.
+	// Zero value is fine for tests that don't exercise tool dispatch.
+	SessionTools SessionToolHost
+
 	// SessionType labels the bound session for skill-autoload
 	// filtering. Today every session is a "root" session; phase 4
 	// makes the type per-session at Open time.
@@ -210,6 +219,17 @@ func (r *Resources) Acquire(ctx context.Context, s *Session) error {
 			return fmt.Errorf("session %s: provider %q register: %w", sessionID, cfg.Name, err)
 		}
 		opened++
+	}
+
+	// Per-session SessionToolProvider — phase 4.1b-pre stage A.
+	// Registered on the session's child ToolManager so session:*
+	// tools dispatch to handlers that already hold *Session +
+	// SessionToolHost. The deps bag is the one pkg/runtime
+	// populated on ResourceDeps at boot.
+	sessProv := NewSessionToolProvider(s, r.deps.SessionTools)
+	if err := child.AddProvider(sessProv); err != nil {
+		rollback()
+		return fmt.Errorf("session %s: register session provider: %w", sessionID, err)
 	}
 
 	r.mu.Lock()

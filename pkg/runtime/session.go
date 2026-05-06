@@ -10,11 +10,13 @@ import (
 
 // phaseSessionManager runs phase 9: assembles the per-session
 // Lifecycle (session.Resources) and the agent-level
-// session.Manager. Registers the Manager as a tool.ToolProvider
-// (so session:* tools dispatch through ToolManager.Resolve), and
-// wires the MCP reconnector's OnRecover hook to broadcast a
-// system_marker into every live root session whenever a
-// previously-stale per_agent provider crawls back to healthy.
+// session.Manager.
+//
+// Phase 4.1b-pre stage A retired the "Manager-as-ToolProvider"
+// pattern. session:* tools now register on a per-session
+// SessionToolProvider whose lifecycle Resources.Acquire owns —
+// see ResourceDeps.SessionTools below. Manager itself is not a
+// tool.ToolProvider anymore.
 //
 // Per-session children + per_session provider construction
 // happens inside Resources.Acquire on Session.Open; Phase 9 only
@@ -27,6 +29,15 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 		SkillStore: core.SkillStore,
 		Workspace:  core.Workspace,
 		Logger:     core.Logger,
+		// SessionTools is the leaf-deps bag the per-session
+		// SessionToolProvider closes over. Constructed once here so
+		// every spawned session's Provider sees the same store /
+		// logger / permission service.
+		SessionTools: session.SessionToolHost{
+			Store:  core.Store,
+			Logger: core.Logger,
+			Perms:  core.Permissions,
+		},
 	})
 	if err := resources.Validate(); err != nil {
 		return fmt.Errorf("session resources: %w", err)
@@ -35,22 +46,12 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 	mgr := session.NewManager(
 		core.Store, core.Agent, core.Models, core.Commands, core.Codec, core.Logger,
 		session.WithLifecycle(resources),
-		session.WithPerms(core.Permissions),
 		session.WithSessionOptions(
 			session.WithTools(core.Tools),
 			session.WithSkills(core.Skills),
 		),
 	)
 	core.Manager = mgr
-
-	// Register Manager as the "session" tool.ToolProvider. The
-	// dispatch table (sessionTools) holds notepad_append, plan_*,
-	// whiteboard_*, spawn_subagent, skill_*, tool_catalog —
-	// everything that needs the calling *Session via
-	// SessionFromContext.
-	if err := core.Tools.AddProvider(mgr); err != nil {
-		return fmt.Errorf("register session provider: %w", err)
-	}
 
 	// Phase 4.1c step 34 retired the central Reconnector and its
 	// OnRecover hook — recovery is now lazy via

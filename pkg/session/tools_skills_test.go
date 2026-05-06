@@ -33,10 +33,11 @@ func (f *fakeSkillsPerms) Subscribe(context.Context) (<-chan perm.RefreshEvent, 
 }
 
 // newSkillsTestManager builds a Manager wired with the supplied
-// SkillManager + perm.Service. The session opened via Open below
-// inherits the SkillManager via WithSkills, so handlers can recover
-// it through callerSession + s.skills.
-func newSkillsTestManager(t *testing.T, skills *skill.SkillManager, perms perm.Service) *Manager {
+// SkillManager. The session opened via Open below inherits the
+// SkillManager via WithSkills; tests that need a permission gate
+// thread perm.Service through SessionToolHost on the handler call
+// (skillsHostFor below).
+func newSkillsTestManager(t *testing.T, skills *skill.SkillManager, _ perm.Service) *Manager {
 	t.Helper()
 	store := newFakeStore()
 	mdl := &scriptedModel{}
@@ -48,10 +49,16 @@ func newSkillsTestManager(t *testing.T, skills *skill.SkillManager, perms perm.S
 	opts := []ManagerOption{
 		WithSessionOptions(WithSkills(skills)),
 	}
-	if perms != nil {
-		opts = append(opts, WithPerms(perms))
-	}
 	return NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), nil, opts...)
+}
+
+// skillsHostFor builds the SessionToolHost a skill_files test passes
+// to the handler. perms may be nil for tests that don't exercise the
+// permission gate.
+func skillsHostFor(m *Manager, perms perm.Service) SessionToolHost {
+	h := mgrToolHost(m)
+	h.Perms = perms
+	return h
 }
 
 // ---------- skill_load ----------
@@ -74,7 +81,7 @@ body
 	defer mgr.ShutdownAll(context.Background())
 	parent := us1OpenParent(t, mgr)
 
-	out, err := callSkillLoad(us1WithSession(parent), mgr, json.RawMessage(`{"name":"alpha"}`))
+	out, err := callSkillLoad(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{"name":"alpha"}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -92,7 +99,7 @@ func TestSkillLoad_NameRequired(t *testing.T) {
 	defer mgr.ShutdownAll(context.Background())
 	parent := us1OpenParent(t, mgr)
 
-	_, err := callSkillLoad(us1WithSession(parent), mgr, json.RawMessage(`{}`))
+	_, err := callSkillLoad(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
 	if !errors.Is(err, tool.ErrArgValidation) {
 		t.Errorf("err = %v, want ErrArgValidation", err)
 	}
@@ -106,7 +113,7 @@ func TestSkillUnload_Idempotent(t *testing.T) {
 	defer mgr.ShutdownAll(context.Background())
 	parent := us1OpenParent(t, mgr)
 
-	if _, err := callSkillUnload(us1WithSession(parent), mgr, json.RawMessage(`{"name":"missing"}`)); err != nil {
+	if _, err := callSkillUnload(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{"name":"missing"}`)); err != nil {
 		t.Errorf("Call: %v", err)
 	}
 }
@@ -117,7 +124,7 @@ func TestSkillPublish_DeferredStub(t *testing.T) {
 	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
 	mgr := newSkillsTestManager(t, skills, nil)
 	defer mgr.ShutdownAll(context.Background())
-	_, err := callSkillPublish(context.Background(), mgr, json.RawMessage(`{"name":"x","body":"y"}`))
+	_, err := callSkillPublish(context.Background(), nil, SessionToolHost{}, json.RawMessage(`{"name":"x","body":"y"}`))
 	if !errors.Is(err, tool.ErrSystemUnavailable) {
 		t.Errorf("err = %v, want ErrSystemUnavailable", err)
 	}
@@ -146,7 +153,7 @@ body
 	if err := skills.Load(context.Background(), parent.id, "alpha"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	_, err := callSkillRef(us1WithSession(parent), mgr, json.RawMessage(`{"skill":"alpha","ref":"x.md"}`))
+	_, err := callSkillRef(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{"skill":"alpha","ref":"x.md"}`))
 	if err == nil {
 		t.Fatalf("expected error (inline skill has no body fs)")
 	}
@@ -191,7 +198,9 @@ allowed-tools:
 
 // newGammaSkillsManager wires SkillManager+Manager around an on-disk
 // `gamma` skill loaded into the parent session opened by us1OpenParent.
-func newGammaSkillsManager(t *testing.T, perms perm.Service) (*Manager, *Session, string) {
+// Returns the SessionToolHost the skill_files handler call should
+// receive (with the supplied perms threaded through Host.Perms).
+func newGammaSkillsManager(t *testing.T, perms perm.Service) (*Manager, *Session, string, SessionToolHost) {
 	t.Helper()
 	root := t.TempDir()
 	skillFixtureRoot(t, root)
@@ -202,14 +211,14 @@ func newGammaSkillsManager(t *testing.T, perms perm.Service) (*Manager, *Session
 	if err := skills.Load(context.Background(), parent.id, "gamma"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	return mgr, parent, root
+	return mgr, parent, root, skillsHostFor(mgr, perms)
 }
 
 func TestSkillFiles_HappyPath(t *testing.T) {
-	mgr, parent, _ := newGammaSkillsManager(t, nil)
+	mgr, parent, _, host := newGammaSkillsManager(t, nil)
 	defer mgr.ShutdownAll(context.Background())
 
-	raw, err := callSkillFiles(us1WithSession(parent), mgr, json.RawMessage(`{"name":"gamma"}`))
+	raw, err := callSkillFiles(us1WithSession(parent), parent, host, json.RawMessage(`{"name":"gamma"}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -235,10 +244,10 @@ func TestSkillFiles_HappyPath(t *testing.T) {
 }
 
 func TestSkillFiles_PathEscape(t *testing.T) {
-	mgr, parent, _ := newGammaSkillsManager(t, nil)
+	mgr, parent, _, host := newGammaSkillsManager(t, nil)
 	defer mgr.ShutdownAll(context.Background())
 
-	_, err := callSkillFiles(us1WithSession(parent), mgr,
+	_, err := callSkillFiles(us1WithSession(parent), parent, host,
 		json.RawMessage(`{"name":"gamma","subdir":"../etc"}`))
 	if !errors.Is(err, tool.ErrPathEscape) {
 		t.Fatalf("err = %v, want ErrPathEscape", err)
@@ -249,10 +258,10 @@ func TestSkillFiles_PermissionDenied(t *testing.T) {
 	denied := &fakeSkillsPerms{rules: map[string]perm.Permission{
 		"hugen:command:skill_files:gamma": {Disabled: true, FromConfig: true},
 	}}
-	mgr, parent, _ := newGammaSkillsManager(t, denied)
+	mgr, parent, _, host := newGammaSkillsManager(t, denied)
 	defer mgr.ShutdownAll(context.Background())
 
-	_, err := callSkillFiles(us1WithSession(parent), mgr, json.RawMessage(`{"name":"gamma"}`))
+	_, err := callSkillFiles(us1WithSession(parent), parent, host, json.RawMessage(`{"name":"gamma"}`))
 	if !errors.Is(err, tool.ErrPermissionDenied) {
 		t.Fatalf("err = %v, want ErrPermissionDenied", err)
 	}
@@ -266,17 +275,17 @@ func TestSkillFiles_NotLoaded(t *testing.T) {
 	parent := us1OpenParent(t, mgr)
 
 	// gamma is never loaded for this session.
-	_, err := callSkillFiles(us1WithSession(parent), mgr, json.RawMessage(`{"name":"gamma"}`))
+	_, err := callSkillFiles(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{"name":"gamma"}`))
 	if !errors.Is(err, tool.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
 
 func TestSkillFiles_BadGlob(t *testing.T) {
-	mgr, parent, _ := newGammaSkillsManager(t, nil)
+	mgr, parent, _, host := newGammaSkillsManager(t, nil)
 	defer mgr.ShutdownAll(context.Background())
 
-	_, err := callSkillFiles(us1WithSession(parent), mgr,
+	_, err := callSkillFiles(us1WithSession(parent), parent, host,
 		json.RawMessage(`{"name":"gamma","glob":"["}`))
 	if !errors.Is(err, tool.ErrArgValidation) {
 		t.Fatalf("err = %v, want ErrArgValidation", err)
@@ -285,12 +294,9 @@ func TestSkillFiles_BadGlob(t *testing.T) {
 
 // ---------- registration ----------
 
-func TestSkillTools_RegisteredOnManager(t *testing.T) {
-	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
-	mgr := newSkillsTestManager(t, skills, nil)
-	defer mgr.ShutdownAll(context.Background())
-
-	tools, err := mgr.List(context.Background())
+func TestSkillTools_RegisteredOnSessionProvider(t *testing.T) {
+	prov := NewSessionToolProvider(nil, SessionToolHost{})
+	tools, err := prov.List(context.Background())
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -308,7 +314,7 @@ func TestSkillTools_RegisteredOnManager(t *testing.T) {
 	}
 	for n, ok := range want {
 		if !ok {
-			t.Errorf("%s not registered on Manager", n)
+			t.Errorf("%s not registered on SessionToolProvider", n)
 		}
 	}
 }

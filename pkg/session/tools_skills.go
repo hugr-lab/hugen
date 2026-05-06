@@ -21,7 +21,7 @@ import (
 // goroutine via the sessionTools dispatch table; the calling
 // *Session is recovered from ctx (its skills field is the shared
 // SkillManager wired by cmd/hugen via WithSkills). skill_files
-// additionally gates on hugen:command:skill_files via m.perms.
+// additionally gates on hugen:command:skill_files via host.Perms.
 
 func init() {
 	sessionTools["skill_load"] = sessionToolDescriptor{
@@ -139,10 +139,9 @@ type skillFilesResult struct {
 
 // ---------- skill_load ----------
 
-func callSkillLoad(ctx context.Context, _ *Manager, args json.RawMessage) (json.RawMessage, error) {
-	s, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callSkillLoad(ctx context.Context, s *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if s.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	if s.skills == nil {
 		return nil, tool.ErrSystemUnavailable
@@ -164,10 +163,9 @@ func callSkillLoad(ctx context.Context, _ *Manager, args json.RawMessage) (json.
 
 // ---------- skill_unload ----------
 
-func callSkillUnload(ctx context.Context, _ *Manager, args json.RawMessage) (json.RawMessage, error) {
-	s, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callSkillUnload(ctx context.Context, s *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if s.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	if s.skills == nil {
 		return nil, tool.ErrSystemUnavailable
@@ -190,16 +188,15 @@ func callSkillUnload(ctx context.Context, _ *Manager, args json.RawMessage) (jso
 // inline-body wiring is still pending (deferred to T039 in the
 // original phase-3 spec). Returning ErrSystemUnavailable keeps
 // callers' UX unchanged across the move.
-func callSkillPublish(_ context.Context, _ *Manager, _ json.RawMessage) (json.RawMessage, error) {
+func callSkillPublish(_ context.Context, _ *Session, _ SessionToolHost, _ json.RawMessage) (json.RawMessage, error) {
 	return nil, fmt.Errorf("%w: skill_publish requires inline body wiring (deferred to T039)", tool.ErrSystemUnavailable)
 }
 
 // ---------- skill_ref ----------
 
-func callSkillRef(ctx context.Context, _ *Manager, args json.RawMessage) (json.RawMessage, error) {
-	s, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callSkillRef(ctx context.Context, s *Session, _ SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if s.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	if s.skills == nil {
 		return nil, tool.ErrSystemUnavailable
@@ -243,10 +240,9 @@ func callSkillRef(ctx context.Context, _ *Manager, args json.RawMessage) (json.R
 
 // ---------- skill_files ----------
 
-func callSkillFiles(ctx context.Context, m *Manager, args json.RawMessage) (json.RawMessage, error) {
-	s, errFrame, err := callerSession(ctx)
-	if errFrame != nil || err != nil {
-		return errFrame, err
+func callSkillFiles(ctx context.Context, s *Session, host SessionToolHost, args json.RawMessage) (json.RawMessage, error) {
+	if s.IsClosed() {
+		return toolErr("session_gone", "calling session has already terminated")
 	}
 	if s.skills == nil {
 		return nil, tool.ErrSystemUnavailable
@@ -269,7 +265,7 @@ func callSkillFiles(ctx context.Context, m *Manager, args json.RawMessage) (json
 			return nil, fmt.Errorf("%w: skill_files: bad glob %q: %v", tool.ErrArgValidation, in.Glob, err)
 		}
 	}
-	if err := gateSkillFiles(ctx, m.perms, in.Name); err != nil {
+	if err := gateSkillFiles(ctx, host.Perms, in.Name); err != nil {
 		return nil, err
 	}
 	loaded, err := s.skills.LoadedSkill(ctx, s.id, in.Name)
