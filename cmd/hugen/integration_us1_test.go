@@ -357,7 +357,7 @@ func TestUS1_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
 	if _, err := os.Stat(sessDir); err != nil {
 		t.Fatalf("workspace dir missing before close: %v", err)
 	}
-	if core.manager.Terminate(ctx, sess.ID(), "user:/end"); err != nil {
+	if err := core.manager.Terminate(ctx, sess.ID(), "user:/end"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if _, err := os.Stat(sessDir); !os.IsNotExist(err) {

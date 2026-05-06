@@ -199,7 +199,7 @@ func TestUS3_5_US2_Python(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(sessDir, ".venv")); err != nil {
 		t.Fatalf("session venv missing before close: %v", err)
 	}
-	if core.manager.Terminate(ctx, sess.ID(), "user:/end"); err != nil {
+	if err := core.manager.Terminate(ctx, sess.ID(), "user:/end"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if _, err := os.Stat(sessDir); !os.IsNotExist(err) {

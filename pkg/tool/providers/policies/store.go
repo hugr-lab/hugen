@@ -71,9 +71,8 @@ func scopeChain(scope string) []string {
 		return []string{ScopeGlobal}
 	}
 	out := []string{scope}
-	if strings.HasPrefix(scope, "role:") {
+	if rest, ok := strings.CutPrefix(scope, "role:"); ok {
 		// role:<skill>:<role> → skill:<skill> → global
-		rest := strings.TrimPrefix(scope, "role:")
 		if i := strings.Index(rest, ":"); i > 0 {
 			out = append(out, "skill:"+rest[:i])
 		}
