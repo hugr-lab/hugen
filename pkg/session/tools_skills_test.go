@@ -78,7 +78,7 @@ body
 	}})
 	skills := skill.NewSkillManager(store, nil)
 	mgr := newSkillsTestManager(t, skills, nil)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, err := callSkillLoad(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{"name":"alpha"}`))
@@ -96,7 +96,7 @@ body
 func TestSkillLoad_NameRequired(t *testing.T) {
 	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
 	mgr := newSkillsTestManager(t, skills, nil)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	_, err := callSkillLoad(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
@@ -110,7 +110,7 @@ func TestSkillLoad_NameRequired(t *testing.T) {
 func TestSkillUnload_Idempotent(t *testing.T) {
 	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
 	mgr := newSkillsTestManager(t, skills, nil)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	if _, err := callSkillUnload(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{"name":"missing"}`)); err != nil {
@@ -123,7 +123,7 @@ func TestSkillUnload_Idempotent(t *testing.T) {
 func TestSkillPublish_DeferredStub(t *testing.T) {
 	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
 	mgr := newSkillsTestManager(t, skills, nil)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	_, err := callSkillPublish(context.Background(), nil, SessionToolHost{}, json.RawMessage(`{"name":"x","body":"y"}`))
 	if !errors.Is(err, tool.ErrSystemUnavailable) {
 		t.Errorf("err = %v, want ErrSystemUnavailable", err)
@@ -147,7 +147,7 @@ body
 	}})
 	skills := skill.NewSkillManager(store, nil)
 	mgr := newSkillsTestManager(t, skills, nil)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	if err := skills.Load(context.Background(), parent.id, "alpha"); err != nil {
@@ -216,7 +216,7 @@ func newGammaSkillsManager(t *testing.T, perms perm.Service) (*Manager, *Session
 
 func TestSkillFiles_HappyPath(t *testing.T) {
 	mgr, parent, _, host := newGammaSkillsManager(t, nil)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 
 	raw, err := callSkillFiles(us1WithSession(parent), parent, host, json.RawMessage(`{"name":"gamma"}`))
 	if err != nil {
@@ -245,7 +245,7 @@ func TestSkillFiles_HappyPath(t *testing.T) {
 
 func TestSkillFiles_PathEscape(t *testing.T) {
 	mgr, parent, _, host := newGammaSkillsManager(t, nil)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 
 	_, err := callSkillFiles(us1WithSession(parent), parent, host,
 		json.RawMessage(`{"name":"gamma","subdir":"../etc"}`))
@@ -259,7 +259,7 @@ func TestSkillFiles_PermissionDenied(t *testing.T) {
 		"hugen:command:skill_files:gamma": {Disabled: true, FromConfig: true},
 	}}
 	mgr, parent, _, host := newGammaSkillsManager(t, denied)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 
 	_, err := callSkillFiles(us1WithSession(parent), parent, host, json.RawMessage(`{"name":"gamma"}`))
 	if !errors.Is(err, tool.ErrPermissionDenied) {
@@ -271,7 +271,7 @@ func TestSkillFiles_NotLoaded(t *testing.T) {
 	store := skill.NewSkillStore(skill.Options{LocalRoot: t.TempDir()})
 	skills := skill.NewSkillManager(store, nil)
 	mgr := newSkillsTestManager(t, skills, nil)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	// gamma is never loaded for this session.
@@ -283,7 +283,7 @@ func TestSkillFiles_NotLoaded(t *testing.T) {
 
 func TestSkillFiles_BadGlob(t *testing.T) {
 	mgr, parent, _, host := newGammaSkillsManager(t, nil)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 
 	_, err := callSkillFiles(us1WithSession(parent), parent, host,
 		json.RawMessage(`{"name":"gamma","glob":"["}`))

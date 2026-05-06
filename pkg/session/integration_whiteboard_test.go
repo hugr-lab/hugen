@@ -26,7 +26,7 @@ func TestUS3_Whiteboard_BroadcastEndToEnd(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
-	defer mgr.ShutdownAll(ctx)
+	defer mgr.Stop(ctx)
 
 	parent := us1OpenParent(t, mgr)
 
@@ -134,7 +134,7 @@ func TestUS3_Whiteboard_BroadcastEndToEnd(t *testing.T) {
 func TestUS3_Whiteboard_StopRefusesNewWrites(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
 	ctx := context.Background()
-	defer mgr.ShutdownAll(ctx)
+	defer mgr.Stop(ctx)
 
 	parent := us1OpenParent(t, mgr)
 	_, _ = callWhiteboardInit(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
@@ -197,11 +197,11 @@ func TestUS3_Whiteboard_SurvivesRestart(t *testing.T) {
 	}
 
 	parentID := parent1.id
-	mgr1.ShutdownAll(ctx) // graceful — writes nothing terminal.
+	mgr1.Stop(ctx) // graceful — writes nothing terminal.
 
 	// Boot 2: fresh Manager, same store.
 	mgr2 := newTestManager(t, store)
-	defer mgr2.ShutdownAll(ctx)
+	defer mgr2.Stop(ctx)
 
 	resumed, err := mgr2.Resume(ctx, parentID)
 	if err != nil {

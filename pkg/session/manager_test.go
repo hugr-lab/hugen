@@ -198,7 +198,7 @@ func TestProjectHistory_Window(t *testing.T) {
 func TestManager_BroadcastSystemMarker_ReachesLiveRoots(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 
 	// Open two roots so we can observe the broadcast lands on both.
 	r1, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "u1"})

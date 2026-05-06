@@ -30,7 +30,7 @@ import (
 // flow naturally through the ctx-chain (ADR
 // `phase-4-tree-ctx-routing.md` D7).
 //
-// wg is shared so Manager.ShutdownAll waits for every goroutine in
+// wg is shared so Manager.Stop waits for every goroutine in
 // the tree, not just root goroutines.
 type sessionDeps struct {
 	store     RuntimeStore

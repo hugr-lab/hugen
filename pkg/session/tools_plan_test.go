@@ -17,7 +17,7 @@ import (
 func TestCallPlanSet_Happy(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	args, _ := json.Marshal(planSetInput{Text: "investigate cache", CurrentStep: "scope"})
@@ -59,7 +59,7 @@ func TestCallPlanSet_Happy(t *testing.T) {
 // TestCallPlanSet_BadRequest covers missing-text refusal.
 func TestCallPlanSet_BadRequest(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, _ := callPlanSet(us1WithSession(parent), parent, mgrToolHost(mgr),
@@ -70,7 +70,7 @@ func TestCallPlanSet_BadRequest(t *testing.T) {
 // TestCallPlanSet_SessionGone — closed-session guard.
 func TestCallPlanSet_SessionGone(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 	parent.closed.Store(true)
 
@@ -88,7 +88,7 @@ func TestCallPlanSet_SessionGone(t *testing.T) {
 // comment and updates current_step preservation correctly.
 func TestCallPlanComment_Happy(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "body", CurrentStep: "a"})
@@ -132,7 +132,7 @@ func TestCallPlanComment_Happy(t *testing.T) {
 // surface no_active_plan.
 func TestCallPlanComment_NoActivePlan(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	args, _ := json.Marshal(planCommentInput{Text: "x"})
@@ -143,7 +143,7 @@ func TestCallPlanComment_NoActivePlan(t *testing.T) {
 // TestCallPlanComment_BadRequest covers missing-text refusal.
 func TestCallPlanComment_BadRequest(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	// Without prior set, the bad_request check fires before
@@ -160,7 +160,7 @@ func TestCallPlanComment_BadRequest(t *testing.T) {
 // TestCallPlanShow_Inactive returns active=false on a fresh session.
 func TestCallPlanShow_Inactive(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, err := callPlanShow(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
@@ -180,7 +180,7 @@ func TestCallPlanShow_Inactive(t *testing.T) {
 // + pointer + both comments.
 func TestCallPlanShow_Roundtrip(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "v1", CurrentStep: "phase-1"})
@@ -212,7 +212,7 @@ func TestCallPlanShow_Roundtrip(t *testing.T) {
 func TestCallPlanClear(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "tmp"})
@@ -238,7 +238,7 @@ func TestCallPlanClear(t *testing.T) {
 // into the next systemPrompt() call.
 func TestPlanRendersInSystemPrompt(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "investigate latency", CurrentStep: "instrument"})

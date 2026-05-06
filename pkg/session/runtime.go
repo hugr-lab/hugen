@@ -88,7 +88,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 // Shutdown is called externally to suspend live sessions; cancellation
 // of the parent ctx unblocks Start. Safe to call multiple times.
 func (r *Runtime) Shutdown(ctx context.Context) error {
-	r.manager.ShutdownAll(ctx)
+	r.manager.Stop(ctx)
 	r.subMu.Lock()
 	for _, chans := range r.subscribers {
 		for _, c := range chans {

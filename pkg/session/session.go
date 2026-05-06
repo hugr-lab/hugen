@@ -206,7 +206,7 @@ type Session struct {
 	// handleExit emits there, and the flag flips at that point too.
 	subagentResultSent atomic.Bool
 	// done is closed by Run on exit. External callers (Manager.Terminate,
-	// ShutdownAll) wait on it to know the session goroutine has
+	// Stop) wait on it to know the session goroutine has
 	// finished its exit handler — including any session_terminated
 	// event append.
 	done chan struct{}
@@ -364,7 +364,7 @@ func (s *Session) Done() <-chan struct{} { return s.done }
 // between the goroutine's exit defer and our send doesn't crash
 // the process; the recovered case also maps to ok=false.
 //
-// External callers (Manager.Close, Manager.Suspend, ShutdownAll,
+// External callers (Manager.Close, Manager.Suspend, Stop,
 // adapters) use Submit instead of touching s.in directly so the
 // "in writes belong to the session goroutine" invariant has a
 // single, audit-friendly entry point.

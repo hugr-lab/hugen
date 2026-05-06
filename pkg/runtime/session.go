@@ -63,7 +63,7 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 	core.addCleanup(func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		mgr.ShutdownAll(shutdownCtx)
+		mgr.Stop(shutdownCtx)
 	})
 	return nil
 }

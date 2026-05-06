@@ -19,7 +19,7 @@ func TestUS1_CancelCascade_TwoDeep(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
-	defer mgr.ShutdownAll(ctx)
+	defer mgr.Stop(ctx)
 
 	root := us1OpenParent(t, mgr)
 
@@ -82,7 +82,7 @@ func TestUS1_SubagentResult_DeliveredToParent(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
-	defer mgr.ShutdownAll(ctx)
+	defer mgr.Stop(ctx)
 
 	parent := us1OpenParent(t, mgr)
 	child, err := parent.Spawn(ctx, SpawnSpec{Task: "t"})
@@ -124,7 +124,7 @@ func TestUS1_SubagentResult_DeliveredToParent(t *testing.T) {
 func TestUS1_WaitSubagents_NaturalTermination(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
 	ctx := context.Background()
-	defer mgr.ShutdownAll(ctx)
+	defer mgr.Stop(ctx)
 
 	parent := us1OpenParent(t, mgr)
 	child, err := parent.Spawn(ctx, SpawnSpec{Task: "t"})

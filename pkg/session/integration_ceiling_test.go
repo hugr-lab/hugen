@@ -106,7 +106,7 @@ func TestRoot_SoftWarning_FiresOncePastCap(t *testing.T) {
 		result: `{"ok":true}`,
 	}
 	mgr := newCeilingTestManager(t, store, mdl, provider, softCap, 64)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 
 	root, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
 	if err != nil {
@@ -154,7 +154,7 @@ func TestRoot_HardCeiling_TerminatesAtCapHard(t *testing.T) {
 		result: `{"ok":true}`,
 	}
 	mgr := newCeilingTestManager(t, store, mdl, provider, softCap, hardCap)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 
 	root, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
 	if err != nil {
@@ -165,7 +165,7 @@ func TestRoot_HardCeiling_TerminatesAtCapHard(t *testing.T) {
 	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
 	root.Inbox() <- protocol.NewUserMessage(root.id, user, "go")
 
-	// Wait until the session is closed; ShutdownAll will drain the
+	// Wait until the session is closed; Stop will drain the
 	// outbox once the goroutine exits.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {

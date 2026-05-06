@@ -10,7 +10,7 @@ import (
 func TestCallNotepadAppend_Happy(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 
 	parent := us1OpenParent(t, mgr)
 
@@ -39,7 +39,7 @@ func TestCallNotepadAppend_Happy(t *testing.T) {
 func TestCallNotepadAppend_BadRequest(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, err := callNotepadAppend(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{not-json`))
@@ -54,7 +54,7 @@ func TestCallNotepadAppend_BadRequest(t *testing.T) {
 func TestCallNotepadAppend_EmptyText(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	args, _ := json.Marshal(notepadAppendInput{Text: ""})

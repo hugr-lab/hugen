@@ -39,11 +39,11 @@ func TestUS2_PlanSurvivesRestart(t *testing.T) {
 		}
 	}
 	parentID := parent.id
-	mgr1.ShutdownAll(ctx) // graceful — writes nothing terminal.
+	mgr1.Stop(ctx) // graceful — writes nothing terminal.
 
 	// Boot 2: fresh Manager + agent, same store.
 	mgr2 := newTestManager(t, store)
-	defer mgr2.ShutdownAll(ctx)
+	defer mgr2.Stop(ctx)
 
 	resumed, err := mgr2.Resume(ctx, parentID)
 	if err != nil {
@@ -94,7 +94,7 @@ func TestUS2_PlanSurvivesRestart(t *testing.T) {
 func TestUS2_PlanSurvivesHistoryWindow(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "anchor body", CurrentStep: "step-1"})
@@ -123,9 +123,9 @@ func TestUS2_PlanSurvivesHistoryWindow(t *testing.T) {
 
 	// Force re-materialise via fresh Resume in a new manager so the
 	// projection gets rebuilt against the inflated history.
-	mgr.ShutdownAll(context.Background())
+	mgr.Stop(context.Background())
 	mgr2 := newTestManager(t, store)
-	defer mgr2.ShutdownAll(context.Background())
+	defer mgr2.Stop(context.Background())
 	resumed, err := mgr2.Resume(context.Background(), parent.id)
 	if err != nil {
 		t.Fatalf("resume: %v", err)
@@ -154,7 +154,7 @@ func TestUS2_PlanSurvivesHistoryWindow(t *testing.T) {
 // session.
 func TestUS2_PlanEndToEnd(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	// 1. Set the plan.

@@ -13,7 +13,7 @@ import (
 // §13.2 #19 (restart resume — adapted to the new settle-based design,
 // commit US6) and §13.2 #20b (graceful shutdown writes nothing). These
 // are end-to-end checks across the Manager lifecycle: open + spawn,
-// graceful ShutdownAll, fresh Manager pointed at the same store,
+// graceful Stop, fresh Manager pointed at the same store,
 // RestoreActive — observable contract surfaced through the persisted
 // events log.
 //
@@ -26,7 +26,7 @@ import (
 
 // TestPhase4Acceptance_GracefulShutdownWritesNothing — §13.2 #20b.
 //
-// Spawn root + sub (one direct child). Call ShutdownAll(ctx) — the
+// Spawn root + sub (one direct child). Call Stop(ctx) — the
 // graceful path: rootCancel fires with no terminationCause attached,
 // each session's Run goroutine returns from teardown(runCtx) without
 // persisting anything. We verify both event logs are clean of any
@@ -67,7 +67,7 @@ func TestPhase4Acceptance_GracefulShutdownWritesNothing(t *testing.T) {
 	drainOutboxOnce(root.Outbox()) // SubagentStarted
 
 	// --- Graceful shutdown: rootCancel without cause ---
-	mgr1.ShutdownAll(ctx)
+	mgr1.Stop(ctx)
 
 	// Verify: NEITHER session has a session_terminated event yet.
 	rootEvents, _ := store.ListEvents(ctx, rootID, ListEventsOpts{})
@@ -88,7 +88,7 @@ func TestPhase4Acceptance_GracefulShutdownWritesNothing(t *testing.T) {
 	if err := mgr2.RestoreActive(ctx); err != nil {
 		t.Fatalf("RestoreActive: %v", err)
 	}
-	defer mgr2.ShutdownAll(ctx)
+	defer mgr2.Stop(ctx)
 
 	// Settle wrote restart_died on the sub.
 	subEvents2, _ := store.ListEvents(ctx, subID, ListEventsOpts{})
@@ -142,7 +142,7 @@ func TestPhase4Acceptance_GracefulShutdownWritesNothing(t *testing.T) {
 // with multiple direct children. This test exercises that with two
 // siblings; both must surface restart_died on the parent.
 //
-// Concretely: root → sub-A + sub-B; ShutdownAll graceful; new
+// Concretely: root → sub-A + sub-B; Stop graceful; new
 // Manager + RestoreActive. After settle, root.events must contain a
 // subagent_result for EACH of sub-A and sub-B with reason
 // restart_died, and EACH sub's events must carry session_terminated
@@ -174,14 +174,14 @@ func TestPhase4Acceptance_RestartResume_TwoSiblings(t *testing.T) {
 
 	// Graceful shutdown — siblings still running, no terminations
 	// written.
-	mgr1.ShutdownAll(ctx)
+	mgr1.Stop(ctx)
 
 	// --- Boot 2 ---
 	mgr2 := newTestManager(t, store)
 	if err := mgr2.RestoreActive(ctx); err != nil {
 		t.Fatalf("RestoreActive: %v", err)
 	}
-	defer mgr2.ShutdownAll(ctx)
+	defer mgr2.Stop(ctx)
 
 	// Each sub has session_terminated{restart_died}.
 	for _, sub := range []*Session{subA, subB} {

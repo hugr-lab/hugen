@@ -105,7 +105,7 @@ body
 	skills := skill.NewSkillManager(store, nil)
 
 	mgr, _ := newCatalogTestManager(t, skills)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 	if err := skills.Load(context.Background(), parent.id, "alpha"); err != nil {
 		t.Fatalf("Load: %v", err)
@@ -141,7 +141,7 @@ body
 func TestToolCatalog_ProviderFilter(t *testing.T) {
 	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
 	mgr, _ := newCatalogTestManager(t, skills)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, err := callToolCatalog(us1WithSession(parent), parent, mgrToolHost(mgr),
@@ -159,7 +159,7 @@ func TestToolCatalog_ProviderFilter(t *testing.T) {
 func TestToolCatalog_PatternFilter(t *testing.T) {
 	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
 	mgr, _ := newCatalogTestManager(t, skills)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, err := callToolCatalog(us1WithSession(parent), parent, mgrToolHost(mgr),
@@ -180,7 +180,7 @@ func TestToolCatalog_PatternFilter(t *testing.T) {
 func TestToolCatalog_BadRequest(t *testing.T) {
 	skills := skill.NewSkillManager(skill.NewSkillStore(skill.Options{}), nil)
 	mgr, _ := newCatalogTestManager(t, skills)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, err := callToolCatalog(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{not-json`))

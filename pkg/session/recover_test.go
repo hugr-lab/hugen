@@ -217,7 +217,7 @@ func TestRestoreActive_SkipsIdleRoot(t *testing.T) {
 	if err := mgr.RestoreActive(ctx); err != nil {
 		t.Fatalf("RestoreActive: %v", err)
 	}
-	defer mgr.ShutdownAll(ctx)
+	defer mgr.Stop(ctx)
 
 	if live := mgr.SessionsLive(); len(live) != 0 {
 		t.Errorf("idle root brought up at boot: live=%v", live)
@@ -247,7 +247,7 @@ func TestRestoreActive_RestoresActiveRoot(t *testing.T) {
 	if err := mgr.RestoreActive(ctx); err != nil {
 		t.Fatalf("RestoreActive: %v", err)
 	}
-	defer mgr.ShutdownAll(ctx)
+	defer mgr.Stop(ctx)
 
 	live := mgr.SessionsLive()
 	if len(live) != 1 || live[0] != "root_active" {
@@ -292,7 +292,7 @@ func TestResume_RejectsSubAgentID(t *testing.T) {
 	})
 
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(ctx)
+	defer mgr.Stop(ctx)
 
 	if _, err := mgr.Resume(ctx, "sub1"); err == nil {
 		t.Fatalf("Resume(subagent) returned nil error, want ErrNotRootSession")
@@ -329,7 +329,7 @@ func TestRestoreActive_SkipsTerminalRoots(t *testing.T) {
 	if err := mgr.RestoreActive(ctx); err != nil {
 		t.Fatalf("RestoreActive: %v", err)
 	}
-	defer mgr.ShutdownAll(ctx)
+	defer mgr.Stop(ctx)
 
 	if live := mgr.SessionsLive(); len(live) != 0 {
 		t.Errorf("terminal root resurrected: live=%v", live)

@@ -16,7 +16,7 @@ func TestTerminate_CascadeWritesCancelCascade(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
-	defer mgr.ShutdownAll(ctx)
+	defer mgr.Stop(ctx)
 
 	parent, _, err := mgr.Open(ctx, OpenRequest{OwnerID: "alice"})
 	if err != nil {
@@ -67,7 +67,7 @@ func TestTerminate_ExplicitWritesCallerReason(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
-	defer mgr.ShutdownAll(ctx)
+	defer mgr.Stop(ctx)
 
 	s, _, err := mgr.Open(ctx, OpenRequest{OwnerID: "alice"})
 	if err != nil {

@@ -414,8 +414,25 @@ func (m *Manager) Get(id string) (*Session, bool) {
 	return s, ok
 }
 
-// ShutdownAll cancels the root context (which propagates to every
+// Start runs the Manager-side per-boot tasks. Today: RestoreActive
+// (settles dangling subagents + eagerly restores non-terminal roots).
+// Reserves the slot for future scheduler-style background work
+// (sweep, cron, …) so callers have a single Start/Stop pair to track.
+//
+// Idempotent: a second call repeats RestoreActive whose own BFS
+// walker short-circuits when there is nothing left to settle.
+//
+// Phase 4.1b-pre stage B (O4) introduces this as the canonical
+// public boot entry; cmd/hugen and the upcoming 4.1b harness call
+// Start instead of poking RestoreActive directly.
+func (m *Manager) Start(ctx context.Context) error {
+	return m.RestoreActive(ctx)
+}
+
+// Stop cancels the root context (which propagates to every
 // per-session ctx) and waits for every session goroutine to exit.
+// Renamed from ShutdownAll in phase-4.1b-pre stage B (O4) — the
+// single public exit point paired with Start.
 //
 // **Phase-4 invariant**: graceful shutdown writes nothing — no
 // `session_terminated` events are appended. Sessions whose goroutines
@@ -429,7 +446,8 @@ func (m *Manager) Get(id string) (*Session, bool) {
 //     a synthetic subagent_result Frame to its parent's inbox.
 //
 // Idempotent and safe to call multiple times.
-func (m *Manager) ShutdownAll(ctx context.Context) {
+func (m *Manager) Stop(ctx context.Context) {
+	_ = ctx
 	m.rootCancel()
 	m.wg.Wait()
 }

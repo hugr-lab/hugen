@@ -17,7 +17,7 @@ import (
 func TestCallWhiteboardInit_Happy(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, err := callWhiteboardInit(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
@@ -53,7 +53,7 @@ func TestCallWhiteboardInit_Happy(t *testing.T) {
 func TestCallWhiteboardInit_Idempotent(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	if _, err := callWhiteboardInit(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`)); err != nil {
@@ -80,7 +80,7 @@ func TestCallWhiteboardInit_Idempotent(t *testing.T) {
 // the no_whiteboard_to_write_to refusal.
 func TestCallWhiteboardWrite_NoParent(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	args, _ := json.Marshal(whiteboardWriteInput{Text: "hi"})
@@ -93,7 +93,7 @@ func TestCallWhiteboardWrite_NoParent(t *testing.T) {
 func TestCallWhiteboardWrite_NoActiveBoard(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
 	ctx := context.Background()
-	defer mgr.ShutdownAll(ctx)
+	defer mgr.Stop(ctx)
 
 	parent := us1OpenParent(t, mgr)
 	child, err := parent.Spawn(ctx, SpawnSpec{Task: "x"})
@@ -111,7 +111,7 @@ func TestCallWhiteboardWrite_NoActiveBoard(t *testing.T) {
 // before the parent-presence / active-board checks.
 func TestCallWhiteboardWrite_BadRequest(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, _ := callWhiteboardWrite(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
@@ -123,7 +123,7 @@ func TestCallWhiteboardWrite_BadRequest(t *testing.T) {
 // TestCallWhiteboardRead_Inactive: a fresh session returns active=false.
 func TestCallWhiteboardRead_Inactive(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, err := callWhiteboardRead(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
@@ -143,7 +143,7 @@ func TestCallWhiteboardRead_Inactive(t *testing.T) {
 // returns the host's projection (no messages yet, but Active=true).
 func TestCallWhiteboardRead_OwnHostedAfterInit(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	if _, err := callWhiteboardInit(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`)); err != nil {
@@ -169,7 +169,7 @@ func TestCallWhiteboardRead_OwnHostedAfterInit(t *testing.T) {
 func TestCallWhiteboardStop_DeactivatesProjection(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	_, _ = callWhiteboardInit(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`))
@@ -200,7 +200,7 @@ func TestCallWhiteboardStop_DeactivatesProjection(t *testing.T) {
 func TestCallWhiteboardStop_OnInactive(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	if _, err := callWhiteboardStop(us1WithSession(parent), parent, mgrToolHost(mgr), json.RawMessage(`{}`)); err != nil {
@@ -218,7 +218,7 @@ func TestCallWhiteboardStop_OnInactive(t *testing.T) {
 
 func TestCallWhiteboard_SessionGone(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 	parent.closed.Store(true)
 

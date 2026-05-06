@@ -45,7 +45,7 @@ func mgrToolHost(m *Manager) SessionToolHost {
 // child entry succeeds and the result names the new id at depth 1.
 func TestCallSpawnSubagent_Happy(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, err := callSpawnSubagent(us1WithSession(parent), parent, mgrToolHost(mgr),
@@ -79,7 +79,7 @@ func TestCallSpawnSubagent_Happy(t *testing.T) {
 // tool_error JSON and NOT spawn anything.
 func TestCallSpawnSubagent_DepthExceeded(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 	// Force the cap so the next spawn would exceed it.
 	parent.deps.maxDepth = 0
@@ -103,7 +103,7 @@ func TestCallSpawnSubagent_DepthExceeded(t *testing.T) {
 // batch refusals.
 func TestCallSpawnSubagent_BadRequest(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, _ := callSpawnSubagent(us1WithSession(parent), parent, mgrToolHost(mgr),
@@ -120,7 +120,7 @@ func TestCallSpawnSubagent_BadRequest(t *testing.T) {
 // spawned. (Validation runs before any parent.Spawn call.)
 func TestCallSpawnSubagent_BatchFailFast(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, _ := callSpawnSubagent(us1WithSession(parent), parent, mgrToolHost(mgr),
@@ -141,7 +141,7 @@ func TestCallSpawnSubagent_BatchFailFast(t *testing.T) {
 // after close, but the guard keeps the handler honest.
 func TestCallSpawnSubagent_SessionGone(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 	parent.closed.Store(true)
 
@@ -161,7 +161,7 @@ func TestCallSpawnSubagent_SessionGone(t *testing.T) {
 // via Submit; the routing layer hands it to activeToolFeed.
 func TestCallWaitSubagents_Happy_LiveResult(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	// Spawn a real child so the id exists; we'll synthesise a result
@@ -239,7 +239,7 @@ func TestCallWaitSubagents_Happy_LiveResult(t *testing.T) {
 func TestCallWaitSubagents_CachedShortCircuit(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	cached := protocol.NewSubagentResult(parent.id, "child-cached", parent.agent.Participant(),
@@ -273,7 +273,7 @@ func TestCallWaitSubagents_CachedShortCircuit(t *testing.T) {
 // TestCallWaitSubagents_BadRequest covers the empty-ids guard.
 func TestCallWaitSubagents_BadRequest(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	out, _ := callWaitSubagents(us1WithSession(parent), parent, mgrToolHost(mgr),
@@ -288,7 +288,7 @@ func TestCallWaitSubagents_BadRequest(t *testing.T) {
 func TestCallSubagentRuns_Happy(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -334,7 +334,7 @@ func TestCallSubagentRuns_Happy(t *testing.T) {
 func TestCallSubagentRuns_NotAChild(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	// Create a row that's not a child of parent.
@@ -358,7 +358,7 @@ func TestCallSubagentRuns_NotAChild(t *testing.T) {
 // — pagination correctness is covered above.
 func TestCallSubagentRuns_HardCap(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -385,7 +385,7 @@ func TestCallSubagentRuns_HardCap(t *testing.T) {
 func TestCallSubagentCancel_Happy(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -428,7 +428,7 @@ func TestCallSubagentCancel_Happy(t *testing.T) {
 func TestCallSubagentCancel_NotAChild(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	// Sibling root with no parent relationship.
@@ -447,7 +447,7 @@ func TestCallSubagentCancel_NotAChild(t *testing.T) {
 // exited.
 func TestCallSubagentCancel_Idempotent(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -481,7 +481,7 @@ func TestCallSubagentCancel_Idempotent(t *testing.T) {
 func TestCallParentContext_Filtering(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -543,7 +543,7 @@ func TestCallParentContext_Filtering(t *testing.T) {
 func TestCallParentContext_QueryAndTimeWindow(t *testing.T) {
 	store := newFakeStore()
 	mgr := newTestManager(t, store)
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -588,7 +588,7 @@ func TestCallParentContext_QueryAndTimeWindow(t *testing.T) {
 // no_parent.
 func TestCallParentContext_NoParentForRoot(t *testing.T) {
 	mgr := newTestManager(t, newFakeStore())
-	defer mgr.ShutdownAll(context.Background())
+	defer mgr.Stop(context.Background())
 	root := us1OpenParent(t, mgr)
 
 	out, err := callParentContext(WithSession(context.Background(), root), root, mgrToolHost(mgr),
