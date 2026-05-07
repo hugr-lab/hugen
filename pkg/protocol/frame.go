@@ -41,6 +41,13 @@ const (
 	KindSessionTerminated Kind = "session_terminated"
 	KindSystemMessage     Kind = "system_message"
 
+	// KindSessionStatus is the persisted lifecycle marker emitted by
+	// Session at every state transition (idle ↔ active ↔ wait_*).
+	// Newest event in the log is authoritative for restart
+	// classification — see [SessionStatusPayload]. Default-deny in
+	// the visibility filter; never reaches the model prompt.
+	KindSessionStatus Kind = "session_status"
+
 	// Phase-4.1b-pre kind: SessionClose is the internal frame the
 	// session loop receives to begin teardown. It is NOT a transcript
 	// event — handleExit translates it into the persisted
@@ -402,6 +409,36 @@ type SessionTerminatedPayload struct {
 	TurnsUsed int    `json:"turns_used,omitempty"`
 }
 
+// SessionStatus state values mark the session's lifecycle stage in
+// its own events log. Idle = quiescent (turn closed, no live work).
+// Active = a turn is in progress. The wait_* values mark explicit
+// runtime pauses; phase-5 HITL plumbing will start emitting them.
+const (
+	SessionStatusIdle          = "idle"
+	SessionStatusActive        = "active"
+	SessionStatusWaitSubagents = "wait_subagents"
+	// Phase-5 HITL placeholders — declared now so the protocol surface
+	// is stable; today no runtime code emits them.
+	SessionStatusWaitApproval  = "wait_approval"
+	SessionStatusWaitUserInput = "wait_user_input"
+)
+
+// SessionStatusPayload is the lifecycle marker the Session emits at
+// every state transition. The NEWEST KindSessionStatus event in a
+// session's log is authoritative for restart classification —
+// Manager.RestoreActive reads it to decide whether to re-attach a
+// goroutine eagerly (active / wait_*) or leave the session dormant
+// until an adapter Resume (idle).
+//
+// State is one of the SessionStatus* constants. Reason is a short
+// free-form trigger label ("user_message", "wait_subagents tool",
+// "turn quiescent", …) used purely for diagnostics and the audit
+// log; the runtime never branches on it.
+type SessionStatusPayload struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+}
+
 // SystemMessagePayload is a model-visible runtime injection (distinct
 // from the UI-only SystemMarker). Rendered into the session's
 // in-memory model history as model.Message{Role:RoleUser,
@@ -481,6 +518,13 @@ type SystemMessage struct {
 	Payload SystemMessagePayload
 }
 
+// SessionStatus is the lifecycle marker frame. See
+// [SessionStatusPayload].
+type SessionStatus struct {
+	BaseFrame
+	Payload SessionStatusPayload
+}
+
 // OpaqueFrame represents a Frame variant the codec does not know.
 // Phase 2 introduces opaque round-trip so future-phase variants
 // (sub_agent_*, approval_*, clarification_*, ...) survive an
@@ -516,6 +560,7 @@ func (f PlanOp) payload() any            { return f.Payload }
 func (f SessionTerminated) payload() any { return f.Payload }
 func (f SessionClose) payload() any      { return f.Payload }
 func (f SystemMessage) payload() any     { return f.Payload }
+func (f SessionStatus) payload() any     { return f.Payload }
 func (f OpaqueFrame) payload() any       { return f.RawPayload }
 
 // newOpaqueFrame is package-private so only the codec materialises
@@ -683,6 +728,16 @@ func NewSystemMessage(sessionID string, author ParticipantInfo, kind, content st
 	}
 }
 
+// NewSessionStatus builds a lifecycle marker frame for state with an
+// optional reason label. Author is the agent's participant info —
+// the runtime stamps its own status, not a user.
+func NewSessionStatus(sessionID string, author ParticipantInfo, state, reason string) *SessionStatus {
+	return &SessionStatus{
+		BaseFrame: newBase(sessionID, KindSessionStatus, author),
+		Payload:   SessionStatusPayload{State: state, Reason: reason},
+	}
+}
+
 // Validate returns a non-nil error if a Frame would be rejected by
 // the codec. Constructors don't validate; callers building frames
 // from external input should run Validate.
@@ -747,6 +802,14 @@ func Validate(f Frame) error {
 	case *SystemMessage:
 		if v.Payload.Kind == "" {
 			return fmt.Errorf("protocol: system_message missing kind")
+		}
+	case *SessionStatus:
+		switch v.Payload.State {
+		case SessionStatusIdle, SessionStatusActive,
+			SessionStatusWaitSubagents, SessionStatusWaitApproval,
+			SessionStatusWaitUserInput:
+		default:
+			return fmt.Errorf("protocol: session_status invalid state %q", v.Payload.State)
 		}
 	case *OpaqueFrame:
 		// OpaqueFrame round-trips deferred kinds the binary doesn't

@@ -196,6 +196,12 @@ func (c *Codec) materialise(base BaseFrame, payload []byte) (Frame, error) {
 			return nil, err
 		}
 		return &SystemMessage{BaseFrame: base, Payload: p}, nil
+	case KindSessionStatus:
+		var p SessionStatusPayload
+		if err := unmarshalPayload(payload, &p); err != nil {
+			return nil, err
+		}
+		return &SessionStatus{BaseFrame: base, Payload: p}, nil
 	case KindExtensionFrame:
 		var p ExtensionFramePayload
 		if err := unmarshalPayload(payload, &p); err != nil {

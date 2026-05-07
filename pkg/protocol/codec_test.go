@@ -50,6 +50,16 @@ func TestCodec_RoundTrip(t *testing.T) {
 			SystemMessageSoftWarning, "you have used N turns")},
 		{"system_message_whiteboard", NewSystemMessage("s1", testAgent,
 			SystemMessageWhiteboard, "[whiteboard] explorer (s2): found auth_logs")},
+		{"session_status_idle", NewSessionStatus("s1", testAgent,
+			SessionStatusIdle, "newSession")},
+		{"session_status_active", NewSessionStatus("s1", testAgent,
+			SessionStatusActive, "user_message")},
+		{"session_status_wait_subagents", NewSessionStatus("s1", testAgent,
+			SessionStatusWaitSubagents, "tool=wait_subagents")},
+		{"session_status_wait_approval_phase5_placeholder", NewSessionStatus("s1", testAgent,
+			SessionStatusWaitApproval, "")},
+		{"session_status_wait_user_input_phase5_placeholder", NewSessionStatus("s1", testAgent,
+			SessionStatusWaitUserInput, "")},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -226,6 +236,9 @@ func TestValidate_Phase4(t *testing.T) {
 		{"plan_op_invalid_op", NewPlanOp("s", testAgent, PlanOpPayload{Op: "rename"}), true},
 		{"session_terminated_missing_reason", NewSessionTerminated("s", testAgent, SessionTerminatedPayload{}), true},
 		{"system_message_missing_kind", NewSystemMessage("s", testAgent, "", "x"), true},
+		{"session_status_idle_ok", NewSessionStatus("s", testAgent, SessionStatusIdle, ""), false},
+		{"session_status_invalid_state", NewSessionStatus("s", testAgent, "running", ""), true},
+		{"session_status_empty_state", NewSessionStatus("s", testAgent, "", ""), true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
