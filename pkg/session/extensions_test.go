@@ -82,7 +82,7 @@ func (e *fullCapStubExtension) FilterTools(_ context.Context, _ extension.Sessio
 	return out
 }
 
-func (e *fullCapStubExtension) Generation() int64 { return e.gen }
+func (e *fullCapStubExtension) Generation(_ extension.SessionState) int64 { return e.gen }
 
 // TestExtensionDispatch_InitStateRunsOnce asserts NewSession iterates
 // Deps.Extensions and invokes InitState exactly once per registered

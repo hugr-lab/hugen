@@ -89,7 +89,21 @@ func (s *Session) callToolCatalog(ctx context.Context, args json.RawMessage) (js
 	if err != nil {
 		return toolErr("io", err.Error())
 	}
-	allowed := allowedFromBindings(ctx, s.skills, s.id)
+	// `granted_to_session` is "would this tool surface to the
+	// model on the next turn?" — i.e. it survived every
+	// registered ToolFilter (skill bindings, permissions, future
+	// filters). The cheapest way to compute that is to ask the
+	// session for its filtered Snapshot and use the names as the
+	// allow-set. fetchSnapshot is cached on the session so the
+	// extra call is essentially free.
+	filtered, err := s.fetchSnapshot(ctx)
+	if err != nil {
+		return toolErr("io", err.Error())
+	}
+	grantedNames := make(map[string]struct{}, len(filtered.Tools))
+	for _, t := range filtered.Tools {
+		grantedNames[t.Name] = struct{}{}
+	}
 
 	groups := make(map[string][]toolCatalogEntry)
 	for _, t := range snap.Tools {
@@ -99,11 +113,12 @@ func (s *Session) callToolCatalog(ctx context.Context, args json.RawMessage) (js
 		if pattern != "" && !strings.Contains(strings.ToLower(t.Name), pattern) {
 			continue
 		}
+		_, granted := grantedNames[t.Name]
 		groups[t.Provider] = append(groups[t.Provider], toolCatalogEntry{
 			Name:             t.Name,
 			Description:      t.Description,
 			PermissionObject: t.PermissionObject,
-			GrantedToSession: allowed.match(t.Name),
+			GrantedToSession: granted,
 		})
 	}
 

@@ -1396,12 +1396,9 @@ func (s *Session) buildMessages(ctx context.Context) []model.Message {
 //     phase-4 spec §6.5 + contracts/tools-plan.md "Prompt-rendering
 //     contract").
 //  2. Agent constitution (universal rules).
-//  3. Body of every skill currently loaded into the session
-//     (concrete tool-usage instructions for the active toolset).
-//  4. Catalogue of every skill the agent can reach — both loaded
-//     and unloaded — so the model picks the right one and calls
-//     skill_load without a separate discovery tool round-trip.
-//     Loaded skills are tagged so the model doesn't reload them.
+//  3. Extension Advertiser sections — registration order. The skill
+//     extension contributes (a) the body of every loaded skill and
+//     (b) the catalogue of every skill the agent can reach.
 func (s *Session) systemPrompt(ctx context.Context) string {
 	var parts []string
 	if block := s.renderPlanBlock(); block != "" {
@@ -1412,17 +1409,6 @@ func (s *Session) systemPrompt(ctx context.Context) string {
 			parts = append(parts, c)
 		}
 	}
-	if s.skills != nil {
-		if b, err := s.skills.Bindings(ctx, s.id); err == nil && b.Instructions != "" {
-			parts = append(parts, b.Instructions)
-		}
-		if catalogue := s.skillCatalogue(ctx); catalogue != "" {
-			parts = append(parts, catalogue)
-		}
-	}
-	// Extension Advertiser sections appended in registration order;
-	// each contributes a non-empty string or skips. v1 has no
-	// ordering primitive — order matters at the registration site.
 	if s.deps != nil {
 		for _, ext := range s.deps.Extensions {
 			adv, ok := ext.(extension.Advertiser)
@@ -1448,36 +1434,6 @@ func (s *Session) renderPlanBlock() string {
 	s.planMu.Lock()
 	defer s.planMu.Unlock()
 	return plan.Render(s.plan)
-}
-
-// skillCatalogue renders one bullet per skill in the store using
-// the manifest's frontmatter `description` (capped at ~120 tokens
-// by the manifest validator). Loaded skills carry a `(loaded)` tag
-// so the model sees its current toolset alongside everything else
-// available. Returns "" when the store is empty.
-func (s *Session) skillCatalogue(ctx context.Context) string {
-	all, err := s.skills.List(ctx)
-	if err != nil || len(all) == 0 {
-		return ""
-	}
-	loadedSet := map[string]struct{}{}
-	for _, n := range s.skills.LoadedNames(ctx, s.id) {
-		loadedSet[n] = struct{}{}
-	}
-	var b strings.Builder
-	b.WriteString("## Available skills\n\nLoad any of these via the `skill_load` tool when their domain becomes relevant. Already-loaded skills are tagged `(loaded)`.\n\n")
-	for _, sk := range all {
-		b.WriteString("- `")
-		b.WriteString(sk.Manifest.Name)
-		b.WriteString("`")
-		if _, on := loadedSet[sk.Manifest.Name]; on {
-			b.WriteString(" (loaded)")
-		}
-		b.WriteString(" — ")
-		b.WriteString(strings.TrimSpace(sk.Manifest.Description))
-		b.WriteString("\n")
-	}
-	return b.String()
 }
 
 // modelToolsForSession converts the per-session ToolManager

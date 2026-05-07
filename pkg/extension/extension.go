@@ -97,14 +97,16 @@ type ToolFilter interface {
 }
 
 // GenerationProvider is an optional capability extensions implement
-// when their state changes in a way that should invalidate the
-// per-session snapshot cache. Generation must be monotonically
-// non-decreasing for the lifetime of the extension; the runtime
-// sums it with other extensions' generations and folds the result
-// into the cache key. Extensions whose state is bind-once at
-// construction (notepad) skip this.
+// when their per-session state changes in a way that should
+// invalidate the snapshot cache. Generation receives the calling
+// session's SessionState so per-session counters (e.g. skill
+// bindings) fit naturally; the runtime sums the value with other
+// extensions' generations and folds the result into the cache key.
+// Generation must be monotonically non-decreasing for the lifetime
+// of (extension, session). Extensions whose state is bind-once at
+// construction (notepad) skip this interface.
 type GenerationProvider interface {
-	Generation() int64
+	Generation(state SessionState) int64
 }
 
 // FrameRouter extensions handle inbound [protocol.ExtensionFrame]

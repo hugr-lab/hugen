@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
+	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -74,10 +75,20 @@ func newCatalogFixture(t *testing.T, skills *skill.SkillManager) (*Session, *too
 	if err := tm.AddProvider(prov); err != nil {
 		t.Fatalf("AddProvider: %v", err)
 	}
-	parent, cleanup := newTestParent(t,
-		withTestTools(tm),
-		withTestSkills(skills),
-	)
+	// Register the skill extension so its FilterTools narrows the
+	// catalogue to bindings.AllowedTools — the path tool_catalog
+	// reads via fetchSnapshot to fill `granted_to_session`. Pre
+	// stage 2 the filter ran inside snapshot_cache directly off
+	// s.skills; that's gone now.
+	opts := []testParentOpt{withTestTools(tm), withTestSkills(skills)}
+	if skills != nil {
+		ext := skillext.NewExtension(skills, nil, "agent-cat")
+		if err := tm.AddProvider(ext); err != nil {
+			t.Fatalf("AddProvider skillext: %v", err)
+		}
+		opts = append(opts, withTestExtensions(ext))
+	}
+	parent, cleanup := newTestParent(t, opts...)
 	return parent, tm, cleanup
 }
 
