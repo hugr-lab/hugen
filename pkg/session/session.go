@@ -164,6 +164,15 @@ type Session struct {
 	// session_events on materialise.
 	softWarningDone atomic.Bool
 
+	// lifecycleState is the current SessionStatus value as last
+	// emitted by markStatus. Reads via Status(); writes only through
+	// markStatus, which serialises emit-then-store under
+	// statusMu so transitions persist in the events log in the same
+	// order the in-memory state mirror reflects them. Restart reads
+	// the latest KindSessionStatus event from store, not this field.
+	statusMu       sync.Mutex
+	lifecycleState string
+
 	in     chan protocol.Frame
 	out    chan protocol.Frame
 	closed atomic.Bool
