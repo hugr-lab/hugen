@@ -754,21 +754,24 @@ func (s *Session) teardown(runCtx context.Context) {
 	}
 	s.pendingInbound = nil
 
-	// 4) Release per-session resources before we write the terminal
-	// event so a future restart-walker reading session_terminated
-	// doesn't see a row whose resources are still alive.
-	if s.deps != nil && s.deps.Lifecycle != nil {
-		if err := s.deps.Lifecycle.Release(tc.writeCtx, s.id); err != nil {
-			s.logger.Warn("session: lifecycle release on teardown",
+	// 4) Extension Closer dispatch in REVERSE registration order so
+	// later extensions whose state depends on earlier ones release
+	// first (mcp closes its providers before workspace removes the
+	// session dir; skill drops its sink before tool catalog goes
+	// away). Errors are logged warn-not-fatal — a misbehaving
+	// extension must not block teardown / terminal write.
+	s.dispatchExtensionClosers(tc.writeCtx)
+
+	// 4.5) Close the per-session ToolManager child after extensions
+	// dropped their references; agent-level providers stay live on
+	// the parent. NewSession created the child via
+	// rootTools.NewChild, so closing it here completes the chain.
+	if s.tools != nil {
+		if err := s.tools.Close(); err != nil {
+			s.logger.Warn("session: per-session tool manager close",
 				"session", s.id, "err", err)
 		}
 	}
-
-	// 4.5) Extension Closer dispatch in REVERSE registration order so
-	// later extensions whose state depends on earlier ones release
-	// first. Errors are logged warn-not-fatal — a misbehaving
-	// extension must not block teardown / terminal write.
-	s.dispatchExtensionClosers(tc.writeCtx)
 
 	// 5) handleExit appends session_terminated, emits subagent_result
 	// to the parent (if any), and (optionally) the SessionClosed

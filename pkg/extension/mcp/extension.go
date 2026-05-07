@@ -20,6 +20,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/extension"
+	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	mcpprov "github.com/hugr-lab/hugen/pkg/tool/providers/mcp"
 	"github.com/hugr-lab/hugen/pkg/tool/providers/recovery"
@@ -104,16 +105,17 @@ func (e *Extension) InitState(ctx context.Context, state extension.SessionState)
 		return fmt.Errorf("mcp extension: session %s has no per-session ToolManager",
 			state.SessionID())
 	}
-	sessDir, ok := state.WorkspaceDir()
-	if !ok {
-		// No workspace wired — runtime configured without a
-		// per-session scratch dir, which is the test-fixture path.
-		// Per_session MCPs need a cwd; bail out cleanly so other
-		// extensions still init.
+	ws := wsext.FromState(state)
+	if ws == nil {
+		// No workspace extension wired — runtime / test-fixture
+		// path without per-session scratch dirs. Per_session MCPs
+		// need a cwd; bail out cleanly so other extensions still
+		// init.
 		state.SetValue(StateKey, &sessionMCP{tm: tm})
 		return nil
 	}
-	root, _ := state.WorkspaceRoot()
+	sessDir := ws.Dir()
+	root := ws.Root()
 
 	h := &sessionMCP{tm: tm}
 	state.SetValue(StateKey, h)

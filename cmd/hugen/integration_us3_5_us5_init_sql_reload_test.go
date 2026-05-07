@@ -26,6 +26,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
 	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
+	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
@@ -148,21 +149,14 @@ func newDuckDBCoreWithInitSQL(t *testing.T, vendorPath, initSQL string) *integra
 	t.Cleanup(func() { _ = tools.Close() })
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	ws := session.NewWorkspace(workspaceDir, true)
-	resources := session.NewResources(session.ResourceDeps{
-		Providers: cfgSvc.ToolProviders(),
-		Workspace: ws,
-		Logger:    logger,
-	})
-	mcpExt := mcpext.NewExtension(cfgSvc.ToolProviders(), logger)
-
 	router, agent := makeRouter(t)
 	mgr := session.NewManager(
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
-		session.WithLifecycle(resources),
-		session.WithWorkspace(ws),
-		session.WithExtensions(mcpExt),
+		session.WithExtensions(
+			wsext.NewExtension(workspaceDir, true),
+			mcpext.NewExtension(cfgSvc.ToolProviders(), logger),
+		),
 	)
 
 	return &integrationCore{
@@ -172,6 +166,5 @@ func newDuckDBCoreWithInitSQL(t *testing.T, vendorPath, initSQL string) *integra
 		skills:       skills,
 		skillStore:   skillStore,
 		manager:      mgr,
-		workspaces:   ws,
 	}
 }

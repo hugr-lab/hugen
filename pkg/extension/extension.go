@@ -63,6 +63,27 @@ type Recovery interface {
 	Recover(ctx context.Context, state SessionState, events []store.EventRow) error
 }
 
+// Shutdowner extensions clean up agent-level resources at runtime
+// shutdown — background goroutines, pooled file handles, network
+// clients, anything that outlives an individual session. The
+// runtime walks every Shutdowner-implementing extension in
+// reverse registration order during graceful shutdown (after
+// every active session has terminated, before pkg/runtime closes
+// the local store).
+//
+// Distinct from [Closer]: Closer.CloseSession runs once per
+// session at session-teardown; Shutdown runs once at process
+// shutdown. Extensions that hold ONLY per-session state implement
+// just Closer; extensions with agent-level state (mcp's
+// per_agent providers managed via the runtime tool registry,
+// future workers, …) implement Shutdown.
+//
+// Errors are logged but do not abort the runtime shutdown sweep —
+// every extension gets a chance to drain regardless.
+type Shutdowner interface {
+	Shutdown(ctx context.Context) error
+}
+
 // Closer extensions release per-session resources at session
 // teardown. Called from session.teardown after lifecycle.Release
 // and before the per-session ToolManager closes. Errors are logged

@@ -3,29 +3,29 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/hugen/pkg/tool/providers"
 	"github.com/hugr-lab/hugen/pkg/tool/providers/admin"
 	"github.com/hugr-lab/hugen/pkg/tool/providers/policies"
 )
 
-// phaseTools runs phase 8: build the per-session Workspace, the
-// providers.Builder, and the root *tool.ToolManager. Per_agent
-// providers from cfg.ToolProviders() load via Manager.Init (the
-// builder dispatches each Spec). The Tier-3 policies store +
-// admin registry-mutation provider register here so Resolve and
-// `tool:provider_*` tools work the moment Core.Tools is non-nil.
+// phaseTools runs phase 8: build providers.Builder + the root
+// *tool.ToolManager. Per_agent providers from cfg.ToolProviders()
+// load via Manager.Init (the builder dispatches each Spec). The
+// Tier-3 policies store + admin registry-mutation provider
+// register here so Resolve and `tool:provider_*` tools work the
+// moment Core.Tools is non-nil.
 //
-// Per_session providers (bash-mcp, ...) stay outside this phase —
-// each session opens them on Resources.Acquire via NewChild +
-// AddProvider/AddBySpec (pkg/session/lifecycle.go).
+// Workspace lifecycle (mkdir per session, cleanup on close) lives
+// on the pkg/extension/workspace extension; per_session providers
+// (bash-mcp, ...) are spawned by pkg/extension/mcp at session
+// InitState. providers.Builder needs the absolute root for the
+// allowed-host-mounts list — derived from cfg directly.
 func phaseTools(ctx context.Context, core *Core) error {
-	core.Workspace = session.NewWorkspace(core.Cfg.Workspace.Dir, core.Cfg.Workspace.CleanupOnClose)
-
-	wsRoot, err := core.Workspace.Root()
+	wsRoot, err := filepath.Abs(core.Cfg.Workspace.Dir)
 	if err != nil {
 		return fmt.Errorf("workspace root: %w", err)
 	}

@@ -9,11 +9,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
 	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
+	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
@@ -56,7 +56,6 @@ type integrationCore struct {
 	skills       *skill.SkillManager
 	skillStore   skill.SkillStore
 	manager      *session.Manager
-	workspaces   *session.Workspace
 }
 
 func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrationCore {
@@ -95,20 +94,14 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 	t.Cleanup(func() { _ = tools.Close() })
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	ws := session.NewWorkspace(workspaceDir, true)
-	resources := session.NewResources(session.ResourceDeps{
-		Providers:  cfgSvc.ToolProviders(),
-		Workspace:  ws,
-		Logger:     logger,
-	})
-
 	router, agent := makeRouter(t)
 	mgr := session.NewManager(
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
-		session.WithLifecycle(resources),
-		session.WithWorkspace(ws),
-		session.WithExtensions(mcpext.NewExtension(cfgSvc.ToolProviders(), logger)),
+		session.WithExtensions(
+			wsext.NewExtension(workspaceDir, true),
+			mcpext.NewExtension(cfgSvc.ToolProviders(), logger),
+		),
 	)
 
 	return &integrationCore{
@@ -119,7 +112,6 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 		skills:       skills,
 		skillStore:   skillStore,
 		manager:      mgr,
-		workspaces:   ws,
 	}
 }
 
@@ -287,34 +279,9 @@ func TestUS1_BashMCP_PermissionDenied(t *testing.T) {
 	}
 }
 
-func TestUS1_OrphanSweep(t *testing.T) {
-	root := t.TempDir()
-	workspaceDir := filepath.Join(root, "workspace")
-	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	live := filepath.Join(workspaceDir, "ses-live")
-	_ = os.MkdirAll(live, 0o755)
-	orphan := filepath.Join(workspaceDir, "ses-old")
-	_ = os.MkdirAll(orphan, 0o755)
-	old := time.Now().Add(-2 * time.Hour)
-	_ = os.Chtimes(orphan, old, old)
-
-	ws := session.NewWorkspace(workspaceDir, true)
-	removed, err := ws.SweepOrphans(map[string]struct{}{"ses-live": {}}, time.Hour)
-	if err != nil {
-		t.Fatalf("sweep: %v", err)
-	}
-	if removed != 1 {
-		t.Errorf("removed = %d, want 1", removed)
-	}
-	if _, err := os.Stat(live); err != nil {
-		t.Errorf("live session removed: %v", err)
-	}
-	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
-		t.Errorf("orphan still on disk")
-	}
-}
+// TestUS1_OrphanSweep moved to pkg/extension/workspace alongside
+// the (now-internal) tracker — same-package access lets the test
+// drive sweepOrphans without re-exporting the API.
 
 func TestUS1_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
 	core := newIntegrationCore(t, nil)

@@ -50,8 +50,6 @@ type Deps struct {
 	Codec     *protocol.Codec
 	Tools     *tool.ToolManager
 	Logger    *slog.Logger
-	Lifecycle Lifecycle
-	Workspace *Workspace
 	Opts      []SessionOption
 
 	// Extensions is the agent-level set of registered extensions.

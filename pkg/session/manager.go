@@ -90,9 +90,7 @@ type Manager struct {
 	logger   *slog.Logger
 
 	sessionOpts []SessionOption
-	lifecycle   Lifecycle
 	extensions  []extension.Extension
-	workspace   *Workspace
 
 	// deps mirrors the per-session dependency bundle passed by
 	// reference to every Session in this Manager's tree (root +
@@ -123,15 +121,6 @@ type Manager struct {
 // ManagerOption configures a Manager at construction.
 type ManagerOption func(*Manager)
 
-// WithLifecycle attaches a Lifecycle to the manager. The Lifecycle
-// owns per-session resource acquisition and release — typically a
-// *Resources constructed by cmd/hugen at boot. A nil Lifecycle
-// means the manager opens sessions without per-session resources
-// (used by tests that don't wire a workspace or tool stack).
-func WithLifecycle(l Lifecycle) ManagerOption {
-	return func(m *Manager) { m.lifecycle = l }
-}
-
 // WithSessionOptions threads SessionOption values through every
 // spawned Session — typically used by cmd/hugen to attach the
 // shared *tool.ToolManager via WithTools.
@@ -139,15 +128,6 @@ func WithSessionOptions(opts ...SessionOption) ManagerOption {
 	return func(m *Manager) {
 		m.sessionOpts = append(m.sessionOpts, opts...)
 	}
-}
-
-// WithWorkspace attaches the agent-level workspace to the manager
-// so per-session [extension.SessionState.WorkspaceDir] /
-// WorkspaceRoot calls return real paths. Optional — tests without
-// a workspace skip this and extensions that need paths see
-// (_, false).
-func WithWorkspace(w *Workspace) ManagerOption {
-	return func(m *Manager) { m.workspace = w }
 }
 
 // WithExtensions registers session extensions (notepad, plan,
@@ -200,8 +180,8 @@ func NewManager(
 		o(m)
 	}
 	// Build the shared Deps view AFTER the options ran, so
-	// Lifecycle and SessionOption updates picked up by m.lifecycle /
-	// m.sessionOpts are reflected in the bundle that newSession /
+	// SessionOption / Extension updates picked up by m.sessionOpts /
+	// m.extensions are reflected in the bundle that newSession /
 	// newSessionRestore see.
 	m.deps = &Deps{
 		Store:      m.store,
@@ -211,8 +191,6 @@ func NewManager(
 		Codec:      m.codec,
 		Tools:      m.tools,
 		Logger:     m.logger,
-		Lifecycle:  m.lifecycle,
-		Workspace:  m.workspace,
 		Extensions: m.extensions,
 		Opts:       m.sessionOpts,
 		RootCtx:    m.rootCtx,

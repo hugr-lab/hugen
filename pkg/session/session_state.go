@@ -43,31 +43,6 @@ func (s *Session) Parent() (extension.SessionState, bool) {
 	return s.parent, true
 }
 
-// WorkspaceDir implements [extension.SessionState]. Returns the
-// absolute per-session directory acquired by Lifecycle, or
-// ("", false) when the runtime has no Workspace wired.
-func (s *Session) WorkspaceDir() (string, bool) {
-	if s.deps == nil || s.deps.Workspace == nil {
-		return "", false
-	}
-	return s.deps.Workspace.Get(s.id)
-}
-
-// WorkspaceRoot implements [extension.SessionState]. Returns the
-// absolute workspace root, or ("", false) when no workspace is
-// wired. Independent of session lifecycle (the root exists from
-// runtime boot).
-func (s *Session) WorkspaceRoot() (string, bool) {
-	if s.deps == nil || s.deps.Workspace == nil {
-		return "", false
-	}
-	root, err := s.deps.Workspace.Root()
-	if err != nil {
-		return "", false
-	}
-	return root, true
-}
-
 // Emit implements [extension.SessionState]. Persists frame to the
 // session's event log and pushes it through the outbox; the
 // internal lowercase emit holds the actual logic (next-seq +

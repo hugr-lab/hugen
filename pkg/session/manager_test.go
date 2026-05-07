@@ -14,28 +14,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
-// stubLifecycle is a function-bag Lifecycle for tests that just
-// want to assert OnOpen/OnClose call counts. Production code uses
-// *Resources, never this.
-type stubLifecycle struct {
-	acquire func(ctx context.Context, sessionID string) error
-	release func(ctx context.Context, sessionID string) error
-}
-
-func (s stubLifecycle) Acquire(ctx context.Context, sess *Session) error {
-	if s.acquire == nil {
-		return nil
-	}
-	return s.acquire(ctx, sess.ID())
-}
-
-func (s stubLifecycle) Release(ctx context.Context, sessionID string) error {
-	if s.release == nil {
-		return nil
-	}
-	return s.release(ctx, sessionID)
-}
-
 // instrumentedStore wraps fakeStore with call counters used by the
 // lazy-materialisation tests.
 type instrumentedStore struct {
@@ -320,62 +298,10 @@ func TestProjectHistory_IncludesSystemMessage(t *testing.T) {
 // Touch the model package to avoid an unused-import lint.
 var _ = model.IntentDefault
 
-func TestManager_LifecycleHooks(t *testing.T) {
-	store := fixture.NewTestStore()
-	mdl := &scriptedModel{}
-	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
-	if err != nil {
-		t.Fatalf("agent: %v", err)
-	}
-
-	var openCalled, closeCalled atomic.Int32
-	mgr := NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), tool.NewToolManager(permsAllow{}, nil, nil), nil,
-		WithLifecycle(stubLifecycle{
-			acquire: func(ctx context.Context, sessionID string) error {
-				openCalled.Add(1)
-				return nil
-			},
-			release: func(ctx context.Context, sessionID string) error {
-				closeCalled.Add(1)
-				return nil
-			},
-		}),
-	)
-	s, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if openCalled.Load() != 1 {
-		t.Errorf("OnOpen calls = %d, want 1", openCalled.Load())
-	}
-	if err := mgr.Terminate(context.Background(), s.ID(), "user:/end"); err != nil {
-		t.Fatalf("terminate: %v", err)
-	}
-	if closeCalled.Load() != 1 {
-		t.Errorf("OnClose calls = %d, want 1", closeCalled.Load())
-	}
-}
-
-func TestManager_OnOpenErrorRollsBack(t *testing.T) {
-	store := fixture.NewTestStore()
-	mdl := &scriptedModel{}
-	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
-	if err != nil {
-		t.Fatalf("agent: %v", err)
-	}
-	failErr := errors.New("hook fail")
-	mgr := NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), tool.NewToolManager(permsAllow{}, nil, nil), nil,
-		WithLifecycle(stubLifecycle{
-			acquire: func(ctx context.Context, sessionID string) error { return failErr },
-		}),
-	)
-	_, _, err = mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
-	if err == nil || !errors.Is(err, failErr) {
-		t.Fatalf("err = %v, want wrap of %v", err, failErr)
-	}
-}
+// TestManager_LifecycleHooks + TestManager_OnOpenErrorRollsBack
+// removed in stage 5c — Lifecycle interface no longer exists.
+// Equivalent open/close hook coverage lives in extension
+// Closer/StateInitializer tests (notepad/skill/mcp/workspace).
 
 // TestSession_Spawn_HappyPath asserts a sub-agent session is created
 // with the right row fields, metadata.depth = parent.depth+1, and the

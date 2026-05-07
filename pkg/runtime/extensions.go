@@ -3,11 +3,13 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
 	notepadext "github.com/hugr-lab/hugen/pkg/extension/notepad"
 	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
+	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/tool"
@@ -31,18 +33,16 @@ import (
 // AddProvider on Core.Tools + (if Commander) Register on
 // Core.Commands.
 func phaseExtensions(_ context.Context, core *Core) error {
+	// Order matters once we have read-from-state dependencies:
+	// the workspace extension must run InitState before mcpext
+	// because mcpext reads workspace.FromState(state) for
+	// SESSION_DIR / WORKSPACES_ROOT. Skill / notepad have no
+	// inter-extension state reads at InitState; their order is
+	// purely aesthetic.
 	exts := []extension.Extension{
+		wsext.NewExtension(core.Cfg.Workspace.Dir, core.Cfg.Workspace.CleanupOnClose),
 		notepadext.NewExtension(core.Store, core.Agent.ID()),
 		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()),
-		// mcpext spawns per_session MCP providers from the
-		// agent-level config view. Registered after skill so
-		// skill's autoload (which can reference per_session-
-		// hosted tools) sees the spawned catalogue once skill's
-		// FilterTools runs in fetchSnapshot. Order across
-		// extensions only matters for state-write dependencies
-		// — neither skill autoload nor mcp spawn reads from the
-		// other's state, so the choice here is purely
-		// aesthetic.
 		mcpext.NewExtension(core.Config.ToolProviders(), core.Logger),
 	}
 
@@ -66,6 +66,26 @@ func phaseExtensions(_ context.Context, core *Core) error {
 	}
 
 	core.Extensions = exts
+
+	// Register a cleanup that walks every Shutdowner-implementing
+	// extension at process shutdown (after Manager.Stop has
+	// drained sessions, before pkg/runtime closes the local
+	// store). Reverse registration order so dependencies that
+	// registered earlier survive longer.
+	core.addCleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		for i := len(exts) - 1; i >= 0; i-- {
+			s, ok := exts[i].(extension.Shutdowner)
+			if !ok {
+				continue
+			}
+			if err := s.Shutdown(ctx); err != nil {
+				core.Logger.Warn("extension shutdown failed",
+					"extension", exts[i].Name(), "err", err)
+			}
+		}
+	})
 	return nil
 }
 

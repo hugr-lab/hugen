@@ -23,6 +23,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/extension"
 	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
+	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/runtime"
@@ -84,21 +85,13 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	}
 	mcpExt := mcpext.NewExtension(cfgSvc.ToolProviders(), logger)
 
-	ws := session.NewWorkspace(workspaceDir, true)
 	store := &stubStore{}
-	resources := session.NewResources(session.ResourceDeps{
-		Providers: cfgSvc.ToolProviders(),
-		Workspace: ws,
-		Logger:    logger,
-	})
 
 	router, agent := makeRouter(t)
 	mgr := session.NewManager(
 		store, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
-		session.WithLifecycle(resources),
-		session.WithWorkspace(ws),
-		session.WithExtensions(skillExt, mcpExt),
+		session.WithExtensions(wsext.NewExtension(workspaceDir, true), skillExt, mcpExt),
 		session.WithSessionOptions(
 			session.WithPerms(perms),
 		),

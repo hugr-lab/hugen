@@ -7,9 +7,21 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
+	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
+
+// wireWorkspace runs the workspace extension's InitState against
+// state so mcp ext tests get a real *SessionWorkspace handle in
+// state. Avoids reaching for private SessionWorkspace fields.
+func wireWorkspace(t *testing.T, state *fixture.TestSessionState, root string) {
+	t.Helper()
+	ext := wsext.NewExtension(root, false)
+	if err := ext.InitState(context.Background(), state); err != nil {
+		t.Fatalf("workspace InitState: %v", err)
+	}
+}
 
 // allowAll resolves every permission as allowed; used so the
 // session ToolManager doesn't reject providers in tests.
@@ -33,7 +45,7 @@ func TestInitState_NoProviders_NoOp(t *testing.T) {
 	ext := NewExtension(providersConfig{}, nil)
 	state := fixture.NewTestSessionState("ses-empty")
 	state.SetTools(tool.NewToolManager(allowAll{}, nil, nil))
-	state.SetWorkspace(t.TempDir(), t.TempDir())
+	wireWorkspace(t, state, t.TempDir())
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -52,7 +64,7 @@ func TestInitState_SkipsPerAgentLifetime(t *testing.T) {
 	}}, nil)
 	state := fixture.NewTestSessionState("ses-skip")
 	state.SetTools(tool.NewToolManager(allowAll{}, nil, nil))
-	state.SetWorkspace(t.TempDir(), t.TempDir())
+	wireWorkspace(t, state, t.TempDir())
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -68,7 +80,7 @@ func TestInitState_RejectsEmptyCommand(t *testing.T) {
 	}}, nil)
 	state := fixture.NewTestSessionState("ses-bad")
 	state.SetTools(tool.NewToolManager(allowAll{}, nil, nil))
-	state.SetWorkspace(t.TempDir(), t.TempDir())
+	wireWorkspace(t, state, t.TempDir())
 	err := ext.InitState(context.Background(), state)
 	if err == nil {
 		t.Fatalf("expected error for empty command")
@@ -104,7 +116,7 @@ func TestInitState_MissingTools_Errors(t *testing.T) {
 		{Name: "x", Type: "mcp", Lifetime: "per_session", Command: "/bin/true"},
 	}}, nil)
 	state := fixture.NewTestSessionState("ses-noTools")
-	state.SetWorkspace(t.TempDir(), t.TempDir())
+	wireWorkspace(t, state, t.TempDir())
 	err := ext.InitState(context.Background(), state)
 	if err == nil {
 		t.Fatalf("expected error when state.Tools() is nil")

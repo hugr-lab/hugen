@@ -135,19 +135,7 @@ func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenReques
 	s.openedAt = now
 	s.ownerID = req.OwnerID
 
-	// 3. Lifecycle.Acquire (workspace dir, autoload skills, per_session
-	// MCPs). Failure here means the row exists but no goroutine —
-	// mark the row terminal so restart-walker doesn't try to resume
-	// it.
-	if deps.Lifecycle != nil {
-		if err := deps.Lifecycle.Acquire(ctx, s); err != nil {
-			s.appendTerminal(ctx, "acquire_failed")
-			cancel(nil)
-			return nil, fmt.Errorf("session: acquire: %w", err)
-		}
-	}
-
-	// 3a. Extension InitState — let every registered extension stash
+	// 3. Extension InitState — let every registered extension stash
 	// its per-session typed handle in s state via SetValue. Order is
 	// preserved: a later extension can read state an earlier one
 	// stored. Errors are logged and the session continues — extensions
@@ -236,24 +224,6 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *De
 	s := buildSessionShell(id, depth, parent, deps, sessCtx, cancel)
 	s.openedAt = row.CreatedAt
 	s.ownerID = row.OwnerID
-
-	// Re-Acquire on the resume path: workspace dir is idempotent
-	// (mkdir is a no-op when present), autoload re-binds the skill
-	// catalogue, and per_session MCP providers re-spawn since they
-	// don't survive a process exit. NOT idempotent under concurrent
-	// resume of the same id — Lifecycle.AddSessionProvider rejects
-	// duplicate (sessionID, name) registrations, so two adapters
-	// racing Manager.Resume on the same id can leave one with a
-	// half-built provider set. Manager.Resume's m.live double-check
-	// at the end keeps the live tree clean (loser's session is
-	// cancelled), but the brief window during construction is a
-	// known follow-up — see review note L2.
-	if deps.Lifecycle != nil {
-		if err := deps.Lifecycle.Acquire(ctx, s); err != nil {
-			cancel(nil)
-			return nil, fmt.Errorf("session: re-acquire: %w", err)
-		}
-	}
 
 	// Extension InitState — every extension allocates a fresh
 	// per-session handle. For resumed sessions Recovery (lazy on the
@@ -368,21 +338,3 @@ func depthFromRow(row store.SessionRow) int {
 	return 0
 }
 
-// appendTerminal appends a session_terminated event to the session's
-// own events. Used on construction-failure paths (acquire_failed) and
-// on goroutine exit when a terminationCause was attached. Best-effort:
-// errors logged but not returned, since the caller is already
-// returning an error of its own.
-func (s *Session) appendTerminal(ctx context.Context, reason string) {
-	terminal := protocol.NewSessionTerminated(s.id, s.deps.Agent.Participant(), protocol.SessionTerminatedPayload{
-		Reason: reason,
-	})
-	row, summary, err := store.FrameToEventRow(terminal, s.deps.Agent.ID())
-	if err != nil {
-		s.deps.Logger.Warn("session: project terminal frame", "session", s.id, "err", err)
-		return
-	}
-	if err := s.deps.Store.AppendEvent(ctx, row, summary); err != nil {
-		s.deps.Logger.Warn("session: append terminal event", "session", s.id, "err", err)
-	}
-}

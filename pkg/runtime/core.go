@@ -64,9 +64,8 @@ type Core struct {
 	Permissions perm.Service
 
 	// Phase 8 (tools).
-	Workspace *session.Workspace
-	Tools     *tool.ToolManager
-	Policies  *policies.Policies
+	Tools    *tool.ToolManager
+	Policies *policies.Policies
 
 	// Phase 8.5 (extensions). Built by phaseExtensions; consumed by
 	// phaseSessionManager via session.WithExtensions. Each extension
