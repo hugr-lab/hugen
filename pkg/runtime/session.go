@@ -36,6 +36,7 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 	mgr := session.NewManager(
 		core.Store, core.Agent, core.Models, core.Commands, core.Codec, core.Tools, core.Logger,
 		session.WithLifecycle(resources),
+		session.WithExtensions(core.Extensions...),
 		session.WithSessionOptions(
 			session.WithSkills(core.Skills),
 			session.WithPerms(core.Permissions),

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/session/tools/notepad"
@@ -147,6 +148,23 @@ func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenReques
 		}
 	}
 
+	// 3a. Extension InitState — let every registered extension stash
+	// its per-session typed handle in s state via SetValue. Order is
+	// preserved: a later extension can read state an earlier one
+	// stored. Errors are logged and the session continues — extensions
+	// must be best-effort at startup; tool dispatch surfaces specific
+	// failures later if the handle is missing.
+	for _, ext := range deps.Extensions {
+		init, ok := ext.(extension.StateInitializer)
+		if !ok {
+			continue
+		}
+		if err := init.InitState(ctx, s); err != nil {
+			deps.Logger.Warn("session: extension InitState",
+				"session", id, "extension", ext.Name(), "err", err)
+		}
+	}
+
 	// 4. Emit SessionOpened so adapters / event log carry the live-cycle
 	// marker. Only roots get a SessionOpened — sub-agents are signalled
 	// to the parent's events via the SubagentStarted frame the caller
@@ -235,6 +253,22 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *De
 		if err := deps.Lifecycle.Acquire(ctx, s); err != nil {
 			cancel(nil)
 			return nil, fmt.Errorf("session: re-acquire: %w", err)
+		}
+	}
+
+	// Extension InitState — every extension allocates a fresh
+	// per-session handle. For resumed sessions Recovery (lazy on the
+	// first inbound frame inside materialise) replays events INTO
+	// the handle that InitState seeded; the order keeps handle
+	// pointers stable across the session's lifetime.
+	for _, ext := range deps.Extensions {
+		init, ok := ext.(extension.StateInitializer)
+		if !ok {
+			continue
+		}
+		if err := init.InitState(ctx, s); err != nil {
+			deps.Logger.Warn("session: extension InitState (resume)",
+				"session", id, "extension", ext.Name(), "err", err)
 		}
 	}
 

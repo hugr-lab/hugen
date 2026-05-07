@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/skill"
@@ -41,12 +42,13 @@ func drainOutboxOnce(out <-chan protocol.Frame) {
 type testParentOpt func(*testParentCfg)
 
 type testParentCfg struct {
-	store    RuntimeStore
-	skills   *skill.SkillManager
-	tools    *tool.ToolManager
-	perms    perm.Service
-	sessOpts []SessionOption
-	runLoop  bool
+	store      RuntimeStore
+	skills     *skill.SkillManager
+	tools      *tool.ToolManager
+	perms      perm.Service
+	sessOpts   []SessionOption
+	extensions []extension.Extension
+	runLoop    bool
 }
 
 // withTestStore sets the RuntimeStore used by the fixture (default:
@@ -79,6 +81,15 @@ func withTestPerms(p perm.Service) testParentOpt {
 	return func(c *testParentCfg) {
 		c.perms = p
 		c.sessOpts = append(c.sessOpts, WithPerms(p))
+	}
+}
+
+// withTestExtensions registers session extensions on the fixture.
+// NewSession iterates them and dispatches each to the capability
+// hooks it implements (StateInitializer at open, …).
+func withTestExtensions(exts ...extension.Extension) testParentOpt {
+	return func(c *testParentCfg) {
+		c.extensions = append(c.extensions, exts...)
 	}
 }
 
@@ -120,17 +131,18 @@ func newTestParent(t *testing.T, opts ...testParentOpt) (*Session, func()) {
 	rootCtx, cancel := context.WithCancel(context.Background())
 	wg := &sync.WaitGroup{}
 	deps := &Deps{
-		Store:    cfg.store,
-		Agent:    agent,
-		Models:   router,
-		Commands: NewCommandRegistry(),
-		Codec:    protocol.NewCodec(),
-		Tools:    cfg.tools,
-		Logger:   slog.Default(),
-		Opts:     cfg.sessOpts,
-		RootCtx:  rootCtx,
-		WG:       wg,
-		MaxDepth: DefaultMaxDepth,
+		Store:      cfg.store,
+		Agent:      agent,
+		Models:     router,
+		Commands:   NewCommandRegistry(),
+		Codec:      protocol.NewCodec(),
+		Tools:      cfg.tools,
+		Logger:     slog.Default(),
+		Opts:       cfg.sessOpts,
+		Extensions: cfg.extensions,
+		RootCtx:    rootCtx,
+		WG:         wg,
+		MaxDepth:   DefaultMaxDepth,
 	}
 	parent, err := New(context.Background(), deps, OpenRequest{OwnerID: "alice"})
 	if err != nil {

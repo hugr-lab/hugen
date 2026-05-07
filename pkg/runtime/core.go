@@ -9,6 +9,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -66,6 +67,12 @@ type Core struct {
 	Workspace *session.Workspace
 	Tools     *tool.ToolManager
 	Policies  *policies.Policies
+
+	// Phase 8.5 (extensions). Built by phaseExtensions; consumed by
+	// phaseSessionManager via session.WithExtensions. Each extension
+	// implementing tool.ToolProvider is also registered on Tools so
+	// its catalogue surfaces to Snapshot/Resolve/Dispatch.
+	Extensions []extension.Extension
 
 	// Phase 9 (session_manager).
 	Manager *session.Manager

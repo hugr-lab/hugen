@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
@@ -51,6 +52,14 @@ type Deps struct {
 	Logger    *slog.Logger
 	Lifecycle Lifecycle
 	Opts      []SessionOption
+
+	// Extensions is the agent-level set of registered extensions.
+	// NewSession iterates this list and dispatches each extension to
+	// the capability hooks it implements (StateInitializer at open,
+	// Recovery at materialise, Closer at teardown, …). Order is
+	// preserved: Advertisers contribute prompt sections in this
+	// order; Closers are called in reverse.
+	Extensions []extension.Extension
 
 	RootCtx context.Context
 	WG      *sync.WaitGroup

@@ -44,7 +44,6 @@ type Session struct {
 	models           *model.ModelRouter
 	codec            *protocol.Codec
 	cmds             *CommandRegistry
-	notepad          *notepad.Notepad
 	tools            *tool.ToolManager   // per-session child manager; required (NewSession derives it)
 	rootTools        *tool.ToolManager   // parent (agent-level) manager; passed to subagents
 	skills           *skill.SkillManager // optional; consulted for per-skill max_turns
@@ -349,7 +348,6 @@ func NewSession(
 		models:    models,
 		codec:     codec,
 		cmds:      cmds,
-		notepad:   notepad.New(store, agent.ID(), id),
 		rootTools: tools,
 		tools:     tools.NewChild(),
 		logger:    logger,
@@ -426,8 +424,22 @@ func (s *Session) Submit(ctx context.Context, f protocol.Frame) (ok bool) {
 	}
 }
 
-// Notepad returns the session's notepad handle.
-func (s *Session) Notepad() *notepad.Notepad { return s.notepad }
+// Notepad returns the session's notepad handle if the notepad
+// extension is registered on the runtime; nil otherwise. The
+// handle lives in the session's [tool.SessionState] under the
+// well-known key the notepad extension owns.
+//
+// This accessor is a transitional shim — direct callers should
+// migrate to extension/notepad.FromState(s) and read state via
+// the [tool.SessionState] surface.
+func (s *Session) Notepad() *notepad.Notepad {
+	v, ok := s.Value("notepad")
+	if !ok {
+		return nil
+	}
+	n, _ := v.(*notepad.Notepad)
+	return n
+}
 
 // Tools exposes the per-session ToolManager. This is the child
 // manager NewSession derived off the root passed at construction:
@@ -1267,7 +1279,7 @@ func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashComma
 		Author:      f.Author(),
 		AgentAuthor: s.agent.Participant(),
 		Models:      s.models,
-		Notepad:     s.notepad,
+		Notepad:     s.Notepad(),
 		Logger:      s.logger,
 		Description: spec.Description,
 	}

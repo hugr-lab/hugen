@@ -477,7 +477,7 @@ func (m *Manifest) validate() error {
 // validator surfaces a helpful error pointing manifest authors at
 // the new path when they reference an old name.
 var legacySystemRename = map[string]string{
-	"notepad_append":    "session:notepad_append",
+	"notepad_append":    "notepad:append",
 	"skill_load":        "session:skill_load",
 	"skill_unload":      "session:skill_unload",
 	"skill_ref":         "session:skill_ref",

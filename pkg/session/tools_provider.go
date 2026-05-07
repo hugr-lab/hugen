@@ -29,7 +29,6 @@ const sessionToolProviderName = "session"
 func (s *Session) initTools() {
 	s.sessionTools = map[string]sessionToolDescriptor{}
 	s.initToolCatalog()
-	s.initNotepad()
 	s.initSubagent()
 	s.initPlan()
 	s.initWhiteboard()

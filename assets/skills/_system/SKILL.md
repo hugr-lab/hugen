@@ -13,11 +13,13 @@ allowed-tools:
       - bash.sed
   - provider: session
     tools:
-      - notepad_append
       - skill_load
       - skill_unload
       - skill_ref
       - skill_files
+  - provider: notepad
+    tools:
+      - append
   - provider: policy
     tools:
       - save
@@ -92,7 +94,7 @@ shell tools and file tools see exactly the same paths.
 
 ## meta tools
 
-- `notepad_append` — append to the per-session scratchpad. Use it
+- `notepad:append` — append to the per-session scratchpad. Use it
   to log intermediate findings the user may ask about later.
 - `skill_load` / `skill_unload` — load or release a skill mid-
   session. Inspect the available skills index in your system

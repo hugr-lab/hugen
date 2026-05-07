@@ -77,7 +77,7 @@ overhead bounded; a 30-comment log doesn't bloat every prompt.
 ## Caps and what they mean
 
 - 8 KB body — generous; if you're approaching this you're probably
-  trying to use the plan as a notebook. Use `notepad_append` for
+  trying to use the plan as a notebook. Use `notepad:append` for
   detail; keep the plan body focused on the goal and the high-level
   shape of the work.
 - 2 KB per comment — about a paragraph. Same advice: keep it

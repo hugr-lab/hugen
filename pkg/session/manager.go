@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
@@ -90,6 +91,7 @@ type Manager struct {
 
 	sessionOpts []SessionOption
 	lifecycle   Lifecycle
+	extensions  []extension.Extension
 
 	// deps mirrors the per-session dependency bundle passed by
 	// reference to every Session in this Manager's tree (root +
@@ -138,6 +140,19 @@ func WithSessionOptions(opts ...SessionOption) ManagerOption {
 	}
 }
 
+// WithExtensions registers session extensions (notepad, plan,
+// whiteboard, skills, future plugins) on this Manager. Each
+// spawned Session iterates the list and dispatches each extension
+// to the capability hooks it implements (StateInitializer at open,
+// Recovery at materialise, Closer at teardown, …). Order is
+// preserved — later extensions read state earlier ones may have
+// stashed; Closers run in reverse.
+func WithExtensions(exts ...extension.Extension) ManagerOption {
+	return func(m *Manager) {
+		m.extensions = append(m.extensions, exts...)
+	}
+}
+
 // NewManager constructs the manager. All required deps are
 // passed in (constitution principle II). The manager owns a root
 // context (separate from any adapter's errgroup context) that scopes
@@ -179,14 +194,15 @@ func NewManager(
 	// m.sessionOpts are reflected in the bundle that newSession /
 	// newSessionRestore see.
 	m.deps = &Deps{
-		Store:     m.store,
-		Agent:     m.agent,
-		Models:    m.models,
-		Commands:  m.commands,
-		Codec:     m.codec,
-		Tools:     m.tools,
-		Logger:    m.logger,
-		Lifecycle: m.lifecycle,
+		Store:      m.store,
+		Agent:      m.agent,
+		Models:     m.models,
+		Commands:   m.commands,
+		Codec:      m.codec,
+		Tools:      m.tools,
+		Logger:     m.logger,
+		Lifecycle:  m.lifecycle,
+		Extensions: m.extensions,
 		Opts:      m.sessionOpts,
 		RootCtx:   m.rootCtx,
 		WG:        &m.wg,
