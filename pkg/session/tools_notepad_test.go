@@ -61,8 +61,9 @@ func TestCallNotepadAppend_EmptyText(t *testing.T) {
 }
 
 func TestNotepadAppend_RegisteredOnSessionProvider(t *testing.T) {
-	prov := (*Session)(nil)
-	tools, err := prov.List(context.Background())
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+	tools, err := parent.List(context.Background())
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

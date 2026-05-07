@@ -191,8 +191,9 @@ func TestToolCatalog_BadRequest(t *testing.T) {
 }
 
 func TestToolCatalog_RegisteredOnSessionProvider(t *testing.T) {
-	prov := (&Session{})
-	tools, err := prov.List(context.Background())
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+	tools, err := parent.List(context.Background())
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

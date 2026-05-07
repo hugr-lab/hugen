@@ -257,8 +257,9 @@ func TestSkillFiles_BadGlob(t *testing.T) {
 // ---------- registration ----------
 
 func TestSkillTools_RegisteredOnSessionProvider(t *testing.T) {
-	prov := (*Session)(nil)
-	tools, err := prov.List(context.Background())
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+	tools, err := parent.List(context.Background())
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
