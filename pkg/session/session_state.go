@@ -43,6 +43,27 @@ func (s *Session) Parent() (extension.SessionState, bool) {
 	return s.parent, true
 }
 
+// Children implements [extension.SessionState]. Returns a
+// snapshot of every direct child's state, or nil when the
+// session has no children. Safe for the caller to iterate
+// without holding any session lock; mutations after the call
+// are not reflected.
+func (s *Session) Children() []extension.SessionState {
+	s.childMu.Lock()
+	defer s.childMu.Unlock()
+	if len(s.children) == 0 {
+		return nil
+	}
+	out := make([]extension.SessionState, 0, len(s.children))
+	for _, c := range s.children {
+		if c == nil {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // Emit implements [extension.SessionState]. Persists frame to the
 // session's event log and pushes it through the outbox; the
 // internal lowercase emit holds the actual logic (next-seq +

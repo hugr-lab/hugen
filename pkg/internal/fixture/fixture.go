@@ -16,15 +16,25 @@ import (
 // *session.Session. Value/SetValue are sync.Map-backed; Tools()
 // returns whatever the test installs via [TestSessionState.SetTools]
 // (nil by default). Parent linkage is set via
-// [TestSessionState.WithParent].
+// [TestSessionState.WithParent]; child linkage via
+// [TestSessionState.AppendChild]. Submit records the inbound frame
+// in a queue per session for assertions; closed sessions reject
+// Submit.
 type TestSessionState struct {
 	id        string
 	tools     *tool.ToolManager
 	parentRef *TestSessionState
 	state     sync.Map
 
+	childMu  sync.Mutex
+	children []*TestSessionState
+
 	emitMu  sync.Mutex
 	emitted []protocol.Frame
+
+	inboxMu sync.Mutex
+	inbox   []protocol.Frame
+	closed  bool
 }
 
 // NewTestSessionState builds a TestSessionState bound to the given
@@ -39,6 +49,33 @@ func NewTestSessionState(sessionID string) *TestSessionState {
 func (s *TestSessionState) WithParent(parent *TestSessionState) *TestSessionState {
 	s.parentRef = parent
 	return s
+}
+
+// AppendChild registers child as a direct child so Children()
+// returns it. Idempotent on duplicate appends. Returns the
+// receiver so callers can chain.
+func (s *TestSessionState) AppendChild(child *TestSessionState) *TestSessionState {
+	if child == nil {
+		return s
+	}
+	s.childMu.Lock()
+	defer s.childMu.Unlock()
+	for _, c := range s.children {
+		if c == child {
+			return s
+		}
+	}
+	s.children = append(s.children, child)
+	return s
+}
+
+// CloseInbox marks the session inbox closed; subsequent Submit
+// calls return false. Tests use this to simulate a terminated
+// session.
+func (s *TestSessionState) CloseInbox() {
+	s.inboxMu.Lock()
+	defer s.inboxMu.Unlock()
+	s.closed = true
 }
 
 // SetTools installs a ToolManager that Tools() returns. Tests
@@ -65,6 +102,21 @@ func (s *TestSessionState) Parent() (extension.SessionState, bool) {
 	return s.parentRef, true
 }
 
+// Children implements [extension.SessionState]. Returns a
+// snapshot of every child registered via AppendChild, or nil.
+func (s *TestSessionState) Children() []extension.SessionState {
+	s.childMu.Lock()
+	defer s.childMu.Unlock()
+	if len(s.children) == 0 {
+		return nil
+	}
+	out := make([]extension.SessionState, 0, len(s.children))
+	for _, c := range s.children {
+		out = append(out, c)
+	}
+	return out
+}
+
 // Tools implements [extension.SessionState]. Returns whatever was
 // installed via [TestSessionState.SetTools]; nil by default.
 func (s *TestSessionState) Tools() *tool.ToolManager { return s.tools }
@@ -88,6 +140,34 @@ func (s *TestSessionState) Emitted() []protocol.Frame {
 	defer s.emitMu.Unlock()
 	out := make([]protocol.Frame, len(s.emitted))
 	copy(out, s.emitted)
+	return out
+}
+
+// Submit implements [extension.SessionState]. Appends frame to
+// the in-memory inbox queue or returns false if the inbox was
+// closed via CloseInbox. ctx is honoured: a cancelled ctx
+// returns false without recording the frame.
+func (s *TestSessionState) Submit(ctx context.Context, frame protocol.Frame) bool {
+	if err := ctx.Err(); err != nil {
+		return false
+	}
+	s.inboxMu.Lock()
+	defer s.inboxMu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.inbox = append(s.inbox, frame)
+	return true
+}
+
+// Inbox returns a snapshot of every frame Submit accepted, in
+// submission order. Read-only — callers must not mutate the
+// returned slice's frames.
+func (s *TestSessionState) Inbox() []protocol.Frame {
+	s.inboxMu.Lock()
+	defer s.inboxMu.Unlock()
+	out := make([]protocol.Frame, len(s.inbox))
+	copy(out, s.inbox)
 	return out
 }
 

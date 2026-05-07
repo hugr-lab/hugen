@@ -35,6 +35,13 @@ type SessionState interface {
 	// transparently traverses any depth.
 	Parent() (SessionState, bool)
 
+	// Children returns a snapshot of the direct child sessions'
+	// states, or nil for sessions with no children. The returned
+	// slice is safe for the caller to iterate; new spawns after the
+	// call are not reflected. Used by extensions that fan a frame
+	// out to every member of a group (whiteboard host broadcast).
+	Children() []SessionState
+
 	Tools() *tool.ToolManager
 
 	// Emit persists frame on the calling session's event log and
@@ -43,6 +50,14 @@ type SessionState interface {
 	// with Category=Op) call this so Recovery can replay them on
 	// restart.
 	Emit(ctx context.Context, frame protocol.Frame) error
+
+	// Submit delivers frame to this session's inbox without
+	// touching the calling session's event log. Returns false if
+	// the inbox is closed (session terminated) or ctx fired before
+	// the send. Used by extensions that route a frame across
+	// sessions in the tree (member→host whiteboard write,
+	// host→member broadcast).
+	Submit(ctx context.Context, frame protocol.Frame) bool
 }
 
 type sessionStateKey struct{}

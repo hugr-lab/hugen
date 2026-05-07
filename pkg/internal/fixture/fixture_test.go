@@ -95,6 +95,69 @@ func TestRuntimeStore_ListEvents_MinSeq(t *testing.T) {
 	})
 }
 
+// TestSessionState_ChildrenAndSubmit covers the cross-session
+// helpers added in stage 7 of the extension migration: Children
+// returns a snapshot of registered children; Submit appends to
+// the inbox and rejects after CloseInbox; a cancelled ctx never
+// records a frame.
+func TestSessionState_ChildrenAndSubmit(t *testing.T) {
+	parent := NewTestSessionState("ses-parent")
+	c1 := NewTestSessionState("ses-c1").WithParent(parent)
+	c2 := NewTestSessionState("ses-c2").WithParent(parent)
+	parent.AppendChild(c1).AppendChild(c2).AppendChild(c1) // duplicate ignored
+
+	t.Run("children_snapshot", func(t *testing.T) {
+		got := parent.Children()
+		if len(got) != 2 {
+			t.Fatalf("len=%d, want 2", len(got))
+		}
+		ids := map[string]bool{got[0].SessionID(): true, got[1].SessionID(): true}
+		if !ids["ses-c1"] || !ids["ses-c2"] {
+			t.Errorf("ids=%v", ids)
+		}
+	})
+
+	t.Run("leaf_children_nil", func(t *testing.T) {
+		if got := c1.Children(); got != nil {
+			t.Errorf("leaf children=%v, want nil", got)
+		}
+	})
+
+	t.Run("submit_records_frame", func(t *testing.T) {
+		f := protocol.NewSystemMarker("ses-c1", protocol.ParticipantInfo{ID: "a"}, "ping", nil)
+		if !c1.Submit(context.Background(), f) {
+			t.Fatal("submit returned false")
+		}
+		if got := c1.Inbox(); len(got) != 1 || got[0] != f {
+			t.Errorf("inbox=%v", got)
+		}
+	})
+
+	t.Run("submit_after_close_returns_false", func(t *testing.T) {
+		c2.CloseInbox()
+		f := protocol.NewSystemMarker("ses-c2", protocol.ParticipantInfo{ID: "a"}, "ping", nil)
+		if c2.Submit(context.Background(), f) {
+			t.Error("submit returned true on closed inbox")
+		}
+		if got := c2.Inbox(); len(got) != 0 {
+			t.Errorf("inbox=%v, want empty", got)
+		}
+	})
+
+	t.Run("submit_with_cancelled_ctx_returns_false", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		fresh := NewTestSessionState("ses-fresh")
+		f := protocol.NewSystemMarker("ses-fresh", protocol.ParticipantInfo{ID: "a"}, "ping", nil)
+		if fresh.Submit(ctx, f) {
+			t.Error("submit returned true on cancelled ctx")
+		}
+		if got := fresh.Inbox(); len(got) != 0 {
+			t.Errorf("inbox=%v, want empty", got)
+		}
+	})
+}
+
 // TestRuntimeStore_ListChildren covers the phase-4 BFS-walker query.
 func TestRuntimeStore_ListChildren(t *testing.T) {
 	ctx := context.Background()
