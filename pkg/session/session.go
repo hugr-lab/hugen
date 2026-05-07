@@ -426,12 +426,12 @@ func (s *Session) Submit(ctx context.Context, f protocol.Frame) (ok bool) {
 
 // Notepad returns the session's notepad handle if the notepad
 // extension is registered on the runtime; nil otherwise. The
-// handle lives in the session's [tool.SessionState] under the
+// handle lives in the session's [extension.SessionState] under the
 // well-known key the notepad extension owns.
 //
 // This accessor is a transitional shim — direct callers should
 // migrate to extension/notepad.FromState(s) and read state via
-// the [tool.SessionState] surface.
+// the [extension.SessionState] surface.
 func (s *Session) Notepad() *notepad.Notepad {
 	v, ok := s.Value("notepad")
 	if !ok {

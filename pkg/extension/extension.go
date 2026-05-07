@@ -8,7 +8,7 @@
 //
 // Extensions are agent-level singletons constructed once during
 // runtime boot (pkg/runtime). Per-session state lives in a
-// [tool.SessionState] handle the extension stores via SetValue at
+// [SessionState] handle the extension stores via SetValue at
 // session creation; subsequent calls (tool dispatch, prompt
 // rendering, frame routing) read it via Value.
 //
@@ -27,7 +27,7 @@ import (
 
 // Extension is the marker interface every plug-in implements.
 // Name returns a stable identifier (e.g. "plan", "whiteboard",
-// "skill") used as the namespace key in [tool.SessionState] and as
+// "skill") used as the namespace key in [SessionState] and as
 // the routing discriminator on [protocol.ExtensionFrame]. Names are
 // case-sensitive and must be unique across the registered set; the
 // runtime panics on a duplicate registration.
@@ -45,7 +45,7 @@ type Extension interface {
 // call state.SetValue(ext.Name(), handle); subsequent capability
 // calls retrieve it via state.Value(ext.Name()).
 type StateInitializer interface {
-	InitState(ctx context.Context, state tool.SessionState) error
+	InitState(ctx context.Context, state SessionState) error
 }
 
 // Recovery extensions rebuild their per-session state from the
@@ -60,7 +60,7 @@ type StateInitializer interface {
 // Returning an error logs a warning; recovery is best-effort and
 // must not block session start.
 type Recovery interface {
-	Recover(ctx context.Context, state tool.SessionState, events []store.EventRow) error
+	Recover(ctx context.Context, state SessionState, events []store.EventRow) error
 }
 
 // Closer extensions release per-session resources at session
@@ -72,7 +72,7 @@ type Recovery interface {
 // whiteboard projections) skip this; only extensions that hold
 // goroutines, file handles, or external bindings implement it.
 type Closer interface {
-	Close(ctx context.Context, state tool.SessionState) error
+	Close(ctx context.Context, state SessionState) error
 }
 
 // Advertiser extensions contribute a section to the system prompt
@@ -83,7 +83,7 @@ type Closer interface {
 // ordering primitives — order this matters to is documented at the
 // registration site.
 type Advertiser interface {
-	AdvertiseSystemPrompt(ctx context.Context, state tool.SessionState) string
+	AdvertiseSystemPrompt(ctx context.Context, state SessionState) string
 }
 
 // ToolFilter extensions narrow the per-session tool catalogue.
@@ -93,7 +93,7 @@ type Advertiser interface {
 // restrictive wins. Implementations must be deterministic for a
 // given (state, all) pair so the snapshot cache stays correct.
 type ToolFilter interface {
-	FilterTools(ctx context.Context, state tool.SessionState, all []tool.Tool) []tool.Tool
+	FilterTools(ctx context.Context, state SessionState, all []tool.Tool) []tool.Tool
 }
 
 // FrameRouter extensions handle inbound [protocol.ExtensionFrame]
@@ -106,5 +106,5 @@ type ToolFilter interface {
 // (plan, skill) skip this interface — only consumers implement it
 // (today: whiteboard's broadcast member-side handler).
 type FrameRouter interface {
-	HandleFrame(ctx context.Context, state tool.SessionState, f *protocol.ExtensionFrame) error
+	HandleFrame(ctx context.Context, state SessionState, f *protocol.ExtensionFrame) error
 }

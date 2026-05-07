@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	notepadpkg "github.com/hugr-lab/hugen/pkg/session/tools/notepad"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -37,7 +38,7 @@ func (f *fakeStore) ListNotes(_ context.Context, sessionID string, _ int) ([]not
 	return out, nil
 }
 
-// fakeState implements tool.SessionState — sync.Map-backed Value/
+// fakeState implements extension.SessionState — sync.Map-backed Value/
 // SetValue plus stable SessionID/ParentID strings. Used by the
 // handler tests so they don't need a full *session.Session.
 type fakeState struct {
@@ -54,6 +55,11 @@ func (f *fakeState) Value(name string) (any, bool) {
 	return f.state.Load(name)
 }
 func (f *fakeState) ParentValue(_ string) (any, bool) { return nil, false }
+
+// Tools returns nil — notepad handler tests don't dynamically
+// mount providers. Real Session implementations return the
+// per-session child manager.
+func (f *fakeState) Tools() *tool.ToolManager { return nil }
 
 // newFixture builds an Extension + a state seeded by InitState so
 // every test starts from "fresh, ready-to-call" — same shape the
@@ -105,7 +111,7 @@ func TestExtension_InitState_StashesNotepad(t *testing.T) {
 // dispatcher path) and verifies the row landed in the store.
 func TestCallAppend_Happy(t *testing.T) {
 	ext, state, store := newFixture(t)
-	ctx := tool.WithSessionState(context.Background(), state)
+	ctx := extension.WithSessionState(context.Background(), state)
 
 	args, _ := json.Marshal(appendInput{Text: "remember this"})
 	out, err := ext.Call(ctx, "notepad:append", args)
@@ -127,7 +133,7 @@ func TestCallAppend_Happy(t *testing.T) {
 
 func TestCallAppend_BadRequest(t *testing.T) {
 	ext, state, _ := newFixture(t)
-	ctx := tool.WithSessionState(context.Background(), state)
+	ctx := extension.WithSessionState(context.Background(), state)
 
 	out, err := ext.Call(ctx, "notepad:append", json.RawMessage(`{not-json`))
 	if err != nil {
@@ -140,7 +146,7 @@ func TestCallAppend_BadRequest(t *testing.T) {
 
 func TestCallAppend_EmptyText(t *testing.T) {
 	ext, state, _ := newFixture(t)
-	ctx := tool.WithSessionState(context.Background(), state)
+	ctx := extension.WithSessionState(context.Background(), state)
 
 	args, _ := json.Marshal(appendInput{Text: ""})
 	out, err := ext.Call(ctx, "notepad:append", args)
@@ -166,7 +172,7 @@ func TestCallAppend_NoSessionInContext(t *testing.T) {
 
 func TestCallAppend_UnknownOp(t *testing.T) {
 	ext, state, _ := newFixture(t)
-	ctx := tool.WithSessionState(context.Background(), state)
+	ctx := extension.WithSessionState(context.Background(), state)
 
 	if _, err := ext.Call(ctx, "notepad:nope", json.RawMessage(`{}`)); err == nil {
 		t.Fatal("expected error for unknown op")

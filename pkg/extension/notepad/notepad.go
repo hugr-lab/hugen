@@ -1,7 +1,7 @@
 // Package notepad is the session extension that exposes the
 // per-session notepad as the LLM-facing tool "notepad:append" and
 // stashes the per-session [notepad.Notepad] handle in
-// [tool.SessionState] under the key "notepad".
+// [extension.SessionState] under the key "notepad".
 //
 // The extension is an agent-level singleton constructed once at
 // runtime boot with a notepad.Store + the agent's id; every
@@ -19,7 +19,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
-// StateKey is the [tool.SessionState] key the extension stores its
+// StateKey is the [extension.SessionState] key the extension stores its
 // per-session [notepad.Notepad] handle under. Exported so callers
 // looking up the handle from outside the extension (legacy
 // session.Notepad accessor, command env wiring) can do so without
@@ -38,7 +38,7 @@ const providerName = "notepad"
 // Extension implements [extension.Extension] +
 // [extension.StateInitializer] + [tool.ToolProvider]. The instance
 // is shared across every session under one Manager; per-session
-// state lives in [tool.SessionState] under [StateKey].
+// state lives in [extension.SessionState] under [StateKey].
 type Extension struct {
 	store   notepadpkg.Store
 	agentID string
@@ -63,14 +63,14 @@ var (
 func (e *Extension) Name() string { return providerName }
 
 // Lifetime implements [tool.ToolProvider]. The provider is
-// stateless (per-session state lives in [tool.SessionState]) so
+// stateless (per-session state lives in [extension.SessionState]) so
 // PerAgent fits — one provider instance shared across sessions.
 func (e *Extension) Lifetime() tool.Lifetime { return tool.LifetimePerAgent }
 
 // InitState implements [extension.StateInitializer]. Allocates a
 // fresh [notepad.Notepad] for the calling session and stashes it
 // under [StateKey].
-func (e *Extension) InitState(_ context.Context, state tool.SessionState) error {
+func (e *Extension) InitState(_ context.Context, state extension.SessionState) error {
 	state.SetValue(StateKey, notepadpkg.New(e.store, e.agentID, state.SessionID()))
 	return nil
 }
@@ -78,7 +78,7 @@ func (e *Extension) InitState(_ context.Context, state tool.SessionState) error 
 // FromState returns the *notepad.Notepad handle for state, or nil
 // if the extension has not run InitState for it (e.g. a session
 // created without the notepad extension registered).
-func FromState(state tool.SessionState) *notepadpkg.Notepad {
+func FromState(state extension.SessionState) *notepadpkg.Notepad {
 	v, ok := state.Value(StateKey)
 	if !ok {
 		return nil
@@ -132,7 +132,7 @@ func (e *Extension) Subscribe(_ context.Context) (<-chan tool.ProviderEvent, err
 
 // Close implements [tool.ToolProvider]. The provider holds no
 // resources of its own — per-session state cleanup happens via
-// [extension.Closer] on the matching [tool.SessionState].
+// [extension.Closer] on the matching [extension.SessionState].
 // Notepad's state is plain memory + store-mediated rows, so no
 // Close hook is needed.
 func (e *Extension) Close() error { return nil }
@@ -158,7 +158,7 @@ func toolErr(code, msg string) (json.RawMessage, error) {
 }
 
 func (e *Extension) callAppend(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-	state, ok := tool.SessionStateFromContext(ctx)
+	state, ok := extension.SessionStateFromContext(ctx)
 	if !ok {
 		return toolErr("session_gone", "no session attached to dispatch ctx")
 	}
