@@ -96,7 +96,7 @@ func buildSmokeVenvTemplate(t *testing.T, bin string) string {
 	return pythonTemplateDir
 }
 
-func TestUS3_5_US2_Python(t *testing.T) {
+func TestAnalyst_Python(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short mode: skipping python-mcp integration test")
 	}

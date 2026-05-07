@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func TestUS3_5_US5_TemplateIdempotent(t *testing.T) {
+func TestAdmin_TemplateIdempotent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short mode: skipping template idempotency test")
 	}

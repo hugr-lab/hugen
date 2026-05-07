@@ -33,7 +33,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
-func TestUS3_5_US5_InitSQLReload(t *testing.T) {
+func TestAdmin_InitSQLReload(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short mode: skipping init-sql reload test")
 	}

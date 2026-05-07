@@ -33,7 +33,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool/providers"
 )
 
-func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
+func TestSkill_FilesRoundTrip(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short mode: skipping skill_files integration test")
 	}

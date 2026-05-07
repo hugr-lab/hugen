@@ -36,7 +36,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
-func TestUS3_5_US1_DuckDBSQL(t *testing.T) {
+func TestAnalyst_DuckDBSQL(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short mode: skipping duckdb-mcp integration test")
 	}

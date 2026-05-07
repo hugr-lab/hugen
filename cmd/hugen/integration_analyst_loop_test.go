@@ -35,7 +35,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool/providers"
 )
 
-func TestUS3_5_US3_AnalystLoop(t *testing.T) {
+func TestAnalyst_Loop(t *testing.T) {
 	if os.Getenv("HUGEN_FULL_E2E") != "1" {
 		t.Skip("HUGEN_FULL_E2E != 1; skipping full analyst-loop e2e")
 	}

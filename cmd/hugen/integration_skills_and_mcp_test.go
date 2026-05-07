@@ -134,7 +134,7 @@ func makeRouter(t *testing.T) (*model.ModelRouter, *session.Agent) {
 	return router, agent
 }
 
-func TestUS1_Skill_DependencyCycle(t *testing.T) {
+func TestSkill_DependencyCycle(t *testing.T) {
 	a := []byte(`---
 name: a
 description: a.
@@ -163,7 +163,7 @@ body`)
 	}
 }
 
-func TestUS1_ThirdPartyDropIn(t *testing.T) {
+func TestSkill_ThirdPartyDropIn(t *testing.T) {
 	root := t.TempDir()
 	communityRoot := filepath.Join(root, "community")
 	skillDir := filepath.Join(communityRoot, "weather")
@@ -201,7 +201,7 @@ allowed-tools: []
 	}
 }
 
-func TestUS1_BashMCP_WriteRead(t *testing.T) {
+func TestBashMCP_WriteRead(t *testing.T) {
 	core := newIntegrationCore(t, nil)
 
 	ctx := context.Background()
@@ -254,7 +254,7 @@ func TestUS1_BashMCP_WriteRead(t *testing.T) {
 	}
 }
 
-func TestUS1_BashMCP_PermissionDenied(t *testing.T) {
+func TestBashMCP_PermissionDenied(t *testing.T) {
 	rules := []config.PermissionRule{
 		{Type: "hugen:tool:bash-mcp", Field: "bash.write_file", Disabled: true},
 	}
@@ -279,11 +279,11 @@ func TestUS1_BashMCP_PermissionDenied(t *testing.T) {
 	}
 }
 
-// TestUS1_OrphanSweep moved to pkg/extension/workspace alongside
+// TestWorkspace_OrphanSweep moved to pkg/extension/workspace alongside
 // the (now-internal) tracker — same-package access lets the test
 // drive sweepOrphans without re-exporting the API.
 
-func TestUS1_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
+func TestWorkspace_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
 	core := newIntegrationCore(t, nil)
 
 	ctx := context.Background()
@@ -334,7 +334,7 @@ func TestUS1_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
 	}
 }
 
-func TestUS1_SkillValidate_HappyPathAndInvalid(t *testing.T) {
+func TestSkill_Validate_HappyPathAndInvalid(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "hugen-skill-validate")
 	cmd := exec.Command("go", "build", "-o", bin, "../hugen-skill-validate")

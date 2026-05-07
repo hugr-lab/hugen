@@ -34,7 +34,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool/providers"
 )
 
-func TestUS3_5_US5_DropProviders(t *testing.T) {
+func TestAdmin_DropProviders(t *testing.T) {
 	root := t.TempDir()
 	workspaceDir := filepath.Join(root, "workspace")
 	sharedDir := filepath.Join(root, "shared")
