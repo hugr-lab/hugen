@@ -157,7 +157,7 @@ var (
 	ErrIO                  = errors.New("tool: io")
 	// ErrSystemUnavailable is the well-known sentinel a provider returns
 	// when its underlying capability is not wired in this deployment
-	// (e.g. policy:save without a Tier-3 store, session:skill_load
+	// (e.g. policy:save without a Tier-3 store, skill:load
 	// without a SkillManager). Callers errors.Is-test for it to decide
 	// whether to retry, escalate, or surface a graceful "not configured"
 	// result.

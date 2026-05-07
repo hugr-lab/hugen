@@ -48,10 +48,12 @@ type Session struct {
 	maxToolItersHard int                 // 0 → 2 × resolved soft cap
 	logger           *slog.Logger
 
-	// sessionTools is the static dispatch table. Per-tool init() funcs
-	// in tools_subagent.go / tools_whiteboard.go register their
-	// entries at session construction; the table is read-only after
-	// initTools so dispatch needs no lock.
+	// sessionTools is the static dispatch table. tools_subagent.go's
+	// initSubagent registers the entries at session construction; the
+	// table is read-only after initTools so dispatch needs no lock.
+	// Whiteboard / plan / notepad / skill ops left this table when
+	// they migrated to pkg/extension/<name>/ — only sub-agent
+	// orchestration tools live here.
 	sessionTools map[string]sessionToolDescriptor
 
 	// state
@@ -1078,13 +1080,14 @@ func (s *Session) handleSubagentResult(ctx context.Context, f *protocol.Subagent
 // Control frames (Cancel, SlashCommand, UserMessage) handle inline:
 // they're the session-lifecycle triggers, not session-to-session
 // data, and the phase-4 three-route model (§10.2) targets multi-
-// session frames (subagent_*, whiteboard_*, future hitl_*).
+// session frames (subagent_*, extension_frame, future hitl_*).
 //
 // Everything else routes through routeFor (pkg/session/routes.go):
 //   - RouteInternal → dispatchInternal runs a sync side-effect
 //     handler from internalHandlers; the Frame never reaches
-//     s.history. C6 ships an empty handler table — phase-4 step
-//     10 (whiteboard primitive) fills it in.
+//     s.history. Stage-7.2 maps KindExtensionFrame here so
+//     dispatchExtensionFrame can hand the frame to the addressed
+//     extension.FrameRouter (whiteboard is the canonical consumer).
 //   - RouteToolFeed → if s.activeToolFeed is registered AND its
 //     Consumes predicate matches the kind, the Frame is forwarded
 //     to the blocking tool's feed; otherwise falls back to
@@ -1442,17 +1445,11 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 		return "", true
 	}
 	dispatchCtx := perm.WithSession(turnCtx, perm.SessionContext{SessionID: s.id})
-	// Wire the live *Session into the dispatch ctx so session-scoped
-	// ToolProviders (Manager-as-ToolProvider, skill_files, …) can
-	// recover the caller without going through Manager.Get — Manager
-	// is root-only after pivot 4, so a sub-agent caller would not be
-	// findable that way.
-	dispatchCtx = WithSession(dispatchCtx, s)
-	// Phase-4.1b-pre extension dispatch path: extension ToolProviders
-	// (notepad, skill, …) recover the calling SessionState via
-	// extension.SessionStateFromContext rather than the legacy
-	// *Session. *Session itself satisfies extension.SessionState so
-	// the same value flows under both keys.
+	// Extension ToolProviders (notepad, plan, whiteboard, skill, …)
+	// recover the calling SessionState via
+	// extension.SessionStateFromContext. *Session satisfies
+	// extension.SessionState directly, so the same value flows
+	// through.
 	dispatchCtx = extension.WithSessionState(dispatchCtx, s)
 
 	rawArgs := marshalToolArgs(tc.Args)

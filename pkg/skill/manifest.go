@@ -66,7 +66,7 @@ type ToolGrant struct {
 //	allowed-tools:
 //	  - bash-mcp:bash.run
 //	  - bash-mcp:bash.read_file
-//	  - session:skill_load
+//	  - skill:load
 //
 // Mixed lists are supported. Flat entries that share a provider
 // merge into a single ToolGrant for that provider.

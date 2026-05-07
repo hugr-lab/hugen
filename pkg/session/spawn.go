@@ -17,8 +17,7 @@ import (
 // cancels every descendant.
 //
 // A subagent_started event is appended to s's events carrying the
-// child id, role, task, depth, started_at, optional inputs, and the
-// captured parent_whiteboard_active flag.
+// child id, role, task, depth, started_at, and optional inputs.
 //
 // The new child is registered in s.children (NOT in Manager.live —
 // pivot 4 of the ADR makes m.live root-only). On goroutine exit the
@@ -70,14 +69,13 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	child.Start(ctx)
 
 	started := protocol.NewSubagentStarted(s.id, s.deps.Agent.Participant(), protocol.SubagentStartedPayload{
-		ChildSessionID:         child.ID(),
-		Skill:                  spec.Skill,
-		Role:                   spec.Role,
-		Task:                   spec.Task,
-		Depth:                  childDepth,
-		StartedAt:              child.openedAt,
-		Inputs:                 spec.Inputs,
-		ParentWhiteboardActive: spec.ParentWhiteboardActive,
+		ChildSessionID: child.ID(),
+		Skill:          spec.Skill,
+		Role:           spec.Role,
+		Task:           spec.Task,
+		Depth:          childDepth,
+		StartedAt:      child.openedAt,
+		Inputs:         spec.Inputs,
 	})
 	if err := s.emit(ctx, started); err != nil {
 		s.deps.Logger.Warn("session: emit subagent_started",

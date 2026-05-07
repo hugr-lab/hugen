@@ -173,7 +173,6 @@ func TestCodec_PayloadIntegrity_Phase4(t *testing.T) {
 		in := NewSubagentStarted("p", testAgent, SubagentStartedPayload{
 			ChildSessionID: "c", Skill: "hugr-data", Role: "explorer",
 			Task: "do thing", Depth: 2, Inputs: map[string]any{"k": float64(1)},
-			ParentWhiteboardActive: true,
 		})
 		data, _ := codec.EncodeFrame(in)
 		out, err := codec.DecodeFrame(data)
@@ -182,7 +181,7 @@ func TestCodec_PayloadIntegrity_Phase4(t *testing.T) {
 		}
 		got := out.(*SubagentStarted).Payload
 		if got.ChildSessionID != "c" || got.Skill != "hugr-data" || got.Role != "explorer" ||
-			got.Task != "do thing" || got.Depth != 2 || !got.ParentWhiteboardActive {
+			got.Task != "do thing" || got.Depth != 2 {
 			t.Errorf("payload drift: %+v", got)
 		}
 	})

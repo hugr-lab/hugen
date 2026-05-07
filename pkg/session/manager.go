@@ -62,13 +62,6 @@ type SpawnSpec struct {
 	// after the manager fills in metadata["depth"] / metadata["spawn_role"]
 	// / metadata["spawn_skill"]. Caller-supplied keys win on collision.
 	Metadata map[string]any
-	// ParentWhiteboardActive captures the host's whiteboard projection
-	// state at spawn time (FR-035 conditional autoload). Set by
-	// callSpawnSubagent (phase-3 commit 10) when the parent's
-	// whiteboard projection has Active=true. Phase-4 commit 4 only
-	// plumbs the field through to OpenRequest / SubagentStarted so the
-	// child's session_started event captures it.
-	ParentWhiteboardActive bool
 }
 
 // Manager owns the live *Session map and brokers

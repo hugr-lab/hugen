@@ -362,14 +362,13 @@ type SystemMarker struct {
 // child sub-agent session is spawned. Inputs is arbitrary JSON the
 // parent passes to the child via spawn_subagent.
 type SubagentStartedPayload struct {
-	ChildSessionID            string    `json:"child_session_id"`
-	Skill                     string    `json:"skill,omitempty"`
-	Role                      string    `json:"role,omitempty"`
-	Task                      string    `json:"task"`
-	Depth                     int       `json:"depth"`
-	StartedAt                 time.Time `json:"started_at"`
-	Inputs                    any       `json:"inputs,omitempty"`
-	ParentWhiteboardActive    bool      `json:"parent_whiteboard_active,omitempty"`
+	ChildSessionID string    `json:"child_session_id"`
+	Skill          string    `json:"skill,omitempty"`
+	Role           string    `json:"role,omitempty"`
+	Task           string    `json:"task"`
+	Depth          int       `json:"depth"`
+	StartedAt      time.Time `json:"started_at"`
+	Inputs         any       `json:"inputs,omitempty"`
 }
 
 // SubagentResultPayload is delivered to the parent's inbox as a Frame

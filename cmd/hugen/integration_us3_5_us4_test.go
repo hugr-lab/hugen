@@ -125,12 +125,10 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	}
 
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
-	// session-scoped tools (skill:files) recover their *Session
-	// via session.WithSession; the live dispatcher does this implicitly
-	// in session.Run, the integration test bypasses Run so we wire it
-	// here. Extension providers (skill:*) read state via
-	// extension.SessionStateFromContext — same value, second key.
-	dispatchCtx = session.WithSession(dispatchCtx, sess)
+	// Extension providers (skill:*) read state via
+	// extension.SessionStateFromContext. The live dispatcher does
+	// this implicitly in session.Run; the integration test bypasses
+	// Run so we wire it here.
 	dispatchCtx = extension.WithSessionState(dispatchCtx, sess)
 
 	args, _ := json.Marshal(map[string]string{"name": "duckdb-data"})

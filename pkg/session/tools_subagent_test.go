@@ -7,18 +7,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
 // us1WithSession is the standard test ctx that pretends a tool
-// dispatcher has already wired the calling session via
-// dispatchToolCall. Post phase-4.1b-pre stage A handlers no longer
-// recover the session via SessionFromContext (they receive *Session
-// directly), but the WithSession wrap stays to exercise the
-// escape-hatch ctx slot kept for future third-party providers.
+// dispatcher has already wired the calling session into the
+// dispatch ctx. The session-tool handlers under test receive their
+// *Session through the receiver, but extension-aware paths read it
+// via extension.SessionStateFromContext, so attach the state under
+// that key.
 func us1WithSession(parent *Session) context.Context {
-	return WithSession(context.Background(), parent)
+	return extension.WithSessionState(context.Background(), parent)
 }
 
 // us1OpenParent opens a fresh root via Manager.Open and drains the
@@ -493,7 +494,7 @@ func TestCallParentContext_Filtering(t *testing.T) {
 	mustAppend(string(protocol.KindAgentMessage), "assistant-mid", map[string]any{"final": false})
 
 	args, _ := json.Marshal(parentContextInput{Limit: 20})
-	out, err := child.callParentContext(WithSession(context.Background(), child), args)
+	out, err := child.callParentContext(extension.WithSessionState(context.Background(), child), args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -552,7 +553,7 @@ func TestCallParentContext_QueryAndTimeWindow(t *testing.T) {
 		Query: "BANANA",
 		From:  from,
 	})
-	out, err := child.callParentContext(WithSession(context.Background(), child), args)
+	out, err := child.callParentContext(extension.WithSessionState(context.Background(), child), args)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -569,7 +570,7 @@ func TestCallParentContext_NoParentForRoot(t *testing.T) {
 	root, cleanup := newTestParent(t)
 	defer cleanup()
 
-	out, err := root.callParentContext(WithSession(context.Background(), root),
+	out, err := root.callParentContext(extension.WithSessionState(context.Background(), root),
 		json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)

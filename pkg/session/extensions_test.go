@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -298,3 +299,56 @@ func (p *staticToolProvider) Subscribe(_ context.Context) (<-chan tool.ProviderE
 	return nil, nil
 }
 func (p *staticToolProvider) Close() error { return nil }
+
+// recordingFrameRouter only implements FrameRouter (plus the marker).
+// Used by the dispatcher test so other capabilities don't fire.
+type recordingFrameRouter struct {
+	name      string
+	calls     int
+	lastOp    string
+	returnErr error
+}
+
+func (e *recordingFrameRouter) Name() string { return e.name }
+func (e *recordingFrameRouter) HandleFrame(_ context.Context, _ extension.SessionState, f *protocol.ExtensionFrame) error {
+	e.calls++
+	e.lastOp = f.Payload.Op
+	return e.returnErr
+}
+
+// TestDispatchExtensionFrame_RoutesToMatchingExtension asserts that an
+// inbound ExtensionFrame addressed to a registered extension lands on
+// that extension's HandleFrame, while a frame addressed to an unknown
+// extension is silently dropped (debug-logged).
+func TestDispatchExtensionFrame_RoutesToMatchingExtension(t *testing.T) {
+	target := &recordingFrameRouter{name: "target"}
+	other := &recordingFrameRouter{name: "other"}
+
+	parent, cleanup := newTestParent(t, withTestExtensions(target, other))
+	defer cleanup()
+
+	author := protocol.ParticipantInfo{ID: "agent", Kind: protocol.ParticipantAgent}
+	frame := protocol.NewExtensionFrame(parent.ID(), author, "target",
+		protocol.CategoryOp, "ping", nil)
+
+	dispatchExtensionFrame(parent, context.Background(), frame)
+
+	if target.calls != 1 {
+		t.Errorf("target HandleFrame calls = %d, want 1", target.calls)
+	}
+	if target.lastOp != "ping" {
+		t.Errorf("target last op = %q, want ping", target.lastOp)
+	}
+	if other.calls != 0 {
+		t.Errorf("other HandleFrame calls = %d, want 0", other.calls)
+	}
+
+	// Unknown extension name: silently dropped, no router fired.
+	unknown := protocol.NewExtensionFrame(parent.ID(), author, "ghost",
+		protocol.CategoryOp, "noop", nil)
+	dispatchExtensionFrame(parent, context.Background(), unknown)
+	if target.calls != 1 || other.calls != 0 {
+		t.Errorf("unknown extension fired a router; target=%d other=%d",
+			target.calls, other.calls)
+	}
+}

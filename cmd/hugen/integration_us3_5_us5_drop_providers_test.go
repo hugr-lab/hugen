@@ -142,7 +142,6 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	}
 
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
-	dispatchCtx = session.WithSession(dispatchCtx, sess)
 	dispatchCtx = extension.WithSessionState(dispatchCtx, sess)
 	args, _ := json.Marshal(map[string]string{"path": "hello.txt", "content": "ok"})
 	_, eff, err := sess.Tools().Resolve(dispatchCtx, writeFile, args)

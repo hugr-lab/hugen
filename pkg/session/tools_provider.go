@@ -15,14 +15,9 @@ import (
 // they read s.store / s.logger / s.perms directly without an
 // injected leaf-deps host.
 //
-// Lifetime is PerSession so Resources.Acquire registers each
-// Session onto its own child ToolManager; teardown drops the
+// Lifetime is PerSession so the per-session ToolManager registers
+// each Session onto its own child manager; teardown drops the
 // registration when the child Closes on Release.
-//
-// The WithSession / SessionFromContext helpers stay
-// (pkg/session/context.go) as the escape-hatch for any future
-// third-party session-aware provider that registers on root and
-// lacks a direct *Session field.
 
 const sessionToolProviderName = "session"
 
