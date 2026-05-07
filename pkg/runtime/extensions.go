@@ -6,6 +6,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	notepadext "github.com/hugr-lab/hugen/pkg/extension/notepad"
+	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/tool"
@@ -31,6 +32,7 @@ import (
 func phaseExtensions(_ context.Context, core *Core) error {
 	exts := []extension.Extension{
 		notepadext.NewExtension(core.Store, core.Agent.ID()),
+		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()),
 	}
 
 	for _, ext := range exts {

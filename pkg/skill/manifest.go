@@ -478,11 +478,11 @@ func (m *Manifest) validate() error {
 // the new path when they reference an old name.
 var legacySystemRename = map[string]string{
 	"notepad_append":    "notepad:append",
-	"skill_load":        "session:skill_load",
-	"skill_unload":      "session:skill_unload",
-	"skill_ref":         "session:skill_ref",
-	"skill_files":       "session:skill_files",
-	"skill_publish":     "session:skill_publish",
+	"skill_load":        "skill:load",
+	"skill_unload":      "skill:unload",
+	"skill_ref":         "skill:ref",
+	"skill_files":       "skill:files",
+	"skill_publish":     "skill:publish",
 	"tool_catalog":      "session:tool_catalog",
 	"policy_save":       "policy:save",
 	"policy_revoke":     "policy:revoke",

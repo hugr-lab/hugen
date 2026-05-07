@@ -1548,6 +1548,12 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 	// is root-only after pivot 4, so a sub-agent caller would not be
 	// findable that way.
 	dispatchCtx = WithSession(dispatchCtx, s)
+	// Phase-4.1b-pre extension dispatch path: extension ToolProviders
+	// (notepad, skill, …) recover the calling SessionState via
+	// extension.SessionStateFromContext rather than the legacy
+	// *Session. *Session itself satisfies extension.SessionState so
+	// the same value flows under both keys.
+	dispatchCtx = extension.WithSessionState(dispatchCtx, s)
 
 	rawArgs := marshalToolArgs(tc.Args)
 	callFrame := protocol.NewToolCall(s.id, s.agent.Participant(), tc.ID, tc.Name, tc.Args)

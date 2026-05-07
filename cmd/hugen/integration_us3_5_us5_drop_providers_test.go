@@ -8,7 +8,7 @@
 //     allowed-tools grants are flagged unavailable via
 //     skill.AnnotateUnavailable (existing phase-3 mechanism);
 //   - bash-mcp tools still resolve and dispatch;
-//   - session:skill_files still works (does not depend on the analyst
+//   - skill:files still works (does not depend on the analyst
 //     providers).
 package main
 
@@ -22,6 +22,8 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
+	"github.com/hugr-lab/hugen/pkg/extension"
+	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session"
@@ -68,6 +70,10 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, nil)))
 	t.Cleanup(func() { _ = tools.Close() })
 
+	skillExt := skillext.NewExtension(skills, perms, "agent-it")
+	if err := tools.AddProvider(skillExt); err != nil {
+		t.Fatalf("AddProvider skillExt: %v", err)
+	}
 
 	ws := session.NewWorkspace(workspaceDir, true)
 	store := &stubStore{}
@@ -84,6 +90,7 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 		store, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
 		session.WithLifecycle(resources),
+		session.WithExtensions(skillExt),
 		session.WithSessionOptions(
 			session.WithSkills(skills),
 			session.WithPerms(perms),
@@ -136,13 +143,14 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	if !ok {
 		t.Fatalf("bash.write_file missing")
 	}
-	skillFiles, ok := findTool(snap.Tools, "session:skill_files")
+	skillFiles, ok := findTool(snap.Tools, "skill:files")
 	if !ok {
-		t.Fatalf("session:skill_files missing")
+		t.Fatalf("skill:files missing")
 	}
 
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
 	dispatchCtx = session.WithSession(dispatchCtx, sess)
+	dispatchCtx = extension.WithSessionState(dispatchCtx, sess)
 	args, _ := json.Marshal(map[string]string{"path": "hello.txt", "content": "ok"})
 	_, eff, err := sess.Tools().Resolve(dispatchCtx, writeFile, args)
 	if err != nil {

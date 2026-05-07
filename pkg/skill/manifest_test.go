@@ -177,7 +177,7 @@ func TestParse_LegacySystemRenameHints(t *testing.T) {
 		newName    string
 	}{
 		{"notepad_append", "notepad:append"},
-		{"skill_load", "session:skill_load"},
+		{"skill_load", "skill:load"},
 		{"policy_save", "policy:save"},
 		{"mcp_add_server", "tool:provider_add"},
 		{"runtime_reload", "runtime:reload"},

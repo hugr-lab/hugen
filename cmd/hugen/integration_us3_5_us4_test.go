@@ -4,7 +4,7 @@
 //
 //   - install bundled `duckdb-data` skill on disk;
 //   - load it into a session;
-//   - call session:skill_files("duckdb-data") through the full
+//   - call skill:files("duckdb-data") through the full
 //     ToolManager pipeline;
 //   - read one absolute path from the envelope via bash.read_file
 //     and confirm bytes match the bundled file (SC-010 cross-check).
@@ -21,6 +21,8 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
+	"github.com/hugr-lab/hugen/pkg/extension"
+	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session"
@@ -75,6 +77,10 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, nil)))
 	t.Cleanup(func() { _ = tools.Close() })
 
+	skillExt := skillext.NewExtension(skills, perms, "agent-it")
+	if err := tools.AddProvider(skillExt); err != nil {
+		t.Fatalf("AddProvider skillExt: %v", err)
+	}
 
 	ws := session.NewWorkspace(workspaceDir, true)
 	store := &stubStore{}
@@ -91,6 +97,7 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 		store, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
 		session.WithLifecycle(resources),
+		session.WithExtensions(skillExt),
 		session.WithSessionOptions(
 			session.WithSkills(skills),
 			session.WithPerms(perms),
@@ -113,9 +120,9 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
-	skillFiles, ok := findTool(snap.Tools, "session:skill_files")
+	skillFiles, ok := findTool(snap.Tools, "skill:files")
 	if !ok {
-		t.Fatalf("session:skill_files missing: %v", toolNames(snap.Tools))
+		t.Fatalf("skill:files missing: %v", toolNames(snap.Tools))
 	}
 	readFile, ok := findTool(snap.Tools, "bash-mcp:bash.read_file")
 	if !ok {
@@ -123,11 +130,13 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	}
 
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
-	// session-scoped tools (session:skill_files) recover their *Session
+	// session-scoped tools (skill:files) recover their *Session
 	// via session.WithSession; the live dispatcher does this implicitly
 	// in session.Run, the integration test bypasses Run so we wire it
-	// here.
+	// here. Extension providers (skill:*) read state via
+	// extension.SessionStateFromContext — same value, second key.
 	dispatchCtx = session.WithSession(dispatchCtx, sess)
+	dispatchCtx = extension.WithSessionState(dispatchCtx, sess)
 
 	args, _ := json.Marshal(map[string]string{"name": "duckdb-data"})
 	_, eff, err := sess.Tools().Resolve(dispatchCtx, skillFiles, args)

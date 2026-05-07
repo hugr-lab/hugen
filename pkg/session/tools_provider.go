@@ -32,7 +32,6 @@ func (s *Session) initTools() {
 	s.initSubagent()
 	s.initPlan()
 	s.initWhiteboard()
-	s.initSkills()
 }
 
 // sessionToolHandler dispatches one session-scoped tool call.
