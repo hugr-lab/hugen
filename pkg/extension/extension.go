@@ -96,6 +96,17 @@ type ToolFilter interface {
 	FilterTools(ctx context.Context, state SessionState, all []tool.Tool) []tool.Tool
 }
 
+// GenerationProvider is an optional capability extensions implement
+// when their state changes in a way that should invalidate the
+// per-session snapshot cache. Generation must be monotonically
+// non-decreasing for the lifetime of the extension; the runtime
+// sums it with other extensions' generations and folds the result
+// into the cache key. Extensions whose state is bind-once at
+// construction (notepad) skip this.
+type GenerationProvider interface {
+	Generation() int64
+}
+
 // FrameRouter extensions handle inbound [protocol.ExtensionFrame]
 // addressed to them (Frame.Extension == ext.Name()). The session's
 // route loop dispatches by Extension name; each name maps to at

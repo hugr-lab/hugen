@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -28,10 +29,17 @@ import (
 
 // snapshotCache is the per-Session cached, filtered tool
 // catalogue. Zero value is empty + invalid; first get rebuilds.
+//
+// extGen is the sum of Generation() over every extension that
+// implements [extension.GenerationProvider]. A bump there
+// invalidates the cache the same way a tool/skill/policy gen bump
+// does — without forcing every ToolFilter extension to round-trip
+// through ToolManager.
 type snapshotCache struct {
-	gens  tool.Generations
-	snap  tool.Snapshot
-	valid bool
+	gens   tool.Generations
+	extGen int64
+	snap   tool.Snapshot
+	valid  bool
 }
 
 // fetchSnapshot returns the filtered Snapshot for the session.
@@ -47,8 +55,9 @@ func (s *Session) fetchSnapshot(ctx context.Context) (tool.Snapshot, error) {
 	if err != nil {
 		return tool.Snapshot{}, err
 	}
+	extGen := s.extensionGenerationSum()
 	s.snapMu.Lock()
-	if s.snapCache.valid && s.snapCache.gens == gens {
+	if s.snapCache.valid && s.snapCache.gens == gens && s.snapCache.extGen == extGen {
 		out := s.snapCache.snap
 		s.snapMu.Unlock()
 		return out, nil
@@ -63,13 +72,44 @@ func (s *Session) fetchSnapshot(ctx context.Context) (tool.Snapshot, error) {
 	if s.skills != nil {
 		filtered = applySkillFilter(ctx, s.skills, s.id, raw.Tools)
 	}
+	// Extension ToolFilter chain composes by intersection — each
+	// filter sees the prior result and may only narrow it further.
+	// Order is registration order; an extension that returns the
+	// same slice it was given is a no-op.
+	if s.deps != nil {
+		for _, ext := range s.deps.Extensions {
+			tf, ok := ext.(extension.ToolFilter)
+			if !ok {
+				continue
+			}
+			filtered = tf.FilterTools(ctx, s, filtered)
+		}
+	}
 	out := tool.Snapshot{Generations: gens, Tools: filtered}
 
 	s.snapMu.Lock()
-	s.snapCache = snapshotCache{gens: gens, snap: out, valid: true}
+	s.snapCache = snapshotCache{gens: gens, extGen: extGen, snap: out, valid: true}
 	s.snapMu.Unlock()
 
 	return out, nil
+}
+
+// extensionGenerationSum returns the running sum of Generation()
+// over every extension that implements
+// [extension.GenerationProvider]. Cheap (one method call per
+// implementing extension); folded into the snapshot cache key so a
+// bump invalidates without any cross-package plumbing.
+func (s *Session) extensionGenerationSum() int64 {
+	if s.deps == nil {
+		return 0
+	}
+	var sum int64
+	for _, ext := range s.deps.Extensions {
+		if g, ok := ext.(extension.GenerationProvider); ok {
+			sum += g.Generation()
+		}
+	}
+	return sum
 }
 
 // snapshotGenerations returns the (Tool, Skill, Policy) triple

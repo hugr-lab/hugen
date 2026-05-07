@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
@@ -56,6 +57,26 @@ func (s *Session) materialise(ctx context.Context) error {
 		// Soft-warning idempotency derives from the event log so a
 		// restart that loses in-memory state still skips re-emission.
 		s.reloadSoftWarningFlag(rows)
+
+		// Extension recovery: every Recovery-implementing extension
+		// rebuilds its per-session projection from the same event
+		// list. Errors are logged warn-not-fatal — recovery is
+		// best-effort and must not block session start. Order
+		// follows registration order; an extension's recovery sees
+		// the projections set up by InitState plus whatever earlier
+		// recoveries wrote into state.
+		if s.deps != nil {
+			for _, ext := range s.deps.Extensions {
+				rec, ok := ext.(extension.Recovery)
+				if !ok {
+					continue
+				}
+				if err := rec.Recover(ctx, s, rows); err != nil && s.deps.Logger != nil {
+					s.deps.Logger.Warn("session: extension recovery failed",
+						"session", s.id, "extension", ext.Name(), "err", err)
+				}
+			}
+		}
 
 		s.materialised.Store(true)
 	})

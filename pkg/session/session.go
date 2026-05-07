@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
@@ -774,10 +775,35 @@ func (s *Session) teardown(runCtx context.Context) {
 		}
 	}
 
+	// 4.5) Extension Closer dispatch in REVERSE registration order so
+	// later extensions whose state depends on earlier ones release
+	// first. Errors are logged warn-not-fatal — a misbehaving
+	// extension must not block teardown / terminal write.
+	s.dispatchExtensionClosers(tc.writeCtx)
+
 	// 5) handleExit appends session_terminated, emits subagent_result
 	// to the parent (if any), and (optionally) the SessionClosed
 	// outbox frame.
 	s.handleExit(runCtx, tc)
+}
+
+// dispatchExtensionClosers runs every Closer-implementing extension's
+// Close in reverse registration order. Errors are logged.
+func (s *Session) dispatchExtensionClosers(ctx context.Context) {
+	if s.deps == nil {
+		return
+	}
+	exts := s.deps.Extensions
+	for i := len(exts) - 1; i >= 0; i-- {
+		closer, ok := exts[i].(extension.Closer)
+		if !ok {
+			continue
+		}
+		if err := closer.Close(ctx, s); err != nil && s.deps.Logger != nil {
+			s.deps.Logger.Warn("session: extension close failed",
+				"session", s.id, "extension", exts[i].Name(), "err", err)
+		}
+	}
 }
 
 // cascadeSessionCloseToChildren forwards a SessionClose Frame to
@@ -1392,6 +1418,20 @@ func (s *Session) systemPrompt(ctx context.Context) string {
 		}
 		if catalogue := s.skillCatalogue(ctx); catalogue != "" {
 			parts = append(parts, catalogue)
+		}
+	}
+	// Extension Advertiser sections appended in registration order;
+	// each contributes a non-empty string or skips. v1 has no
+	// ordering primitive — order matters at the registration site.
+	if s.deps != nil {
+		for _, ext := range s.deps.Extensions {
+			adv, ok := ext.(extension.Advertiser)
+			if !ok {
+				continue
+			}
+			if section := adv.AdvertiseSystemPrompt(ctx, s); section != "" {
+				parts = append(parts, section)
+			}
 		}
 	}
 	if len(parts) == 0 {
