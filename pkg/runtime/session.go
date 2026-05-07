@@ -38,7 +38,6 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 		session.WithLifecycle(resources),
 		session.WithExtensions(core.Extensions...),
 		session.WithSessionOptions(
-			session.WithSkills(core.Skills),
 			session.WithPerms(core.Permissions),
 		),
 	)

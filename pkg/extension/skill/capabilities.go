@@ -31,6 +31,8 @@ var (
 	_ extension.Advertiser         = (*Extension)(nil)
 	_ extension.ToolFilter         = (*Extension)(nil)
 	_ extension.GenerationProvider = (*Extension)(nil)
+	_ extension.ToolPolicyAdvisor  = (*Extension)(nil)
+	_ extension.SubagentDescriber  = (*Extension)(nil)
 )
 
 // AdvertiseSystemPrompt implements [extension.Advertiser].
@@ -113,6 +115,59 @@ func (e *Extension) FilterTools(ctx context.Context, state extension.SessionStat
 		}
 	}
 	return out
+}
+
+// AdviseToolPolicy implements [extension.ToolPolicyAdvisor].
+// Reads max_turns / max_turns_hard / stuck_detection from the
+// loaded skills' bindings and reports them as a [ToolIterPolicy].
+// Empty bindings (no skill loaded, or no SkillManager wired) yield
+// the zero-valued policy, which the runtime treats as "no
+// recommendation" and falls back to its own defaults.
+func (e *Extension) AdviseToolPolicy(ctx context.Context, state extension.SessionState) extension.ToolIterPolicy {
+	h := FromState(state)
+	if h == nil || h.manager == nil {
+		return extension.ToolIterPolicy{}
+	}
+	b, err := h.manager.Bindings(ctx, h.sessionID)
+	if err != nil {
+		return extension.ToolIterPolicy{}
+	}
+	return extension.ToolIterPolicy{
+		SoftCap:            b.MaxTurns,
+		HardCeiling:        b.MaxTurnsHard,
+		DisableStuckNudges: b.StuckDetectionDisabled,
+	}
+}
+
+// DescribeSubagent implements [extension.SubagentDescriber]. Walks
+// every skill in the manager's catalog; on the first match returns
+// SubagentValid (role empty or matches a declared subagent role)
+// or SubagentSkillFoundRoleMissing. Returns SubagentUnknown when
+// no skill in the catalog matches the requested name.
+func (e *Extension) DescribeSubagent(ctx context.Context, state extension.SessionState, skillName, roleName string) (extension.SubagentValidation, error) {
+	h := FromState(state)
+	if h == nil || h.manager == nil {
+		return extension.SubagentUnknown, nil
+	}
+	all, err := h.manager.List(ctx)
+	if err != nil {
+		return extension.SubagentUnknown, err
+	}
+	for _, s := range all {
+		if s.Manifest.Name != skillName {
+			continue
+		}
+		if roleName == "" {
+			return extension.SubagentValid, nil
+		}
+		for _, r := range s.Manifest.Hugen.SubAgents {
+			if r.Name == roleName {
+				return extension.SubagentValid, nil
+			}
+		}
+		return extension.SubagentSkillFoundRoleMissing, nil
+	}
+	return extension.SubagentUnknown, nil
 }
 
 // Generation implements [extension.GenerationProvider]. Returns

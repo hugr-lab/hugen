@@ -99,7 +99,6 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 		session.WithLifecycle(resources),
 		session.WithExtensions(skillExt),
 		session.WithSessionOptions(
-			session.WithSkills(skills),
 			session.WithPerms(perms),
 		),
 	)

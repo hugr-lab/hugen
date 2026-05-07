@@ -113,6 +113,82 @@ type GenerationProvider interface {
 	Generation(state SessionState) int64
 }
 
+// ToolIterPolicy is the per-turn tool-loop policy an extension
+// recommends for the calling session. The runtime composes
+// recommendations across every [ToolPolicyAdvisor] extension by
+// taking the largest non-zero SoftCap / HardCeiling and a logical
+// OR over DisableStuckNudges (the loosest setting wins by intent
+// — an explorer skill raising the budget shouldn't be undone by a
+// utility skill keeping the default).
+type ToolIterPolicy struct {
+	// SoftCap is the per-turn tool-iteration cap. Zero means "no
+	// recommendation"; the runtime falls back to its session-level
+	// override / default.
+	SoftCap int
+
+	// HardCeiling is the per-turn hard ceiling at which the runtime
+	// terminates with reason "hard_ceiling". Zero means "no
+	// recommendation"; the runtime falls back to 2 × SoftCap (or
+	// its default).
+	HardCeiling int
+
+	// DisableStuckNudges asks the runtime to silence the
+	// stuck-detection nudges for this session. Multiple extensions
+	// compose by OR — a single advisor disabling is enough.
+	DisableStuckNudges bool
+}
+
+// ToolPolicyAdvisor extensions advise the per-turn tool-loop
+// policy. Sampled once at the top of every user turn alongside
+// resolveToolIterCap; results stay stable through the loop even
+// if a tool call mutates extension state mid-turn.
+//
+// Skill ext is the canonical advisor today (loaded skills'
+// metadata.hugen.{max_turns,max_turns_hard,stuck_detection}); a
+// future plan / whiteboard ext could lift the cap for analyst
+// flows.
+type ToolPolicyAdvisor interface {
+	AdviseToolPolicy(ctx context.Context, state SessionState) ToolIterPolicy
+}
+
+// SubagentValidation is the outcome a [SubagentDescriber]
+// extension reports for a (skill, role) pair on spawn_subagent
+// validation.
+type SubagentValidation int
+
+const (
+	// SubagentUnknown — this advisor has no information about the
+	// requested skill (e.g. the skill ext queried but the skill
+	// catalog doesn't list it). Composition rule: if every advisor
+	// returns Unknown, the runtime treats the spawn as
+	// skill_not_found.
+	SubagentUnknown SubagentValidation = iota
+
+	// SubagentValid — skill exists; role is either omitted or
+	// matches a declared subagent role.
+	SubagentValid
+
+	// SubagentSkillFoundRoleMissing — skill exists in this advisor's
+	// catalog but the requested role is not declared on it.
+	SubagentSkillFoundRoleMissing
+)
+
+// SubagentDescriber extensions validate spawn_subagent's
+// (skill, role) tuple against their own knowledge of the skill
+// catalog. The runtime composes results across every advisor:
+// SubagentValid from any advisor wins; otherwise if any reports
+// SubagentSkillFoundRoleMissing the spawn surfaces as
+// role_not_found; otherwise (every advisor returned Unknown) the
+// spawn surfaces as skill_not_found. A session with no advisor
+// registered short-circuits to "no validation" — matching the
+// pre-stage-4 behaviour when no SkillManager was wired.
+//
+// Skill ext is the canonical advisor today; future plan /
+// whiteboard extensions could declare their own dispatch surfaces.
+type SubagentDescriber interface {
+	DescribeSubagent(ctx context.Context, state SessionState, skill, role string) (SubagentValidation, error)
+}
+
 // FrameRouter extensions handle inbound [protocol.ExtensionFrame]
 // addressed to them (Frame.Extension == ext.Name()). The session's
 // route loop dispatches by Extension name; each name maps to at

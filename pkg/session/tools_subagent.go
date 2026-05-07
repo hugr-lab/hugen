@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
-	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // init registers the five US1 session-scoped tools into the
@@ -184,22 +184,27 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 					parent.depth, maxDepth))
 		}
 		if e.Skill != "" {
-			role, ok, err := lookupSubAgentRole(ctx, parent, e.Skill, e.Role)
+			validation, err := describeSubagent(ctx, parent, e.Skill, e.Role)
 			if err != nil {
 				return toolErr("skill_not_found",
 					fmt.Sprintf("subagents[%d]: %v", i, err))
 			}
-			if !ok {
+			switch validation {
+			case extension.SubagentSkillFoundRoleMissing:
 				return toolErr("role_not_found",
 					fmt.Sprintf("subagents[%d]: role %q not declared in skill %q",
 						i, e.Role, e.Skill))
-			}
-			if role != nil && !role.CanSpawnEffective() {
-				// role.CanSpawn refers to whether the spawned child may
-				// itself spawn — phase-4 §3 step 8. v1: enforce only at
-				// the spawning side; the child re-checks on its own
-				// spawn_subagent call.
-				_ = role
+			case extension.SubagentUnknown:
+				// No advisor recognised the skill. Honour the legacy
+				// "no advisor wired" short-circuit: when no extension
+				// implements SubagentDescriber at all, we want to fall
+				// through (treat as valid) so test fixtures without a
+				// SkillManager don't break. hasSubagentDescriber tells
+				// the two cases apart.
+				if hasSubagentDescriber(parent) {
+					return toolErr("skill_not_found",
+						fmt.Sprintf("subagents[%d]: skill %q not found", i, e.Skill))
+				}
 			}
 		}
 	}
@@ -238,40 +243,51 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 	return json.Marshal(out)
 }
 
-// lookupSubAgentRole resolves (skill, role) → *SubAgentRole through
-// the parent's SkillManager. Returns:
-//
-//   - role=nil, ok=true, err=nil  → role omitted by caller; skill
-//     exists but no specific role requested. Caller decides whether
-//     to allow.
-//   - role=nil, ok=false, err=nil → skill exists but role not
-//     declared — surfaces as role_not_found.
-//   - role=nil, ok=false, err!=nil → skill missing entirely —
-//     surfaces as skill_not_found.
-func lookupSubAgentRole(ctx context.Context, parent *Session, skillName, roleName string) (*skill.SubAgentRole, bool, error) {
-	if parent.skills == nil {
-		return nil, true, nil
+// describeSubagent walks every [extension.SubagentDescriber] on
+// parent and composes the per-advisor verdicts: SubagentValid from
+// any advisor wins; otherwise SubagentSkillFoundRoleMissing wins
+// over SubagentUnknown. Errors from any advisor are returned
+// immediately — failing fast on a corrupt skill catalog matches
+// the pre-stage-4 lookupSubAgentRole behaviour.
+func describeSubagent(ctx context.Context, parent *Session, skillName, roleName string) (extension.SubagentValidation, error) {
+	if parent.deps == nil {
+		return extension.SubagentValid, nil
 	}
-	all, err := parent.skills.List(ctx)
-	if err != nil {
-		return nil, false, err
-	}
-	for _, s := range all {
-		if s.Manifest.Name != skillName {
+	best := extension.SubagentUnknown
+	for _, ext := range parent.deps.Extensions {
+		adv, ok := ext.(extension.SubagentDescriber)
+		if !ok {
 			continue
 		}
-		if roleName == "" {
-			return nil, true, nil
+		got, err := adv.DescribeSubagent(ctx, parent, skillName, roleName)
+		if err != nil {
+			return extension.SubagentUnknown, err
 		}
-		for i := range s.Manifest.Hugen.SubAgents {
-			r := s.Manifest.Hugen.SubAgents[i]
-			if r.Name == roleName {
-				return &r, true, nil
-			}
+		switch got {
+		case extension.SubagentValid:
+			return extension.SubagentValid, nil
+		case extension.SubagentSkillFoundRoleMissing:
+			best = extension.SubagentSkillFoundRoleMissing
 		}
-		return nil, false, nil
 	}
-	return nil, false, fmt.Errorf("skill %q not found", skillName)
+	return best, nil
+}
+
+// hasSubagentDescriber reports whether any registered extension
+// implements [extension.SubagentDescriber]. Used by the spawn
+// validator to distinguish "no advisor → no validation" (legacy
+// behaviour for fixture / no-skill tests) from "advisor present
+// but didn't recognise the skill → skill_not_found".
+func hasSubagentDescriber(parent *Session) bool {
+	if parent.deps == nil {
+		return false
+	}
+	for _, ext := range parent.deps.Extensions {
+		if _, ok := ext.(extension.SubagentDescriber); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- wait_subagents ----------

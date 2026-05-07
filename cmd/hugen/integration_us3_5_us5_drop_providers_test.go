@@ -92,7 +92,6 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 		session.WithLifecycle(resources),
 		session.WithExtensions(skillExt),
 		session.WithSessionOptions(
-			session.WithSkills(skills),
 			session.WithPerms(perms),
 		),
 	)

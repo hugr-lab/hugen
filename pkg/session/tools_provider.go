@@ -12,8 +12,8 @@ import (
 // Session implements tool.ToolProvider directly. The "session:*"
 // catalogue is a static dispatch table populated by per-tool init()
 // funcs in tools_subagent.go / tools_plan.go / … — handlers are
-// methods on *Session so they read s.store / s.logger / s.perms /
-// s.skills directly without an injected leaf-deps host.
+// methods on *Session so they read s.store / s.logger / s.perms
+// directly without an injected leaf-deps host.
 //
 // Lifetime is PerSession so Resources.Acquire registers each
 // Session onto its own child ToolManager; teardown drops the

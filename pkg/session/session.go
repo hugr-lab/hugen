@@ -18,7 +18,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/session/tools/plan"
 	"github.com/hugr-lab/hugen/pkg/session/tools/whiteboard"
-	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -46,7 +45,6 @@ type Session struct {
 	cmds             *CommandRegistry
 	tools            *tool.ToolManager   // per-session child manager; required (NewSession derives it)
 	rootTools        *tool.ToolManager   // parent (agent-level) manager; passed to subagents
-	skills           *skill.SkillManager // optional; consulted for per-skill max_turns
 	perms            perm.Service        // optional; consulted by tool handlers (skill_files etc.)
 	maxToolIters     int                 // 0 → defaultMaxToolIterations
 	maxToolItersHard int                 // 0 → 2 × resolved soft cap
@@ -292,15 +290,6 @@ func WithMaxToolIterationsHard(n int) SessionOption {
 			s.maxToolItersHard = n
 		}
 	}
-}
-
-// WithSkills attaches a SkillManager to the session so the Turn
-// loop can read per-skill metadata (currently max_turns; phase-4
-// adds sub-agent dispatch state). Optional — sessions without
-// WithSkills behave the same as before, just without skill-driven
-// caps.
-func WithSkills(sm *skill.SkillManager) SessionOption {
-	return func(s *Session) { s.skills = sm }
 }
 
 // WithPerms attaches a perm.Service the session-scoped tool
@@ -1320,17 +1309,44 @@ func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashComma
 	return nil
 }
 
-// resolveToolIterCap picks the tool-iteration cap for one user
-// Turn. Precedence: loaded skills' max(metadata.hugen.max_turns)
-// → session-level WithMaxToolIterations override → runtime
-// default. Sampled once at the top of the user turn so the cap
-// stays stable through the loop even if a tool call mutates the
-// loaded skills mid-turn.
-func (s *Session) resolveToolIterCap(ctx context.Context) int {
-	if s.skills != nil {
-		if b, err := s.skills.Bindings(ctx, s.id); err == nil && b.MaxTurns > 0 {
-			return b.MaxTurns
+// gatherToolPolicy walks every [extension.ToolPolicyAdvisor]
+// extension once and composes their recommendations: take the
+// largest non-zero SoftCap / HardCeiling, OR over
+// DisableStuckNudges. Empty advisors yield the zero policy
+// (callers fall back to runtime defaults).
+func (s *Session) gatherToolPolicy(ctx context.Context) extension.ToolIterPolicy {
+	if s.deps == nil {
+		return extension.ToolIterPolicy{}
+	}
+	var p extension.ToolIterPolicy
+	for _, ext := range s.deps.Extensions {
+		adv, ok := ext.(extension.ToolPolicyAdvisor)
+		if !ok {
+			continue
 		}
+		got := adv.AdviseToolPolicy(ctx, s)
+		if got.SoftCap > p.SoftCap {
+			p.SoftCap = got.SoftCap
+		}
+		if got.HardCeiling > p.HardCeiling {
+			p.HardCeiling = got.HardCeiling
+		}
+		if got.DisableStuckNudges {
+			p.DisableStuckNudges = true
+		}
+	}
+	return p
+}
+
+// resolveToolIterCap picks the tool-iteration cap for one user
+// Turn. Precedence: ToolPolicyAdvisor recommendation (skills'
+// max(metadata.hugen.max_turns) today) → session-level
+// WithMaxToolIterations override → runtime default. Sampled once
+// at the top of the user turn so the cap stays stable through
+// the loop even if a tool call mutates extension state mid-turn.
+func (s *Session) resolveToolIterCap(ctx context.Context) int {
+	if cap := s.gatherToolPolicy(ctx).SoftCap; cap > 0 {
+		return cap
 	}
 	if s.maxToolIters > 0 {
 		return s.maxToolIters
@@ -1340,15 +1356,11 @@ func (s *Session) resolveToolIterCap(ctx context.Context) int {
 
 // resolveHardCeiling picks the per-Turn hard ceiling at which the
 // session terminates with reason "hard_ceiling" (phase-4-spec §8.2).
-// Precedence: loaded skills' max(metadata.hugen.max_turns_hard) →
-// 2 × resolved soft cap (the spec's documented default). Sampled
-// once at the top of the user turn alongside the soft cap so the
-// two stay coherent through the loop.
+// Precedence: ToolPolicyAdvisor HardCeiling → session override →
+// 2 × resolved soft cap.
 func (s *Session) resolveHardCeiling(ctx context.Context, softCap int) int {
-	if s.skills != nil {
-		if b, err := s.skills.Bindings(ctx, s.id); err == nil && b.MaxTurnsHard > 0 {
-			return b.MaxTurnsHard
-		}
+	if hard := s.gatherToolPolicy(ctx).HardCeiling; hard > 0 {
+		return hard
 	}
 	if s.maxToolItersHard > 0 {
 		return s.maxToolItersHard
@@ -1360,18 +1372,10 @@ func (s *Session) resolveHardCeiling(ctx context.Context, softCap int) int {
 }
 
 // stuckDetectionEnabled reports whether the heuristic stuck-detection
-// nudges are active for this session. Returns false only when a loaded
-// skill explicitly disables them (Bindings.StuckDetectionDisabled).
-// Sessions without a SkillManager keep the conservative default ON.
+// nudges are active for this session. Disabled when any
+// ToolPolicyAdvisor sets DisableStuckNudges. Default ON.
 func (s *Session) stuckDetectionEnabled(ctx context.Context) bool {
-	if s.skills == nil {
-		return true
-	}
-	b, err := s.skills.Bindings(ctx, s.id)
-	if err != nil {
-		return true
-	}
-	return !b.StuckDetectionDisabled
+	return !s.gatherToolPolicy(ctx).DisableStuckNudges
 }
 
 // buildMessages prepends the per-Turn system message (agent

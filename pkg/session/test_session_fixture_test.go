@@ -11,7 +11,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
-	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -43,9 +42,7 @@ type testParentOpt func(*testParentCfg)
 
 type testParentCfg struct {
 	store      RuntimeStore
-	skills     *skill.SkillManager
 	tools      *tool.ToolManager
-	perms      perm.Service
 	sessOpts   []SessionOption
 	extensions []extension.Extension
 	runLoop    bool
@@ -57,31 +54,11 @@ func withTestStore(s RuntimeStore) testParentOpt {
 	return func(c *testParentCfg) { c.store = s }
 }
 
-// withTestSkills attaches a SkillManager to the session via
-// WithSkills and records it on the cfg so callers can fetch it
-// from the returned host (skill_files passes it through).
-func withTestSkills(s *skill.SkillManager) testParentOpt {
-	return func(c *testParentCfg) {
-		c.skills = s
-		c.sessOpts = append(c.sessOpts, WithSkills(s))
-	}
-}
-
 // withTestTools sets the agent-level (root) ToolManager passed to
 // the session constructor. NewSession derives its own per-session
 // child off this root.
 func withTestTools(tm *tool.ToolManager) testParentOpt {
 	return func(c *testParentCfg) { c.tools = tm }
-}
-
-// withTestPerms attaches a perm.Service to the session via
-// WithPerms. Tests that don't exercise the permission gate can
-// skip this option.
-func withTestPerms(p perm.Service) testParentOpt {
-	return func(c *testParentCfg) {
-		c.perms = p
-		c.sessOpts = append(c.sessOpts, WithPerms(p))
-	}
 }
 
 // withTestExtensions registers session extensions on the fixture.

@@ -8,7 +8,6 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/identity"
-	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 
 	"github.com/hugr-lab/query-engine/types"
@@ -73,10 +72,13 @@ func BuildPermissionService(
 }
 
 // phaseSkillsAndPerms runs phase 7: builds the SkillManager +
-// SkillStore from the installed-skills tree, assembles the
-// permission service, and registers the /skill slash command on
-// the CommandRegistry built by phase 6. Populates Core.Skills,
-// Core.SkillStore, Core.Permissions.
+// SkillStore from the installed-skills tree and assembles the
+// permission service. Populates Core.Skills, Core.SkillStore,
+// Core.Permissions.
+//
+// The /skill slash command (list / load / unload) lives on the
+// skill extension's [extension.Commander] surface; phaseExtensions
+// registers it onto Core.Commands later in the boot sequence.
 func phaseSkillsAndPerms(_ context.Context, core *Core) error {
 	skills, store, err := BuildSkillStack(core.Cfg.StateDir, core.Logger)
 	if err != nil {
@@ -97,12 +99,5 @@ func phaseSkillsAndPerms(_ context.Context, core *Core) error {
 		core.LocalQuerier,
 		core.Logger,
 	)
-
-	if err := core.Commands.Register("skill", session.CommandSpec{
-		Handler:     skillCommandHandler(core.Skills, core.SkillStore, core.Permissions),
-		Description: "list, load or unload skills: /skill list | /skill load <name> | /skill unload <name>",
-	}); err != nil {
-		return fmt.Errorf("register /skill: %w", err)
-	}
 	return nil
 }
