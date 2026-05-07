@@ -185,6 +185,8 @@ func TestManager_BroadcastSystemMarker_ReachesLiveRoots(t *testing.T) {
 		t.Fatalf("Open r2: %v", err)
 	}
 	drainOutboxOnce(r1.Outbox()) // SessionOpened
+	drainOutboxOnce(r1.Outbox()) // initial SessionStatus{idle}
+	drainOutboxOnce(r2.Outbox())
 	drainOutboxOnce(r2.Outbox())
 
 	mgr.BroadcastSystemMarker(context.Background(), "mcp_recovered",

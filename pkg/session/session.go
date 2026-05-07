@@ -1082,6 +1082,14 @@ func (s *Session) handleSubagentResult(ctx context.Context, f *protocol.Subagent
 		delete(s.children, childID)
 	}
 	s.childMu.Unlock()
+
+	// Lifecycle: a child just deregistered. If the parent's own turn
+	// already closed and no other children remain (and no buffered
+	// pending frames / active feed), this is the canonical transition
+	// point back to idle.
+	if s.isQuiescent() {
+		s.markStatus(ctx, protocol.SessionStatusIdle, "subagent_drained")
+	}
 }
 
 // routeInbound dispatches a single inbound Frame.

@@ -149,6 +149,7 @@ func TestSession_HappyPathTurn_FrameSequence(t *testing.T) {
 done:
 
 	wantOrder := []string{
+		string(protocol.KindSessionStatus), // active marker emitted by startTurn
 		string(protocol.KindUserMessage),
 		string(protocol.KindReasoning),
 		string(protocol.KindAgentMessage),

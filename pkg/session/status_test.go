@@ -37,10 +37,10 @@ func TestMarkStatus_TransitionGuard(t *testing.T) {
 			statusEvents++
 		}
 	}
-	// active, idle, active — three transitions; one duplicate active
-	// dropped by the guard.
-	if statusEvents != 3 {
-		t.Errorf("status events persisted = %d, want 3 (guard drops dupes)", statusEvents)
+	// initial idle (newSession) + active + idle + active — four
+	// transitions; one duplicate active dropped by the guard.
+	if statusEvents != 4 {
+		t.Errorf("status events persisted = %d, want 4 (guard drops dupes; initial idle from newSession)", statusEvents)
 	}
 }
 

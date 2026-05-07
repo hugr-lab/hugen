@@ -165,6 +165,11 @@ func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenReques
 		if err := s.emit(ctx, opened); err != nil && !errors.Is(err, ErrSessionClosed) {
 			deps.Logger.Warn("session: emit session_opened", "session", id, "err", err)
 		}
+		// Initial lifecycle marker — fresh session starts idle (no
+		// turn yet, no children). Restart classifier reads this as
+		// the canonical "session opened cleanly, awaiting first
+		// input" signal.
+		s.markStatus(ctx, protocol.SessionStatusIdle, "session_opened")
 	}
 
 	// Mark in-memory materialise flag so the first inbound Frame
