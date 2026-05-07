@@ -120,6 +120,13 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 			PermissionObject: permObjectRef,
 			ArgSchema:        json.RawMessage(refSchema),
 		},
+		{
+			Name:             toolNameToolsCatalog,
+			Description:      toolDescToolsCatalog,
+			Provider:         providerName,
+			PermissionObject: permObjectToolsCatalog,
+			ArgSchema:        json.RawMessage(toolsCatalogSchema),
+		},
 	}, nil
 }
 
@@ -149,6 +156,8 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 		return h.callFiles(ctx, args)
 	case "ref":
 		return h.callRef(ctx, args)
+	case "tools_catalog":
+		return h.callToolsCatalog(ctx, args)
 	default:
 		return nil, fmt.Errorf("%w: skill:%s", tool.ErrUnknownTool, short)
 	}
