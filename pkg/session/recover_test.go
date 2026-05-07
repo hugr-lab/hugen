@@ -273,6 +273,75 @@ func TestRestoreActive_RestoresActiveRoot(t *testing.T) {
 	}
 }
 
+// TestRestoreActive_PromotesStaleWaitMarker covers the convergence
+// fix: a root whose last persisted lifecycle marker is wait_subagents
+// (and whose children all delivered before the crash, so settle has
+// nothing to write) must be eagerly resumed AND have its marker
+// promoted back to active. Without the promotion the next boot
+// sees the same wait_subagents marker and re-eagerly-resumes
+// indefinitely.
+func TestRestoreActive_PromotesStaleWaitMarker(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	mustOpen(t, store, ctx, SessionRow{
+		ID: "root_wait", AgentID: "a1", SessionType: "root", Status: StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	mustWriteStatus(t, store, ctx, "root_wait", protocol.SessionStatusWaitSubagents)
+
+	mgr := newTestManager(t, store)
+	if err := mgr.RestoreActive(ctx); err != nil {
+		t.Fatalf("RestoreActive: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	rows, err := store.ListEvents(ctx, "root_wait", ListEventsOpts{})
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if got := lookupLatestStatusEvent(rows); got != protocol.SessionStatusActive {
+		t.Errorf("post-resume marker = %q, want active (promotion missing)", got)
+	}
+}
+
+// TestRestoreActive_SkipsUnknownState covers the defensive branch
+// for a future enum value that the running binary doesn't
+// recognise — log and skip rather than panic.
+func TestRestoreActive_SkipsUnknownState(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	mustOpen(t, store, ctx, SessionRow{
+		ID: "root_unknown", AgentID: "a1", SessionType: "root", Status: StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	// Synthetic raw row with a state value the enum doesn't list —
+	// bypasses FrameToEventRow's Validate so we exercise the
+	// classifier's defensive default branch on a row that the codec
+	// itself wouldn't produce today.
+	if err := store.AppendEvent(ctx, EventRow{
+		ID: "future-state-1", SessionID: "root_unknown", AgentID: "a1",
+		EventType: string(protocol.KindSessionStatus),
+		Author:    "a1", CreatedAt: now,
+		Metadata: map[string]any{"state": "future_state"},
+	}, ""); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	mgr := newTestManager(t, store)
+	if err := mgr.RestoreActive(ctx); err != nil {
+		t.Fatalf("RestoreActive: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	if live := mgr.SessionsLive(); len(live) != 0 {
+		t.Errorf("unknown-state root brought up at boot: live=%v", live)
+	}
+}
+
 // TestResume_RejectsSubAgentID confirms the Manager.Resume invariant
 // that m.live is root-only (phase-4-tree-ctx-routing ADR D4): passing
 // a sub-agent id surfaces ErrNotRootSession instead of registering

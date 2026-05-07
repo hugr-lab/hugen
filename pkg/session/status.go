@@ -46,6 +46,21 @@ func (s *Session) Status() string {
 // reason is a free-form trigger label captured into the marker for
 // audit / debugging. Never branched on by runtime code.
 //
+// Concurrency contract — the persisted events log is the source
+// of truth for [Manager.RestoreActive]; the in-memory
+// [Session.lifecycleState] mirror is best-effort. We deliberately
+// release statusMu BEFORE calling s.emit to avoid holding the
+// mutex across a potentially blocking outbox send (s.emit writes
+// to a buffered s.out channel; a slow adapter consumer would
+// otherwise stall every status transition under contention).
+// Today's wired call sites do not race in practice (Run goroutine
+// for turn boundaries / handleSubagentResult; tool dispatcher
+// goroutines for Spawn / registerToolFeed — they don't overlap on
+// the same session at the same time), so the narrow race window
+// where in-memory drifts from the latest persisted event is
+// invisible to runtime behaviour. Future call sites that DO race
+// must read state from events, not Status().
+//
 // emit failure logs a warning but does not roll back the in-memory
 // state — events remain the source of truth, and a subsequent
 // markStatus retry simply emits a fresh marker.
@@ -142,7 +157,11 @@ func (s *Session) registerToolFeed(ctx context.Context, feed *ToolFeed) (release
 		released = true
 		s.activeToolFeed.Store(nil)
 		if feed.BlockingState != "" {
-			s.markStatus(ctx, protocol.SessionStatusActive, feed.BlockingReason+" released")
+			reason := "released"
+			if feed.BlockingReason != "" {
+				reason = feed.BlockingReason + " released"
+			}
+			s.markStatus(ctx, protocol.SessionStatusActive, reason)
 		}
 	}
 }

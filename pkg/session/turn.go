@@ -422,19 +422,29 @@ func (s *Session) advanceOrFinish(runCtx context.Context) {
 		return
 	}
 
-	// /cancel — turnCtx cancelled.
+	// /cancel — turnCtx cancelled. Mark idle if quiescent so the
+	// restart classifier won't eagerly resume a session that just
+	// idled out of an aborted turn.
 	if s.turnCtx != nil && s.turnCtx.Err() != nil {
 		s.rollbackTurn()
 		s.retireTurn()
+		if s.isQuiescent() {
+			s.markStatus(runCtx, protocol.SessionStatusIdle, "cancelled")
+		}
 		return
 	}
 	// Stream / Generate error — fold a stream_error frame and bail.
+	// Same idle-on-quiescent treatment as cancel: the session is no
+	// longer working, even though the turn ended on an error.
 	if st.streamErr != nil {
 		s.rollbackTurn()
 		errFrame := protocol.NewError(s.id, s.agent.Participant(),
 			"stream_error", st.streamErr.Error(), true)
 		_ = s.emit(runCtx, errFrame)
 		s.retireTurn()
+		if s.isQuiescent() {
+			s.markStatus(runCtx, protocol.SessionStatusIdle, "stream_error")
+		}
 		return
 	}
 

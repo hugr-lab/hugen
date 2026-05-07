@@ -222,10 +222,21 @@ func (m *Manager) RestoreActive(ctx context.Context) error {
 					"session", row.ID, "err", err)
 				continue
 			}
-			if _, err := m.Resume(ctx, row.ID); err != nil {
+			resumed, err := m.Resume(ctx, row.ID)
+			if err != nil {
 				m.logger.Warn("manager: restore-active resume",
 					"session", row.ID, "err", err)
+				continue
 			}
+			// Promote the lifecycle marker out of any stale wait_*
+			// state. Without this, a session whose last transition
+			// was wait_subagents (and whose children all delivered
+			// before the crash so settle had nothing new to write)
+			// would loop through eager Resume on every boot — its
+			// persisted marker never converging back to active.
+			// Guard drops the emit when the marker is already
+			// active.
+			resumed.markStatus(ctx, protocol.SessionStatusActive, "restore_active_resume")
 		default:
 			m.logger.Warn("manager: restore-active: unknown lifecycle state, skipping",
 				"session", row.ID, "state", state)

@@ -165,12 +165,15 @@ func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenReques
 		if err := s.emit(ctx, opened); err != nil && !errors.Is(err, ErrSessionClosed) {
 			deps.Logger.Warn("session: emit session_opened", "session", id, "err", err)
 		}
-		// Initial lifecycle marker — fresh session starts idle (no
-		// turn yet, no children). Restart classifier reads this as
-		// the canonical "session opened cleanly, awaiting first
-		// input" signal.
-		s.markStatus(ctx, protocol.SessionStatusIdle, "session_opened")
 	}
+	// Initial lifecycle marker — fresh session (root or sub-agent)
+	// starts idle: no turn, no children. Roots: restart classifier
+	// reads this as "session opened cleanly, awaiting first input".
+	// Sub-agents: parent.Spawn flips this to active immediately
+	// after newSession returns; the symmetric initial marker keeps
+	// Status() non-empty for any caller introspecting a child
+	// before its first turn.
+	s.markStatus(ctx, protocol.SessionStatusIdle, "session_opened")
 
 	// Mark in-memory materialise flag so the first inbound Frame
 	// doesn't trigger a redundant store walk for a session with no
