@@ -7,46 +7,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
-// coreFakeStore is the test double the Notepad core (Append/List)
-// uses. Distinct from the Extension test fakeStore in
-// notepad_test.go — that one drives the tool-handler dispatch
-// path, this one drives the persistence layer underneath. Both
-// satisfy the package-local Store interface.
-type coreFakeStore struct {
-	rows []store.NoteRow
-	err  error
-}
+// errStore returns a fixed error from every method. Used to drive
+// the AppendNote-error-propagation path; the rest of the core
+// tests run against the shared [fixture.TestStore].
+type errStore struct{ err error }
 
-func (f *coreFakeStore) AppendNote(_ context.Context, row store.NoteRow) error {
-	if f.err != nil {
-		return f.err
-	}
-	f.rows = append(f.rows, row)
-	return nil
-}
-
-func (f *coreFakeStore) ListNotes(_ context.Context, sessionID string, limit int) ([]store.NoteRow, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	out := make([]store.NoteRow, 0, len(f.rows))
-	for _, r := range f.rows {
-		if r.SessionID != sessionID {
-			continue
-		}
-		out = append(out, r)
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-	}
-	return out, nil
+func (e errStore) AppendNote(_ context.Context, _ store.NoteRow) error { return e.err }
+func (e errStore) ListNotes(_ context.Context, _ string, _ int) ([]store.NoteRow, error) {
+	return nil, e.err
 }
 
 func TestAppend_PersistsRow(t *testing.T) {
-	st := &coreFakeStore{}
+	st := fixture.NewTestStore()
 	np := New(st, "agent-1", "sess-1")
 	id, err := np.Append(context.Background(), "user-9", "hello")
 	if err != nil {
@@ -55,10 +31,10 @@ func TestAppend_PersistsRow(t *testing.T) {
 	if id == "" {
 		t.Fatal("empty id")
 	}
-	if len(st.rows) != 1 {
-		t.Fatalf("expected 1 row, got %d", len(st.rows))
+	if len(st.Notes) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(st.Notes))
 	}
-	row := st.rows[0]
+	row := st.Notes[0]
 	if row.ID != id || row.AgentID != "agent-1" || row.SessionID != "sess-1" || row.Content != "hello" {
 		t.Errorf("row mismatch: %+v", row)
 	}
@@ -68,7 +44,7 @@ func TestAppend_PersistsRow(t *testing.T) {
 }
 
 func TestAppend_RejectsEmptyAndOversize(t *testing.T) {
-	np := New(&coreFakeStore{}, "agent-1", "sess-1")
+	np := New(fixture.NewTestStore(), "agent-1", "sess-1")
 	if _, err := np.Append(context.Background(), "u", ""); err == nil {
 		t.Error("empty text accepted")
 	}
@@ -79,7 +55,7 @@ func TestAppend_RejectsEmptyAndOversize(t *testing.T) {
 
 func TestAppend_PropagatesStoreError(t *testing.T) {
 	want := errors.New("boom")
-	np := New(&coreFakeStore{err: want}, "agent-1", "sess-1")
+	np := New(errStore{err: want}, "agent-1", "sess-1")
 	_, err := np.Append(context.Background(), "u", "ok")
 	if !errors.Is(err, want) {
 		t.Fatalf("expected wrapped store err, got %v", err)
@@ -87,11 +63,12 @@ func TestAppend_PropagatesStoreError(t *testing.T) {
 }
 
 func TestList_ReturnsRowsForSession(t *testing.T) {
-	st := &coreFakeStore{rows: []store.NoteRow{
+	st := fixture.NewTestStore()
+	st.Notes = []store.NoteRow{
 		{ID: "n1", SessionID: "sess-1", AuthorSessionID: "sess-1", Content: "a", CreatedAt: time.Now()},
 		{ID: "n2", SessionID: "sess-2", AuthorSessionID: "sess-2", Content: "b", CreatedAt: time.Now()},
 		{ID: "n3", SessionID: "sess-1", AuthorSessionID: "sess-1", Content: "c", CreatedAt: time.Now()},
-	}}
+	}
 	np := New(st, "agent-1", "sess-1")
 	notes, err := np.List(context.Background(), 0)
 	if err != nil {

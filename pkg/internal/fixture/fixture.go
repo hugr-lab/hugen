@@ -164,10 +164,20 @@ func (s *TestStore) AppendNote(_ context.Context, n store.NoteRow) error {
 	return nil
 }
 
-func (s *TestStore) ListNotes(_ context.Context, _ string, _ int) ([]store.NoteRow, error) {
+func (s *TestStore) ListNotes(_ context.Context, sessionID string, limit int) ([]store.NoteRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]store.NoteRow(nil), s.Notes...), nil
+	out := make([]store.NoteRow, 0, len(s.Notes))
+	for _, n := range s.Notes {
+		if sessionID != "" && n.SessionID != sessionID {
+			continue
+		}
+		out = append(out, n)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (s *TestStore) ListSessions(_ context.Context, _, _ string) ([]store.SessionRow, error) {

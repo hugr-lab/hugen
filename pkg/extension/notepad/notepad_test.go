@@ -4,48 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
-	"github.com/hugr-lab/hugen/pkg/session/store"
 )
-
-// fakeStore is the minimal notepad.Store the handler needs —
-// records appended rows in memory + serves them back via List.
-type fakeStore struct {
-	mu   sync.Mutex
-	rows []store.NoteRow
-}
-
-func (f *fakeStore) AppendNote(_ context.Context, row store.NoteRow) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.rows = append(f.rows, row)
-	return nil
-}
-
-func (f *fakeStore) ListNotes(_ context.Context, sessionID string, _ int) ([]store.NoteRow, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]store.NoteRow, 0, len(f.rows))
-	for _, r := range f.rows {
-		if r.SessionID == sessionID {
-			out = append(out, r)
-		}
-	}
-	return out, nil
-}
 
 // newFixture builds an Extension + a state seeded by InitState so
 // every test starts from "fresh, ready-to-call" — same shape the
 // runtime gives a brand-new session. Uses the shared
-// [fixture.TestSessionState] so future extensions reuse the same
-// SessionState fake.
-func newFixture(t *testing.T) (*Extension, *fixture.TestSessionState, *fakeStore) {
+// [fixture.TestStore] for persistence and
+// [fixture.TestSessionState] for session state so every extension
+// migration reuses the same fakes.
+func newFixture(t *testing.T) (*Extension, *fixture.TestSessionState, *fixture.TestStore) {
 	t.Helper()
-	store := &fakeStore{}
+	store := fixture.NewTestStore()
 	ext := NewExtension(store, "agent-test")
 	state := fixture.NewTestSessionState("ses-test")
 	if err := ext.InitState(context.Background(), state); err != nil {
@@ -55,14 +28,14 @@ func newFixture(t *testing.T) (*Extension, *fixture.TestSessionState, *fakeStore
 }
 
 func TestExtension_Name(t *testing.T) {
-	ext := NewExtension(&fakeStore{}, "a1")
+	ext := NewExtension(fixture.NewTestStore(), "a1")
 	if got := ext.Name(); got != "notepad" {
 		t.Errorf("Name = %q, want notepad", got)
 	}
 }
 
 func TestExtension_List(t *testing.T) {
-	ext := NewExtension(&fakeStore{}, "a1")
+	ext := NewExtension(fixture.NewTestStore(), "a1")
 	tools, err := ext.List(context.Background())
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -105,8 +78,8 @@ func TestCallAppend_Happy(t *testing.T) {
 		t.Fatalf("empty id; out=%s", out)
 	}
 
-	if len(store.rows) != 1 || store.rows[0].Content != "remember this" {
-		t.Errorf("store rows = %+v, want one with our text", store.rows)
+	if len(store.Notes) != 1 || store.Notes[0].Content != "remember this" {
+		t.Errorf("store rows = %+v, want one with our text", store.Notes)
 	}
 }
 
@@ -138,7 +111,7 @@ func TestCallAppend_EmptyText(t *testing.T) {
 }
 
 func TestCallAppend_NoSessionInContext(t *testing.T) {
-	ext := NewExtension(&fakeStore{}, "a1")
+	ext := NewExtension(fixture.NewTestStore(), "a1")
 	args, _ := json.Marshal(appendInput{Text: "x"})
 	out, err := ext.Call(context.Background(), "notepad:append", args)
 	if err != nil {
