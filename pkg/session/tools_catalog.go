@@ -27,13 +27,13 @@ import (
 //   - applies the optional `provider` exact filter and `pattern`
 //     case-insensitive substring filter on tool name.
 
-func init() {
-	sessionTools["tool_catalog"] = sessionToolDescriptor{
+func (s *Session) initToolCatalog() {
+	s.sessionTools["tool_catalog"] = sessionToolDescriptor{
 		Name:             "tool_catalog",
 		Description:      "Returns the catalogue of every provider and tool the agent process has registered. `granted_to_session` reflects whether the calling session's loaded skills admit each tool. Optional filters: `provider` (exact name) + `pattern` (case-insensitive substring on tool name).",
 		PermissionObject: permObjectToolCatalog,
 		ArgSchema:        json.RawMessage(toolCatalogSchema),
-		Handler:          (*Session).callToolCatalog,
+		Handler:          s.callToolCatalog,
 	}
 }
 

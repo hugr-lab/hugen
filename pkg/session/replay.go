@@ -7,8 +7,9 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/plan"
-	"github.com/hugr-lab/hugen/pkg/session/whiteboard"
+	"github.com/hugr-lab/hugen/pkg/session/store"
+	"github.com/hugr-lab/hugen/pkg/session/tools/plan"
+	"github.com/hugr-lab/hugen/pkg/session/tools/whiteboard"
 )
 
 // defaultHistoryWindow is the number of most-recent events the
@@ -37,7 +38,7 @@ func (s *Session) materialise(ctx context.Context) error {
 	}
 	var firstErr error
 	s.matOnce.Do(func() {
-		rows, err := s.store.ListEvents(ctx, s.id, ListEventsOpts{})
+		rows, err := s.store.ListEvents(ctx, s.id, store.ListEventsOpts{})
 		if err != nil {
 			firstErr = fmt.Errorf("session %s: list events: %w", s.id, err)
 			return
@@ -65,7 +66,7 @@ func (s *Session) materialise(ctx context.Context) error {
 // full event list and converts each into a whiteboard.ProjectEvent.
 // The session package owns this conversion so pkg/session/whiteboard
 // stays free of EventRow / store imports.
-func whiteboardEventsFrom(rows []EventRow) []whiteboard.ProjectEvent {
+func whiteboardEventsFrom(rows []store.EventRow) []whiteboard.ProjectEvent {
 	out := make([]whiteboard.ProjectEvent, 0)
 	for _, r := range rows {
 		if protocol.Kind(r.EventType) != protocol.KindWhiteboardOp {
@@ -125,7 +126,7 @@ func whiteboardEventsFrom(rows []EventRow) []whiteboard.ProjectEvent {
 // list and converts each into a plan.ProjectEvent. The session
 // package owns this conversion so pkg/session/plan stays free of
 // EventRow / store imports.
-func planEventsFrom(rows []EventRow) []plan.ProjectEvent {
+func planEventsFrom(rows []store.EventRow) []plan.ProjectEvent {
 	out := make([]plan.ProjectEvent, 0)
 	for _, r := range rows {
 		if protocol.Kind(r.EventType) != protocol.KindPlanOp {
@@ -187,7 +188,7 @@ func planEventsFrom(rows []EventRow) []plan.ProjectEvent {
 // would be invisible to the model after a process restart.
 // Reading the same shape live and after replay keeps the model's
 // mental model continuous across the cut.
-func projectHistory(rows []EventRow, window int) []model.Message {
+func projectHistory(rows []store.EventRow, window int) []model.Message {
 	if window <= 0 {
 		window = defaultHistoryWindow
 	}

@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 // TestTerminate_CascadeWritesCancelCascade asserts that when a parent
@@ -13,8 +15,8 @@ import (
 // records reason="cancel_cascade" — not the parent's reason — and no
 // SessionClosed Frame is emitted on the subagent's transcript.
 func TestTerminate_CascadeWritesCancelCascade(t *testing.T) {
-	store := newFakeStore()
-	mgr := newTestManager(t, store)
+	testStore := fixture.NewTestStore()
+	mgr := newTestManager(t, testStore)
 	ctx := context.Background()
 	defer mgr.Stop(ctx)
 
@@ -44,7 +46,7 @@ func TestTerminate_CascadeWritesCancelCascade(t *testing.T) {
 		t.Fatal("child goroutine did not exit within 2s of parent terminate")
 	}
 
-	childEvents, _ := store.ListEvents(ctx, child.ID(), ListEventsOpts{})
+	childEvents, _ := testStore.ListEvents(ctx, child.ID(), store.ListEventsOpts{})
 	if !containsKindWithReason(childEvents, protocol.KindSessionTerminated, protocol.TerminationCancelCascade) {
 		t.Errorf("child session_terminated reason ≠ cancel_cascade: events=%v", kindsWithReasons(childEvents))
 	}
@@ -54,7 +56,7 @@ func TestTerminate_CascadeWritesCancelCascade(t *testing.T) {
 		}
 	}
 
-	parentEvents, _ := store.ListEvents(ctx, parent.ID(), ListEventsOpts{})
+	parentEvents, _ := testStore.ListEvents(ctx, parent.ID(), store.ListEventsOpts{})
 	if !containsKindWithReason(parentEvents, protocol.KindSessionTerminated, "user:/end manual") {
 		t.Errorf("parent session_terminated reason ≠ user:/end manual: events=%v", kindsWithReasons(parentEvents))
 	}
@@ -64,8 +66,8 @@ func TestTerminate_CascadeWritesCancelCascade(t *testing.T) {
 // path is unchanged: an explicitly-terminated session writes
 // session_terminated with the caller-supplied reason verbatim.
 func TestTerminate_ExplicitWritesCallerReason(t *testing.T) {
-	store := newFakeStore()
-	mgr := newTestManager(t, store)
+	testStore := fixture.NewTestStore()
+	mgr := newTestManager(t, testStore)
 	ctx := context.Background()
 	defer mgr.Stop(ctx)
 
@@ -84,13 +86,13 @@ func TestTerminate_ExplicitWritesCallerReason(t *testing.T) {
 		t.Fatal("session goroutine did not exit within 2s")
 	}
 
-	events, _ := store.ListEvents(ctx, s.ID(), ListEventsOpts{})
+	events, _ := testStore.ListEvents(ctx, s.ID(), store.ListEventsOpts{})
 	if !containsKindWithReason(events, protocol.KindSessionTerminated, "test_reason") {
 		t.Errorf("session_terminated reason ≠ test_reason: events=%v", kindsWithReasons(events))
 	}
 }
 
-func kindsWithReasons(events []EventRow) []string {
+func kindsWithReasons(events []store.EventRow) []string {
 	out := make([]string, 0, len(events))
 	for _, ev := range events {
 		r, _ := ev.Metadata["reason"].(string)

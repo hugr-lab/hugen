@@ -10,6 +10,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -38,13 +39,13 @@ func (s stubLifecycle) Release(ctx context.Context, sessionID string) error {
 // instrumentedStore wraps fakeStore with call counters used by the
 // lazy-materialisation tests.
 type instrumentedStore struct {
-	*fakeStore
+	*fixture.TestStore
 	listEventsCalls atomic.Int32
 }
 
 func (s *instrumentedStore) ListEvents(ctx context.Context, sid string, opts ListEventsOpts) ([]EventRow, error) {
 	s.listEventsCalls.Add(1)
-	return s.fakeStore.ListEvents(ctx, sid, opts)
+	return s.TestStore.ListEvents(ctx, sid, opts)
 }
 
 func newTestManager(t *testing.T, store RuntimeStore) *Manager {
@@ -60,7 +61,7 @@ func newTestManager(t *testing.T, store RuntimeStore) *Manager {
 }
 
 func TestManager_LazyMaterialisation(t *testing.T) {
-	base := newFakeStore()
+	base := fixture.NewTestStore()
 	// Seed the store with a session row + 100 historic events.
 	_ = base.OpenSession(context.Background(), SessionRow{
 		ID: "s1", AgentID: "a1", Status: StatusActive,
@@ -76,7 +77,7 @@ func TestManager_LazyMaterialisation(t *testing.T) {
 			Content:   "msg",
 		}, "")
 	}
-	store := &instrumentedStore{fakeStore: base}
+	store := &instrumentedStore{TestStore: base}
 
 	mgr := newTestManager(t, store)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -126,7 +127,7 @@ func TestManager_LazyMaterialisation(t *testing.T) {
 }
 
 func TestManager_ResumeClosed(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	ctx := context.Background()
 	_ = store.OpenSession(ctx, SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
 	// Phase-4: liveness is event-derived. Append a session_terminated
@@ -142,7 +143,7 @@ func TestManager_ResumeClosed(t *testing.T) {
 }
 
 func TestManager_ResumeNotFound(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	if _, err := mgr.Resume(context.Background(), "nope"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound, got %v", err)
@@ -150,7 +151,7 @@ func TestManager_ResumeNotFound(t *testing.T) {
 }
 
 func TestManager_OpenAndList(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	s, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
 	if err != nil {
@@ -160,7 +161,7 @@ func TestManager_OpenAndList(t *testing.T) {
 		t.Fatal("expected non-empty session id")
 	}
 	// At least one event_opened was persisted.
-	if len(store.events) == 0 {
+	if len(store.Events) == 0 {
 		t.Fatal("expected session_opened event in store")
 	}
 }
@@ -192,7 +193,7 @@ func TestProjectHistory_Window(t *testing.T) {
 // see a system_marker frame on its outbox carrying the supplied
 // subject + metadata.
 func TestManager_BroadcastSystemMarker_ReachesLiveRoots(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	defer mgr.Stop(context.Background())
 
@@ -320,7 +321,7 @@ func TestProjectHistory_IncludesSystemMessage(t *testing.T) {
 var _ = model.IntentDefault
 
 func TestManager_LifecycleHooks(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mdl := &scriptedModel{}
 	router := newRouterWithModel(t, mdl)
 	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
@@ -357,7 +358,7 @@ func TestManager_LifecycleHooks(t *testing.T) {
 }
 
 func TestManager_OnOpenErrorRollsBack(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mdl := &scriptedModel{}
 	router := newRouterWithModel(t, mdl)
 	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
@@ -380,7 +381,7 @@ func TestManager_OnOpenErrorRollsBack(t *testing.T) {
 // with the right row fields, metadata.depth = parent.depth+1, and the
 // parent's events contain a subagent_started record naming the child.
 func TestSession_Spawn_HappyPath(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
 
@@ -392,9 +393,9 @@ func TestSession_Spawn_HappyPath(t *testing.T) {
 	drainOutboxOnce(parent.Outbox())
 
 	child, err := parent.Spawn(ctx, SpawnSpec{
-		Skill: "hugr-data",
-		Role:  "explorer",
-		Task:  "list sources",
+		Skill:  "hugr-data",
+		Role:   "explorer",
+		Task:   "list sources",
 		Inputs: map[string]any{"hint": "begin with auth_logs"},
 	})
 	if err != nil {
@@ -443,7 +444,7 @@ func TestSession_Spawn_HappyPath(t *testing.T) {
 // TestSession_Spawn_DepthIncrements asserts a 2-deep spawn yields
 // depth 2 on the grandchild, derived from the in-memory parent.depth.
 func TestSession_Spawn_DepthIncrements(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
 
@@ -467,7 +468,7 @@ func TestSession_Spawn_DepthIncrements(t *testing.T) {
 // TestManager_Deliver_RoutesToSession asserts Deliver pushes the frame
 // onto the addressed session's inbox and returns no error.
 func TestManager_Deliver_RoutesToSession(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
 
@@ -499,11 +500,10 @@ func TestManager_Deliver_RoutesToSession(t *testing.T) {
 // TestManager_Deliver_UnknownSession returns ErrSessionNotFound for an
 // id that has never been opened.
 func TestManager_Deliver_UnknownSession(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	frame := protocol.NewHeartbeat("ghost", protocol.ParticipantInfo{ID: "x", Kind: "system"})
 	if err := mgr.Deliver(context.Background(), "ghost", frame); !errors.Is(err, ErrSessionNotFound) {
 		t.Errorf("err = %v, want ErrSessionNotFound", err)
 	}
 }
-

@@ -8,6 +8,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -98,7 +99,7 @@ func newCeilingTestManager(t *testing.T, store RuntimeStore, mdl model.Model, pr
 // subsequent iterations do not re-inject.
 func TestRoot_SoftWarning_FiresOncePastCap(t *testing.T) {
 	const softCap = 3
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mdl := newFanOutToolModel(5) // 5 tool turns + final
 	provider := &stubProvider{
 		tools:  []tool.Tool{{Name: "fake:do", Provider: "fake", PermissionObject: "hugen:tool:fake"}},
@@ -146,7 +147,7 @@ func TestRoot_SoftWarning_FiresOncePastCap(t *testing.T) {
 func TestRoot_HardCeiling_TerminatesAtCapHard(t *testing.T) {
 	const softCap = 2
 	const hardCap = 4
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mdl := newFanOutToolModel(8)
 	provider := &stubProvider{
 		tools:  []tool.Tool{{Name: "fake:do", Provider: "fake", PermissionObject: "hugen:tool:fake"}},

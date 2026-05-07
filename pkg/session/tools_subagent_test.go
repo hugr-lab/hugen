@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
 )
 
 // us1WithSession is the standard test ctx that pretends a tool
@@ -33,7 +34,6 @@ func us1OpenParent(t *testing.T, mgr *Manager) *Session {
 	drainOutboxOnce(parent.Outbox())
 	return parent
 }
-
 
 // ---------- spawn_subagent ----------
 
@@ -227,8 +227,8 @@ func TestCallWaitSubagents_Happy_LiveResult(t *testing.T) {
 // immediately from drainCachedSubagentResults without ever
 // registering an activeToolFeed.
 func TestCallWaitSubagents_CachedShortCircuit(t *testing.T) {
-	store := newFakeStore()
-	parent, cleanup := newTestParent(t, withTestStore(store))
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	cached := protocol.NewSubagentResult(parent.ID(), "child-cached", parent.agent.Participant(),
@@ -238,7 +238,7 @@ func TestCallWaitSubagents_CachedShortCircuit(t *testing.T) {
 			Reason:    protocol.TerminationCompleted,
 		})
 	row, summary, _ := FrameToEventRow(cached, parent.agent.ID())
-	if err := store.AppendEvent(context.Background(), row, summary); err != nil {
+	if err := testStore.AppendEvent(context.Background(), row, summary); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -274,8 +274,8 @@ func TestCallWaitSubagents_BadRequest(t *testing.T) {
 // TestCallSubagentRuns_Happy seeds a child's events and verifies
 // pagination + next_since_seq cursor.
 func TestCallSubagentRuns_Happy(t *testing.T) {
-	store := newFakeStore()
-	parent, cleanup := newTestParent(t, withTestStore(store))
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -284,7 +284,7 @@ func TestCallSubagentRuns_Happy(t *testing.T) {
 	}
 	// Seed five additional events on the child.
 	for i := 0; i < 5; i++ {
-		_ = store.AppendEvent(context.Background(), EventRow{
+		_ = testStore.AppendEvent(context.Background(), EventRow{
 			ID:        "ev-x",
 			SessionID: child.ID(),
 			AgentID:   "a1",
@@ -319,14 +319,14 @@ func TestCallSubagentRuns_Happy(t *testing.T) {
 // gate: a session belonging to a different parent surfaces
 // not_a_child even when it exists.
 func TestCallSubagentRuns_NotAChild(t *testing.T) {
-	store := newFakeStore()
-	parent, cleanup := newTestParent(t, withTestStore(store))
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	// Create a row that's not a child of parent.
 	other := SessionRow{ID: "ses-other", AgentID: "a1", Status: StatusActive,
 		ParentSessionID: "ses-different-parent"}
-	_ = store.OpenSession(context.Background(), other)
+	_ = testStore.OpenSession(context.Background(), other)
 
 	args, _ := json.Marshal(subagentRunsInput{SessionID: "ses-other"})
 	out, _ := parent.callSubagentRuns(us1WithSession(parent), args)
@@ -368,8 +368,8 @@ func TestCallSubagentRuns_HardCap(t *testing.T) {
 // TestCallSubagentCancel_Happy spawns a child, cancels it, and
 // asserts the child's goroutine exits with the expected reason.
 func TestCallSubagentCancel_Happy(t *testing.T) {
-	store := newFakeStore()
-	parent, cleanup := newTestParent(t, withTestStore(store))
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -399,7 +399,7 @@ func TestCallSubagentCancel_Happy(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("child did not exit within 2s")
 	}
-	events, _ := store.ListEvents(context.Background(), child.ID(), ListEventsOpts{})
+	events, _ := testStore.ListEvents(context.Background(), child.ID(), ListEventsOpts{})
 	wanted := protocol.TerminationSubagentCancelPrefix + "user wants out"
 	if !containsKindWithReason(events, protocol.KindSessionTerminated, wanted) {
 		t.Errorf("child terminated with wrong reason; events=%v", kindsWithReasons(events))
@@ -412,10 +412,10 @@ func TestCallSubagentCancel_Happy(t *testing.T) {
 // handler's store lookup finds the target row (otherwise it would
 // surface session_not_found before the cross-tree check fires).
 func TestCallSubagentCancel_NotAChild(t *testing.T) {
-	store := newFakeStore()
-	parent, cleanup := newTestParent(t, withTestStore(store))
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
-	other, otherCleanup := newTestParent(t, withTestStore(store))
+	other, otherCleanup := newTestParent(t, withTestStore(testStore))
 	defer otherCleanup()
 
 	args, _ := json.Marshal(subagentCancelInput{SessionID: other.ID()})
@@ -427,7 +427,8 @@ func TestCallSubagentCancel_NotAChild(t *testing.T) {
 // should still return ok=true even though the child has already
 // exited.
 func TestCallSubagentCancel_Idempotent(t *testing.T) {
-	parent, cleanup := newTestParent(t)
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -459,8 +460,8 @@ func TestCallSubagentCancel_Idempotent(t *testing.T) {
 // TestCallParentContext_Filtering seeds a parent's events with a mix
 // of types and asserts only user/assistant messages flow through.
 func TestCallParentContext_Filtering(t *testing.T) {
-	store := newFakeStore()
-	parent, cleanup := newTestParent(t, withTestStore(store))
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -473,7 +474,7 @@ func TestCallParentContext_Filtering(t *testing.T) {
 	at := time.Now().Add(-time.Hour)
 	mustAppend := func(et string, content string, meta map[string]any) {
 		t.Helper()
-		_ = store.AppendEvent(context.Background(), EventRow{
+		_ = testStore.AppendEvent(context.Background(), EventRow{
 			ID:        "x",
 			SessionID: parent.ID(),
 			AgentID:   "a1",
@@ -520,8 +521,8 @@ func TestCallParentContext_Filtering(t *testing.T) {
 // TestCallParentContext_QueryAndTimeWindow combines substring + from
 // filter.
 func TestCallParentContext_QueryAndTimeWindow(t *testing.T) {
-	store := newFakeStore()
-	parent, cleanup := newTestParent(t, withTestStore(store))
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
@@ -539,7 +540,7 @@ func TestCallParentContext_QueryAndTimeWindow(t *testing.T) {
 		{2 * time.Hour, "cherry payload here"},
 	}
 	for _, r := range rows {
-		_ = store.AppendEvent(context.Background(), EventRow{
+		_ = testStore.AppendEvent(context.Background(), EventRow{
 			ID: "x", SessionID: parent.ID(), AgentID: "a1",
 			EventType: string(protocol.KindUserMessage),
 			Content:   r.text, CreatedAt: base.Add(r.offset),

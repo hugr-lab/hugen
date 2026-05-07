@@ -6,7 +6,8 @@ import (
 	"testing"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/whiteboard"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/session/tools/whiteboard"
 )
 
 // ---------- whiteboard_init ----------
@@ -15,8 +16,8 @@ import (
 // the in-memory projection becomes Active and a whiteboard_op{op:"init"}
 // event lands in the store.
 func TestCallWhiteboardInit_Happy(t *testing.T) {
-	store := newFakeStore()
-	parent, cleanup := newTestParent(t, withTestStore(store))
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	out, err := parent.callWhiteboardInit(us1WithSession(parent), json.RawMessage(`{}`))
@@ -33,7 +34,7 @@ func TestCallWhiteboardInit_Happy(t *testing.T) {
 		t.Errorf("in-memory board not active after init")
 	}
 
-	events, _ := store.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
+	events, _ := testStore.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
 	found := false
 	for _, ev := range events {
 		if ev.EventType == string(protocol.KindWhiteboardOp) && ev.Metadata["op"] == "init" {
@@ -48,8 +49,8 @@ func TestCallWhiteboardInit_Happy(t *testing.T) {
 // TestCallWhiteboardInit_Idempotent: a second init on an active board
 // returns ok with no second event written.
 func TestCallWhiteboardInit_Idempotent(t *testing.T) {
-	store := newFakeStore()
-	parent, cleanup := newTestParent(t, withTestStore(store))
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	if _, err := parent.callWhiteboardInit(us1WithSession(parent), json.RawMessage(`{}`)); err != nil {
@@ -58,7 +59,7 @@ func TestCallWhiteboardInit_Idempotent(t *testing.T) {
 	if _, err := parent.callWhiteboardInit(us1WithSession(parent), json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("second init: %v", err)
 	}
-	events, _ := store.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
+	events, _ := testStore.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
 	count := 0
 	for _, ev := range events {
 		if ev.EventType == string(protocol.KindWhiteboardOp) && ev.Metadata["op"] == "init" {
@@ -158,8 +159,8 @@ func TestCallWhiteboardRead_OwnHostedAfterInit(t *testing.T) {
 // TestCallWhiteboardStop_DeactivatesProjection: stop after init flips
 // Active=false and writes a stop event.
 func TestCallWhiteboardStop_DeactivatesProjection(t *testing.T) {
-	store := newFakeStore()
-	parent, cleanup := newTestParent(t, withTestStore(store))
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	_, _ = parent.callWhiteboardInit(us1WithSession(parent), json.RawMessage(`{}`))
@@ -171,7 +172,7 @@ func TestCallWhiteboardStop_DeactivatesProjection(t *testing.T) {
 		t.Errorf("board still active after stop: %+v", parent.WhiteboardSnapshot())
 	}
 
-	events, _ := store.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
+	events, _ := testStore.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
 	stopFound := false
 	for _, ev := range events {
 		if ev.EventType == string(protocol.KindWhiteboardOp) && ev.Metadata["op"] == "stop" {
@@ -186,14 +187,14 @@ func TestCallWhiteboardStop_DeactivatesProjection(t *testing.T) {
 // TestCallWhiteboardStop_OnInactive: stop with no prior init is a
 // no-op success — idempotent, no event.
 func TestCallWhiteboardStop_OnInactive(t *testing.T) {
-	store := newFakeStore()
-	parent, cleanup := newTestParent(t, withTestStore(store))
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	if _, err := parent.callWhiteboardStop(us1WithSession(parent), json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
-	events, _ := store.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
+	events, _ := testStore.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
 	for _, ev := range events {
 		if ev.EventType == string(protocol.KindWhiteboardOp) {
 			t.Errorf("unexpected whiteboard_op event for stop on inactive board: %+v", ev.Metadata)
@@ -209,12 +210,12 @@ func TestCallWhiteboard_SessionGone(t *testing.T) {
 	parent.MarkClosed()
 
 	for name, call := range map[string]sessionToolHandler{
-		"init":  (*Session).callWhiteboardInit,
-		"write": (*Session).callWhiteboardWrite,
-		"read":  (*Session).callWhiteboardRead,
-		"stop":  (*Session).callWhiteboardStop,
+		"init":  parent.callWhiteboardInit,
+		"write": parent.callWhiteboardWrite,
+		"read":  parent.callWhiteboardRead,
+		"stop":  parent.callWhiteboardStop,
 	} {
-		out, err := call(parent, us1WithSession(parent), json.RawMessage(`{"text":"x"}`))
+		out, err := call(us1WithSession(parent), json.RawMessage(`{"text":"x"}`))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}

@@ -8,6 +8,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/store/local"
 
 	hugr "github.com/hugr-lab/query-engine"
@@ -65,10 +66,10 @@ func BuildLocalEngine(
 // not supported.
 func ChooseStore(localQ, remoteQ types.Querier, embedderEnabled bool) session.RuntimeStore {
 	if localQ != nil {
-		return session.NewRuntimeStoreLocal(localQ, embedderEnabled)
+		return store.NewRuntimeStoreLocal(localQ, embedderEnabled)
 	}
 	if remoteQ != nil {
-		return session.NewRuntimeStoreLocal(remoteQ, embedderEnabled)
+		return store.NewRuntimeStoreLocal(remoteQ, embedderEnabled)
 	}
 	return nil
 }

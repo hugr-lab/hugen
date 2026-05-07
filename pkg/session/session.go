@@ -14,8 +14,10 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/plan"
-	"github.com/hugr-lab/hugen/pkg/session/whiteboard"
+	"github.com/hugr-lab/hugen/pkg/session/store"
+	"github.com/hugr-lab/hugen/pkg/session/tools/notepad"
+	"github.com/hugr-lab/hugen/pkg/session/tools/plan"
+	"github.com/hugr-lab/hugen/pkg/session/tools/whiteboard"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -33,23 +35,32 @@ import (
 // the same shared bundle so new constructors can inject everything
 // in one go.
 type Session struct {
-	id           string
-	ownerID      string              // owner from SessionRow.OwnerID; inherited by subagents
-	depth        int                 // 0 for root; parent.depth+1 for subagent
-	deps         *Deps        // shared bundle; nil only in legacy NewSession callers
-	agent        *Agent
-	store        RuntimeStore
-	models       *model.ModelRouter
-	codec        *protocol.Codec
-	cmds         *CommandRegistry
-	notepad      *Notepad
-	tools        *tool.ToolManager   // per-session child manager; required (NewSession derives it)
-	rootTools    *tool.ToolManager   // parent (agent-level) manager; passed to subagents
-	skills       *skill.SkillManager // optional; consulted for per-skill max_turns
-	perms        perm.Service        // optional; consulted by tool handlers (skill_files etc.)
-	maxToolIters     int             // 0 → defaultMaxToolIterations
-	maxToolItersHard int             // 0 → 2 × resolved soft cap
-	logger       *slog.Logger
+	id               string
+	ownerID          string // owner from SessionRow.OwnerID; inherited by subagents
+	depth            int    // 0 for root; parent.depth+1 for subagent
+	deps             *Deps  // shared bundle; nil only in legacy NewSession callers
+	agent            *Agent
+	store            store.RuntimeStore
+	models           *model.ModelRouter
+	codec            *protocol.Codec
+	cmds             *CommandRegistry
+	notepad          *notepad.Notepad
+	tools            *tool.ToolManager   // per-session child manager; required (NewSession derives it)
+	rootTools        *tool.ToolManager   // parent (agent-level) manager; passed to subagents
+	skills           *skill.SkillManager // optional; consulted for per-skill max_turns
+	perms            perm.Service        // optional; consulted by tool handlers (skill_files etc.)
+	maxToolIters     int                 // 0 → defaultMaxToolIterations
+	maxToolItersHard int                 // 0 → 2 × resolved soft cap
+	logger           *slog.Logger
+
+	// sessionTools is the static dispatch table. Per-tool init() funcs
+	// in tools_subagent.go / tools_plan.go / … register their entries
+	// at package-init time; the table is read-only thereafter so
+	// dispatch needs no lock.
+	sessionTools map[string]sessionToolDescriptor
+
+	// state
+	state sync.Map // string → any; for tool handlers to stash arbitrary bits without a dedicated field in Session. Not persisted; lost on restart.
 
 	// Per-session tool snapshot cache. Phase 4.1a stage A step 8
 	// moved skill-bindings filtering and per-session caching out
@@ -212,7 +223,6 @@ type Session struct {
 	// finished its exit handler — including any session_terminated
 	// event append.
 	done chan struct{}
-
 }
 
 // terminationCause is the cancel cause attached to a per-session ctx
@@ -314,7 +324,7 @@ func WithPerms(p perm.Service) SessionOption {
 func NewSession(
 	id string,
 	agent *Agent,
-	store RuntimeStore,
+	store store.RuntimeStore,
 	models *model.ModelRouter,
 	cmds *CommandRegistry,
 	codec *protocol.Codec,
@@ -339,7 +349,7 @@ func NewSession(
 		models:    models,
 		codec:     codec,
 		cmds:      cmds,
-		notepad:   NewNotepad(store, agent.ID(), id),
+		notepad:   notepad.New(store, agent.ID(), id),
 		rootTools: tools,
 		tools:     tools.NewChild(),
 		logger:    logger,
@@ -355,6 +365,8 @@ func NewSession(
 	// manager — handlers dispatch back to s.callXxx methods. Done
 	// after options run so any option that flips a field the
 	// provider consumes (perms, skills) sees the final state.
+	s.initTools()
+
 	if err := s.tools.AddProvider(s); err != nil {
 		// Self-registration failure indicates a name collision in
 		// the parent manager (someone already registered "session").
@@ -415,7 +427,7 @@ func (s *Session) Submit(ctx context.Context, f protocol.Frame) (ok bool) {
 }
 
 // Notepad returns the session's notepad handle.
-func (s *Session) Notepad() *Notepad { return s.notepad }
+func (s *Session) Notepad() *notepad.Notepad { return s.notepad }
 
 // Tools exposes the per-session ToolManager. This is the child
 // manager NewSession derived off the root passed at construction:
@@ -555,7 +567,7 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 	if s.closed.Load() {
 		return ErrSessionClosed
 	}
-	row, summary, perr := FrameToEventRow(f, s.agent.ID())
+	row, summary, perr := store.FrameToEventRow(f, s.agent.ID())
 	if perr != nil {
 		return fmt.Errorf("session %s: project frame: %w", s.id, perr)
 	}
@@ -656,8 +668,7 @@ func (s *Session) Run(ctx context.Context) error {
 				return nil
 			}
 			if err := s.routeInbound(ctx, f); err != nil {
-				var cs *sessionCloseSignal
-				if errors.As(err, &cs) {
+				if cs, ok := errors.AsType[*sessionCloseSignal](err); ok {
 					// Phase 4.1b-pre stage B: event-driven teardown. The
 					// SessionClose Frame is the unified close trigger;
 					// teardown reads s.closeReason as the reason for the
@@ -878,7 +889,7 @@ func (s *Session) drainOnTeardown() {
 // before handleExit writes the terminal row. Mirrors emit's seq
 // allocation so seq monotonicity holds across the boundary.
 func (s *Session) persistOnly(ctx context.Context, f protocol.Frame) error {
-	row, summary, err := FrameToEventRow(f, s.agent.ID())
+	row, summary, err := store.FrameToEventRow(f, s.agent.ID())
 	if err != nil {
 		return fmt.Errorf("session %s: project frame on teardown: %w", s.id, err)
 	}
@@ -942,7 +953,7 @@ func (s *Session) handleExit(runCtx context.Context, tc *terminationCause) {
 	terminal := protocol.NewSessionTerminated(s.id, s.agent.Participant(), protocol.SessionTerminatedPayload{
 		Reason: reason,
 	})
-	if termRow, summary, perr := FrameToEventRow(terminal, s.agent.ID()); perr == nil {
+	if termRow, summary, perr := store.FrameToEventRow(terminal, s.agent.ID()); perr == nil {
 		if nextSeq, serr := s.store.NextSeq(writeCtx, s.id); serr == nil {
 			termRow.Seq = nextSeq
 			if setter, ok := any(terminal).(protocol.SeqSetter); ok {
@@ -977,7 +988,7 @@ func (s *Session) handleExit(runCtx context.Context, tc *terminationCause) {
 	// and emit will recover-safely panic on a closed outbox.
 	if emitClose {
 		closed := protocol.NewSessionClosed(s.id, s.agent.Participant(), reason)
-		if cRow, cSum, perr := FrameToEventRow(closed, s.agent.ID()); perr == nil {
+		if cRow, cSum, perr := store.FrameToEventRow(closed, s.agent.ID()); perr == nil {
 			if nextSeq, serr := s.store.NextSeq(writeCtx, s.id); serr == nil {
 				cRow.Seq = nextSeq
 				if setter, ok := any(closed).(protocol.SeqSetter); ok {
@@ -1037,7 +1048,7 @@ func (s *Session) emitSubagentResultToParent(persistCtx context.Context, reason 
 		return
 	}
 	// Parent inbox closed — fall back to direct store append.
-	resRow, summary, err := FrameToEventRow(result, s.agent.ID())
+	resRow, summary, err := store.FrameToEventRow(result, s.agent.ID())
 	if err != nil {
 		s.logger.Warn("session: project subagent_result for parent",
 			"parent", parent.id, "child", s.id, "err", err)

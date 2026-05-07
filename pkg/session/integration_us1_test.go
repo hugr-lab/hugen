@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
 )
 
 // TestUS1_CancelCascade_TwoDeep exercises phase-4-spec §13.2 #5: a
@@ -16,7 +17,7 @@ import (
 // terminate (only its in-flight turn would abort, but in this test
 // it has no turn — we just assert root is still alive).
 func TestUS1_CancelCascade_TwoDeep(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
 	defer mgr.Stop(ctx)
@@ -79,7 +80,7 @@ func TestUS1_CancelCascade_TwoDeep(t *testing.T) {
 // parent's events end up with a subagent_result row whose
 // session_id matches the cancelled child.
 func TestUS1_SubagentResult_DeliveredToParent(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
 	defer mgr.Stop(ctx)
@@ -122,7 +123,7 @@ func TestUS1_SubagentResult_DeliveredToParent(t *testing.T) {
 // the child's natural exit-time SubagentResult arrives via the
 // activeToolFeed.
 func TestUS1_WaitSubagents_NaturalTermination(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
+	mgr := newTestManager(t, fixture.NewTestStore())
 	ctx := context.Background()
 	defer mgr.Stop(ctx)
 

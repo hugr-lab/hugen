@@ -7,11 +7,40 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/store"
+	"github.com/hugr-lab/hugen/pkg/session/tools/notepad"
 )
 
 // ErrDepthExceeded is returned by parent.Spawn when the new
 // sub-agent's depth would exceed deps.MaxDepth.
 var ErrDepthExceeded = errors.New("session: max sub-agent depth exceeded")
+
+var (
+	ErrSessionClosed   = store.ErrSessionClosed
+	ErrSessionNotFound = store.ErrSessionNotFound
+)
+
+const (
+	StatusActive    = store.StatusActive
+	StatusSuspended = store.StatusSuspended // legacy; phase-4 never writes
+	StatusClosed    = store.StatusClosed    // legacy; phase-4 never writes
+)
+
+type (
+	EventRow       = store.EventRow
+	SessionRow     = store.SessionRow
+	ListEventsOpts = store.ListEventsOpts
+	RuntimeStore   = store.RuntimeStore
+)
+
+var (
+	EventRowToFrame = store.EventRowToFrame
+	FrameToEventRow = store.FrameToEventRow
+)
+
+type (
+	NoteRow = notepad.NoteRow
+)
 
 // New creates a fresh root Session. Thin public wrapper over the
 // package-private newSession constructor; exists so the upcoming
@@ -87,7 +116,7 @@ func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenReques
 	// 2. Persist the initial row (the only sessions-row WRITE on the
 	// open path; future writes touch session_events instead).
 	now := time.Now().UTC()
-	row := SessionRow{
+	row := store.SessionRow{
 		ID:                 id,
 		AgentID:            deps.Agent.ID(),
 		OwnerID:            req.OwnerID,
@@ -277,8 +306,8 @@ func (s *Session) Start(_ context.Context) {
 // hasTerminated returns true iff the session has at least one
 // session_terminated event in its events. Cheap read-only walk used
 // by Resume / Recover to gate "is this session gone?".
-func hasTerminated(ctx context.Context, store RuntimeStore, id string) bool {
-	events, err := store.ListEvents(ctx, id, ListEventsOpts{Limit: 1000})
+func hasTerminated(ctx context.Context, rs store.RuntimeStore, id string) bool {
+	events, err := rs.ListEvents(ctx, id, store.ListEventsOpts{Limit: 1000})
 	if err != nil {
 		return false
 	}
@@ -293,7 +322,7 @@ func hasTerminated(ctx context.Context, store RuntimeStore, id string) bool {
 // depthFromRow extracts metadata.depth from a SessionRow, handling
 // both int and float64 (JSON unmarshal default) forms. Returns 0 if
 // missing.
-func depthFromRow(row SessionRow) int {
+func depthFromRow(row store.SessionRow) int {
 	if row.Metadata == nil {
 		return 0
 	}
@@ -315,7 +344,7 @@ func (s *Session) appendTerminal(ctx context.Context, reason string) {
 	terminal := protocol.NewSessionTerminated(s.id, s.deps.Agent.Participant(), protocol.SessionTerminatedPayload{
 		Reason: reason,
 	})
-	row, summary, err := FrameToEventRow(terminal, s.deps.Agent.ID())
+	row, summary, err := store.FrameToEventRow(terminal, s.deps.Agent.ID())
 	if err != nil {
 		s.deps.Logger.Warn("session: project terminal frame", "session", s.id, "err", err)
 		return
@@ -324,4 +353,3 @@ func (s *Session) appendTerminal(ctx context.Context, reason string) {
 		s.deps.Logger.Warn("session: append terminal event", "session", s.id, "err", err)
 	}
 }
-

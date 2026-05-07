@@ -9,6 +9,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -105,7 +106,7 @@ func newTestParent(t *testing.T, opts ...testParentOpt) (*Session, func()) {
 		opt(cfg)
 	}
 	if cfg.store == nil {
-		cfg.store = newFakeStore()
+		cfg.store = fixture.NewTestStore()
 	}
 	if cfg.tools == nil {
 		cfg.tools = tool.NewToolManager(permsAllowAll{}, nil, nil)

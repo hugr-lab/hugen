@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/plan"
+	"github.com/hugr-lab/hugen/pkg/session/tools/plan"
 )
 
 // init registers the four US2 plan tools into the package-level
@@ -20,34 +20,34 @@ import (
 // so the US1 sub-agent surface and the US2 plan surface stay
 // independently reviewable and the dispatch table grows by file
 // rather than by editing one block.
-func init() {
-	sessionTools["plan_set"] = sessionToolDescriptor{
+func (s *Session) initPlan() {
+	s.sessionTools["plan_set"] = sessionToolDescriptor{
 		Name:             "plan_set",
 		Description:      "Write or replace the plan body. Wipes the in-memory comment log; events are not deleted.",
 		PermissionObject: permObjectPlanWrite,
 		ArgSchema:        json.RawMessage(planSetSchema),
-		Handler:          (*Session).callPlanSet,
+		Handler:          s.callPlanSet,
 	}
-	sessionTools["plan_comment"] = sessionToolDescriptor{
+	s.sessionTools["plan_comment"] = sessionToolDescriptor{
 		Name:             "plan_comment",
 		Description:      "Append a progress comment. Optionally moves the current-step pointer.",
 		PermissionObject: permObjectPlanWrite,
 		ArgSchema:        json.RawMessage(planCommentSchema),
-		Handler:          (*Session).callPlanComment,
+		Handler:          s.callPlanComment,
 	}
-	sessionTools["plan_show"] = sessionToolDescriptor{
+	s.sessionTools["plan_show"] = sessionToolDescriptor{
 		Name:             "plan_show",
 		Description:      "Return the full plan state — body + pointer + every retained comment since the last set.",
 		PermissionObject: permObjectPlanRead,
 		ArgSchema:        json.RawMessage(planShowSchema),
-		Handler:          (*Session).callPlanShow,
+		Handler:          s.callPlanShow,
 	}
-	sessionTools["plan_clear"] = sessionToolDescriptor{
+	s.sessionTools["plan_clear"] = sessionToolDescriptor{
 		Name:             "plan_clear",
 		Description:      "Drop the plan entirely. Body and pointer no longer render in the system prompt.",
 		PermissionObject: permObjectPlanWrite,
 		ArgSchema:        json.RawMessage(planClearSchema),
-		Handler:          (*Session).callPlanClear,
+		Handler:          s.callPlanClear,
 	}
 }
 
@@ -151,12 +151,12 @@ func (caller *Session) callPlanComment(ctx context.Context, args json.RawMessage
 // ---------- plan_show ----------
 
 type planShowOutput struct {
-	Active      bool                  `json:"active"`
-	Text        string                `json:"text,omitempty"`
-	CurrentStep string                `json:"current_step,omitempty"`
-	SetAt       string                `json:"set_at,omitempty"`
-	UpdatedAt   string                `json:"updated_at,omitempty"`
-	Comments    []planShowCommentRow  `json:"comments,omitempty"`
+	Active      bool                 `json:"active"`
+	Text        string               `json:"text,omitempty"`
+	CurrentStep string               `json:"current_step,omitempty"`
+	SetAt       string               `json:"set_at,omitempty"`
+	UpdatedAt   string               `json:"updated_at,omitempty"`
+	Comments    []planShowCommentRow `json:"comments,omitempty"`
 }
 
 type planShowCommentRow struct {

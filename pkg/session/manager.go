@@ -12,6 +12,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -79,7 +80,7 @@ type SpawnSpec struct {
 // crash != session loss.
 
 type Manager struct {
-	store    RuntimeStore
+	store    store.RuntimeStore
 	agent    *Agent
 	models   *model.ModelRouter
 	commands *CommandRegistry
@@ -142,7 +143,7 @@ func WithSessionOptions(opts ...SessionOption) ManagerOption {
 // context (separate from any adapter's errgroup context) that scopes
 // every session goroutine; Shutdown cancels it.
 func NewManager(
-	store RuntimeStore,
+	store store.RuntimeStore,
 	agent *Agent,
 	models *model.ModelRouter,
 	commands *CommandRegistry,
@@ -298,7 +299,7 @@ func (m *Manager) Deliver(ctx context.Context, to string, f protocol.Frame) erro
 	s, ok := m.live[to]
 	m.mu.RUnlock()
 	if !ok {
-		return ErrSessionNotFound
+		return store.ErrSessionNotFound
 	}
 	if !s.Submit(ctx, f) {
 		return ErrSessionGone
@@ -369,7 +370,7 @@ func (m *Manager) Terminate(ctx context.Context, id, reason string) error {
 	s, ok := m.live[id]
 	m.mu.RUnlock()
 	if !ok {
-		return ErrSessionNotFound
+		return store.ErrSessionNotFound
 	}
 	closeFrame := protocol.NewSessionClose(s.id, m.agent.Participant(), reason)
 	s.Submit(ctx, closeFrame)

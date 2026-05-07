@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
@@ -18,41 +19,41 @@ import (
 // entries the LLM sees as session:spawn_subagent /
 // session:wait_subagents / session:subagent_runs /
 // session:subagent_cancel / session:parent_context.
-func init() {
-	sessionTools["spawn_subagent"] = sessionToolDescriptor{
+func (s *Session) initSubagent() {
+	s.sessionTools["spawn_subagent"] = sessionToolDescriptor{
 		Name:             "spawn_subagent",
 		Description:      "Spawn one or more sub-agent sessions. Non-blocking — returns child session ids immediately; results arrive asynchronously via wait_subagents.",
 		PermissionObject: permObjectSubagentSpawn,
 		ArgSchema:        json.RawMessage(spawnSubagentSchema),
-		Handler:          (*Session).callSpawnSubagent,
+		Handler:          s.callSpawnSubagent,
 	}
-	sessionTools["wait_subagents"] = sessionToolDescriptor{
+	s.sessionTools["wait_subagents"] = sessionToolDescriptor{
 		Name:             "wait_subagents",
 		Description:      "Block until each listed sub-agent produces a terminal result. Returns one row per id.",
 		PermissionObject: permObjectSubagentWait,
 		ArgSchema:        json.RawMessage(waitSubagentsSchema),
-		Handler:          (*Session).callWaitSubagents,
+		Handler:          s.callWaitSubagents,
 	}
-	sessionTools["subagent_runs"] = sessionToolDescriptor{
+	s.sessionTools["subagent_runs"] = sessionToolDescriptor{
 		Name:             "subagent_runs",
 		Description:      "Paginated transcript pull-through for a sub-agent the calling session spawned.",
 		PermissionObject: permObjectSubagentRead,
 		ArgSchema:        json.RawMessage(subagentRunsSchema),
-		Handler:          (*Session).callSubagentRuns,
+		Handler:          s.callSubagentRuns,
 	}
-	sessionTools["subagent_cancel"] = sessionToolDescriptor{
+	s.sessionTools["subagent_cancel"] = sessionToolDescriptor{
 		Name:             "subagent_cancel",
 		Description:      "Cancel one of the calling session's sub-agents with a stated reason. Cascades to descendants via ctx.",
 		PermissionObject: permObjectSubagentCancel,
 		ArgSchema:        json.RawMessage(subagentCancelSchema),
-		Handler:          (*Session).callSubagentCancel,
+		Handler:          s.callSubagentCancel,
 	}
-	sessionTools["parent_context"] = sessionToolDescriptor{
+	s.sessionTools["parent_context"] = sessionToolDescriptor{
 		Name:             "parent_context",
 		Description:      "Sub-agent's window into its direct parent's user-facing communication. Filtered to user/assistant messages.",
 		PermissionObject: permObjectSubagentParentContext,
 		ArgSchema:        json.RawMessage(parentContextSchema),
-		Handler:          (*Session).callParentContext,
+		Handler:          s.callParentContext,
 	}
 }
 
@@ -402,7 +403,7 @@ func drainCachedSubagentResults(ctx context.Context, parent *Session, ids []stri
 	for _, id := range ids {
 		want[id] = struct{}{}
 	}
-	rows, err := parent.store.ListEvents(ctx, parent.id, ListEventsOpts{Limit: 1000})
+	rows, err := parent.store.ListEvents(ctx, parent.id, store.ListEventsOpts{Limit: 1000})
 	if err != nil {
 		return nil, err
 	}
@@ -505,7 +506,7 @@ func (parent *Session) callSubagentRuns(ctx context.Context, args json.RawMessag
 		limit = subagentRunsHardCap
 	}
 
-	rows, err := parent.store.ListEvents(ctx, in.SessionID, ListEventsOpts{
+	rows, err := parent.store.ListEvents(ctx, in.SessionID, store.ListEventsOpts{
 		MinSeq: in.SinceSeq,
 		Limit:  limit,
 	})
@@ -547,7 +548,7 @@ func (parent *Session) assertChildOf(ctx context.Context, sessionID string) json
 	}
 	row, err := parent.store.LoadSession(ctx, sessionID)
 	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) {
+		if errors.Is(err, store.ErrSessionNotFound) {
 			out, _ := toolErr("session_not_found", fmt.Sprintf("session %q not found", sessionID))
 			return out
 		}
@@ -698,7 +699,7 @@ func (caller *Session) callParentContext(ctx context.Context, args json.RawMessa
 	}
 	q := strings.ToLower(strings.TrimSpace(in.Query))
 
-	rows, err := caller.store.ListEvents(ctx, parentID, ListEventsOpts{Limit: 1000})
+	rows, err := caller.store.ListEvents(ctx, parentID, store.ListEventsOpts{Limit: 1000})
 	if err != nil {
 		return toolErr("io", err.Error())
 	}
@@ -742,11 +743,11 @@ func (caller *Session) callParentContext(ctx context.Context, args json.RawMessa
 // parentContextRole maps an EventRow to the user/assistant role the
 // parent_context surface exposes. Rows that don't represent
 // user-facing communication are filtered upstream.
-func parentContextRole(r EventRow) (string, bool) {
+func parentContextRole(r store.EventRow) (string, bool) {
 	switch r.EventType {
-	case string(protocol.KindUserMessage), EventTypeHumanMessageReceived:
+	case string(protocol.KindUserMessage), store.EventTypeHumanMessageReceived:
 		return "user", true
-	case string(protocol.KindAgentMessage), EventTypeAssistantMessageSent:
+	case string(protocol.KindAgentMessage), store.EventTypeAssistantMessageSent:
 		return "assistant", true
 	}
 	return "", false

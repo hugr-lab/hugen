@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
 )
 
 // TestSettleDangling_NonTerminalChild_RestartDied: a child row exists,
@@ -15,7 +16,7 @@ import (
 // the child's events, (2) write a subagent_result{restart_died} on the
 // parent with a clear instruction body, and (3) report written=1.
 func TestSettleDangling_NonTerminalChild_RestartDied(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -27,8 +28,8 @@ func TestSettleDangling_NonTerminalChild_RestartDied(t *testing.T) {
 	mustOpen(t, store, ctx, SessionRow{
 		ID: childID, AgentID: "a1", ParentSessionID: parentID,
 		SessionType: "subagent", Status: StatusActive,
-		Metadata:    map[string]any{"depth": 1},
-		CreatedAt:   now, UpdatedAt: now,
+		Metadata:  map[string]any{"depth": 1},
+		CreatedAt: now, UpdatedAt: now,
 	})
 
 	mgr := newTestManager(t, store)
@@ -80,7 +81,7 @@ func TestSettleDangling_NonTerminalChild_RestartDied(t *testing.T) {
 // synthetic parent-side subagent_result — never fake "restart_died" for
 // a child that exited cleanly.
 func TestSettleDangling_CleanlyTerminatedChild_PreservesReason(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -92,8 +93,8 @@ func TestSettleDangling_CleanlyTerminatedChild_PreservesReason(t *testing.T) {
 	mustOpen(t, store, ctx, SessionRow{
 		ID: childID, AgentID: "a1", ParentSessionID: parentID,
 		SessionType: "subagent", Status: StatusActive,
-		Metadata:    map[string]any{"depth": 1},
-		CreatedAt:   now, UpdatedAt: now,
+		Metadata:  map[string]any{"depth": 1},
+		CreatedAt: now, UpdatedAt: now,
 	})
 	// Pre-seed child as cleanly terminated.
 	terminal := protocol.NewSessionTerminated(childID,
@@ -153,7 +154,7 @@ func TestSettleDangling_CleanlyTerminatedChild_PreservesReason(t *testing.T) {
 // subagent_result for the child. Settle must NOT write anything more —
 // neither on parent nor on child — and report written=0.
 func TestSettleDangling_AlreadySettled_NoOp(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -165,8 +166,8 @@ func TestSettleDangling_AlreadySettled_NoOp(t *testing.T) {
 	mustOpen(t, store, ctx, SessionRow{
 		ID: childID, AgentID: "a1", ParentSessionID: parentID,
 		SessionType: "subagent", Status: StatusActive,
-		Metadata:    map[string]any{"depth": 1},
-		CreatedAt:   now, UpdatedAt: now,
+		Metadata:  map[string]any{"depth": 1},
+		CreatedAt: now, UpdatedAt: now,
 	})
 	// Pre-seed the parent with an existing subagent_result.
 	pre := protocol.NewSubagentResult(parentID, childID,
@@ -204,7 +205,7 @@ func TestSettleDangling_AlreadySettled_NoOp(t *testing.T) {
 // RestoreActive must not bring up its goroutine (no entry in
 // SessionsLive) — adapter Resume on demand handles it later.
 func TestRestoreActive_SkipsIdleRoot(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -228,7 +229,7 @@ func TestRestoreActive_SkipsIdleRoot(t *testing.T) {
 // non-terminal child is active. RestoreActive must (1) settle the
 // child, (2) bring up the root's goroutine.
 func TestRestoreActive_RestoresActiveRoot(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -239,8 +240,8 @@ func TestRestoreActive_RestoresActiveRoot(t *testing.T) {
 	mustOpen(t, store, ctx, SessionRow{
 		ID: "sub1", AgentID: "a1", ParentSessionID: "root_active",
 		SessionType: "subagent", Status: StatusActive,
-		Metadata:    map[string]any{"depth": 1},
-		CreatedAt:   now, UpdatedAt: now,
+		Metadata:  map[string]any{"depth": 1},
+		CreatedAt: now, UpdatedAt: now,
 	})
 
 	mgr := newTestManager(t, store)
@@ -276,7 +277,7 @@ func TestRestoreActive_RestoresActiveRoot(t *testing.T) {
 // the row in m.live as a fake root. Sub-agents are reachable only
 // through their parent's children map.
 func TestResume_RejectsSubAgentID(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -287,8 +288,8 @@ func TestResume_RejectsSubAgentID(t *testing.T) {
 	mustOpen(t, store, ctx, SessionRow{
 		ID: "sub1", AgentID: "a1", ParentSessionID: "root1",
 		SessionType: "subagent", Status: StatusActive,
-		Metadata:    map[string]any{"depth": 1},
-		CreatedAt:   now, UpdatedAt: now,
+		Metadata:  map[string]any{"depth": 1},
+		CreatedAt: now, UpdatedAt: now,
 	})
 
 	mgr := newTestManager(t, store)
@@ -311,7 +312,7 @@ func TestResume_RejectsSubAgentID(t *testing.T) {
 // even if it had children (which stay as orphan rows in DB —
 // no parent ever wakes up to read them).
 func TestRestoreActive_SkipsTerminalRoots(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -357,4 +358,3 @@ func containsKindWithReason(events []EventRow, kind protocol.Kind, reason string
 	}
 	return false
 }
-

@@ -11,6 +11,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/tools/notepad"
 )
 
 // ErrCommandExists is returned by CommandRegistry.Register when a
@@ -35,7 +36,7 @@ type CommandEnv struct {
 	Author      protocol.ParticipantInfo
 	AgentAuthor protocol.ParticipantInfo
 	Models      *model.ModelRouter
-	Notepad     *Notepad
+	Notepad     *notepad.Notepad
 	Logger      *slog.Logger
 	// Description is set by Register for the /help listing.
 	Description string

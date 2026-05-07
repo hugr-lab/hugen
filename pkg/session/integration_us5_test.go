@@ -10,6 +10,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -83,7 +84,7 @@ func TestUS5_NoHugr_BashFlowWorks(t *testing.T) {
 		{{Content: ptr("done"), Final: true}},
 	}}
 
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	_ = store.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "ag01", Status: StatusActive})
 	tm := tool.NewToolManager(permsAllow{}, nil, nil)
 	if err := tm.AddProvider(files); err != nil {

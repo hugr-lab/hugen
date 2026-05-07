@@ -13,6 +13,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -108,7 +109,7 @@ func (p *us4Stub) Call(_ context.Context, _ string, args json.RawMessage) (json.
 
 func us4NewSession(t *testing.T, mdl model.Model, perms perm.Service, agentID string, providers ...tool.ToolProvider) (*Session, *tool.ToolManager, context.CancelFunc) {
 	t.Helper()
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	_ = store.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: agentID, Status: StatusActive})
 
 	tm := tool.NewToolManager(perms, nil, nil)

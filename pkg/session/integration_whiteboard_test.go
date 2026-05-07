@@ -8,7 +8,8 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/whiteboard"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/session/tools/whiteboard"
 )
 
 // TestUS3_Whiteboard_BroadcastEndToEnd is the canonical phase-4-spec
@@ -23,7 +24,7 @@ import (
 //     broadcast that the member-side internal handler converts into
 //     a local whiteboard_op + system_message + history line.
 func TestUS3_Whiteboard_BroadcastEndToEnd(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
 	defer mgr.Stop(ctx)
@@ -132,7 +133,7 @@ func TestUS3_Whiteboard_BroadcastEndToEnd(t *testing.T) {
 // after whiteboard_stop, a member's write surfaces no_active_whiteboard
 // rather than silently dropping.
 func TestUS3_Whiteboard_StopRefusesNewWrites(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
+	mgr := newTestManager(t, fixture.NewTestStore())
 	ctx := context.Background()
 	defer mgr.Stop(ctx)
 
@@ -160,7 +161,7 @@ func TestUS3_Whiteboard_StopRefusesNewWrites(t *testing.T) {
 // opens a fresh Manager against the same store, resumes the host, and
 // asserts the projection reflects the full event log.
 func TestUS3_Whiteboard_SurvivesRestart(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	ctx := context.Background()
 
 	// Boot 1.

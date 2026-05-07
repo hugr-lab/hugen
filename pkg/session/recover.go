@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 // settleDanglingSubagents reconciles a parent session's child set with
@@ -50,7 +51,7 @@ func settleDanglingSubagents(ctx context.Context, deps *Deps, parentID string) (
 		return 0, nil
 	}
 
-	parentEvents, err := deps.Store.ListEvents(ctx, parentID, ListEventsOpts{})
+	parentEvents, err := deps.Store.ListEvents(ctx, parentID, store.ListEventsOpts{})
 	if err != nil {
 		return 0, fmt.Errorf("session: settle list-events: %w", err)
 	}
@@ -89,8 +90,8 @@ func settleDanglingSubagents(ctx context.Context, deps *Deps, parentID string) (
 // lookupChildTerminationReason returns the reason field of the child's
 // own `session_terminated` event, or "" if the child has no terminal
 // event yet (i.e. it never exited gracefully). Reads only — no writes.
-func lookupChildTerminationReason(ctx context.Context, store RuntimeStore, childID string) string {
-	rows, err := store.ListEvents(ctx, childID, ListEventsOpts{Limit: 1000})
+func lookupChildTerminationReason(ctx context.Context, rs store.RuntimeStore, childID string) string {
+	rows, err := rs.ListEvents(ctx, childID, store.ListEventsOpts{Limit: 1000})
 	if err != nil {
 		return ""
 	}
@@ -117,7 +118,7 @@ func lookupChildTerminationReason(ctx context.Context, store RuntimeStore, child
 func appendChildTerminal(ctx context.Context, deps *Deps, childID, reason string) {
 	terminal := protocol.NewSessionTerminated(childID, deps.Agent.Participant(),
 		protocol.SessionTerminatedPayload{Reason: reason})
-	row, summary, err := FrameToEventRow(terminal, deps.Agent.ID())
+	row, summary, err := store.FrameToEventRow(terminal, deps.Agent.ID())
 	if err != nil {
 		deps.Logger.Warn("session: settle project child terminal",
 			"child", childID, "err", err)
@@ -146,7 +147,7 @@ func appendParentSubagentResult(ctx context.Context, deps *Deps, parentID, child
 			Reason:    reason,
 			Result:    body,
 		})
-	row, summary, err := FrameToEventRow(result, deps.Agent.ID())
+	row, summary, err := store.FrameToEventRow(result, deps.Agent.ID())
 	if err != nil {
 		deps.Logger.Warn("session: settle project subagent_result",
 			"parent", parentID, "child", childID, "err", err)

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
 )
 
 // ---------- plan_set ----------
@@ -15,8 +16,8 @@ import (
 // in-memory projection reflects body + pointer; the persisted
 // event has the right shape.
 func TestCallPlanSet_Happy(t *testing.T) {
-	store := newFakeStore()
-	parent, cleanup := newTestParent(t, withTestStore(store))
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	args, _ := json.Marshal(planSetInput{Text: "investigate cache", CurrentStep: "scope"})
@@ -35,7 +36,7 @@ func TestCallPlanSet_Happy(t *testing.T) {
 	}
 
 	// Persisted event check.
-	events, _ := store.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
+	events, _ := testStore.ListEvents(context.Background(), parent.ID(), ListEventsOpts{})
 	found := false
 	for _, ev := range events {
 		if ev.EventType == string(protocol.KindPlanOp) {
@@ -82,7 +83,8 @@ func TestCallPlanSet_SessionGone(t *testing.T) {
 // TestCallPlanComment_Happy: after plan_set, plan_comment appends a
 // comment and updates current_step preservation correctly.
 func TestCallPlanComment_Happy(t *testing.T) {
-	parent, cleanup := newTestParent(t)
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	setArgs, _ := json.Marshal(planSetInput{Text: "body", CurrentStep: "a"})
@@ -121,7 +123,8 @@ func TestCallPlanComment_Happy(t *testing.T) {
 // TestCallPlanComment_NoActivePlan: comment without prior set must
 // surface no_active_plan.
 func TestCallPlanComment_NoActivePlan(t *testing.T) {
-	parent, cleanup := newTestParent(t)
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	args, _ := json.Marshal(planCommentInput{Text: "x"})
@@ -131,7 +134,8 @@ func TestCallPlanComment_NoActivePlan(t *testing.T) {
 
 // TestCallPlanComment_BadRequest covers missing-text refusal.
 func TestCallPlanComment_BadRequest(t *testing.T) {
-	parent, cleanup := newTestParent(t)
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
 	defer cleanup()
 
 	// Without prior set, the bad_request check fires before

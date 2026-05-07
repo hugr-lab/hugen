@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
 )
 
 // TestUS2_PlanSurvivesRestart exercises phase-4-spec §13.2 #12: a
@@ -17,7 +18,7 @@ import (
 // the same fakeStore, then Resume the session and read both the
 // rendered system prompt and the plan_show output.
 func TestUS2_PlanSurvivesRestart(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 
 	// Boot 1: open session, write a plan + 2 comments.
 	mgr1 := newTestManager(t, store)
@@ -92,7 +93,7 @@ func TestUS2_PlanSurvivesRestart(t *testing.T) {
 // prompt because its source is the full event log, not the
 // windowed history.
 func TestUS2_PlanSurvivesHistoryWindow(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
@@ -153,7 +154,7 @@ func TestUS2_PlanSurvivesHistoryWindow(t *testing.T) {
 // orchestration tools and plan tools compose cleanly within one
 // session.
 func TestUS2_PlanEndToEnd(t *testing.T) {
-	mgr := newTestManager(t, newFakeStore())
+	mgr := newTestManager(t, fixture.NewTestStore())
 	defer mgr.Stop(context.Background())
 	parent := us1OpenParent(t, mgr)
 

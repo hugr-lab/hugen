@@ -10,13 +10,13 @@ import (
 // (per-session state). Handler signature receives *Session directly
 // via SessionToolProvider — no ctx-stash recovery.
 
-func init() {
-	sessionTools["notepad_append"] = sessionToolDescriptor{
+func (s *Session) initNotepad() {
+	s.sessionTools["notepad_append"] = sessionToolDescriptor{
 		Name:             "notepad_append",
 		Description:      "Append a note to the caller's session notepad.",
 		PermissionObject: permObjectNotepadAppend,
 		ArgSchema:        json.RawMessage(notepadAppendSchema),
-		Handler:          (*Session).callNotepadAppend,
+		Handler:          s.callNotepadAppend,
 	}
 }
 

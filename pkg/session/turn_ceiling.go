@@ -6,6 +6,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 // turn_ceiling.go implements phase-4-spec §8.1 + §8.2: a soft-warning
@@ -20,7 +21,7 @@ import (
 // (event-sourcing rule §4.3) — a restart that loses the in-memory
 // state must rebuild it from events to keep the once-per-session
 // invariant honest. Cheap: events are already loaded for replay.
-func (s *Session) reloadSoftWarningFlag(rows []EventRow) {
+func (s *Session) reloadSoftWarningFlag(rows []store.EventRow) {
 	for _, ev := range rows {
 		if ev.EventType != string(protocol.KindSystemMessage) {
 			continue
@@ -51,7 +52,7 @@ func (s *Session) roleAndTaskForNudge(ctx context.Context) (role, task string) {
 			}
 		}
 		if s.parent.id != "" {
-			if rows, err := s.store.ListEvents(ctx, s.parent.id, ListEventsOpts{}); err == nil {
+			if rows, err := s.store.ListEvents(ctx, s.parent.id, store.ListEventsOpts{}); err == nil {
 				for _, ev := range rows {
 					if ev.EventType != string(protocol.KindSubagentStarted) {
 						continue

@@ -23,41 +23,41 @@ import (
 // SkillManager wired by cmd/hugen via WithSkills). skill_files
 // additionally gates on hugen:command:skill_files via host.Perms.
 
-func init() {
-	sessionTools["skill_load"] = sessionToolDescriptor{
+func (s *Session) initSkills() {
+	s.sessionTools["skill_load"] = sessionToolDescriptor{
 		Name:             "skill_load",
 		Description:      "Load a skill (and transitive requires) into the caller's session. Use the catalogue from your system prompt to discover available skills.",
 		PermissionObject: permObjectSkillLoad,
 		ArgSchema:        json.RawMessage(skillLoadSchema),
-		Handler:          (*Session).callSkillLoad,
+		Handler:          s.callSkillLoad,
 	}
-	sessionTools["skill_unload"] = sessionToolDescriptor{
+	s.sessionTools["skill_unload"] = sessionToolDescriptor{
 		Name:             "skill_unload",
 		Description:      "Unload a skill from the caller's session.",
 		PermissionObject: permObjectSkillUnload,
 		ArgSchema:        json.RawMessage(skillUnloadSchema),
-		Handler:          (*Session).callSkillUnload,
+		Handler:          s.callSkillUnload,
 	}
-	sessionTools["skill_publish"] = sessionToolDescriptor{
+	s.sessionTools["skill_publish"] = sessionToolDescriptor{
 		Name:             "skill_publish",
 		Description:      "Publish a skill manifest+body into the local store.",
 		PermissionObject: permObjectSkillPublish,
 		ArgSchema:        json.RawMessage(skillPublishSchema),
-		Handler:          (*Session).callSkillPublish,
+		Handler:          s.callSkillPublish,
 	}
-	sessionTools["skill_files"] = sessionToolDescriptor{
+	s.sessionTools["skill_files"] = sessionToolDescriptor{
 		Name:             "skill_files",
 		Description:      "List on-disk files of a loaded skill with relative + absolute paths so other tools (bash.read_file, python.run_script) can read them. Optional subdir narrows the listing; optional glob filters by path pattern.",
 		PermissionObject: permObjectSkillFiles,
 		ArgSchema:        json.RawMessage(skillFilesSchema),
-		Handler:          (*Session).callSkillFiles,
+		Handler:          s.callSkillFiles,
 	}
-	sessionTools["skill_ref"] = sessionToolDescriptor{
+	s.sessionTools["skill_ref"] = sessionToolDescriptor{
 		Name:             "skill_ref",
 		Description:      "Read a reference document (references/<ref>.md) from a loaded skill. References are listed in the skill's SKILL.md body.",
 		PermissionObject: permObjectSkillRef,
 		ArgSchema:        json.RawMessage(skillRefSchema),
-		Handler:          (*Session).callSkillRef,
+		Handler:          s.callSkillRef,
 	}
 }
 
@@ -188,7 +188,7 @@ func (s *Session) callSkillUnload(ctx context.Context, args json.RawMessage) (js
 // inline-body wiring is still pending (deferred to T039 in the
 // original phase-3 spec). Returning ErrSystemUnavailable keeps
 // callers' UX unchanged across the move.
-func (_ *Session) callSkillPublish(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
+func (s *Session) callSkillPublish(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	return nil, fmt.Errorf("%w: skill_publish requires inline body wiring (deferred to T039)", tool.ErrSystemUnavailable)
 }
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -41,7 +42,7 @@ import (
 // Outside this module nobody should be assembling a Deps by hand —
 // the public surface for that is NewManager.
 type Deps struct {
-	Store     RuntimeStore
+	Store     store.RuntimeStore
 	Agent     *Agent
 	Models    *model.ModelRouter
 	Commands  *CommandRegistry

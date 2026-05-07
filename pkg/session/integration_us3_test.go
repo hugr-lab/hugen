@@ -11,6 +11,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/hugen/pkg/tool/providers/policies"
 	"github.com/hugr-lab/query-engine/types"
@@ -183,7 +184,7 @@ func (p *us3Stub) Call(context.Context, string, json.RawMessage) (json.RawMessag
 
 func us3NewSession(t *testing.T, mdl model.Model, perms perm.Service, agentID string, providers ...tool.ToolProvider) (*Session, *tool.ToolManager, context.CancelFunc) {
 	t.Helper()
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	_ = store.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: agentID, Status: StatusActive})
 
 	tm := tool.NewToolManager(perms, nil, nil)

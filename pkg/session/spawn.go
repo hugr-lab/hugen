@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
@@ -43,9 +44,7 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 		"spawn_role":  spec.Role,
 		"spawn_skill": spec.Skill,
 	}
-	for k, v := range spec.Metadata {
-		childMeta[k] = v
-	}
+	maps.Copy(childMeta, spec.Metadata)
 	req := OpenRequest{
 		OwnerID:            s.ownerID,
 		ParentSessionID:    s.id,
@@ -86,4 +85,3 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	}
 	return child, nil
 }
-

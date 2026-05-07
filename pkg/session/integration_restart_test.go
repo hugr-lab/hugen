@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
 )
 
 // integration_restart_test.go covers the phase-4 acceptance scenarios
@@ -43,7 +44,7 @@ import (
 // shutdown doesn't lie about state — sessions stay non-terminal in
 // the DB until the next boot reconciles them.
 func TestPhase4Acceptance_GracefulShutdownWritesNothing(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	ctx := context.Background()
 
 	// --- First Manager: open root + spawn sub ---
@@ -150,7 +151,7 @@ func TestPhase4Acceptance_GracefulShutdownWritesNothing(t *testing.T) {
 // results in s.history (via the projectHistory subagent_result
 // rendering — verified separately in TestProjectHistory_IncludesSubagentFrames).
 func TestPhase4Acceptance_RestartResume_TwoSiblings(t *testing.T) {
-	store := newFakeStore()
+	store := fixture.NewTestStore()
 	ctx := context.Background()
 
 	mgr1 := newTestManager(t, store)

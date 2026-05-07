@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/whiteboard"
+	"github.com/hugr-lab/hugen/pkg/session/tools/whiteboard"
 )
 
 // init registers the four US3 whiteboard tools into the package-level
@@ -19,34 +19,34 @@ import (
 // Permission objects per contracts/permission-objects.md §"Whiteboard
 // system tools" — init/write/stop share the write capability; read is
 // gated by read.
-func init() {
-	sessionTools["whiteboard_init"] = sessionToolDescriptor{
+func (s *Session) initWhiteboard() {
+	s.sessionTools["whiteboard_init"] = sessionToolDescriptor{
 		Name:             "whiteboard_init",
 		Description:      "Open a broadcast whiteboard on this session. Children spawned afterward can write/read.",
 		PermissionObject: permObjectWhiteboardWrite,
 		ArgSchema:        json.RawMessage(whiteboardInitSchema),
-		Handler:          (*Session).callWhiteboardInit,
+		Handler:          s.callWhiteboardInit,
 	}
-	sessionTools["whiteboard_write"] = sessionToolDescriptor{
+	s.sessionTools["whiteboard_write"] = sessionToolDescriptor{
 		Name:             "whiteboard_write",
 		Description:      "Append a broadcast to the whiteboard your parent owns. Every member sees it.",
 		PermissionObject: permObjectWhiteboardWrite,
 		ArgSchema:        json.RawMessage(whiteboardWriteSchema),
-		Handler:          (*Session).callWhiteboardWrite,
+		Handler:          s.callWhiteboardWrite,
 	}
-	sessionTools["whiteboard_read"] = sessionToolDescriptor{
+	s.sessionTools["whiteboard_read"] = sessionToolDescriptor{
 		Name:             "whiteboard_read",
 		Description:      "Return the retained whiteboard messages — own hosted board if active, else parent's.",
 		PermissionObject: permObjectWhiteboardRead,
 		ArgSchema:        json.RawMessage(whiteboardReadSchema),
-		Handler:          (*Session).callWhiteboardRead,
+		Handler:          s.callWhiteboardRead,
 	}
-	sessionTools["whiteboard_stop"] = sessionToolDescriptor{
+	s.sessionTools["whiteboard_stop"] = sessionToolDescriptor{
 		Name:             "whiteboard_stop",
 		Description:      "Close the whiteboard hosted on this session. New writes from members surface no_active_whiteboard.",
 		PermissionObject: permObjectWhiteboardWrite,
 		ArgSchema:        json.RawMessage(whiteboardStopSchema),
-		Handler:          (*Session).callWhiteboardStop,
+		Handler:          s.callWhiteboardStop,
 	}
 }
 

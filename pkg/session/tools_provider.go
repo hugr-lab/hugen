@@ -26,10 +26,20 @@ import (
 
 const sessionToolProviderName = "session"
 
+func (s *Session) initTools() {
+	s.sessionTools = map[string]sessionToolDescriptor{}
+	s.initToolCatalog()
+	s.initNotepad()
+	s.initSubagent()
+	s.initPlan()
+	s.initWhiteboard()
+	s.initSkills()
+}
+
 // sessionToolHandler dispatches one session-scoped tool call.
 // First arg is the calling session; the package-level dispatch
 // table holds method values like (*Session).callSpawnSubagent.
-type sessionToolHandler func(s *Session, ctx context.Context, args json.RawMessage) (json.RawMessage, error)
+type sessionToolHandler func(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
 
 // sessionToolDescriptor is the runtime metadata used to project a
 // registered tool into the tool.Tool catalogue. The schema is
@@ -44,12 +54,6 @@ type sessionToolDescriptor struct {
 	Handler          sessionToolHandler
 }
 
-// sessionTools is the static dispatch table. Per-tool init() funcs
-// in tools_subagent.go / tools_plan.go / … register their entries
-// at package-init time; the table is read-only thereafter so
-// dispatch needs no lock.
-var sessionTools = map[string]sessionToolDescriptor{}
-
 // Name implements tool.ToolProvider.
 func (s *Session) Name() string { return sessionToolProviderName }
 
@@ -62,11 +66,11 @@ func (s *Session) Lifetime() tool.Lifetime { return tool.LifetimePerSession }
 // sessionTools table to []tool.Tool with the canonical
 // "session:<name>" prefix the rest of ToolManager expects.
 func (s *Session) List(_ context.Context) ([]tool.Tool, error) {
-	if len(sessionTools) == 0 {
+	if len(s.sessionTools) == 0 {
 		return nil, nil
 	}
-	out := make([]tool.Tool, 0, len(sessionTools))
-	for _, d := range sessionTools {
+	out := make([]tool.Tool, 0, len(s.sessionTools))
+	for _, d := range s.sessionTools {
 		out = append(out, tool.Tool{
 			Name:             sessionToolProviderName + ":" + d.Name,
 			Description:      d.Description,
@@ -83,11 +87,11 @@ func (s *Session) List(_ context.Context) ([]tool.Tool, error) {
 // on this Session.
 func (s *Session) Call(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
 	short := strings.TrimPrefix(name, sessionToolProviderName+":")
-	d, ok := sessionTools[short]
+	d, ok := s.sessionTools[short]
 	if !ok {
 		return nil, fmt.Errorf("%w: session:%s", tool.ErrUnknownTool, short)
 	}
-	return d.Handler(s, ctx, args)
+	return d.Handler(ctx, args)
 }
 
 // Subscribe implements tool.ToolProvider. The session catalogue is
