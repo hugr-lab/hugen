@@ -4,14 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"maps"
 	"strings"
 	"sync"
 
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/tool"
-	mcpprov "github.com/hugr-lab/hugen/pkg/tool/providers/mcp"
-	"github.com/hugr-lab/hugen/pkg/tool/providers/recovery"
 )
 
 // Lifecycle is the contract Manager calls on Open and Close. The
@@ -60,8 +57,7 @@ type ResourceDeps struct {
 type Resources struct {
 	deps ResourceDeps
 
-	mu       sync.Mutex
-	revokers map[string][]func()
+	mu sync.Mutex
 	// children records the per-session child ToolManager (= s.Tools())
 	// at Acquire time so Release can close it when the session goes
 	// away. The session itself owns the child via NewSession; this
@@ -79,7 +75,6 @@ func NewResources(deps ResourceDeps) *Resources {
 	}
 	return &Resources{
 		deps:     deps,
-		revokers: make(map[string][]func()),
 		children: make(map[string]*tool.ToolManager),
 	}
 }
@@ -108,13 +103,14 @@ func (r *Resources) Validate() error {
 	return fmt.Errorf("session lifecycle validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
-// Acquire creates the workspace directory, spawns every
-// per_session provider, registers each with ToolManager, autoloads
-// skills, and stores the per-session revokers for Release.
-//
-// On any failure, the partial state is unwound: spawned providers
-// are removed, the workspace is released.
-func (r *Resources) Acquire(ctx context.Context, s *Session) error {
+// Acquire creates the workspace directory and records the
+// per-session ToolManager for Release. Per_session MCP provider
+// spawning moved off lifecycle in phase 4.1b-pre stage 5b — the
+// pkg/extension/mcp extension owns it now and runs from
+// InitState (which fires after Acquire, so workspace paths are
+// already on the SessionState by the time the extension reads
+// them).
+func (r *Resources) Acquire(_ context.Context, s *Session) error {
 	sessionID := s.id
 	if r.deps.Workspace == nil {
 		return fmt.Errorf("session %s: workspace not configured", sessionID)
@@ -127,72 +123,13 @@ func (r *Resources) Acquire(ctx context.Context, s *Session) error {
 	if err != nil {
 		return fmt.Errorf("session %s: %w", sessionID, err)
 	}
-	root, _ := r.deps.Workspace.Root()
-
-	// The session's per-session child ToolManager — derived from
-	// the agent-level root inside NewSession. Per_session providers
-	// register on this child; child.Close() in Release drops them
-	// without touching agent-level state.
-	child := s.Tools()
-
-	var (
-		opened   int
-		rollback = func() {
-			_ = child.Close()
-			_, _ = r.deps.Workspace.Release(sessionID)
-		}
-	)
-
-	for _, cfg := range r.deps.Providers.Providers() {
-		if tool.EffectiveLifetime(cfg) != tool.LifetimePerSession {
-			continue
-		}
-		if cfg.Command == "" {
-			rollback()
-			return fmt.Errorf("session %s: provider %q has empty command", sessionID, cfg.Name)
-		}
-
-		env := make(map[string]string, len(cfg.Env)+2)
-		maps.Copy(env, cfg.Env)
-		env["SESSION_DIR"] = sessDir
-		env["WORKSPACES_ROOT"] = root
-
-		spec := mcpprov.Spec{
-			Name:        cfg.Name,
-			Command:     cfg.Command,
-			Args:        cfg.Args,
-			Env:         env,
-			Cwd:         sessDir,
-			Lifetime:    tool.LifetimePerSession,
-			PermObject:  "hugen:tool:" + cfg.Name,
-			Description: "session-scoped " + cfg.Name,
-			Transport:   mcpprov.TransportStdio,
-		}
-		inner, err := mcpprov.NewWithSpec(ctx, spec, r.deps.Logger)
-		if err != nil {
-			rollback()
-			return fmt.Errorf("session %s: provider %q spawn: %w", sessionID, cfg.Name, err)
-		}
-		// Wrap with the lazy retry decorator so per_session MCPs
-		// recover transparently from EOF / closed-pipe failures.
-		// The decorator delegates to the inner provider's
-		// TryReconnect; recovery is driven by the next failed
-		// Call/List, not a background goroutine.
-		prov := recovery.Wrap(inner, recovery.WithLogger(r.deps.Logger))
-		if err := child.AddProvider(prov); err != nil {
-			_ = prov.Close()
-			rollback()
-			return fmt.Errorf("session %s: provider %q register: %w", sessionID, cfg.Name, err)
-		}
-		opened++
-	}
 
 	r.mu.Lock()
-	r.children[sessionID] = child
+	r.children[sessionID] = s.Tools()
 	r.mu.Unlock()
 
 	r.deps.Logger.Info("session resources acquired",
-		"session", sessionID, "dir", sessDir, "providers", opened)
+		"session", sessionID, "dir", sessDir)
 	return nil
 }
 
@@ -203,8 +140,6 @@ func (r *Resources) Release(ctx context.Context, sessionID string) error {
 	r.mu.Lock()
 	child := r.children[sessionID]
 	delete(r.children, sessionID)
-	revs := r.revokers[sessionID]
-	delete(r.revokers, sessionID)
 	r.mu.Unlock()
 
 	if child != nil {
@@ -212,9 +147,6 @@ func (r *Resources) Release(ctx context.Context, sessionID string) error {
 			r.deps.Logger.Warn("session release: tool teardown",
 				"session", sessionID, "err", err)
 		}
-	}
-	for _, rv := range revs {
-		rv()
 	}
 	if r.deps.Workspace != nil {
 		if _, err := r.deps.Workspace.Release(sessionID); err != nil {

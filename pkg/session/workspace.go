@@ -47,6 +47,18 @@ func (w *Workspace) Root() (string, error) {
 	return filepath.Abs(w.root)
 }
 
+// Get returns the session directory recorded for sessionID, or
+// ("", false) when the session has not been Acquired (or has
+// since been Released). Read-after-acquire helper used by
+// extensions that need session-scoped paths without touching the
+// Workspace lifecycle.
+func (w *Workspace) Get(sessionID string) (string, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	dir, ok := w.dirs[sessionID]
+	return dir, ok
+}
+
 // Acquire creates the per-session directory under Root and records
 // it under the given sessionID. Idempotent: a second call for the
 // same sessionID returns the recorded dir without touching the

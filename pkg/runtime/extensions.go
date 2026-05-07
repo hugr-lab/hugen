@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
 	notepadext "github.com/hugr-lab/hugen/pkg/extension/notepad"
 	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -33,6 +34,16 @@ func phaseExtensions(_ context.Context, core *Core) error {
 	exts := []extension.Extension{
 		notepadext.NewExtension(core.Store, core.Agent.ID()),
 		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()),
+		// mcpext spawns per_session MCP providers from the
+		// agent-level config view. Registered after skill so
+		// skill's autoload (which can reference per_session-
+		// hosted tools) sees the spawned catalogue once skill's
+		// FilterTools runs in fetchSnapshot. Order across
+		// extensions only matters for state-write dependencies
+		// — neither skill autoload nor mcp spawn reads from the
+		// other's state, so the choice here is purely
+		// aesthetic.
+		mcpext.NewExtension(core.Config.ToolProviders(), core.Logger),
 	}
 
 	for _, ext := range exts {

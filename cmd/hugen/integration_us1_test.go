@@ -13,6 +13,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
+	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
@@ -106,6 +107,8 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
 		session.WithLifecycle(resources),
+		session.WithWorkspace(ws),
+		session.WithExtensions(mcpext.NewExtension(cfgSvc.ToolProviders(), logger)),
 	)
 
 	return &integrationCore{

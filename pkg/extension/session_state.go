@@ -37,6 +37,20 @@ type SessionState interface {
 
 	Tools() *tool.ToolManager
 
+	// WorkspaceDir returns the absolute path of this session's
+	// workspace directory and ok=true once the lifecycle has
+	// acquired it (always before [StateInitializer.InitState]
+	// runs). Returns ("", false) for sessions whose runtime has
+	// no workspace wired (test fixtures).
+	WorkspaceDir() (string, bool)
+
+	// WorkspaceRoot returns the absolute path of the workspace
+	// root every session shares, and ok=true when the runtime has
+	// a workspace wired. Extensions that need to expose the root
+	// to their providers (e.g. MCP env WORKSPACES_ROOT) read it
+	// here.
+	WorkspaceRoot() (string, bool)
+
 	// Emit persists frame on the calling session's event log and
 	// pushes it through the session's outbox for adapters.
 	// Extensions emitting state-change events ([protocol.ExtensionFrame]

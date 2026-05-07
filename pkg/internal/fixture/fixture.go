@@ -18,10 +18,12 @@ import (
 // (nil by default). Parent linkage is set via
 // [TestSessionState.WithParent].
 type TestSessionState struct {
-	id        string
-	tools     *tool.ToolManager
-	parentRef *TestSessionState
-	state     sync.Map
+	id            string
+	tools         *tool.ToolManager
+	parentRef     *TestSessionState
+	state         sync.Map
+	workspaceDir  string
+	workspaceRoot string
 
 	emitMu  sync.Mutex
 	emitted []protocol.Frame
@@ -68,6 +70,25 @@ func (s *TestSessionState) Parent() (extension.SessionState, bool) {
 // Tools implements [extension.SessionState]. Returns whatever was
 // installed via [TestSessionState.SetTools]; nil by default.
 func (s *TestSessionState) Tools() *tool.ToolManager { return s.tools }
+
+// SetWorkspace installs absolute paths for WorkspaceDir /
+// WorkspaceRoot. Tests exercising extensions that read workspace
+// paths (e.g. mcp ext) wire this; default zero values surface as
+// ok=false.
+func (s *TestSessionState) SetWorkspace(sessionDir, root string) {
+	s.workspaceDir = sessionDir
+	s.workspaceRoot = root
+}
+
+// WorkspaceDir implements [extension.SessionState].
+func (s *TestSessionState) WorkspaceDir() (string, bool) {
+	return s.workspaceDir, s.workspaceDir != ""
+}
+
+// WorkspaceRoot implements [extension.SessionState].
+func (s *TestSessionState) WorkspaceRoot() (string, bool) {
+	return s.workspaceRoot, s.workspaceRoot != ""
+}
 
 // Emit implements [extension.SessionState]. Records the frame in
 // memory so tests can assert what an extension emitted; the

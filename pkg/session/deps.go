@@ -51,6 +51,7 @@ type Deps struct {
 	Tools     *tool.ToolManager
 	Logger    *slog.Logger
 	Lifecycle Lifecycle
+	Workspace *Workspace
 	Opts      []SessionOption
 
 	// Extensions is the agent-level set of registered extensions.

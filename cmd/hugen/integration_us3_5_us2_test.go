@@ -29,6 +29,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
+	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
@@ -273,6 +274,8 @@ func newPythonIntegrationCore(t *testing.T, pyBin, tmpl string) *integrationCore
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
 		session.WithLifecycle(resources),
+		session.WithWorkspace(ws),
+		session.WithExtensions(mcpext.NewExtension(cfgSvc.ToolProviders(), logger)),
 	)
 
 	return &integrationCore{

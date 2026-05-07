@@ -92,6 +92,7 @@ type Manager struct {
 	sessionOpts []SessionOption
 	lifecycle   Lifecycle
 	extensions  []extension.Extension
+	workspace   *Workspace
 
 	// deps mirrors the per-session dependency bundle passed by
 	// reference to every Session in this Manager's tree (root +
@@ -138,6 +139,15 @@ func WithSessionOptions(opts ...SessionOption) ManagerOption {
 	return func(m *Manager) {
 		m.sessionOpts = append(m.sessionOpts, opts...)
 	}
+}
+
+// WithWorkspace attaches the agent-level workspace to the manager
+// so per-session [extension.SessionState.WorkspaceDir] /
+// WorkspaceRoot calls return real paths. Optional — tests without
+// a workspace skip this and extensions that need paths see
+// (_, false).
+func WithWorkspace(w *Workspace) ManagerOption {
+	return func(m *Manager) { m.workspace = w }
 }
 
 // WithExtensions registers session extensions (notepad, plan,
@@ -202,11 +212,12 @@ func NewManager(
 		Tools:      m.tools,
 		Logger:     m.logger,
 		Lifecycle:  m.lifecycle,
+		Workspace:  m.workspace,
 		Extensions: m.extensions,
-		Opts:      m.sessionOpts,
-		RootCtx:   m.rootCtx,
-		WG:        &m.wg,
-		MaxDepth:  DefaultMaxDepth,
+		Opts:       m.sessionOpts,
+		RootCtx:    m.rootCtx,
+		WG:         &m.wg,
+		MaxDepth:   DefaultMaxDepth,
 	}
 	// Phase 4.1b-pre stage B / D6: a root session calling
 	// requestClose hands the close request to Manager via this hook.
