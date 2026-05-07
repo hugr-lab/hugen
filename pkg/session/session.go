@@ -799,7 +799,7 @@ func (s *Session) dispatchExtensionClosers(ctx context.Context) {
 		if !ok {
 			continue
 		}
-		if err := closer.Close(ctx, s); err != nil && s.deps.Logger != nil {
+		if err := closer.CloseSession(ctx, s); err != nil && s.deps.Logger != nil {
 			s.deps.Logger.Warn("session: extension close failed",
 				"session", s.id, "extension", exts[i].Name(), "err", err)
 		}

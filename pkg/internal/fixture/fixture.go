@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -21,6 +22,9 @@ type TestSessionState struct {
 	tools     *tool.ToolManager
 	parentRef *TestSessionState
 	state     sync.Map
+
+	emitMu  sync.Mutex
+	emitted []protocol.Frame
 }
 
 // NewTestSessionState builds a TestSessionState bound to the given
@@ -64,6 +68,27 @@ func (s *TestSessionState) Parent() (extension.SessionState, bool) {
 // Tools implements [extension.SessionState]. Returns whatever was
 // installed via [TestSessionState.SetTools]; nil by default.
 func (s *TestSessionState) Tools() *tool.ToolManager { return s.tools }
+
+// Emit implements [extension.SessionState]. Records the frame in
+// memory so tests can assert what an extension emitted; the
+// fixture is not wired to any real event store.
+func (s *TestSessionState) Emit(_ context.Context, frame protocol.Frame) error {
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	s.emitted = append(s.emitted, frame)
+	return nil
+}
+
+// Emitted returns a snapshot of every frame Emit has accepted, in
+// emission order. Read-only — callers must not mutate the
+// returned slice's frames.
+func (s *TestSessionState) Emitted() []protocol.Frame {
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	out := make([]protocol.Frame, len(s.emitted))
+	copy(out, s.emitted)
+	return out
+}
 
 // Compile-time interface assertion.
 var _ extension.SessionState = (*TestSessionState)(nil)

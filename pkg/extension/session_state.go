@@ -3,6 +3,7 @@ package extension
 import (
 	"context"
 
+	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -35,6 +36,13 @@ type SessionState interface {
 	Parent() (SessionState, bool)
 
 	Tools() *tool.ToolManager
+
+	// Emit persists frame on the calling session's event log and
+	// pushes it through the session's outbox for adapters.
+	// Extensions emitting state-change events ([protocol.ExtensionFrame]
+	// with Category=Op) call this so Recovery can replay them on
+	// restart.
+	Emit(ctx context.Context, frame protocol.Frame) error
 }
 
 type sessionStateKey struct{}

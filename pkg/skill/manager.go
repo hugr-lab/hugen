@@ -302,6 +302,21 @@ func (m *SkillManager) LoadedNames(_ context.Context, sessionID string) []string
 	return out
 }
 
+// Drop releases the per-session entry for sessionID so the
+// manager's map doesn't accumulate state for terminated sessions.
+// Idempotent — Drop on a missing session is a no-op. The session
+// extension's Closer hook calls this on teardown; tests with
+// short-lived sessions may call it explicitly.
+//
+// Phase-4.1b-pre stage 5 will dissolve m.sessions entirely (state
+// moves to the per-session [skill.Extension] handle); Drop becomes
+// unnecessary then.
+func (m *SkillManager) Drop(sessionID string) {
+	m.mu.Lock()
+	delete(m.sessions, sessionID)
+	m.mu.Unlock()
+}
+
 // Refresh re-reads `name` from the store and updates every
 // session that has it loaded. Returns the new generation token.
 func (m *SkillManager) Refresh(ctx context.Context, name string) (int64, error) {

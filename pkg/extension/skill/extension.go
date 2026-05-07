@@ -12,6 +12,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -33,6 +34,15 @@ type Extension struct {
 	manager *skillpkg.SkillManager
 	perms   perm.Service
 	agentID string
+}
+
+// agentParticipant returns the ParticipantInfo skill ext stamps on
+// every emitted ExtensionFrame. The skill tool path is always
+// invoked by the agent (the model issues the tool call), so author
+// is the agent — operator / human authors flow through other
+// surfaces (slash commands).
+func (e *Extension) agentParticipant() protocol.ParticipantInfo {
+	return protocol.ParticipantInfo{ID: e.agentID, Kind: protocol.ParticipantAgent}
 }
 
 // NewExtension builds the skill extension. sm is the agent-level
@@ -65,6 +75,7 @@ func (e *Extension) InitState(_ context.Context, state extension.SessionState) e
 		manager:   e.manager,
 		perms:     e.perms,
 		sessionID: state.SessionID(),
+		author:    e.agentParticipant(),
 	})
 	return nil
 }
@@ -77,6 +88,38 @@ type SessionSkill struct {
 	manager   *skillpkg.SkillManager
 	perms     perm.Service
 	sessionID string
+	author    protocol.ParticipantInfo
+}
+
+// emitOp is the shared persist path for the tool-side load /
+// unload events. Builds the matching ExtensionFrame and pushes it
+// through the calling session's [extension.SessionState.Emit] so
+// Recovery can replay it on restart. Errors are logged-but-not-
+// returned: the in-memory mutation already happened, and dropping
+// a persistence write surfaces as a missing replay event rather
+// than a tool-call failure (the model's view stays consistent
+// within the live process).
+func (h *SessionSkill) emitOp(ctx context.Context, op, name string) {
+	state, ok := extension.SessionStateFromContext(ctx)
+	if !ok || state == nil {
+		return
+	}
+	var (
+		frame protocol.Frame
+		err   error
+	)
+	switch op {
+	case OpLoad:
+		frame, err = newLoadFrame(h.sessionID, h.author, name)
+	case OpUnload:
+		frame, err = newUnloadFrame(h.sessionID, h.author, name)
+	default:
+		return
+	}
+	if err != nil {
+		return
+	}
+	_ = state.Emit(ctx, frame)
 }
 
 // Manager returns the shared *SkillManager. Exported so future

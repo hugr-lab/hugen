@@ -68,11 +68,15 @@ type Recovery interface {
 // and before the per-session ToolManager closes. Errors are logged
 // but do not abort teardown — close paths must drain regardless.
 //
+// CloseSession (rather than Close) so an extension that also
+// implements [tool.ToolProvider] can satisfy both interfaces
+// without a name clash with ToolProvider.Close().
+//
 // Optional: extensions whose state is plain memory (plan,
 // whiteboard projections) skip this; only extensions that hold
 // goroutines, file handles, or external bindings implement it.
 type Closer interface {
-	Close(ctx context.Context, state SessionState) error
+	CloseSession(ctx context.Context, state SessionState) error
 }
 
 // Advertiser extensions contribute a section to the system prompt

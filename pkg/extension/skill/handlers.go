@@ -169,8 +169,8 @@ func (e *Extension) Subscribe(_ context.Context) (<-chan tool.ProviderEvent, err
 }
 
 // Close implements [tool.ToolProvider]. Per-session state cleanup
-// happens via the [extension.Closer] hook (added in stage 3); the
-// provider itself holds no resources.
+// flows through the separate [extension.Closer.CloseSession] hook
+// (recovery.go); the provider itself holds no resources.
 func (e *Extension) Close() error { return nil }
 
 // ---------- skill:load ----------
@@ -191,6 +191,7 @@ func (h *SessionSkill) callLoad(ctx context.Context, args json.RawMessage) (json
 	if err := h.manager.Load(ctx, h.sessionID, in.Name); err != nil {
 		return nil, err
 	}
+	h.emitOp(ctx, OpLoad, in.Name)
 	return json.RawMessage(`{"loaded":true}`), nil
 }
 
@@ -209,6 +210,7 @@ func (h *SessionSkill) callUnload(ctx context.Context, args json.RawMessage) (js
 	if err := h.manager.Unload(ctx, h.sessionID, in.Name); err != nil {
 		return nil, err
 	}
+	h.emitOp(ctx, OpUnload, in.Name)
 	return json.RawMessage(`{"unloaded":true}`), nil
 }
 

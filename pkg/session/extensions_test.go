@@ -58,7 +58,7 @@ func (e *fullCapStubExtension) Recover(_ context.Context, _ extension.SessionSta
 	return nil
 }
 
-func (e *fullCapStubExtension) Close(_ context.Context, _ extension.SessionState) error {
+func (e *fullCapStubExtension) CloseSession(_ context.Context, _ extension.SessionState) error {
 	e.closeCalls++
 	return nil
 }
@@ -273,7 +273,7 @@ type recordingCloser struct {
 }
 
 func (e *recordingCloser) Name() string { return e.name }
-func (e *recordingCloser) Close(_ context.Context, _ extension.SessionState) error {
+func (e *recordingCloser) CloseSession(_ context.Context, _ extension.SessionState) error {
 	*e.record = append(*e.record, e.name)
 	return nil
 }

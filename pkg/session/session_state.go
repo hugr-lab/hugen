@@ -1,6 +1,11 @@
 package session
 
-import "github.com/hugr-lab/hugen/pkg/extension"
+import (
+	"context"
+
+	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/protocol"
+)
 
 // Session implements [extension.SessionState] — extensions and tool
 // providers stash per-session typed handles via SetValue and read
@@ -36,4 +41,12 @@ func (s *Session) Parent() (extension.SessionState, bool) {
 		return nil, false
 	}
 	return s.parent, true
+}
+
+// Emit implements [extension.SessionState]. Persists frame to the
+// session's event log and pushes it through the outbox; the
+// internal lowercase emit holds the actual logic (next-seq +
+// store.AppendEvent + outbox push).
+func (s *Session) Emit(ctx context.Context, frame protocol.Frame) error {
+	return s.emit(ctx, frame)
 }
