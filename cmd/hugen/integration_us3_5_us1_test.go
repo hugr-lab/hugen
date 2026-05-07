@@ -220,8 +220,6 @@ func newDuckDBIntegrationCore(t *testing.T, vendorPath string) *integrationCore 
 	ws := session.NewWorkspace(workspaceDir, true)
 	resources := session.NewResources(session.ResourceDeps{
 		Providers:  cfgSvc.ToolProviders(),
-		Skills:     skills,
-		SkillStore: skillStore,
 		Workspace:  ws,
 		Logger:     logger,
 	})

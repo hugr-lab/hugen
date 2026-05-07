@@ -106,7 +106,7 @@ func TestExtension_List_AllFiveTools(t *testing.T) {
 // ---------- skill:load ----------
 
 func TestCallLoad_Happy(t *testing.T) {
-	ext, state, mgr := newAlphaFixture(t, nil)
+	ext, state, _ := newAlphaFixture(t, nil)
 	out, err := ext.Call(newCallCtx(state), "skill:load", json.RawMessage(`{"name":"alpha"}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -114,7 +114,7 @@ func TestCallLoad_Happy(t *testing.T) {
 	if !strings.Contains(string(out), `"loaded":true`) {
 		t.Errorf("out = %s", out)
 	}
-	if _, err := mgr.LoadedSkill(context.Background(), state.SessionID(), "alpha"); err != nil {
+	if _, err := FromState(state).LoadedSkill(context.Background(), "alpha"); err != nil {
 		t.Errorf("LoadedSkill: %v", err)
 	}
 }
@@ -157,8 +157,8 @@ func TestCallPublish_DeferredStub(t *testing.T) {
 // ---------- skill:ref ----------
 
 func TestCallRef_InlineSkillHasNoFS(t *testing.T) {
-	ext, state, mgr := newAlphaFixture(t, nil)
-	if err := mgr.Load(context.Background(), state.SessionID(), "alpha"); err != nil {
+	ext, state, _ := newAlphaFixture(t, nil)
+	if err := FromState(state).Load(context.Background(), "alpha"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	_, err := ext.Call(newCallCtx(state), "skill:ref", json.RawMessage(`{"skill":"alpha","ref":"x.md"}`))
@@ -215,7 +215,7 @@ func newGammaFixture(t *testing.T, perms perm.Service) (*Extension, *fixture.Tes
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
-	if err := mgr.Load(context.Background(), state.SessionID(), "gamma"); err != nil {
+	if err := FromState(state).Load(context.Background(), "gamma"); err != nil {
 		t.Fatalf("Load gamma: %v", err)
 	}
 	return ext, state, mgr

@@ -11,7 +11,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
-	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -117,46 +116,9 @@ func TestUS5_NoHugr_BashFlowWorks(t *testing.T) {
 	}
 }
 
-// TestUS5_HugrSkillLoadsAndReportsUnavailable — a skill that
-// grants Hugr-flavoured tools loads cleanly under a no-Hugr
-// deployment; AnnotateUnavailable surfaces the gap so callers
-// can show "tools unavailable" instead of crashing the load.
-func TestUS5_HugrSkillLoadsAndReportsUnavailable(t *testing.T) {
-	manifest := []byte(`---
-name: hugr-data
-description: Hugr data access skill.
-license: MIT
-allowed-tools:
-  - provider: hugr-main
-    tools: ["data-*", "discovery-*"]
-  - provider: bash-mcp
-    tools: [read_file]
----
-Hugr data skill body.
-`)
-	store := skill.NewSkillStore(skill.Options{Inline: map[string][]byte{
-		"hugr-data": manifest,
-	}})
-	mgr := skill.NewSkillManager(store, nil)
-
-	if err := mgr.Load(context.Background(), "s1", "hugr-data"); err != nil {
-		t.Fatalf("Load (Hugr absent): %v", err)
-	}
-	b, err := mgr.Bindings(context.Background(), "s1")
-	if err != nil {
-		t.Fatalf("Bindings: %v", err)
-	}
-	annotated := skill.AnnotateUnavailable(b, []string{"bash-mcp", "system"})
-	if len(annotated.Unavailable) != 1 {
-		t.Fatalf("Unavailable = %+v, want 1 entry", annotated.Unavailable)
-	}
-	if annotated.Unavailable[0].Provider != "hugr-main" {
-		t.Errorf("provider = %q, want hugr-main", annotated.Unavailable[0].Provider)
-	}
-	if !contains(annotated.Unavailable[0].Tools, "data-*") {
-		t.Errorf("missing data-*: %+v", annotated.Unavailable[0].Tools)
-	}
-}
+// TestUS5_HugrSkillLoadsAndReportsUnavailable moved to
+// pkg/extension/skill/state_test.go (the per-session Load /
+// Bindings API moved to *SessionSkill in stage 5).
 
 // TestUS5_HugrAbsentToolDispatchFails — when a skill grants
 // hugr-main:* but no provider is registered, dispatching the

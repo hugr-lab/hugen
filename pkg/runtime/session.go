@@ -23,11 +23,9 @@ import (
 // builds the wiring.
 func phaseSessionManager(_ context.Context, core *Core) error {
 	resources := session.NewResources(session.ResourceDeps{
-		Providers:  core.Config.ToolProviders(),
-		Skills:     core.Skills,
-		SkillStore: core.SkillStore,
-		Workspace:  core.Workspace,
-		Logger:     core.Logger,
+		Providers: core.Config.ToolProviders(),
+		Workspace: core.Workspace,
+		Logger:    core.Logger,
 	})
 	if err := resources.Validate(); err != nil {
 		return fmt.Errorf("session resources: %w", err)

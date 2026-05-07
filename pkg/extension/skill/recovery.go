@@ -47,11 +47,11 @@ func (e *Extension) Recover(ctx context.Context, state extension.SessionState, e
 		}
 		switch op {
 		case OpLoad:
-			if err := h.manager.Load(ctx, h.sessionID, name); err != nil {
+			if err := h.Load(ctx, name); err != nil {
 				return fmt.Errorf("skill: recover load %q: %w", name, err)
 			}
 		case OpUnload:
-			if err := h.manager.Unload(ctx, h.sessionID, name); err != nil {
+			if err := h.Unload(ctx, name); err != nil {
 				return fmt.Errorf("skill: recover unload %q: %w", name, err)
 			}
 		}
@@ -59,16 +59,17 @@ func (e *Extension) Recover(ctx context.Context, state extension.SessionState, e
 	return nil
 }
 
-// CloseSession implements [extension.Closer]. Drops the per-session
-// SkillManager entry so its map doesn't accumulate state for
-// terminated sessions. Idempotent — Drop on a missing session is
-// a no-op.
+// CloseSession implements [extension.Closer]. Deregisters the
+// session's [SessionSkill] handle from the manager's broadcast
+// list so Refresh stops calling into it. The loaded set itself
+// just gets garbage-collected with the SessionState handle.
+// Idempotent — Deregister on an unknown session is a no-op.
 func (e *Extension) CloseSession(_ context.Context, state extension.SessionState) error {
 	h := FromState(state)
 	if h == nil || h.manager == nil {
 		return nil
 	}
-	h.manager.Drop(h.sessionID)
+	h.manager.DeregisterSink(h.sessionID)
 	return nil
 }
 

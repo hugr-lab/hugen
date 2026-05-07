@@ -86,8 +86,6 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	store := &stubStore{}
 	resources := session.NewResources(session.ResourceDeps{
 		Providers:  cfgSvc.ToolProviders(),
-		Skills:     skills,
-		SkillStore: skillStore,
 		Workspace:  ws,
 		Logger:     logger,
 	})
@@ -110,8 +108,10 @@ func TestUS3_5_US4_SkillFilesRoundTrip(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = mgr.Terminate(ctx, sess.ID(), "user:/end") })
 
-	// Load duckdb-data into the session.
-	if err := skills.Load(ctx, sess.ID(), "duckdb-data"); err != nil {
+	// Load duckdb-data into the session via the skill extension's
+	// per-session handle (stage 5: state lives on *SessionSkill,
+	// not on the manager).
+	if err := skillext.FromState(sess).Load(ctx, "duckdb-data"); err != nil {
 		t.Fatalf("Load duckdb-data: %v", err)
 	}
 

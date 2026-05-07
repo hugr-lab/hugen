@@ -106,7 +106,7 @@ func TestRecover_LoadsThenUnloadsRebuildsState(t *testing.T) {
 	if err := ext.Recover(ctx, state, rows); err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
-	loaded := mgr.LoadedNames(ctx, state.SessionID())
+	loaded := FromState(state).LoadedNames(ctx)
 	if len(loaded) != 1 || loaded[0] != "alpha" {
 		t.Fatalf("loaded = %v, want [alpha]", loaded)
 	}
@@ -118,7 +118,7 @@ func TestRecover_LoadsThenUnloadsRebuildsState(t *testing.T) {
 	if err := ext.Recover(ctx, state2, rows); err != nil {
 		t.Fatalf("Recover 2: %v", err)
 	}
-	if got := mgr.LoadedNames(ctx, state2.SessionID()); len(got) != 0 {
+	if got := FromState(state2).LoadedNames(ctx); len(got) != 0 {
 		t.Errorf("after replay, loaded = %v, want empty", got)
 	}
 }
@@ -151,14 +151,18 @@ func TestRecover_IgnoresNonSkillEvents(t *testing.T) {
 	if err := ext.Recover(ctx, state, rows); err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
-	if got := mgr.LoadedNames(ctx, state.SessionID()); len(got) != 0 {
+	if got := FromState(state).LoadedNames(ctx); len(got) != 0 {
 		t.Errorf("expected nothing loaded, got %v", got)
 	}
 }
 
-// TestCloseSession_DropsManagerEntry asserts CloseSession removes
-// the per-session entry from SkillManager.
-func TestCloseSession_DropsManagerEntry(t *testing.T) {
+// TestCloseSession_DeregistersFromManagerBroadcast asserts
+// CloseSession deregisters the handle from the manager's
+// broadcast list — Refresh after close stops calling into this
+// session's OnSkillRefreshed. The loaded set on the handle is
+// not erased (it's memory that GCs with the SessionState); the
+// teardown contract is "stop receiving cross-session events".
+func TestCloseSession_DeregistersFromManagerBroadcast(t *testing.T) {
 	ctx := context.Background()
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
 		"alpha": []byte(inlineAlphaManifest),
@@ -167,17 +171,21 @@ func TestCloseSession_DropsManagerEntry(t *testing.T) {
 	ext := NewExtension(mgr, nil, "a1")
 	state := fixture.NewTestSessionState("ses-cl")
 	_ = ext.InitState(ctx, state)
-	if err := mgr.Load(ctx, state.SessionID(), "alpha"); err != nil {
+	if err := FromState(state).Load(ctx, "alpha"); err != nil {
 		t.Fatalf("Load: %v", err)
-	}
-	if got := mgr.LoadedNames(ctx, state.SessionID()); len(got) != 1 {
-		t.Fatalf("pre-close loaded = %v", got)
 	}
 	if err := ext.CloseSession(ctx, state); err != nil {
 		t.Fatalf("CloseSession: %v", err)
 	}
-	if got := mgr.LoadedNames(ctx, state.SessionID()); len(got) != 0 {
-		t.Errorf("post-close loaded = %v, want empty", got)
+	// Refresh after CloseSession must NOT update the handle's copy
+	// (it deregistered from the broadcast list); pre-close gen is
+	// preserved.
+	preGen := FromState(state).gen
+	if _, err := mgr.Refresh(ctx, "alpha"); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if FromState(state).gen != preGen {
+		t.Errorf("handle gen mutated after close: %d → %d (deregister failed)", preGen, FromState(state).gen)
 	}
 }
 

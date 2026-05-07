@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/hugr-lab/hugen/pkg/config"
-	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	mcpprov "github.com/hugr-lab/hugen/pkg/tool/providers/mcp"
 	"github.com/hugr-lab/hugen/pkg/tool/providers/recovery"
@@ -31,22 +30,14 @@ type Lifecycle interface {
 
 // ResourceDeps groups every dependency Resources needs.
 //
-// Providers and Workspace are required. Skills and SkillStore may
-// be nil for deployments that disable autoload. The agent-level
-// root ToolManager is no longer threaded here — each session
-// brings its own per-session child via s.Tools(), and Acquire
-// adds per_session MCP providers to that child directly.
+// Providers and Workspace are required. Skill autoload moved off
+// Resources in phase 4.1b-pre stage 5 — the skill extension now
+// owns it (triggered from its own InitState), so Resources stops
+// touching SkillManager / SkillStore entirely.
 type ResourceDeps struct {
-	Providers  config.ToolProvidersView
-	Skills     *skill.SkillManager
-	SkillStore skill.SkillStore
-	Workspace  *Workspace
-	Logger     *slog.Logger
-
-	// SessionType labels the bound session for skill-autoload
-	// filtering. Today every session is a "root" session; phase 4
-	// makes the type per-session at Open time.
-	SessionType string
+	Providers config.ToolProvidersView
+	Workspace *Workspace
+	Logger    *slog.Logger
 }
 
 // Resources is the per-session-resources owner. It implements
@@ -85,9 +76,6 @@ type Resources struct {
 func NewResources(deps ResourceDeps) *Resources {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
-	}
-	if deps.SessionType == "" {
-		deps.SessionType = skill.SessionTypeRoot
 	}
 	return &Resources{
 		deps:     deps,
@@ -203,10 +191,6 @@ func (r *Resources) Acquire(ctx context.Context, s *Session) error {
 	r.children[sessionID] = child
 	r.mu.Unlock()
 
-	if r.deps.Skills != nil && r.deps.SkillStore != nil {
-		r.autoloadSkills(ctx, sessionID)
-	}
-
 	r.deps.Logger.Info("session resources acquired",
 		"session", sessionID, "dir", sessDir, "providers", opened)
 	return nil
@@ -241,26 +225,3 @@ func (r *Resources) Release(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// autoloadSkills binds every skill that opts into autoload for
-// the configured SessionType. Per-skill failures log a warning
-// and continue — one bad bundle must not deny the session its
-// working tool surface.
-func (r *Resources) autoloadSkills(ctx context.Context, sessionID string) {
-	all, err := r.deps.SkillStore.List(ctx)
-	if err != nil {
-		r.deps.Logger.Warn("session: list skills for autoload",
-			"session", sessionID, "err", err)
-	}
-	for _, s := range all {
-		if !s.Manifest.AutoloadIn(r.deps.SessionType) {
-			continue
-		}
-		if err := r.deps.Skills.Load(ctx, sessionID, s.Manifest.Name); err != nil {
-			r.deps.Logger.Warn("session: autoload skill failed",
-				"session", sessionID, "skill", s.Manifest.Name, "err", err)
-			continue
-		}
-		r.deps.Logger.Info("session: skill autoloaded",
-			"session", sessionID, "skill", s.Manifest.Name)
-	}
-}

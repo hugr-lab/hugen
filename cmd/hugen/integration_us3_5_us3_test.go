@@ -242,8 +242,6 @@ func newAnalystIntegrationCore(t *testing.T, pyBin, tmpl, vendor string) *integr
 	ws := session.NewWorkspace(workspaceDir, true)
 	resources := session.NewResources(session.ResourceDeps{
 		Providers:  cfgSvc.ToolProviders(),
-		Skills:     skills,
-		SkillStore: skillStore,
 		Workspace:  ws,
 		Logger:     logger,
 	})

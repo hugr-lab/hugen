@@ -95,7 +95,7 @@ func (h *SessionSkill) callToolsCatalog(ctx context.Context, args json.RawMessag
 
 	// granted_to_session: tools the loaded skills admit (the same
 	// allow-set FilterTools applies to the model-facing snapshot).
-	allowed := allowedFromBindings(ctx, h.manager, h.sessionID)
+	allowed := allowedFromHandle(ctx, h)
 	skillIndex := buildSkillToolsIndex(ctx, h.manager)
 
 	groups := make(map[string][]toolsCatalogEntry)

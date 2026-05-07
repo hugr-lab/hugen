@@ -3,6 +3,7 @@ package skill
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"testing/fstest"
 )
@@ -13,7 +14,29 @@ func newTestManager(t *testing.T, inline map[string][]byte) *SkillManager {
 	return NewSkillManager(store, nil)
 }
 
-func TestManager_LoadAndBindings(t *testing.T) {
+// fakeSink records OnSkillRefreshed invocations so tests can
+// assert manager-side broadcast behaviour without a live skill
+// extension.
+type fakeSink struct {
+	id  string
+	mu  sync.Mutex
+	got []Skill
+}
+
+func (s *fakeSink) SessionID() string { return s.id }
+func (s *fakeSink) OnSkillRefreshed(sk Skill) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.got = append(s.got, sk)
+}
+func (s *fakeSink) refreshed() []Skill {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := append([]Skill(nil), s.got...)
+	return out
+}
+
+func TestResolveClosure_Single(t *testing.T) {
 	m := newTestManager(t, map[string][]byte{
 		"alpha": []byte(`---
 name: alpha
@@ -23,232 +46,191 @@ allowed-tools:
   - provider: bash-mcp
     tools: [bash.read_file]
 ---
-Body of alpha.
+Body.
 `),
 	})
-
-	ctx := context.Background()
-	if err := m.Load(ctx, "sess-1", "alpha"); err != nil {
-		t.Fatalf("Load error: %v", err)
-	}
-
-	b, err := m.Bindings(ctx, "sess-1")
+	closure, err := m.ResolveClosure(context.Background(), "alpha")
 	if err != nil {
-		t.Fatalf("Bindings error: %v", err)
+		t.Fatalf("ResolveClosure: %v", err)
 	}
-	if b.Generation == 0 {
-		t.Errorf("Bindings.Generation = 0, want non-zero")
-	}
-	if len(b.AllowedTools) != 1 || b.AllowedTools[0].Provider != "bash-mcp" {
-		t.Errorf("AllowedTools = %+v", b.AllowedTools)
-	}
-	if b.Instructions == "" {
-		t.Errorf("Instructions empty, want body content")
+	if len(closure) != 1 || closure[0].Manifest.Name != "alpha" {
+		t.Errorf("closure = %+v", closure)
 	}
 }
 
-func TestManager_LoadCycleRejected(t *testing.T) {
+func TestResolveClosure_Transitive(t *testing.T) {
 	m := newTestManager(t, map[string][]byte{
-		"a": []byte(`---
-name: a
-description: a depends on b.
+		"alpha": []byte(`---
+name: alpha
+description: alpha skill.
 license: MIT
 metadata:
   hugen:
-    requires: [b]
+    requires: [beta]
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.read_file]
 ---
 `),
-		"b": []byte(`---
-name: b
-description: b depends on a.
+		"beta": []byte(`---
+name: beta
+description: beta skill.
 license: MIT
 metadata:
   hugen:
-    requires: [a]
+    requires: [gamma]
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.write_file]
+---
+`),
+		"gamma": []byte(`---
+name: gamma
+description: leaf skill.
+license: MIT
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.list_dir]
 ---
 `),
 	})
-
-	err := m.Load(context.Background(), "s", "a")
-	if err == nil {
-		t.Fatal("Load(cycle) returned nil error")
+	closure, err := m.ResolveClosure(context.Background(), "alpha")
+	if err != nil {
+		t.Fatalf("ResolveClosure: %v", err)
 	}
+	// Dependencies precede dependents: gamma, beta, alpha.
+	if len(closure) != 3 {
+		t.Fatalf("closure size = %d, want 3", len(closure))
+	}
+	want := []string{"gamma", "beta", "alpha"}
+	for i, w := range want {
+		if closure[i].Manifest.Name != w {
+			t.Errorf("closure[%d] = %q, want %q", i, closure[i].Manifest.Name, w)
+		}
+	}
+}
+
+func TestResolveClosure_CycleRejected(t *testing.T) {
+	m := newTestManager(t, map[string][]byte{
+		"alpha": []byte(`---
+name: alpha
+description: cycles back via beta.
+license: MIT
+metadata:
+  hugen:
+    requires: [beta]
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.read_file]
+---
+`),
+		"beta": []byte(`---
+name: beta
+description: cycles back via alpha.
+license: MIT
+metadata:
+  hugen:
+    requires: [alpha]
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.write_file]
+---
+`),
+	})
+	_, err := m.ResolveClosure(context.Background(), "alpha")
 	if !errors.Is(err, ErrSkillCycle) {
-		t.Errorf("err = %v, want ErrSkillCycle", err)
+		t.Errorf("expected ErrSkillCycle, got %v", err)
 	}
 }
 
-func TestManager_LoadResolvesTransitiveDeps(t *testing.T) {
-	m := newTestManager(t, map[string][]byte{
-		"top": []byte(`---
-name: top
-description: top
-license: MIT
-metadata:
-  hugen:
-    requires: [mid]
----
-`),
-		"mid": []byte(`---
-name: mid
-description: mid
-license: MIT
-metadata:
-  hugen:
-    requires: [base]
----
-`),
-		"base": []byte(`---
-name: base
-description: base
-license: MIT
-allowed-tools:
-  - provider: bash-mcp
-    tools: [bash.read_file]
----
-`),
-	})
-
-	if err := m.Load(context.Background(), "s", "top"); err != nil {
-		t.Fatalf("Load error: %v", err)
-	}
-
-	b, err := m.Bindings(context.Background(), "s")
-	if err != nil {
-		t.Fatalf("Bindings error: %v", err)
-	}
-	// Base contributed allowed-tools through transitive load.
-	if len(b.AllowedTools) != 1 {
-		t.Errorf("AllowedTools = %+v, want one entry from base", b.AllowedTools)
-	}
-}
-
-// TestManager_LoadResolvesRequiresSkills_PhaseFour mirrors the
-// transitive-deps coverage above using the phase-4 canonical
-// `requires_skills` key — proves the closure resolver consumes the
-// new key alongside the legacy `requires`.
-func TestManager_LoadResolvesRequiresSkills_PhaseFour(t *testing.T) {
-	m := newTestManager(t, map[string][]byte{
-		"top": []byte(`---
-name: top
-description: top
-license: MIT
-metadata:
-  hugen:
-    requires_skills: [base]
----
-`),
-		"base": []byte(`---
-name: base
-description: base
-license: MIT
-allowed-tools:
-  - provider: bash-mcp
-    tools: [bash.read_file]
----
-`),
-	})
-
-	if err := m.Load(context.Background(), "s", "top"); err != nil {
-		t.Fatalf("Load error: %v", err)
-	}
-	b, err := m.Bindings(context.Background(), "s")
-	if err != nil {
-		t.Fatalf("Bindings: %v", err)
-	}
-	if len(b.AllowedTools) != 1 {
-		t.Errorf("AllowedTools = %+v, want one entry from base via requires_skills", b.AllowedTools)
-	}
-}
-
-func TestManager_LoadMissingSkill(t *testing.T) {
-	m := newTestManager(t, nil)
-	err := m.Load(context.Background(), "s", "ghost")
-	if err == nil {
-		t.Fatal("Load(missing) returned nil error")
-	}
+func TestResolveClosure_MissingSkill(t *testing.T) {
+	m := newTestManager(t, map[string][]byte{})
+	_, err := m.ResolveClosure(context.Background(), "missing")
 	if !errors.Is(err, ErrSkillNotFound) {
-		t.Errorf("err = %v, want to wrap ErrSkillNotFound", err)
+		t.Errorf("expected ErrSkillNotFound, got %v", err)
 	}
 }
 
-func TestManager_UnloadIdempotent(t *testing.T) {
+func TestRegisterSink_BroadcastOnRefresh(t *testing.T) {
 	m := newTestManager(t, map[string][]byte{
-		"x": []byte(`---
-name: x
-description: x
+		"alpha": []byte(`---
+name: alpha
+description: alpha v1.
 license: MIT
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.read_file]
+---
+v1
+`),
+	})
+	sink := &fakeSink{id: "ses-1"}
+	m.RegisterSink(sink)
+
+	if _, err := m.Refresh(context.Background(), "alpha"); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	got := sink.refreshed()
+	if len(got) != 1 || got[0].Manifest.Name != "alpha" {
+		t.Errorf("refresh broadcast = %+v", got)
+	}
+}
+
+func TestDeregisterSink_StopsBroadcast(t *testing.T) {
+	m := newTestManager(t, map[string][]byte{
+		"alpha": []byte(`---
+name: alpha
+description: alpha.
+license: MIT
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.read_file]
 ---
 `),
 	})
-	ctx := context.Background()
-	if err := m.Load(ctx, "s", "x"); err != nil {
-		t.Fatalf("Load: %v", err)
+	sink := &fakeSink{id: "ses-deregister"}
+	m.RegisterSink(sink)
+	m.DeregisterSink(sink.id)
+	if _, err := m.Refresh(context.Background(), "alpha"); err != nil {
+		t.Fatalf("Refresh: %v", err)
 	}
-	if err := m.Unload(ctx, "s", "x"); err != nil {
-		t.Fatalf("Unload: %v", err)
-	}
-	// Second Unload is a no-op, no error.
-	if err := m.Unload(ctx, "s", "x"); err != nil {
-		t.Errorf("Unload (twice): %v", err)
-	}
-	// Unloading from a session that doesn't exist is a no-op.
-	if err := m.Unload(ctx, "no-such-session", "x"); err != nil {
-		t.Errorf("Unload (unknown session): %v", err)
+	if got := sink.refreshed(); len(got) != 0 {
+		t.Errorf("expected no broadcast after deregister, got %+v", got)
 	}
 }
 
-func TestManager_Bindings_GenerationStableWithinTurn(t *testing.T) {
+func TestRegisterSink_Idempotent(t *testing.T) {
 	m := newTestManager(t, map[string][]byte{
-		"x": []byte(`---
-name: x
-description: x
+		"alpha": []byte(`---
+name: alpha
+description: alpha.
 license: MIT
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.read_file]
 ---
 `),
 	})
-	ctx := context.Background()
-	if err := m.Load(ctx, "s", "x"); err != nil {
-		t.Fatalf("Load: %v", err)
+	sink := &fakeSink{id: "ses-dup"}
+	m.RegisterSink(sink)
+	m.RegisterSink(sink) // second call replaces in place — no double broadcast
+	if _, err := m.Refresh(context.Background(), "alpha"); err != nil {
+		t.Fatalf("Refresh: %v", err)
 	}
-	b1, _ := m.Bindings(ctx, "s")
-	b2, _ := m.Bindings(ctx, "s")
-	if b1.Generation != b2.Generation {
-		t.Errorf("Generation moved without a Load/Unload: %d vs %d", b1.Generation, b2.Generation)
-	}
-}
-
-func TestManager_Bindings_GenerationMovesOnLoad(t *testing.T) {
-	m := newTestManager(t, map[string][]byte{
-		"a": []byte(`---
-name: a
-description: a
-license: MIT
----
-`),
-		"b": []byte(`---
-name: b
-description: b
-license: MIT
----
-`),
-	})
-	ctx := context.Background()
-	_ = m.Load(ctx, "s", "a")
-	b1, _ := m.Bindings(ctx, "s")
-	_ = m.Load(ctx, "s", "b")
-	b2, _ := m.Bindings(ctx, "s")
-	if b2.Generation <= b1.Generation {
-		t.Errorf("Generation did not move on second Load: %d -> %d", b1.Generation, b2.Generation)
+	if got := sink.refreshed(); len(got) != 1 {
+		t.Errorf("expected single broadcast for idempotent register, got %d", len(got))
 	}
 }
 
-func TestManager_Subscribe_DeliversLoadedAndUnloaded(t *testing.T) {
+func TestSubscribe_DeliversRefreshAndPublish(t *testing.T) {
 	m := newTestManager(t, map[string][]byte{
-		"x": []byte(`---
-name: x
-description: x
+		"alpha": []byte(`---
+name: alpha
+description: alpha.
 license: MIT
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.read_file]
 ---
 `),
 	})
@@ -256,158 +238,77 @@ license: MIT
 	defer cancel()
 	ch, err := m.Subscribe(ctx)
 	if err != nil {
-		t.Fatalf("Subscribe error: %v", err)
+		t.Fatalf("Subscribe: %v", err)
 	}
 
-	if err := m.Load(ctx, "s", "x"); err != nil {
-		t.Fatalf("Load: %v", err)
+	if _, err := m.Refresh(context.Background(), "alpha"); err != nil {
+		t.Fatalf("Refresh: %v", err)
 	}
-	if err := m.Unload(ctx, "s", "x"); err != nil {
-		t.Fatalf("Unload: %v", err)
-	}
-
-	gotKinds := []SkillChangeKind{}
-	for i := 0; i < 2; i++ {
-		select {
-		case ev := <-ch:
-			gotKinds = append(gotKinds, ev.Kind)
-		default:
-			t.Fatalf("expected event %d, got nothing", i+1)
+	select {
+	case ev := <-ch:
+		if ev.Kind != SkillRefreshed {
+			t.Errorf("kind = %v, want refreshed", ev.Kind)
 		}
-	}
-	if gotKinds[0] != SkillLoaded || gotKinds[1] != SkillUnloaded {
-		t.Errorf("event order = %v, want [Loaded, Unloaded]", gotKinds)
+	default:
+		t.Errorf("no event delivered after Refresh")
 	}
 }
 
-func TestManager_PublishEmitsEvent(t *testing.T) {
-	store := NewSkillStore(Options{LocalRoot: t.TempDir()})
+func TestPublishEmitsEvent(t *testing.T) {
+	store := NewSkillStore(Options{
+		LocalRoot: t.TempDir(),
+	})
 	m := NewSkillManager(store, nil)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ch, _ := m.Subscribe(ctx)
+	ch, err := m.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 
-	manifest, _ := Parse([]byte(`---
-name: pub
-description: published
-license: MIT
----
-`))
-
-	if err := m.Publish(ctx, manifest, fstest.MapFS{}); err != nil {
+	manifest := Manifest{
+		Name:        "published-skill",
+		Description: "test",
+		License:     "MIT",
+		AllowedTools: []ToolGrant{
+			{Provider: "bash-mcp", Tools: []string{"bash.read_file"}},
+		},
+	}
+	body := fstest.MapFS{}
+	if err := m.Publish(ctx, manifest, body); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	select {
 	case ev := <-ch:
 		if ev.Kind != SkillPublished {
-			t.Errorf("event kind = %v, want SkillPublished", ev.Kind)
+			t.Errorf("kind = %v, want published", ev.Kind)
 		}
-		if ev.SkillName != "pub" {
-			t.Errorf("event skill = %q, want pub", ev.SkillName)
+		if ev.SkillName != "published-skill" {
+			t.Errorf("name = %q", ev.SkillName)
 		}
 	default:
-		t.Fatal("Publish event not delivered")
+		t.Errorf("no event after Publish")
 	}
 }
 
-// TestManager_BindingsCeilingFields covers the phase-4-spec §8 ceiling
-// surface on Bindings: MaxTurnsHard takes the max across loaded skills;
-// StuckDetectionDisabled flips when ANY skill explicitly opts out, so
-// the loosest skill (an analyst that legitimately loops) silences the
-// detectors for the whole session.
-func TestManager_BindingsCeilingFields(t *testing.T) {
+func TestRefreshBumpsGeneration(t *testing.T) {
 	m := newTestManager(t, map[string][]byte{
-		"explorer": []byte(`---
-name: explorer
-description: explorer
+		"alpha": []byte(`---
+name: alpha
+description: alpha.
 license: MIT
-metadata:
-  hugen:
-    max_turns: 5
-    max_turns_hard: 12
-    stuck_detection:
-      enabled: false
----
-`),
-		"helper": []byte(`---
-name: helper
-description: helper
-license: MIT
-metadata:
-  hugen:
-    max_turns: 3
-    max_turns_hard: 7
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.read_file]
 ---
 `),
 	})
-	ctx := context.Background()
-	if err := m.Load(ctx, "s", "explorer"); err != nil {
-		t.Fatalf("Load explorer: %v", err)
-	}
-	if err := m.Load(ctx, "s", "helper"); err != nil {
-		t.Fatalf("Load helper: %v", err)
-	}
-	b, err := m.Bindings(ctx, "s")
-	if err != nil {
-		t.Fatalf("Bindings: %v", err)
-	}
-	if b.MaxTurns != 5 {
-		t.Errorf("MaxTurns = %d, want max(5,3)=5", b.MaxTurns)
-	}
-	if b.MaxTurnsHard != 12 {
-		t.Errorf("MaxTurnsHard = %d, want max(12,7)=12", b.MaxTurnsHard)
-	}
-	if !b.StuckDetectionDisabled {
-		t.Errorf("StuckDetectionDisabled = false, want true (explorer opted out)")
-	}
-}
-
-// TestManager_BindingsStuckDetection_AllOptedIn pins the conservative
-// default: when no loaded skill flips Enabled to false, the detectors
-// stay active (Disabled stays false).
-func TestManager_BindingsStuckDetection_AllOptedIn(t *testing.T) {
-	m := newTestManager(t, map[string][]byte{
-		"plain": []byte(`---
-name: plain
-description: plain
-license: MIT
-metadata:
-  hugen:
-    max_turns: 3
----
-`),
-	})
-	ctx := context.Background()
-	if err := m.Load(ctx, "s", "plain"); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	b, _ := m.Bindings(ctx, "s")
-	if b.StuckDetectionDisabled {
-		t.Errorf("StuckDetectionDisabled = true on default config, want false")
-	}
-}
-
-func TestManager_RefreshBumpsGeneration(t *testing.T) {
-	m := newTestManager(t, map[string][]byte{
-		"x": []byte(`---
-name: x
-description: x
-license: MIT
----
-`),
-	})
-	ctx := context.Background()
-	_ = m.Load(ctx, "s", "x")
-	b1, _ := m.Bindings(ctx, "s")
-	gen, err := m.Refresh(ctx, "x")
-	if err != nil {
+	g0 := m.Gen()
+	if _, err := m.Refresh(context.Background(), "alpha"); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	b2, _ := m.Bindings(ctx, "s")
-	if b2.Generation != gen {
-		t.Errorf("Bindings.Generation = %d, want %d (Refresh return)", b2.Generation, gen)
-	}
-	if b2.Generation <= b1.Generation {
-		t.Errorf("Refresh did not move generation: %d -> %d", b1.Generation, b2.Generation)
+	if m.Gen() <= g0 {
+		t.Errorf("Gen did not bump: %d → %d", g0, m.Gen())
 	}
 }

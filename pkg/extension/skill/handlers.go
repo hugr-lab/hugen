@@ -188,7 +188,7 @@ func (h *SessionSkill) callLoad(ctx context.Context, args json.RawMessage) (json
 	if in.Name == "" {
 		return nil, fmt.Errorf("%w: skill:load: name required", tool.ErrArgValidation)
 	}
-	if err := h.manager.Load(ctx, h.sessionID, in.Name); err != nil {
+	if err := h.Load(ctx, in.Name); err != nil {
 		return nil, err
 	}
 	h.emitOp(ctx, OpLoad, in.Name)
@@ -207,7 +207,7 @@ func (h *SessionSkill) callUnload(ctx context.Context, args json.RawMessage) (js
 	if err := json.Unmarshal(args, &in); err != nil {
 		return nil, fmt.Errorf("%w: skill:unload: %v", tool.ErrArgValidation, err)
 	}
-	if err := h.manager.Unload(ctx, h.sessionID, in.Name); err != nil {
+	if err := h.Unload(ctx, in.Name); err != nil {
 		return nil, err
 	}
 	h.emitOp(ctx, OpUnload, in.Name)
@@ -240,7 +240,7 @@ func (h *SessionSkill) callRef(ctx context.Context, args json.RawMessage) (json.
 	if in.Skill == "" || in.Ref == "" {
 		return nil, fmt.Errorf("%w: skill:ref: skill and ref required", tool.ErrArgValidation)
 	}
-	loaded, err := h.manager.LoadedSkill(ctx, h.sessionID, in.Skill)
+	loaded, err := h.LoadedSkill(ctx, in.Skill)
 	if err != nil {
 		return nil, fmt.Errorf("skill:ref: %w", err)
 	}
@@ -307,7 +307,7 @@ func (h *SessionSkill) callFiles(ctx context.Context, args json.RawMessage) (jso
 	if err := gateFiles(ctx, h.perms, in.Name); err != nil {
 		return nil, err
 	}
-	loaded, err := h.manager.LoadedSkill(ctx, h.sessionID, in.Name)
+	loaded, err := h.LoadedSkill(ctx, in.Name)
 	if err != nil {
 		if errors.Is(err, skillpkg.ErrSkillNotFound) {
 			return nil, fmt.Errorf("%w: skill not loaded: %s", tool.ErrNotFound, in.Name)

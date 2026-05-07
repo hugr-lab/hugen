@@ -97,8 +97,6 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 	ws := session.NewWorkspace(workspaceDir, true)
 	resources := session.NewResources(session.ResourceDeps{
 		Providers:  cfgSvc.ToolProviders(),
-		Skills:     skills,
-		SkillStore: skillStore,
 		Workspace:  ws,
 		Logger:     logger,
 	})
@@ -164,7 +162,7 @@ metadata:
 body`)
 	store := skill.NewSkillStore(skill.Options{Inline: map[string][]byte{"a": a, "b": b}})
 	mgr := skill.NewSkillManager(store, nil)
-	err := mgr.Load(context.Background(), "s1", "a")
+	_, err := mgr.ResolveClosure(context.Background(), "a")
 	if !errors.Is(err, skill.ErrSkillCycle) {
 		t.Errorf("err = %v, want ErrSkillCycle", err)
 	}
@@ -190,8 +188,8 @@ allowed-tools: []
 	}
 	store := skill.NewSkillStore(skill.Options{CommunityRoot: communityRoot})
 	mgr := skill.NewSkillManager(store, nil)
-	if err := mgr.Load(context.Background(), "s1", "weather"); err != nil {
-		t.Fatalf("Load community skill: %v", err)
+	if _, err := mgr.ResolveClosure(context.Background(), "weather"); err != nil {
+		t.Fatalf("ResolveClosure community skill: %v", err)
 	}
 	got, err := store.List(context.Background())
 	if err != nil {

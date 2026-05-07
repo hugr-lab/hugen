@@ -84,8 +84,10 @@ func (e *Extension) handleSkillList(ctx context.Context, state extension.Session
 	}
 
 	loaded := map[string]bool{}
-	for _, n := range e.manager.LoadedNames(ctx, state.SessionID()) {
-		loaded[n] = true
+	if h := FromState(state); h != nil {
+		for _, n := range h.LoadedNames(ctx) {
+			loaded[n] = true
+		}
 	}
 
 	type entry struct {
@@ -159,7 +161,14 @@ func (e *Extension) handleSkillLoad(ctx context.Context, state extension.Session
 		}
 	}
 
-	if err := e.manager.Load(ctx, state.SessionID(), name); err != nil {
+	h := FromState(state)
+	if h == nil {
+		return []protocol.Frame{
+			protocol.NewError(state.SessionID(), env.AgentAuthor, "skill_unavailable",
+				"skill extension not initialised", true),
+		}, nil
+	}
+	if err := h.Load(ctx, name); err != nil {
 		code := "skill_load_failed"
 		switch {
 		case errors.Is(err, skillpkg.ErrSkillNotFound):
@@ -194,7 +203,14 @@ func (e *Extension) handleSkillUnload(ctx context.Context, state extension.Sessi
 		}, nil
 	}
 	name := args[0]
-	if err := e.manager.Unload(ctx, state.SessionID(), name); err != nil {
+	h := FromState(state)
+	if h == nil {
+		return []protocol.Frame{
+			protocol.NewError(state.SessionID(), env.AgentAuthor, "skill_unavailable",
+				"skill extension not initialised", true),
+		}, nil
+	}
+	if err := h.Unload(ctx, name); err != nil {
 		return []protocol.Frame{
 			protocol.NewError(state.SessionID(), env.AgentAuthor, "skill_unload_failed",
 				err.Error(), true),

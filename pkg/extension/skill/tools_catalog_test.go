@@ -113,7 +113,7 @@ body
 		t.Fatalf("InitState: %v", err)
 	}
 	if loadAlpha {
-		if err := mgr.Load(context.Background(), state.SessionID(), "alpha"); err != nil {
+		if err := FromState(state).Load(context.Background(), "alpha"); err != nil {
 			t.Fatalf("Load alpha: %v", err)
 		}
 	}

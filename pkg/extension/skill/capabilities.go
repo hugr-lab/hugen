@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
-	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -48,10 +47,10 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 		return ""
 	}
 	var parts []string
-	if b, err := h.manager.Bindings(ctx, h.sessionID); err == nil && b.Instructions != "" {
+	if b, err := h.Bindings(ctx); err == nil && b.Instructions != "" {
 		parts = append(parts, b.Instructions)
 	}
-	if cat := renderCatalogue(ctx, h.manager, h.sessionID); cat != "" {
+	if cat := renderCatalogue(ctx, h); cat != "" {
 		parts = append(parts, cat)
 	}
 	if len(parts) == 0 {
@@ -63,13 +62,13 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 // renderCatalogue produces the "## Available skills" section of
 // the system prompt: one bullet per skill in the store using the
 // manifest description. Loaded skills carry a `(loaded)` tag.
-func renderCatalogue(ctx context.Context, sm *skillpkg.SkillManager, sessionID string) string {
-	all, err := sm.List(ctx)
+func renderCatalogue(ctx context.Context, h *SessionSkill) string {
+	all, err := h.manager.List(ctx)
 	if err != nil || len(all) == 0 {
 		return ""
 	}
 	loadedSet := map[string]struct{}{}
-	for _, n := range sm.LoadedNames(ctx, sessionID) {
+	for _, n := range h.LoadedNames(ctx) {
 		loadedSet[n] = struct{}{}
 	}
 	var b strings.Builder
@@ -104,7 +103,7 @@ func (e *Extension) FilterTools(ctx context.Context, state extension.SessionStat
 	if h == nil || h.manager == nil {
 		return all
 	}
-	allowed := allowedFromBindings(ctx, h.manager, h.sessionID)
+	allowed := allowedFromHandle(ctx, h)
 	if allowed == nil {
 		return all
 	}
@@ -128,7 +127,7 @@ func (e *Extension) AdviseToolPolicy(ctx context.Context, state extension.Sessio
 	if h == nil || h.manager == nil {
 		return extension.ToolIterPolicy{}
 	}
-	b, err := h.manager.Bindings(ctx, h.sessionID)
+	b, err := h.Bindings(ctx)
 	if err != nil {
 		return extension.ToolIterPolicy{}
 	}
@@ -177,10 +176,10 @@ func (e *Extension) DescribeSubagent(ctx context.Context, state extension.Sessio
 // modelToolsForSession recomputes the allow-list.
 func (e *Extension) Generation(state extension.SessionState) int64 {
 	h := FromState(state)
-	if h == nil || h.manager == nil {
+	if h == nil {
 		return 0
 	}
-	b, err := h.manager.Bindings(context.Background(), h.sessionID)
+	b, err := h.Bindings(context.Background())
 	if err != nil {
 		return 0
 	}
@@ -219,14 +218,15 @@ func (a *allowedSet) match(name string) bool {
 	return false
 }
 
-// allowedFromBindings compiles the loaded-skill bindings into an
-// allowedSet. Returns nil when sm is nil; an empty (non-nil) set
-// when the session has no loaded skills; populated otherwise.
-func allowedFromBindings(ctx context.Context, sm *skillpkg.SkillManager, sessionID string) *allowedSet {
-	if sm == nil {
+// allowedFromHandle compiles the loaded-skill bindings into an
+// allowedSet. Returns nil when h is nil (no skill ext wired);
+// an empty (non-nil) set when the session has no loaded skills;
+// populated otherwise.
+func allowedFromHandle(ctx context.Context, h *SessionSkill) *allowedSet {
+	if h == nil {
 		return nil
 	}
-	b, err := sm.Bindings(ctx, sessionID)
+	b, err := h.Bindings(ctx)
 	if err != nil || len(b.AllowedTools) == 0 {
 		return &allowedSet{exact: map[string]bool{}}
 	}

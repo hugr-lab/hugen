@@ -39,7 +39,7 @@ func TestFilterTools_WildcardAndExact(t *testing.T) {
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
-	if err := mgr.Load(ctx, state.SessionID(), "dataset"); err != nil {
+	if err := FromState(state).Load(ctx, "dataset"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 
@@ -142,14 +142,14 @@ func TestGeneration_BumpsOnLoadUnload(t *testing.T) {
 		t.Fatalf("InitState: %v", err)
 	}
 	g0 := ext.Generation(state)
-	if err := mgr.Load(ctx, state.SessionID(), "alpha"); err != nil {
+	if err := FromState(state).Load(ctx, "alpha"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	g1 := ext.Generation(state)
 	if g1 <= g0 {
 		t.Errorf("Generation did not bump on Load: %d → %d", g0, g1)
 	}
-	if err := mgr.Unload(ctx, state.SessionID(), "alpha"); err != nil {
+	if err := FromState(state).Unload(ctx, "alpha"); err != nil {
 		t.Fatalf("Unload: %v", err)
 	}
 	g2 := ext.Generation(state)
@@ -192,7 +192,7 @@ func TestAdvertiseSystemPrompt_LoadedTaggedAndInstructionsPrepended(t *testing.T
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
-	if err := mgr.Load(ctx, state.SessionID(), "alpha"); err != nil {
+	if err := FromState(state).Load(ctx, "alpha"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	out := ext.AdvertiseSystemPrompt(ctx, state)

@@ -79,8 +79,6 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	store := &stubStore{}
 	resources := session.NewResources(session.ResourceDeps{
 		Providers:  cfgSvc.ToolProviders(),
-		Skills:     skills,
-		SkillStore: skillStore,
 		Workspace:  ws,
 		Logger:     logger,
 	})
@@ -106,17 +104,17 @@ func TestUS3_5_US5_DropProviders(t *testing.T) {
 	// Loading duckdb-data must succeed even though duckdb-mcp is
 	// absent — phase-3 path: skill manifest validates, allowed-tools
 	// referencing missing providers are tagged Unavailable.
-	if err := skills.Load(ctx, sess.ID(), "duckdb-data"); err != nil {
+	skillHandle := skillext.FromState(sess)
+	if err := skillHandle.Load(ctx, "duckdb-data"); err != nil {
 		t.Fatalf("Load duckdb-data with missing duckdb-mcp: %v", err)
 	}
 
 	// Verify the unavailability annotation surfaces. Bindings on its
 	// own only knows about loaded skills' grants; AnnotateUnavailable
 	// is the helper that flags entries whose provider isn't in the
-	// registered list. We mirror what the runtime does: pass the
-	// list of registered provider names. With duckdb-mcp dropped,
-	// duckdb-mcp grants must show up as Unavailable.
-	b, err := skills.Bindings(ctx, sess.ID())
+	// registered list. With duckdb-mcp dropped, duckdb-mcp grants
+	// must show up as Unavailable.
+	b, err := skillHandle.Bindings(ctx)
 	if err != nil {
 		t.Fatalf("Bindings: %v", err)
 	}
