@@ -253,6 +253,28 @@ func (s *TestStore) ListEvents(_ context.Context, sessionID string, opts store.L
 	return out, nil
 }
 
+// LatestEventOfKinds returns the newest event in the session
+// whose EventType matches one of kinds. Backs RestoreActive's
+// narrow classifier query.
+func (s *TestStore) LatestEventOfKinds(_ context.Context, sessionID string, kinds []string) (store.EventRow, bool, error) {
+	if len(kinds) == 0 {
+		return store.EventRow{}, false, nil
+	}
+	want := make(map[string]struct{}, len(kinds))
+	for _, k := range kinds {
+		want[k] = struct{}{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src := s.Events[sessionID]
+	for i := len(src) - 1; i >= 0; i-- {
+		if _, ok := want[src[i].EventType]; ok {
+			return src[i], true, nil
+		}
+	}
+	return store.EventRow{}, false, nil
+}
+
 func (s *TestStore) NextSeq(_ context.Context, sessionID string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

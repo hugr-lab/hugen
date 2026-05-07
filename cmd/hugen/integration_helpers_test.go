@@ -46,6 +46,9 @@ func (s *stubStore) AppendEvent(_ context.Context, _ session.EventRow, _ string)
 func (s *stubStore) ListEvents(_ context.Context, _ string, _ session.ListEventsOpts) ([]session.EventRow, error) {
 	return nil, nil
 }
+func (s *stubStore) LatestEventOfKinds(_ context.Context, _ string, _ []string) (session.EventRow, bool, error) {
+	return session.EventRow{}, false, nil
+}
 func (s *stubStore) NextSeq(_ context.Context, _ string) (int, error) {
 	return 1, nil
 }

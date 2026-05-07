@@ -462,6 +462,14 @@ func (s *Session) advanceOrFinish(runCtx context.Context) {
 	// explicit-cancel teardown path. The deferred handleExit writes
 	// session_terminated{reason:"hard_ceiling"} and (for sub-agents)
 	// surfaces a clean subagent_result to the parent.
+	//
+	// No lifecycle marker is emitted on this path: the session is
+	// terminating, not idling. The session_terminated event is the
+	// final state; Manager.RestoreActive's narrow probe sees that
+	// terminal row first (it's the newest of the
+	// session_terminated|session_status pair) and skips the
+	// session, so the persisted "active" marker that immediately
+	// precedes session_terminated never reaches the classifier.
 	if st.capHard > 0 && st.iter >= st.capHard {
 		s.logger.Warn("session: tool re-call hard ceiling hit",
 			"session", s.id, "max_hard", st.capHard, "iter", st.iter)

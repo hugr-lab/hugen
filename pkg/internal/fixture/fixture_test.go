@@ -158,6 +158,74 @@ func TestSessionState_ChildrenAndSubmit(t *testing.T) {
 	})
 }
 
+// TestRuntimeStore_LatestEventOfKinds covers the narrow probe
+// Manager.RestoreActive uses to classify a session without paging
+// the full event log. Returns the newest matching row across the
+// requested EventTypes, or ok=false when nothing matches.
+func TestRuntimeStore_LatestEventOfKinds(t *testing.T) {
+	ctx := context.Background()
+	s := NewTestStore()
+	const sid = "s1"
+	if err := s.OpenSession(ctx, store.SessionRow{ID: sid, AgentID: "a1", Status: store.StatusActive}); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	mustAppend := func(kind string) {
+		t.Helper()
+		if err := s.AppendEvent(ctx, store.EventRow{
+			ID: "ev-" + kind, SessionID: sid, AgentID: "a1",
+			EventType: kind, Author: "u1",
+		}, ""); err != nil {
+			t.Fatalf("append %s: %v", kind, err)
+		}
+	}
+	mustAppend(string(protocol.KindUserMessage))
+	mustAppend(string(protocol.KindSessionStatus))
+	mustAppend(string(protocol.KindAgentMessage))
+	mustAppend(string(protocol.KindSessionStatus))
+	mustAppend(string(protocol.KindToolCall))
+
+	t.Run("returns_newest_match", func(t *testing.T) {
+		got, ok, err := s.LatestEventOfKinds(ctx, sid, []string{
+			string(protocol.KindSessionStatus),
+		})
+		if err != nil || !ok {
+			t.Fatalf("err=%v ok=%v", err, ok)
+		}
+		if got.Seq != 4 {
+			t.Errorf("Seq=%d, want 4 (newest session_status row)", got.Seq)
+		}
+	})
+
+	t.Run("multi_kind_picks_newest_across_all", func(t *testing.T) {
+		got, ok, _ := s.LatestEventOfKinds(ctx, sid, []string{
+			string(protocol.KindSessionStatus),
+			string(protocol.KindToolCall),
+		})
+		if !ok {
+			t.Fatal("ok=false")
+		}
+		if got.Seq != 5 || got.EventType != string(protocol.KindToolCall) {
+			t.Errorf("got Seq=%d Kind=%q, want Seq=5 ToolCall", got.Seq, got.EventType)
+		}
+	})
+
+	t.Run("none_matched_returns_false", func(t *testing.T) {
+		_, ok, err := s.LatestEventOfKinds(ctx, sid, []string{
+			string(protocol.KindError),
+		})
+		if err != nil || ok {
+			t.Errorf("err=%v ok=%v, want nil/false", err, ok)
+		}
+	})
+
+	t.Run("empty_kinds_returns_false", func(t *testing.T) {
+		_, ok, err := s.LatestEventOfKinds(ctx, sid, nil)
+		if err != nil || ok {
+			t.Errorf("err=%v ok=%v, want nil/false", err, ok)
+		}
+	})
+}
+
 // TestRuntimeStore_ListChildren covers the phase-4 BFS-walker query.
 func TestRuntimeStore_ListChildren(t *testing.T) {
 	ctx := context.Background()

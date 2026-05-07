@@ -163,8 +163,10 @@ func appendParentSubagentResult(ctx context.Context, deps *Deps, parentID, child
 
 // RestoreActive runs at process boot. For every non-terminal root
 // session belonging to this agent it reads the lifecycle state
-// from the persisted [protocol.KindSessionStatus] markers and
-// decides whether to bring the goroutine up eagerly:
+// via a single narrow store query
+// ([store.RuntimeStore.LatestEventOfKinds]) — newest matched row
+// of [protocol.KindSessionTerminated, protocol.KindSessionStatus]
+// — and decides whether to bring the goroutine up eagerly:
 //
 //   - idle                                       → lazy. Adapter
 //     Resume on demand rebuilds the session via
@@ -191,23 +193,32 @@ func (m *Manager) RestoreActive(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("manager: restore-active list: %w", err)
 	}
+	probeKinds := []string{
+		string(protocol.KindSessionTerminated),
+		string(protocol.KindSessionStatus),
+	}
 	for _, row := range rows {
 		if row.SessionType != "" && row.SessionType != "root" {
 			continue
 		}
-		events, err := m.store.ListEvents(ctx, row.ID, store.ListEventsOpts{})
+		latest, ok, err := m.store.LatestEventOfKinds(ctx, row.ID, probeKinds)
 		if err != nil {
-			m.logger.Warn("manager: restore-active list events",
+			m.logger.Warn("manager: restore-active probe",
 				"session", row.ID, "err", err)
 			continue
 		}
-		if hasTerminatedRows(events) {
+		if !ok {
+			m.logger.Warn("manager: restore-active: no lifecycle marker, skipping",
+				"session", row.ID)
 			continue
 		}
-		state := lookupLatestStatusEvent(events)
+		if protocol.Kind(latest.EventType) == protocol.KindSessionTerminated {
+			continue
+		}
+		state, _ := latest.Metadata["state"].(string)
 		switch state {
 		case "":
-			m.logger.Warn("manager: restore-active: no lifecycle marker, skipping",
+			m.logger.Warn("manager: restore-active: malformed lifecycle marker, skipping",
 				"session", row.ID)
 			continue
 		case protocol.SessionStatusIdle:
@@ -245,14 +256,3 @@ func (m *Manager) RestoreActive(ctx context.Context) error {
 	return nil
 }
 
-// hasTerminatedRows is the events-slice variant of hasTerminated —
-// avoids a second store round-trip when the caller already loaded
-// the full log (RestoreActive does).
-func hasTerminatedRows(events []store.EventRow) bool {
-	for _, ev := range events {
-		if ev.EventType == string(protocol.KindSessionTerminated) {
-			return true
-		}
-	}
-	return false
-}

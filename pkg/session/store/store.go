@@ -122,6 +122,12 @@ type RuntimeStore interface {
 	UpdateSessionStatus(ctx context.Context, id, status string) error
 	AppendEvent(ctx context.Context, ev EventRow, summary string) error
 	ListEvents(ctx context.Context, sessionID string, opts ListEventsOpts) ([]EventRow, error)
+	// LatestEventOfKinds returns the newest EventRow whose
+	// EventType matches one of kinds. ok=false (with nil err) when
+	// no such row exists; non-nil err only on backing-store I/O
+	// failure. Used by Manager.RestoreActive to classify a session
+	// without loading its full event log.
+	LatestEventOfKinds(ctx context.Context, sessionID string, kinds []string) (EventRow, bool, error)
 	NextSeq(ctx context.Context, sessionID string) (int, error)
 	AppendNote(ctx context.Context, note NoteRow) error
 	ListNotes(ctx context.Context, sessionID string, limit int) ([]NoteRow, error)
@@ -352,6 +358,45 @@ func (s *RuntimeStoreLocal) ListEvents(ctx context.Context, sessionID string, op
 		return nil, err
 	}
 	return rows, nil
+}
+
+// LatestEventOfKinds runs a narrow query (DESC by seq, limit 1,
+// event_type IN kinds) so RestoreActive can classify a session
+// without paging the full event log.
+func (s *RuntimeStoreLocal) LatestEventOfKinds(ctx context.Context, sessionID string, kinds []string) (EventRow, bool, error) {
+	if len(kinds) == 0 {
+		return EventRow{}, false, nil
+	}
+	filter := map[string]any{
+		"session_id": map[string]any{"eq": sessionID},
+		"event_type": map[string]any{"in": kinds},
+	}
+	rows, err := queries.RunQuery[[]EventRow](ctx, s.querier,
+		`query ($filter: hub_db_session_events_filter) {
+			hub { db { agent {
+				session_events(
+					filter: $filter,
+					order_by: [{field: "seq", direction: DESC}],
+					limit: 1
+				) {
+					id session_id agent_id seq event_type author content
+					tool_name tool_args tool_result metadata created_at
+				}
+			}}}
+		}`,
+		map[string]any{"filter": filter},
+		"hub.db.agent.session_events",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return EventRow{}, false, nil
+		}
+		return EventRow{}, false, err
+	}
+	if len(rows) == 0 {
+		return EventRow{}, false, nil
+	}
+	return rows[0], true, nil
 }
 
 func (s *RuntimeStoreLocal) AppendNote(ctx context.Context, note NoteRow) error {
