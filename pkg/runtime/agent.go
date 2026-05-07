@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/hugr-lab/hugen/assets"
+	notepadext "github.com/hugr-lab/hugen/pkg/extension/notepad"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
@@ -114,7 +115,14 @@ func noteHandler() session.CommandHandler {
 			}, nil
 		}
 		text := joinArgs(args)
-		id, err := env.Notepad.Append(ctx, env.Author.ID, text)
+		np := notepadext.FromState(env.Session)
+		if np == nil {
+			return []protocol.Frame{
+				protocol.NewError(env.Session.ID(), env.AgentAuthor, "note_failed",
+					"notepad extension not registered on this session", false),
+			}, nil
+		}
+		id, err := np.Append(ctx, env.Author.ID, text)
 		if err != nil {
 			return []protocol.Frame{
 				protocol.NewError(env.Session.ID(), env.AgentAuthor, "note_failed", err.Error(), true),

@@ -15,7 +15,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
-	"github.com/hugr-lab/hugen/pkg/extension/notepad"
 	"github.com/hugr-lab/hugen/pkg/session/tools/plan"
 	"github.com/hugr-lab/hugen/pkg/session/tools/whiteboard"
 	"github.com/hugr-lab/hugen/pkg/skill"
@@ -422,23 +421,6 @@ func (s *Session) Submit(ctx context.Context, f protocol.Frame) (ok bool) {
 	case <-ctx.Done():
 		return false
 	}
-}
-
-// Notepad returns the session's notepad handle if the notepad
-// extension is registered on the runtime; nil otherwise. The
-// handle lives in the session's [extension.SessionState] under the
-// well-known key the notepad extension owns.
-//
-// This accessor is a transitional shim — direct callers should
-// migrate to extension/notepad.FromState(s) and read state via
-// the [extension.SessionState] surface.
-func (s *Session) Notepad() *notepad.Notepad {
-	v, ok := s.Value("notepad")
-	if !ok {
-		return nil
-	}
-	n, _ := v.(*notepad.Notepad)
-	return n
 }
 
 // Tools exposes the per-session ToolManager. This is the child
@@ -1279,7 +1261,6 @@ func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashComma
 		Author:      f.Author(),
 		AgentAuthor: s.agent.Participant(),
 		Models:      s.models,
-		Notepad:     s.Notepad(),
 		Logger:      s.logger,
 		Description: spec.Description,
 	}
