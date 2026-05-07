@@ -206,12 +206,12 @@ func us3NewSession(t *testing.T, mdl model.Model, perms perm.Service, agentID st
 	return sess, tm, cancel
 }
 
-// TestUS3_AlwaysAllow_NextCallSkipsPromptPath drives the model
+// TestPermTier3_AlwaysAllow_NextCallSkipsPromptPath drives the model
 // to call fake:do twice with a policy_save in between. Both
 // calls succeed. The second call's tool_result must be marked
 // FromUser (the audit Frame names the user as the deciding
 // tier). This exercises exit-criterion-11 step 1.
-func TestUS3_AlwaysAllow_NextCallSkipsPromptPath(t *testing.T) {
+func TestPermTier3_AlwaysAllow_NextCallSkipsPromptPath(t *testing.T) {
 	q := newFakeUS3Querier()
 
 	provider := &us3Stub{
@@ -281,9 +281,9 @@ func TestUS3_AlwaysAllow_NextCallSkipsPromptPath(t *testing.T) {
 	}
 }
 
-// TestUS3_FloorBeatsTier3 — operator floor disables fake:do; a
+// TestPermTier1_FloorBeatsTier3 — operator floor disables fake:do; a
 // Tier-3 allow row cannot relax it. Exit-criterion-11 step 2.
-func TestUS3_FloorBeatsTier3(t *testing.T) {
+func TestPermTier1_FloorBeatsTier3(t *testing.T) {
 	q := newFakeUS3Querier()
 	pol := policies.New(q, nil, nil)
 	if _, err := pol.Save(context.Background(), policies.Input{
@@ -350,9 +350,9 @@ func TestUS3_FloorBeatsTier3(t *testing.T) {
 	}
 }
 
-// TestUS3_PerAgentIsolation — a row saved against ag01 has no
+// TestPermTier3_PerAgentIsolation — a row saved against ag01 has no
 // effect on a session running as ag02. Exit-criterion-11 step 3.
-func TestUS3_PerAgentIsolation(t *testing.T) {
+func TestPermTier3_PerAgentIsolation(t *testing.T) {
 	q := newFakeUS3Querier()
 	pol := policies.New(q, nil, nil)
 	if _, err := pol.Save(context.Background(), policies.Input{
@@ -407,10 +407,10 @@ func TestUS3_PerAgentIsolation(t *testing.T) {
 	}
 }
 
-// TestUS3_PolicyPersistGateBlocksSave — operator denies
+// TestPermTier3_PolicyPersistGateBlocksSave — operator denies
 // hugen:policy:persist:* so policy_save returns permission_denied.
 // Exit-criterion-11 step 4.
-func TestUS3_PolicyPersistGateBlocksSave(t *testing.T) {
+func TestPermTier3_PolicyPersistGateBlocksSave(t *testing.T) {
 	q := newFakeUS3Querier()
 
 	mdl := &scriptedToolModel{

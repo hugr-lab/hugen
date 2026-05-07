@@ -130,9 +130,9 @@ func us4NewSession(t *testing.T, mdl model.Model, perms perm.Service, agentID st
 	return sess, tm, cancel
 }
 
-// TestUS4_Tier2DisabledBlocks — Tier-2 (Hugr role) disables the
+// TestPermTier2_Tier2DisabledBlocks — Tier-2 (Hugr role) disables the
 // tool; Resolve must surface permission_denied. Exit-criterion 8.
-func TestUS4_Tier2DisabledBlocks(t *testing.T) {
+func TestPermTier2_Tier2DisabledBlocks(t *testing.T) {
 	view := &us4View{refreshInterval: time.Hour}
 	q := newUS4Querier([]perm.Rule{
 		{Type: "hugen:tool:fake", Field: "do", Disabled: true},
@@ -179,10 +179,10 @@ func TestUS4_Tier2DisabledBlocks(t *testing.T) {
 	}
 }
 
-// TestUS4_Tier1FloorBeatsTier2Silence — operator floor disables
+// TestPermTier2_Tier1FloorBeatsTier2Silence — operator floor disables
 // fake:do; Tier-2 stays silent (no rule). Floor still wins.
 // Exit-criterion 9.
-func TestUS4_Tier1FloorBeatsTier2Silence(t *testing.T) {
+func TestPermTier2_Tier1FloorBeatsTier2Silence(t *testing.T) {
 	view := &us4View{
 		rules:           []perm.Rule{{Type: "hugen:tool:fake", Field: "do", Disabled: true}},
 		refreshInterval: time.Hour,
@@ -224,10 +224,10 @@ func TestUS4_Tier1FloorBeatsTier2Silence(t *testing.T) {
 	t.Errorf("expected an error tool_result")
 }
 
-// TestUS4_DataInjection — Tier-2 rule injects {"tenant_id":7}
+// TestPermTier2_DataInjection — Tier-2 rule injects {"tenant_id":7}
 // into args; LLM-supplied "tenant_id":99 is overridden because
 // rule data wins. Exit-criterion 10.
-func TestUS4_DataInjection(t *testing.T) {
+func TestPermTier2_DataInjection(t *testing.T) {
 	view := &us4View{refreshInterval: time.Hour}
 	q := newUS4Querier([]perm.Rule{{
 		Type:  "hugen:tool:fake",
@@ -277,11 +277,11 @@ func TestUS4_DataInjection(t *testing.T) {
 	}
 }
 
-// TestUS4_TTLRefreshAndRuntimeReload — initial Tier-2 allows
+// TestPermTier2_TTLRefreshAndRuntimeReload — initial Tier-2 allows
 // fake:do; remote flips to deny; an explicit Refresh (mimicking
 // runtime_reload) picks up the change before TTL elapses.
 // Exit-criterion 12.
-func TestUS4_TTLRefreshAndRuntimeReload(t *testing.T) {
+func TestPermTier2_TTLRefreshAndRuntimeReload(t *testing.T) {
 	view := &us4View{refreshInterval: time.Hour}
 	q := newUS4Querier(nil) // start permissive
 	perms := perm.NewRemotePermissions(view, us4FakeIdentity{id: "ag01", role: "analyst"}, q)
@@ -324,10 +324,10 @@ func TestUS4_TTLRefreshAndRuntimeReload(t *testing.T) {
 	}
 }
 
-// TestUS4_RefreshFailureKeepsSnapshot — a transient remote
+// TestPermTier2_RefreshFailureKeepsSnapshot — a transient remote
 // failure does not flip the cached decision; the previous
 // snapshot continues to serve until a later refresh succeeds.
-func TestUS4_RefreshFailureKeepsSnapshot(t *testing.T) {
+func TestPermTier2_RefreshFailureKeepsSnapshot(t *testing.T) {
 	view := &us4View{refreshInterval: 30 * time.Millisecond}
 	q := newUS4Querier([]perm.Rule{
 		{Type: "hugen:tool:fake", Field: "do", Disabled: true},

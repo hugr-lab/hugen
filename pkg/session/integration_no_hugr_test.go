@@ -66,9 +66,9 @@ func (p *fsToolStub) Call(_ context.Context, name string, args json.RawMessage) 
 	return nil, nil
 }
 
-// TestUS5_NoHugr_BashFlowWorks — the agent boots without any
+// TestNoHugr_NoHugr_BashFlowWorks — the agent boots without any
 // Hugr providers and a bash-only round-trip succeeds.
-func TestUS5_NoHugr_BashFlowWorks(t *testing.T) {
+func TestNoHugr_NoHugr_BashFlowWorks(t *testing.T) {
 	files := &fsToolStub{files: map[string]string{}}
 
 	mdl := &scriptedToolModel{turns: [][]model.Chunk{
@@ -116,14 +116,14 @@ func TestUS5_NoHugr_BashFlowWorks(t *testing.T) {
 	}
 }
 
-// TestUS5_HugrSkillLoadsAndReportsUnavailable moved to
+// TestNoHugr_HugrSkillLoadsAndReportsUnavailable moved to
 // pkg/extension/skill/state_test.go (the per-session Load /
 // Bindings API moved to *SessionSkill in stage 5).
 
-// TestUS5_HugrAbsentToolDispatchFails — when a skill grants
+// TestNoHugr_HugrAbsentToolDispatchFails — when a skill grants
 // hugr-main:* but no provider is registered, dispatching the
 // tool surfaces ErrUnknownProvider rather than a panic.
-func TestUS5_HugrAbsentToolDispatchFails(t *testing.T) {
+func TestNoHugr_HugrAbsentToolDispatchFails(t *testing.T) {
 	tm := tool.NewToolManager(permsAllow{}, nil, nil)
 	tl := tool.Tool{
 		Name:             "hugr-main:data-execute_query",
@@ -139,10 +139,10 @@ func TestUS5_HugrAbsentToolDispatchFails(t *testing.T) {
 	}
 }
 
-// TestUS5_PolicyServiceWithoutHugr — LocalPermissions remains
+// TestNoHugr_PolicyServiceWithoutHugr — LocalPermissions remains
 // the choice when the deployment skips Hugr; Resolve still works
 // for the bash tool floor without contacting any remote.
-func TestUS5_PolicyServiceWithoutHugr(t *testing.T) {
+func TestNoHugr_PolicyServiceWithoutHugr(t *testing.T) {
 	v := &fakeUS5View{rules: []perm.Rule{
 		{Type: "hugen:tool:bash-mcp", Field: "*"},
 	}}

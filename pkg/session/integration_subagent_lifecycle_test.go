@@ -10,13 +10,13 @@ import (
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 )
 
-// TestUS1_CancelCascade_TwoDeep exercises phase-4-spec §13.2 #5: a
+// TestSubagent_CancelCascade_TwoDeep exercises phase-4-spec §13.2 #5: a
 // `/cancel all` on the root cascades through every descendant. Tree
 // shape: root → mid → leaf. After the cancel, both mid and leaf
 // terminate with reason "cancel_cascade"; root itself does NOT
 // terminate (only its in-flight turn would abort, but in this test
 // it has no turn — we just assert root is still alive).
-func TestUS1_CancelCascade_TwoDeep(t *testing.T) {
+func TestSubagent_CancelCascade_TwoDeep(t *testing.T) {
 	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
@@ -70,7 +70,7 @@ func TestUS1_CancelCascade_TwoDeep(t *testing.T) {
 	}
 }
 
-// TestUS1_SubagentResult_DeliveredToParent verifies the producer-
+// TestSubagent_Result_DeliveredToParent verifies the producer-
 // side of the wait_subagents contract: when a child terminates via
 // subagent_cancel, a SubagentResult Frame surfaces on the parent —
 // either consumed by an active wait_subagents (live path) or
@@ -79,7 +79,7 @@ func TestUS1_CancelCascade_TwoDeep(t *testing.T) {
 // This test exercises the buffered path: cancel the child, assert
 // parent's events end up with a subagent_result row whose
 // session_id matches the cancelled child.
-func TestUS1_SubagentResult_DeliveredToParent(t *testing.T) {
+func TestSubagent_Result_DeliveredToParent(t *testing.T) {
 	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
@@ -117,12 +117,12 @@ func TestUS1_SubagentResult_DeliveredToParent(t *testing.T) {
 		child.id, kindsWithReasons(evs))
 }
 
-// TestUS1_WaitSubagents_NaturalTermination drives a real cancel-then-
+// TestSubagent_Wait_NaturalTermination drives a real cancel-then-
 // wait flow: spawn a child, start wait_subagents, then cancel the
 // child from a separate goroutine. wait_subagents must return when
 // the child's natural exit-time SubagentResult arrives via the
 // activeToolFeed.
-func TestUS1_WaitSubagents_NaturalTermination(t *testing.T) {
+func TestSubagent_Wait_NaturalTermination(t *testing.T) {
 	mgr := newTestManager(t, fixture.NewTestStore())
 	ctx := context.Background()
 	defer mgr.Stop(ctx)
