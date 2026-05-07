@@ -14,7 +14,8 @@ import (
 //
 // Extensions store per-session projections under a stable name
 // (typically the extension's own [Extension.Name]). Sub-agents
-// can consult parent state via [SessionState.ParentValue].
+// reach the host's state through [SessionState.Parent] — call
+// SessionID / Value on the returned parent directly.
 //
 // Tools returns the per-session child [*tool.ToolManager] —
 // extensions that need to mount providers dynamically at runtime
@@ -27,8 +28,11 @@ type SessionState interface {
 	Value(name string) (any, bool)
 	SetValue(name string, value any)
 
-	ParentID() string
-	ParentValue(name string) (any, bool)
+	// Parent returns the parent session's state for sub-agents and
+	// (nil, false) for root sessions. Callers read parent's
+	// SessionID / Value directly off the returned handle —
+	// transparently traverses any depth.
+	Parent() (SessionState, bool)
 
 	Tools() *tool.ToolManager
 }

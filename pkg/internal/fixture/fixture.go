@@ -14,28 +14,26 @@ import (
 // for tests that drive extensions / tool providers without a real
 // *session.Session. Value/SetValue are sync.Map-backed; Tools()
 // returns whatever the test installs via [TestSessionState.SetTools]
-// (nil by default). Parent linkage is set via [TestSessionState.WithParent].
+// (nil by default). Parent linkage is set via
+// [TestSessionState.WithParent].
 type TestSessionState struct {
-	id, parent string
-	tools      *tool.ToolManager
-	parentRef  *TestSessionState
-	state      sync.Map
+	id        string
+	tools     *tool.ToolManager
+	parentRef *TestSessionState
+	state     sync.Map
 }
 
 // NewTestSessionState builds a TestSessionState bound to the given
-// session id. Most tests use just this — they don't need parent or
-// tools wiring.
+// session id. Most tests use just this — they don't need parent
+// or tools wiring.
 func NewTestSessionState(sessionID string) *TestSessionState {
 	return &TestSessionState{id: sessionID}
 }
 
-// WithParent wires a parent TestSessionState so ParentValue walks
-// to it. Returns the receiver so callers can chain.
+// WithParent wires a parent TestSessionState so Parent() returns
+// it. Returns the receiver so callers can chain.
 func (s *TestSessionState) WithParent(parent *TestSessionState) *TestSessionState {
 	s.parentRef = parent
-	if parent != nil {
-		s.parent = parent.id
-	}
 	return s
 }
 
@@ -47,22 +45,20 @@ func (s *TestSessionState) SetTools(tm *tool.ToolManager) { s.tools = tm }
 // SessionID implements [extension.SessionState].
 func (s *TestSessionState) SessionID() string { return s.id }
 
-// ParentID implements [extension.SessionState].
-func (s *TestSessionState) ParentID() string { return s.parent }
-
 // SetValue implements [extension.SessionState].
 func (s *TestSessionState) SetValue(name string, value any) { s.state.Store(name, value) }
 
 // Value implements [extension.SessionState].
 func (s *TestSessionState) Value(name string) (any, bool) { return s.state.Load(name) }
 
-// ParentValue implements [extension.SessionState]. Returns nothing
-// when no parent was attached via [TestSessionState.WithParent].
-func (s *TestSessionState) ParentValue(name string) (any, bool) {
+// Parent implements [extension.SessionState]. Returns the wired
+// parent or (nil, false) when no parent was attached via
+// [TestSessionState.WithParent].
+func (s *TestSessionState) Parent() (extension.SessionState, bool) {
 	if s.parentRef == nil {
 		return nil, false
 	}
-	return s.parentRef.Value(name)
+	return s.parentRef, true
 }
 
 // Tools implements [extension.SessionState]. Returns whatever was
