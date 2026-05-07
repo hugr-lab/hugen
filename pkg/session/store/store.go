@@ -10,9 +10,23 @@ import (
 	"github.com/hugr-lab/query-engine/types"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/tools/notepad"
 	"github.com/hugr-lab/hugen/pkg/store/queries"
 )
+
+// NoteRow mirrors hub.db.agent.session_notes — the persistence
+// shape RuntimeStore implementations work with. JSON tags match
+// queries.RunQuery decoding. The notepad extension owns the
+// in-memory Note type and the higher-level wrapper around this
+// shape; the row itself stays here next to RuntimeStore.AppendNote
+// so the persistence column stays the single source of truth.
+type NoteRow struct {
+	ID              string    `json:"id"`
+	AgentID         string    `json:"agent_id"`
+	SessionID       string    `json:"session_id"`
+	AuthorSessionID string    `json:"author_session_id"`
+	Content         string    `json:"content"`
+	CreatedAt       time.Time `json:"created_at"`
+}
 
 // Sentinel errors returned by RuntimeStore implementations.
 var (
@@ -109,8 +123,8 @@ type RuntimeStore interface {
 	AppendEvent(ctx context.Context, ev EventRow, summary string) error
 	ListEvents(ctx context.Context, sessionID string, opts ListEventsOpts) ([]EventRow, error)
 	NextSeq(ctx context.Context, sessionID string) (int, error)
-	AppendNote(ctx context.Context, note notepad.NoteRow) error
-	ListNotes(ctx context.Context, sessionID string, limit int) ([]notepad.NoteRow, error)
+	AppendNote(ctx context.Context, note NoteRow) error
+	ListNotes(ctx context.Context, sessionID string, limit int) ([]NoteRow, error)
 	ListSessions(ctx context.Context, agentID, status string) ([]SessionRow, error)
 	// ListChildren returns every session whose parent_session_id equals
 	// parentID. Used by the phase-4 restart BFS walker to traverse
@@ -340,7 +354,7 @@ func (s *RuntimeStoreLocal) ListEvents(ctx context.Context, sessionID string, op
 	return rows, nil
 }
 
-func (s *RuntimeStoreLocal) AppendNote(ctx context.Context, note notepad.NoteRow) error {
+func (s *RuntimeStoreLocal) AppendNote(ctx context.Context, note NoteRow) error {
 	if note.ID == "" {
 		return fmt.Errorf("runtime store: AppendNote requires ID")
 	}
@@ -370,11 +384,11 @@ func (s *RuntimeStoreLocal) AppendNote(ctx context.Context, note notepad.NoteRow
 	)
 }
 
-func (s *RuntimeStoreLocal) ListNotes(ctx context.Context, sessionID string, limit int) ([]notepad.NoteRow, error) {
+func (s *RuntimeStoreLocal) ListNotes(ctx context.Context, sessionID string, limit int) ([]NoteRow, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := queries.RunQuery[[]notepad.NoteRow](ctx, s.querier,
+	rows, err := queries.RunQuery[[]NoteRow](ctx, s.querier,
 		`query ($sid: String!, $limit: Int) {
 			hub { db { agent {
 				session_notes(

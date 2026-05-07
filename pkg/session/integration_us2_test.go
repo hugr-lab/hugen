@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 )
 
 // TestUS2_PlanSurvivesRestart exercises phase-4-spec §13.2 #12: a

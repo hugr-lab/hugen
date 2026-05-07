@@ -8,28 +8,28 @@ import (
 	"testing"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
-	notepadpkg "github.com/hugr-lab/hugen/pkg/session/tools/notepad"
-	"github.com/hugr-lab/hugen/pkg/tool"
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 // fakeStore is the minimal notepad.Store the handler needs —
 // records appended rows in memory + serves them back via List.
 type fakeStore struct {
 	mu   sync.Mutex
-	rows []notepadpkg.NoteRow
+	rows []store.NoteRow
 }
 
-func (f *fakeStore) AppendNote(_ context.Context, row notepadpkg.NoteRow) error {
+func (f *fakeStore) AppendNote(_ context.Context, row store.NoteRow) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rows = append(f.rows, row)
 	return nil
 }
 
-func (f *fakeStore) ListNotes(_ context.Context, sessionID string, _ int) ([]notepadpkg.NoteRow, error) {
+func (f *fakeStore) ListNotes(_ context.Context, sessionID string, _ int) ([]store.NoteRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]notepadpkg.NoteRow, 0, len(f.rows))
+	out := make([]store.NoteRow, 0, len(f.rows))
 	for _, r := range f.rows {
 		if r.SessionID == sessionID {
 			out = append(out, r)
@@ -38,37 +38,16 @@ func (f *fakeStore) ListNotes(_ context.Context, sessionID string, _ int) ([]not
 	return out, nil
 }
 
-// fakeState implements extension.SessionState — sync.Map-backed Value/
-// SetValue plus stable SessionID/ParentID strings. Used by the
-// handler tests so they don't need a full *session.Session.
-type fakeState struct {
-	id, parent string
-	state      sync.Map
-}
-
-func (f *fakeState) SessionID() string { return f.id }
-func (f *fakeState) ParentID() string  { return f.parent }
-func (f *fakeState) SetValue(name string, value any) {
-	f.state.Store(name, value)
-}
-func (f *fakeState) Value(name string) (any, bool) {
-	return f.state.Load(name)
-}
-func (f *fakeState) ParentValue(_ string) (any, bool) { return nil, false }
-
-// Tools returns nil — notepad handler tests don't dynamically
-// mount providers. Real Session implementations return the
-// per-session child manager.
-func (f *fakeState) Tools() *tool.ToolManager { return nil }
-
 // newFixture builds an Extension + a state seeded by InitState so
 // every test starts from "fresh, ready-to-call" — same shape the
-// runtime gives a brand-new session.
-func newFixture(t *testing.T) (*Extension, *fakeState, *fakeStore) {
+// runtime gives a brand-new session. Uses the shared
+// [fixture.TestSessionState] so future extensions reuse the same
+// SessionState fake.
+func newFixture(t *testing.T) (*Extension, *fixture.TestSessionState, *fakeStore) {
 	t.Helper()
 	store := &fakeStore{}
-	ext := New(store, "agent-test")
-	state := &fakeState{id: "ses-test"}
+	ext := NewExtension(store, "agent-test")
+	state := fixture.NewTestSessionState("ses-test")
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -76,14 +55,14 @@ func newFixture(t *testing.T) (*Extension, *fakeState, *fakeStore) {
 }
 
 func TestExtension_Name(t *testing.T) {
-	ext := New(&fakeStore{}, "a1")
+	ext := NewExtension(&fakeStore{}, "a1")
 	if got := ext.Name(); got != "notepad" {
 		t.Errorf("Name = %q, want notepad", got)
 	}
 }
 
 func TestExtension_List(t *testing.T) {
-	ext := New(&fakeStore{}, "a1")
+	ext := NewExtension(&fakeStore{}, "a1")
 	tools, err := ext.List(context.Background())
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -159,7 +138,7 @@ func TestCallAppend_EmptyText(t *testing.T) {
 }
 
 func TestCallAppend_NoSessionInContext(t *testing.T) {
-	ext := New(&fakeStore{}, "a1")
+	ext := NewExtension(&fakeStore{}, "a1")
 	args, _ := json.Marshal(appendInput{Text: "x"})
 	out, err := ext.Call(context.Background(), "notepad:append", args)
 	if err != nil {

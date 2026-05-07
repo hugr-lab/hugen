@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/session/tools/whiteboard"
 )
 

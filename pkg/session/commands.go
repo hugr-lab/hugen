@@ -11,7 +11,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/tools/notepad"
+	"github.com/hugr-lab/hugen/pkg/extension/notepad"
 )
 
 // ErrCommandExists is returned by CommandRegistry.Register when a

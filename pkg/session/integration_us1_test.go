@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 )
 
 // TestUS1_CancelCascade_TwoDeep exercises phase-4-spec §13.2 #5: a

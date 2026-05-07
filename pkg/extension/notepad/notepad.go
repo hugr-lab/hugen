@@ -1,12 +1,14 @@
-// Package notepad is the session extension that exposes the
-// per-session notepad as the LLM-facing tool "notepad:append" and
-// stashes the per-session [notepad.Notepad] handle in
-// [extension.SessionState] under the key "notepad".
+// Package notepad bundles everything for the notepad session
+// extension into one place: the per-session [Notepad] type
+// (Append/List around the persistence layer), the narrow [Store]
+// interface RuntimeStore satisfies, and the [Extension] wrapper
+// that exposes "notepad:append" as a tool.ToolProvider and stashes
+// per-session [Notepad] handles in [extension.SessionState] under
+// [StateKey].
 //
 // The extension is an agent-level singleton constructed once at
-// runtime boot with a notepad.Store + the agent's id; every
-// session gets its own *notepad.Notepad handle initialised by
-// InitState.
+// runtime boot with a Store + the agent's id; every session gets
+// its own *Notepad handle initialised by InitState.
 package notepad
 
 import (
@@ -15,12 +17,11 @@ import (
 	"fmt"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
-	notepadpkg "github.com/hugr-lab/hugen/pkg/session/tools/notepad"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
-// StateKey is the [extension.SessionState] key the extension stores its
-// per-session [notepad.Notepad] handle under. Exported so callers
+// StateKey is the [extension.SessionState] key the extension stores
+// its per-session [Notepad] handle under. Exported so callers
 // looking up the handle from outside the extension (legacy
 // session.Notepad accessor, command env wiring) can do so without
 // magic strings.
@@ -40,15 +41,15 @@ const providerName = "notepad"
 // is shared across every session under one Manager; per-session
 // state lives in [extension.SessionState] under [StateKey].
 type Extension struct {
-	store   notepadpkg.Store
+	store   Store
 	agentID string
 }
 
-// New constructs the notepad extension. store is the persistence
-// surface (typically the agent's RuntimeStore) and agentID is the
-// owning agent's id stamped onto every NoteRow.
-func New(store notepadpkg.Store, agentID string) *Extension {
-	return &Extension{store: store, agentID: agentID}
+// NewExtension constructs the notepad extension. s is the
+// persistence surface (typically the agent's RuntimeStore) and
+// agentID is the owning agent's id stamped onto every NoteRow.
+func NewExtension(s Store, agentID string) *Extension {
+	return &Extension{store: s, agentID: agentID}
 }
 
 // Compile-time interface assertions.
@@ -68,22 +69,22 @@ func (e *Extension) Name() string { return providerName }
 func (e *Extension) Lifetime() tool.Lifetime { return tool.LifetimePerAgent }
 
 // InitState implements [extension.StateInitializer]. Allocates a
-// fresh [notepad.Notepad] for the calling session and stashes it
-// under [StateKey].
+// fresh [Notepad] for the calling session and stashes it under
+// [StateKey].
 func (e *Extension) InitState(_ context.Context, state extension.SessionState) error {
-	state.SetValue(StateKey, notepadpkg.New(e.store, e.agentID, state.SessionID()))
+	state.SetValue(StateKey, New(e.store, e.agentID, state.SessionID()))
 	return nil
 }
 
-// FromState returns the *notepad.Notepad handle for state, or nil
-// if the extension has not run InitState for it (e.g. a session
-// created without the notepad extension registered).
-func FromState(state extension.SessionState) *notepadpkg.Notepad {
+// FromState returns the *Notepad handle for state, or nil if the
+// extension has not run InitState for it (e.g. a session created
+// without the notepad extension registered).
+func FromState(state extension.SessionState) *Notepad {
 	v, ok := state.Value(StateKey)
 	if !ok {
 		return nil
 	}
-	n, _ := v.(*notepadpkg.Notepad)
+	n, _ := v.(*Notepad)
 	return n
 }
 

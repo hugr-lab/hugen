@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 )
 
 // integration_restart_test.go covers the phase-4 acceptance scenarios

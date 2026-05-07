@@ -6,7 +6,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	notepadext "github.com/hugr-lab/hugen/pkg/extension/notepad"
-	"github.com/hugr-lab/hugen/pkg/session/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 )
 
 // TestNotepadExtension_RegisteredOnSession boots a session with
@@ -20,7 +20,7 @@ func TestNotepadExtension_RegisteredOnSession(t *testing.T) {
 	store := fixture.NewTestStore()
 	parent, cleanup := newTestParent(t,
 		withTestStore(store),
-		withTestExtensions(notepadext.New(store, "a1")),
+		withTestExtensions(notepadext.NewExtension(store, "a1")),
 	)
 	defer cleanup()
 

@@ -27,7 +27,7 @@ import (
 // ToolProvider) AddProvider on Core.Tools.
 func phaseExtensions(_ context.Context, core *Core) error {
 	exts := []extension.Extension{
-		notepadext.New(core.Store, core.Agent.ID()),
+		notepadext.NewExtension(core.Store, core.Agent.ID()),
 	}
 
 	for _, ext := range exts {

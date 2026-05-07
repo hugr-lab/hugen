@@ -1,8 +1,3 @@
-// Package notepad owns the per-session notepad type that records
-// agent and operator notes. Phase 4.1a step 17 lifts the previous
-// pkg/session.Notepad into its own subpackage; pkg/session keeps
-// type aliases for back-compat so external callers (cmd/hugen,
-// adapters) compile unchanged.
 package notepad
 
 import (
@@ -11,11 +6,16 @@ import (
 	"encoding/hex"
 	"fmt"
 	"time"
+
+	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 const noteMaxBytes = 64 * 1024
 
-// Note is the in-memory representation of a session note.
+// Note is the in-memory representation of a session note returned
+// by [Notepad.List]. The persistence shape lives next to the
+// store interface as [store.NoteRow]; Note is the ergonomic view
+// extensions and slash-command handlers consume.
 type Note struct {
 	ID        string
 	SessionID string
@@ -24,25 +24,11 @@ type Note struct {
 	CreatedAt time.Time
 }
 
-// NoteRow mirrors hub.db.agent.session_notes — the persistence
-// shape Store implementations work with. Owned here so the Store
-// interface and the on-disk row stay in lock-step. JSON tags
-// preserve compatibility with queries.RunQuery decoding.
-type NoteRow struct {
-	ID              string    `json:"id"`
-	AgentID         string    `json:"agent_id"`
-	SessionID       string    `json:"session_id"`
-	AuthorSessionID string    `json:"author_session_id"`
-	Content         string    `json:"content"`
-	CreatedAt       time.Time `json:"created_at"`
-}
-
 // Store is the narrow persistence surface the notepad needs. The
-// session.RuntimeStore satisfies it implicitly via the NoteRow
-// type alias declared in pkg/session.
+// session/store.RuntimeStore satisfies it implicitly.
 type Store interface {
-	AppendNote(ctx context.Context, row NoteRow) error
-	ListNotes(ctx context.Context, sessionID string, limit int) ([]NoteRow, error)
+	AppendNote(ctx context.Context, row store.NoteRow) error
+	ListNotes(ctx context.Context, sessionID string, limit int) ([]store.NoteRow, error)
 }
 
 // Notepad gives a Session a typed handle on its notes table. All
@@ -67,7 +53,7 @@ func (n *Notepad) Append(ctx context.Context, authorID, text string) (string, er
 		return "", fmt.Errorf("notepad: text exceeds %d bytes", noteMaxBytes)
 	}
 	id := newNoteID()
-	row := NoteRow{
+	row := store.NoteRow{
 		ID:              id,
 		AgentID:         n.agentID,
 		SessionID:       n.sessionID,

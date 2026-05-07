@@ -9,7 +9,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
-	"github.com/hugr-lab/hugen/pkg/session/tools/notepad"
 )
 
 // ErrDepthExceeded is returned by parent.Spawn when the new
@@ -40,7 +39,7 @@ var (
 )
 
 type (
-	NoteRow = notepad.NoteRow
+	NoteRow = store.NoteRow
 )
 
 // New creates a fresh root Session. Thin public wrapper over the

@@ -5,9 +5,72 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/session/store"
-	"github.com/hugr-lab/hugen/pkg/session/tools/notepad"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
+
+// TestSessionState is a minimal in-memory [extension.SessionState]
+// for tests that drive extensions / tool providers without a real
+// *session.Session. Value/SetValue are sync.Map-backed; Tools()
+// returns whatever the test installs via [TestSessionState.SetTools]
+// (nil by default). Parent linkage is set via [TestSessionState.WithParent].
+type TestSessionState struct {
+	id, parent string
+	tools      *tool.ToolManager
+	parentRef  *TestSessionState
+	state      sync.Map
+}
+
+// NewTestSessionState builds a TestSessionState bound to the given
+// session id. Most tests use just this — they don't need parent or
+// tools wiring.
+func NewTestSessionState(sessionID string) *TestSessionState {
+	return &TestSessionState{id: sessionID}
+}
+
+// WithParent wires a parent TestSessionState so ParentValue walks
+// to it. Returns the receiver so callers can chain.
+func (s *TestSessionState) WithParent(parent *TestSessionState) *TestSessionState {
+	s.parentRef = parent
+	if parent != nil {
+		s.parent = parent.id
+	}
+	return s
+}
+
+// SetTools installs a ToolManager that Tools() returns. Tests
+// exercising dynamic-provider mounting via state.Tools().AddProvider
+// pass a real manager here.
+func (s *TestSessionState) SetTools(tm *tool.ToolManager) { s.tools = tm }
+
+// SessionID implements [extension.SessionState].
+func (s *TestSessionState) SessionID() string { return s.id }
+
+// ParentID implements [extension.SessionState].
+func (s *TestSessionState) ParentID() string { return s.parent }
+
+// SetValue implements [extension.SessionState].
+func (s *TestSessionState) SetValue(name string, value any) { s.state.Store(name, value) }
+
+// Value implements [extension.SessionState].
+func (s *TestSessionState) Value(name string) (any, bool) { return s.state.Load(name) }
+
+// ParentValue implements [extension.SessionState]. Returns nothing
+// when no parent was attached via [TestSessionState.WithParent].
+func (s *TestSessionState) ParentValue(name string) (any, bool) {
+	if s.parentRef == nil {
+		return nil, false
+	}
+	return s.parentRef.Value(name)
+}
+
+// Tools implements [extension.SessionState]. Returns whatever was
+// installed via [TestSessionState.SetTools]; nil by default.
+func (s *TestSessionState) Tools() *tool.ToolManager { return s.tools }
+
+// Compile-time interface assertion.
+var _ extension.SessionState = (*TestSessionState)(nil)
 
 // TestStore is a minimal in-memory RuntimeStore. It supports multiple
 // sessions so phase-4 spawn / restart tests can build small parent /
@@ -20,7 +83,7 @@ import (
 type TestStore struct {
 	mu       sync.Mutex
 	Events   map[string][]store.EventRow // by sessionID
-	Notes    []notepad.NoteRow
+	Notes    []store.NoteRow
 	Sessions map[string]store.SessionRow // by sessionID
 	Seq      map[string]int              // per-session seq cursor
 }
@@ -94,17 +157,17 @@ func (s *TestStore) NextSeq(_ context.Context, sessionID string) (int, error) {
 	return s.Seq[sessionID] + 1, nil
 }
 
-func (s *TestStore) AppendNote(_ context.Context, n notepad.NoteRow) error {
+func (s *TestStore) AppendNote(_ context.Context, n store.NoteRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Notes = append(s.Notes, n)
 	return nil
 }
 
-func (s *TestStore) ListNotes(_ context.Context, _ string, _ int) ([]notepad.NoteRow, error) {
+func (s *TestStore) ListNotes(_ context.Context, _ string, _ int) ([]store.NoteRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]notepad.NoteRow(nil), s.Notes...), nil
+	return append([]store.NoteRow(nil), s.Notes...), nil
 }
 
 func (s *TestStore) ListSessions(_ context.Context, _, _ string) ([]store.SessionRow, error) {
