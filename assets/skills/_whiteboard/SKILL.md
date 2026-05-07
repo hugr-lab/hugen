@@ -3,12 +3,12 @@ name: _whiteboard
 description: Parent-mediated broadcast channel that lets parallel sub-agents share findings in real time. Bounded retention, ordered delivery.
 license: Apache-2.0
 allowed-tools:
-  - provider: session
+  - provider: whiteboard
     tools:
-      - whiteboard_init
-      - whiteboard_write
-      - whiteboard_read
-      - whiteboard_stop
+      - init
+      - write
+      - read
+      - stop
 metadata:
   hugen:
     requires_skills: []
@@ -45,17 +45,17 @@ right cadence.
 
 ## The four tools
 
-- `session:whiteboard_init` — open a board on YOUR session. Idempotent;
+- `whiteboard:init` — open a board on YOUR session. Idempotent;
   re-init on an active board is a no-op. Children spawned AFTER init
   see the board automatically; children spawned before do not.
-- `session:whiteboard_write` — append a broadcast. Caller must be a
+- `whiteboard:write` — append a broadcast. Caller must be a
   sub-agent whose parent has an active board. Author is auto-stamped
   from your session id. Returns `no_active_whiteboard` if the parent
   closed the board between dispatch and arrival.
-- `session:whiteboard_read` — read the current projection. Returns
+- `whiteboard:read` — read the current projection. Returns
   your own hosted board if active, otherwise the parent's board you
   are a member of. Returns `active=false` when neither applies.
-- `session:whiteboard_stop` — close the board you host. New writes
+- `whiteboard:stop` — close the board you host. New writes
   from members surface `no_active_whiteboard`. Idempotent.
 
 ## Caps

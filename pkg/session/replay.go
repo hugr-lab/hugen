@@ -2,14 +2,12 @@ package session
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
-	"github.com/hugr-lab/hugen/pkg/session/tools/whiteboard"
 )
 
 // defaultHistoryWindow is the number of most-recent events the
@@ -25,13 +23,9 @@ const defaultHistoryWindow = 50
 // Re-derived projections (phase-4):
 //   - history: most-recent user/agent text messages within the
 //     window cap (placeholder for phase-5 compactor).
-//   - whiteboard: full whiteboard_op replay through
-//     pkg/session/whiteboard.Project. The board reads the full
-//     event log so it survives history truncation and process
-//     restart.
 //
-// Extension-owned projections (plan, skill, …) ride the
-// [extension.Recovery] hook below — every Recovery-implementing
+// Extension-owned projections (plan, whiteboard, skill, …) ride
+// the [extension.Recovery] hook below — every Recovery-implementing
 // extension sees the same full event slice and rebuilds its own
 // state.
 func (s *Session) materialise(ctx context.Context) error {
@@ -46,10 +40,6 @@ func (s *Session) materialise(ctx context.Context) error {
 			return
 		}
 		s.history = projectHistory(rows, defaultHistoryWindow)
-
-		s.whiteboardMu.Lock()
-		s.whiteboard = whiteboard.Project(whiteboardEventsFrom(rows))
-		s.whiteboardMu.Unlock()
 
 		// Soft-warning idempotency derives from the event log so a
 		// restart that loses in-memory state still skips re-emission.
@@ -78,66 +68,6 @@ func (s *Session) materialise(ctx context.Context) error {
 		s.materialised.Store(true)
 	})
 	return firstErr
-}
-
-// whiteboardEventsFrom selects whiteboard_op rows from the session's
-// full event list and converts each into a whiteboard.ProjectEvent.
-// The session package owns this conversion so pkg/session/whiteboard
-// stays free of EventRow / store imports.
-func whiteboardEventsFrom(rows []store.EventRow) []whiteboard.ProjectEvent {
-	out := make([]whiteboard.ProjectEvent, 0)
-	for _, r := range rows {
-		if protocol.Kind(r.EventType) != protocol.KindWhiteboardOp {
-			continue
-		}
-		ev := whiteboard.ProjectEvent{At: r.CreatedAt}
-		if r.Metadata != nil {
-			if v, ok := r.Metadata["op"].(string); ok {
-				ev.Op = v
-			}
-			if v, ok := r.Metadata["text"].(string); ok {
-				ev.Text = v
-			}
-			if v, ok := r.Metadata["from_session_id"].(string); ok {
-				ev.FromSessionID = v
-			}
-			if v, ok := r.Metadata["from_role"].(string); ok {
-				ev.FromRole = v
-			}
-			if v, ok := r.Metadata["truncated"].(bool); ok {
-				ev.Truncated = v
-			}
-			if v, ok := r.Metadata["seq"]; ok {
-				switch t := v.(type) {
-				case float64:
-					ev.Seq = int64(t)
-				case int64:
-					ev.Seq = t
-				case int:
-					ev.Seq = int64(t)
-				}
-			}
-		}
-		if ev.Op == "" {
-			if raw, ok := r.Metadata["payload"]; ok {
-				b, _ := json.Marshal(raw)
-				var p protocol.WhiteboardOpPayload
-				if json.Unmarshal(b, &p) == nil {
-					ev.Op = p.Op
-					ev.Text = p.Text
-					ev.FromSessionID = p.FromSessionID
-					ev.FromRole = p.FromRole
-					ev.Truncated = p.Truncated
-					ev.Seq = p.Seq
-				}
-			}
-		}
-		if ev.Op == "" {
-			continue
-		}
-		out = append(out, ev)
-	}
-	return out
 }
 
 // projectHistory walks events newest-last and keeps the most recent

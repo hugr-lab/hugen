@@ -42,14 +42,6 @@ func TestCodec_RoundTrip(t *testing.T) {
 			Op: "comment", Text: "found A,B,C", CurrentStep: "step 2",
 		})},
 		{"plan_op_clear", NewPlanOp("s1", testAgent, PlanOpPayload{Op: "clear"})},
-		{"whiteboard_op_init", NewWhiteboardOp("s1", "", testAgent, WhiteboardOpPayload{Op: "init"})},
-		{"whiteboard_op_write", NewWhiteboardOp("s1", "s2", testAgent, WhiteboardOpPayload{
-			Op: "write", Seq: 7, FromSessionID: "s2", FromRole: "explorer", Text: "found auth_logs",
-		})},
-		{"whiteboard_op_stop", NewWhiteboardOp("s1", "", testAgent, WhiteboardOpPayload{Op: "stop"})},
-		{"whiteboard_message", NewWhiteboardMessage("s1", "s3", testAgent, WhiteboardMessagePayload{
-			FromSessionID: "s2", FromRole: "explorer", Seq: 7, Text: "found auth_logs",
-		})},
 		{"session_terminated", NewSessionTerminated("s1", testAgent, SessionTerminatedPayload{
 			Reason: TerminationHardCeiling, TurnsUsed: 30,
 		})},
@@ -203,17 +195,6 @@ func TestCodec_PayloadIntegrity_Phase4(t *testing.T) {
 			t.Errorf("clear payload drift: %+v", got)
 		}
 	})
-	t.Run("whiteboard_op_truncated_flag", func(t *testing.T) {
-		in := NewWhiteboardOp("h", "c", testAgent, WhiteboardOpPayload{
-			Op: "write", Seq: 99, FromSessionID: "c", FromRole: "x", Text: "y", Truncated: true,
-		})
-		data, _ := codec.EncodeFrame(in)
-		out, _ := codec.DecodeFrame(data)
-		got := out.(*WhiteboardOp).Payload
-		if !got.Truncated || got.Seq != 99 {
-			t.Errorf("write payload drift: %+v", got)
-		}
-	})
 	t.Run("session_terminated_with_result", func(t *testing.T) {
 		in := NewSessionTerminated("s", testAgent, SessionTerminatedPayload{
 			Reason: TerminationCompleted, Result: "final answer", TurnsUsed: 3,
@@ -244,8 +225,6 @@ func TestValidate_Phase4(t *testing.T) {
 			SessionID: "c",
 		}), true},
 		{"plan_op_invalid_op", NewPlanOp("s", testAgent, PlanOpPayload{Op: "rename"}), true},
-		{"whiteboard_op_invalid_op", NewWhiteboardOp("s", "", testAgent, WhiteboardOpPayload{Op: "spin"}), true},
-		{"whiteboard_message_missing_from", NewWhiteboardMessage("h", "r", testAgent, WhiteboardMessagePayload{}), true},
 		{"session_terminated_missing_reason", NewSessionTerminated("s", testAgent, SessionTerminatedPayload{}), true},
 		{"system_message_missing_kind", NewSystemMessage("s", testAgent, "", "x"), true},
 	}

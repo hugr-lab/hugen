@@ -11,9 +11,9 @@ import (
 
 // Session implements tool.ToolProvider directly. The "session:*"
 // catalogue is a static dispatch table populated by per-tool init()
-// funcs in tools_subagent.go / tools_whiteboard.go — handlers are
-// methods on *Session so they read s.store / s.logger / s.perms
-// directly without an injected leaf-deps host.
+// funcs in tools_subagent.go — handlers are methods on *Session so
+// they read s.store / s.logger / s.perms directly without an
+// injected leaf-deps host.
 //
 // Lifetime is PerSession so Resources.Acquire registers each
 // Session onto its own child ToolManager; teardown drops the
@@ -29,7 +29,6 @@ const sessionToolProviderName = "session"
 func (s *Session) initTools() {
 	s.sessionTools = map[string]sessionToolDescriptor{}
 	s.initSubagent()
-	s.initWhiteboard()
 }
 
 // sessionToolHandler dispatches one session-scoped tool call. The

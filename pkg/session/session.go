@@ -16,7 +16,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
-	"github.com/hugr-lab/hugen/pkg/session/tools/whiteboard"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -146,18 +145,6 @@ type Session struct {
 	materialised atomic.Bool
 	matOnce      sync.Once
 	history      []model.Message
-
-	// whiteboard is the in-memory projection of whiteboard_op
-	// events (US3). On a host session it carries the canonical
-	// message log + NextSeq; on a member session it carries the
-	// member's own snapshot of broadcasts received. Built once at
-	// materialise and updated by the four whiteboard_* tool
-	// handlers (host side) and the member-side internal handler
-	// for inbound whiteboard_message Frames. whiteboardMu serialises
-	// the seq-allocate + emit + Apply sequence on the host so two
-	// concurrent broadcasts can't reuse the same seq.
-	whiteboardMu sync.Mutex
-	whiteboard   whiteboard.Whiteboard
 
 	// stuck is the in-memory rising-edge state for the three stuck-
 	// detection heuristics (phase-4-spec §8.3). Owned by Run; mutated
@@ -462,21 +449,6 @@ func (s *Session) MarkMaterialised() { s.materialised.Store(true) }
 // composition without driving a full turn.
 func (s *Session) SystemPrompt(ctx context.Context) string {
 	return s.systemPrompt(ctx)
-}
-
-// WhiteboardSnapshot returns a deep copy of the whiteboard
-// projection taken under the projection mutex. Tests use this to
-// assert host vs. member projections without poking the internal
-// mutex/field directly. The returned struct is independent of the
-// session's live projection — mutations on it do not flow back.
-func (s *Session) WhiteboardSnapshot() whiteboard.Whiteboard {
-	s.whiteboardMu.Lock()
-	defer s.whiteboardMu.Unlock()
-	wb := s.whiteboard
-	if len(wb.Messages) > 0 {
-		wb.Messages = append([]whiteboard.Message(nil), wb.Messages...)
-	}
-	return wb
 }
 
 // ActiveToolFeed returns the currently-registered ToolFeed for the

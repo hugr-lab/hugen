@@ -135,3 +135,13 @@ func newTestParent(t *testing.T, opts ...testParentOpt) (*Session, func()) {
 	}
 	return parent, cleanup
 }
+
+// kindsOnly is a debug helper for failing assertions — extracts the
+// sequence of event kinds for a more readable error message.
+func kindsOnly(rows []EventRow) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.EventType)
+	}
+	return out
+}

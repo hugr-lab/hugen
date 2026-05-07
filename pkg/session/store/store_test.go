@@ -34,18 +34,23 @@ func TestFrameToEventRow_RoundTrip_Phase4(t *testing.T) {
 		{"plan_op_clear", func() protocol.Frame {
 			return protocol.NewPlanOp("s", author, protocol.PlanOpPayload{Op: "clear"})
 		}},
-		{"whiteboard_op_init", func() protocol.Frame {
-			return protocol.NewWhiteboardOp("h", "", author, protocol.WhiteboardOpPayload{Op: "init"})
+		{"extension_frame_whiteboard_init", func() protocol.Frame {
+			return protocol.NewExtensionFrame("h", author, "whiteboard",
+				protocol.CategoryOp, "init", nil)
 		}},
-		{"whiteboard_op_write", func() protocol.Frame {
-			return protocol.NewWhiteboardOp("h", "c", author, protocol.WhiteboardOpPayload{
-				Op: "write", Seq: 7, FromSessionID: "c", FromRole: "explorer", Text: "found x",
-			})
+		{"extension_frame_whiteboard_write", func() protocol.Frame {
+			f := protocol.NewExtensionFrame("h", author, "whiteboard",
+				protocol.CategoryOp, "write",
+				[]byte(`{"seq":7,"from_session_id":"c","from_role":"explorer","text":"found x"}`))
+			f.BaseFrame.FromSession = "c"
+			return f
 		}},
-		{"whiteboard_message", func() protocol.Frame {
-			return protocol.NewWhiteboardMessage("h", "r", author, protocol.WhiteboardMessagePayload{
-				FromSessionID: "c", FromRole: "explorer", Seq: 7, Text: "found x",
-			})
+		{"extension_frame_whiteboard_message", func() protocol.Frame {
+			f := protocol.NewExtensionFrame("r", author, "whiteboard",
+				protocol.CategoryMessage, "message",
+				[]byte(`{"seq":7,"from_session_id":"c","from_role":"explorer","text":"found x"}`))
+			f.BaseFrame.FromSession = "h"
+			return f
 		}},
 		{"session_terminated", func() protocol.Frame {
 			return protocol.NewSessionTerminated("s", author, protocol.SessionTerminatedPayload{

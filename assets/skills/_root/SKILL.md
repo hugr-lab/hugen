@@ -65,7 +65,7 @@ each one takes a process slot and adds latency.
 
 - `session:parent_context` — root has no parent. Calling it always
   surfaces `tool_error{code:"no_parent"}`.
-- `session:whiteboard_write` — the host of a whiteboard usually
+- `whiteboard:write` — the host of a whiteboard usually
   orchestrates rather than writing into its own broadcast channel.
   Override per skill if your deployment really needs this.
 

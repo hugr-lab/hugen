@@ -61,14 +61,6 @@ func TestProjectFrameToHistory_AllowList(t *testing.T) {
 			wantPrefix:  "[system: " + protocol.SystemMessageSoftWarning + "]",
 		},
 		{
-			name: "whiteboard_message defensive projection",
-			frame: protocol.NewWhiteboardMessage("s1", "host", author, protocol.WhiteboardMessagePayload{
-				FromSessionID: "child-A", FromRole: "explorer", Seq: 1, Text: "found db",
-			}),
-			wantAllowed: true,
-			wantPrefix:  "[system: " + protocol.SystemMessageWhiteboard + "]",
-		},
-		{
 			name:        "reasoning frame denied (default-deny)",
 			frame:       protocol.NewReasoning("s1", author, "thinking…", 0, false),
 			wantAllowed: false,

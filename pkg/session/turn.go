@@ -397,7 +397,7 @@ func (s *Session) turnComplete() bool {
 // next view of s.history. The drain runs each Frame through the §11
 // visibility filter (visibility.go::projectFrameToHistory) — default-
 // deny except the explicit allow-list (UserMessage, SubagentStarted,
-// SubagentResult, SystemMessage, WhiteboardMessage).
+// SubagentResult, SystemMessage).
 func (s *Session) advanceOrFinish(runCtx context.Context) {
 	st := s.turnState
 	if st == nil {

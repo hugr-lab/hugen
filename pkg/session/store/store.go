@@ -533,10 +533,22 @@ func FrameToEventRow(f protocol.Frame, agentID string) (EventRow, string, error)
 		row.Content = v.Payload.Result
 	case *protocol.PlanOp:
 		row.Content = v.Payload.Text
-	case *protocol.WhiteboardOp:
-		row.Content = v.Payload.Text
-	case *protocol.WhiteboardMessage:
-		row.Content = v.Payload.Text
+	case *protocol.ExtensionFrame:
+		// Extension-owned events (whiteboard, skill, notepad, …) put
+		// their human-readable surface — when one exists — into Content
+		// so query / digest paths that read Content directly still see
+		// it. Today only whiteboard write events carry text in their
+		// JSON payload; skill/notepad/plan use other fields. The codec
+		// already round-trips the full payload through Metadata, so a
+		// missing Content here is harmless.
+		if v.Payload.Op == "write" && len(v.Payload.Data) > 0 {
+			var data struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(v.Payload.Data, &data); err == nil {
+				row.Content = data.Text
+			}
+		}
 	case *protocol.SessionTerminated:
 		row.Content = v.Payload.Reason
 	case *protocol.SystemMessage:

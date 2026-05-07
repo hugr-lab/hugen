@@ -24,9 +24,9 @@ const (
 	// RouteInternal triggers a synchronous side-effect handler from
 	// internalHandlers — runs immediately (even mid-turn), persists
 	// any events the handler chooses, and discards the Frame: it
-	// never reaches s.history. Phase 4 reserves this for whiteboard
-	// host-side ops (kinds added in step 10); the table stays empty
-	// until then.
+	// never reaches s.history. Stage-7.2 (whiteboard ext) registered
+	// [protocol.KindExtensionFrame] so cross-session whiteboard ops
+	// route through the [extension.FrameRouter] capability.
 	RouteInternal
 
 	// RouteToolFeed forwards the Frame to s.activeToolFeed when one
@@ -42,20 +42,14 @@ const (
 //
 // Phase 4:
 //   - subagent_result → RouteToolFeed (consumed by wait_subagents).
-//   - whiteboard_op → RouteInternal on the host (handler validates
-//     active board, persists host-monotonic seq, broadcasts to
-//     children).
-//   - whiteboard_message → RouteInternal on the member (handler
-//     persists member's local whiteboard_op event, updates the
-//     in-memory projection, surfaces the broadcast to history as a
-//     formatted system_message so the model sees it on its next
-//     prompt build).
+//   - extension_frame → RouteInternal; dispatchExtensionFrame walks
+//     the registered extensions for a [extension.FrameRouter] match
+//     (canonical consumer today: whiteboard).
 //
 // Phase 5 HITL kinds register on landing.
 var kindRoutes = map[protocol.Kind]InboundRoute{
-	protocol.KindSubagentResult:    RouteToolFeed,
-	protocol.KindWhiteboardOp:      RouteInternal,
-	protocol.KindWhiteboardMessage: RouteInternal,
+	protocol.KindSubagentResult: RouteToolFeed,
+	protocol.KindExtensionFrame: RouteInternal,
 }
 
 // routeFor looks up the InboundRoute for a Frame Kind. Default is

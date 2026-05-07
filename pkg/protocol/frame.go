@@ -32,14 +32,14 @@ const (
 	KindError         Kind = "error"
 	KindSystemMarker  Kind = "system_marker"
 
-	// Phase-4 kinds (sub-agents, plan, whiteboard, runtime injections).
-	KindSubagentStarted    Kind = "subagent_started"
-	KindSubagentResult     Kind = "subagent_result"
-	KindPlanOp             Kind = "plan_op"
-	KindWhiteboardOp       Kind = "whiteboard_op"
-	KindWhiteboardMessage  Kind = "whiteboard_message"
-	KindSessionTerminated  Kind = "session_terminated"
-	KindSystemMessage      Kind = "system_message"
+	// Phase-4 kinds (sub-agents, plan, runtime injections). Whiteboard
+	// state-change events ride [KindExtensionFrame] with
+	// Extension="whiteboard" instead of dedicated kinds.
+	KindSubagentStarted   Kind = "subagent_started"
+	KindSubagentResult    Kind = "subagent_result"
+	KindPlanOp            Kind = "plan_op"
+	KindSessionTerminated Kind = "session_terminated"
+	KindSystemMessage     Kind = "system_message"
 
 	// Phase-4.1b-pre kind: SessionClose is the internal frame the
 	// session loop receives to begin teardown. It is NOT a transcript
@@ -393,29 +393,6 @@ type PlanOpPayload struct {
 	CurrentStep string `json:"current_step,omitempty"`
 }
 
-// WhiteboardOpPayload is appended to a host's events on
-// init/write/stop and to each receiving member's events on receipt of
-// a whiteboard_message Frame at turn-boundary drain. Seq is
-// host-monotonic; FromSessionID + FromRole + Text apply only to
-// op="write".
-type WhiteboardOpPayload struct {
-	Op             string `json:"op"`
-	Seq            int64  `json:"seq,omitempty"`
-	FromSessionID  string `json:"from_session_id,omitempty"`
-	FromRole       string `json:"from_role,omitempty"`
-	Text           string `json:"text,omitempty"`
-	Truncated      bool   `json:"truncated,omitempty"`
-}
-
-// WhiteboardMessagePayload is the host→member broadcast Frame; each
-// member persists its own WhiteboardOp{op:"write"} on receipt.
-type WhiteboardMessagePayload struct {
-	FromSessionID string `json:"from_session_id"`
-	FromRole      string `json:"from_role"`
-	Seq           int64  `json:"seq"`
-	Text          string `json:"text"`
-}
-
 // SessionTerminatedPayload is the sole terminal write for any
 // session. Reason is free-form; phase-4 writers use:
 // "completed", "hard_ceiling", "subagent_cancel: <rationale>",
@@ -487,16 +464,6 @@ type PlanOp struct {
 	Payload PlanOpPayload
 }
 
-type WhiteboardOp struct {
-	BaseFrame
-	Payload WhiteboardOpPayload
-}
-
-type WhiteboardMessage struct {
-	BaseFrame
-	Payload WhiteboardMessagePayload
-}
-
 type SessionTerminated struct {
 	BaseFrame
 	Payload SessionTerminatedPayload
@@ -547,8 +514,6 @@ func (f SystemMarker) payload() any      { return f.Payload }
 func (f SubagentStarted) payload() any   { return f.Payload }
 func (f SubagentResult) payload() any    { return f.Payload }
 func (f PlanOp) payload() any            { return f.Payload }
-func (f WhiteboardOp) payload() any      { return f.Payload }
-func (f WhiteboardMessage) payload() any { return f.Payload }
 func (f SessionTerminated) payload() any { return f.Payload }
 func (f SessionClose) payload() any      { return f.Payload }
 func (f SystemMessage) payload() any     { return f.Payload }
@@ -693,26 +658,6 @@ func NewPlanOp(sessionID string, author ParticipantInfo, p PlanOpPayload) *PlanO
 	}
 }
 
-// NewWhiteboardOp builds a whiteboard_op Frame. fromSessionID is the
-// author's session id for op="write" (echoed in BaseFrame.FromSession
-// for cross-session writes; empty for the host's own op="init"/"stop").
-func NewWhiteboardOp(sessionID, fromSessionID string, author ParticipantInfo, p WhiteboardOpPayload) *WhiteboardOp {
-	base := newBase(sessionID, KindWhiteboardOp, author)
-	if fromSessionID != "" {
-		base.FromSession = fromSessionID
-	}
-	return &WhiteboardOp{BaseFrame: base, Payload: p}
-}
-
-// NewWhiteboardMessage builds the host→member broadcast Frame.
-// hostSessionID is the broadcasting host (BaseFrame.FromSession).
-// recipientSessionID is the addressed sibling (BaseFrame.SessionID).
-func NewWhiteboardMessage(hostSessionID, recipientSessionID string, author ParticipantInfo, p WhiteboardMessagePayload) *WhiteboardMessage {
-	base := newBase(recipientSessionID, KindWhiteboardMessage, author)
-	base.FromSession = hostSessionID
-	return &WhiteboardMessage{BaseFrame: base, Payload: p}
-}
-
 func NewSessionTerminated(sessionID string, author ParticipantInfo, p SessionTerminatedPayload) *SessionTerminated {
 	return &SessionTerminated{
 		BaseFrame: newBase(sessionID, KindSessionTerminated, author),
@@ -791,16 +736,6 @@ func Validate(f Frame) error {
 		case "set", "comment", "clear":
 		default:
 			return fmt.Errorf("protocol: plan_op invalid op %q", v.Payload.Op)
-		}
-	case *WhiteboardOp:
-		switch v.Payload.Op {
-		case "init", "write", "stop":
-		default:
-			return fmt.Errorf("protocol: whiteboard_op invalid op %q", v.Payload.Op)
-		}
-	case *WhiteboardMessage:
-		if v.Payload.FromSessionID == "" {
-			return fmt.Errorf("protocol: whiteboard_message missing from_session_id")
 		}
 	case *SessionTerminated:
 		if v.Payload.Reason == "" {

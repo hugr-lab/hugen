@@ -178,18 +178,6 @@ func (c *Codec) materialise(base BaseFrame, payload []byte) (Frame, error) {
 			return nil, err
 		}
 		return &PlanOp{BaseFrame: base, Payload: p}, nil
-	case KindWhiteboardOp:
-		var p WhiteboardOpPayload
-		if err := unmarshalPayload(payload, &p); err != nil {
-			return nil, err
-		}
-		return &WhiteboardOp{BaseFrame: base, Payload: p}, nil
-	case KindWhiteboardMessage:
-		var p WhiteboardMessagePayload
-		if err := unmarshalPayload(payload, &p); err != nil {
-			return nil, err
-		}
-		return &WhiteboardMessage{BaseFrame: base, Payload: p}, nil
 	case KindSessionTerminated:
 		var p SessionTerminatedPayload
 		if err := unmarshalPayload(payload, &p); err != nil {

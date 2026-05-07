@@ -1,13 +1,13 @@
-// Package whiteboard is the pure projection layer for phase-4 §7.
-// A whiteboard is a parent-mediated broadcast channel: the host
-// owns the canonical list of messages, members each persist their
-// own copy on receipt of a broadcast Frame.
+// Package whiteboard is the parent-mediated broadcast extension —
+// the host owns a canonical list of messages, members each persist
+// their own copy on receipt of a broadcast Frame.
 //
-// This package is deliberately independent of pkg/session and
-// pkg/protocol — it walks a flat ProjectEvent slice and emits a
-// Whiteboard projection. The session package converts EventRow /
-// WhiteboardOpPayload into ProjectEvent at materialise / apply
-// time so cycles stay outside the projection layer.
+// This file (whiteboard_core.go) is the pure projection layer:
+// Project / Apply walk a flat [ProjectEvent] slice and emit a
+// [Whiteboard] view. extension.go / framerouter.go / recovery.go
+// own the runtime side (tools, FrameRouter, Recovery) and convert
+// persisted [protocol.ExtensionFrame] events into ProjectEvent at
+// the boundary.
 //
 // Caps (per phase-4-spec §7.3):
 //
@@ -39,12 +39,14 @@ const (
 	TruncationMarker = "\n[…truncated]"
 )
 
-// Op constants mirror the protocol.WhiteboardOpPayload.Op values.
-// Mirrored here so the projection layer doesn't import pkg/protocol.
+// Op constants mirror the [protocol.ExtensionFrame] Op values for
+// CategoryOp whiteboard events. Mirrored here so the projection
+// layer doesn't import pkg/protocol.
 const (
-	OpInit  = "init"
-	OpWrite = "write"
-	OpStop  = "stop"
+	OpInit    = "init"
+	OpWrite   = "write"
+	OpStop    = "stop"
+	OpMessage = "message"
 )
 
 // Whiteboard is the in-memory projection a session keeps for either
