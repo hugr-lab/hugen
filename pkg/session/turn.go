@@ -88,8 +88,9 @@ type toolResultEvent struct {
 
 // ToolFeed reserves the slot a phase-4 blocking system tool (the
 // canonical example is wait_subagents) uses to consume Frames the
-// session would otherwise buffer. C5 keeps the type + s.activeToolFeed
-// field as a stub; first wired in C7 alongside the sub-agent tools.
+// session would otherwise buffer. Tools register a feed via
+// [Session.registerToolFeed] for the duration of the block and
+// release it on return.
 type ToolFeed struct {
 	// Consumes returns true for Frame Kinds the active tool wants to
 	// receive. The Run loop checks this before falling back to
@@ -98,6 +99,18 @@ type ToolFeed struct {
 	// Feed delivers a matching Frame to the tool's blocking handler.
 	// Must be non-blocking (the loop is single-goroutine).
 	Feed func(protocol.Frame)
+	// BlockingState is the [protocol.SessionStatus] state value the
+	// session should transition to while this feed is registered.
+	// Empty string skips the lifecycle transition (the feed is
+	// "active" but not separately observable). Today
+	// callWaitSubagents fills in SessionStatusWaitSubagents; the
+	// phase-5 HITL approval / clarification tools will fill
+	// SessionStatusWaitApproval / SessionStatusWaitUserInput.
+	BlockingState string
+	// BlockingReason is the diagnostic label the lifecycle marker
+	// records alongside the state transition. Free-form, never
+	// branched on.
+	BlockingReason string
 }
 
 // startTurn moves the Session from idle to "model goroutine running".

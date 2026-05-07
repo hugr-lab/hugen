@@ -79,6 +79,9 @@ func (parent *Session) callWaitSubagents(ctx context.Context, args json.RawMessa
 	// Register the active tool feed so the Run loop forwards matching
 	// SubagentResult frames here. The loop reads activeToolFeed via
 	// atomic load (session.go), so the store + clear is race-safe.
+	// BlockingState declaratively flips the session into
+	// wait_subagents for the duration of the block; the release
+	// closure flips it back to active. Tool owns zero lifecycle code.
 	feedCh := make(chan *protocol.SubagentResult, len(pending))
 	feed := &ToolFeed{
 		Consumes: func(k protocol.Kind) bool {
@@ -97,9 +100,11 @@ func (parent *Session) callWaitSubagents(ctx context.Context, args json.RawMessa
 				// — drop it (subagent_result is exactly-once per child).
 			}
 		},
+		BlockingState:  protocol.SessionStatusWaitSubagents,
+		BlockingReason: "tool=wait_subagents",
 	}
-	parent.activeToolFeed.Store(feed)
-	defer parent.activeToolFeed.Store(nil)
+	release := parent.registerToolFeed(ctx, feed)
+	defer release()
 
 	// Block until every pending id resolves, the parent's turn ctx
 	// cancels (/cancel), or the call ctx fires.

@@ -113,6 +113,40 @@ func lookupLatestStatusEvent(events []store.EventRow) string {
 	return ""
 }
 
+// registerToolFeed installs feed as the session's active blocking
+// feed and (if feed.BlockingState is non-empty) transitions the
+// session to that state. Returns a release closure tools defer to
+// drop the feed and transition the session back to active.
+//
+// Tools that block on inbound frames (wait_subagents today;
+// phase-5 HITL approval / clarification) own zero lifecycle code
+// — they fill BlockingState declaratively in the ToolFeed and
+// the runtime handles every transition.
+//
+// release is idempotent: a second call is a no-op. The defer
+// pattern is therefore safe even when the tool early-returns
+// before registering the feed.
+func (s *Session) registerToolFeed(ctx context.Context, feed *ToolFeed) (release func()) {
+	if feed == nil {
+		return func() {}
+	}
+	s.activeToolFeed.Store(feed)
+	if feed.BlockingState != "" {
+		s.markStatus(ctx, feed.BlockingState, feed.BlockingReason)
+	}
+	released := false
+	return func() {
+		if released {
+			return
+		}
+		released = true
+		s.activeToolFeed.Store(nil)
+		if feed.BlockingState != "" {
+			s.markStatus(ctx, protocol.SessionStatusActive, feed.BlockingReason+" released")
+		}
+	}
+}
+
 // isQuiescent returns true when the session has no live work in
 // flight — the predicate the Run loop checks at every turn
 // boundary to decide whether to mark itself idle.

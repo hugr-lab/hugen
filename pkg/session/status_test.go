@@ -70,6 +70,47 @@ func TestLookupLatestStatusEvent(t *testing.T) {
 	}
 }
 
+// TestRegisterToolFeed_TransitionsAndReleasesIdempotently asserts
+// the helper installs the feed, transitions to BlockingState,
+// releases the feed, and transitions back to active. The release
+// closure must be idempotent so defer-double-call patterns are safe.
+func TestRegisterToolFeed_TransitionsAndReleasesIdempotently(t *testing.T) {
+	s, cleanup := newTestParent(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	s.markStatus(ctx, protocol.SessionStatusActive, "test_setup")
+
+	feed := &ToolFeed{
+		Consumes:       func(k protocol.Kind) bool { return false },
+		Feed:           func(f protocol.Frame) {},
+		BlockingState:  protocol.SessionStatusWaitSubagents,
+		BlockingReason: "test=feed",
+	}
+	release := s.registerToolFeed(ctx, feed)
+
+	if got := s.activeToolFeed.Load(); got != feed {
+		t.Errorf("activeToolFeed = %v, want feed", got)
+	}
+	if got := s.Status(); got != protocol.SessionStatusWaitSubagents {
+		t.Errorf("Status() = %q, want wait_subagents", got)
+	}
+
+	release()
+	if got := s.activeToolFeed.Load(); got != nil {
+		t.Errorf("activeToolFeed after release = %v, want nil", got)
+	}
+	if got := s.Status(); got != protocol.SessionStatusActive {
+		t.Errorf("Status() after release = %q, want active", got)
+	}
+
+	// Double release is a no-op.
+	release()
+	if got := s.Status(); got != protocol.SessionStatusActive {
+		t.Errorf("Status() after second release = %q, want active", got)
+	}
+}
+
 // TestIsQuiescent_FreshSession asserts a freshly-opened root with
 // no children, no buffered frames, no active feed reports
 // quiescent. Smoke probe — full state machine wiring covered
