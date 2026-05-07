@@ -3,12 +3,12 @@ name: _planner
 description: Persistent plan + comments primitive for long autonomous tasks. Survives history compaction and process restarts.
 license: Apache-2.0
 allowed-tools:
-  - provider: session
+  - provider: plan
     tools:
-      - plan_set
-      - plan_comment
-      - plan_show
-      - plan_clear
+      - set
+      - comment
+      - show
+      - clear
 metadata:
   hugen:
     requires_skills: []
@@ -44,18 +44,18 @@ the overhead is not worth it.
 
 ## The four tools
 
-- `session:plan_set` — write or replace the body. Wipes the
+- `plan:set` — write or replace the body. Wipes the
   in-memory comment log; events stay for audit. Use this at the
   start of a task, and any time the goal materially changes (a
   scope expansion, a pivot, a new constraint from the user).
-- `session:plan_comment` — append a one-line progress note. Optional
+- `plan:comment` — append a one-line progress note. Optional
   `current_step` moves the focus pointer. Use at every meaningful
   inflection: tool call returned a key result, sub-agent spawned,
   branch ruled out.
-- `session:plan_show` — read back the full plan plus retained
+- `plan:show` — read back the full plan plus retained
   comments. Use when you've drifted long enough that you may have
   forgotten what you wrote.
-- `session:plan_clear` — drop the plan when the task is genuinely
+- `plan:clear` — drop the plan when the task is genuinely
   done. After clear the prompt block disappears.
 
 ## What the plan looks like in the prompt
@@ -71,7 +71,7 @@ Current focus: <current_step>
 ```
 
 Comments are NOT rendered — they live in the events log and
-`plan_show` retrieves them on demand. This keeps the per-turn
+`plan:show` retrieves them on demand. This keeps the per-turn
 overhead bounded; a 30-comment log doesn't bloat every prompt.
 
 ## Caps and what they mean
@@ -84,7 +84,7 @@ overhead bounded; a 30-comment log doesn't bloat every prompt.
   one-line-ish; longer prose belongs in the notepad.
 - 30 comments retained — older comments stay in the events log
   (`subagent_runs` / future `events_search` can find them) but
-  drop out of `plan_show` and the projection.
+  drop out of `plan:show` and the projection.
 
 When you exceed any cap the runtime appends a small truncation
 marker in the visible projection.

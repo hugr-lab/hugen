@@ -9,10 +9,12 @@ allowed-tools:
       - wait_subagents
       - subagent_runs
       - subagent_cancel
-      - plan_set
-      - plan_comment
-      - plan_show
-      - plan_clear
+  - provider: plan
+    tools:
+      - set
+      - comment
+      - show
+      - clear
 metadata:
   hugen:
     requires_skills: []

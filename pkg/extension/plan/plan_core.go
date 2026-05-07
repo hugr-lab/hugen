@@ -1,29 +1,13 @@
-// Package plan implements the per-session Plan projection: the
-// model's persistent anchor across context-window truncation and
-// process restarts. A Plan is a body of free-form text + a current-
-// step pointer + an append-only log of progress comments, all
-// re-derivable from session events alone.
+// Package plan implements the plan session extension: the
+// per-session [Plan] projection (Project / Apply / Render), the
+// [SessionPlan] handle that wraps the projection + a mutex behind
+// Set / Comment / Show / Clear, and the [Extension] wrapper
+// exposing the four plan tools and the [extension.StateInitializer]
+// / [extension.Recovery] / [extension.Advertiser] hooks the runtime
+// dispatches against.
 //
 // Phase-4 spec §6 + contracts/tools-plan.md + data-model.md §3.1
-// govern the contract.
-//
-// Three responsibilities live here:
-//
-//   - Project([]ProjectEvent) — replay store events into the in-
-//     memory Plan struct, applying the projection caps. Run at
-//     session start (first launch / resume / post-crash) and any
-//     time the Plan needs a clean rebuild.
-//   - Apply(Plan, ProjectEvent) — pure projection step, applied
-//     incrementally by tool handlers right after they emit a new
-//     plan_op event. Equivalent to Project on the events-so-far +
-//     this op; cheaper because it skips the full walk.
-//   - Render(Plan) — format the plan block for the model's system
-//     prompt. The session's systemPrompt builder injects the result
-//     at the top on every turn.
-//
-// The package has no dependencies on session.RuntimeStore or
-// pkg/protocol so it stays trivially testable and the session
-// package converts EventRow into ProjectEvent before calling.
+// govern the projection contract.
 package plan
 
 import (
@@ -185,7 +169,7 @@ func applyComment(p Plan, ev ProjectEvent) Plan {
 // Render formats the active plan as a system-prompt block. Returns
 // "" when the plan is inactive — callers can drop the block on a
 // clean nil-empty test. Comments are NOT rendered: the model
-// retrieves them on demand via plan_show.
+// retrieves them on demand via plan:show.
 //
 // Layout (per contracts/tools-plan.md "Prompt-rendering contract"):
 //

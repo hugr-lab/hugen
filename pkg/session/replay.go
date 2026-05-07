@@ -9,7 +9,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
-	"github.com/hugr-lab/hugen/pkg/session/tools/plan"
 	"github.com/hugr-lab/hugen/pkg/session/tools/whiteboard"
 )
 
@@ -26,13 +25,15 @@ const defaultHistoryWindow = 50
 // Re-derived projections (phase-4):
 //   - history: most-recent user/agent text messages within the
 //     window cap (placeholder for phase-5 compactor).
-//   - plan: full plan_op replay through pkg/session/plan.Project.
-//     The plan survives history truncation — its source is the
-//     full event log, not the windowed history.
 //   - whiteboard: full whiteboard_op replay through
-//     pkg/session/whiteboard.Project. Like the plan, the board
-//     reads the full event log so it survives history truncation
-//     and process restart.
+//     pkg/session/whiteboard.Project. The board reads the full
+//     event log so it survives history truncation and process
+//     restart.
+//
+// Extension-owned projections (plan, skill, …) ride the
+// [extension.Recovery] hook below — every Recovery-implementing
+// extension sees the same full event slice and rebuilds its own
+// state.
 func (s *Session) materialise(ctx context.Context) error {
 	if s.materialised.Load() {
 		return nil
@@ -45,10 +46,6 @@ func (s *Session) materialise(ctx context.Context) error {
 			return
 		}
 		s.history = projectHistory(rows, defaultHistoryWindow)
-
-		s.planMu.Lock()
-		s.plan = plan.Project(planEventsFrom(rows))
-		s.planMu.Unlock()
 
 		s.whiteboardMu.Lock()
 		s.whiteboard = whiteboard.Project(whiteboardEventsFrom(rows))
@@ -134,56 +131,6 @@ func whiteboardEventsFrom(rows []store.EventRow) []whiteboard.ProjectEvent {
 					ev.Seq = p.Seq
 				}
 			}
-		}
-		if ev.Op == "" {
-			continue
-		}
-		out = append(out, ev)
-	}
-	return out
-}
-
-// planEventsFrom selects plan_op rows from the session's full event
-// list and converts each into a plan.ProjectEvent. The session
-// package owns this conversion so pkg/session/plan stays free of
-// EventRow / store imports.
-func planEventsFrom(rows []store.EventRow) []plan.ProjectEvent {
-	out := make([]plan.ProjectEvent, 0)
-	for _, r := range rows {
-		if protocol.Kind(r.EventType) != protocol.KindPlanOp {
-			continue
-		}
-		ev := plan.ProjectEvent{At: r.CreatedAt}
-		// Payload travels two ways: a structured PlanOpPayload stashed
-		// directly in Metadata (newer rows) or just Content carrying
-		// the body (older / minimal rows). Try the structured shape
-		// first; fall back to columnar fields.
-		if r.Metadata != nil {
-			if v, ok := r.Metadata["op"].(string); ok {
-				ev.Op = v
-			}
-			if v, ok := r.Metadata["text"].(string); ok {
-				ev.Text = v
-			}
-			if v, ok := r.Metadata["current_step"].(string); ok {
-				ev.CurrentStep = v
-			}
-		}
-		if ev.Op == "" {
-			// Defensive fallback: serialised payload may have used a
-			// `payload` envelope rather than top-level keys.
-			if raw, ok := r.Metadata["payload"]; ok {
-				b, _ := json.Marshal(raw)
-				var p protocol.PlanOpPayload
-				if json.Unmarshal(b, &p) == nil {
-					ev.Op = p.Op
-					ev.Text = p.Text
-					ev.CurrentStep = p.CurrentStep
-				}
-			}
-		}
-		if ev.Text == "" {
-			ev.Text = r.Content
 		}
 		if ev.Op == "" {
 			continue

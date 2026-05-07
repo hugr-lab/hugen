@@ -8,6 +8,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/extension"
 	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
 	notepadext "github.com/hugr-lab/hugen/pkg/extension/notepad"
+	planext "github.com/hugr-lab/hugen/pkg/extension/plan"
 	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
 	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -42,6 +43,7 @@ func phaseExtensions(_ context.Context, core *Core) error {
 	exts := []extension.Extension{
 		wsext.NewExtension(core.Cfg.Workspace.Dir, core.Cfg.Workspace.CleanupOnClose),
 		notepadext.NewExtension(core.Store, core.Agent.ID()),
+		planext.NewExtension(core.Agent.ID()),
 		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()),
 		mcpext.NewExtension(core.Config.ToolProviders(), core.Logger),
 	}

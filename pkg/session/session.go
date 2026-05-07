@@ -16,7 +16,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
-	"github.com/hugr-lab/hugen/pkg/session/tools/plan"
 	"github.com/hugr-lab/hugen/pkg/session/tools/whiteboard"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -51,9 +50,9 @@ type Session struct {
 	logger           *slog.Logger
 
 	// sessionTools is the static dispatch table. Per-tool init() funcs
-	// in tools_subagent.go / tools_plan.go / … register their entries
-	// at package-init time; the table is read-only thereafter so
-	// dispatch needs no lock.
+	// in tools_subagent.go / tools_whiteboard.go register their
+	// entries at session construction; the table is read-only after
+	// initTools so dispatch needs no lock.
 	sessionTools map[string]sessionToolDescriptor
 
 	// state
@@ -147,16 +146,6 @@ type Session struct {
 	materialised atomic.Bool
 	matOnce      sync.Once
 	history      []model.Message
-
-	// plan is the projection of plan_op events for this session
-	// (US2). Built once at materialise and updated incrementally
-	// by the four plan_* tool handlers. planMu serialises the
-	// emit-then-Apply sequence so concurrent tool handlers can't
-	// race the in-memory mirror; the persisted events remain the
-	// source of truth so a desync (handler crashed mid-update,
-	// say) self-heals on the next materialise / restart.
-	planMu sync.Mutex
-	plan   plan.Plan
 
 	// whiteboard is the in-memory projection of whiteboard_op
 	// events (US3). On a host session it carries the canonical
@@ -496,15 +485,6 @@ func (s *Session) WhiteboardSnapshot() whiteboard.Whiteboard {
 // reaching into the atomic pointer field.
 func (s *Session) ActiveToolFeed() *ToolFeed {
 	return s.activeToolFeed.Load()
-}
-
-// PlanSnapshot returns a copy of the plan projection taken under
-// the projection mutex. Tests use this to assert plan state without
-// poking the planMu / plan fields directly.
-func (s *Session) PlanSnapshot() plan.Plan {
-	s.planMu.Lock()
-	defer s.planMu.Unlock()
-	return s.plan
 }
 
 // MarkClosed forces the session-closed flag on. Tests use this to
@@ -1398,19 +1378,14 @@ func (s *Session) buildMessages(ctx context.Context) []model.Message {
 
 // systemPrompt assembles the system-prompt body for the next
 // model.Generate call. Order:
-//  1. Active plan block (when set; renders body + current-step
-//     pointer at the top so it survives history truncation —
-//     phase-4 spec §6.5 + contracts/tools-plan.md "Prompt-rendering
-//     contract").
-//  2. Agent constitution (universal rules).
-//  3. Extension Advertiser sections — registration order. The skill
-//     extension contributes (a) the body of every loaded skill and
-//     (b) the catalogue of every skill the agent can reach.
+//  1. Agent constitution (universal rules).
+//  2. Extension Advertiser sections — registration order. Plan ext
+//     advertises the active-plan block (registered before skill so
+//     it lands ahead of skill instructions / catalogue); skill ext
+//     contributes (a) the body of every loaded skill and (b) the
+//     catalogue of every skill the agent can reach.
 func (s *Session) systemPrompt(ctx context.Context) string {
 	var parts []string
-	if block := s.renderPlanBlock(); block != "" {
-		parts = append(parts, block)
-	}
 	if s.agent != nil {
 		if c := s.agent.Constitution(); c != "" {
 			parts = append(parts, c)
@@ -1431,16 +1406,6 @@ func (s *Session) systemPrompt(ctx context.Context) string {
 		return ""
 	}
 	return strings.Join(parts, "\n\n")
-}
-
-// renderPlanBlock returns the system-prompt-friendly rendering of
-// this session's plan projection — empty when no plan is active.
-// Holding planMu briefly ensures the read sees a consistent
-// snapshot even if a tool handler is mid-Apply on another goroutine.
-func (s *Session) renderPlanBlock() string {
-	s.planMu.Lock()
-	defer s.planMu.Unlock()
-	return plan.Render(s.plan)
 }
 
 // modelToolsForSession converts the per-session ToolManager

@@ -11,7 +11,7 @@ import (
 
 // Session implements tool.ToolProvider directly. The "session:*"
 // catalogue is a static dispatch table populated by per-tool init()
-// funcs in tools_subagent.go / tools_plan.go / … — handlers are
+// funcs in tools_subagent.go / tools_whiteboard.go — handlers are
 // methods on *Session so they read s.store / s.logger / s.perms
 // directly without an injected leaf-deps host.
 //
@@ -29,13 +29,11 @@ const sessionToolProviderName = "session"
 func (s *Session) initTools() {
 	s.sessionTools = map[string]sessionToolDescriptor{}
 	s.initSubagent()
-	s.initPlan()
 	s.initWhiteboard()
 }
 
-// sessionToolHandler dispatches one session-scoped tool call.
-// First arg is the calling session; the package-level dispatch
-// table holds method values like (*Session).callSpawnSubagent.
+// sessionToolHandler dispatches one session-scoped tool call. The
+// dispatch table holds method values like (*Session).callSpawnSubagent.
 type sessionToolHandler func(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
 
 // sessionToolDescriptor is the runtime metadata used to project a
