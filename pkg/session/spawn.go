@@ -81,5 +81,11 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 		s.deps.Logger.Warn("session: emit subagent_started",
 			"parent", s.id, "child", child.ID(), "err", err)
 	}
+	// Lifecycle: a parent with live children is not idle. The
+	// in-flight-tool-call path already marked us active when the
+	// turn started; this transition is the defensive backstop for
+	// out-of-turn callers (test fixtures that Spawn directly
+	// without driving a UserMessage). Guard drops the duplicate.
+	s.markStatus(ctx, protocol.SessionStatusActive, "spawn")
 	return child, nil
 }

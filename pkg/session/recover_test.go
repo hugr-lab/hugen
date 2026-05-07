@@ -213,6 +213,7 @@ func TestRestoreActive_SkipsIdleRoot(t *testing.T) {
 		ID: "root_idle", AgentID: "a1", SessionType: "root", Status: StatusActive,
 		CreatedAt: now, UpdatedAt: now,
 	})
+	mustWriteStatus(t, store, ctx, "root_idle", protocol.SessionStatusIdle)
 
 	mgr := newTestManager(t, store)
 	if err := mgr.RestoreActive(ctx); err != nil {
@@ -237,6 +238,7 @@ func TestRestoreActive_RestoresActiveRoot(t *testing.T) {
 		ID: "root_active", AgentID: "a1", SessionType: "root", Status: StatusActive,
 		CreatedAt: now, UpdatedAt: now,
 	})
+	mustWriteStatus(t, store, ctx, "root_active", protocol.SessionStatusActive)
 	mustOpen(t, store, ctx, SessionRow{
 		ID: "sub1", AgentID: "a1", ParentSessionID: "root_active",
 		SessionType: "subagent", Status: StatusActive,
@@ -343,6 +345,24 @@ func mustOpen(t *testing.T, store RuntimeStore, ctx context.Context, row Session
 	t.Helper()
 	if err := store.OpenSession(ctx, row); err != nil {
 		t.Fatalf("OpenSession %s: %v", row.ID, err)
+	}
+}
+
+// mustWriteStatus persists a synthetic [protocol.KindSessionStatus]
+// event for sessionID — replaces the missing newSession path in
+// tests that build sessions via mustOpen directly. RestoreActive
+// keys off this marker.
+func mustWriteStatus(t *testing.T, store RuntimeStore, ctx context.Context, sessionID, state string) {
+	t.Helper()
+	frame := protocol.NewSessionStatus(sessionID,
+		protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent},
+		state, "test_setup")
+	row, summary, err := FrameToEventRow(frame, "a1")
+	if err != nil {
+		t.Fatalf("FrameToEventRow %s/%s: %v", sessionID, state, err)
+	}
+	if err := store.AppendEvent(ctx, row, summary); err != nil {
+		t.Fatalf("AppendEvent %s/%s: %v", sessionID, state, err)
 	}
 }
 

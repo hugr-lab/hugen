@@ -162,25 +162,30 @@ func appendParentSubagentResult(ctx context.Context, deps *Deps, parentID, child
 }
 
 // RestoreActive runs at process boot. For every non-terminal root
-// session belonging to this agent it:
+// session belonging to this agent it reads the lifecycle state
+// from the persisted [protocol.KindSessionStatus] markers and
+// decides whether to bring the goroutine up eagerly:
 //
-//  1. Calls settleDanglingSubagents — synthesises a subagent_result
-//     on the parent for any child whose result didn't make it to
-//     parent.events on the previous run (and writes a session_terminated
-//     {restart_died} on non-terminal children before doing so).
-//  2. If settle wrote anything (active root) → calls Manager.Resume to
-//     reattach a goroutine. If it wrote nothing (idle root) → skips;
-//     the session stays dormant in DB and an adapter that asks for it
-//     later will trigger Manager.Resume on demand. Same code path,
-//     same `newSessionRestore`, same lifecycle.Acquire — boot is just
-//     the eager case.
+//   - idle                                       → lazy. Adapter
+//     Resume on demand rebuilds the session via
+//     newSessionRestore.
+//   - active / wait_subagents / wait_approval /
+//     wait_user_input                            → eager. Settle
+//     dangling sub-agents (writes synthetic subagent_result on
+//     the parent for children whose result didn't land last run)
+//     then Manager.Resume reattaches a goroutine.
+//   - no marker (pre-9.x branch session)         → skip with a
+//     warn log. Hard cutover; the branch isn't published, so the
+//     only sessions without markers are dev DBs from before this
+//     foundation.
 //
-// Sub-agents are NOT restored — the synthetic subagent_result on the
-// parent is the contract. The model decides whether to spawn a fresh
-// sub-agent for the same task on its next turn (no runtime auto-
-// spawn). Phase-4 spec §12.
+// Sub-agents are NOT restored — the synthetic subagent_result on
+// the parent is the contract. The model decides whether to spawn
+// a fresh sub-agent for the same task on its next turn (no
+// runtime auto-spawn). Phase-4 spec §12.
 //
-// Errors from individual roots are logged but do not abort the loop.
+// Errors from individual roots are logged but do not abort the
+// loop.
 func (m *Manager) RestoreActive(ctx context.Context) error {
 	rows, err := m.store.ListSessions(ctx, m.agent.ID(), "")
 	if err != nil {
@@ -190,25 +195,53 @@ func (m *Manager) RestoreActive(ctx context.Context) error {
 		if row.SessionType != "" && row.SessionType != "root" {
 			continue
 		}
-		if hasTerminated(ctx, m.store, row.ID) {
-			continue
-		}
-		written, err := settleDanglingSubagents(ctx, m.deps, row.ID)
+		events, err := m.store.ListEvents(ctx, row.ID, store.ListEventsOpts{})
 		if err != nil {
-			m.logger.Warn("manager: restore-active settle",
+			m.logger.Warn("manager: restore-active list events",
 				"session", row.ID, "err", err)
 			continue
 		}
-		if written == 0 {
-			// Idle root — no dangling sub-agents, no eager goroutine.
-			// Adapter Resume will rebuild on demand using the same
-			// newSessionRestore path.
+		if hasTerminatedRows(events) {
 			continue
 		}
-		if _, err := m.Resume(ctx, row.ID); err != nil {
-			m.logger.Warn("manager: restore-active resume",
-				"session", row.ID, "err", err)
+		state := lookupLatestStatusEvent(events)
+		switch state {
+		case "":
+			m.logger.Warn("manager: restore-active: no lifecycle marker, skipping",
+				"session", row.ID)
+			continue
+		case protocol.SessionStatusIdle:
+			// Lazy: stays dormant; adapter Resume on demand.
+			continue
+		case protocol.SessionStatusActive,
+			protocol.SessionStatusWaitSubagents,
+			protocol.SessionStatusWaitApproval,
+			protocol.SessionStatusWaitUserInput:
+			if _, err := settleDanglingSubagents(ctx, m.deps, row.ID); err != nil {
+				m.logger.Warn("manager: restore-active settle",
+					"session", row.ID, "err", err)
+				continue
+			}
+			if _, err := m.Resume(ctx, row.ID); err != nil {
+				m.logger.Warn("manager: restore-active resume",
+					"session", row.ID, "err", err)
+			}
+		default:
+			m.logger.Warn("manager: restore-active: unknown lifecycle state, skipping",
+				"session", row.ID, "state", state)
 		}
 	}
 	return nil
+}
+
+// hasTerminatedRows is the events-slice variant of hasTerminated —
+// avoids a second store round-trip when the caller already loaded
+// the full log (RestoreActive does).
+func hasTerminatedRows(events []store.EventRow) bool {
+	for _, ev := range events {
+		if ev.EventType == string(protocol.KindSessionTerminated) {
+			return true
+		}
+	}
+	return false
 }
