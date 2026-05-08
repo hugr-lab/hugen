@@ -96,34 +96,32 @@ func settleDanglingSubagents(ctx context.Context, deps *Deps, parentID string) (
 	return written, nil
 }
 
-// lookupChildTerminationReason returns the reason field of the child's
-// own `session_terminated` event, or "" if the child has no terminal
-// event yet (i.e. it never exited gracefully). Reads only — no writes.
+// lookupChildTerminationReason returns the reason field of the
+// child's own `session_terminated` event, or "" if the child has no
+// terminal event yet (i.e. it never exited gracefully). Single
+// indexed probe via [store.RuntimeStore.LatestEventOfKinds] — no
+// full-table walk.
 func lookupChildTerminationReason(ctx context.Context, rs store.RuntimeStore, childID string) string {
-	rows, err := rs.ListEvents(ctx, childID, store.ListEventsOpts{Limit: 1000})
-	if err != nil {
+	row, ok, err := rs.LatestEventOfKinds(ctx, childID, []string{string(protocol.KindSessionTerminated)})
+	if err != nil || !ok {
 		return ""
 	}
-	for _, r := range rows {
-		if r.EventType != string(protocol.KindSessionTerminated) {
-			continue
-		}
-		if reason, _ := r.Metadata["reason"].(string); reason != "" {
-			return reason
-		}
-		// Fallback: store.go FrameToEventRow stashes the reason in
-		// row.Content for SessionTerminated frames.
-		if r.Content != "" {
-			return r.Content
-		}
+	if reason, _ := row.Metadata["reason"].(string); reason != "" {
+		return reason
 	}
-	return ""
+	// Fallback: store.go FrameToEventRow stashes the reason in
+	// row.Content for SessionTerminated frames.
+	return row.Content
 }
 
-// appendChildTerminal best-effort writes session_terminated{reason} on
-// the child's events. Errors are logged; callers continue regardless
-// (the parent-side subagent_result still gets written, which is the
-// load-bearing piece for the parent's view).
+// appendChildTerminal best-effort writes session_terminated{reason}
+// on the child's events AND flips the child's `sessions.status`
+// column to Terminated so list/visibility queries that key off the
+// column see the orphan as dead. Symmetric with [Session.handleExit]
+// for live sessions: event first (durability), column second (cache).
+// Errors are logged; callers continue regardless — the parent-side
+// subagent_result still gets written, which is the load-bearing
+// piece for the parent's view.
 func appendChildTerminal(ctx context.Context, deps *Deps, childID, reason string) {
 	terminal := protocol.NewSessionTerminated(childID, deps.Agent.Participant(),
 		protocol.SessionTerminatedPayload{Reason: reason})
@@ -135,6 +133,10 @@ func appendChildTerminal(ctx context.Context, deps *Deps, childID, reason string
 	}
 	if err := deps.Store.AppendEvent(ctx, row, summary); err != nil {
 		deps.Logger.Warn("session: settle append child terminal",
+			"child", childID, "err", err)
+	}
+	if err := deps.Store.UpdateSessionStatus(ctx, childID, store.StatusTerminated); err != nil {
+		deps.Logger.Warn("session: settle update child status",
 			"child", childID, "err", err)
 	}
 }

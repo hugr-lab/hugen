@@ -156,10 +156,10 @@ func (f *fakeHost) CloseSession(_ context.Context, id, _ string) (time.Time, err
 	if !ok {
 		return time.Time{}, session.ErrSessionNotFound
 	}
-	if row.Status == session.StatusClosed {
+	if row.Status == session.StatusTerminated {
 		return row.UpdatedAt, nil
 	}
-	row.Status = session.StatusClosed
+	row.Status = session.StatusTerminated
 	row.UpdatedAt = time.Now().UTC()
 	return row.UpdatedAt, nil
 }

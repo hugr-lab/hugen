@@ -1,33 +1,41 @@
 package manager
 
 import (
+	"context"
 	"fmt"
 
-	"context"
-
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session"
 )
 
-// RestoreActive runs at process boot. For every non-terminal root
+// RestoreActive runs at process boot. For every non-terminated root
 // session belonging to this agent it reads the lifecycle state
 // via a single narrow store query
-// ([store.RuntimeStore.LatestEventOfKinds]) — newest matched row
-// of [protocol.KindSessionTerminated, protocol.KindSessionStatus]
-// — and decides whether to bring the goroutine up eagerly:
+// ([store.RuntimeStore.LatestEventOfKinds]) — newest
+// [protocol.KindSessionStatus] row — and decides whether to bring
+// the goroutine up eagerly:
 //
 //   - idle                                       → lazy. Adapter
 //     Resume on demand rebuilds the session via
 //     newSessionRestore.
 //   - active / wait_subagents / wait_approval /
-//     wait_user_input                            → eager. Settle
-//     dangling sub-agents (writes synthetic subagent_result on
-//     the parent for children whose result didn't land last run)
-//     then Manager.Resume reattaches a goroutine.
+//     wait_user_input                            → eager. Manager.Resume
+//     reattaches a goroutine; the per-session restore path
+//     (newSessionRestore) settles dangling sub-agents internally
+//     before the goroutine starts, so this method does not call
+//     settle directly.
 //   - no marker (pre-9.x branch session)         → skip with a
 //     warn log. Hard cutover; the branch isn't published, so the
 //     only sessions without markers are dev DBs from before this
 //     foundation.
+//
+// Terminated sessions are filtered out at the database by
+// [store.RuntimeStore.ListResumableRoots] — the
+// `sessions.status` column is now authoritative (the live Session
+// flips it from teardown), so a single indexed-column lookup
+// replaces the previous events relation filter. Legacy dev DBs
+// where the column is "stuck" on Active despite a terminated
+// event still surface here; they remain resumable until the next
+// live close updates the column.
 //
 // Sub-agents are NOT restored — the synthetic subagent_result on
 // the parent is the contract. The model decides whether to spawn
@@ -35,36 +43,20 @@ import (
 // runtime auto-spawn). Phase-4 spec §12.
 //
 // Errors from individual roots are logged but do not abort the
-// loop. The dangling-subagent settle helpers themselves live in
-// pkg/session/recover.go (so newSessionRestore can call them
-// internally) — this method delegates via session.SettleDanglingSubagents.
+// loop.
 func (m *Manager) RestoreActive(ctx context.Context) error {
-	rows, err := m.store.ListSessions(ctx, m.agent.ID(), "")
+	rows, err := m.store.ListResumableRoots(ctx, m.agent.ID())
 	if err != nil {
 		return fmt.Errorf("manager: restore-active list: %w", err)
 	}
-	probeKinds := []string{
-		string(protocol.KindSessionTerminated),
-		string(protocol.KindSessionStatus),
-	}
-	for _, row := range rows {
-		if row.SessionType != "" && row.SessionType != "root" {
-			continue
-		}
-		latest, ok, err := m.store.LatestEventOfKinds(ctx, row.ID, probeKinds)
-		if err != nil {
-			m.logger.Warn("manager: restore-active probe",
-				"session", row.ID, "err", err)
-			continue
-		}
-		if !ok {
+	for _, root := range rows {
+		row := root.SessionRow
+		if len(root.Lifecycle) == 0 {
 			m.logger.Warn("manager: restore-active: no lifecycle marker, skipping",
 				"session", row.ID)
 			continue
 		}
-		if protocol.Kind(latest.EventType) == protocol.KindSessionTerminated {
-			continue
-		}
+		latest := root.Lifecycle[0]
 		state, _ := latest.Metadata["state"].(string)
 		switch state {
 		case "":
@@ -78,11 +70,6 @@ func (m *Manager) RestoreActive(ctx context.Context) error {
 			protocol.SessionStatusWaitSubagents,
 			protocol.SessionStatusWaitApproval,
 			protocol.SessionStatusWaitUserInput:
-			if _, err := session.SettleDanglingSubagents(ctx, m.deps, row.ID); err != nil {
-				m.logger.Warn("manager: restore-active settle",
-					"session", row.ID, "err", err)
-				continue
-			}
 			resumed, err := m.Resume(ctx, row.ID)
 			if err != nil {
 				m.logger.Warn("manager: restore-active resume",

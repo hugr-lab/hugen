@@ -171,7 +171,26 @@ type UserMessagePayload struct {
 type AgentMessagePayload struct {
 	Text     string `json:"text"`
 	ChunkSeq int    `json:"chunk_seq"`
-	Final    bool   `json:"final"`
+	// Final marks the end of the assistant TURN (not iteration) — adapters
+	// use it to render newline + prompt cuts. Set on the consolidated
+	// row for the model iteration that retires the turn (i.e. produced
+	// no tool calls). Tool-call iterations retire later, after the
+	// dispatcher's results land.
+	Final bool `json:"final"`
+	// Consolidated marks the per-iteration "complete assistant record"
+	// row that lands in the persisted event log: assembled text + tool
+	// calls + reasoning state for ONE model iteration. Live streaming
+	// chunks are emitted with Consolidated=false and stay outbox-only
+	// (adapters render them incrementally; never persisted). Replay
+	// reads only Consolidated=true rows so model.Message history
+	// reconstructs exactly the per-iteration assistant turns the runtime
+	// originally appended — no chunk reassembly, no orphan tool_calls.
+	Consolidated bool `json:"consolidated,omitempty"`
+	// Consolidated-only fields. Carry the assistant iteration's tool
+	// calls + reasoning state alongside the assembled text.
+	ToolCalls        []ToolCallPayload `json:"tool_calls,omitempty"`
+	Thinking         string            `json:"thinking,omitempty"`
+	ThoughtSignature string            `json:"thought_signature,omitempty"`
 }
 
 type ReasoningPayload struct {
@@ -595,6 +614,30 @@ func NewAgentMessage(sessionID string, author ParticipantInfo, text string, seq 
 	return &AgentMessage{
 		BaseFrame: newBase(sessionID, KindAgentMessage, author),
 		Payload:   AgentMessagePayload{Text: text, ChunkSeq: seq, Final: final},
+	}
+}
+
+// NewAgentMessageConsolidated constructs the per-iteration assistant
+// turn record: full assembled text + tool calls + reasoning state.
+// Consolidated=true is implied. Final reflects whether this iteration
+// retires the assistant turn — true when there are no tool calls to
+// dispatch (next iteration would be a fresh user input, not another
+// model call), false when tool calls follow. Emitted once per model
+// iteration by foldAssistantAndMaybeDispatch; this is the only
+// AgentMessage shape that lands in the persisted event log.
+func NewAgentMessageConsolidated(sessionID string, author ParticipantInfo, text string, seq int, final bool,
+	toolCalls []ToolCallPayload, thinking, thoughtSignature string) *AgentMessage {
+	return &AgentMessage{
+		BaseFrame: newBase(sessionID, KindAgentMessage, author),
+		Payload: AgentMessagePayload{
+			Text:             text,
+			ChunkSeq:         seq,
+			Final:            final,
+			Consolidated:     true,
+			ToolCalls:        toolCalls,
+			Thinking:         thinking,
+			ThoughtSignature: thoughtSignature,
+		},
 	}
 }
 

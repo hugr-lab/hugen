@@ -331,6 +331,37 @@ func (s *TestStore) ListSessions(_ context.Context, _, _ string) ([]store.Sessio
 	return out, nil
 }
 
+func (s *TestStore) ListResumableRoots(_ context.Context, agentID string) ([]store.ResumableRoot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]store.ResumableRoot, 0, len(s.Sessions))
+	for _, row := range s.Sessions {
+		if row.AgentID != agentID {
+			continue
+		}
+		if row.SessionType != "" && row.SessionType != "root" {
+			continue
+		}
+		if row.Status != store.StatusActive {
+			continue
+		}
+		// Pick the latest KindSessionStatus event for this row,
+		// mirroring the production query's nested filter (limit=1,
+		// order_by created_at DESC). Events arrive in append order
+		// — walk backwards.
+		var lifecycle []store.EventRow
+		evs := s.Events[row.ID]
+		for i := len(evs) - 1; i >= 0; i-- {
+			if protocol.Kind(evs[i].EventType) == protocol.KindSessionStatus {
+				lifecycle = []store.EventRow{evs[i]}
+				break
+			}
+		}
+		out = append(out, store.ResumableRoot{SessionRow: row, Lifecycle: lifecycle})
+	}
+	return out, nil
+}
+
 func (s *TestStore) ListChildren(_ context.Context, parentID string) ([]store.SessionRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

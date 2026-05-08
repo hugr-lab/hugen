@@ -205,8 +205,8 @@ func TestHandlers_CloseIdempotent(t *testing.T) {
 		t.Fatalf("second close status = %d, want 200", resp2.StatusCode)
 	}
 	resp2.Body.Close()
-	if got := host.sessions[open.SessionID].Status; got != session.StatusClosed {
-		t.Errorf("status after close = %q, want %q", got, session.StatusClosed)
+	if got := host.sessions[open.SessionID].Status; got != session.StatusTerminated {
+		t.Errorf("status after close = %q, want %q", got, session.StatusTerminated)
 	}
 }
 

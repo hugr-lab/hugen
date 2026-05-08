@@ -106,13 +106,9 @@ func TestManager_LazyMaterialisation(t *testing.T) {
 func TestManager_ResumeClosed(t *testing.T) {
 	store := fixture.NewTestStore()
 	ctx := context.Background()
-	_ = store.OpenSession(ctx, session.SessionRow{ID: "s1", AgentID: "a1", Status: session.StatusActive})
-	// Phase-4: liveness is event-derived. Append a session_terminated
-	// event so isSessionTerminated returns true on Resume.
-	terminal := protocol.NewSessionTerminated("s1", protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent},
-		protocol.SessionTerminatedPayload{Reason: protocol.TerminationUserEnd})
-	row, summary, _ := session.FrameToEventRow(terminal, "a1")
-	_ = store.AppendEvent(ctx, row, summary)
+	// Status column is now authoritative for liveness — newSessionRestore
+	// keys off it directly instead of scanning the event log.
+	_ = store.OpenSession(ctx, session.SessionRow{ID: "s1", AgentID: "a1", Status: session.StatusTerminated})
 	mgr := newTestManager(t, store)
 	if _, err := mgr.Resume(ctx, "s1"); !errors.Is(err, session.ErrSessionClosed) {
 		t.Fatalf("expected ErrSessionClosed, got %v", err)
@@ -140,6 +136,49 @@ func TestManager_OpenAndList(t *testing.T) {
 	// At least one event_opened was persisted.
 	if len(store.Events) == 0 {
 		t.Fatal("expected session_opened event in store")
+	}
+}
+
+// TestManager_ListResumableRoots_FiltersTerminatedAndSubagents pins the
+// boot-time resume picker contract: only roots, only those whose
+// status column is Active. A subagent row and a Terminated root
+// must not surface — both are filtered DB-side via indexed scalar
+// columns (session_type='root' AND status='active'), so the caller
+// (cmd/hugen + Manager.RestoreActive) never has to post-filter in
+// Go.
+func TestManager_ListResumableRoots_FiltersTerminatedAndSubagents(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Live root — must be returned.
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root_live", AgentID: "a1", SessionType: "root", Status: session.StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	// Terminated root — must be filtered (column flipped).
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root_dead", AgentID: "a1", SessionType: "root", Status: session.StatusTerminated,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	// Subagent — must be filtered (not a root).
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "sub_alive", AgentID: "a1", ParentSessionID: "root_live",
+		SessionType: "subagent", Status: session.StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+
+	mgr := newTestManager(t, store)
+	rows, err := mgr.ListResumableRoots(ctx)
+	if err != nil {
+		t.Fatalf("ListResumableRoots: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "root_live" {
+		ids := make([]string, len(rows))
+		for i, r := range rows {
+			ids[i] = r.ID
+		}
+		t.Errorf("ListResumableRoots = %v, want [root_live]", ids)
 	}
 }
 

@@ -214,6 +214,22 @@ func (a *Adapter) render(f protocol.Frame) {
 		// showed it.
 		_ = v
 	case *protocol.AgentMessage:
+		// Consolidated rows carry the same text already streamed via
+		// chunks (Consolidated=false). Re-printing would duplicate
+		// the assistant's output on screen. Treat them as markers:
+		// Final=true draws the newline + prompt cut; Final=false
+		// (tool-iteration) is silent — the dispatcher's tool_call
+		// rendering follows.
+		if v.Payload.Consolidated {
+			if v.Payload.Final {
+				if a.currentSection != "" {
+					fmt.Fprintln(a.out)
+				}
+				a.currentSection = ""
+				fmt.Fprint(a.out, "> ")
+			}
+			break
+		}
 		if a.currentSection != "agent" {
 			if a.currentSection != "" {
 				fmt.Fprintln(a.out)
@@ -221,11 +237,6 @@ func (a *Adapter) render(f protocol.Frame) {
 			a.currentSection = "agent"
 		}
 		fmt.Fprint(a.out, v.Payload.Text)
-		if v.Payload.Final {
-			fmt.Fprintln(a.out)
-			a.currentSection = ""
-			fmt.Fprint(a.out, "> ")
-		}
 	case *protocol.Reasoning:
 		if a.currentSection != "reasoning" {
 			if a.currentSection != "" {

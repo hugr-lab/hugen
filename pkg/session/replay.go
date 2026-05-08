@@ -75,8 +75,21 @@ func (s *Session) materialise(ctx context.Context) error {
 // slice.
 //
 // Reasoning frames are excluded — phase 1 doesn't replay reasoning
-// to the model; the model emits its own reasoning per turn. Tool
-// calls are excluded too (Phase 3+ tools emit their own frames).
+// to the model from per-chunk rows; the consolidated final
+// agent_message carries the Anthropic/Gemini thinking + signature
+// fields directly when set, so the chain continues across resume.
+//
+// AgentMessage rows are only consolidated finals (Final=true with
+// full assembled text). Streaming chunks (Final=false) are
+// outbox-only and never persisted — see emit() in session.go. So
+// reading Content directly gives the full assistant text and lifting
+// tool_calls / thinking from metadata gives a well-formed
+// model.Message with no chunk reassembly.
+//
+// tool_result rows replay as RoleTool messages, paired with the
+// tool_call id from the consolidated assistant turn that requested
+// them. Standalone tool_call rows are skipped — the assistant
+// message already lists them in ToolCalls.
 //
 // system_message rows ARE projected — as RoleUser with the same
 // "[system: <kind>] <content>" prefix the live visibility filter
@@ -97,12 +110,34 @@ func projectHistory(rows []store.EventRow, window int) []model.Message {
 		case protocol.KindUserMessage:
 			all = append(all, model.Message{Role: model.RoleUser, Content: r.Content})
 		case protocol.KindAgentMessage:
-			// Only keep the final chunk per turn — partial deltas
-			// aren't needed for replay. The "final" flag lives in
-			// metadata; if missing we fall back to non-empty content.
-			if final, _ := metadataBool(r.Metadata, "final"); final {
-				all = append(all, model.Message{Role: model.RoleAssistant, Content: r.Content})
+			// Persisted AgentMessage rows are per-iteration consolidated
+			// records (see session.emit); streaming chunks are
+			// outbox-only and never reach us here. Defensive: if a
+			// pre-this-change DB has chunk rows mixed in, the absence
+			// of "consolidated" metadata is the discriminator — skip
+			// them so we don't replay partial deltas as turns.
+			if cons, _ := metadataBool(r.Metadata, "consolidated"); !cons {
+				continue
 			}
+			msg := model.Message{
+				Role:             model.RoleAssistant,
+				Content:          r.Content,
+				ToolCalls:        decodeToolCalls(r.Metadata),
+				Thinking:         metadataString(r.Metadata, "thinking"),
+				ThoughtSignature: metadataString(r.Metadata, "thought_signature"),
+			}
+			all = append(all, msg)
+		case protocol.KindToolResult:
+			toolID := metadataString(r.Metadata, "tool_id")
+			body := r.ToolResult
+			if body == "" {
+				body = r.Content
+			}
+			all = append(all, model.Message{
+				Role:       model.RoleTool,
+				ToolCallID: toolID,
+				Content:    body,
+			})
 		case protocol.KindSystemMessage:
 			kind, _ := r.Metadata["kind"].(string)
 			if kind == "" {
@@ -173,4 +208,38 @@ func metadataBool(m map[string]any, key string) (bool, bool) {
 	}
 	b, ok := v.(bool)
 	return b, ok
+}
+
+func metadataString(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	s, _ := m[key].(string)
+	return s
+}
+
+// decodeToolCalls lifts the tool_calls array stashed in the
+// consolidated final AgentMessage's metadata back into
+// model.ChunkToolCall — the shape model.Message.ToolCalls expects so
+// the model can resume its conversation knowing what it requested.
+// Returns nil when absent or malformed.
+func decodeToolCalls(m map[string]any) []model.ChunkToolCall {
+	raw, ok := m["tool_calls"].([]any)
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	out := make([]model.ChunkToolCall, 0, len(raw))
+	for _, e := range raw {
+		obj, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		call := model.ChunkToolCall{
+			ID:   metadataString(obj, "tool_id"),
+			Name: metadataString(obj, "name"),
+		}
+		call.Args = obj["args"]
+		out = append(out, call)
+	}
+	return out
 }

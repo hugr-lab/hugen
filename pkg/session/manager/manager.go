@@ -366,6 +366,29 @@ func (m *Manager) ListSessions(ctx context.Context, status string) ([]session.Se
 	if err != nil {
 		return nil, err
 	}
+	return rowsToSummaries(rows), nil
+}
+
+// ListResumableRoots returns summaries of every root session for
+// this agent whose status column is Active. Ordered by updated_at
+// DESC. Backed by [store.RuntimeStore.ListResumableRoots]; the
+// returned rows include their latest lifecycle event but adapters
+// asking for a summary list don't need it, so we drop it here.
+// Used by the console adapter's resume picker; RestoreActive calls
+// the store directly so it can read the lifecycle classifier.
+func (m *Manager) ListResumableRoots(ctx context.Context) ([]session.SessionSummary, error) {
+	rows, err := m.store.ListResumableRoots(ctx, m.agent.ID())
+	if err != nil {
+		return nil, err
+	}
+	plain := make([]store.SessionRow, len(rows))
+	for i, r := range rows {
+		plain[i] = r.SessionRow
+	}
+	return rowsToSummaries(plain), nil
+}
+
+func rowsToSummaries(rows []store.SessionRow) []session.SessionSummary {
 	out := make([]session.SessionSummary, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, session.SessionSummary{
@@ -376,7 +399,7 @@ func (m *Manager) ListSessions(ctx context.Context, status string) ([]session.Se
 			Metadata:  r.Metadata,
 		})
 	}
-	return out, nil
+	return out
 }
 
 // Get returns a live *Session by id (already-running). Used by the

@@ -93,7 +93,7 @@ func TestProjectHistory_IncludesSystemMessage(t *testing.T) {
 		{
 			EventType: string(protocol.KindAgentMessage),
 			Content:   "ack",
-			Metadata:  map[string]any{"final": true},
+			Metadata:  map[string]any{"final": true, "consolidated": true},
 		},
 	}
 	got := projectHistory(rows, 50)

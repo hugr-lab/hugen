@@ -38,15 +38,25 @@ var (
 
 // Session lifecycle states. Stored on `sessions.status`.
 //
-// Phase-4 makes `sessions.status` informational only: every session
-// is written as `StatusActive` once at create and never updated
-// afterwards. Liveness is derived from the presence/absence of a
-// `session_terminated` event; the legacy column is kept for one
-// release for adapter list filters that still read it.
+// `sessions.status` is authoritative for liveness queries. The live
+// Session writes its own column update from teardown
+// ([Session.handleExit]) right after appending the
+// `session_terminated` event — single owner, single write. The event
+// log stays append-only (constitution §"Append-only persistence on
+// memory tables") and remains the durable record; the column is a
+// queryable cache on top of it that lets list paths filter by an
+// indexed scalar instead of probing event rows.
+//
+// Crash between event-append and column-update leaves the row
+// "stuck" on Active. Resume picker treats stuck rows as resumable —
+// next live close (`/end`) flips the column. Reconciliation passes
+// (e.g. a future cron) can sweep them too.
+//
+// Legacy "suspended" / "closed" values are dropped — phase-4 never
+// wrote them and no reader special-cases them.
 const (
-	StatusActive    = "active"
-	StatusSuspended = "suspended" // legacy; phase-4 never writes
-	StatusClosed    = "closed"    // legacy; phase-4 never writes
+	StatusActive     = "active"
+	StatusTerminated = "terminated"
 )
 
 // EventTypeRoutingOp is reserved for phase-5 HITL chain forwarding.
@@ -64,6 +74,18 @@ const (
 	EventTypeHumanMessageReceived = "human_message_received"
 	EventTypeAssistantMessageSent = "assistant_message_sent"
 )
+
+// ResumableRoot is one root session returned by
+// [RuntimeStoreLocal.ListResumableRoots]: the row plus its most
+// recent lifecycle event (latest [protocol.KindSessionStatus]) fetched
+// in the same nested GraphQL query so the resume classifier doesn't
+// have to make a second round-trip per session. `Lifecycle` is at
+// most one row (limit=1, order_by created_at DESC) and may be empty
+// for sessions that never wrote a session_status frame.
+type ResumableRoot struct {
+	SessionRow
+	Lifecycle []EventRow `json:"events,omitempty"`
+}
 
 // SessionRow mirrors the hub.db.agent.sessions row layout.
 type SessionRow struct {
@@ -132,6 +154,15 @@ type RuntimeStore interface {
 	AppendNote(ctx context.Context, note NoteRow) error
 	ListNotes(ctx context.Context, sessionID string, limit int) ([]NoteRow, error)
 	ListSessions(ctx context.Context, agentID, status string) ([]SessionRow, error)
+	// ListResumableRoots returns every root session for agentID
+	// whose `status` column is Active. Each row carries its most
+	// recent [protocol.KindSessionStatus] event nested under
+	// `Lifecycle` so the caller (Manager.RestoreActive) can classify
+	// idle / active / wait_* without a second round-trip per row.
+	// Ordered by `updated_at DESC` so callers that want "the
+	// freshest resumable" can take rows[0]. The nested event sub-
+	// query is bounded `limit=1` and `order_by created_at DESC`.
+	ListResumableRoots(ctx context.Context, agentID string) ([]ResumableRoot, error)
 	// ListChildren returns every session whose parent_session_id equals
 	// parentID. Used by the phase-4 restart BFS walker to traverse
 	// parent→child trees on boot. Returns an empty slice (not an error)
@@ -216,7 +247,7 @@ func (s *RuntimeStoreLocal) LoadSession(ctx context.Context, id string) (Session
 }
 
 func (s *RuntimeStoreLocal) UpdateSessionStatus(ctx context.Context, id, status string) error {
-	if status != StatusActive && status != StatusSuspended && status != StatusClosed {
+	if status != StatusActive && status != StatusTerminated {
 		return fmt.Errorf("%w: %q", ErrInvalidStatus, status)
 	}
 	return queries.RunMutation(ctx, s.querier,
@@ -498,6 +529,42 @@ func (s *RuntimeStoreLocal) ListSessions(ctx context.Context, agentID, status st
 			}}}
 		}`,
 		map[string]any{"filter": filter},
+		"hub.db.agent.sessions",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (s *RuntimeStoreLocal) ListResumableRoots(ctx context.Context, agentID string) ([]ResumableRoot, error) {
+	filter := map[string]any{
+		"agent_id":     map[string]any{"eq": agentID},
+		"session_type": map[string]any{"eq": "root"},
+		"status":       map[string]any{"eq": StatusActive},
+	}
+	eventFilter := map[string]any{
+		"event_type": map[string]any{"eq": string(protocol.KindSessionStatus)},
+	}
+	rows, err := queries.RunQuery[[]ResumableRoot](ctx, s.querier,
+		`query ($filter: hub_db_sessions_filter, $events_filter: hub_db_session_events_filter) {
+			hub { db { agent {
+				sessions(filter: $filter, order_by: [{field: "updated_at", direction: DESC}]) {
+					id agent_id owner_id parent_session_id session_type spawned_from_event_id
+					status mission metadata created_at updated_at
+					events(filter: $events_filter, order_by: [{field: "created_at", direction: DESC}], limit: 1) {
+						id session_id agent_id seq event_type author content metadata created_at
+					}
+				}
+			}}}
+		}`,
+		map[string]any{
+			"filter":        filter,
+			"events_filter": eventFilter,
+		},
 		"hub.db.agent.sessions",
 	)
 	if err != nil {

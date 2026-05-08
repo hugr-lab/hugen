@@ -285,6 +285,11 @@ func (s *Session) handleModelEvent(runCtx context.Context, ev modelChunkEvent) {
 // applyChunk emits Reasoning + AgentMessage frames for one streamed
 // chunk and folds tool_calls + reasoning state into turnState. Mirrors
 // the pre-C5 streamTurn body, minus the loop wrapper.
+//
+// Streamed chunks always carry Final=false — they're outbox-only for
+// live rendering. The single Final=true frame for the turn is emitted
+// by foldAssistantAndMaybeDispatch with the assembled text + tool
+// calls + reasoning state, and that one IS persisted. See emit().
 func (s *Session) applyChunk(runCtx context.Context, chunk model.Chunk) {
 	st := s.turnState
 	if chunk.Reasoning != nil && *chunk.Reasoning != "" {
@@ -299,7 +304,7 @@ func (s *Session) applyChunk(runCtx context.Context, chunk model.Chunk) {
 	if chunk.Content != nil && *chunk.Content != "" {
 		st.finalText += *chunk.Content
 		af := protocol.NewAgentMessage(s.id, s.agent.Participant(),
-			*chunk.Content, st.agentSeq, chunk.Final)
+			*chunk.Content, st.agentSeq, false)
 		if err := s.emit(runCtx, af); err != nil {
 			st.streamErr = err
 			return
@@ -516,14 +521,20 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 			ThoughtSignature: st.thoughtSignature,
 		})
 	}
-	// Stream ended without an explicit final-flagged content chunk
-	// AND with no tool calls: emit a zero-text closer so subscribers
-	// can detect the boundary. Skipped when the stream produced only
-	// tool calls — another model turn is coming.
-	if st.agentSeq > 0 && !st.sawFinal && !hasToolCalls {
-		closer := protocol.NewAgentMessage(s.id, s.agent.Participant(),
-			"", st.agentSeq, true)
-		_ = s.emit(runCtx, closer)
+	// Persist one consolidated AgentMessage per model iteration: full
+	// assembled text + tool calls + reasoning state. Streaming chunks
+	// stayed outbox-only — this row is the canonical assistant
+	// iteration record that replay reads. Final=true marks the turn
+	// boundary (no tool calls; turn retires after this); Final=false
+	// is a tool-iteration that hands off to the dispatcher and
+	// expects another model iteration after results return. Skipped
+	// when the iteration produced nothing.
+	if st.agentSeq > 0 || hasToolCalls || st.finalText != "" {
+		consolidated := protocol.NewAgentMessageConsolidated(s.id, s.agent.Participant(),
+			st.finalText, st.agentSeq, !hasToolCalls,
+			toolCallPayloads(st.toolCalls),
+			st.thinking, st.thoughtSignature)
+		_ = s.emit(runCtx, consolidated)
 	}
 	st.assistantFolded = true
 
@@ -596,6 +607,20 @@ func (s *Session) retireTurn() {
 	s.modelChunks = nil
 	s.toolResults = nil
 	s.turnState = nil
+}
+
+// toolCallPayloads projects model.ChunkToolCall slices onto the
+// protocol.ToolCallPayload shape used in the consolidated final
+// AgentMessage. Drops Hash (used only by the live stuck-detector).
+func toolCallPayloads(calls []model.ChunkToolCall) []protocol.ToolCallPayload {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]protocol.ToolCallPayload, len(calls))
+	for i, c := range calls {
+		out[i] = protocol.ToolCallPayload{ToolID: c.ID, Name: c.Name, Args: c.Args}
+	}
+	return out
 }
 
 // drainPendingInbound runs at every turn boundary. Buffered frames

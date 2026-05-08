@@ -509,9 +509,21 @@ func (s *Session) sessionModels() map[model.Intent]model.ModelSpec {
 // happens before delivery so observers can't see anything that
 // failed to durably land. Emitting after the session has exited
 // (Outbox closed) returns ErrSessionClosed instead of panicking.
+//
+// One exception: streaming AgentMessage chunks (Final=false) and
+// streaming Reasoning chunks (Final=false) are outbox-only —
+// adapters render them live, but the row that lands in
+// session_events is the consolidated Final=true frame
+// foldAssistantAndMaybeDispatch emits at turn end (carrying full
+// text + tool_calls + thinking). Replay reads only the consolidated
+// row, so model.Message history is well-formed after resume without
+// reassembling chunks or scanning sibling tool_call rows.
 func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 	if s.closed.Load() {
 		return ErrSessionClosed
+	}
+	if isStreamingChunk(f) {
+		return s.outboxOnly(ctx, f)
 	}
 	row, summary, perr := store.FrameToEventRow(f, s.agent.ID())
 	if perr != nil {
@@ -546,6 +558,41 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 		if r := recover(); r != nil {
 			// Outbox was closed concurrently; treat as a graceful
 			// shutdown signal rather than a crash.
+			err = ErrSessionClosed
+		}
+	}()
+	select {
+	case s.out <- f:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// isStreamingChunk returns true for outbox-only intermediate frames
+// — the streaming text deltas adapters render live but never replay.
+// See emit's doc comment for why these aren't persisted. AgentMessage
+// rows pass through to the store only when marked Consolidated=true
+// (the per-iteration assistant turn record); Reasoning chunks are
+// always outbox-only because their thinking/signature lives in the
+// consolidated AgentMessage's metadata instead.
+func isStreamingChunk(f protocol.Frame) bool {
+	switch v := f.(type) {
+	case *protocol.AgentMessage:
+		return !v.Payload.Consolidated
+	case *protocol.Reasoning:
+		return !v.Payload.Final
+	default:
+		return false
+	}
+}
+
+// outboxOnly pushes a Frame onto the outbox without seq allocation
+// or persistence. Mirrors emit's outbox semantics including the
+// closed-channel recover.
+func (s *Session) outboxOnly(ctx context.Context, f protocol.Frame) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
 			err = ErrSessionClosed
 		}
 	}()
@@ -939,6 +986,16 @@ func (s *Session) handleExit(runCtx context.Context, tc *terminationCause) {
 		}
 	} else {
 		s.logger.Warn("session: project session_terminated", "session", s.id, "err", perr)
+	}
+	// Flip the row's status column to terminated so list paths
+	// (ListResumableRoots, HTTP /sessions?status=) can filter by an
+	// indexed scalar instead of probing the event log. The
+	// authoritative event was already written above; this column is
+	// a queryable cache. Best-effort: a failure here leaves the row
+	// "stuck" on Active — the next live close (or a future
+	// reconciliation sweep) flips it.
+	if err := s.store.UpdateSessionStatus(writeCtx, s.id, store.StatusTerminated); err != nil {
+		s.logger.Warn("session: update status terminated", "session", s.id, "err", err)
 	}
 	s.closed.Store(true)
 	// Surface subagent_result to the parent on every explicit

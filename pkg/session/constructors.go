@@ -21,14 +21,14 @@ var (
 )
 
 const (
-	StatusActive    = store.StatusActive
-	StatusSuspended = store.StatusSuspended // legacy; phase-4 never writes
-	StatusClosed    = store.StatusClosed    // legacy; phase-4 never writes
+	StatusActive     = store.StatusActive
+	StatusTerminated = store.StatusTerminated
 )
 
 type (
 	EventRow       = store.EventRow
 	SessionRow     = store.SessionRow
+	ResumableRoot  = store.ResumableRoot
 	ListEventsOpts = store.ListEventsOpts
 	RuntimeStore   = store.RuntimeStore
 )
@@ -202,7 +202,7 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *De
 	if err != nil {
 		return nil, err
 	}
-	if hasTerminated(ctx, deps.Store, id) {
+	if row.Status == store.StatusTerminated {
 		return nil, ErrSessionClosed
 	}
 
@@ -314,21 +314,6 @@ func (s *Session) Start(_ context.Context) {
 	}()
 }
 
-// hasTerminated returns true iff the session has at least one
-// session_terminated event in its events. Cheap read-only walk used
-// by Resume / Recover to gate "is this session gone?".
-func hasTerminated(ctx context.Context, rs store.RuntimeStore, id string) bool {
-	events, err := rs.ListEvents(ctx, id, store.ListEventsOpts{Limit: 1000})
-	if err != nil {
-		return false
-	}
-	for _, ev := range events {
-		if ev.EventType == string(protocol.KindSessionTerminated) {
-			return true
-		}
-	}
-	return false
-}
 
 // depthFromRow extracts metadata.depth from a SessionRow, handling
 // both int and float64 (JSON unmarshal default) forms. Returns 0 if

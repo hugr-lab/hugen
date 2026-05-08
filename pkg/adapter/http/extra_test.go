@@ -449,7 +449,7 @@ func TestAPILifecycle_OpenSubscribePostListClose(t *testing.T) {
 	var closed CloseSessionResponse
 	_ = json.NewDecoder(closeResp.Body).Decode(&closed)
 	closeResp.Body.Close()
-	if closed.Status != session.StatusClosed || closed.ClosedAt.IsZero() {
+	if closed.Status != session.StatusTerminated || closed.ClosedAt.IsZero() {
 		t.Errorf("close response = %+v", closed)
 	}
 }

@@ -81,7 +81,7 @@ func (a *Adapter) handleListSessions(host manager.AdapterHost) stdhttp.HandlerFu
 		q := r.URL.Query()
 		status := q.Get("status")
 		switch status {
-		case "", session.StatusActive, session.StatusSuspended, session.StatusClosed:
+		case "", session.StatusActive, session.StatusTerminated:
 			// ok
 		default:
 			writeError(w, stdhttp.StatusBadRequest, "bad_query", "unknown status: "+status)
@@ -225,7 +225,7 @@ func (a *Adapter) handleCloseSession(host manager.AdapterHost) stdhttp.HandlerFu
 		}
 		writeJSON(w, stdhttp.StatusOK, CloseSessionResponse{
 			SessionID: sessionID,
-			Status:    session.StatusClosed,
+			Status:    session.StatusTerminated,
 			ClosedAt:  closedAt,
 		})
 	}

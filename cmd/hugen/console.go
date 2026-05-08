@@ -9,7 +9,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/adapter/console"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/runtime"
-	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/manager"
 )
 
@@ -44,9 +43,9 @@ func runConsole(ctx context.Context, core *runtime.Core) int {
 }
 
 func tryFindResumableSession(ctx context.Context, m *manager.Manager, logger *slog.Logger) string {
-	rows, err := m.ListSessions(ctx, session.StatusActive)
+	rows, err := m.ListResumableRoots(ctx)
 	if err != nil {
-		logger.Warn("list active sessions", "err", err)
+		logger.Warn("list resumable roots", "err", err)
 		return ""
 	}
 	if len(rows) == 0 {
