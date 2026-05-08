@@ -172,12 +172,6 @@ func (c *Codec) materialise(base BaseFrame, payload []byte) (Frame, error) {
 			return nil, err
 		}
 		return &SubagentResult{BaseFrame: base, Payload: p}, nil
-	case KindPlanOp:
-		var p PlanOpPayload
-		if err := unmarshalPayload(payload, &p); err != nil {
-			return nil, err
-		}
-		return &PlanOp{BaseFrame: base, Payload: p}, nil
 	case KindSessionTerminated:
 		var p SessionTerminatedPayload
 		if err := unmarshalPayload(payload, &p); err != nil {

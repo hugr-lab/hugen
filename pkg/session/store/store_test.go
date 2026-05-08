@@ -26,13 +26,14 @@ func TestFrameToEventRow_RoundTrip_Phase4(t *testing.T) {
 				SessionID: "c", Result: "ok", Reason: protocol.TerminationCompleted, TurnsUsed: 4,
 			})
 		}},
-		{"plan_op_set", func() protocol.Frame {
-			return protocol.NewPlanOp("s", author, protocol.PlanOpPayload{
-				Op: "set", Text: "## plan", CurrentStep: "step 1",
-			})
+		{"extension_frame_plan_set", func() protocol.Frame {
+			return protocol.NewExtensionFrame("s", author, "plan",
+				protocol.CategoryOp, "set",
+				[]byte(`{"text":"## plan","current_step":"step 1"}`))
 		}},
-		{"plan_op_clear", func() protocol.Frame {
-			return protocol.NewPlanOp("s", author, protocol.PlanOpPayload{Op: "clear"})
+		{"extension_frame_plan_clear", func() protocol.Frame {
+			return protocol.NewExtensionFrame("s", author, "plan",
+				protocol.CategoryOp, "clear", nil)
 		}},
 		{"extension_frame_whiteboard_init", func() protocol.Frame {
 			return protocol.NewExtensionFrame("h", author, "whiteboard",

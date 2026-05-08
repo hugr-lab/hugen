@@ -37,7 +37,7 @@ const (
 	TruncationMarker = "\n[…truncated]"
 )
 
-// Plan is the in-memory projection of a session's plan_op events.
+// Plan is the in-memory projection of a session's plan extension_frame events.
 // Active=false means "no plan in projection" — either the events
 // log has none yet or the most recent boundary op is "clear". When
 // Active is false, every other field is zero by definition.
@@ -60,14 +60,23 @@ type Comment struct {
 }
 
 // ProjectEvent is the input shape Project / Apply consume — the
-// session package converts a plan_op EventRow into this. Time is
-// the row's CreatedAt; Op / Text / CurrentStep mirror the protocol
-// PlanOpPayload.
+// session package converts a plan extension_frame EventRow into
+// this. Time is the row's CreatedAt; Op mirrors
+// ExtensionFramePayload.Op; Text / CurrentStep are decoded from
+// ExtensionFramePayload.Data.
 type ProjectEvent struct {
 	At          time.Time
 	Op          string // "set" | "comment" | "clear"
 	Text        string
 	CurrentStep string
+}
+
+// OpData is the JSON-encoded payload that rides
+// ExtensionFramePayload.Data for plan ops. Set / comment carry both
+// fields; clear emits an empty object.
+type OpData struct {
+	Text        string `json:"text,omitempty"`
+	CurrentStep string `json:"current_step,omitempty"`
 }
 
 const (
@@ -117,7 +126,7 @@ func Project(events []ProjectEvent) Plan {
 // Apply is the pure projection step for one new event. Equivalent
 // to Project(events ∥ ev) when called against a Plan derived from
 // `events`. Used by tool handlers to update the in-memory cache
-// after persisting the corresponding plan_op event.
+// after persisting the corresponding plan extension_frame event.
 func Apply(p Plan, ev ProjectEvent) Plan {
 	switch ev.Op {
 	case OpSet:

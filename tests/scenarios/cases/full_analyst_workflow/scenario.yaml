@@ -34,10 +34,11 @@ steps:
 
     queries:
       # Plan ops — should show plan:set + 3+ plan:comment.
+      # Plan rides KindExtensionFrame with metadata.extension="plan".
       - name: plan_ops
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.session_events | map({seq, op: .metadata.op, data: .metadata.data})") {
+            jq(query: ".hub.db.agent.session_events | map(select(.metadata.extension == \"plan\")) | map({seq, op: .metadata.op, current_step: .metadata.data.current_step, text: .metadata.data.text})") {
               hub { db { agent {
                 session_events(
                   filter: {session_id: {eq: $sid}, event_type: {eq: "extension_frame"}}

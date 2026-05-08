@@ -32,12 +32,11 @@ const (
 	KindError         Kind = "error"
 	KindSystemMarker  Kind = "system_marker"
 
-	// Phase-4 kinds (sub-agents, plan, runtime injections). Whiteboard
-	// state-change events ride [KindExtensionFrame] with
-	// Extension="whiteboard" instead of dedicated kinds.
+	// Phase-4 kinds (sub-agents, runtime injections). Whiteboard and
+	// plan state-change events ride [KindExtensionFrame] with
+	// Extension="whiteboard" / "plan" instead of dedicated kinds.
 	KindSubagentStarted   Kind = "subagent_started"
 	KindSubagentResult    Kind = "subagent_result"
-	KindPlanOp            Kind = "plan_op"
 	KindSessionTerminated Kind = "session_terminated"
 	KindSystemMessage     Kind = "system_message"
 
@@ -409,15 +408,6 @@ type SubagentResultPayload struct {
 	TurnsUsed  int    `json:"turns_used"`
 }
 
-// PlanOpPayload is appended to a session's own events. op ∈ {set,
-// comment, clear}. Set / comment carry Text and optionally CurrentStep;
-// clear carries neither.
-type PlanOpPayload struct {
-	Op          string `json:"op"`
-	Text        string `json:"text,omitempty"`
-	CurrentStep string `json:"current_step,omitempty"`
-}
-
 // SessionTerminatedPayload is the sole terminal write for any
 // session. Reason is free-form; phase-4 writers use:
 // "completed", "hard_ceiling", "subagent_cancel: <rationale>",
@@ -514,11 +504,6 @@ type SubagentResult struct {
 	Payload SubagentResultPayload
 }
 
-type PlanOp struct {
-	BaseFrame
-	Payload PlanOpPayload
-}
-
 type SessionTerminated struct {
 	BaseFrame
 	Payload SessionTerminatedPayload
@@ -575,7 +560,6 @@ func (f Error) payload() any             { return f.Payload }
 func (f SystemMarker) payload() any      { return f.Payload }
 func (f SubagentStarted) payload() any   { return f.Payload }
 func (f SubagentResult) payload() any    { return f.Payload }
-func (f PlanOp) payload() any            { return f.Payload }
 func (f SessionTerminated) payload() any { return f.Payload }
 func (f SessionClose) payload() any      { return f.Payload }
 func (f SystemMessage) payload() any     { return f.Payload }
@@ -738,13 +722,6 @@ func NewSubagentResult(parentSessionID, fromSessionID string, author Participant
 	return &SubagentResult{BaseFrame: base, Payload: p}
 }
 
-func NewPlanOp(sessionID string, author ParticipantInfo, p PlanOpPayload) *PlanOp {
-	return &PlanOp{
-		BaseFrame: newBase(sessionID, KindPlanOp, author),
-		Payload:   p,
-	}
-}
-
 func NewSessionTerminated(sessionID string, author ParticipantInfo, p SessionTerminatedPayload) *SessionTerminated {
 	return &SessionTerminated{
 		BaseFrame: newBase(sessionID, KindSessionTerminated, author),
@@ -827,12 +804,6 @@ func Validate(f Frame) error {
 		}
 		if v.Payload.Reason == "" {
 			return fmt.Errorf("protocol: subagent_result missing reason")
-		}
-	case *PlanOp:
-		switch v.Payload.Op {
-		case "set", "comment", "clear":
-		default:
-			return fmt.Errorf("protocol: plan_op invalid op %q", v.Payload.Op)
 		}
 	case *SessionTerminated:
 		if v.Payload.Reason == "" {

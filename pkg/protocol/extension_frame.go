@@ -19,8 +19,8 @@ type Category string
 
 const (
 	// CategoryOp marks a state-change event the extension's Recovery
-	// hook replays into its in-memory projection (plan_op, whiteboard_op,
-	// skill_load, …). Never visible to the model directly.
+	// hook replays into its in-memory projection (plan ops, whiteboard
+	// ops, skill_load, …). Never visible to the model directly.
 	CategoryOp Category = "op"
 
 	// CategoryMessage marks a message-shaped event that may project
