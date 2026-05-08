@@ -20,7 +20,16 @@ authoritative (see `.specify/memory/constitution.md` and
 ## Where we are
 
 We are mid-execution of **design 001 — Hugr Agent Runtime**
-(`design/001-agent-runtime/design.md`). Phase plan:
+(`design/001-agent-runtime/design.md`).
+
+**Architecture-of-record**: `design/001-agent-runtime/architecture.md`
+is the current-state snapshot — read this first before touching
+session / extension / tool / skill internals. Phase docs remain
+authoritative as historical record of *why* each piece ended up
+where it did, but `architecture.md` wins on questions of *how
+things actually work today and where to plug in*.
+
+Phase plan:
 
 | Phase | Status |
 |-------|--------|
@@ -29,10 +38,11 @@ We are mid-execution of **design 001 — Hugr Agent Runtime**
 | 3. Action layer (skills + tools + 3-tier permissions + bash/hugr-mcp) | shipped |
 | 3.5. Analyst toolkit (duckdb-mcp + python-mcp + analyst skills) | shipped |
 | **4. Sub-agents + plan + whiteboard + event-driven session loop** | **spec drafted v2** (`phase-4-spec.md`, ready for `/speckit.specify`); architecture decisions in `phase-4-architecture.md` |
-| 4.1a. Extract `pkg/runtime` + dissolve `SystemProvider` (tools onto domain `ToolProvider`s; absorbs ex-4.3) | spec drafted v1 (`phase-4.1a-spec.md`); follows 4, gates 4.1b |
-| 4.1b. Observational scenario harness (port `../agent/tests/scenarios/` pattern; live LLM + real Hugr; ~8 scenarios v1) | spec drafted v1 (`phase-4.1b-spec.md`); follows 4.1a, gates 4.1c |
-| 4.1c. Subagent-as-adapter: parent observes child's outbox; eliminates child→parent.Submit cross-session shortcut. Surfaced by 4.1b harness (every sub-agent hung mid-flight). | spec drafted v1 (`phase-4.1c-spec.md`); follows 4.1b, gates 4.2 |
-| 4.2. Analyst mega-skill + role sub-agents + `skill_builder` + community-skill enablement (tri-state `allowed-tools`, `system:tool_catalog`) | spec drafted v0 (`phase-4.2-spec.md`); follows 4.1c |
+| 4.1a. Extract `pkg/runtime` + dissolve `SystemProvider` (tools onto domain `ToolProvider`s; absorbs ex-4.3) | shipped (`33a0bc3`) |
+| 4.1b. Observational scenario harness (port `../agent/tests/scenarios/` pattern; live LLM + real Hugr; ~8 scenarios v1) | shipped (`109f6b9`); 7 of 9 scenarios validated on gemini-pro + gemma4-26b, claude-sonnet canary green; `full_analyst_workflow` deferred → 4.2 |
+| 4.1c. Subagent-as-adapter: parent observes child's outbox; eliminates child→parent.Submit cross-session shortcut. Surfaced by 4.1b harness (every sub-agent hung mid-flight). | shipped (`109f6b9`) — pump + retry + per-skill intent + plan envelope migration all in same merge |
+| 4.2. Analyst mega-skill + role sub-agents + `skill_builder` + community-skill enablement (tri-state `allowed-tools`, `system:tool_catalog`) **+ task-complexity routing** (auto-classify when a task warrants a sub-agent vs. inline tool calls vs. just answering — gates `spawn_subagent` so root doesn't fan out trivial requests) | spec drafted v0 (`phase-4.2-spec.md`); follows 4.1c. Scope expanded 2026-05-08 to absorb the routing question that came out of 4.1b harness runs (root sometimes spawns when it shouldn't, sometimes does data work itself when it should delegate). |
+| ~~4.3~~ | **cancelled 2026-05-08** — historical scope was Manager-as-ToolProvider generalisation; superseded by 4.1a (`SystemProvider` already dissolved) and the per-domain ToolProvider pattern that landed with it. |
 | 5. Compactor + HITL: approvals + clarifications (compactor first within the phase; replaces the phase-3 `defaultHistoryWindow=50` stop-gap) | open |
 | 6. Cron + scheduler | open |
 | 7. Memory pipeline + LLM Wiki (short + long-term) | open |
@@ -46,56 +56,39 @@ Goal: finish design-001 cleanly, then move to **hub integration**
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
 
-## Active focus — phase 4.1c
+## Active focus — phase 4.2
 
-Phases 4 / 4.1a / 4.1b-pre shipped to `main`
-(`ba003c0` / `33a0bc3` / `8a2719e`). Phase 4.1b (scenario
-harness) lives on branch `009-scenario-harness`; the harness
-surfaced an architectural bug — every `Spawn`-ed sub-agent
-hangs mid-flight because no consumer exists for child's
-outbox. Active focus is **phase 4.1c** on branch
-`010-fix-subagent-delivery` to fix it before the manual
-multi-LLM run (4.1b §12 step 8) can complete and 4.2 starts.
+Phases 4 / 4.1a / 4.1b-pre / 4.1b / 4.1c all shipped to `main`
+(latest merge `109f6b9`). The scenario harness lives in
+`tests/scenarios/`; subagent pump + retry + per-skill intent +
+plan→ExtensionFrame migration all landed with phase 4.1c. 4.3 is
+**cancelled** (its scope was Manager-as-ToolProvider, which 4.1a
+already absorbed).
 
-**Document set for 4.1c work** (in order of authority):
+Next phase is **4.2 — analyst skill + skill_builder + community
+enablement + task-complexity routing**. The routing piece
+(automatically deciding "spawn a sub-agent vs. answer inline vs.
+do the tool call directly") was added on 2026-05-08 after 4.1b
+runs showed every LLM family makes routing mistakes, but each in
+a different way (Claude over-spawns trivial requests, gemma
+sometimes under-delegates and tries to do data work itself).
 
-1. **`design/001-agent-runtime/phase-4.1c-spec.md`** — the
-   contract. §1 Why, §2 Two symmetric channels, §3 Pump,
-   §4 Kind-level dispatch, §5 End-to-end flow, §6 Abnormal
-   terminations, §7 What does NOT change, §8 Files, §9
-   Implementation order, §10 Verification.
-2. **`design/001-agent-runtime/phase-4.1b-spec.md`** — the
-   harness; `step 8` (manual runs across 4 LLMs) is blocked
-   on this fix.
-3. **`pkg/protocol/frame.go:21-58`** — closed kind set the
-   pump filters against. No protocol change in 4.1c.
+Spec: `design/001-agent-runtime/phase-4.2-spec.md` (v0 draft).
+Needs revision before implementation to spell out:
 
-**Key locked decisions for 4.1c**:
+1. The classifier signal — system-prompt nudges only, or a
+   dedicated `task_classify` tool the LLM calls before deciding,
+   or a heuristic gate that fires before `spawn_subagent` is
+   even visible. Open question.
+2. The skill / role catalogue — what shape `analyst-mega-skill`
+   takes, how role sub-agents declare their cost class
+   (`Intent` already wired, but role description needs richer
+   "when to use me" text).
+3. `skill_builder` — author tooling for users to create their
+   own skills + community publication path.
 
-- Parent runs one **fire-and-forget pump goroutine** per child
-  (`Session.consumeChildOutbox`). Started from `Spawn` after
-  `child.Start(ctx)`. Lifecycle = channel close.
-- Pump's switch is **kind-level only** — no payload spelunking,
-  no extension-name knowledge. `AgentMessage{Final&&Consolidated}`
-  → "result", `Error{!Recoverable}` → "terminal error",
-  `SessionTerminated` → fallback projection. Everything else
-  drains.
-- **`SubagentResult` kind stays unchanged in `pkg/protocol/`**;
-  only the producer moves from child to parent. Frame is
-  constructed by parent's pump and Submit'd to parent's own
-  inbox so `routeInbound` → `handleSubagentResult` →
-  `wait_subagents` feed pipeline works unchanged.
-- `emitSubagentResultToParent` is **deleted**.
-  `requestClose` for subagents now self-Submits SessionClose.
-  `subagentResultSent` atomic gate is gone — single producer
-  (the pump) replaces the dual child-side producers.
-- `handleExit` for subagents pushes its `SessionTerminated`
-  frame onto the outbox (best-effort, recover-safe) so the pump
-  observes the actual reason; root sessions skip this push.
-- **Whiteboard / plan / all extensions are NOT touched** —
-  `parentState.Submit` is a legitimate extension-level
-  cross-session contract, not the child-runtime shortcut.
-- 4.1c is **one PR** on branch `010-fix-subagent-delivery`.
+Treat 4.2 as an open discussion until the spec is revised — the
+harness is the regression net, but the design isn't locked.
 
 ## Project structure
 
