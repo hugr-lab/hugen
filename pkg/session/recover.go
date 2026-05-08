@@ -144,12 +144,17 @@ func appendChildTerminal(ctx context.Context, deps *Deps, childID, reason string
 	}
 }
 
-// appendParentSubagentResult writes the synthetic subagent_result on
-// the parent's events. Reason is propagated from the child's terminal
-// (or "restart_died" for non-terminal children). Result text is
-// generic — "did not deliver, re-spawn if relevant" — so the model
-// gets a clear instruction without runtime needing to know skill /
-// role / task. Returns true on a successful append.
+// appendParentSubagentResult writes a synthetic subagent_result on the
+// parent's events for a non-delivering child (recovery path). Reason
+// is propagated from the child's terminal (or "restart_died" for
+// non-terminal children). Result body is generic — "did not deliver,
+// re-spawn if relevant" — so the model gets a clear instruction
+// without runtime needing to know skill / role / task. Returns true
+// on a successful append.
+//
+// Live-pump path uses [appendSubagentResultRow] directly with a
+// fully-populated SubagentResult constructed from observed child
+// frames (real result text + turns count).
 func appendParentSubagentResult(ctx context.Context, deps *Deps, parentID, childID, reason string) bool {
 	body := fmt.Sprintf(
 		"Sub-agent %s did not deliver a result before the previous process exited (reason: %s). If the work is still relevant, re-spawn a fresh sub-agent for it.",
@@ -161,15 +166,25 @@ func appendParentSubagentResult(ctx context.Context, deps *Deps, parentID, child
 			Reason:    reason,
 			Result:    body,
 		})
-	row, summary, err := store.FrameToEventRow(result, deps.Agent.ID())
+	return appendSubagentResultRow(ctx, deps, result)
+}
+
+// appendSubagentResultRow persists a fully-constructed SubagentResult
+// directly to parent's events, bypassing parent.Submit. Used both by
+// the recovery wrapper above (for synthetic dangling-child rows) and
+// by the live pump's offline-parent fallback (when parent.IsClosed
+// would otherwise drop the projection). The frame must already be
+// addressed to parent's SessionID with FromSession=child.id.
+func appendSubagentResultRow(ctx context.Context, deps *Deps, sr *protocol.SubagentResult) bool {
+	row, summary, err := store.FrameToEventRow(sr, deps.Agent.ID())
 	if err != nil {
-		deps.Logger.Warn("session: settle project subagent_result",
-			"parent", parentID, "child", childID, "err", err)
+		deps.Logger.Warn("session: project subagent_result row",
+			"parent", sr.SessionID(), "child", sr.FromSessionID(), "err", err)
 		return false
 	}
 	if err := deps.Store.AppendEvent(ctx, row, summary); err != nil {
-		deps.Logger.Warn("session: settle append subagent_result",
-			"parent", parentID, "child", childID, "err", err)
+		deps.Logger.Warn("session: append subagent_result row",
+			"parent", sr.SessionID(), "child", sr.FromSessionID(), "err", err)
 		return false
 	}
 	return true
