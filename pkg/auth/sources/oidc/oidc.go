@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,6 +21,11 @@ import (
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/hugr-lab/hugen/pkg/auth/sources"
 )
+
+// ErrNoTokens is returned by Tokens when no successful login has
+// completed yet. Callers (cmd/hugen-test-token) treat it as the
+// "block until ready then retry" signal.
+var ErrNoTokens = errors.New("oidc: no tokens captured yet")
 
 // inFlightTTL bounds how long a /auth/login state is remembered
 // waiting for the matching /auth/callback. Keeps the map from
@@ -160,6 +166,23 @@ func (s *Source) tokenWithTTL(ctx context.Context) (string, int, error) {
 		return "", 0, err
 	}
 	return tok, ttlSeconds(s.expiresAt), nil
+}
+
+// Tokens returns the current access + refresh tokens and the
+// announced expiry. Returns ErrNoTokens when no successful login
+// has completed yet (accessToken still empty). Read under tokenMu.
+//
+// Used exclusively by cmd/hugen-test-token to dump credentials to
+// disk after the browser flow completes — production paths read
+// the access token via Token / TokenWithTTL, which already block
+// on s.ready and refresh on demand.
+func (s *Source) Tokens() (access, refresh string, expiresAt time.Time, err error) {
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
+	if s.accessToken == "" {
+		return "", "", time.Time{}, ErrNoTokens
+	}
+	return s.accessToken, s.refreshToken, s.expiresAt, nil
 }
 
 func ttlSeconds(expiresAt time.Time) int {

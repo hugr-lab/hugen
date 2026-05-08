@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth/internal/fixture"
 	"github.com/stretchr/testify/assert"
@@ -116,6 +117,67 @@ func TestOIDCStore_IdPError(t *testing.T) {
 	store.HandleCallback(w, r)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "access_denied")
+}
+
+func TestOIDCStore_Tokens_BeforeLogin(t *testing.T) {
+	idp := fixture.NewMockIdP(t)
+	store, err := New(context.Background(), Config{
+		Name:        "hugr",
+		IssuerURL:   idp.Srv.URL,
+		ClientID:    "agent",
+		RedirectURL: "http://localhost/auth/callback",
+	})
+	require.NoError(t, err)
+
+	access, refresh, expiresAt, err := store.Tokens()
+	assert.ErrorIs(t, err, ErrNoTokens)
+	assert.Empty(t, access)
+	assert.Empty(t, refresh)
+	assert.True(t, expiresAt.IsZero())
+}
+
+func TestOIDCStore_Tokens_AfterLogin(t *testing.T) {
+	idp := fixture.NewMockIdP(t)
+	store, err := New(context.Background(), Config{
+		Name:        "hugr",
+		IssuerURL:   idp.Srv.URL,
+		ClientID:    "agent",
+		RedirectURL: "http://localhost:10000/auth/callback",
+	})
+	require.NoError(t, err)
+
+	// Drive a full login flow using the helpers from
+	// TestOIDCStore_StatePrefixAndLoginCallback so the post-login
+	// state of (accessToken, refreshToken, expiresAt) is real.
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/auth/login/hugr", nil)
+	store.HandleLogin(w, r)
+	authorizeURL, err := url.Parse(w.Header().Get("Location"))
+	require.NoError(t, err)
+
+	noFollow := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	idpResp, err := noFollow.Get(authorizeURL.String())
+	require.NoError(t, err)
+	_ = idpResp.Body.Close()
+	callbackLoc, err := idpResp.Location()
+	require.NoError(t, err)
+
+	cw := httptest.NewRecorder()
+	cr := httptest.NewRequest(http.MethodGet, "/auth/callback?"+callbackLoc.RawQuery, nil)
+	store.HandleCallback(cw, cr)
+	require.Equal(t, http.StatusOK, cw.Code)
+
+	access, refresh, expiresAt, err := store.Tokens()
+	require.NoError(t, err)
+	assert.Equal(t, "access-token-1", access)
+	assert.NotEmpty(t, refresh)
+	assert.False(t, expiresAt.IsZero())
+	assert.True(t, expiresAt.After(time.Now()),
+		"expiresAt must be in the future, got %v", expiresAt)
 }
 
 func TestOIDCStore_NameRequired(t *testing.T) {
