@@ -15,10 +15,17 @@
 #  - go test -run TestScenarios/<run-name> ./tests/scenarios/...
 #  - go test -run TestScenarios/<run-name>/<scenario-name> ...
 runs:
-  - name: claude-sonnet-embedded
+  # Every v1 scenario expects skill:load("hugr-data") which surfaces
+  # tools from hugr-main + hugr-query providers. Embedded topology
+  # strips those — running an hugr-data scenario there leaves the
+  # model hallucinating tools that aren't in the snapshot. Until
+  # we add embedded-only scenarios (python_analysis only — pending
+  # phase-4.2 analyst skills), every run uses external-hugr.
+
+  - name: claude-sonnet
     llm: configs/llm-claude-sonnet.yaml
-    topology: configs/topology-embedded.yaml
-    requires: [anthropic]
+    topology: configs/topology-external-hugr.yaml
+    requires: [anthropic, hugr]
     scenarios:
       - single_explorer
       - delegation_required
@@ -26,36 +33,31 @@ runs:
       - plan_root_solo
       - whiteboard_fanout3
       - python_analysis_subagent
-
-  - name: claude-sonnet-hugr
-    llm: configs/llm-claude-sonnet.yaml
-    topology: configs/topology-external-hugr.yaml
-    requires: [anthropic, hugr]
-    scenarios:
       - hugr_data_explorer
       - full_analyst_workflow
-      - delegation_required
 
-  - name: gemini-pro-hugr
+  - name: gemini-pro
     llm: configs/llm-gemini-pro.yaml
     topology: configs/topology-external-hugr.yaml
     requires: [gemini, hugr]
     scenarios:
-      - full_analyst_workflow
+      - single_explorer
       - delegation_required
+      - full_analyst_workflow
 
-  - name: gpt-5-4-hugr
+  - name: gpt-5-4
     llm: configs/llm-gpt-5-4.yaml
     topology: configs/topology-external-hugr.yaml
     requires: [openai, hugr]
     scenarios:
-      - full_analyst_workflow
+      - single_explorer
       - delegation_required
+      - full_analyst_workflow
 
-  - name: gemma4-26b-fast
+  - name: gemma4-26b
     llm: configs/llm-gemma4-26b.yaml
-    topology: configs/topology-embedded.yaml
-    requires: [local]
+    topology: configs/topology-external-hugr.yaml
+    requires: [local, hugr]
     scenarios:
       - single_explorer
       - delegation_required
