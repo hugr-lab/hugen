@@ -1,4 +1,4 @@
-.PHONY: build mcps bash-mcp hugr-query python-mcp python-mcp-template submodule-update submodule-check run run-console run-webui test vet lint check tidy clean
+.PHONY: build mcps bash-mcp hugr-query python-mcp python-mcp-template submodule-update submodule-check run run-console run-webui test vet lint check tidy clean scenario scenario-run scenario-one hugr-token
 
 BINARY := bin/hugen
 TAGS   := duckdb_arrow
@@ -88,3 +88,42 @@ tidy:
 
 clean:
 	go clean -cache -testcache
+
+# ── Phase 4.1b — observational scenario harness ─────────────
+# Build tag pair `duckdb_arrow,scenario` keeps the harness out of
+# default `go test ./...`. Per-run artefacts land under
+# tests/scenarios/.data/run-<ts>/<run_name>/. See
+# tests/scenarios/README.md and design/001-agent-runtime/phase-4.1b-spec.md.
+
+# Run every scenario in tests/scenarios/runs.yaml. Runs whose
+# `requires:` env vars are missing skip cleanly — empty
+# tests/scenarios/.test.env is a valid state.
+scenario:
+	go test -tags=$(TAGS),scenario -count=1 -v -timeout=30m \
+	  -run TestScenarios ./tests/scenarios/...
+
+# Run every scenario inside one named run from runs.yaml.
+# Usage: make scenario-run run=claude-sonnet-embedded
+scenario-run:
+	@if [ -z "$(run)" ]; then \
+	  echo "usage: make scenario-run run=<run_name>"; exit 1; fi
+	go test -tags=$(TAGS),scenario -count=1 -v -timeout=30m \
+	  -run "TestScenarios/$(run)" ./tests/scenarios/...
+
+# Run a single scenario inside a named run.
+# Usage: make scenario-one run=claude-sonnet-embedded name=delegation_required
+scenario-one:
+	@if [ -z "$(run)" ] || [ -z "$(name)" ]; then \
+	  echo "usage: make scenario-one run=<run_name> name=<scenario_name>"; \
+	  exit 1; fi
+	go test -tags=$(TAGS),scenario -count=1 -v -timeout=10m \
+	  -run "TestScenarios/$(run)/$(name)" ./tests/scenarios/...
+
+# Capture fresh OIDC tokens against the configured Hugr instance
+# and write them into tests/scenarios/.test.env. Runs the browser
+# flow via cmd/hugen-test-token. Override the discover URL via
+# `make hugr-token URL=http://...`.
+hugr-token:
+	go run ./cmd/hugen-test-token \
+	  --env-file=tests/scenarios/.test.env \
+	  $(if $(URL),--discover-url=$(URL),)
