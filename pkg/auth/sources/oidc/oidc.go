@@ -221,8 +221,17 @@ func ttlSeconds(expiresAt time.Time) int {
 }
 
 // Login implements Source — prints the login URL and opens the
-// browser. Safe to call multiple times.
+// browser. Safe to call multiple times. Short-circuits when the
+// source already holds an access token (typically because
+// SetTokens injected one during boot — the harness path); in that
+// case there's nothing for the user to log into.
 func (s *Source) Login(ctx context.Context) error {
+	s.tokenMu.Lock()
+	hasToken := s.accessToken != ""
+	s.tokenMu.Unlock()
+	if hasToken {
+		return nil
+	}
 	loginURL := s.loginEndpointURL()
 	s.logger.Info("OIDC login required — open in browser",
 		"name", s.cfg.Name, "url", loginURL, "client", s.cfg.ClientID)

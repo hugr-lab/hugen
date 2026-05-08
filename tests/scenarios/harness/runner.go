@@ -85,7 +85,7 @@ func (h *SessionHandle) Step(ctx context.Context, step Step, idx int) {
 	h.t.Helper()
 	h.t.Logf("── step %d ──", idx+1)
 
-	budget := step.Budget
+	budget := step.Budget.Std()
 	if budget == 0 {
 		budget = 60 * time.Second
 	}
@@ -100,7 +100,7 @@ func (h *SessionHandle) Step(ctx context.Context, step Step, idx int) {
 	}
 
 	if step.WaitForSubagents > 0 {
-		h.waitForSubagentsSettle(step.WaitForSubagents)
+		h.waitForSubagentsSettle(step.WaitForSubagents.Std())
 	}
 	if step.WaitForCondition != nil {
 		h.waitForCondition(ctx, step.WaitForCondition)

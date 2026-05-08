@@ -73,7 +73,7 @@ func TestScenarios(t *testing.T) {
 			for _, name := range run.Scenarios {
 				name := name
 				t.Run(name, func(t *testing.T) {
-					scenarioPath := filepath.Join(rootCwd, name, "scenario.yaml")
+					scenarioPath := filepath.Join(rootCwd, "cases", name, "scenario.yaml")
 					if _, err := os.Stat(scenarioPath); err != nil {
 						t.Skipf("scenario file missing: %v", err)
 					}

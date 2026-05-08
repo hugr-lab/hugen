@@ -2,7 +2,56 @@
 
 package harness
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
+
+// Duration wraps time.Duration with JSON / YAML unmarshalling that
+// accepts strings ("60s", "5m"), bare-number seconds (60), and
+// nested numeric scalars. The default time.Duration UnmarshalJSON
+// only accepts integer nanoseconds, which makes scenario.yaml
+// unwriteable in human-friendly units. The oasdiff/yaml package
+// goes through JSON, so a custom UnmarshalJSON covers both paths.
+type Duration time.Duration
+
+// String renders via the underlying time.Duration formatter
+// ("1m30s") so log output matches the YAML the operator wrote.
+func (d Duration) String() string { return time.Duration(d).String() }
+
+// Std exposes the wrapped time.Duration for sites that take the
+// stdlib type (context deadlines, timer arithmetic).
+func (d Duration) Std() time.Duration { return time.Duration(d) }
+
+// UnmarshalJSON accepts:
+//   - quoted duration strings: "90s", "5m", "1h"
+//   - bare numbers: 90 (interpreted as seconds)
+//   - null: zero duration
+func (d *Duration) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*d = 0
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		dur, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("parse duration %q: %w", s, err)
+		}
+		*d = Duration(dur)
+		return nil
+	}
+	var secs float64
+	if err := json.Unmarshal(data, &secs); err != nil {
+		return fmt.Errorf("parse duration scalar: %w", err)
+	}
+	*d = Duration(time.Duration(secs * float64(time.Second)))
+	return nil
+}
 
 // RunsFile is the top-level shape of tests/scenarios/runs.yaml.
 type RunsFile struct {
@@ -44,12 +93,12 @@ type Scenario struct {
 // inbox drain). WaitForSubagents and WaitForCondition are optional
 // settling sentinels run before Queries.
 type Step struct {
-	Say              string        `yaml:"say,omitempty"`
-	Tick             bool          `yaml:"tick,omitempty"`
-	Budget           time.Duration `yaml:"budget,omitempty"` // overrides default 60s
-	WaitForSubagents time.Duration `yaml:"wait_for_subagents,omitempty"`
-	WaitForCondition *WaitCond     `yaml:"wait_for_condition,omitempty"`
-	Queries          []Query       `yaml:"queries,omitempty"`
+	Say              string    `yaml:"say,omitempty"`
+	Tick             bool      `yaml:"tick,omitempty"`
+	Budget           Duration  `yaml:"budget,omitempty"` // overrides default 60s
+	WaitForSubagents Duration  `yaml:"wait_for_subagents,omitempty"`
+	WaitForCondition *WaitCond `yaml:"wait_for_condition,omitempty"`
+	Queries          []Query   `yaml:"queries,omitempty"`
 }
 
 // WaitCond is a generic "poll until persisted state matches" gate.
@@ -61,7 +110,7 @@ type WaitCond struct {
 	Vars     map[string]any `yaml:"vars,omitempty"`
 	Path     string         `yaml:"path,omitempty"`
 	Expected int            `yaml:"expected_rows"`
-	Budget   time.Duration  `yaml:"budget,omitempty"`
+	Budget   Duration       `yaml:"budget,omitempty"`
 }
 
 // Query is one inspection clause logged after the step's primary

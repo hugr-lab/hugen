@@ -50,6 +50,59 @@ func TestMessagesToHugrJSON_RejectsEmptyRole(t *testing.T) {
 	}
 }
 
+func TestNormalizeToolArgs(t *testing.T) {
+	tcs := []struct {
+		name string
+		in   any
+		want any
+	}{
+		{"nil → empty object", nil, map[string]any{}},
+		{"empty string → empty object", "", map[string]any{}},
+		{"already an object", map[string]any{"x": 1}, map[string]any{"x": 1}},
+		{"json string", `{"a":2}`, map[string]any{"a": float64(2)}},
+		{"non-json string wrapped", "hello", map[string]any{"_raw": "hello"}},
+		{"list wrapped", []any{1, 2}, map[string]any{"_raw": "[1,2]"}},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeToolArgs(tc.in)
+			gotJSON, _ := json.Marshal(got)
+			wantJSON, _ := json.Marshal(tc.want)
+			if string(gotJSON) != string(wantJSON) {
+				t.Errorf("got %s, want %s", gotJSON, wantJSON)
+			}
+		})
+	}
+}
+
+func TestMessagesToHugrJSON_ToolCallNilArgsBecomesObject(t *testing.T) {
+	out, err := messagesToHugrJSON([]model.Message{{
+		Role: model.RoleAssistant,
+		ToolCalls: []model.ChunkToolCall{
+			{ID: "call_1", Name: "session:wait_subagents", Args: nil},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(out[0]), &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	calls, ok := m["tool_calls"].([]any)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("tool_calls = %v", m["tool_calls"])
+	}
+	first, _ := calls[0].(map[string]any)
+	args, ok := first["arguments"].(map[string]any)
+	if !ok {
+		t.Errorf("arguments = %T (%v), want map[string]any", first["arguments"], first["arguments"])
+	}
+	if len(args) != 0 {
+		t.Errorf("arguments = %v, want empty object", args)
+	}
+}
+
 func TestMessagesToHugrJSON_PreservesToolCallID(t *testing.T) {
 	out, err := messagesToHugrJSON([]model.Message{
 		{Role: model.RoleTool, Content: "ok", ToolCallID: "call_42"},

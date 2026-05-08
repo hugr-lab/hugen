@@ -12,7 +12,7 @@ tool_providers:
   - name: bash-mcp
     type: mcp
     transport: stdio
-    command: ./bin/bash-mcp
+    command: ${HUGEN_BIN_DIR}/bash-mcp
     lifetime: per_session
     env:
       SHARED_DIR: ${HUGEN_SHARED_ROOT}
@@ -26,7 +26,7 @@ tool_providers:
   - name: hugr-query
     type: mcp
     transport: stdio
-    command: ./bin/hugr-query
+    command: ${HUGEN_BIN_DIR}/hugr-query
     lifetime: per_agent
     auth: hugr
     env:
@@ -35,7 +35,7 @@ tool_providers:
   - name: python-mcp
     type: mcp
     transport: stdio
-    command: ./bin/python-mcp
+    command: ${HUGEN_BIN_DIR}/python-mcp
     args: [--template, "${HUGEN_PYTHON_TEMPLATE}"]
     lifetime: per_agent
     auth: hugr

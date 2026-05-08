@@ -7,10 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -58,6 +58,23 @@ func Setup(ctx context.Context, t *testing.T, opts SetupOpts) *Runtime {
 		t.Fatalf("harness.Setup: load env: %v", err)
 	}
 
+	// Inject repo-relative paths the topology configs reference via
+	// ${HUGEN_BIN_DIR} / ${HUGEN_VENDOR_DIR}. Test cwd is
+	// tests/scenarios/, so unqualified `./bin/...` would resolve to
+	// tests/scenarios/bin/ which doesn't exist. We pre-compute
+	// absolute paths from repo root and let mergeConfigs / runtime
+	// expand them.
+	if env["HUGEN_BIN_DIR"] == "" {
+		if abs, err := filepath.Abs(filepath.Join(opts.RunsRoot, "..", "..", "bin")); err == nil {
+			env["HUGEN_BIN_DIR"] = abs
+		}
+	}
+	if env["HUGEN_VENDOR_DIR"] == "" {
+		if abs, err := filepath.Abs(filepath.Join(opts.RunsRoot, "..", "..", "vendor")); err == nil {
+			env["HUGEN_VENDOR_DIR"] = abs
+		}
+	}
+
 	if ok, reason := EvalRequires(env, opts.Run.Requires); !ok {
 		t.Skipf("scenario run %q skipped: %s", opts.Run.Name, reason)
 	}
@@ -103,9 +120,16 @@ func Setup(ctx context.Context, t *testing.T, opts SetupOpts) *Runtime {
 		t.Fatalf("harness.Setup: merge configs: %v", err)
 	}
 
-	port, err := freePort()
-	if err != nil {
-		t.Fatalf("harness.Setup: free port: %v", err)
+	// HTTP port: Keycloak whitelists redirect_uri by port, so we
+	// can't pick a free one — must match an entry the OIDC client
+	// is registered with. Default 10000 (HUGEN_PORT in prod .env);
+	// override via HUGEN_PORT in .test.env when the deployment
+	// reserves a separate AGENT_PORT for harness use.
+	port := 10000
+	if v := env["HUGEN_PORT"]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			port = n
+		}
 	}
 
 	logLevel := slog.LevelInfo
@@ -218,18 +242,6 @@ func makeTokenInjectionHook(env map[string]string, logger *slog.Logger) func(con
 	}
 }
 
-// freePort returns a free TCP port by binding to :0 then closing.
-// Used to pick the harness HTTP listener port; collision with a
-// running hugen is impossible.
-func freePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = l.Close() }()
-	return l.Addr().(*net.TCPAddr).Port, nil
-}
-
 // mergeConfigs deep-merges base ← llmOverlay ← topologyOverlay
 // into out. Maps merge recursively; lists are replaced (overlay
 // wins). Scalars are replaced (overlay wins).
@@ -307,8 +319,6 @@ func SortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-// errFreePort is returned to keep go vet happy on unused-result
-// helpers; surfaces nowhere in production paths.
-var errFreePort = errors.New("harness: no free port")
-
-var _ = errFreePort
+// errUnused keeps the errors import live in case future helpers
+// want it without churning the import block.
+var _ = errors.New
