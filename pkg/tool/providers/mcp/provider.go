@@ -205,15 +205,7 @@ func (p *Provider) newClient() (cli *mcpcli.Client, needsStart bool, err error) 
 	switch p.spec.Transport {
 	case TransportStdio:
 		env := envSlice(p.spec.Env)
-		opts := []transport.StdioOption{
-			// Route mcp-go's transport logs through our slog and
-			// filter the benign teardown-order noise (the library
-			// reads stdout in a goroutine; on Close the process
-			// pipes can close between cmd.Wait completion and the
-			// reader's next ReadString, surfacing as "file already
-			// closed" — see stdioLogger).
-			transport.WithCommandLogger(stdioLogger{base: p.log, name: p.spec.Name}),
-		}
+		var opts []transport.StdioOption
 		if p.spec.Cwd != "" {
 			cwd := p.spec.Cwd
 			opts = append(opts, transport.WithCommandFunc(func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
@@ -508,39 +500,3 @@ var (
 	_ tool.Recoverable  = (*Provider)(nil)
 )
 
-// stdioLogger bridges mcp-go's transport logger surface into our
-// slog and filters the benign teardown-order noise that the
-// library prints on its own stdlib log otherwise. The library's
-// stdout reader goroutine (mcp-go/client/transport/stdio.go's
-// readResponses) prints "Error reading from stdout: %v" when the
-// process pipes close between cmd.Wait completion and ReadString
-// returning EOF — that surfaces as "file already closed" and is
-// not an actual error condition. We swallow it here; everything
-// else routes to p.log under the provider name.
-type stdioLogger struct {
-	base *slog.Logger
-	name string
-}
-
-func (l stdioLogger) Infof(format string, v ...any) {
-	if l.base == nil {
-		return
-	}
-	l.base.Debug(fmt.Sprintf(format, v...), "provider", l.name)
-}
-
-func (l stdioLogger) Errorf(format string, v ...any) {
-	msg := fmt.Sprintf(format, v...)
-	// Filter the known shutdown-order noise from mcp-go's stdio
-	// reader. Other transport-level errors fall through.
-	if strings.Contains(msg, "file already closed") {
-		if l.base != nil {
-			l.base.Debug(msg, "provider", l.name)
-		}
-		return
-	}
-	if l.base == nil {
-		return
-	}
-	l.base.Warn(msg, "provider", l.name)
-}
