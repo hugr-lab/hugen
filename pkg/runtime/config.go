@@ -1,8 +1,11 @@
 package runtime
 
 import (
+	"context"
 	"log/slog"
 	"time"
+
+	"github.com/hugr-lab/hugen/pkg/auth"
 )
 
 // Config is a fully resolved, env-pure runtime configuration.
@@ -20,6 +23,14 @@ type Config struct {
 	Workspace       WorkspaceConfig
 	HTTP            HTTPConfig
 	Hugr            HugrConfig
+
+	// AfterAuthHook fires after phaseHTTPAuth has built core.Auth
+	// and BEFORE phaseStorage's LoadFromView drains the prompt-login
+	// queue. The harness uses this to inject pre-captured OIDC
+	// tokens into the hugr source (oidc.Source.SetTokens) so
+	// scenarios run against real Hugr without an interactive
+	// browser flow. Production callers leave it nil.
+	AfterAuthHook func(ctx context.Context, svc *auth.Service) error
 }
 
 // WorkspaceConfig — per-session scratch root.
