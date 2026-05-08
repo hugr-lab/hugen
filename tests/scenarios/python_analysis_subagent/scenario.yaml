@@ -1,0 +1,54 @@
+# python_analysis_subagent — root spawns one sub-agent loaded with
+# the python-runner skill, which uses python-mcp's run_code to
+# compute something. By-eye: did the venv autoload? Does
+# python:run_code see expected packages? Did root NOT call python:*
+# directly?
+name: python_analysis_subagent
+requires: []
+
+steps:
+  - say: |
+      I have a list of numbers: [12, 7, 19, 3, 8, 24, 11].
+
+      Spawn ONE sub-agent (skill: python-runner, role: analyst)
+      that uses python:run_code to compute mean, median, and
+      standard deviation. The child returns those three numbers
+      back to you; you then format them as a one-line summary.
+
+      Don't run Python yourself.
+    budget: 180s
+    wait_for_subagents: 120s
+
+    queries:
+      # Root must NOT have python:* in tool_name. Only delegation
+      # tools.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # The child's tool calls — should include python:run_code.
+      - name: tool_calls_children
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({id, calls: (.events // [])})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events: session_events(
+                    filter: {event_type: {eq: "tool_call"}}
+                    order_by: [{field: "seq", direction: ASC}]
+                  ) { seq tool_name tool_args }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq

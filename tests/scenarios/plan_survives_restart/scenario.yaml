@@ -1,0 +1,50 @@
+# plan_survives_restart — write a plan + 2 comments, then end the
+# scenario. The harness preserves memory.db on disk; the operator
+# can re-run hugen against the same .data/run-<ts>/<run>/state/
+# memory.db and verify plan:show returns the original body +
+# comments (Recovery hook on the plan extension rebuilds
+# projection from extension_frame events).
+#
+# v1 caveat: the harness does not yet automate the restart leg.
+# This scenario writes the plan; the by-eye verification is:
+#
+#   1. Run this scenario; note the .data/run-<ts>/<run>/state path.
+#   2. Open .data/<...>/state/memory.db with DuckDB:
+#        SELECT * FROM hub.db.agent.session_events
+#        WHERE event_type='extension_frame' AND payload.extension='plan';
+#      Confirm plan:set + 2 plan:comment rows are present.
+#   3. (manual) Re-boot hugen against that state dir; type
+#      `/skill load _planner` then ask "show me the plan" — the
+#      response should include the body + comments from step 2.
+#
+# When the harness gains restart-aware step primitives (phase-4.1b
+# follow-up), this YAML grows automated checks.
+name: plan_survives_restart
+requires: []
+
+steps:
+  - say: |
+      Use the planner skill to draft a 3-step plan for analysing
+      a hypothetical "monthly sales" report. Don't execute the
+      steps. Add a one-line plan:comment for step 1 ("would query
+      orders by month") and another for step 2 ("would join with
+      customers"). Then plan:show so I can read it back.
+    budget: 60s
+
+    queries:
+      # All plan:* extension_frame ops — captures what was
+      # persisted, which is exactly what Recovery will replay.
+      - name: plan_ops
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map(select(.metadata.extension == \"plan\")) | map({seq, op: .metadata.op, data: .metadata.data})") {
+              hub { db { agent {
+                session_events(
+                  filter: {session_id: {eq: $sid}, event_type: {eq: "extension_frame"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq metadata }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq

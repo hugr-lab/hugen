@@ -1,0 +1,58 @@
+# single_explorer — root spawns ONE sub-agent and waits for its
+# result. By-eye check: did the model call session:spawn_subagent
+# exactly once with skill=hugr-data + role=explorer? Did it
+# session:wait_subagents or trust the synchronous return?
+name: single_explorer
+requires: []
+
+steps:
+  - say: |
+      I have a data source named "northwind". Spawn ONE explorer
+      sub-agent (skill: hugr-data, role: explorer) to summarise its
+      schema in two sentences. Don't answer yourself — delegate,
+      wait for the specialist's reply, then relay it.
+    budget: 90s
+
+    queries:
+      # Children of the root session — should be exactly 1.
+      - name: subagent_rows
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Every tool the root called, in order. For single_explorer,
+      # the only entries should be session:spawn_subagent /
+      # session:wait_subagents / session:subagent_runs / plan:* /
+      # skill:tools_catalog. Anything else (hugr-main:* etc) means
+      # root did the work itself instead of delegating.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Session lifecycle state machine — useful to confirm the
+      # session went through wait_subagents and back to active.
+      - name: lifecycle_status
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "session_status"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq metadata }
+            }}}
+          }
+        vars: { sid: "$sid" }

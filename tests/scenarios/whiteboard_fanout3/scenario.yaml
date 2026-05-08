@@ -1,0 +1,78 @@
+# whiteboard_fanout3 — root inits a whiteboard, spawns 3 explorer
+# children, each writes one finding, root reads back all writes.
+# By-eye: do siblings see each other's writes (whiteboard:message
+# extension_frame in their session_events)? Does whiteboard:read
+# from root return all 3 writes in monotonic seq?
+name: whiteboard_fanout3
+requires: []
+
+steps:
+  - say: |
+      Initialise a shared whiteboard. Then spawn 3 explorer
+      sub-agents (skill: hugr-data, role: explorer); each child's
+      task is to write one short finding about the "northwind"
+      data source to the whiteboard via whiteboard:write
+      (different fact each).
+
+      After all children finish, call whiteboard:read and report
+      back what's on the board.
+    budget: 180s
+    wait_for_subagents: 120s
+
+    queries:
+      # Whiteboard ops on the root: init + read should appear here;
+      # writes themselves originated from children but the host
+      # session also receives the relayed extension_frame (category
+      # message) per pkg/extension/whiteboard.
+      - name: whiteboard_ops_root
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map(select(.metadata.extension == \"whiteboard\")) | map({seq, op: .metadata.op, category: .metadata.category, data: .metadata.data})") {
+              hub { db { agent {
+                session_events(
+                  filter: {session_id: {eq: $sid}, event_type: {eq: "extension_frame"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq metadata }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Children — useful to confirm 3 sub-agent rows.
+      - name: subagent_rows
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Cross-session whiteboard ops: the union view. Lets the
+      # operator eyeball each child's whiteboard:write + the
+      # whiteboard:message broadcast that landed in siblings.
+      - name: whiteboard_ops_tree
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({id, status, ops: (.events // [])})") {
+              hub { db { agent {
+                sessions(filter: {
+                  or: [
+                    {id: {eq: $sid}},
+                    {parent_session_id: {eq: $sid}}
+                  ]
+                }) {
+                  id status
+                  events: session_events(
+                    filter: {event_type: {eq: "extension_frame"}}
+                    order_by: [{field: "seq", direction: ASC}]
+                  ) { seq metadata }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
