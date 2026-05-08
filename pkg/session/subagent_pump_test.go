@@ -177,11 +177,15 @@ func TestPump_ProjectTerminalError(t *testing.T) {
 	}
 }
 
-// TestPump_RecoverableErrorIsDrained asserts that recoverable errors
-// (model retry-able stream blip, etc.) do NOT trigger projection —
-// child's own emit path handles them inline; pump must not surface
-// them as terminal.
-func TestPump_RecoverableErrorIsDrained(t *testing.T) {
+// TestPump_RecoverableErrorAlsoProjects asserts that even Recoverable
+// errors (stream_error / 429 / transient model failures that the
+// session-side path leaves as Recoverable=true) project as terminal
+// from a subagent's outbox. A subagent has no human user to retry
+// against — leaving the child idle hangs the parent's wait_subagents
+// forever. Retries belong in the model layer; once Error reaches
+// session.emit the model has already given up. Parent's LLM decides
+// the next step from the projected SubagentResult.
+func TestPump_RecoverableErrorAlsoProjects(t *testing.T) {
 	parent, cleanup := newTestParent(t, withTestRunLoop())
 	defer cleanup()
 
@@ -192,16 +196,21 @@ func TestPump_RecoverableErrorIsDrained(t *testing.T) {
 	go parent.consumeChildOutbox(child)
 
 	child.out <- protocol.NewError(child.id, agentParticipant("a1"),
-		"transient", "retry-able", true)
+		"stream_error", "Anthropic API error (status 429): rate_limit_error", true)
 	close(child.out)
 
-	// Wait for pump to exit, then check: post-loop finalizer projects
-	// "abnormal_close" because no terminal frame reached the pump.
-	// That's the expected drain-recoverable behaviour.
 	waitFor(t, func() bool { return captured.len() >= 1 }, 2*time.Second)
-	if captured.len() != 1 || captured.snapshot()[0].Payload.Reason != "abnormal_close" {
-		t.Errorf("captured = %+v, want one abnormal_close (recoverable error drained)",
-			projectionReasons(captured.snapshot()))
+
+	got := captured.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("captured = %+v, want exactly one projection", projectionReasons(got))
+	}
+	sr := got[0]
+	if sr.Payload.Reason != "error: stream_error" {
+		t.Errorf("reason = %q, want %q", sr.Payload.Reason, "error: stream_error")
+	}
+	if sr.Payload.Result == "" {
+		t.Errorf("result is empty, want the underlying error message")
 	}
 }
 

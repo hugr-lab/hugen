@@ -61,7 +61,15 @@ type childPumpState struct {
 //
 //   - AgentMessage with Final && Consolidated → "result" (turn-end
 //     with no further tool calls — child's standard answer signal).
-//   - Error with !Recoverable → "terminal error".
+//   - Error → "terminal error" (any Error in a subagent context is
+//     terminal: a subagent has no human user to retry against, so
+//     even a Recoverable=true error like stream_error / 429 leaves
+//     the child idle forever from parent's POV. Retries belong in
+//     the model layer; once Error reaches session.emit the model
+//     has already given up. Parent's LLM decides next steps from
+//     the projected SubagentResult. Roots keep their existing
+//     "stay idle on recoverable error" semantics — only the pump's
+//     subagent-side projection is opinionated here.)
 //   - SessionTerminated → fallback projection if no prior result
 //     reached the pump (handleExit emits this on outbox best-effort
 //     for non-cancel paths via the SessionClosed-side recover'd push;
@@ -87,7 +95,7 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 			st.projected = true
 		}
 	case *protocol.Error:
-		if !st.projected && !v.Payload.Recoverable {
+		if !st.projected {
 			sr := protocol.NewSubagentResult(s.id, child.id, s.agent.Participant(),
 				protocol.SubagentResultPayload{
 					SessionID: child.id,
