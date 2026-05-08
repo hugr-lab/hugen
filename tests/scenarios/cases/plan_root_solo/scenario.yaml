@@ -18,17 +18,17 @@ steps:
     budget: 90s
 
     queries:
-      # All plan:* and notepad:* extension_frame events. metadata
-      # carries {extension, op, data:{...}} per
-      # pkg/protocol/extension_frame.go. jq() reshapes into a
-      # readable per-row summary.
+      # plan_op events — plan uses its own KindPlanOp
+      # (pkg/protocol/frame.go:40), NOT KindExtensionFrame, so the
+      # row's event_type column is "plan_op" and metadata carries
+      # PlanOpPayload {op, text, current_step} flat.
       - name: plan_ops
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.session_events | map({seq, ext: .metadata.extension, op: .metadata.op, data: .metadata.data})") {
+            jq(query: ".hub.db.agent.session_events | map({seq, op: .metadata.op, current_step: .metadata.current_step, text: .metadata.text})") {
               hub { db { agent {
                 session_events(
-                  filter: {session_id: {eq: $sid}, event_type: {eq: "extension_frame"}}
+                  filter: {session_id: {eq: $sid}, event_type: {eq: "plan_op"}}
                   order_by: [{field: "seq", direction: ASC}]
                 ) { seq metadata }
               }}}
