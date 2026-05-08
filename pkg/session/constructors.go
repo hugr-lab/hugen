@@ -302,6 +302,19 @@ func (s *Session) Start(_ context.Context) {
 	s.deps.WG.Add(1)
 	if s.parent != nil {
 		s.parent.childWG.Add(1)
+		// Sub-agent outbox has no production consumer: adapters
+		// only subscribe to roots (Manager.live is root-only per
+		// phase-4-tree-ctx-routing.md ADR pivot 4). Without a
+		// drainer, streaming chunks back-fill the 32-deep buffer
+		// on every iteration of the child's turn loop — once full,
+		// emit blocks → run loop blocks → model stream blocks →
+		// the child looks "hung" with no progress logged. Start a
+		// no-op drainer that reads + discards every frame; the
+		// channel is closed by teardown, ending this goroutine
+		// cleanly. (Any adapter that genuinely wants child
+		// transcripts wires its own subscriber via Resources at
+		// session-open time — that drainer drains in addition.)
+		go drainSubagentOutbox(s.out)
 	}
 	go func() {
 		defer s.deps.WG.Done()
@@ -312,6 +325,14 @@ func (s *Session) Start(_ context.Context) {
 			s.deps.Logger.Warn("session loop exited", "session", s.id, "err", err)
 		}
 	}()
+}
+
+// drainSubagentOutbox is the no-op consumer for sub-agent
+// sessions whose outbox no production code subscribes to. Reads +
+// discards every frame until the channel is closed by teardown.
+func drainSubagentOutbox(out <-chan protocol.Frame) {
+	for range out {
+	}
 }
 
 
