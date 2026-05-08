@@ -156,7 +156,18 @@ func NewManager(
 	// from its cancel chain so Terminate survives the Run loop's own
 	// teardown that follows.
 	m.deps.OnCloseRequest = func(ctx context.Context, id, reason string) {
-		go func() { _ = m.Terminate(context.WithoutCancel(ctx), id, reason) }()
+		// Track terminate goroutines in m.wg so Manager.Stop waits
+		// for them before returning. Without this, a close-storm
+		// during shutdown leaves Terminate goroutines running past
+		// Stop with no observer; rootCancel propagates to the
+		// targeted session anyway, so the goroutine eventually
+		// exits via <-s.Done(), but Stop's caller sees the binary
+		// "settled" prematurely.
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			_ = m.Terminate(context.WithoutCancel(ctx), id, reason)
+		}()
 	}
 	return m
 }
@@ -169,7 +180,7 @@ func NewManager(
 // Phase 4: only roots reach this path. Sub-agents go through
 // Manager.Spawn → newSession(ctx, parent, ...) which bypasses Open.
 func (m *Manager) Open(ctx context.Context, req session.OpenRequest) (*session.Session, time.Time, error) {
-	s, err := session.NewRootSession(ctx, m.deps, req)
+	s, err := session.New(ctx, m.deps, req)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -223,7 +234,7 @@ func (m *Manager) Resume(ctx context.Context, id string) (*session.Session, erro
 			row.SessionType, id, ErrNotRootSession)
 	}
 
-	s, err := session.ResumeSession(ctx, id, m.deps)
+	s, err := session.NewRestore(ctx, id, m.deps)
 	if err != nil {
 		return nil, err
 	}

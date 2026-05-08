@@ -473,7 +473,7 @@ func (s *Session) advanceOrFinish(runCtx context.Context) {
 	if st.capHard > 0 && st.iter >= st.capHard {
 		s.logger.Warn("session: tool re-call hard ceiling hit",
 			"session", s.id, "max_hard", st.capHard, "iter", st.iter)
-		s.triggerHardCeiling(runCtx, st.iter)
+		s.triggerHardCeiling(runCtx)
 		s.retireTurn()
 		return
 	}

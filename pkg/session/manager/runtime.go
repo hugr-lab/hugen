@@ -102,17 +102,33 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 }
 
 // fanout pushes a Frame to every subscriber of its session.
+//
+// Concurrency: a snapshot of the subscriber slice is taken under
+// subMu; the actual sends happen unlocked so a slow subscriber
+// never blocks the rest. Shutdown closes channels concurrently;
+// the per-channel send is wrapped in a recover so the rare
+// send-to-closed-channel race during teardown surfaces as a
+// silent drop rather than a process panic.
 func (r *Runtime) fanout(f protocol.Frame) {
 	r.subMu.Lock()
 	chans := append([]chan protocol.Frame(nil), r.subscribers[f.SessionID()]...)
 	r.subMu.Unlock()
 	for _, c := range chans {
-		select {
-		case c <- f:
-		default:
-			// Slow subscriber — drop. Adapters that need lossless
-			// streams must size their buffer accordingly.
-		}
+		safeFanoutSend(c, f)
+	}
+}
+
+// safeFanoutSend tries a non-blocking send and absorbs the panic
+// from a concurrent close (Shutdown closed the channel between
+// the snapshot copy and our send). Slow subscribers (full buffer)
+// drop via the default branch.
+func safeFanoutSend(c chan protocol.Frame, f protocol.Frame) {
+	defer func() { _ = recover() }()
+	select {
+	case c <- f:
+	default:
+		// Slow subscriber — drop. Adapters that need lossless
+		// streams must size their buffer accordingly.
 	}
 }
 

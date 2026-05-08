@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -59,9 +60,7 @@ func (parent *Session) callWaitSubagents(ctx context.Context, args json.RawMessa
 	// the round-trip is cheap relative to a sub-agent's normal lifetime.
 	collected := make(map[string]waitResultRow, len(in.IDs))
 	if cached, err := drainCachedSubagentResults(ctx, parent, in.IDs); err == nil {
-		for k, v := range cached {
-			collected[k] = v
-		}
+		maps.Copy(collected, cached)
 	}
 
 	pending := make(map[string]struct{}, len(in.IDs))

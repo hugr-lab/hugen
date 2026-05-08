@@ -145,11 +145,11 @@ func softWarningText(role, task string, turns int, canSpawnDeeper bool) string {
 //
 // Phase 4.1b-pre stage B (O8) drops the standalone hard_ceiling_hit
 // system_marker emit — requestClose already records the close trigger
-// via close_requested{reason:"hard_ceiling"}, the unified observability
-// signal. turnsUsed is preserved on the marker's details so the
-// adapter / operator dashboards still see it without parsing the
-// terminal record.
-func (s *Session) triggerHardCeiling(runCtx context.Context, turnsUsed int) {
-	_ = turnsUsed
+// via close_requested{reason:"hard_ceiling"}, the unified
+// observability signal. The exact iteration count at which the
+// ceiling fired is recoverable from the events log
+// (count tool_call rows in the active turn); not threaded into the
+// marker today since no consumer depends on it.
+func (s *Session) triggerHardCeiling(runCtx context.Context) {
 	s.requestClose(runCtx, protocol.TerminationHardCeiling)
 }
