@@ -43,6 +43,12 @@ runs:
     scenarios:
       - single_explorer
       - delegation_required
+      - three_parallel
+      - plan_root_solo
+      - whiteboard_fanout3
+      - python_analysis_subagent
+      - hugr_data_explorer
+      - plan_survives_restart
       - full_analyst_workflow
 
   - name: gpt-5-4
@@ -61,3 +67,9 @@ runs:
     scenarios:
       - single_explorer
       - delegation_required
+      - three_parallel
+      - plan_root_solo
+      - whiteboard_fanout3
+      - python_analysis_subagent
+      - hugr_data_explorer
+      - plan_survives_restart
