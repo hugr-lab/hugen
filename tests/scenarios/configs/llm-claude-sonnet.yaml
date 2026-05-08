@@ -11,8 +11,15 @@ models:
   mode: local
   model: claude-sonnet
   max_tokens: 8192
+  # Anthropic 429 windows are per-minute. Hammering the upstream
+  # with a sub-second exponential ladder is pointless — the bucket
+  # refills on the minute boundary. Set initial=30s; combined with
+  # the 30s cap this gives a flat 30s × 10 = 5min retry budget for
+  # a multi-minute rate-limit storm.
+  retry_initial_backoff: 30s
   routes:
     cheap:
       mode: local
       model: claude-sonnet
       max_tokens: 8192
+      retry_initial_backoff: 30s
