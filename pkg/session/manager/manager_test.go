@@ -1,16 +1,15 @@
-package session
+package manager
 
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/model"
-	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -21,32 +20,32 @@ type instrumentedStore struct {
 	listEventsCalls atomic.Int32
 }
 
-func (s *instrumentedStore) ListEvents(ctx context.Context, sid string, opts ListEventsOpts) ([]EventRow, error) {
+func (s *instrumentedStore) ListEvents(ctx context.Context, sid string, opts session.ListEventsOpts) ([]session.EventRow, error) {
 	s.listEventsCalls.Add(1)
 	return s.TestStore.ListEvents(ctx, sid, opts)
 }
 
-func newTestManager(t *testing.T, store RuntimeStore) *Manager {
+func newTestManager(t *testing.T, store session.RuntimeStore) *Manager {
 	t.Helper()
 	mdl := &scriptedModel{}
 	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
+	agent, err := session.NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
 	tm := tool.NewToolManager(permsAllow{}, nil, nil)
-	return NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), tm, nil)
+	return NewManager(store, agent, router, session.NewCommandRegistry(), protocol.NewCodec(), tm, nil)
 }
 
 func TestManager_LazyMaterialisation(t *testing.T) {
 	base := fixture.NewTestStore()
 	// Seed the store with a session row + 100 historic events.
-	_ = base.OpenSession(context.Background(), SessionRow{
-		ID: "s1", AgentID: "a1", Status: StatusActive,
+	_ = base.OpenSession(context.Background(), session.SessionRow{
+		ID: "s1", AgentID: "a1", Status: session.StatusActive,
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	})
 	for i := 0; i < 100; i++ {
-		_ = base.AppendEvent(context.Background(), EventRow{
+		_ = base.AppendEvent(context.Background(), session.EventRow{
 			ID:        "ev" + string(rune('a'+i%26)),
 			SessionID: "s1",
 			AgentID:   "a1",
@@ -107,15 +106,15 @@ func TestManager_LazyMaterialisation(t *testing.T) {
 func TestManager_ResumeClosed(t *testing.T) {
 	store := fixture.NewTestStore()
 	ctx := context.Background()
-	_ = store.OpenSession(ctx, SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
+	_ = store.OpenSession(ctx, session.SessionRow{ID: "s1", AgentID: "a1", Status: session.StatusActive})
 	// Phase-4: liveness is event-derived. Append a session_terminated
 	// event so isSessionTerminated returns true on Resume.
 	terminal := protocol.NewSessionTerminated("s1", protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent},
 		protocol.SessionTerminatedPayload{Reason: protocol.TerminationUserEnd})
-	row, summary, _ := FrameToEventRow(terminal, "a1")
+	row, summary, _ := session.FrameToEventRow(terminal, "a1")
 	_ = store.AppendEvent(ctx, row, summary)
 	mgr := newTestManager(t, store)
-	if _, err := mgr.Resume(ctx, "s1"); !errors.Is(err, ErrSessionClosed) {
+	if _, err := mgr.Resume(ctx, "s1"); !errors.Is(err, session.ErrSessionClosed) {
 		t.Fatalf("expected ErrSessionClosed, got %v", err)
 	}
 }
@@ -123,7 +122,7 @@ func TestManager_ResumeClosed(t *testing.T) {
 func TestManager_ResumeNotFound(t *testing.T) {
 	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
-	if _, err := mgr.Resume(context.Background(), "nope"); !errors.Is(err, ErrSessionNotFound) {
+	if _, err := mgr.Resume(context.Background(), "nope"); !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound, got %v", err)
 	}
 }
@@ -131,7 +130,7 @@ func TestManager_ResumeNotFound(t *testing.T) {
 func TestManager_OpenAndList(t *testing.T) {
 	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
-	s, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
+	s, _, err := mgr.Open(context.Background(), session.OpenRequest{OwnerID: "alice"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -141,27 +140,6 @@ func TestManager_OpenAndList(t *testing.T) {
 	// At least one event_opened was persisted.
 	if len(store.Events) == 0 {
 		t.Fatal("expected session_opened event in store")
-	}
-}
-
-// projectHistory unit test — keeps the most-recent K user/agent
-// messages.
-func TestProjectHistory_Window(t *testing.T) {
-	rows := make([]EventRow, 0, 200)
-	for i := 0; i < 100; i++ {
-		rows = append(rows, EventRow{
-			EventType: string(protocol.KindUserMessage),
-			Content:   "user",
-		})
-		rows = append(rows, EventRow{
-			EventType: string(protocol.KindAgentMessage),
-			Content:   "agent",
-			Metadata:  map[string]any{"final": true},
-		})
-	}
-	got := projectHistory(rows, 50)
-	if len(got) != 50 {
-		t.Errorf("len = %d, want 50", len(got))
 	}
 }
 
@@ -176,11 +154,11 @@ func TestManager_BroadcastSystemMarker_ReachesLiveRoots(t *testing.T) {
 	defer mgr.Stop(context.Background())
 
 	// Open two roots so we can observe the broadcast lands on both.
-	r1, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "u1"})
+	r1, _, err := mgr.Open(context.Background(), session.OpenRequest{OwnerID: "u1"})
 	if err != nil {
 		t.Fatalf("Open r1: %v", err)
 	}
-	r2, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "u2"})
+	r2, _, err := mgr.Open(context.Background(), session.OpenRequest{OwnerID: "u2"})
 	if err != nil {
 		t.Fatalf("Open r2: %v", err)
 	}
@@ -192,7 +170,7 @@ func TestManager_BroadcastSystemMarker_ReachesLiveRoots(t *testing.T) {
 	mgr.BroadcastSystemMarker(context.Background(), "mcp_recovered",
 		map[string]any{"provider": "hugr-main"})
 
-	check := func(t *testing.T, s *Session) {
+	check := func(t *testing.T, s *session.Session) {
 		t.Helper()
 		select {
 		case f := <-s.Outbox():
@@ -217,89 +195,6 @@ func TestManager_BroadcastSystemMarker_ReachesLiveRoots(t *testing.T) {
 	check(t, r2)
 }
 
-// TestProjectHistory_IncludesSubagentFrames verifies phase-4 US6:
-// subagent_started and subagent_result events replay into history
-// with the same "[system: spawned_note] ..." / "[system:
-// subagent_result] ... reason=... turns=..." rendering the live
-// visibility filter (visibility.go projectFrameToHistory) uses.
-// Without this the synthetic settle subagent_result rows written by
-// settleDanglingSubagents would be invisible to the parent's model
-// after a process restart.
-func TestProjectHistory_IncludesSubagentFrames(t *testing.T) {
-	rows := []EventRow{
-		{
-			EventType: string(protocol.KindSubagentStarted),
-			Content:   "explore the catalog",
-			Metadata: map[string]any{
-				"child_session_id": "sub-c1",
-				"role":             "explorer",
-				"depth":            float64(1),
-				"task":             "explore the catalog",
-			},
-		},
-		{
-			EventType: string(protocol.KindSubagentResult),
-			Content:   "Sub-agent sub-c1 did not deliver a result before the previous process exited.",
-			Metadata: map[string]any{
-				"session_id": "sub-c1",
-				"reason":     protocol.TerminationRestartDied,
-				"turns_used": float64(0),
-			},
-		},
-	}
-	got := projectHistory(rows, 50)
-	if len(got) != 2 {
-		t.Fatalf("len = %d, want 2; got=%v", len(got), got)
-	}
-	if !strings.HasPrefix(got[0].Content,
-		"[system: "+protocol.SystemMessageSpawnedNote+"]") {
-		t.Errorf("subagent_started replay = %q, want spawned_note prefix", got[0].Content)
-	}
-	if !strings.HasPrefix(got[1].Content, "[system: subagent_result]") {
-		t.Errorf("subagent_result replay = %q, want subagent_result prefix", got[1].Content)
-	}
-	if !strings.Contains(got[1].Content, protocol.TerminationRestartDied) {
-		t.Errorf("subagent_result replay = %q, missing reason", got[1].Content)
-	}
-}
-
-// TestProjectHistory_IncludesSystemMessage verifies the phase-4 US6
-// extension: system_message rows replay into history under the
-// canonical "[system: <kind>] <content>" prefix so runtime-injected
-// notices (soft_warning, stuck_nudge, whiteboard) survive a process
-// restart's materialise. Read shape matches the live visibility
-// filter (visibility.go) so the model sees identical text whether
-// the frame arrived live or on replay.
-func TestProjectHistory_IncludesSystemMessage(t *testing.T) {
-	rows := []EventRow{
-		{EventType: string(protocol.KindUserMessage), Content: "hi"},
-		{
-			EventType: string(protocol.KindSystemMessage),
-			Content:   "sub-agent X died on restart; Y respawned.",
-			Metadata:  map[string]any{"kind": protocol.SystemMessageSpawnedNote},
-		},
-		{
-			EventType: string(protocol.KindAgentMessage),
-			Content:   "ack",
-			Metadata:  map[string]any{"final": true},
-		},
-	}
-	got := projectHistory(rows, 50)
-	if len(got) != 3 {
-		t.Fatalf("len = %d, want 3 (user + system + agent); got=%v", len(got), got)
-	}
-	if got[1].Role != model.RoleUser {
-		t.Errorf("system_message Role = %v, want RoleUser", got[1].Role)
-	}
-	wantPrefix := "[system: " + protocol.SystemMessageSpawnedNote + "] "
-	if !strings.HasPrefix(got[1].Content, wantPrefix) {
-		t.Errorf("system_message Content = %q, want prefix %q", got[1].Content, wantPrefix)
-	}
-}
-
-// Touch the model package to avoid an unused-import lint.
-var _ = model.IntentDefault
-
 // TestManager_LifecycleHooks + TestManager_OnOpenErrorRollsBack
 // removed in stage 5c — Lifecycle interface no longer exists.
 // Equivalent open/close hook coverage lives in extension
@@ -313,14 +208,14 @@ func TestSession_Spawn_HappyPath(t *testing.T) {
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
 
-	parent, _, err := mgr.Open(ctx, OpenRequest{OwnerID: "alice"})
+	parent, _, err := mgr.Open(ctx, session.OpenRequest{OwnerID: "alice"})
 	if err != nil {
 		t.Fatalf("open root: %v", err)
 	}
 	// Drain the session_opened frame so the outbox doesn't block.
 	drainOutboxOnce(parent.Outbox())
 
-	child, err := parent.Spawn(ctx, SpawnSpec{
+	child, err := parent.Spawn(ctx, session.SpawnSpec{
 		Skill:  "hugr-data",
 		Role:   "explorer",
 		Task:   "list sources",
@@ -351,7 +246,7 @@ func TestSession_Spawn_HappyPath(t *testing.T) {
 	}
 
 	// Parent's events contain a subagent_started record.
-	parentEvents, _ := store.ListEvents(ctx, parent.ID(), ListEventsOpts{})
+	parentEvents, _ := store.ListEvents(ctx, parent.ID(), session.ListEventsOpts{})
 	var foundStart bool
 	for _, ev := range parentEvents {
 		if ev.EventType == string(protocol.KindSubagentStarted) {
@@ -376,14 +271,14 @@ func TestSession_Spawn_DepthIncrements(t *testing.T) {
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
 
-	root, _, _ := mgr.Open(ctx, OpenRequest{OwnerID: "alice"})
+	root, _, _ := mgr.Open(ctx, session.OpenRequest{OwnerID: "alice"})
 	drainOutboxOnce(root.Outbox())
-	child, err := root.Spawn(ctx, SpawnSpec{Role: "x", Task: "t"})
+	child, err := root.Spawn(ctx, session.SpawnSpec{Role: "x", Task: "t"})
 	if err != nil {
 		t.Fatalf("spawn child: %v", err)
 	}
 	drainOutboxOnce(child.Outbox())
-	grand, err := child.Spawn(ctx, SpawnSpec{Role: "y", Task: "t2"})
+	grand, err := child.Spawn(ctx, session.SpawnSpec{Role: "y", Task: "t2"})
 	if err != nil {
 		t.Fatalf("spawn grandchild: %v", err)
 	}
@@ -400,7 +295,7 @@ func TestManager_Deliver_RoutesToSession(t *testing.T) {
 	mgr := newTestManager(t, store)
 	ctx := context.Background()
 
-	target, _, _ := mgr.Open(ctx, OpenRequest{OwnerID: "alice"})
+	target, _, _ := mgr.Open(ctx, session.OpenRequest{OwnerID: "alice"})
 	drainOutboxOnce(target.Outbox())
 
 	frame := protocol.NewSystemMessage(target.ID(),
@@ -431,7 +326,7 @@ func TestManager_Deliver_UnknownSession(t *testing.T) {
 	store := fixture.NewTestStore()
 	mgr := newTestManager(t, store)
 	frame := protocol.NewHeartbeat("ghost", protocol.ParticipantInfo{ID: "x", Kind: "system"})
-	if err := mgr.Deliver(context.Background(), "ghost", frame); !errors.Is(err, ErrSessionNotFound) {
+	if err := mgr.Deliver(context.Background(), "ghost", frame); !errors.Is(err, session.ErrSessionNotFound) {
 		t.Errorf("err = %v, want ErrSessionNotFound", err)
 	}
 }

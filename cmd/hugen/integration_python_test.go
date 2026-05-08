@@ -33,6 +33,7 @@ import (
 	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/manager"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/hugen/pkg/tool/providers"
@@ -264,10 +265,10 @@ func newPythonIntegrationCore(t *testing.T, pyBin, tmpl string) *integrationCore
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	router, agent := makeRouter(t)
-	mgr := session.NewManager(
+	mgr := manager.NewManager(
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
-		session.WithExtensions(
+		manager.WithExtensions(
 			wsext.NewExtension(workspaceDir, true),
 			mcpext.NewExtension(cfgSvc.ToolProviders(), logger),
 		),

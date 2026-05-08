@@ -18,11 +18,9 @@ import (
 // it has no turn — we just assert root is still alive).
 func TestSubagent_CancelCascade_TwoDeep(t *testing.T) {
 	store := fixture.NewTestStore()
-	mgr := newTestManager(t, store)
+	root, cleanup := newTestParent(t, withTestStore(store), withTestRunLoop())
+	defer cleanup()
 	ctx := context.Background()
-	defer mgr.Stop(ctx)
-
-	root := us1OpenParent(t, mgr)
 
 	mid, err := root.Spawn(ctx, SpawnSpec{Task: "mid"})
 	if err != nil {
@@ -81,11 +79,9 @@ func TestSubagent_CancelCascade_TwoDeep(t *testing.T) {
 // session_id matches the cancelled child.
 func TestSubagent_Result_DeliveredToParent(t *testing.T) {
 	store := fixture.NewTestStore()
-	mgr := newTestManager(t, store)
+	parent, cleanup := newTestParent(t, withTestStore(store), withTestRunLoop())
+	defer cleanup()
 	ctx := context.Background()
-	defer mgr.Stop(ctx)
-
-	parent := us1OpenParent(t, mgr)
 	child, err := parent.Spawn(ctx, SpawnSpec{Task: "t"})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
@@ -123,11 +119,9 @@ func TestSubagent_Result_DeliveredToParent(t *testing.T) {
 // the child's natural exit-time SubagentResult arrives via the
 // activeToolFeed.
 func TestSubagent_Wait_NaturalTermination(t *testing.T) {
-	mgr := newTestManager(t, fixture.NewTestStore())
+	parent, cleanup := newTestParent(t, withTestRunLoop())
+	defer cleanup()
 	ctx := context.Background()
-	defer mgr.Stop(ctx)
-
-	parent := us1OpenParent(t, mgr)
 	child, err := parent.Spawn(ctx, SpawnSpec{Task: "t"})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
@@ -190,6 +184,36 @@ func TestSubagent_Wait_NaturalTermination(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("wait_subagents did not return after natural child termination")
 	}
+}
+
+// containsKindWithReason scans events for a row whose EventType
+// matches kind AND whose Metadata["reason"] equals reason. Local copy
+// of the helper that lives next to the manager-side cascade tests —
+// duplicated here so this test file (which sits in pkg/session for
+// access to private session state) doesn't import pkg/session/manager.
+func containsKindWithReason(events []EventRow, kind protocol.Kind, reason string) bool {
+	for _, ev := range events {
+		if ev.EventType == string(kind) {
+			if r, _ := ev.Metadata["reason"].(string); r == reason {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// kindsWithReasons stringifies events for diagnostic messages.
+func kindsWithReasons(events []EventRow) []string {
+	out := make([]string, 0, len(events))
+	for _, ev := range events {
+		r, _ := ev.Metadata["reason"].(string)
+		if r != "" {
+			out = append(out, ev.EventType+"{"+r+"}")
+		} else {
+			out = append(out, ev.EventType)
+		}
+	}
+	return out
 }
 
 // containsKindForChild scans events for a row whose EventType matches

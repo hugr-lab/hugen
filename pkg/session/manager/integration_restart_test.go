@@ -1,4 +1,4 @@
-package session
+package manager
 
 import (
 	"context"
@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // integration_restart_test.go covers the phase-4 acceptance scenarios
@@ -49,14 +50,14 @@ func TestPhase4Acceptance_GracefulShutdownWritesNothing(t *testing.T) {
 
 	// --- First Manager: open root + spawn sub ---
 	mgr1 := newTestManager(t, store)
-	root, _, err := mgr1.Open(ctx, OpenRequest{OwnerID: "alice"})
+	root, _, err := mgr1.Open(ctx, session.OpenRequest{OwnerID: "alice"})
 	if err != nil {
 		t.Fatalf("Open root: %v", err)
 	}
 	rootID := root.ID()
 	drainOutboxOnce(root.Outbox()) // SessionOpened
 
-	sub, err := root.Spawn(ctx, SpawnSpec{
+	sub, err := root.Spawn(ctx, session.SpawnSpec{
 		Skill: "demo",
 		Role:  "worker",
 		Task:  "do the thing",
@@ -71,13 +72,13 @@ func TestPhase4Acceptance_GracefulShutdownWritesNothing(t *testing.T) {
 	mgr1.Stop(ctx)
 
 	// Verify: NEITHER session has a session_terminated event yet.
-	rootEvents, _ := store.ListEvents(ctx, rootID, ListEventsOpts{})
+	rootEvents, _ := store.ListEvents(ctx, rootID, session.ListEventsOpts{})
 	for _, ev := range rootEvents {
 		if ev.EventType == string(protocol.KindSessionTerminated) {
 			t.Errorf("graceful shutdown wrote session_terminated on root: %v", ev)
 		}
 	}
-	subEvents, _ := store.ListEvents(ctx, subID, ListEventsOpts{})
+	subEvents, _ := store.ListEvents(ctx, subID, session.ListEventsOpts{})
 	for _, ev := range subEvents {
 		if ev.EventType == string(protocol.KindSessionTerminated) {
 			t.Errorf("graceful shutdown wrote session_terminated on sub: %v", ev)
@@ -92,7 +93,7 @@ func TestPhase4Acceptance_GracefulShutdownWritesNothing(t *testing.T) {
 	defer mgr2.Stop(ctx)
 
 	// Settle wrote restart_died on the sub.
-	subEvents2, _ := store.ListEvents(ctx, subID, ListEventsOpts{})
+	subEvents2, _ := store.ListEvents(ctx, subID, session.ListEventsOpts{})
 	if !containsKindWithReason(subEvents2,
 		protocol.KindSessionTerminated, protocol.TerminationRestartDied) {
 		t.Errorf("post-boot: sub missing session_terminated{restart_died}; events=%v",
@@ -100,7 +101,7 @@ func TestPhase4Acceptance_GracefulShutdownWritesNothing(t *testing.T) {
 	}
 
 	// Settle wrote a synthetic subagent_result{restart_died} on root.
-	rootEvents2, _ := store.ListEvents(ctx, rootID, ListEventsOpts{})
+	rootEvents2, _ := store.ListEvents(ctx, rootID, session.ListEventsOpts{})
 	var sawResult bool
 	for _, ev := range rootEvents2 {
 		if ev.EventType != string(protocol.KindSubagentResult) {
@@ -155,19 +156,19 @@ func TestPhase4Acceptance_RestartResume_TwoSiblings(t *testing.T) {
 	ctx := context.Background()
 
 	mgr1 := newTestManager(t, store)
-	root, _, err := mgr1.Open(ctx, OpenRequest{OwnerID: "alice"})
+	root, _, err := mgr1.Open(ctx, session.OpenRequest{OwnerID: "alice"})
 	if err != nil {
 		t.Fatalf("Open root: %v", err)
 	}
 	rootID := root.ID()
 	drainOutboxOnce(root.Outbox())
 
-	subA, err := root.Spawn(ctx, SpawnSpec{Role: "explorer", Task: "scout-a"})
+	subA, err := root.Spawn(ctx, session.SpawnSpec{Role: "explorer", Task: "scout-a"})
 	if err != nil {
 		t.Fatalf("Spawn subA: %v", err)
 	}
 	drainOutboxOnce(root.Outbox())
-	subB, err := root.Spawn(ctx, SpawnSpec{Role: "explorer", Task: "scout-b"})
+	subB, err := root.Spawn(ctx, session.SpawnSpec{Role: "explorer", Task: "scout-b"})
 	if err != nil {
 		t.Fatalf("Spawn subB: %v", err)
 	}
@@ -185,8 +186,8 @@ func TestPhase4Acceptance_RestartResume_TwoSiblings(t *testing.T) {
 	defer mgr2.Stop(ctx)
 
 	// Each sub has session_terminated{restart_died}.
-	for _, sub := range []*Session{subA, subB} {
-		evs, _ := store.ListEvents(ctx, sub.ID(), ListEventsOpts{})
+	for _, sub := range []*session.Session{subA, subB} {
+		evs, _ := store.ListEvents(ctx, sub.ID(), session.ListEventsOpts{})
 		if !containsKindWithReason(evs,
 			protocol.KindSessionTerminated, protocol.TerminationRestartDied) {
 			t.Errorf("sub %s missing session_terminated{restart_died}; events=%v",
@@ -195,7 +196,7 @@ func TestPhase4Acceptance_RestartResume_TwoSiblings(t *testing.T) {
 	}
 
 	// Root has subagent_result{restart_died} for BOTH children.
-	rootEvents, _ := store.ListEvents(ctx, rootID, ListEventsOpts{})
+	rootEvents, _ := store.ListEvents(ctx, rootID, session.ListEventsOpts{})
 	results := map[string]string{}
 	for _, ev := range rootEvents {
 		if ev.EventType != string(protocol.KindSubagentResult) {
@@ -207,7 +208,7 @@ func TestPhase4Acceptance_RestartResume_TwoSiblings(t *testing.T) {
 			results[cid] = reason
 		}
 	}
-	for _, sub := range []*Session{subA, subB} {
+	for _, sub := range []*session.Session{subA, subB} {
 		got, ok := results[sub.ID()]
 		if !ok {
 			t.Errorf("root missing subagent_result for child %s; events=%v",
@@ -256,7 +257,7 @@ func TestPhase4Acceptance_RestartResume_TwoSiblings(t *testing.T) {
 // global `kinds` helper used to live in recover_test.go but is
 // unused in the settle-only suite — reintroducing a private helper
 // keeps the dependency tight.
-func eventKinds(events []EventRow) []string {
+func eventKinds(events []session.EventRow) []string {
 	out := make([]string, 0, len(events))
 	for _, ev := range events {
 		out = append(out, ev.EventType)

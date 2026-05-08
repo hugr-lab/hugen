@@ -14,6 +14,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/manager"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/hugen/pkg/tool/providers/policies"
@@ -74,7 +75,7 @@ type Core struct {
 	Extensions []extension.Extension
 
 	// Phase 9 (session_manager).
-	Manager *session.Manager
+	Manager *manager.Manager
 
 	// cleanups stacks per-phase teardown closures in registration
 	// order. cleanupPartial (failure path) and Shutdown (success

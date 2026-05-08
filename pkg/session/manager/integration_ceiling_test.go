@@ -1,4 +1,4 @@
-package session
+package manager
 
 import (
 	"context"
@@ -6,9 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -72,7 +73,7 @@ func idxID(i int) string { return "tc-" + string(rune('A'+i%26)) }
 // onto every spawned Session via WithSessionOptions. Mirrors
 // newTestManager but with the explicit dep overrides the §8 tests
 // need.
-func newCeilingTestManager(t *testing.T, store RuntimeStore, mdl model.Model, provider tool.ToolProvider, softCap, hardCap int) *Manager {
+func newCeilingTestManager(t *testing.T, store session.RuntimeStore, mdl model.Model, provider tool.ToolProvider, softCap, hardCap int) *Manager {
 	t.Helper()
 	tm := tool.NewToolManager(permsAllow{}, nil, nil)
 	if provider != nil {
@@ -81,14 +82,14 @@ func newCeilingTestManager(t *testing.T, store RuntimeStore, mdl model.Model, pr
 		}
 	}
 	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
+	agent, err := session.NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
-	return NewManager(store, agent, router, NewCommandRegistry(), protocol.NewCodec(), tm, nil,
+	return NewManager(store, agent, router, session.NewCommandRegistry(), protocol.NewCodec(), tm, nil,
 		WithSessionOptions(
-			WithMaxToolIterations(softCap),
-			WithMaxToolIterationsHard(hardCap),
+			session.WithMaxToolIterations(softCap),
+			session.WithMaxToolIterationsHard(hardCap),
 		))
 }
 
@@ -108,14 +109,14 @@ func TestRoot_SoftWarning_FiresOncePastCap(t *testing.T) {
 	mgr := newCeilingTestManager(t, store, mdl, provider, softCap, 64)
 	defer mgr.Stop(context.Background())
 
-	root, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
+	root, _, err := mgr.Open(context.Background(), session.OpenRequest{OwnerID: "alice"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	drainOutboxOnce(root.Outbox())
 
 	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
-	root.Inbox() <- protocol.NewUserMessage(root.id, user, "go")
+	root.Inbox() <- protocol.NewUserMessage(root.ID(), user, "go")
 
 	collectFrames(t, root, func(seen []protocol.Frame) bool {
 		if am, ok := seen[len(seen)-1].(*protocol.AgentMessage); ok && am.Payload.Final {
@@ -124,7 +125,7 @@ func TestRoot_SoftWarning_FiresOncePastCap(t *testing.T) {
 		return false
 	}, 5*time.Second)
 
-	events, _ := store.ListEvents(context.Background(), root.id, ListEventsOpts{})
+	events, _ := store.ListEvents(context.Background(), root.ID(), session.ListEventsOpts{})
 	soft := 0
 	for _, ev := range events {
 		if ev.EventType == string(protocol.KindSystemMessage) {
@@ -156,14 +157,14 @@ func TestRoot_HardCeiling_TerminatesAtCapHard(t *testing.T) {
 	mgr := newCeilingTestManager(t, store, mdl, provider, softCap, hardCap)
 	defer mgr.Stop(context.Background())
 
-	root, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
+	root, _, err := mgr.Open(context.Background(), session.OpenRequest{OwnerID: "alice"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	drainOutboxOnce(root.Outbox())
 
 	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
-	root.Inbox() <- protocol.NewUserMessage(root.id, user, "go")
+	root.Inbox() <- protocol.NewUserMessage(root.ID(), user, "go")
 
 	// Wait until the session is closed; Stop will drain the
 	// outbox once the goroutine exits.
@@ -182,7 +183,7 @@ func TestRoot_HardCeiling_TerminatesAtCapHard(t *testing.T) {
 	}
 done:
 
-	events, _ := store.ListEvents(context.Background(), root.id, ListEventsOpts{})
+	events, _ := store.ListEvents(context.Background(), root.ID(), session.ListEventsOpts{})
 	var sawCeilingMarker, sawTerminated bool
 	for _, ev := range events {
 		switch ev.EventType {

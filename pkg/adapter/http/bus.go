@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/manager"
 )
 
 // sessionBus is the per-session fan-out point inside the http
@@ -217,7 +217,7 @@ func (b *sessionBus) removeSubscriber(s *subscriber) {
 // busesMu) cannot race with attach. A bus that is shutting down
 // has already deleted itself from a.buses, so the lookup at the
 // top creates a fresh bus rather than handing out a dead one.
-func (a *Adapter) attachSubscriber(host session.AdapterHost, sessionID string) (*subscriber, func(), error) {
+func (a *Adapter) attachSubscriber(host manager.AdapterHost, sessionID string) (*subscriber, func(), error) {
 	a.busesMu.Lock()
 	bus, ok := a.buses[sessionID]
 	if !ok {

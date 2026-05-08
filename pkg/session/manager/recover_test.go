@@ -1,4 +1,4 @@
-package session
+package manager
 
 import (
 	"context"
@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // TestSettleDangling_NonTerminalChild_RestartDied: a child row exists,
@@ -21,19 +22,19 @@ func TestSettleDangling_NonTerminalChild_RestartDied(t *testing.T) {
 	now := time.Now().UTC()
 
 	parentID, childID := "root1", "sub1"
-	mustOpen(t, store, ctx, SessionRow{
-		ID: parentID, AgentID: "a1", SessionType: "root", Status: StatusActive,
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: parentID, AgentID: "a1", SessionType: "root", Status: session.StatusActive,
 		CreatedAt: now, UpdatedAt: now,
 	})
-	mustOpen(t, store, ctx, SessionRow{
+	mustOpen(t, store, ctx, session.SessionRow{
 		ID: childID, AgentID: "a1", ParentSessionID: parentID,
-		SessionType: "subagent", Status: StatusActive,
+		SessionType: "subagent", Status: session.StatusActive,
 		Metadata:  map[string]any{"depth": 1},
 		CreatedAt: now, UpdatedAt: now,
 	})
 
 	mgr := newTestManager(t, store)
-	written, err := settleDanglingSubagents(ctx, mgr.deps, parentID)
+	written, err := session.SettleDanglingSubagents(ctx, mgr.deps, parentID)
 	if err != nil {
 		t.Fatalf("settle: %v", err)
 	}
@@ -41,11 +42,11 @@ func TestSettleDangling_NonTerminalChild_RestartDied(t *testing.T) {
 		t.Fatalf("written = %d, want 1", written)
 	}
 
-	if !containsKindWithReason(must(store.ListEvents(ctx, childID, ListEventsOpts{})),
+	if !containsKindWithReason(must(store.ListEvents(ctx, childID, session.ListEventsOpts{})),
 		protocol.KindSessionTerminated, protocol.TerminationRestartDied) {
 		t.Errorf("child missing session_terminated{restart_died}")
 	}
-	parentEvents := must(store.ListEvents(ctx, parentID, ListEventsOpts{}))
+	parentEvents := must(store.ListEvents(ctx, parentID, session.ListEventsOpts{}))
 	var foundResult bool
 	for _, ev := range parentEvents {
 		if ev.EventType != string(protocol.KindSubagentResult) {
@@ -86,13 +87,13 @@ func TestSettleDangling_CleanlyTerminatedChild_PreservesReason(t *testing.T) {
 	now := time.Now().UTC()
 
 	parentID, childID := "root1", "sub1"
-	mustOpen(t, store, ctx, SessionRow{
-		ID: parentID, AgentID: "a1", SessionType: "root", Status: StatusActive,
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: parentID, AgentID: "a1", SessionType: "root", Status: session.StatusActive,
 		CreatedAt: now, UpdatedAt: now,
 	})
-	mustOpen(t, store, ctx, SessionRow{
+	mustOpen(t, store, ctx, session.SessionRow{
 		ID: childID, AgentID: "a1", ParentSessionID: parentID,
-		SessionType: "subagent", Status: StatusActive,
+		SessionType: "subagent", Status: session.StatusActive,
 		Metadata:  map[string]any{"depth": 1},
 		CreatedAt: now, UpdatedAt: now,
 	})
@@ -100,7 +101,7 @@ func TestSettleDangling_CleanlyTerminatedChild_PreservesReason(t *testing.T) {
 	terminal := protocol.NewSessionTerminated(childID,
 		protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent},
 		protocol.SessionTerminatedPayload{Reason: protocol.TerminationCompleted})
-	tRow, tSum, err := FrameToEventRow(terminal, "a1")
+	tRow, tSum, err := session.FrameToEventRow(terminal, "a1")
 	if err != nil {
 		t.Fatalf("project terminal: %v", err)
 	}
@@ -109,7 +110,7 @@ func TestSettleDangling_CleanlyTerminatedChild_PreservesReason(t *testing.T) {
 	}
 
 	mgr := newTestManager(t, store)
-	written, err := settleDanglingSubagents(ctx, mgr.deps, parentID)
+	written, err := session.SettleDanglingSubagents(ctx, mgr.deps, parentID)
 	if err != nil {
 		t.Fatalf("settle: %v", err)
 	}
@@ -117,7 +118,7 @@ func TestSettleDangling_CleanlyTerminatedChild_PreservesReason(t *testing.T) {
 		t.Fatalf("written = %d, want 1", written)
 	}
 
-	parentEvents := must(store.ListEvents(ctx, parentID, ListEventsOpts{}))
+	parentEvents := must(store.ListEvents(ctx, parentID, session.ListEventsOpts{}))
 	var sawCorrectReason bool
 	for _, ev := range parentEvents {
 		if ev.EventType != string(protocol.KindSubagentResult) {
@@ -138,7 +139,7 @@ func TestSettleDangling_CleanlyTerminatedChild_PreservesReason(t *testing.T) {
 	}
 	// The child's existing session_terminated{completed} must NOT be
 	// overwritten by a synthetic restart_died (idempotent on terminal).
-	childEvents := must(store.ListEvents(ctx, childID, ListEventsOpts{}))
+	childEvents := must(store.ListEvents(ctx, childID, session.ListEventsOpts{}))
 	termCount := 0
 	for _, ev := range childEvents {
 		if ev.EventType == string(protocol.KindSessionTerminated) {
@@ -159,13 +160,13 @@ func TestSettleDangling_AlreadySettled_NoOp(t *testing.T) {
 	now := time.Now().UTC()
 
 	parentID, childID := "root1", "sub1"
-	mustOpen(t, store, ctx, SessionRow{
-		ID: parentID, AgentID: "a1", SessionType: "root", Status: StatusActive,
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: parentID, AgentID: "a1", SessionType: "root", Status: session.StatusActive,
 		CreatedAt: now, UpdatedAt: now,
 	})
-	mustOpen(t, store, ctx, SessionRow{
+	mustOpen(t, store, ctx, session.SessionRow{
 		ID: childID, AgentID: "a1", ParentSessionID: parentID,
-		SessionType: "subagent", Status: StatusActive,
+		SessionType: "subagent", Status: session.StatusActive,
 		Metadata:  map[string]any{"depth": 1},
 		CreatedAt: now, UpdatedAt: now,
 	})
@@ -177,7 +178,7 @@ func TestSettleDangling_AlreadySettled_NoOp(t *testing.T) {
 			Reason:    protocol.TerminationCompleted,
 			Result:    "ok",
 		})
-	row, sum, err := FrameToEventRow(pre, "a1")
+	row, sum, err := session.FrameToEventRow(pre, "a1")
 	if err != nil {
 		t.Fatalf("project pre-result: %v", err)
 	}
@@ -186,7 +187,7 @@ func TestSettleDangling_AlreadySettled_NoOp(t *testing.T) {
 	}
 
 	mgr := newTestManager(t, store)
-	written, err := settleDanglingSubagents(ctx, mgr.deps, parentID)
+	written, err := session.SettleDanglingSubagents(ctx, mgr.deps, parentID)
 	if err != nil {
 		t.Fatalf("settle: %v", err)
 	}
@@ -194,7 +195,7 @@ func TestSettleDangling_AlreadySettled_NoOp(t *testing.T) {
 		t.Errorf("written = %d on already-settled parent, want 0", written)
 	}
 	// Child must NOT have gained a session_terminated row.
-	for _, ev := range must(store.ListEvents(ctx, childID, ListEventsOpts{})) {
+	for _, ev := range must(store.ListEvents(ctx, childID, session.ListEventsOpts{})) {
 		if ev.EventType == string(protocol.KindSessionTerminated) {
 			t.Errorf("idempotent settle wrote a child terminal: %v", ev)
 		}
@@ -209,8 +210,8 @@ func TestRestoreActive_SkipsIdleRoot(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	mustOpen(t, store, ctx, SessionRow{
-		ID: "root_idle", AgentID: "a1", SessionType: "root", Status: StatusActive,
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root_idle", AgentID: "a1", SessionType: "root", Status: session.StatusActive,
 		CreatedAt: now, UpdatedAt: now,
 	})
 	mustWriteStatus(t, store, ctx, "root_idle", protocol.SessionStatusIdle)
@@ -234,14 +235,14 @@ func TestRestoreActive_RestoresActiveRoot(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	mustOpen(t, store, ctx, SessionRow{
-		ID: "root_active", AgentID: "a1", SessionType: "root", Status: StatusActive,
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root_active", AgentID: "a1", SessionType: "root", Status: session.StatusActive,
 		CreatedAt: now, UpdatedAt: now,
 	})
 	mustWriteStatus(t, store, ctx, "root_active", protocol.SessionStatusActive)
-	mustOpen(t, store, ctx, SessionRow{
+	mustOpen(t, store, ctx, session.SessionRow{
 		ID: "sub1", AgentID: "a1", ParentSessionID: "root_active",
-		SessionType: "subagent", Status: StatusActive,
+		SessionType: "subagent", Status: session.StatusActive,
 		Metadata:  map[string]any{"depth": 1},
 		CreatedAt: now, UpdatedAt: now,
 	})
@@ -258,7 +259,7 @@ func TestRestoreActive_RestoresActiveRoot(t *testing.T) {
 	}
 
 	// Settle wrote a subagent_result for the dangling child.
-	parentEvents := must(store.ListEvents(ctx, "root_active", ListEventsOpts{}))
+	parentEvents := must(store.ListEvents(ctx, "root_active", session.ListEventsOpts{}))
 	var saw bool
 	for _, ev := range parentEvents {
 		if ev.EventType == string(protocol.KindSubagentResult) &&
@@ -285,8 +286,8 @@ func TestRestoreActive_PromotesStaleWaitMarker(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	mustOpen(t, store, ctx, SessionRow{
-		ID: "root_wait", AgentID: "a1", SessionType: "root", Status: StatusActive,
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root_wait", AgentID: "a1", SessionType: "root", Status: session.StatusActive,
 		CreatedAt: now, UpdatedAt: now,
 	})
 	mustWriteStatus(t, store, ctx, "root_wait", protocol.SessionStatusWaitSubagents)
@@ -297,11 +298,11 @@ func TestRestoreActive_PromotesStaleWaitMarker(t *testing.T) {
 	}
 	defer mgr.Stop(ctx)
 
-	rows, err := store.ListEvents(ctx, "root_wait", ListEventsOpts{})
+	rows, err := store.ListEvents(ctx, "root_wait", session.ListEventsOpts{})
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}
-	if got := lookupLatestStatusEvent(rows); got != protocol.SessionStatusActive {
+	if got := session.LookupLatestStatusEvent(rows); got != protocol.SessionStatusActive {
 		t.Errorf("post-resume marker = %q, want active (promotion missing)", got)
 	}
 }
@@ -314,15 +315,15 @@ func TestRestoreActive_SkipsUnknownState(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	mustOpen(t, store, ctx, SessionRow{
-		ID: "root_unknown", AgentID: "a1", SessionType: "root", Status: StatusActive,
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root_unknown", AgentID: "a1", SessionType: "root", Status: session.StatusActive,
 		CreatedAt: now, UpdatedAt: now,
 	})
 	// Synthetic raw row with a state value the enum doesn't list —
-	// bypasses FrameToEventRow's Validate so we exercise the
+	// bypasses session.FrameToEventRow's Validate so we exercise the
 	// classifier's defensive default branch on a row that the codec
 	// itself wouldn't produce today.
-	if err := store.AppendEvent(ctx, EventRow{
+	if err := store.AppendEvent(ctx, session.EventRow{
 		ID: "future-state-1", SessionID: "root_unknown", AgentID: "a1",
 		EventType: string(protocol.KindSessionStatus),
 		Author:    "a1", CreatedAt: now,
@@ -352,13 +353,13 @@ func TestResume_RejectsSubAgentID(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	mustOpen(t, store, ctx, SessionRow{
-		ID: "root1", AgentID: "a1", SessionType: "root", Status: StatusActive,
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root1", AgentID: "a1", SessionType: "root", Status: session.StatusActive,
 		CreatedAt: now, UpdatedAt: now,
 	})
-	mustOpen(t, store, ctx, SessionRow{
+	mustOpen(t, store, ctx, session.SessionRow{
 		ID: "sub1", AgentID: "a1", ParentSessionID: "root1",
-		SessionType: "subagent", Status: StatusActive,
+		SessionType: "subagent", Status: session.StatusActive,
 		Metadata:  map[string]any{"depth": 1},
 		CreatedAt: now, UpdatedAt: now,
 	})
@@ -387,14 +388,14 @@ func TestRestoreActive_SkipsTerminalRoots(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	mustOpen(t, store, ctx, SessionRow{
-		ID: "root_dead", AgentID: "a1", SessionType: "root", Status: StatusActive,
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root_dead", AgentID: "a1", SessionType: "root", Status: session.StatusActive,
 		CreatedAt: now, UpdatedAt: now,
 	})
 	dead := protocol.NewSessionTerminated("root_dead",
 		protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent},
 		protocol.SessionTerminatedPayload{Reason: protocol.TerminationUserEnd})
-	dRow, dSum, _ := FrameToEventRow(dead, "a1")
+	dRow, dSum, _ := session.FrameToEventRow(dead, "a1")
 	_ = store.AppendEvent(ctx, dRow, dSum)
 
 	mgr := newTestManager(t, store)
@@ -410,7 +411,7 @@ func TestRestoreActive_SkipsTerminalRoots(t *testing.T) {
 
 // helpers
 
-func mustOpen(t *testing.T, store RuntimeStore, ctx context.Context, row SessionRow) {
+func mustOpen(t *testing.T, store session.RuntimeStore, ctx context.Context, row session.SessionRow) {
 	t.Helper()
 	if err := store.OpenSession(ctx, row); err != nil {
 		t.Fatalf("OpenSession %s: %v", row.ID, err)
@@ -421,23 +422,23 @@ func mustOpen(t *testing.T, store RuntimeStore, ctx context.Context, row Session
 // event for sessionID — replaces the missing newSession path in
 // tests that build sessions via mustOpen directly. RestoreActive
 // keys off this marker.
-func mustWriteStatus(t *testing.T, store RuntimeStore, ctx context.Context, sessionID, state string) {
+func mustWriteStatus(t *testing.T, store session.RuntimeStore, ctx context.Context, sessionID, state string) {
 	t.Helper()
 	frame := protocol.NewSessionStatus(sessionID,
 		protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent},
 		state, "test_setup")
-	row, summary, err := FrameToEventRow(frame, "a1")
+	row, summary, err := session.FrameToEventRow(frame, "a1")
 	if err != nil {
-		t.Fatalf("FrameToEventRow %s/%s: %v", sessionID, state, err)
+		t.Fatalf("session.FrameToEventRow %s/%s: %v", sessionID, state, err)
 	}
 	if err := store.AppendEvent(ctx, row, summary); err != nil {
 		t.Fatalf("AppendEvent %s/%s: %v", sessionID, state, err)
 	}
 }
 
-func must(events []EventRow, _ error) []EventRow { return events }
+func must(events []session.EventRow, _ error) []session.EventRow { return events }
 
-func containsKindWithReason(events []EventRow, kind protocol.Kind, reason string) bool {
+func containsKindWithReason(events []session.EventRow, kind protocol.Kind, reason string) bool {
 	for _, ev := range events {
 		if ev.EventType == string(kind) {
 			if r, _ := ev.Metadata["reason"].(string); r == reason {

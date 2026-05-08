@@ -80,6 +80,14 @@ func (s *Session) markStatus(ctx context.Context, state, reason string) {
 	}
 }
 
+// MarkStatus is the cross-package entry point for the lifecycle
+// transition primitive. Used by the supervisor (pkg/session/manager)
+// to promote a session out of a stale wait_* state at restore time.
+// Internal callers continue to use markStatus directly.
+func (s *Session) MarkStatus(ctx context.Context, state, reason string) {
+	s.markStatus(ctx, state, reason)
+}
+
 // markIdle / markActive / markWaitSubagents are the wired
 // transitions today. The phase-5 placeholders below are defined
 // for symmetry but never called by runtime code — HITL plumbing
@@ -109,11 +117,11 @@ func (s *Session) markWaitUserInput(ctx context.Context, reason string) {
 	s.markStatus(ctx, protocol.SessionStatusWaitUserInput, reason)
 }
 
-// lookupLatestStatusEvent walks events newest-last and returns the
+// LookupLatestStatusEvent walks events newest-last and returns the
 // state of the most recent [protocol.KindSessionStatus] row, or ""
 // when the log carries none. Used by Manager.RestoreActive to
 // classify a session at boot. Reads only — no writes.
-func lookupLatestStatusEvent(events []store.EventRow) string {
+func LookupLatestStatusEvent(events []store.EventRow) string {
 	for i := len(events) - 1; i >= 0; i-- {
 		ev := events[i]
 		if protocol.Kind(ev.EventType) != protocol.KindSessionStatus {

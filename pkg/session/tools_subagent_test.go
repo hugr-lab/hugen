@@ -22,20 +22,6 @@ func us1WithSession(parent *Session) context.Context {
 	return extension.WithSessionState(context.Background(), parent)
 }
 
-// us1OpenParent opens a fresh root via Manager.Open and drains the
-// SessionOpened frame. Integration tests that exercise Manager-
-// level scenarios use this; tests of individual tool handlers use
-// newTestParent (Manager-free) instead.
-func us1OpenParent(t *testing.T, mgr *Manager) *Session {
-	t.Helper()
-	parent, _, err := mgr.Open(context.Background(), OpenRequest{OwnerID: "alice"})
-	if err != nil {
-		t.Fatalf("open parent: %v", err)
-	}
-	drainOutboxOnce(parent.Outbox())
-	return parent
-}
-
 // ---------- spawn_subagent ----------
 
 // TestCallSpawnSubagent_Happy verifies the simplest path: a single

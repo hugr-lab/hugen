@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/manager"
 )
 
 //go:embed static
@@ -112,7 +112,7 @@ func (a *Adapter) serve(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 	a.assets.ServeHTTP(w, r)
 }
 
-// Name implements session.Adapter.
+// Name implements manager.Adapter.
 func (a *Adapter) Name() string { return "webui" }
 
 // Run starts the listener and blocks until ctx is cancelled. Returns
@@ -121,7 +121,7 @@ func (a *Adapter) Name() string { return "webui" }
 // host is supplied by the runtime but unused: the webui adapter
 // binds its own loopback listener (the static UI surface is
 // distinct from the /api/v1 mux).
-func (a *Adapter) Run(ctx context.Context, _ session.AdapterHost) error {
+func (a *Adapter) Run(ctx context.Context, _ manager.AdapterHost) error {
 	a.srv = &stdhttp.Server{
 		Addr:    fmt.Sprintf("%s:%d", a.host, a.port),
 		Handler: stdhttp.HandlerFunc(a.serve),

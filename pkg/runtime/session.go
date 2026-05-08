@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/manager"
 )
 
 // phaseSessionManager runs phase 9: assembles the agent-level
@@ -12,10 +13,10 @@ import (
 // extensions (workspace, mcp) in stages 5c / 5b — Manager
 // construction no longer wires Resources / Lifecycle.
 func phaseSessionManager(_ context.Context, core *Core) error {
-	mgr := session.NewManager(
+	mgr := manager.NewManager(
 		core.Store, core.Agent, core.Models, core.Commands, core.Codec, core.Tools, core.Logger,
-		session.WithExtensions(core.Extensions...),
-		session.WithSessionOptions(
+		manager.WithExtensions(core.Extensions...),
+		manager.WithSessionOptions(
 			session.WithPerms(core.Permissions),
 		),
 	)

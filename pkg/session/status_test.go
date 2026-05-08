@@ -56,16 +56,16 @@ func TestLookupLatestStatusEvent(t *testing.T) {
 		{EventType: string(protocol.KindSessionStatus), Metadata: map[string]any{"state": "wait_subagents"}},
 		{EventType: string(protocol.KindToolCall)},
 	}
-	if got := lookupLatestStatusEvent(rows); got != "wait_subagents" {
+	if got := LookupLatestStatusEvent(rows); got != "wait_subagents" {
 		t.Errorf("got %q, want wait_subagents", got)
 	}
 
-	if got := lookupLatestStatusEvent(nil); got != "" {
+	if got := LookupLatestStatusEvent(nil); got != "" {
 		t.Errorf("empty events: got %q, want empty", got)
 	}
 
 	noStatus := []EventRow{{EventType: string(protocol.KindUserMessage)}}
-	if got := lookupLatestStatusEvent(noStatus); got != "" {
+	if got := LookupLatestStatusEvent(noStatus); got != "" {
 		t.Errorf("no status rows: got %q, want empty", got)
 	}
 }

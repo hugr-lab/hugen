@@ -1,12 +1,13 @@
-package session
+package manager
 
 import (
 	"context"
 	"testing"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
@@ -20,13 +21,13 @@ func TestTerminate_CascadeWritesCancelCascade(t *testing.T) {
 	ctx := context.Background()
 	defer mgr.Stop(ctx)
 
-	parent, _, err := mgr.Open(ctx, OpenRequest{OwnerID: "alice"})
+	parent, _, err := mgr.Open(ctx, session.OpenRequest{OwnerID: "alice"})
 	if err != nil {
 		t.Fatalf("open parent: %v", err)
 	}
 	drainOutboxOnce(parent.Outbox())
 
-	child, err := parent.Spawn(ctx, SpawnSpec{Role: "explorer", Task: "t"})
+	child, err := parent.Spawn(ctx, session.SpawnSpec{Role: "explorer", Task: "t"})
 	if err != nil {
 		t.Fatalf("spawn child: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestTerminate_ExplicitWritesCallerReason(t *testing.T) {
 	ctx := context.Background()
 	defer mgr.Stop(ctx)
 
-	s, _, err := mgr.Open(ctx, OpenRequest{OwnerID: "alice"})
+	s, _, err := mgr.Open(ctx, session.OpenRequest{OwnerID: "alice"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

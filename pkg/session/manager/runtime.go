@@ -1,10 +1,10 @@
-// Package runtime is the core of the hugen agent: it owns the
-// supervisor goroutine, the Manager, and brokers Frame
-// traffic between adapters and Sessions.
+// runtime.go: supervisor goroutine + Adapter contract. The Runtime
+// owns the Manager, runs every adapter under one errgroup, and brokers
+// Frame traffic between adapters and Sessions.
 //
 // Phase 1 ships a single Adapter (console) and a single Agent.
 // Sub-agents, peer groups, and remote adapters are later phases.
-package session
+package manager
 
 import (
 	"context"
@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // Adapter is the surface the runtime exposes to inbound channels
@@ -30,12 +31,12 @@ type Adapter interface {
 // AdapterHost is the runtime side of the Adapter contract. Adapters
 // open/resume sessions and submit/subscribe to Frames through this.
 type AdapterHost interface {
-	OpenSession(ctx context.Context, req OpenRequest) (*Session, time.Time, error)
-	ResumeSession(ctx context.Context, id string) (*Session, error)
+	OpenSession(ctx context.Context, req session.OpenRequest) (*session.Session, time.Time, error)
+	ResumeSession(ctx context.Context, id string) (*session.Session, error)
 	Submit(ctx context.Context, frame protocol.Frame) error
 	Subscribe(ctx context.Context, sessionID string) (<-chan protocol.Frame, error)
 	CloseSession(ctx context.Context, id, reason string) (time.Time, error)
-	ListSessions(ctx context.Context, status string) ([]SessionSummary, error)
+	ListSessions(ctx context.Context, status string) ([]session.SessionSummary, error)
 	Logger() *slog.Logger
 }
 
@@ -118,7 +119,7 @@ func (r *Runtime) fanout(f protocol.Frame) {
 // startSessionPump bridges a Session.Outbox to the runtime's
 // subscriber list. One goroutine per live session; exits when the
 // session goroutine closes its Outbox.
-func (r *Runtime) startSessionPump(s *Session) {
+func (r *Runtime) startSessionPump(s *session.Session) {
 	go func() {
 		for f := range s.Outbox() {
 			r.fanout(f)
@@ -132,7 +133,7 @@ type adapterHost struct {
 	ctx context.Context
 }
 
-func (h *adapterHost) OpenSession(ctx context.Context, req OpenRequest) (*Session, time.Time, error) {
+func (h *adapterHost) OpenSession(ctx context.Context, req session.OpenRequest) (*session.Session, time.Time, error) {
 	s, openedAt, err := h.rt.manager.Open(ctx, req)
 	if err != nil {
 		return nil, time.Time{}, err
@@ -141,7 +142,7 @@ func (h *adapterHost) OpenSession(ctx context.Context, req OpenRequest) (*Sessio
 	return s, openedAt, nil
 }
 
-func (h *adapterHost) ResumeSession(ctx context.Context, id string) (*Session, error) {
+func (h *adapterHost) ResumeSession(ctx context.Context, id string) (*session.Session, error) {
 	s, err := h.rt.manager.Resume(ctx, id)
 	if err != nil {
 		return nil, err
@@ -162,10 +163,10 @@ func (h *adapterHost) Submit(ctx context.Context, f protocol.Frame) error {
 		// it just transitioned out of live state (Close raced our
 		// post). Both surface as ErrSessionClosed for the adapter
 		// layer; the post handler routes that to 409.
-		return ErrSessionClosed
+		return session.ErrSessionClosed
 	}
 	if s.IsClosed() {
-		return ErrSessionClosed
+		return session.ErrSessionClosed
 	}
 	select {
 	case s.Inbox() <- f:
@@ -209,7 +210,7 @@ func (h *adapterHost) CloseSession(ctx context.Context, id, reason string) (time
 	return time.Now().UTC(), nil
 }
 
-func (h *adapterHost) ListSessions(ctx context.Context, status string) ([]SessionSummary, error) {
+func (h *adapterHost) ListSessions(ctx context.Context, status string) ([]session.SessionSummary, error) {
 	return h.rt.manager.ListSessions(ctx, status)
 }
 

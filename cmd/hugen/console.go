@@ -10,6 +10,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/manager"
 )
 
 // runConsole attaches the console adapter to a shared *runtime.Core
@@ -24,7 +25,7 @@ func runConsole(ctx context.Context, core *runtime.Core) int {
 		console.WithUser(operatorParticipant()),
 	)
 
-	rt := session.NewRuntime(core.Manager, []session.Adapter{consoleAdapter}, core.Logger)
+	rt := manager.NewRuntime(core.Manager, []manager.Adapter{consoleAdapter}, core.Logger)
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -42,7 +43,7 @@ func runConsole(ctx context.Context, core *runtime.Core) int {
 	return exitOK
 }
 
-func tryFindResumableSession(ctx context.Context, m *session.Manager, logger *slog.Logger) string {
+func tryFindResumableSession(ctx context.Context, m *manager.Manager, logger *slog.Logger) string {
 	rows, err := m.ListSessions(ctx, session.StatusActive)
 	if err != nil {
 		logger.Warn("list active sessions", "err", err)
