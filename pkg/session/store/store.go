@@ -141,11 +141,23 @@ type EventRow struct {
 //     rows whose metadata column is a superset of the given map.
 //     Combine with Kinds for tight scans like
 //     "subagent_started where child_session_id = X".
+//   - From / To, when non-zero, bound `created_at` (inclusive). Use
+//     for time-window scans (parent_context).
+//   - SemanticQuery, when non-empty AND the store has an embedder
+//     attached, ranks the result by similarity to that text via
+//     Hugr's `semantic: { query, limit }` argument (the
+//     [`@embeddings` directive](docs/8-references/1-directives.md)
+//     on `session_events`). Ordering switches from seq ASC to
+//     similarity DESC. Without an embedder the search is silently
+//     dropped — caller falls back to time-ordered Kinds filter.
 type ListEventsOpts struct {
 	MinSeq           int
 	Limit            int
 	Kinds            []string
 	MetadataContains map[string]any
+	From             time.Time
+	To               time.Time
+	SemanticQuery    string
 }
 
 // RuntimeStore is the persistence facade consumed by Session and
@@ -384,6 +396,47 @@ func (s *RuntimeStoreLocal) ListEvents(ctx context.Context, sessionID string, op
 	}
 	if len(opts.MetadataContains) > 0 {
 		filter["metadata"] = map[string]any{"contains": opts.MetadataContains}
+	}
+	if !opts.From.IsZero() || !opts.To.IsZero() {
+		ts := map[string]any{}
+		if !opts.From.IsZero() {
+			ts["gte"] = opts.From.UTC().Format(time.RFC3339Nano)
+		}
+		if !opts.To.IsZero() {
+			ts["lte"] = opts.To.UTC().Format(time.RFC3339Nano)
+		}
+		filter["created_at"] = ts
+	}
+	// Semantic ranking: when the store has an embedder attached and
+	// the caller passed a non-empty query, switch to Hugr's
+	// `semantic: { query, limit }` argument. Hugr generates the query
+	// embedding internally (per the @embeddings directive on
+	// session_events) and orders by similarity. Filters still apply
+	// first (Hugr docs §"Filter Combined with Vector Search":
+	// 1) filter, 2) similarity, 3) limit).
+	if opts.SemanticQuery != "" && s.embedderEnabled {
+		rows, err := queries.RunQuery[[]EventRow](ctx, s.querier,
+			`query ($filter: hub_db_session_events_filter, $semantic: SemanticSearchInput) {
+				hub { db { agent {
+					session_events(filter: $filter, semantic: $semantic) {
+						id session_id agent_id seq event_type author content
+						tool_name tool_args tool_result metadata created_at
+					}
+				}}}
+			}`,
+			map[string]any{
+				"filter":   filter,
+				"semantic": map[string]any{"query": opts.SemanticQuery, "limit": opts.Limit},
+			},
+			"hub.db.agent.session_events",
+		)
+		if err != nil {
+			if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return rows, nil
 	}
 	rows, err := queries.RunQuery[[]EventRow](ctx, s.querier,
 		`query ($filter: hub_db_session_events_filter, $limit: Int) {

@@ -3,6 +3,7 @@ package fixture
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
@@ -274,7 +275,27 @@ func (s *TestStore) ListEvents(_ context.Context, sessionID string, opts store.L
 		if !metadataContains(ev.Metadata, opts.MetadataContains) {
 			continue
 		}
+		if !opts.From.IsZero() && ev.CreatedAt.Before(opts.From) {
+			continue
+		}
+		if !opts.To.IsZero() && ev.CreatedAt.After(opts.To) {
+			continue
+		}
 		out = append(out, ev)
+	}
+	// SemanticQuery is best-effort substring fallback in tests — the
+	// fixture has no embedder, so we approximate ranking with a
+	// case-insensitive content match. Production routes through Hugr's
+	// `semantic:` argument when an embedder is attached.
+	if opts.SemanticQuery != "" {
+		needle := strings.ToLower(opts.SemanticQuery)
+		matched := out[:0]
+		for _, ev := range out {
+			if strings.Contains(strings.ToLower(ev.Content), needle) {
+				matched = append(matched, ev)
+			}
+		}
+		out = matched
 	}
 	if opts.Limit > 0 && len(out) > opts.Limit {
 		out = out[:opts.Limit]

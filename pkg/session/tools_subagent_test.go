@@ -474,7 +474,7 @@ func TestCallParentContext_Filtering(t *testing.T) {
 		at = at.Add(time.Second)
 	}
 	mustAppend(string(protocol.KindUserMessage), "user-says", nil)
-	mustAppend(string(protocol.KindAgentMessage), "assistant-final", map[string]any{"final": true})
+	mustAppend(string(protocol.KindAgentMessage), "assistant-final", map[string]any{"final": true, "consolidated": true})
 	mustAppend(string(protocol.KindReasoning), "thinking", nil)
 	mustAppend(string(protocol.KindToolCall), "tool", nil)
 	mustAppend(string(protocol.KindAgentMessage), "assistant-mid", map[string]any{"final": false})

@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"sort"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -19,7 +19,7 @@ import (
 const parentContextSchema = `{
   "type": "object",
   "properties": {
-    "query": {"type": "string", "description": "Optional case-insensitive substring filter."},
+    "query": {"type": "string", "description": "Optional semantic search query — matches against parent transcript by meaning, not literal substring. Requires the embedder data source to be attached; falls back to chronological listing otherwise."},
     "from":  {"type": "string", "description": "Optional RFC3339 lower bound."},
     "to":    {"type": "string", "description": "Optional RFC3339 upper bound."},
     "limit": {"type": "integer", "minimum": 1, "maximum": 20}
@@ -71,62 +71,66 @@ func (caller *Session) callParentContext(ctx context.Context, args json.RawMessa
 		limit = parentContextHardCap
 	}
 
-	var fromT, toT time.Time
-	var hasFrom, hasTo bool
+	opts := store.ListEventsOpts{
+		Kinds: []string{
+			string(protocol.KindUserMessage),
+			string(protocol.KindAgentMessage),
+			store.EventTypeHumanMessageReceived,
+			store.EventTypeAssistantMessageSent,
+		},
+		Limit: limit,
+	}
 	if in.From != "" {
 		t, err := time.Parse(time.RFC3339, in.From)
 		if err != nil {
 			return toolErr("bad_request", fmt.Sprintf("from must be RFC3339: %v", err))
 		}
-		fromT = t
-		hasFrom = true
+		opts.From = t
 	}
 	if in.To != "" {
 		t, err := time.Parse(time.RFC3339, in.To)
 		if err != nil {
 			return toolErr("bad_request", fmt.Sprintf("to must be RFC3339: %v", err))
 		}
-		toT = t
-		hasTo = true
+		opts.To = t
 	}
-	q := strings.ToLower(strings.TrimSpace(in.Query))
-
-	rows, err := caller.store.ListEvents(ctx, parentID, store.ListEventsOpts{Limit: 1000})
+	if in.Query != "" {
+		opts.SemanticQuery = in.Query
+	}
+	rows, err := caller.store.ListEvents(ctx, parentID, opts)
 	if err != nil {
 		return toolErr("io", err.Error())
 	}
-
-	out := parentContextOutput{Messages: []parentContextMessage{}}
-	// Newest first per contract — walk in reverse and stop at the cap.
-	for i := len(rows) - 1; i >= 0 && len(out.Messages) < limit; i-- {
-		r := rows[i]
+	// AgentMessage chunks are not persisted (Consolidated=false stays
+	// outbox-only — see session.emit), so the only KindAgentMessage rows
+	// here are the per-iteration consolidated records carrying full
+	// turn text. Filter belt-and-braces in case a legacy DB still has
+	// chunk rows.
+	out := parentContextOutput{Messages: make([]parentContextMessage, 0, len(rows))}
+	for _, r := range rows {
 		role, ok := parentContextRole(r)
 		if !ok {
 			continue
 		}
-		if hasFrom && r.CreatedAt.Before(fromT) {
-			continue
-		}
-		if hasTo && r.CreatedAt.After(toT) {
-			continue
-		}
-		// AgentMessage rows are written per chunk; only the final
-		// chunk is meaningful in a transcript window. Fall back to
-		// "any non-empty content row" when metadata is absent.
 		if r.EventType == string(protocol.KindAgentMessage) {
-			final, _ := r.Metadata["final"].(bool)
-			if !final {
+			cons, _ := r.Metadata["consolidated"].(bool)
+			if !cons {
 				continue
 			}
-		}
-		if q != "" && !strings.Contains(strings.ToLower(r.Content), q) {
-			continue
 		}
 		out.Messages = append(out.Messages, parentContextMessage{
 			Seq:     r.Seq,
 			At:      r.CreatedAt,
 			Role:    role,
 			Content: r.Content,
+		})
+	}
+	// Caller contract is "newest first". Semantic ranking comes back
+	// in similarity order; the chronological path comes back seq ASC.
+	// Re-order only when there's no semantic ranking to preserve.
+	if opts.SemanticQuery == "" {
+		sort.SliceStable(out.Messages, func(i, j int) bool {
+			return out.Messages[i].Seq > out.Messages[j].Seq
 		})
 	}
 	return json.Marshal(out)
