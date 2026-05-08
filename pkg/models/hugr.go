@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"time"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -166,6 +167,7 @@ func (m *HugrModel) Generate(ctx context.Context, req model.Request) (model.Stre
 	)
 
 	subCtx, cancel := context.WithCancel(ctx)
+	subscribeStart := time.Now()
 	sub, err := m.querier.Subscribe(subCtx, chatCompletionSubscription, vars)
 	if err != nil {
 		cancel()
@@ -173,9 +175,13 @@ func (m *HugrModel) Generate(ctx context.Context, req model.Request) (model.Stre
 			"model", m.hugrModel, "err", err)
 		return nil, fmt.Errorf("hugrmodel: subscribe: %w", err)
 	}
+	m.logger.Debug("hugr chat_completion subscribe ready",
+		"model", m.hugrModel,
+		"elapsed_ms", time.Since(subscribeStart).Milliseconds(),
+	)
 
 	out := make(chan streamItem, 8)
-	go m.pumpSubscription(subCtx, sub, out)
+	go m.pumpSubscription(subCtx, sub, out, subscribeStart)
 	return &hugrStream{
 		ch:     out,
 		sub:    sub,
@@ -188,19 +194,38 @@ func (m *HugrModel) Generate(ctx context.Context, req model.Request) (model.Stre
 // pumpSubscription reads RecordBatches from the Hugr subscription,
 // converts each row to a model.Chunk, and pushes onto out. Closes out
 // when the subscription ends or ctx is cancelled.
-func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscription, out chan<- streamItem) {
+func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscription, out chan<- streamItem, subscribeStart time.Time) {
 	defer close(out)
 	const completionPath = ""
 	var finishEv types.LLMStreamEvent
 	var sawFinish bool
+	var batchCount, rowCount int
+	var firstBatchAt time.Time
+
+	// Watchdog: if no batch arrives within 30s, log a heartbeat
+	// every 30s so a stuck upstream LLM is observable in real time
+	// instead of silent until budget elapsed. Stopped by close(out)
+	// — defer above runs after ReadSubscription returns.
+	heartbeatStop := make(chan struct{})
+	defer close(heartbeatStop)
+	go m.subscriptionHeartbeat(heartbeatStop, &batchCount, &rowCount, subscribeStart, &firstBatchAt)
 
 	err := ReadSubscription(ctx, sub, map[string]BatchHandler{
 		completionPath: func(ctx context.Context, batch arrow.RecordBatch) error {
+			if firstBatchAt.IsZero() {
+				firstBatchAt = time.Now()
+				m.logger.Debug("hugr chat_completion first batch",
+					"model", m.hugrModel,
+					"elapsed_ms", time.Since(subscribeStart).Milliseconds(),
+				)
+			}
+			batchCount++
 			schema := batch.Schema()
 			for i := 0; i < int(batch.NumRows()); i++ {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
+				rowCount++
 				ev := readStreamEvent(schema, batch, i)
 				if ev.Type == "error" {
 					return fmt.Errorf("stream error: %s", ev.Content)
@@ -273,6 +298,36 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 		"tool_calls_emitted", finishEv.ToolCalls != "",
 	)
 	_ = sendItem(ctx, out, streamItem{chunk: final})
+}
+
+// subscriptionHeartbeat logs a Debug message every 30s while the
+// subscription is open with no batches received. Surfaces stuck
+// upstream LLM calls so the operator sees the stall in real time
+// instead of silent-until-budget-elapsed. Returns when stop is
+// closed (always — pumpSubscription's defer guarantees it).
+func (m *HugrModel) subscriptionHeartbeat(stop <-chan struct{}, batchCount, rowCount *int, subscribeStart time.Time, firstBatchAt *time.Time) {
+	tick := time.NewTicker(30 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+			elapsed := time.Since(subscribeStart)
+			fields := []any{
+				"model", m.hugrModel,
+				"elapsed_s", int(elapsed.Seconds()),
+				"batches", *batchCount,
+				"rows", *rowCount,
+			}
+			if firstBatchAt.IsZero() {
+				m.logger.Debug("hugr chat_completion still waiting for first batch", fields...)
+			} else {
+				fields = append(fields, "first_batch_after_ms", time.Since(*firstBatchAt).Milliseconds())
+				m.logger.Debug("hugr chat_completion still streaming", fields...)
+			}
+		}
+	}
 }
 
 // streamEventToChunk maps a single Hugr stream event onto a
