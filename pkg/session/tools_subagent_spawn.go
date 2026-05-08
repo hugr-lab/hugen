@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -123,6 +124,19 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 			// retry independently of the rest of the batch.
 			return toolErr("io",
 				fmt.Sprintf("subagents[%d]: spawn: %v", i, err))
+		}
+		// Apply the per-role spawn hint (skill manifest's role.intent →
+		// child's default-intent override). Best-effort: a missing
+		// hint or unknown intent leaves the child on the parent's
+		// default. The actual intent → spec resolution happens at
+		// every turn boundary inside ModelRouter.Resolve, so a typo
+		// in the manifest surfaces as a model_unavailable error on
+		// the child's first turn (visible to operator) rather than a
+		// silent fallback.
+		if e.Skill != "" {
+			if hint := subagentSpawnHint(ctx, parent, e.Skill, e.Role); hint.Intent != "" {
+				child.SetDefaultIntent(model.Intent(hint.Intent))
+			}
 		}
 		out = append(out, spawnSubagentResult{
 			SessionID: child.ID(),

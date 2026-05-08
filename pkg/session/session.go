@@ -94,6 +94,14 @@ type Session struct {
 	overridesMu sync.RWMutex
 	overrides   map[model.Intent]model.ModelSpec
 
+	// defaultIntent is the model.Intent that startTurn passes to the
+	// router by default. Roots leave it at IntentDefault. Subagents
+	// may override it via SetDefaultIntent at spawn time when the
+	// skill manifest's role declares an `intent:` (phase-4.1d). The
+	// value is read on every turn boundary by startTurn — atomic
+	// store/load keeps it lock-free for the common path.
+	defaultIntent atomic.Value // model.Intent
+
 	// pendingSwitch captures a /model use queued for the next turn.
 	// Single-goroutine (Run) reader/writer post-C5 — no lock needed.
 	pendingSwitch *modelSwitch
@@ -466,6 +474,34 @@ func (s *Session) ActiveToolFeed() *ToolFeed {
 // running a full teardown. Production code never calls this — Run
 // owns s.closed via teardown.
 func (s *Session) MarkClosed() { s.closed.Store(true) }
+
+// SetDefaultIntent records the per-session intent that startTurn
+// will resolve through on every turn (instead of model.IntentDefault).
+// Empty intent reverts to IntentDefault. Used by Spawn to honour a
+// SubAgentRole.Intent declared in the skill manifest. Safe to call
+// concurrently with the Run goroutine — the value is read once per
+// turn via DefaultIntent.
+func (s *Session) SetDefaultIntent(intent model.Intent) {
+	if intent == "" {
+		intent = model.IntentDefault
+	}
+	s.defaultIntent.Store(intent)
+}
+
+// DefaultIntent returns the per-session default intent
+// (IntentDefault when never set). Read once per turn boundary by
+// startTurn.
+func (s *Session) DefaultIntent() model.Intent {
+	v := s.defaultIntent.Load()
+	if v == nil {
+		return model.IntentDefault
+	}
+	intent, _ := v.(model.Intent)
+	if intent == "" {
+		return model.IntentDefault
+	}
+	return intent
+}
 
 // SetModelOverride records a per-session model preference. The next
 // turn will route through it and emit a system_marker.

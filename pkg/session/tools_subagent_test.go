@@ -113,6 +113,87 @@ func TestCallSpawnSubagent_BatchFailFast(t *testing.T) {
 	}
 }
 
+// stubSpawnHinter is a minimal SubagentSpawnHinter for the
+// per-skill-intent wiring test. Implements the runtime's expected
+// composition: it pretends to advertise one skill ("hugr-data") with
+// one role ("explorer") whose Intent is "cheap".
+type stubSpawnHinter struct {
+	skill, role, intent string
+	calls               int
+}
+
+func (h *stubSpawnHinter) Name() string { return "stub-hinter" }
+
+func (h *stubSpawnHinter) SubagentSpawnHint(_ context.Context, _ extension.SessionState,
+	skill, role string,
+) (extension.SubagentSpawnHint, error) {
+	h.calls++
+	if skill == h.skill && role == h.role {
+		return extension.SubagentSpawnHint{Intent: h.intent}, nil
+	}
+	return extension.SubagentSpawnHint{}, nil
+}
+
+// TestCallSpawnSubagent_RoleIntentOverride asserts that a skill
+// manifest's role.intent surfaces as a per-session default-intent
+// override on the spawned child. Phase-4.1d wiring: skill ext's
+// SubagentSpawnHint → child.SetDefaultIntent.
+func TestCallSpawnSubagent_RoleIntentOverride(t *testing.T) {
+	hinter := &stubSpawnHinter{skill: "hugr-data", role: "explorer", intent: "cheap"}
+	parent, cleanup := newTestParent(t, withTestExtensions(hinter))
+	defer cleanup()
+
+	out, err := parent.callSpawnSubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagents":[{"skill":"hugr-data","role":"explorer","task":"t"}]}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if hinter.calls == 0 {
+		t.Errorf("SubagentSpawnHint never called — wiring broken")
+	}
+	var got []spawnSubagentResult
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v\nout=%s", err, out)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got)=%d, want 1; out=%s", len(got), out)
+	}
+	parent.childMu.Lock()
+	child := parent.children[got[0].SessionID]
+	parent.childMu.Unlock()
+	if child == nil {
+		t.Fatalf("child %q missing from parent.children", got[0].SessionID)
+	}
+	if want, got := "cheap", string(child.DefaultIntent()); got != want {
+		t.Errorf("child.DefaultIntent() = %q, want %q", got, want)
+	}
+}
+
+// TestCallSpawnSubagent_NoIntent_KeepsParentDefault asserts the
+// default path: when the skill role doesn't declare an intent, the
+// child stays on IntentDefault — no spurious override.
+func TestCallSpawnSubagent_NoIntent_KeepsParentDefault(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+
+	out, err := parent.callSpawnSubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagents":[{"task":"t"}]}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var got []spawnSubagentResult
+	_ = json.Unmarshal(out, &got)
+	parent.childMu.Lock()
+	child := parent.children[got[0].SessionID]
+	parent.childMu.Unlock()
+	if child == nil {
+		t.Fatalf("child missing")
+	}
+	if got := string(child.DefaultIntent()); got != "default" {
+		t.Errorf("child.DefaultIntent() = %q, want default", got)
+	}
+}
+
 // TestCallSpawnSubagent_SessionGone verifies the closed-session guard
 // — Post phase-4.1b-pre stage A handlers receive *Session directly so
 // the only "no-caller" failure mode is calling against a session that

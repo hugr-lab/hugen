@@ -32,6 +32,7 @@ var (
 	_ extension.GenerationProvider = (*Extension)(nil)
 	_ extension.ToolPolicyAdvisor  = (*Extension)(nil)
 	_ extension.SubagentDescriber  = (*Extension)(nil)
+	_ extension.SubagentSpawnHinter = (*Extension)(nil)
 )
 
 // AdvertiseSystemPrompt implements [extension.Advertiser].
@@ -167,6 +168,33 @@ func (e *Extension) DescribeSubagent(ctx context.Context, state extension.Sessio
 		return extension.SubagentSkillFoundRoleMissing, nil
 	}
 	return extension.SubagentUnknown, nil
+}
+
+// SubagentSpawnHint implements [extension.SubagentSpawnHinter]. Walks
+// the manager's catalog for the requested (skill, role) and returns
+// the role's manifest-declared Intent (empty string when not set or
+// when the skill / role is unknown). Skill-level (no role) calls
+// always return zero — only role authors can pin an intent.
+func (e *Extension) SubagentSpawnHint(ctx context.Context, state extension.SessionState, skillName, roleName string) (extension.SubagentSpawnHint, error) {
+	h := FromState(state)
+	if h == nil || h.manager == nil || roleName == "" {
+		return extension.SubagentSpawnHint{}, nil
+	}
+	all, err := h.manager.List(ctx)
+	if err != nil {
+		return extension.SubagentSpawnHint{}, err
+	}
+	for _, s := range all {
+		if s.Manifest.Name != skillName {
+			continue
+		}
+		for _, r := range s.Manifest.Hugen.SubAgents {
+			if r.Name == roleName {
+				return extension.SubagentSpawnHint{Intent: r.Intent}, nil
+			}
+		}
+	}
+	return extension.SubagentSpawnHint{}, nil
 }
 
 // Generation implements [extension.GenerationProvider]. Returns
