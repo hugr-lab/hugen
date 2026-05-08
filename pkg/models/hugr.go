@@ -68,6 +68,7 @@ type HugrModel struct {
 	maxTokens      int
 	temperature    *float32
 	toolChoiceFunc func() string
+	retry          retryPolicy
 }
 
 // Option configures a HugrModel.
@@ -97,6 +98,17 @@ func WithToolChoiceFunc(f func() string) Option {
 	return func(m *HugrModel) { m.toolChoiceFunc = f }
 }
 
+// WithRetry configures transient-error retries on the chat
+// completion subscription. maxAttempts caps the number of retries
+// (0 = no retries); initialBackoff seeds an exponential schedule
+// (initial × 2^attempt, capped at retryMaxBackoff = 30s). Retries
+// only fire BEFORE the first chunk reaches the caller — once the
+// model emits content / tool_use the stream is committed and the
+// error propagates to session as today.
+func WithRetry(maxAttempts int, initialBackoff time.Duration) Option {
+	return func(m *HugrModel) { m.retry = newRetryPolicy(maxAttempts, initialBackoff) }
+}
+
 // NewHugr builds a HugrModel pinned to a specific Hugr LLM data
 // source name (e.g. "gemma4-26b").
 func NewHugr(q types.Querier, hugrModel string, opts ...Option) *HugrModel {
@@ -105,6 +117,7 @@ func NewHugr(q types.Querier, hugrModel string, opts ...Option) *HugrModel {
 		hugrModel: hugrModel,
 		querier:   q,
 		logger:    slog.Default(),
+		retry:     newRetryPolicy(0, 0),
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -123,6 +136,15 @@ func (m *HugrModel) Spec() model.ModelSpec {
 // Generate implements model.Model. Opens a chat_completion
 // subscription and returns a Stream that yields Chunks until the
 // subscription emits "finish" (or Close is called).
+//
+// Transient-error retry policy (configured via WithRetry, default
+// no-retry) wraps Subscribe + the pre-first-chunk window: a 429 /
+// 5xx / network blip that arrives before any chunk reaches the
+// caller is retried with exponential backoff (initial × 2^attempt,
+// capped 30s). Once the first content_delta / tool_use lands the
+// stream is committed — subsequent errors propagate as today,
+// because the caller has already begun assembling the assistant
+// turn and a silent re-roll would corrupt the transcript.
 func (m *HugrModel) Generate(ctx context.Context, req model.Request) (model.Stream, error) {
 	messages, err := messagesToHugrJSON(req.Messages)
 	if err != nil {
@@ -167,45 +189,108 @@ func (m *HugrModel) Generate(ctx context.Context, req model.Request) (model.Stre
 	)
 
 	subCtx, cancel := context.WithCancel(ctx)
-	subscribeStart := time.Now()
-	sub, err := m.querier.Subscribe(subCtx, chatCompletionSubscription, vars)
-	if err != nil {
-		cancel()
-		m.logger.Error("hugr chat_completion subscribe failed",
-			"model", m.hugrModel, "err", err)
-		return nil, fmt.Errorf("hugrmodel: subscribe: %w", err)
-	}
-	m.logger.Debug("hugr chat_completion subscribe ready",
-		"model", m.hugrModel,
-		"elapsed_ms", time.Since(subscribeStart).Milliseconds(),
-	)
-
 	out := make(chan streamItem, 8)
-	go m.pumpSubscription(subCtx, sub, out, subscribeStart)
+	go m.runWithRetry(subCtx, vars, out)
 	return &hugrStream{
 		ch:     out,
-		sub:    sub,
 		cancel: cancel,
 		logger: m.logger,
 		model:  m.hugrModel,
 	}, nil
 }
 
-// pumpSubscription reads RecordBatches from the Hugr subscription,
-// converts each row to a model.Chunk, and pushes onto out. Closes out
-// when the subscription ends or ctx is cancelled.
-func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscription, out chan<- streamItem, subscribeStart time.Time) {
+// runWithRetry is the top-level pump for a single Generate call.
+// Drives Subscribe + pumpSubscription up to retry.maxAttempts+1
+// times whenever a transient error fires before any chunk has
+// reached the caller. Once committed (chunk sent on out), the
+// retry loop exits and the error propagates as a streamItem.err.
+//
+// Closing out is this function's responsibility (matches the
+// pre-retry contract of pumpSubscription) — caller blocks on the
+// channel and stops when it closes.
+func (m *HugrModel) runWithRetry(ctx context.Context, vars map[string]any, out chan<- streamItem) {
 	defer close(out)
+
+	var lastErr error
+	maxAttempts := m.retry.maxAttempts
+	for attempt := 0; attempt <= maxAttempts; attempt++ {
+		if attempt > 0 {
+			backoff := m.retry.nextBackoff(attempt)
+			m.logger.Warn("hugr chat_completion retry",
+				"model", m.hugrModel,
+				"attempt", attempt,
+				"max", maxAttempts,
+				"backoff", backoff,
+				"last_err", lastErr,
+			)
+			if err := m.retry.sleepBackoff(ctx, attempt); err != nil {
+				_ = sendItem(ctx, out, streamItem{err: err})
+				return
+			}
+		}
+
+		subscribeStart := time.Now()
+		sub, err := m.querier.Subscribe(ctx, chatCompletionSubscription, vars)
+		if err != nil {
+			lastErr = err
+			m.logger.Error("hugr chat_completion subscribe failed",
+				"model", m.hugrModel, "err", err, "attempt", attempt)
+			if attempt < maxAttempts && isRetryableSubscribeErr(err) {
+				continue
+			}
+			_ = sendItem(ctx, out, streamItem{err: fmt.Errorf("hugrmodel: subscribe: %w", err)})
+			return
+		}
+		m.logger.Debug("hugr chat_completion subscribe ready",
+			"model", m.hugrModel,
+			"attempt", attempt,
+			"elapsed_ms", time.Since(subscribeStart).Milliseconds(),
+		)
+
+		committed, err := m.pumpSubscription(ctx, sub, out, subscribeStart)
+		if err == nil {
+			return
+		}
+		lastErr = err
+		if committed {
+			// Stream already emitted a chunk to the caller — silent
+			// retry would duplicate / re-order tokens. Surface the
+			// error and exit; session decides next move.
+			m.logger.Error("hugr chat_completion subscription failed (mid-stream, no retry)",
+				"model", m.hugrModel, "err", err, "attempt", attempt)
+			_ = sendItem(ctx, out, streamItem{err: fmt.Errorf("hugrmodel: subscription: %w", err)})
+			return
+		}
+		if attempt < maxAttempts && isRetryableSubscribeErr(err) {
+			m.logger.Warn("hugr chat_completion subscription failed (will retry)",
+				"model", m.hugrModel, "err", err, "attempt", attempt)
+			continue
+		}
+		m.logger.Error("hugr chat_completion subscription failed",
+			"model", m.hugrModel, "err", err, "attempt", attempt)
+		_ = sendItem(ctx, out, streamItem{err: fmt.Errorf("hugrmodel: subscription: %w", err)})
+		return
+	}
+}
+
+// pumpSubscription reads RecordBatches from the Hugr subscription,
+// converts each row to a model.Chunk, and pushes onto out. Returns
+// (committed, err): committed=true once any chunk has been delivered
+// to the caller (retries forbidden past this point); err is non-nil
+// on the failure path AND on canceled (caller distinguishes via
+// isCanceled). Does NOT close out — runWithRetry owns the lifetime
+// since it may re-enter this call on retry.
+func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscription, out chan<- streamItem, subscribeStart time.Time) (bool, error) {
 	const completionPath = ""
 	var finishEv types.LLMStreamEvent
 	var sawFinish bool
 	var batchCount, rowCount int
 	var firstBatchAt time.Time
+	var committed bool
 
 	// Watchdog: if no batch arrives within 30s, log a heartbeat
 	// every 30s so a stuck upstream LLM is observable in real time
-	// instead of silent until budget elapsed. Stopped by close(out)
-	// — defer above runs after ReadSubscription returns.
+	// instead of silent until budget elapsed. Stopped on every exit.
 	heartbeatStop := make(chan struct{})
 	defer close(heartbeatStop)
 	go m.subscriptionHeartbeat(heartbeatStop, &batchCount, &rowCount, subscribeStart, &firstBatchAt)
@@ -242,20 +327,18 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 				if err := sendItem(ctx, out, streamItem{chunk: chunk}); err != nil {
 					return err
 				}
+				committed = true
 			}
 			return nil
 		},
 	})
 	if err != nil && !isCanceled(err) {
-		m.logger.Error("hugr chat_completion subscription failed",
-			"model", m.hugrModel, "err", err)
-		_ = sendItem(ctx, out, streamItem{err: fmt.Errorf("hugrmodel: subscription: %w", err)})
-		return
+		return committed, err
 	}
 	if !sawFinish {
 		// Subscription closed without a finish event. Treat as
-		// canceled / drained — no terminal chunk to emit.
-		return
+		// canceled / drained — no terminal chunk to emit, no err.
+		return committed, nil
 	}
 	// Hugr collapses tool_use into the finish event (carries
 	// `tool_use` finish_reason + a populated ToolCalls string)
@@ -298,6 +381,10 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 		"tool_calls_emitted", finishEv.ToolCalls != "",
 	)
 	_ = sendItem(ctx, out, streamItem{chunk: final})
+	// A successful finish counts as committed — caller has the
+	// terminal chunk in hand. Returning nil err short-circuits the
+	// retry loop in runWithRetry.
+	return true, nil
 }
 
 // subscriptionHeartbeat logs a Debug message every 30s while the
@@ -398,7 +485,6 @@ type streamItem struct {
 // stays alive).
 type hugrStream struct {
 	ch     chan streamItem
-	sub    *types.Subscription
 	cancel context.CancelFunc
 	logger *slog.Logger
 	model  string
@@ -423,15 +509,15 @@ func (s *hugrStream) Next(ctx context.Context) (model.Chunk, bool, error) {
 
 // Close cancels the subscription's context. The underlying
 // WebSocket reader returns immediately, the upstream provider sees
-// the cancellation, and the pump goroutine drains and closes the
-// out channel.
+// the cancellation, and runWithRetry drains and closes the out
+// channel. Sub.Cancel is not called explicitly here — runWithRetry
+// owns the *types.Subscription instance(s) (one per retry attempt)
+// and they all share this ctx; canceling it propagates to all of
+// them.
 func (s *hugrStream) Close() error {
 	s.closeOnce.Do(func() {
 		if s.cancel != nil {
 			s.cancel()
-		}
-		if s.sub != nil {
-			s.sub.Cancel()
 		}
 		// Drain remaining items so the pump goroutine isn't blocked.
 		go func() {
