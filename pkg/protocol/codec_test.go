@@ -35,13 +35,6 @@ func TestCodec_RoundTrip(t *testing.T) {
 			SessionID: "s2", Result: "found 3 tables",
 			Reason: TerminationCompleted, TurnsUsed: 4,
 		})},
-		{"plan_op_set", NewPlanOp("s1", testAgent, PlanOpPayload{
-			Op: "set", Text: "# Plan\n1. discover\n2. aggregate", CurrentStep: "step 1",
-		})},
-		{"plan_op_comment", NewPlanOp("s1", testAgent, PlanOpPayload{
-			Op: "comment", Text: "found A,B,C", CurrentStep: "step 2",
-		})},
-		{"plan_op_clear", NewPlanOp("s1", testAgent, PlanOpPayload{Op: "clear"})},
 		{"session_terminated", NewSessionTerminated("s1", testAgent, SessionTerminatedPayload{
 			Reason: TerminationHardCeiling, TurnsUsed: 30,
 		})},
@@ -195,15 +188,6 @@ func TestCodec_PayloadIntegrity_Phase4(t *testing.T) {
 			t.Errorf("payload drift: %+v", got)
 		}
 	})
-	t.Run("plan_op_clear_no_text", func(t *testing.T) {
-		in := NewPlanOp("s", testAgent, PlanOpPayload{Op: "clear"})
-		data, _ := codec.EncodeFrame(in)
-		out, _ := codec.DecodeFrame(data)
-		got := out.(*PlanOp).Payload
-		if got.Op != "clear" || got.Text != "" || got.CurrentStep != "" {
-			t.Errorf("clear payload drift: %+v", got)
-		}
-	})
 	t.Run("session_terminated_with_result", func(t *testing.T) {
 		in := NewSessionTerminated("s", testAgent, SessionTerminatedPayload{
 			Reason: TerminationCompleted, Result: "final answer", TurnsUsed: 3,
@@ -233,7 +217,6 @@ func TestValidate_Phase4(t *testing.T) {
 		{"subagent_result_missing_reason", NewSubagentResult("p", "c", testAgent, SubagentResultPayload{
 			SessionID: "c",
 		}), true},
-		{"plan_op_invalid_op", NewPlanOp("s", testAgent, PlanOpPayload{Op: "rename"}), true},
 		{"session_terminated_missing_reason", NewSessionTerminated("s", testAgent, SessionTerminatedPayload{}), true},
 		{"system_message_missing_kind", NewSystemMessage("s", testAgent, "", "x"), true},
 		{"session_status_idle_ok", NewSessionStatus("s", testAgent, SessionStatusIdle, ""), false},

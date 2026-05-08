@@ -1,0 +1,75 @@
+# Phase 4.1b — observational scenario harness orchestration.
+#
+# Each `runs:` entry boots one *runtime.Core (via runtime.Build,
+# wrapped by tests/scenarios/harness/Setup). The agent-config the
+# Core consumes is built per run by deep-merging the prod
+# config.yaml with the listed `llm:` and `topology:` overlays
+# (LLM picks the model route, topology picks the tool_providers
+# set). All listed scenarios share that one Core; each gets its
+# own root session.
+#
+# `requires:` gates the whole run on env-var availability — runs
+# whose env is missing t.Skip cleanly instead of crashing.
+#
+# Knobs:
+#  - go test -run TestScenarios/<run-name> ./tests/scenarios/...
+#  - go test -run TestScenarios/<run-name>/<scenario-name> ...
+runs:
+  # Every v1 scenario expects skill:load("hugr-data") which surfaces
+  # tools from hugr-main + hugr-query providers. Embedded topology
+  # strips those — running an hugr-data scenario there leaves the
+  # model hallucinating tools that aren't in the snapshot. Until
+  # we add embedded-only scenarios (python_analysis only — pending
+  # phase-4.2 analyst skills), every run uses external-hugr.
+
+  - name: claude-sonnet
+    llm: configs/llm-claude-sonnet.yaml
+    topology: configs/topology-external-hugr.yaml
+    requires: [anthropic, hugr]
+    scenarios:
+      - single_explorer
+      - delegation_required
+      - three_parallel
+      - plan_root_solo
+      - whiteboard_fanout3
+      - python_analysis_subagent
+      - hugr_data_explorer
+      - full_analyst_workflow
+
+  - name: gemini-pro
+    llm: configs/llm-gemini-pro.yaml
+    topology: configs/topology-external-hugr.yaml
+    requires: [gemini, hugr]
+    scenarios:
+      - single_explorer
+      - delegation_required
+      - three_parallel
+      - plan_root_solo
+      - whiteboard_fanout3
+      - python_analysis_subagent
+      - hugr_data_explorer
+      - plan_survives_restart
+      - full_analyst_workflow
+
+  - name: gpt-5-4
+    llm: configs/llm-gpt-5-4.yaml
+    topology: configs/topology-external-hugr.yaml
+    requires: [openai, hugr]
+    scenarios:
+      - single_explorer
+      - delegation_required
+      - full_analyst_workflow
+
+  - name: gemma4-26b
+    llm: configs/llm-gemma4-26b.yaml
+    topology: configs/topology-external-hugr.yaml
+    requires: [local, hugr]
+    scenarios:
+      - single_explorer
+      - delegation_required
+      - three_parallel
+      - plan_root_solo
+      - whiteboard_fanout3
+      - python_analysis_subagent
+      - hugr_data_explorer
+      - plan_survives_restart

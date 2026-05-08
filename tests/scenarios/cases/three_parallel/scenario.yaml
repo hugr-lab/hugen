@@ -1,0 +1,64 @@
+# three_parallel — the model spawns 3 sub-agents AT THE SAME TURN
+# (one batched session:spawn_subagent call OR three sequential
+# calls, but all from one model iteration). By-eye check: did the
+# model batch them into one tool call (efficient) or fire three
+# (also acceptable but less elegant)?
+name: three_parallel
+requires: []
+
+steps:
+  - say: |
+      Spawn THREE sub-agents in parallel using the hugr-data skill
+      (no role needed), each looking at one of these tables in
+      "northwind": products, suppliers, categories. Each child
+      returns a one-line description.
+
+      Wait for ALL three to finish, then list the descriptions.
+    budget: 360s
+    wait_for_subagents: 240s
+
+    queries:
+      # If model batched, there's ONE tool_call row with args
+      # holding three children. If sequential, there are THREE
+      # spawn_subagent rows — both visible here side-by-side.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Expect 3 child rows.
+      - name: subagent_rows
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Order of subagent_result events shows actual completion
+      # order (not spawn order) — useful to see whether all three
+      # genuinely ran in parallel.
+      - name: subagent_lifecycle_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {
+                  session_id: {eq: $sid},
+                  event_type: {in: ["subagent_started", "subagent_result"]}
+                }
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq event_type metadata }
+            }}}
+          }
+        vars: { sid: "$sid" }

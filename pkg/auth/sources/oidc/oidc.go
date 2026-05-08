@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,6 +21,11 @@ import (
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/hugr-lab/hugen/pkg/auth/sources"
 )
+
+// ErrNoTokens is returned by Tokens when no successful login has
+// completed yet. Callers (cmd/hugen-test-token) treat it as the
+// "block until ready then retry" signal.
+var ErrNoTokens = errors.New("oidc: no tokens captured yet")
 
 // inFlightTTL bounds how long a /auth/login state is remembered
 // waiting for the matching /auth/callback. Keeps the map from
@@ -162,6 +168,50 @@ func (s *Source) tokenWithTTL(ctx context.Context) (string, int, error) {
 	return tok, ttlSeconds(s.expiresAt), nil
 }
 
+// Tokens returns the current access + refresh tokens and the
+// announced expiry. Returns ErrNoTokens when no successful login
+// has completed yet (accessToken still empty). Read under tokenMu.
+//
+// Used exclusively by cmd/hugen-test-token to dump credentials to
+// disk after the browser flow completes — production paths read
+// the access token via Token / TokenWithTTL, which already block
+// on s.ready and refresh on demand.
+func (s *Source) Tokens() (access, refresh string, expiresAt time.Time, err error) {
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
+	if s.accessToken == "" {
+		return "", "", time.Time{}, ErrNoTokens
+	}
+	return s.accessToken, s.refreshToken, s.expiresAt, nil
+}
+
+// SetTokens injects pre-captured tokens into the source and marks
+// it ready, bypassing the browser flow on Token / TokenWithTTL.
+// Subsequent refreshes use the injected refresh token through the
+// usual /token endpoint — the source behaves identically to a
+// freshly-logged-in instance, just without the interactive step.
+//
+// Used exclusively by tests/scenarios/harness to seed the source
+// from tokens captured offline via cmd/hugen-test-token. Calling
+// it after a successful HandleCallback overwrites the live tokens,
+// which may be exactly what the caller wants (rotation) or a
+// footgun (clobbering a fresh login). The harness uses it once
+// at boot and never racing the auth/callback path.
+//
+// Idempotent w.r.t. the ready channel — only the first call closes
+// it; subsequent calls update token state without disturbing
+// blocked Token() callers further.
+func (s *Source) SetTokens(access, refresh string, expiresAt time.Time) {
+	s.tokenMu.Lock()
+	s.accessToken = access
+	s.refreshToken = refresh
+	s.expiresAt = expiresAt
+	s.tokenMu.Unlock()
+	if access != "" {
+		s.readyOnce.Do(func() { close(s.ready) })
+	}
+}
+
 func ttlSeconds(expiresAt time.Time) int {
 	d := time.Until(expiresAt)
 	if d <= 0 {
@@ -171,8 +221,17 @@ func ttlSeconds(expiresAt time.Time) int {
 }
 
 // Login implements Source — prints the login URL and opens the
-// browser. Safe to call multiple times.
+// browser. Safe to call multiple times. Short-circuits when the
+// source already holds an access token (typically because
+// SetTokens injected one during boot — the harness path); in that
+// case there's nothing for the user to log into.
 func (s *Source) Login(ctx context.Context) error {
+	s.tokenMu.Lock()
+	hasToken := s.accessToken != ""
+	s.tokenMu.Unlock()
+	if hasToken {
+		return nil
+	}
 	loginURL := s.loginEndpointURL()
 	s.logger.Info("OIDC login required — open in browser",
 		"name", s.cfg.Name, "url", loginURL, "client", s.cfg.ClientID)

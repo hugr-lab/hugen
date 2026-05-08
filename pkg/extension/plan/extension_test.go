@@ -69,12 +69,19 @@ func TestCallSet_Happy(t *testing.T) {
 	if len(emitted) != 1 {
 		t.Fatalf("emitted = %d, want 1", len(emitted))
 	}
-	pf, isPlanOp := emitted[0].(*protocol.PlanOp)
-	if !isPlanOp {
-		t.Fatalf("frame type = %T, want *PlanOp", emitted[0])
+	pf, isExt := emitted[0].(*protocol.ExtensionFrame)
+	if !isExt {
+		t.Fatalf("frame type = %T, want *ExtensionFrame", emitted[0])
 	}
-	if pf.Payload.Op != "set" || pf.Payload.Text != "investigate cache" {
-		t.Errorf("payload = %+v", pf.Payload)
+	if pf.Payload.Extension != providerName || pf.Payload.Category != protocol.CategoryOp || pf.Payload.Op != "set" {
+		t.Errorf("envelope = %+v, want extension=plan category=op op=set", pf.Payload)
+	}
+	var data OpData
+	if err := json.Unmarshal(pf.Payload.Data, &data); err != nil {
+		t.Fatalf("unmarshal data: %v", err)
+	}
+	if data.Text != "investigate cache" {
+		t.Errorf("data = %+v, want Text='investigate cache'", data)
 	}
 	if pf.Author().ID != "agent-test" {
 		t.Errorf("author = %+v", pf.Author())
@@ -254,9 +261,9 @@ func TestAdvertiseSystemPrompt_Inactive(t *testing.T) {
 // ---------- Recovery ----------
 
 // TestRecover_RebuildsProjection: a fresh handle (no in-memory plan)
-// fed a slice of plan_op event rows replays them via Project so the
-// snapshot matches the persistent state. Mirrors the restart-resume
-// invariant from phase-4-spec §13.2 #12.
+// fed a slice of plan extension_frame event rows replays them via
+// Project so the snapshot matches the persistent state. Mirrors the
+// restart-resume invariant from phase-4-spec §13.2 #12.
 func TestRecover_RebuildsProjection(t *testing.T) {
 	ext, state := newReadyExt(t)
 
@@ -264,30 +271,35 @@ func TestRecover_RebuildsProjection(t *testing.T) {
 	events := []store.EventRow{
 		{
 			SessionID: "ses-test",
-			EventType: string(protocol.KindPlanOp),
+			EventType: string(protocol.KindExtensionFrame),
 			CreatedAt: now,
 			Metadata: map[string]any{
-				"op":           "set",
-				"text":         "investigate latency",
-				"current_step": "scope",
+				"extension": providerName,
+				"category":  string(protocol.CategoryOp),
+				"op":        "set",
+				"data":      map[string]any{"text": "investigate latency", "current_step": "scope"},
 			},
 		},
 		{
 			SessionID: "ses-test",
-			EventType: string(protocol.KindPlanOp),
+			EventType: string(protocol.KindExtensionFrame),
 			CreatedAt: now.Add(time.Second),
 			Metadata: map[string]any{
-				"op":   "comment",
-				"text": "checked headers",
+				"extension": providerName,
+				"category":  string(protocol.CategoryOp),
+				"op":        "comment",
+				"data":      map[string]any{"text": "checked headers"},
 			},
 		},
 		{
 			SessionID: "ses-test",
-			EventType: string(protocol.KindPlanOp),
+			EventType: string(protocol.KindExtensionFrame),
 			CreatedAt: now.Add(2 * time.Second),
 			Metadata: map[string]any{
-				"op":   "comment",
-				"text": "instrumented handler",
+				"extension": providerName,
+				"category":  string(protocol.CategoryOp),
+				"op":        "comment",
+				"data":      map[string]any{"text": "instrumented handler"},
 			},
 		},
 	}
@@ -325,15 +337,24 @@ func TestRecover_ClearedTerminates(t *testing.T) {
 	events := []store.EventRow{
 		{
 			SessionID: "ses-test",
-			EventType: string(protocol.KindPlanOp),
+			EventType: string(protocol.KindExtensionFrame),
 			CreatedAt: now,
-			Metadata: map[string]any{"op": "set", "text": "tmp"},
+			Metadata: map[string]any{
+				"extension": providerName,
+				"category":  string(protocol.CategoryOp),
+				"op":        "set",
+				"data":      map[string]any{"text": "tmp"},
+			},
 		},
 		{
 			SessionID: "ses-test",
-			EventType: string(protocol.KindPlanOp),
+			EventType: string(protocol.KindExtensionFrame),
 			CreatedAt: now.Add(time.Second),
-			Metadata: map[string]any{"op": "clear"},
+			Metadata: map[string]any{
+				"extension": providerName,
+				"category":  string(protocol.CategoryOp),
+				"op":        "clear",
+			},
 		},
 	}
 
@@ -346,8 +367,9 @@ func TestRecover_ClearedTerminates(t *testing.T) {
 	}
 }
 
-// TestRecover_IgnoresUnrelatedRows: rows of other event kinds are
-// skipped — Recovery only cares about plan_op.
+// TestRecover_IgnoresUnrelatedRows: rows of other event kinds (and
+// extension_frames from other extensions) are skipped — Recovery
+// only cares about plan extension_frame events.
 func TestRecover_IgnoresUnrelatedRows(t *testing.T) {
 	ext, state := newReadyExt(t)
 
@@ -355,9 +377,23 @@ func TestRecover_IgnoresUnrelatedRows(t *testing.T) {
 	events := []store.EventRow{
 		{EventType: string(protocol.KindUserMessage), CreatedAt: now, Content: "noise"},
 		{
-			EventType: string(protocol.KindPlanOp),
+			EventType: string(protocol.KindExtensionFrame),
+			CreatedAt: now.Add(500 * time.Millisecond),
+			Metadata: map[string]any{
+				"extension": "whiteboard",
+				"category":  string(protocol.CategoryOp),
+				"op":        "init",
+			},
+		},
+		{
+			EventType: string(protocol.KindExtensionFrame),
 			CreatedAt: now.Add(time.Second),
-			Metadata:  map[string]any{"op": "set", "text": "anchor"},
+			Metadata: map[string]any{
+				"extension": providerName,
+				"category":  string(protocol.CategoryOp),
+				"op":        "set",
+				"data":      map[string]any{"text": "anchor"},
+			},
 		},
 		{EventType: string(protocol.KindAgentMessage), CreatedAt: now.Add(2 * time.Second), Content: "more noise"},
 	}

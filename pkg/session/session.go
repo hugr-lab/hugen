@@ -94,6 +94,14 @@ type Session struct {
 	overridesMu sync.RWMutex
 	overrides   map[model.Intent]model.ModelSpec
 
+	// defaultIntent is the model.Intent that startTurn passes to the
+	// router by default. Roots leave it at IntentDefault. Subagents
+	// may override it via SetDefaultIntent at spawn time when the
+	// skill manifest's role declares an `intent:` (phase-4.1d). The
+	// value is read on every turn boundary by startTurn — atomic
+	// store/load keeps it lock-free for the common path.
+	defaultIntent atomic.Value // model.Intent
+
 	// pendingSwitch captures a /model use queued for the next turn.
 	// Single-goroutine (Run) reader/writer post-C5 — no lock needed.
 	pendingSwitch *modelSwitch
@@ -194,14 +202,6 @@ type Session struct {
 	// session_terminated row lands.
 	closing atomic.Bool
 
-	// subagentResultSent is set the first time emitSubagentResultToParent
-	// fires for this session. requestClose on a subagent fires the
-	// emit early so the parent can route SessionClose back; handleExit
-	// on the SessionClose-driven exit must NOT re-emit. Cancel-
-	// initiated paths (parent_cascade, subagent_cancel via SessionClose)
-	// reach handleExit without requestClose having fired locally — so
-	// handleExit emits there, and the flag flips at that point too.
-	subagentResultSent atomic.Bool
 	// done is closed by Run on exit. External callers (Manager.Terminate,
 	// Stop) wait on it to know the session goroutine has
 	// finished its exit handler — including any session_terminated
@@ -474,6 +474,34 @@ func (s *Session) ActiveToolFeed() *ToolFeed {
 // running a full teardown. Production code never calls this — Run
 // owns s.closed via teardown.
 func (s *Session) MarkClosed() { s.closed.Store(true) }
+
+// SetDefaultIntent records the per-session intent that startTurn
+// will resolve through on every turn (instead of model.IntentDefault).
+// Empty intent reverts to IntentDefault. Used by Spawn to honour a
+// SubAgentRole.Intent declared in the skill manifest. Safe to call
+// concurrently with the Run goroutine — the value is read once per
+// turn via DefaultIntent.
+func (s *Session) SetDefaultIntent(intent model.Intent) {
+	if intent == "" {
+		intent = model.IntentDefault
+	}
+	s.defaultIntent.Store(intent)
+}
+
+// DefaultIntent returns the per-session default intent
+// (IntentDefault when never set). Read once per turn boundary by
+// startTurn.
+func (s *Session) DefaultIntent() model.Intent {
+	v := s.defaultIntent.Load()
+	if v == nil {
+		return model.IntentDefault
+	}
+	intent, _ := v.(model.Intent)
+	if intent == "" {
+		return model.IntentDefault
+	}
+	return intent
+}
 
 // SetModelOverride records a per-session model preference. The next
 // turn will route through it and emit a system_marker.
@@ -987,6 +1015,15 @@ func (s *Session) handleExit(runCtx context.Context, tc *terminationCause) {
 	} else {
 		s.logger.Warn("session: project session_terminated", "session", s.id, "err", perr)
 	}
+	// Phase 4.1c: subagent terminations push the SessionTerminated
+	// frame onto the outbox so the parent's pump (consumeChildOutbox)
+	// observes it and projects a SubagentResult with the actual reason
+	// instead of falling back to "abnormal_close". Best-effort: if the
+	// outbox is already closed (graceful path), outboxOnly's recover
+	// absorbs the panic. Roots skip this push — no parent observer.
+	if s.parent != nil {
+		_ = s.outboxOnly(writeCtx, terminal)
+	}
 	// Flip the row's status column to terminated so list paths
 	// (ListResumableRoots, HTTP /sessions?status=) can filter by an
 	// indexed scalar instead of probing the event log. The
@@ -998,22 +1035,15 @@ func (s *Session) handleExit(runCtx context.Context, tc *terminationCause) {
 		s.logger.Warn("session: update status terminated", "session", s.id, "err", err)
 	}
 	s.closed.Store(true)
-	// Surface subagent_result to the parent on every explicit
-	// terminate (including cascade). Live delivery via Submit feeds
-	// any active wait_subagents through the routing layer; on Submit
-	// failure (parent inbox closed because parent itself is shutting
-	// down) the result is appended directly to parent's events so a
-	// future settleDanglingSubagents pass or wait_subagents cached
-	// lookup still sees the terminal row.
-	//
-	// Symmetric with recover.go's settleDanglingSubagents synthetic
-	// emit (US6): settle handles the "child died without graceful
-	// exit, parent re-attached at boot" case; this handler covers
-	// every other live terminate path (subagent_cancel, /end, parent
-	// cascade).
-	if s.parent != nil {
-		s.emitSubagentResultToParent(writeCtx, reason)
-	}
+	// Phase 4.1c: subagent_result is no longer constructed here.
+	// The SessionTerminated frame pushed to the outbox above is what
+	// the parent's pump observes; it constructs the parent-side
+	// SubagentResult itself and routes it through parent.Submit so
+	// handleSubagentResult + wait_subagents see it via the standard
+	// routeInbound path. Recovery for offline parents stays via
+	// settleDanglingSubagents (recover.go) and the pump's IsClosed
+	// fallback to appendSubagentResultRow.
+
 	// SessionClosed is the model-/adapter-visible counterpart;
 	// best-effort outbox push is fine since closed=true is now set
 	// and emit will recover-safely panic on a closed outbox.
@@ -1038,62 +1068,6 @@ func (s *Session) handleExit(runCtx context.Context, tc *terminationCause) {
 			default:
 			}
 		}()
-	}
-}
-
-// emitSubagentResultToParent surfaces this session's terminal state
-// to its parent at exit time. Live path: Submit to parent's inbox
-// so any active wait_subagents tool feed catches it; the routing
-// layer either delivers via RouteToolFeed (consumed + persisted by
-// wait_subagents) or buffers via RouteBuffered (persisted at the
-// next turn boundary's drain).
-//
-// Offline path: if Submit fails because the parent's inbox has
-// already closed (parent terminated first), append the SubagentResult
-// directly to parent's events via the store so a future
-// drainCachedSubagentResults call or settleDanglingSubagents pass
-// still surfaces the terminal row.
-//
-// Called once from handleExit per session lifetime — no in-handler
-// dedup against an existing parent-side subagent_result row, since
-// the goroutine reaches handleExit at most once. The settle primitive
-// (recover.go) is the deduplication site for any subagent_result row
-// the parent might already carry from an earlier path.
-func (s *Session) emitSubagentResultToParent(persistCtx context.Context, reason string) {
-	parent := s.parent
-	if parent == nil {
-		return
-	}
-	if !s.subagentResultSent.CompareAndSwap(false, true) {
-		// Phase 4.1b-pre stage B: requestClose may emit the result
-		// early so the parent's handleSubagentResult can issue
-		// SessionClose back. handleExit must not duplicate the row.
-		return
-	}
-	result := protocol.NewSubagentResult(parent.id, s.id, s.agent.Participant(),
-		protocol.SubagentResultPayload{
-			SessionID: s.id,
-			Reason:    reason,
-		})
-	if !parent.IsClosed() {
-		<-parent.Submit(persistCtx, result)
-	}
-	if !parent.IsClosed() {
-		return
-	}
-	// Parent inbox closed — fall back to direct store append.
-	resRow, summary, err := store.FrameToEventRow(result, s.agent.ID())
-	if err != nil {
-		s.logger.Warn("session: project subagent_result for parent",
-			"parent", parent.id, "child", s.id, "err", err)
-		return
-	}
-	if nextSeq, err := s.store.NextSeq(persistCtx, parent.id); err == nil {
-		resRow.Seq = nextSeq
-	}
-	if err := s.store.AppendEvent(persistCtx, resRow, summary); err != nil {
-		s.logger.Warn("session: append subagent_result to parent",
-			"parent", parent.id, "child", s.id, "err", err)
 	}
 }
 
@@ -1330,13 +1304,14 @@ func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashComma
 		}
 	}
 	// If a handler emitted SessionClosed (e.g. /end), trigger the
-	// event-driven teardown via requestClose. For roots the OnCloseRequest
-	// hook spawns a goroutine that Submits SessionClose back through
-	// Manager.Terminate; for subagents requestClose surfaces
-	// subagent_result to the parent so handleSubagentResult issues
-	// SessionClose. handleExit will skip the duplicate SessionClosed
-	// emit because the reason starts with "user:" — emitSessionClosedForReason
-	// suppresses it.
+	// event-driven teardown via requestClose. For roots the
+	// OnCloseRequest hook spawns a goroutine that Submits
+	// SessionClose back through Manager.Terminate; for subagents
+	// requestClose self-Submits SessionClose so the Run loop drives
+	// its own teardown — parent observes the resulting
+	// SessionTerminated via the pump. handleExit will skip the
+	// duplicate SessionClosed emit because the reason starts with
+	// "user:" — emitSessionClosedForReason suppresses it.
 	if sawClose {
 		s.requestClose(ctx, "user:"+f.Payload.Name+" "+closeReason)
 	}
@@ -1708,22 +1683,23 @@ func (s *Session) IsClosing() bool { return s.closing.Load() }
 func (s *Session) markClosing() { s.closing.Store(true) }
 
 // requestClose triggers session teardown through the event-driven
-// SessionClose protocol (phase-4.1b-pre §6 Stage B / D6). It emits a
-// close_requested system_marker for observability, marks the session
-// closing (so subsequent UserMessages are refused), and dispatches
-// the close trigger to whoever owns the session's termination:
+// SessionClose protocol. It emits a close_requested system_marker for
+// observability, marks the session closing (so subsequent UserMessages
+// are refused), and dispatches the close trigger to whoever owns the
+// session's termination:
 //
 //   - root sessions: deps.OnCloseRequest fires (Manager wiring spawns
 //     a goroutine that Submits SessionClose back to the root via
 //     Manager.Terminate). The hook never blocks the caller.
-//   - subagent sessions: emit subagent_result to the parent's inbox
-//     so the parent's handleSubagentResult issues the SessionClose
-//     trigger back. The Run loop then sits idle until the trigger
-//     arrives.
+//   - subagent sessions: self-Submit SessionClose so the Run loop
+//     drives its own teardown. handleExit then writes
+//     session_terminated and pushes it to the outbox where the
+//     parent's pump (consumeChildOutbox) projects a SubagentResult
+//     with this reason — same surface as today's wait_subagents,
+//     just produced by parent rather than child.
 //
 // Idempotent: a second call after closing=true is a no-op (Store is
-// already set; OnCloseRequest fires once; subagent_result is gated
-// by subagentResultSent).
+// already set; OnCloseRequest / self-Submit fire once).
 //
 // ctx is the caller's request-scoped context (typically the Run
 // loop's runCtx or a turnCtx). Implementations of OnCloseRequest
@@ -1744,10 +1720,12 @@ func (s *Session) requestClose(ctx context.Context, reason string) {
 			"session", s.id, "reason", reason, "err", err)
 	}
 	if s.parent != nil {
-		// Subagent path: surface the terminal result to the parent so
-		// its handleSubagentResult can issue SessionClose back. The
-		// Run loop stays alive until the SessionClose Frame arrives.
-		s.emitSubagentResultToParent(ctx, reason)
+		// Subagent path: self-Submit SessionClose. Run loop catches it
+		// next iteration → teardown → handleExit writes
+		// session_terminated{reason} to child's store and pushes it to
+		// the outbox; parent's pump observes and projects.
+		closeFrame := protocol.NewSessionClose(s.id, s.agent.Participant(), reason)
+		_ = s.Submit(ctx, closeFrame)
 		return
 	}
 	// Root path: hand the close request to whoever owns this tree's

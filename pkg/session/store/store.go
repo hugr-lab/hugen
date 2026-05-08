@@ -715,17 +715,16 @@ func FrameToEventRow(f protocol.Frame, agentID string) (EventRow, string, error)
 		row.Content = v.Payload.Task
 	case *protocol.SubagentResult:
 		row.Content = v.Payload.Result
-	case *protocol.PlanOp:
-		row.Content = v.Payload.Text
 	case *protocol.ExtensionFrame:
-		// Extension-owned events (whiteboard, skill, notepad, …) put
-		// their human-readable surface — when one exists — into Content
-		// so query / digest paths that read Content directly still see
-		// it. Today only whiteboard write events carry text in their
-		// JSON payload; skill/notepad/plan use other fields. The codec
-		// already round-trips the full payload through Metadata, so a
-		// missing Content here is harmless.
-		if v.Payload.Op == "write" && len(v.Payload.Data) > 0 {
+		// Extension-owned events (whiteboard, skill, notepad, plan, …)
+		// put their human-readable surface — when one exists — into
+		// Content so query / digest paths that read Content directly
+		// still see it. Today whiteboard write + plan set/comment ops
+		// carry a `text` field in their JSON data payload; skill /
+		// notepad use other fields. The codec already round-trips the
+		// full payload through Metadata, so a missing Content here is
+		// harmless.
+		if len(v.Payload.Data) > 0 {
 			var data struct {
 				Text string `json:"text"`
 			}

@@ -1,0 +1,49 @@
+# Embedded topology — bash-mcp + duckdb-mcp + python-mcp only,
+# no Hugr providers. Useful for skill scaffolding scenarios that
+# don't touch Hugr's data plane (single_explorer / delegation_required
+# / whiteboard_fanout3 / plan_root_solo).
+#
+# python-mcp stays in the embedded topology because it doesn't
+# require a remote Hugr connection — just the local venv template
+# (HUGEN_PYTHON_TEMPLATE) seeded once via `make python-mcp-template`.
+# Strip it manually from this overlay if your scenario can't run
+# python at all.
+tool_providers:
+  - name: bash-mcp
+    type: mcp
+    transport: stdio
+    command: ${HUGEN_BIN_DIR}/bash-mcp
+    lifetime: per_session
+    env:
+      SHARED_DIR: ${HUGEN_SHARED_ROOT}
+
+  - name: python-mcp
+    type: mcp
+    transport: stdio
+    command: ${HUGEN_BIN_DIR}/python-mcp
+    args: [--template, "${HUGEN_PYTHON_TEMPLATE}"]
+    lifetime: per_agent
+    env:
+      HUGR_URL: ${HUGR_URL}/ipc
+
+  - name: duckdb-mcp
+    type: mcp
+    transport: stdio
+    command: uvx
+    lifetime: per_session
+    args:
+      - --from
+      - ${HUGEN_VENDOR_DIR}/mcp-server-motherduck
+      - mcp-server-motherduck
+      - --db-path
+      - ":memory:"
+      - --read-write
+      - --allow-switch-databases
+      - --init-sql
+      - |
+        SET memory_limit     = '4GB';
+        SET threads          = 4;
+        SET temp_directory   = '.duckdb/tmp';
+        SET secret_directory = '.duckdb/secrets';
+        INSTALL spatial; LOAD spatial;
+        INSTALL httpfs;  LOAD httpfs;

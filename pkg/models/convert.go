@@ -35,7 +35,7 @@ func messagesToHugrJSON(messages []model.Message) ([]string, error) {
 				calls[i] = types.LLMToolCall{
 					ID:        tc.ID,
 					Name:      tc.Name,
-					Arguments: tc.Args,
+					Arguments: normalizeToolArgs(tc.Args),
 				}
 			}
 			hm.ToolCalls = calls
@@ -47,6 +47,49 @@ func messagesToHugrJSON(messages []model.Message) ([]string, error) {
 		out = append(out, string(b))
 	}
 	return out, nil
+}
+
+// normalizeToolArgs guarantees the wire format LLM providers
+// expect for tool_use.input — Anthropic specifically rejects
+// non-object inputs ("messages.N.content.M.tool_use.input: Input
+// should be an object"). Nil / scalar / list values are coerced
+// to an empty map; strings holding JSON object literals are
+// decoded; anything else passes through.
+//
+// Background: when a model emits a tool call with no arguments,
+// the parsed payload is `nil` (parseToolCalls leaves args
+// untouched on empty Arguments). Re-sending nil to Anthropic
+// surfaces as a 400 on the next round-trip.
+func normalizeToolArgs(args any) any {
+	switch v := args.(type) {
+	case nil:
+		return map[string]any{}
+	case map[string]any:
+		return v
+	case string:
+		if v == "" {
+			return map[string]any{}
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(v), &decoded); err == nil {
+			return decoded
+		}
+		// Not a JSON object — wrap so Anthropic still gets an
+		// object; surface the raw string under a synthetic key.
+		return map[string]any{"_raw": v}
+	default:
+		// Slices / scalars / structs: marshal-then-unmarshal-into-map
+		// is the safest universal coercion. Failure → empty object.
+		b, err := json.Marshal(v)
+		if err != nil {
+			return map[string]any{}
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(b, &decoded); err == nil {
+			return decoded
+		}
+		return map[string]any{"_raw": string(b)}
+	}
 }
 
 // mapRole maps pkg/model role names onto the role names Hugr

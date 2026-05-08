@@ -1,0 +1,98 @@
+# full_analyst_workflow — the big one. Plan + whiteboard + 3
+# explorers + final report against real Hugr. This is the
+# scenario phase-4.2 analyst-skill iteration uses as its
+# regression line.
+#
+# By-eye:
+#   - Did root invoke the planner skill (plan:set + ≥3 plan:comment)?
+#   - Did root init a whiteboard?
+#   - Did root spawn 3 explorers (delegation, no direct hugr-main:*)?
+#   - Did each child write to the whiteboard?
+#   - Did root produce a final synthesis?
+#
+# Requires hugr — same gating as hugr_data_explorer.
+name: full_analyst_workflow
+requires: [hugr]
+
+steps:
+  - say: |
+      I want a high-level analysis of "northwind" — what it tracks,
+      who the stakeholders are, what aggregate metrics matter.
+
+      Use the analyst pattern:
+        1) Draft a 3-step plan via the planner skill.
+        2) Initialise a whiteboard.
+        3) Spawn 3 sub-agents using the hugr-data skill (no role
+           needed); each takes one of: entities, relationships,
+           aggregates. Each writes its findings to the whiteboard.
+        4) Read the whiteboard. Produce a final summary.
+
+      You are the orchestrator. Do not call hugr-main:* tools
+      yourself.
+    budget: 600s
+    wait_for_subagents: 300s
+
+    queries:
+      # Plan ops — should show plan:set + 3+ plan:comment.
+      # Plan rides KindExtensionFrame with metadata.extension="plan".
+      - name: plan_ops
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map(select(.metadata.extension == \"plan\")) | map({seq, op: .metadata.op, current_step: .metadata.data.current_step, text: .metadata.data.text})") {
+              hub { db { agent {
+                session_events(
+                  filter: {session_id: {eq: $sid}, event_type: {eq: "extension_frame"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq metadata }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # 3 children expected.
+      - name: subagent_rows
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Root tool calls — should be plan:* + whiteboard:* +
+      # session:spawn_subagent + session:wait_subagents +
+      # whiteboard:read + (optionally) skill:tools_catalog. NO
+      # hugr-main:* on root.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Children tool calls — these SHOULD show hugr-main:* +
+      # whiteboard:write + (optionally) other data tools.
+      - name: tool_calls_children
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({id, calls: (.events // []) | map(select(.event_type == \"tool_call\")) | map({seq, tool_name})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(order_by: [{field: "seq", direction: ASC}]) {
+                    seq event_type tool_name
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq

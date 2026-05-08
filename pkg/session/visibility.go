@@ -38,7 +38,7 @@ import (
 //
 // Everything else falls through. Tool calls / tool results, raw
 // reasoning frames, sub-agent's own system_messages, and sub-agent
-// plan_op / extension_frame events stay out of the parent's history
+// extension_frame events stay out of the parent's history
 // per §11 ("stays in the originating session's events; only
 // surfaces via subagent_runs").
 func projectFrameToHistory(f protocol.Frame) (model.Message, bool) {

@@ -17,12 +17,11 @@ import (
 // keys are preserved in Metadata so skills authored against a
 // future spec revision still parse.
 type Manifest struct {
-	Name          string         `json:"name"`
-	Description   string         `json:"description"`
-	License       string         `json:"license"`
-	Compatibility Compatibility  `json:"compatibility,omitempty"`
-	AllowedTools  AllowedTools   `json:"allowed-tools,omitempty"`
-	Metadata      map[string]any `json:"metadata,omitempty"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description"`
+	License      string         `json:"license"`
+	AllowedTools AllowedTools   `json:"allowed-tools,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
 
 	// Hugen is the typed projection of metadata.hugen.* — populated
 	// after Parse runs the raw YAML through extractHugen. Authors
@@ -37,14 +36,6 @@ type Manifest struct {
 	// Raw is the original frontmatter bytes (between the two `---`
 	// lines, exclusive). Useful for re-emitting / round-trip tests.
 	Raw []byte `json:"-"`
-}
-
-// Compatibility ties a skill to the model/runtime it was authored
-// against. Both fields are optional — agentskills.io recommends
-// them but doesn't require them.
-type Compatibility struct {
-	Model   string `json:"model,omitempty"`
-	Runtime string `json:"runtime,omitempty"`
 }
 
 // ToolGrant declares which tools of a given provider the skill
@@ -350,6 +341,15 @@ type SubAgentRole struct {
 	// case. Pointer so the default-true semantics survive the
 	// missing-key case (a plain bool would default to false).
 	CanSpawn *bool `json:"can_spawn,omitempty" yaml:"can_spawn,omitempty"`
+
+	// Intent names the model-router intent this role's child session
+	// resolves through (default | cheap | tool_calling | … | any
+	// custom intent registered in models.routes). Empty inherits the
+	// parent's default intent — operators put fast / cheap roles on
+	// `cheap`, deep-reasoning roles on `default`. Phase-4.1d wiring:
+	// the spawn flow calls child.SetDefaultIntent(model.Intent(role.Intent))
+	// when this field is set.
+	Intent string `json:"intent,omitempty" yaml:"intent,omitempty"`
 }
 
 // CanSpawnEffective resolves SubAgentRole.CanSpawn to the boolean

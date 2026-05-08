@@ -1,0 +1,51 @@
+# hugr_data_explorer — direct exercise of the hugr-main MCP
+# provider against the real Hugr endpoint. The model performs the
+# discovery → schema → data round-trip; root may call hugr-main
+# tools directly (this scenario is about whether the data plane
+# itself works, NOT about delegation).
+#
+# Requires hugr — run skips when HUGR_URL/HUGR_ACCESS_TOKEN is
+# missing.
+name: hugr_data_explorer
+requires: [hugr]
+
+steps:
+  - say: |
+      List the data sources available via hugr-main. Then for the
+      first source listed, fetch its schema (via hugr-main:schema-source
+      or equivalent) and report a one-line summary of the entities
+      it exposes.
+    budget: 120s
+
+    queries:
+      # See the order in which the model called hugr-main tools —
+      # discovery first, then schema, then data is the canonical
+      # sequence.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Tool results — surface a short preview so the operator
+      # can spot empty / errored responses.
+      - name: tool_results_root
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map({seq, tool: .tool_name, error: (.metadata.is_error // false), result: (.tool_result | tostring | .[0:200])})") {
+              hub { db { agent {
+                session_events(
+                  filter: {session_id: {eq: $sid}, event_type: {eq: "tool_result"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq tool_name tool_result metadata }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq

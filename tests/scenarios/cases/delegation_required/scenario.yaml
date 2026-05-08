@@ -1,0 +1,85 @@
+# delegation_required — the user-facing pain point check.
+#
+# A clear "fan out, gather, conclude" task that should NOT be done
+# inline by the root agent. By-eye assertion: tool_calls_root's
+# tool_name set is a subset of:
+#
+#   session:spawn_subagent
+#   session:wait_subagents
+#   session:subagent_runs
+#   session:subagent_cancel
+#   session:parent_context
+#   plan:set / plan:comment / plan:show / plan:clear
+#   whiteboard:init / whiteboard:read / whiteboard:write / whiteboard:stop
+#   skill:tools_catalog / skill:load / skill:unload / skill:files / skill:ref / skill:publish
+#   notepad:append
+#
+# Anything else on the ROOT (hugr-main:*, python:*, bash:*, duckdb:*)
+# means the root did data work it should have delegated. Run this
+# scenario across every LLM in runs.yaml — failure mode is
+# non-deterministic and worth catching across model classes.
+name: delegation_required
+requires: []
+
+steps:
+  - say: |
+      I need a brief comparative summary of three tables in our
+      "northwind" data source: orders, customers, returns.
+
+      For each table, spawn a separate sub-agent using the
+      hugr-data skill (no role needed) that returns a one-line
+      description plus a row count. Then, AFTER you have all three
+      sub-agent results, write a final 3-bullet summary directly to
+      me.
+
+      Important: do NOT call any data-source tools yourself. Your
+      job is to delegate, gather, and synthesise. The explorers
+      do the lookups.
+    budget: 480s
+    wait_for_subagents: 360s
+
+    queries:
+      # The pain-point query. Read this list — anything that isn't
+      # session:* / plan:* / whiteboard:* / skill:* / notepad:*
+      # is a delegation failure for this scenario.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Should be 3 sub-agent rows.
+      - name: subagent_rows
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # subagent_started + subagent_result frames on root —
+      # confirms each child finished cleanly (or surfaces the
+      # reason if not).
+      - name: subagent_lifecycle_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {
+                  session_id: {eq: $sid},
+                  event_type: {in: ["subagent_started", "subagent_result"]}
+                }
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq event_type content metadata }
+            }}}
+          }
+        vars: { sid: "$sid" }

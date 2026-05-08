@@ -146,7 +146,7 @@ func (s *Session) startTurn(runCtx context.Context, f *protocol.UserMessage) {
 		return
 	}
 	mdl, _, err := s.models.Resolve(runCtx, model.Hint{
-		Intent:        model.IntentDefault,
+		Intent:        s.DefaultIntent(),
 		SessionModels: s.sessionModels(),
 	})
 	if err != nil {

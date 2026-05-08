@@ -1,0 +1,65 @@
+# External-Hugr topology — full prod tool_providers set including
+# hugr-main (HTTP MCP) + hugr-query (in-tree GraphQL → file MCP).
+# Requires HUGR_URL + HUGR_ACCESS_TOKEN in .test.env (capture via
+# `make hugr-token`). The harness injects the captured tokens via
+# AfterAuthHook so no browser flow runs at test time.
+#
+# Identical to the prod config.yaml's tool_providers list — kept
+# in this overlay (rather than inherited from base verbatim) so
+# scenarios that need provider-shape changes can land them here
+# without touching prod config.yaml.
+tool_providers:
+  - name: bash-mcp
+    type: mcp
+    transport: stdio
+    command: ${HUGEN_BIN_DIR}/bash-mcp
+    lifetime: per_session
+    env:
+      SHARED_DIR: ${HUGEN_SHARED_ROOT}
+
+  - name: hugr-main
+    type: mcp
+    transport: http
+    endpoint: ${HUGR_URL}/mcp
+    auth: hugr
+
+  - name: hugr-query
+    type: mcp
+    transport: stdio
+    command: ${HUGEN_BIN_DIR}/hugr-query
+    lifetime: per_agent
+    auth: hugr
+    env:
+      HUGR_URL: ${HUGR_URL}/ipc
+
+  - name: python-mcp
+    type: mcp
+    transport: stdio
+    command: ${HUGEN_BIN_DIR}/python-mcp
+    args: [--template, "${HUGEN_PYTHON_TEMPLATE}"]
+    lifetime: per_agent
+    auth: hugr
+    env:
+      HUGR_URL: ${HUGR_URL}/ipc
+
+  - name: duckdb-mcp
+    type: mcp
+    transport: stdio
+    command: uvx
+    lifetime: per_session
+    args:
+      - --from
+      - ${HUGEN_VENDOR_DIR}/mcp-server-motherduck
+      - mcp-server-motherduck
+      - --db-path
+      - ":memory:"
+      - --read-write
+      - --allow-switch-databases
+      - --init-sql
+      - |
+        SET memory_limit     = '4GB';
+        SET threads          = 4;
+        SET temp_directory   = '.duckdb/tmp';
+        SET secret_directory = '.duckdb/secrets';
+        INSTALL spatial; LOAD spatial;
+        INSTALL httpfs;  LOAD httpfs;

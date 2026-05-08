@@ -30,8 +30,9 @@ We are mid-execution of **design 001 — Hugr Agent Runtime**
 | 3.5. Analyst toolkit (duckdb-mcp + python-mcp + analyst skills) | shipped |
 | **4. Sub-agents + plan + whiteboard + event-driven session loop** | **spec drafted v2** (`phase-4-spec.md`, ready for `/speckit.specify`); architecture decisions in `phase-4-architecture.md` |
 | 4.1a. Extract `pkg/runtime` + dissolve `SystemProvider` (tools onto domain `ToolProvider`s; absorbs ex-4.3) | spec drafted v1 (`phase-4.1a-spec.md`); follows 4, gates 4.1b |
-| 4.1b. Observational scenario harness (port `../agent/tests/scenarios/` pattern; live LLM + real Hugr; ~8 scenarios v1) | spec drafted v1 (`phase-4.1b-spec.md`); follows 4.1a, gates 4.2 |
-| 4.2. Analyst mega-skill + role sub-agents + `skill_builder` + community-skill enablement (tri-state `allowed-tools`, `system:tool_catalog`) | spec drafted v0 (`phase-4.2-spec.md`); follows 4.1b |
+| 4.1b. Observational scenario harness (port `../agent/tests/scenarios/` pattern; live LLM + real Hugr; ~8 scenarios v1) | spec drafted v1 (`phase-4.1b-spec.md`); follows 4.1a, gates 4.1c |
+| 4.1c. Subagent-as-adapter: parent observes child's outbox; eliminates child→parent.Submit cross-session shortcut. Surfaced by 4.1b harness (every sub-agent hung mid-flight). | spec drafted v1 (`phase-4.1c-spec.md`); follows 4.1b, gates 4.2 |
+| 4.2. Analyst mega-skill + role sub-agents + `skill_builder` + community-skill enablement (tri-state `allowed-tools`, `system:tool_catalog`) | spec drafted v0 (`phase-4.2-spec.md`); follows 4.1c |
 | 5. Compactor + HITL: approvals + clarifications (compactor first within the phase; replaces the phase-3 `defaultHistoryWindow=50` stop-gap) | open |
 | 6. Cron + scheduler | open |
 | 7. Memory pipeline + LLM Wiki (short + long-term) | open |
@@ -45,61 +46,56 @@ Goal: finish design-001 cleanly, then move to **hub integration**
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
 
-## Active focus — phase 4.1a
+## Active focus — phase 4.1c
 
-Phase 4 shipped to `main` as `ba003c0` (PR #6). Active focus
-moves to **phase 4.1a — extract `pkg/runtime` + dissolve
-`SystemProvider`** before the observational harness (4.1b)
-and the analyst mega-skill (4.2) can land on a clean wiring
-surface.
+Phases 4 / 4.1a / 4.1b-pre shipped to `main`
+(`ba003c0` / `33a0bc3` / `8a2719e`). Phase 4.1b (scenario
+harness) lives on branch `009-scenario-harness`; the harness
+surfaced an architectural bug — every `Spawn`-ed sub-agent
+hangs mid-flight because no consumer exists for child's
+outbox. Active focus is **phase 4.1c** on branch
+`010-fix-subagent-delivery` to fix it before the manual
+multi-LLM run (4.1b §12 step 8) can complete and 4.2 starts.
 
-**Document set for phase 4.1a work** (in order of authority for
-an implementer):
+**Document set for 4.1c work** (in order of authority):
 
-1. **`design/001-agent-runtime/phase-4.1a-spec.md`** — the
-   contract. §1 Why bundle two refactors, §2 Goal, §3 Boundary
-   contract, §4 Two config types (BootstrapConfig vs
-   runtime.Config — env-pure), §5 Nine phases of `Build`, §6
-   System-tools refactor (absorbed from ex-4.3), §7 File
-   layout, §8 Migration / risk, §9 Implementation order (19
-   commits, single PR), §10 What 4.1a does NOT include.
-2. **`design/001-agent-runtime/phase-4.3-spec.md`** —
-   superseded by 4.1a §6, kept for historical context. Tool
-   ownership map and rename rationale carry over verbatim.
-3. **`design/001-agent-runtime/design.md §19`** —
-   architectural foundations to honour. 4.1a is a refactor —
-   no foundation lands here; existing decisions stay.
+1. **`design/001-agent-runtime/phase-4.1c-spec.md`** — the
+   contract. §1 Why, §2 Two symmetric channels, §3 Pump,
+   §4 Kind-level dispatch, §5 End-to-end flow, §6 Abnormal
+   terminations, §7 What does NOT change, §8 Files, §9
+   Implementation order, §10 Verification.
+2. **`design/001-agent-runtime/phase-4.1b-spec.md`** — the
+   harness; `step 8` (manual runs across 4 LLMs) is blocked
+   on this fix.
+3. **`pkg/protocol/frame.go:21-58`** — closed kind set the
+   pump filters against. No protocol change in 4.1c.
 
-**Key locked decisions for 4.1a**:
+**Key locked decisions for 4.1c**:
 
-- `pkg/runtime.Build(ctx, runtime.Config) (*Core, error)` is
-  the single boot-path entry point. Both `cmd/hugen` and the
-  4.1b harness call it.
-- `runtime.Config` is **env-pure** — no `os.Getenv` inside
-  Build. Caller projects from `BootstrapConfig` (cmd/hugen) or
-  scenario-bootstrap (harness).
-- Build runs **9 named phases** sequentially; each phase reads
-  fields populated by prior ones. No cross-cutting helpers.
-- `pkg/tool/system.go` is **deleted**. Every system tool lives
-  next to its state owner via `tool.ToolProvider`:
-  `*skill.SkillManager`, `*tool.ToolManager` (self-hosting),
-  `*tool.Policies`, `*session.Manager` (`notepad_append`),
-  `cmd/hugen.reloadProvider` (`runtime:reload`).
-- **Strict rename** for tool names (`system:foo` →
-  `<owner>:foo`). Bundled skill manifests under
-  `assets/skills/` update in the same PR; manifest validator
-  emits a helpful migration error for stale `system:*`
-  references in `allowed-tools`.
-- 4.1a is a **pure refactor** — no behaviour change visible to
-  the model, no new flags / env vars / tools.
-
-Phase 4.1a is **one PR** on branch `007-runtime-extract`.
-Internal commit order in spec §9 (19 commits) is prescriptive
-for the author / reviewer; not enforced as separate PRs.
-
-Phase 4.1b (harness; `phase-4.1b-spec.md`) and phase 4.2
-(`phase-4.2-spec.md`) follow sequentially; both consume the
-clean `pkg/runtime` surface 4.1a establishes.
+- Parent runs one **fire-and-forget pump goroutine** per child
+  (`Session.consumeChildOutbox`). Started from `Spawn` after
+  `child.Start(ctx)`. Lifecycle = channel close.
+- Pump's switch is **kind-level only** — no payload spelunking,
+  no extension-name knowledge. `AgentMessage{Final&&Consolidated}`
+  → "result", `Error{!Recoverable}` → "terminal error",
+  `SessionTerminated` → fallback projection. Everything else
+  drains.
+- **`SubagentResult` kind stays unchanged in `pkg/protocol/`**;
+  only the producer moves from child to parent. Frame is
+  constructed by parent's pump and Submit'd to parent's own
+  inbox so `routeInbound` → `handleSubagentResult` →
+  `wait_subagents` feed pipeline works unchanged.
+- `emitSubagentResultToParent` is **deleted**.
+  `requestClose` for subagents now self-Submits SessionClose.
+  `subagentResultSent` atomic gate is gone — single producer
+  (the pump) replaces the dual child-side producers.
+- `handleExit` for subagents pushes its `SessionTerminated`
+  frame onto the outbox (best-effort, recover-safe) so the pump
+  observes the actual reason; root sessions skip this push.
+- **Whiteboard / plan / all extensions are NOT touched** —
+  `parentState.Submit` is a legitimate extension-level
+  cross-session contract, not the child-runtime shortcut.
+- 4.1c is **one PR** on branch `010-fix-subagent-delivery`.
 
 ## Project structure
 

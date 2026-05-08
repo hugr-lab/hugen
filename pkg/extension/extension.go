@@ -210,6 +210,33 @@ type SubagentDescriber interface {
 	DescribeSubagent(ctx context.Context, state SessionState, skill, role string) (SubagentValidation, error)
 }
 
+// SubagentSpawnHint carries optional per-role spawn-time hints the
+// runtime applies to a freshly-Spawn'ed child. Today only Intent —
+// names the model-router intent the child resolves through (default
+// | cheap | tool_calling | …). Empty intent leaves the parent's
+// default in place.
+//
+// Future fields (max_turns override, system_prompt prefix, etc.)
+// land here without breaking call-site shape.
+type SubagentSpawnHint struct {
+	Intent string
+}
+
+// SubagentSpawnHinter is a sibling capability of [SubagentDescriber]
+// — extensions that own a (skill, role) record can report spawn-time
+// configuration the runtime applies after Session.Spawn returns. The
+// runtime calls every registered hinter; the first non-empty Intent
+// wins (deterministic order: registration order). Returning a zero
+// hint means "no opinion" and the next hinter / the runtime default
+// applies.
+//
+// Skill ext is the canonical hinter today; future plan / whiteboard
+// extensions could declare their own dispatch surfaces with their
+// own preferred intents.
+type SubagentSpawnHinter interface {
+	SubagentSpawnHint(ctx context.Context, state SessionState, skill, role string) (SubagentSpawnHint, error)
+}
+
 // FrameRouter extensions handle inbound [protocol.ExtensionFrame]
 // addressed to them (Frame.Extension == ext.Name()). The session's
 // route loop dispatches by Extension name; each name maps to at

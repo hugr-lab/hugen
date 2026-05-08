@@ -101,6 +101,34 @@ func describeSubagent(ctx context.Context, parent *Session, skillName, roleName 
 	return best, nil
 }
 
+// subagentSpawnHint runs every registered SubagentSpawnHinter
+// extension and returns the first non-empty hint (deterministic
+// extension order). Today the hint carries Intent only; phase-4.1d.
+// Errors from any hinter are logged and skipped — a misbehaving
+// hinter must not block a spawn.
+func subagentSpawnHint(ctx context.Context, parent *Session, skillName, roleName string) extension.SubagentSpawnHint {
+	if parent.deps == nil {
+		return extension.SubagentSpawnHint{}
+	}
+	for _, ext := range parent.deps.Extensions {
+		hinter, ok := ext.(extension.SubagentSpawnHinter)
+		if !ok {
+			continue
+		}
+		hint, err := hinter.SubagentSpawnHint(ctx, parent, skillName, roleName)
+		if err != nil {
+			parent.logger.Warn("session: SubagentSpawnHint failed",
+				"extension", fmt.Sprintf("%T", ext),
+				"skill", skillName, "role", roleName, "err", err)
+			continue
+		}
+		if hint.Intent != "" {
+			return hint
+		}
+	}
+	return extension.SubagentSpawnHint{}
+}
+
 // hasSubagentDescriber reports whether any registered extension
 // implements [extension.SubagentDescriber]. Used by the spawn
 // validator to distinguish "no advisor → no validation" (legacy

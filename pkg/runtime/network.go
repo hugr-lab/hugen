@@ -93,5 +93,10 @@ func phaseHTTPAuth(ctx context.Context, core *Core) error {
 		return err
 	}
 	core.Auth = authSvc
+	if hook := core.Cfg.AfterAuthHook; hook != nil {
+		if err := hook(ctx, authSvc); err != nil {
+			return fmt.Errorf("after-auth hook: %w", err)
+		}
+	}
 	return nil
 }

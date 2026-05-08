@@ -40,7 +40,7 @@ type Extension struct {
 }
 
 // NewExtension constructs the plan extension. agentID stamps the
-// ParticipantInfo on every emitted plan_op frame.
+// ParticipantInfo on every emitted plan extension_frame.
 func NewExtension(agentID string) *Extension {
 	return &Extension{agentID: agentID}
 }
@@ -63,7 +63,7 @@ func (e *Extension) Name() string { return providerName }
 func (e *Extension) Lifetime() tool.Lifetime { return tool.LifetimePerAgent }
 
 // agentParticipant returns the ParticipantInfo plan ext stamps on
-// every emitted PlanOp frame. The plan tool path is always invoked
+// every emitted plan extension_frame. The plan tool path is always invoked
 // by the agent (the model issues the tool call), so the author is
 // the agent.
 func (e *Extension) agentParticipant() protocol.ParticipantInfo {
@@ -73,7 +73,7 @@ func (e *Extension) agentParticipant() protocol.ParticipantInfo {
 // InitState implements [extension.StateInitializer]. Allocates a
 // fresh [SessionPlan] handle for the calling session and stashes it
 // under [StateKey]. The handle starts with an empty (Active=false)
-// projection; Recovery on materialise replays plan_op events into
+// projection; Recovery on materialise replays plan extension_frame events into
 // it.
 func (e *Extension) InitState(_ context.Context, state extension.SessionState) error {
 	state.SetValue(StateKey, &SessionPlan{
@@ -393,13 +393,13 @@ func persistAndApply(ctx context.Context, state extension.SessionState, h *Sessi
 		currentStep = h.plan.CurrentStep
 	}
 
-	frame := protocol.NewPlanOp(h.sessionID, h.author, protocol.PlanOpPayload{
-		Op:          op,
-		Text:        text,
-		CurrentStep: currentStep,
-	})
+	data, err := json.Marshal(OpData{Text: text, CurrentStep: currentStep})
+	if err != nil {
+		return toolErr("io", fmt.Sprintf("marshal plan op data: %v", err))
+	}
+	frame := protocol.NewExtensionFrame(h.sessionID, h.author, providerName, protocol.CategoryOp, op, data)
 	if err := state.Emit(ctx, frame); err != nil {
-		return toolErr("io", fmt.Sprintf("emit plan_op: %v", err))
+		return toolErr("io", fmt.Sprintf("emit plan op: %v", err))
 	}
 	h.plan = Apply(h.plan, ProjectEvent{
 		At:          frame.OccurredAt(),
