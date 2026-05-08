@@ -38,9 +38,11 @@ Body here.
 	if m.License != "MIT" {
 		t.Errorf("License = %q, want MIT", m.License)
 	}
-	if m.Compatibility.Model != "claude-sonnet-4" {
-		t.Errorf("Compatibility.Model = %q", m.Compatibility.Model)
-	}
+	// `compatibility:` is parsed leniently — the field has no
+	// runtime effect (phase-4.1d removed Compatibility from the
+	// Manifest struct since nothing in hugen reads it). Manifests
+	// that still carry it should round-trip via Metadata without
+	// erroring; the assertion lives in TestParse_PreservesUnknownFields.
 	if len(m.AllowedTools) != 1 || m.AllowedTools[0].Provider != "bash-mcp" {
 		t.Errorf("AllowedTools = %+v", m.AllowedTools)
 	}

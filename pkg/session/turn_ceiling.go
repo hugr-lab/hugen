@@ -137,9 +137,9 @@ func softWarningText(role, task string, turns int, canSpawnDeeper bool) string {
 // triggerHardCeiling invokes the §8.2 termination path. The session
 // goroutine calls requestClose(reason="hard_ceiling") on itself; for
 // roots the OnCloseRequest hook spawns Manager.Terminate which
-// Submits SessionClose, and for subagents emitSubagentResultToParent
-// fires so the parent's handleSubagentResult issues SessionClose
-// back. The deferred teardown in Session.Run writes the canonical
+// Submits SessionClose, and for subagents requestClose self-Submits
+// SessionClose (phase 4.1c). Either way the deferred teardown in
+// Session.Run writes the canonical
 // session_terminated{reason:"hard_ceiling"} event.
 //
 // Phase 4.1b-pre stage B (O8) drops the standalone hard_ceiling_hit

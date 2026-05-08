@@ -87,10 +87,19 @@ func newRouteModel(local, remote types.Querier, cfg config.ModelsConfig, opts []
 	return NewHugr(target, cfg.Model, append(opts, buildOptsFor(cfg)...)...)
 }
 
-// buildOptsFor lifts MaxTokens / Temperature off a ModelsConfig into
-// the per-call Option slice. Lives in pkg/models because Option is a
-// pkg/models concept; the config struct itself stays a pure data
-// shape in pkg/config.
+// buildOptsFor lifts MaxTokens / Temperature / retry knobs off a
+// ModelsConfig into the per-call Option slice. Lives in pkg/models
+// because Option is a pkg/models concept; the config struct itself
+// stays a pure data shape in pkg/config.
+//
+// Retry: zero / negative RetryMaxAttempts falls back to
+// DefaultRetryMaxAttempts (10) so the operator gets transient-
+// error resilience by default. Set retry_max_attempts: 0 explicitly
+// in YAML when retries should be disabled — viper / mapstructure
+// distinguishes the unset case from the explicit-zero case via
+// the same int(0) value, so the only way to disable today is a
+// negative number (-1). Acceptable for v1; revisit when an
+// observed need shows up.
 func buildOptsFor(cfg config.ModelsConfig) []Option {
 	var out []Option
 	if cfg.MaxTokens > 0 {
@@ -99,6 +108,17 @@ func buildOptsFor(cfg config.ModelsConfig) []Option {
 	if cfg.Temperature > 0 {
 		out = append(out, WithTemperature(cfg.Temperature))
 	}
+	maxAttempts := cfg.RetryMaxAttempts
+	if maxAttempts == 0 {
+		maxAttempts = config.DefaultRetryMaxAttempts
+	} else if maxAttempts < 0 {
+		maxAttempts = 0
+	}
+	initialBackoff := cfg.RetryInitialBackoff
+	if initialBackoff <= 0 {
+		initialBackoff = config.DefaultRetryInitialBackoff
+	}
+	out = append(out, WithRetry(maxAttempts, initialBackoff))
 	return out
 }
 
