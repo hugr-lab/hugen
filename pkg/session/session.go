@@ -1680,9 +1680,20 @@ func (s *Session) requestClose(ctx context.Context, reason string) {
 	if !s.closing.CompareAndSwap(false, true) {
 		return
 	}
+	// Detach from the caller's cancellation chain for the persisted
+	// marker write. requestClose is the runtime's "I intend to close"
+	// declaration — its own audit row must not race the cancel that
+	// the close itself triggers (e.g. /end → SessionClosed frame →
+	// adapter exits → errgroup cancels its derived ctx → this Run's
+	// runCtx is the cancelled one when the marker emit reaches the
+	// store). 5s budget is more than enough for a single local
+	// AppendEvent; if the store is genuinely stuck the runtime has
+	// bigger problems than a missed observability marker.
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	marker := protocol.NewSystemMarker(s.id, s.agent.Participant(),
 		"close_requested", map[string]any{"reason": reason})
-	if err := s.emit(ctx, marker); err != nil && !errors.Is(err, ErrSessionClosed) {
+	if err := s.emit(persistCtx, marker); err != nil && !errors.Is(err, ErrSessionClosed) {
 		s.logger.Warn("session: emit close_requested marker",
 			"session", s.id, "reason", reason, "err", err)
 	}
