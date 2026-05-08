@@ -185,6 +185,33 @@ func (s *Source) Tokens() (access, refresh string, expiresAt time.Time, err erro
 	return s.accessToken, s.refreshToken, s.expiresAt, nil
 }
 
+// SetTokens injects pre-captured tokens into the source and marks
+// it ready, bypassing the browser flow on Token / TokenWithTTL.
+// Subsequent refreshes use the injected refresh token through the
+// usual /token endpoint — the source behaves identically to a
+// freshly-logged-in instance, just without the interactive step.
+//
+// Used exclusively by tests/scenarios/harness to seed the source
+// from tokens captured offline via cmd/hugen-test-token. Calling
+// it after a successful HandleCallback overwrites the live tokens,
+// which may be exactly what the caller wants (rotation) or a
+// footgun (clobbering a fresh login). The harness uses it once
+// at boot and never racing the auth/callback path.
+//
+// Idempotent w.r.t. the ready channel — only the first call closes
+// it; subsequent calls update token state without disturbing
+// blocked Token() callers further.
+func (s *Source) SetTokens(access, refresh string, expiresAt time.Time) {
+	s.tokenMu.Lock()
+	s.accessToken = access
+	s.refreshToken = refresh
+	s.expiresAt = expiresAt
+	s.tokenMu.Unlock()
+	if access != "" {
+		s.readyOnce.Do(func() { close(s.ready) })
+	}
+}
+
 func ttlSeconds(expiresAt time.Time) int {
 	d := time.Until(expiresAt)
 	if d <= 0 {

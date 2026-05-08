@@ -180,6 +180,30 @@ func TestOIDCStore_Tokens_AfterLogin(t *testing.T) {
 		"expiresAt must be in the future, got %v", expiresAt)
 }
 
+func TestOIDCStore_SetTokens_BypassesBrowserFlow(t *testing.T) {
+	idp := fixture.NewMockIdP(t)
+	store, err := New(context.Background(), Config{
+		Name:        "hugr",
+		IssuerURL:   idp.Srv.URL,
+		ClientID:    "agent",
+		RedirectURL: "http://localhost/auth/callback",
+	})
+	require.NoError(t, err)
+
+	expiry := time.Now().Add(1 * time.Hour)
+	store.SetTokens("injected-access", "injected-refresh", expiry)
+
+	tok, err := store.Token(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "injected-access", tok)
+
+	access, refresh, gotExpiry, err := store.Tokens()
+	require.NoError(t, err)
+	assert.Equal(t, "injected-access", access)
+	assert.Equal(t, "injected-refresh", refresh)
+	assert.True(t, gotExpiry.Equal(expiry))
+}
+
 func TestOIDCStore_NameRequired(t *testing.T) {
 	_, err := New(context.Background(), Config{
 		IssuerURL: "http://x",
