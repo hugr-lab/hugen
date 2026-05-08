@@ -67,6 +67,15 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	// handleSubagentResult — still drain the WG. parent.children
 	// deregistration lives in handleSubagentResult.
 	child.Start(ctx)
+	// Phase 4.1c: parent acts as adapter to child's outbox. The pump
+	// goroutine reads child.Outbox(), projects cross-session-relevant
+	// frames into parent's pipeline via parent.Submit, and drains the
+	// rest. Without this, child's outbox back-fills its 32-buffer on
+	// streaming chunks and emit blocks indefinitely. See
+	// pkg/session/subagent_pump.go for the kind-level dispatch and
+	// abnormal-close finalizer. Fire-and-forget — the range loop
+	// exits naturally when child closes its outbox in Run's defer.
+	go s.consumeChildOutbox(child)
 
 	started := protocol.NewSubagentStarted(s.id, s.deps.Agent.Participant(), protocol.SubagentStartedPayload{
 		ChildSessionID: child.ID(),
