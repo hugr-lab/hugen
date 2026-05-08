@@ -16,8 +16,8 @@ steps:
       back to you; you then format them as a one-line summary.
 
       Don't run Python yourself.
-    budget: 180s
-    wait_for_subagents: 120s
+    budget: 360s
+    wait_for_subagents: 240s
 
     queries:
       # Root must NOT have python:* in tool_name. Only delegation

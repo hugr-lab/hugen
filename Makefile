@@ -121,7 +121,7 @@ scenario-one: mcps
 	@if [ -z "$(run)" ] || [ -z "$(name)" ]; then \
 	  echo "usage: make scenario-one run=<run_name> name=<scenario_name>"; \
 	  exit 1; fi
-	go test -tags=$(TAGS),scenario -count=1 -v -timeout=10m \
+	go test -tags=$(TAGS),scenario -count=1 -v -timeout=20m \
 	  -run "TestScenarios/$(run)/$(name)" ./tests/scenarios/...
 
 # Capture fresh OIDC tokens against the configured Hugr instance

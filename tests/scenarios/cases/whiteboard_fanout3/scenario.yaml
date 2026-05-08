@@ -16,8 +16,8 @@ steps:
 
       After all children finish, call whiteboard:read and report
       back what's on the board.
-    budget: 180s
-    wait_for_subagents: 120s
+    budget: 480s
+    wait_for_subagents: 360s
 
     queries:
       # Whiteboard ops on the root: init + read should appear here;

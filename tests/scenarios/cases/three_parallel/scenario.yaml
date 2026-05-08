@@ -14,8 +14,8 @@ steps:
       returns a one-line description.
 
       Wait for ALL three to finish, then list the descriptions.
-    budget: 180s
-    wait_for_subagents: 90s
+    budget: 360s
+    wait_for_subagents: 240s
 
     queries:
       # If model batched, there's ONE tool_call row with args

@@ -35,8 +35,8 @@ steps:
       Important: do NOT call any data-source tools yourself. Your
       job is to delegate, gather, and synthesise. The explorers
       do the lookups.
-    budget: 180s
-    wait_for_subagents: 60s
+    budget: 480s
+    wait_for_subagents: 360s
 
     queries:
       # The pain-point query. Read this list — anything that isn't

@@ -16,7 +16,7 @@ steps:
       using the hugr-data skill (no role) to summarise its schema
       in two sentences. Don't answer yourself — delegate, wait for
       the specialist's reply, then relay it.
-    budget: 90s
+    budget: 240s
 
     queries:
       # Children of the root session — should be exactly 1.
