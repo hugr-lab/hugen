@@ -26,8 +26,8 @@ steps:
       I need a brief comparative summary of three tables in our
       "northwind" data source: orders, customers, returns.
 
-      For each table, spawn a separate explorer sub-agent
-      (skill: hugr-data, role: explorer) that returns a one-line
+      For each table, spawn a separate sub-agent using the
+      hugr-data skill (no role needed) that returns a one-line
       description plus a row count. Then, AFTER you have all three
       sub-agent results, write a final 3-bullet summary directly to
       me.

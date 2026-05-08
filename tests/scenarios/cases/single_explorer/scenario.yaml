@@ -1,16 +1,21 @@
 # single_explorer — root spawns ONE sub-agent and waits for its
 # result. By-eye check: did the model call session:spawn_subagent
-# exactly once with skill=hugr-data + role=explorer? Did it
-# session:wait_subagents or trust the synchronous return?
+# exactly once with skill=hugr-data? Did it session:wait_subagents
+# or trust the synchronous return?
+#
+# Note on roles: shipped skills (assets/skills/<name>/SKILL.md) all
+# declare `sub_agents: []` — no role taxonomy yet (phase 4.2 adds
+# explorer / analyst / etc to the analyst mega-skill). For v1
+# scenarios pass an empty role; the model just supplies skill.
 name: single_explorer
 requires: []
 
 steps:
   - say: |
-      I have a data source named "northwind". Spawn ONE explorer
-      sub-agent (skill: hugr-data, role: explorer) to summarise its
-      schema in two sentences. Don't answer yourself — delegate,
-      wait for the specialist's reply, then relay it.
+      I have a data source named "northwind". Spawn ONE sub-agent
+      using the hugr-data skill (no role) to summarise its schema
+      in two sentences. Don't answer yourself — delegate, wait for
+      the specialist's reply, then relay it.
     budget: 90s
 
     queries:

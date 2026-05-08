@@ -8,8 +8,8 @@ requires: []
 
 steps:
   - say: |
-      Spawn THREE explorer sub-agents in parallel (skill: hugr-data,
-      role: explorer), each looking at one of these tables in
+      Spawn THREE sub-agents in parallel using the hugr-data skill
+      (no role needed), each looking at one of these tables in
       "northwind": products, suppliers, categories. Each child
       returns a one-line description.
 

@@ -10,7 +10,7 @@ steps:
   - say: |
       I have a list of numbers: [12, 7, 19, 3, 8, 24, 11].
 
-      Spawn ONE sub-agent (skill: python-runner, role: analyst)
+      Spawn ONE sub-agent using the python-runner skill (no role)
       that uses python:run_code to compute mean, median, and
       standard deviation. The child returns those three numbers
       back to you; you then format them as a one-line summary.

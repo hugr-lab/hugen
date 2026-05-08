@@ -8,8 +8,8 @@ requires: []
 
 steps:
   - say: |
-      Initialise a shared whiteboard. Then spawn 3 explorer
-      sub-agents (skill: hugr-data, role: explorer); each child's
+      Initialise a shared whiteboard. Then spawn 3 sub-agents
+      using the hugr-data skill (no role needed); each child's
       task is to write one short finding about the "northwind"
       data source to the whiteboard via whiteboard:write
       (different fact each).

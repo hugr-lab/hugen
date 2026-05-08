@@ -22,8 +22,8 @@ steps:
       Use the analyst pattern:
         1) Draft a 3-step plan via the planner skill.
         2) Initialise a whiteboard.
-        3) Spawn 3 explorer sub-agents (skill: hugr-data, role:
-           explorer); each takes one of: entities, relationships,
+        3) Spawn 3 sub-agents using the hugr-data skill (no role
+           needed); each takes one of: entities, relationships,
            aggregates. Each writes its findings to the whiteboard.
         4) Read the whiteboard. Produce a final summary.
 

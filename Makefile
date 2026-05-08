@@ -98,13 +98,18 @@ clean:
 # Run every scenario in tests/scenarios/runs.yaml. Runs whose
 # `requires:` env vars are missing skip cleanly — empty
 # tests/scenarios/.test.env is a valid state.
-scenario:
+#
+# Depends on `mcps` so bash-mcp / hugr-query / python-mcp binaries
+# are present at ./bin/ before scenarios spawn them. The harness
+# resolves provider commands via ${HUGEN_BIN_DIR} (= absolute path
+# of repo's bin/, set by harness.Setup).
+scenario: mcps
 	go test -tags=$(TAGS),scenario -count=1 -v -timeout=30m \
 	  -run TestScenarios ./tests/scenarios/...
 
 # Run every scenario inside one named run from runs.yaml.
 # Usage: make scenario-run run=claude-sonnet-embedded
-scenario-run:
+scenario-run: mcps
 	@if [ -z "$(run)" ]; then \
 	  echo "usage: make scenario-run run=<run_name>"; exit 1; fi
 	go test -tags=$(TAGS),scenario -count=1 -v -timeout=30m \
@@ -112,7 +117,7 @@ scenario-run:
 
 # Run a single scenario inside a named run.
 # Usage: make scenario-one run=claude-sonnet-embedded name=delegation_required
-scenario-one:
+scenario-one: mcps
 	@if [ -z "$(run)" ] || [ -z "$(name)" ]; then \
 	  echo "usage: make scenario-one run=<run_name> name=<scenario_name>"; \
 	  exit 1; fi
