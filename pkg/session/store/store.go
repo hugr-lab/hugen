@@ -130,9 +130,22 @@ type EventRow struct {
 //     pkg/adapter/http (Last-Event-ID header). See R-Plan-20.
 //   - Limit=0 means "use the implementation default" (1000 for the
 //     local store).
+//   - Kinds, when non-empty, narrows the query to those event_type
+//     values via `event_type: { in: kinds }`. Empty = all kinds.
+//     Use this to push event-type filters down to the database
+//     instead of materialising the entire log only to discard most
+//     of it (e.g. settle's subagent_result scan,
+//     drainCachedSubagentResults, roleAndTaskForNudge).
+//   - MetadataContains, when non-nil, narrows further via Hugr's
+//     JSON `contains` operator (PostgreSQL `@>` semantics) — match
+//     rows whose metadata column is a superset of the given map.
+//     Combine with Kinds for tight scans like
+//     "subagent_started where child_session_id = X".
 type ListEventsOpts struct {
-	MinSeq int
-	Limit  int
+	MinSeq           int
+	Limit            int
+	Kinds            []string
+	MetadataContains map[string]any
 }
 
 // RuntimeStore is the persistence facade consumed by Session and
@@ -365,6 +378,12 @@ func (s *RuntimeStoreLocal) ListEvents(ctx context.Context, sessionID string, op
 	filter := map[string]any{"session_id": map[string]any{"eq": sessionID}}
 	if opts.MinSeq > 0 {
 		filter["seq"] = map[string]any{"gt": opts.MinSeq}
+	}
+	if len(opts.Kinds) > 0 {
+		filter["event_type"] = map[string]any{"in": opts.Kinds}
+	}
+	if len(opts.MetadataContains) > 0 {
+		filter["metadata"] = map[string]any{"contains": opts.MetadataContains}
 	}
 	rows, err := queries.RunQuery[[]EventRow](ctx, s.querier,
 		`query ($filter: hub_db_session_events_filter, $limit: Int) {

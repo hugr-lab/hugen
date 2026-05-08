@@ -60,15 +60,18 @@ func settleDanglingSubagents(ctx context.Context, deps *Deps, parentID string) (
 		return 0, nil
 	}
 
-	parentEvents, err := deps.Store.ListEvents(ctx, parentID, store.ListEventsOpts{})
+	// Pull only subagent_result rows from the parent's log instead
+	// of paging the whole transcript: each parent has at most one
+	// such row per child it ever spawned, so the result set is a
+	// tiny fraction of the events table.
+	parentEvents, err := deps.Store.ListEvents(ctx, parentID, store.ListEventsOpts{
+		Kinds: []string{string(protocol.KindSubagentResult)},
+	})
 	if err != nil {
 		return 0, fmt.Errorf("session: settle list-events: %w", err)
 	}
-	settled := make(map[string]struct{})
+	settled := make(map[string]struct{}, len(parentEvents))
 	for _, ev := range parentEvents {
-		if ev.EventType != string(protocol.KindSubagentResult) {
-			continue
-		}
 		cid, _ := ev.Metadata["session_id"].(string)
 		if cid == "" {
 			continue

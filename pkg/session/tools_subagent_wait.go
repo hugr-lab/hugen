@@ -160,15 +160,15 @@ func drainCachedSubagentResults(ctx context.Context, parent *Session, ids []stri
 	for _, id := range ids {
 		want[id] = struct{}{}
 	}
-	rows, err := parent.store.ListEvents(ctx, parent.id, store.ListEventsOpts{Limit: 1000})
+	rows, err := parent.store.ListEvents(ctx, parent.id, store.ListEventsOpts{
+		Kinds: []string{string(protocol.KindSubagentResult)},
+		Limit: 1000,
+	})
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]waitResultRow)
 	for _, r := range rows {
-		if r.EventType != string(protocol.KindSubagentResult) {
-			continue
-		}
 		var p protocol.SubagentResultPayload
 		if r.Metadata != nil {
 			if b, err := json.Marshal(r.Metadata); err == nil {

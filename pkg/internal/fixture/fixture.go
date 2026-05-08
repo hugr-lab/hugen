@@ -254,9 +254,24 @@ func (s *TestStore) ListEvents(_ context.Context, sessionID string, opts store.L
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	src := s.Events[sessionID]
+	var kinds map[string]struct{}
+	if len(opts.Kinds) > 0 {
+		kinds = make(map[string]struct{}, len(opts.Kinds))
+		for _, k := range opts.Kinds {
+			kinds[k] = struct{}{}
+		}
+	}
 	out := make([]store.EventRow, 0, len(src))
 	for _, ev := range src {
 		if opts.MinSeq > 0 && ev.Seq <= opts.MinSeq {
+			continue
+		}
+		if kinds != nil {
+			if _, ok := kinds[ev.EventType]; !ok {
+				continue
+			}
+		}
+		if !metadataContains(ev.Metadata, opts.MetadataContains) {
 			continue
 		}
 		out = append(out, ev)
@@ -265,6 +280,25 @@ func (s *TestStore) ListEvents(_ context.Context, sessionID string, opts store.L
 		out = out[:opts.Limit]
 	}
 	return out, nil
+}
+
+// metadataContains mirrors Hugr's JSON `contains` (PostgreSQL `@>`)
+// for the in-memory test store: returns true iff every key/value
+// in want is present and equal in have. Empty want = match all.
+func metadataContains(have, want map[string]any) bool {
+	if len(want) == 0 {
+		return true
+	}
+	if len(have) == 0 {
+		return false
+	}
+	for k, w := range want {
+		h, ok := have[k]
+		if !ok || h != w {
+			return false
+		}
+	}
+	return true
 }
 
 // LatestEventOfKinds returns the newest event in the session

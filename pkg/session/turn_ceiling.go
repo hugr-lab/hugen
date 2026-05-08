@@ -52,19 +52,18 @@ func (s *Session) roleAndTaskForNudge(ctx context.Context) (role, task string) {
 			}
 		}
 		if s.parent.id != "" {
-			if rows, err := s.store.ListEvents(ctx, s.parent.id, store.ListEventsOpts{}); err == nil {
-				for _, ev := range rows {
-					if ev.EventType != string(protocol.KindSubagentStarted) {
-						continue
-					}
-					childID, _ := ev.Metadata["child_session_id"].(string)
-					if childID != s.id {
-						continue
-					}
-					if t, _ := ev.Metadata["task"].(string); t != "" {
-						task = t
-					}
-					break
+			// Tight DB-side scan: parent's subagent_started row whose
+			// metadata.child_session_id == this session's id. The
+			// metadata.contains filter compiles to PostgreSQL `@>`,
+			// so the result set is at most one row.
+			rows, err := s.store.ListEvents(ctx, s.parent.id, store.ListEventsOpts{
+				Kinds:            []string{string(protocol.KindSubagentStarted)},
+				MetadataContains: map[string]any{"child_session_id": s.id},
+				Limit:            1,
+			})
+			if err == nil && len(rows) > 0 {
+				if t, _ := rows[0].Metadata["task"].(string); t != "" {
+					task = t
 				}
 			}
 		}
