@@ -42,4 +42,8 @@ data/
 # Local config (template lives in config.example.yaml)
 config.yaml
 
+# Scenario harness — captured credentials.
+# Per-run artefacts already match `.data/` above. The .test.env.example
+# template stays tracked.
+tests/scenarios/.test.env
 

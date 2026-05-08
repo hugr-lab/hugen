@@ -1,0 +1,11 @@
+# Cloud Anthropic Claude Sonnet 4. Requires ANTHROPIC_API_KEY in
+# the harness's .test.env. Routes default + cheap to the same
+# upstream — cloud TTFB is fast enough that splitting them adds
+# no value for scenario timing.
+models:
+  mode: local
+  model: claude-sonnet
+  routes:
+    cheap:
+      mode: local
+      model: claude-sonnet

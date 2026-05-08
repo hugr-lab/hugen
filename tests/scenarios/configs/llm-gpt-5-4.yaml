@@ -1,0 +1,9 @@
+# Cloud OpenAI GPT-5.4. Requires OPENAI_API_KEY in the harness's
+# .test.env.
+models:
+  mode: local
+  model: gpt-5-4
+  routes:
+    cheap:
+      mode: local
+      model: gpt-5-4

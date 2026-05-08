@@ -1,0 +1,9 @@
+# Cloud Google Gemini Pro 3.1. Requires GEMINI_API_KEY in
+# the harness's .test.env.
+models:
+  mode: local
+  model: gemini-pro-3-1
+  routes:
+    cheap:
+      mode: local
+      model: gemini-pro-3-1

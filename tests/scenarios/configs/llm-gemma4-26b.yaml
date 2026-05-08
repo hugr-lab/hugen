@@ -1,0 +1,10 @@
+# Local Gemma4-26B via LM Studio. Requires LLM_LOCAL_URL in the
+# harness's .test.env (e.g. http://host.docker.internal:1234/v1/chat/completions).
+# This is the prod default — shape mirrors config.yaml's models.model.
+models:
+  mode: local
+  model: gemma4-26b
+  routes:
+    cheap:
+      mode: local
+      model: gemma-small
