@@ -1,10 +1,16 @@
 # Local Gemma4-26B via LM Studio. Requires LLM_LOCAL_URL in the
 # harness's .test.env (e.g. http://host.docker.internal:1234/v1/chat/completions).
 # This is the prod default — shape mirrors config.yaml's models.model.
+# Bumps max_tokens to 8192 on both default + cheap so the LM
+# Studio provider's thinking_budget=2048 always sits below max
+# (cheap's inherited 2048 from base.config.yaml would trip the
+# anthropic-style guard if a cloud-typed proxy ever stands in).
 models:
   mode: local
   model: gemma4-26b
+  max_tokens: 8192
   routes:
     cheap:
       mode: local
       model: gemma-small
+      max_tokens: 4096

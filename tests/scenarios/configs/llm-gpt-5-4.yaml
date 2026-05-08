@@ -1,9 +1,11 @@
 # Cloud OpenAI GPT-5.4. Requires OPENAI_API_KEY in the harness's
-# .test.env.
+# .test.env. Same max_tokens story — see llm-claude-sonnet.yaml.
 models:
   mode: local
   model: gpt-5-4
+  max_tokens: 8192
   routes:
     cheap:
       mode: local
       model: gpt-5-4
+      max_tokens: 8192

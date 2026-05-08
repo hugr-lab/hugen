@@ -35,17 +35,19 @@ steps:
         vars: { sid: "$sid" }
 
       # The child's tool calls — should include python:run_code.
+      # Schema exposes `events` (not session_events) as the
+      # references_query on a session row; jq filters by event_type
+      # to keep only tool_call rows.
       - name: tool_calls_children
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.sessions | map({id, calls: (.events // [])})") {
+            jq(query: ".hub.db.agent.sessions | map({id, calls: (.events // []) | map(select(.event_type == \"tool_call\")) | map({seq, tool_name, tool_args})})") {
               hub { db { agent {
                 sessions(filter: {parent_session_id: {eq: $sid}}) {
                   id
-                  events: session_events(
-                    filter: {event_type: {eq: "tool_call"}}
-                    order_by: [{field: "seq", direction: ASC}]
-                  ) { seq tool_name tool_args }
+                  events(order_by: [{field: "seq", direction: ASC}]) {
+                    seq event_type tool_name tool_args
+                  }
                 }
               }}}
             }

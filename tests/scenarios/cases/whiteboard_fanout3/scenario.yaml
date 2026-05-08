@@ -51,25 +51,21 @@ steps:
           }
         vars: { sid: "$sid" }
 
-      # Cross-session whiteboard ops: the union view. Lets the
-      # operator eyeball each child's whiteboard:write + the
-      # whiteboard:message broadcast that landed in siblings.
-      - name: whiteboard_ops_tree
+      # Children-side whiteboard ops: each sub-agent's view of the
+      # whiteboard chain. The schema exposes `events` as the
+      # references_query on session (not session_events nested
+      # under sessions) — reads ALL events on the child, the jq
+      # filter narrows to whiteboard extension_frame rows.
+      - name: whiteboard_ops_children
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.sessions | map({id, status, ops: (.events // [])})") {
+            jq(query: ".hub.db.agent.sessions | map({id, status, ops: (.events // []) | map(select(.event_type == \"extension_frame\" and .metadata.extension == \"whiteboard\")) | map({seq, op: .metadata.op, category: .metadata.category, data: .metadata.data})})") {
               hub { db { agent {
-                sessions(filter: {
-                  or: [
-                    {id: {eq: $sid}},
-                    {parent_session_id: {eq: $sid}}
-                  ]
-                }) {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
                   id status
-                  events: session_events(
-                    filter: {event_type: {eq: "extension_frame"}}
-                    order_by: [{field: "seq", direction: ASC}]
-                  ) { seq metadata }
+                  events(order_by: [{field: "seq", direction: ASC}]) {
+                    seq event_type metadata
+                  }
                 }
               }}}
             }

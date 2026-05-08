@@ -82,14 +82,13 @@ steps:
       - name: tool_calls_children
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.sessions | map({id, calls: (.events // [])})") {
+            jq(query: ".hub.db.agent.sessions | map({id, calls: (.events // []) | map(select(.event_type == \"tool_call\")) | map({seq, tool_name})})") {
               hub { db { agent {
                 sessions(filter: {parent_session_id: {eq: $sid}}) {
                   id
-                  events: session_events(
-                    filter: {event_type: {eq: "tool_call"}}
-                    order_by: [{field: "seq", direction: ASC}]
-                  ) { seq tool_name }
+                  events(order_by: [{field: "seq", direction: ASC}]) {
+                    seq event_type tool_name
+                  }
                 }
               }}}
             }

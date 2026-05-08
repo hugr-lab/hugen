@@ -2,10 +2,17 @@
 # the harness's .test.env. Routes default + cheap to the same
 # upstream — cloud TTFB is fast enough that splitting them adds
 # no value for scenario timing.
+#
+# max_tokens is explicitly set on both default + cheap so the
+# anthropic provider's `max_tokens > thinking.budget_tokens`
+# check holds (provider URL pins thinking_budget=2048; cheap's
+# inherited 2048 from base config.yaml fails the check).
 models:
   mode: local
   model: claude-sonnet
+  max_tokens: 8192
   routes:
     cheap:
       mode: local
       model: claude-sonnet
+      max_tokens: 8192
