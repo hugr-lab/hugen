@@ -63,6 +63,14 @@ func run(args []string, errOut *os.File) int {
 		"open the OS default browser to the login URL")
 	timeout := fs.Duration("timeout", 5*time.Minute,
 		"how long to wait for the user to complete the OIDC flow")
+	// Hugr's OIDC client is registered with a fixed redirect_uri
+	// (http://localhost:10000/auth/callback — matches HUGEN_BASE_URL
+	// in the prod .env). The IdP rejects callbacks on any other host
+	// or port, so we bind that exact port. Override with --port if
+	// the deployment registered a different value.
+	port := fs.Int("port", 10000,
+		"local port to bind for the OIDC callback. Must match the "+
+			"redirect_uri registered for this OIDC client.")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK
@@ -104,16 +112,22 @@ func run(args []string, errOut *os.File) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Probe a free local port for the callback redirect. Hugen-proper
-	// uses HUGEN_PORT (10000); we pick a fresh one so the binary
-	// works alongside a running hugen without colliding.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	// Bind the configured port (default 10000). The OIDC client
+	// registered against this Hugr deploy has a fixed redirect_uri
+	// (http://localhost:10000/auth/callback — matches HUGEN_BASE_URL
+	// in prod .env). The IdP rejects callbacks on any other host or
+	// port, so we MUST bind that exact value. EADDRINUSE here means
+	// a hugen instance is already listening; stop it or pass
+	// --port=<other> only if the client was registered differently.
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", *port))
 	if err != nil {
-		fmt.Fprintf(errOut, "bind callback listener: %v\n", err)
+		fmt.Fprintf(errOut, "bind 127.0.0.1:%d: %v\n", *port, err)
+		fmt.Fprintln(errOut,
+			"hint: stop any running hugen on this port, or pass --port=<other> "+
+				"if the OIDC client was registered with a different redirect_uri.")
 		return exitErr
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	baseURL := fmt.Sprintf("http://localhost:%d", port)
+	baseURL := fmt.Sprintf("http://localhost:%d", *port)
 
 	logger.Info("discovering OIDC config", "url", *discoverURL+"/auth/config")
 	source, err := hugr.BuildHugrSource(ctx, hugr.Config{
