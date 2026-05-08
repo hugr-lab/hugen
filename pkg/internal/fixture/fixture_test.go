@@ -125,35 +125,32 @@ func TestSessionState_ChildrenAndSubmit(t *testing.T) {
 
 	t.Run("submit_records_frame", func(t *testing.T) {
 		f := protocol.NewSystemMarker("ses-c1", protocol.ParticipantInfo{ID: "a"}, "ping", nil)
-		if !c1.Submit(context.Background(), f) {
-			t.Fatal("submit returned false")
-		}
+		<-c1.Submit(context.Background(), f) // settled channel closes immediately in fixture
 		if got := c1.Inbox(); len(got) != 1 || got[0] != f {
 			t.Errorf("inbox=%v", got)
 		}
 	})
 
-	t.Run("submit_after_close_returns_false", func(t *testing.T) {
+	t.Run("submit_after_close_drops_frame", func(t *testing.T) {
 		c2.CloseInbox()
 		f := protocol.NewSystemMarker("ses-c2", protocol.ParticipantInfo{ID: "a"}, "ping", nil)
-		if c2.Submit(context.Background(), f) {
-			t.Error("submit returned true on closed inbox")
+		<-c2.Submit(context.Background(), f)
+		if !c2.IsClosed() {
+			t.Error("expected IsClosed=true after CloseInbox")
 		}
 		if got := c2.Inbox(); len(got) != 0 {
-			t.Errorf("inbox=%v, want empty", got)
+			t.Errorf("inbox=%v, want empty (closed sessions drop)", got)
 		}
 	})
 
-	t.Run("submit_with_cancelled_ctx_returns_false", func(t *testing.T) {
+	t.Run("submit_with_cancelled_ctx_drops_frame", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		fresh := NewTestSessionState("ses-fresh")
 		f := protocol.NewSystemMarker("ses-fresh", protocol.ParticipantInfo{ID: "a"}, "ping", nil)
-		if fresh.Submit(ctx, f) {
-			t.Error("submit returned true on cancelled ctx")
-		}
+		<-fresh.Submit(ctx, f)
 		if got := fresh.Inbox(); len(got) != 0 {
-			t.Errorf("inbox=%v, want empty", got)
+			t.Errorf("inbox=%v, want empty (cancelled ctx drops)", got)
 		}
 	})
 }

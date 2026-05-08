@@ -131,9 +131,15 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 
 		// Deliver the task as the child's first user message so the
 		// child's run-loop has something to drive a turn off of. The
-		// child's goroutine is already started (parent.Spawn).
+		// child's goroutine is already started (parent.Spawn). Wait
+		// on the settled channel so the child sees the task before
+		// we move to the next batch entry; pre/post IsClosed checks
+		// distinguish "delivered" from "child already gone".
 		first := protocol.NewUserMessage(child.ID(), parent.agent.Participant(), e.Task)
-		if !child.Submit(ctx, first) {
+		if !child.IsClosed() {
+			<-child.Submit(ctx, first)
+		}
+		if child.IsClosed() {
 			parent.logger.Warn("session: spawn_subagent: child rejected initial task",
 				"parent", parent.id, "child", child.ID())
 		}

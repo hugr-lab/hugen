@@ -319,7 +319,11 @@ func (e *Extension) callWrite(ctx context.Context, state extension.SessionState,
 	if err != nil {
 		return toolErr("io", err.Error())
 	}
-	if !parentState.Submit(ctx, frame) {
+	if parentState.IsClosed() {
+		return toolErr("io", "host session inbox closed")
+	}
+	<-parentState.Submit(ctx, frame)
+	if parentState.IsClosed() {
 		return toolErr("io", "host session inbox closed")
 	}
 	return json.Marshal(okOutput{OK: true})

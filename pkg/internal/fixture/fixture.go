@@ -78,6 +78,14 @@ func (s *TestSessionState) CloseInbox() {
 	s.closed = true
 }
 
+// IsClosed implements [extension.SessionState]. Reports the
+// closed flag CloseInbox toggles.
+func (s *TestSessionState) IsClosed() bool {
+	s.inboxMu.Lock()
+	defer s.inboxMu.Unlock()
+	return s.closed
+}
+
 // SetTools installs a ToolManager that Tools() returns. Tests
 // exercising dynamic-provider mounting via state.Tools().AddProvider
 // pass a real manager here.
@@ -143,21 +151,27 @@ func (s *TestSessionState) Emitted() []protocol.Frame {
 	return out
 }
 
-// Submit implements [extension.SessionState]. Appends frame to
-// the in-memory inbox queue or returns false if the inbox was
-// closed via CloseInbox. ctx is honoured: a cancelled ctx
-// returns false without recording the frame.
-func (s *TestSessionState) Submit(ctx context.Context, frame protocol.Frame) bool {
-	if err := ctx.Err(); err != nil {
-		return false
+// Submit implements [extension.SessionState]. Synchronously
+// appends frame to the in-memory inbox queue when the session is
+// alive and ctx is live; returns an already-closed "settled"
+// channel either way so the test sees the same shape as the
+// production *Session.Submit (the goroutine + channel allocation
+// is unnecessary in tests). Use [TestSessionState.CloseInbox] to
+// simulate a terminated session — subsequent Submit drops the
+// frame but still returns a closed channel.
+func (s *TestSessionState) Submit(ctx context.Context, frame protocol.Frame) <-chan struct{} {
+	settled := make(chan struct{})
+	close(settled)
+	if ctx.Err() != nil {
+		return settled
 	}
 	s.inboxMu.Lock()
 	defer s.inboxMu.Unlock()
 	if s.closed {
-		return false
+		return settled
 	}
 	s.inbox = append(s.inbox, frame)
-	return true
+	return settled
 }
 
 // Inbox returns a snapshot of every frame Submit accepted, in

@@ -40,8 +40,9 @@ func TestSubagent_CancelCascade_TwoDeep(t *testing.T) {
 		protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser},
 		"global stop")
 	cancelFrame.Payload.Cascade = true
-	if !root.Submit(ctx, cancelFrame) {
-		t.Fatal("Submit /cancel all rejected by root")
+	<-root.Submit(ctx, cancelFrame)
+	if root.IsClosed() {
+		t.Fatal("root closed before /cancel all could settle")
 	}
 
 	// Mid + leaf should both terminate. Root stays alive.

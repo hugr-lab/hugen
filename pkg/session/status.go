@@ -53,13 +53,19 @@ func (s *Session) Status() string {
 // mutex across a potentially blocking outbox send (s.emit writes
 // to a buffered s.out channel; a slow adapter consumer would
 // otherwise stall every status transition under contention).
-// Today's wired call sites do not race in practice (Run goroutine
-// for turn boundaries / handleSubagentResult; tool dispatcher
-// goroutines for Spawn / registerToolFeed — they don't overlap on
-// the same session at the same time), so the narrow race window
-// where in-memory drifts from the latest persisted event is
-// invisible to runtime behaviour. Future call sites that DO race
-// must read state from events, not Status().
+//
+// Concurrent callers ARE possible — Run goroutine handles turn
+// boundaries / handleSubagentResult / advanceOrFinish; tool
+// dispatcher goroutines call markStatus indirectly through
+// registerToolFeed and parent.Spawn. Two emits with different
+// states can land in the events log under race; the guard
+// prevents duplicate identical emits but does not serialise
+// distinct state transitions. The classifier reads the newest
+// row of the events log, so the worst case is a brief disagreement
+// between Status() and the latest persisted state — never a
+// crash, never a missed marker. Callers that need a strictly
+// consistent read of "what is the lifecycle state right now"
+// must consume the events log, not Status().
 //
 // emit failure logs a warning but does not roll back the in-memory
 // state — events remain the source of truth, and a subsequent
@@ -119,8 +125,12 @@ func (s *Session) markWaitUserInput(ctx context.Context, reason string) {
 
 // LookupLatestStatusEvent walks events newest-last and returns the
 // state of the most recent [protocol.KindSessionStatus] row, or ""
-// when the log carries none. Used by Manager.RestoreActive to
-// classify a session at boot. Reads only — no writes.
+// when the log carries none. Manager.RestoreActive uses the
+// store-side narrow probe (LatestEventOfKinds) for the live
+// classifier path; this helper survives for tests that build a
+// synthetic event slice and want to assert the same lookup
+// semantics without round-tripping through the store fixture.
+// Reads only — no writes.
 func LookupLatestStatusEvent(events []store.EventRow) string {
 	for i := len(events) - 1; i >= 0; i-- {
 		ev := events[i]

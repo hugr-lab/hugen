@@ -256,7 +256,11 @@ func (m *Manager) Deliver(ctx context.Context, to string, f protocol.Frame) erro
 	if !ok {
 		return store.ErrSessionNotFound
 	}
-	if !s.Submit(ctx, f) {
+	if s.IsClosed() {
+		return ErrSessionGone
+	}
+	<-s.Submit(ctx, f)
+	if s.IsClosed() {
 		return ErrSessionGone
 	}
 	return nil
@@ -293,10 +297,10 @@ func (m *Manager) BroadcastSystemMarker(ctx context.Context, subject string, met
 	m.mu.RUnlock()
 	for _, s := range targets {
 		marker := protocol.NewSystemMarker(s.ID(), m.agent.Participant(), subject, meta)
-		if !s.Submit(ctx, marker) {
-			m.logger.Debug("manager: broadcast system_marker dropped",
-				"session", s.ID(), "subject", subject)
-		}
+		// Fire-and-forget broadcast — the per-session Submit
+		// goroutine handles delivery + drop on closed inbox without
+		// blocking the broadcast loop on any single slow session.
+		_ = s.Submit(ctx, marker)
 	}
 }
 

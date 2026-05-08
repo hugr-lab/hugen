@@ -139,10 +139,13 @@ func (e *Extension) handleMemberBroadcast(ctx context.Context, state extension.S
 	at := f.OccurredAt()
 
 	h.mu.Lock()
-	if !h.wb.Active {
+	needInit := !h.wb.Active
+	if needInit {
 		// Synthesise an init boundary so the member-side projection
 		// has somewhere to attach OpWrite — reflects "I joined the
-		// board on first broadcast" without a separate init Frame.
+		// board on first broadcast". The synthetic init is persisted
+		// below so a restart's Recover sees it (without a persisted
+		// init the writes drop in Apply's defensive guard).
 		h.wb = Apply(h.wb, ProjectEvent{Op: OpInit, At: at})
 	}
 	h.wb = Apply(h.wb, ProjectEvent{
@@ -155,6 +158,19 @@ func (e *Extension) handleMemberBroadcast(ctx context.Context, state extension.S
 		Truncated:     in.Truncated,
 	})
 	h.mu.Unlock()
+
+	// Persist the synthetic init first when the member is observing
+	// a board for the first time. Recovery applies events in order
+	// so the init must precede the write in the log.
+	if needInit {
+		initFrame, err := newOpFrame(state.SessionID(), "", e.agentParticipant(), OpInit, nil)
+		if err != nil {
+			return err
+		}
+		if err := state.Emit(ctx, initFrame); err != nil {
+			return fmt.Errorf("persist member whiteboard:init: %w", err)
+		}
+	}
 
 	// Persist the member's own write event so a restart reconstructs
 	// the projection from this session's events alone.

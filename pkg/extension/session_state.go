@@ -51,13 +51,27 @@ type SessionState interface {
 	// restart.
 	Emit(ctx context.Context, frame protocol.Frame) error
 
-	// Submit delivers frame to this session's inbox without
-	// touching the calling session's event log. Returns false if
-	// the inbox is closed (session terminated) or ctx fired before
-	// the send. Used by extensions that route a frame across
+	// IsClosed reports whether the session has begun teardown
+	// (closed flag set, Run goroutine exiting / exited). Useful
+	// for callers that want to distinguish "delivered" from
+	// "session gone" after awaiting a [SessionState.Submit]
+	// channel — the channel itself is close-only and doesn't
+	// carry that signal.
+	IsClosed() bool
+
+	// Submit delivers frame to this session's inbox
+	// asynchronously and returns a "settled" channel that closes
+	// when the send has either landed in the inbox, the session
+	// terminated, or ctx fired. Callers that want
+	// fire-and-forget ignore the returned channel; callers that
+	// need delivery before proceeding wait on it. The channel
+	// does not distinguish delivered from cancelled — use
+	// post-checks (IsClosed / ctx.Err()) when that distinction
+	// matters. Used by extensions that route frames across
 	// sessions in the tree (member→host whiteboard write,
-	// host→member broadcast).
-	Submit(ctx context.Context, frame protocol.Frame) bool
+	// host→member broadcast) where blocking on a slow consumer
+	// would stall the producer's Run goroutine.
+	Submit(ctx context.Context, frame protocol.Frame) <-chan struct{}
 }
 
 type sessionStateKey struct{}

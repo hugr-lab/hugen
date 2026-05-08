@@ -328,7 +328,7 @@ func NewSession(
 		tools:     tools.NewChild(),
 		logger:    logger,
 		overrides: make(map[model.Intent]model.ModelSpec),
-		in:        make(chan protocol.Frame, 16),
+		in:        make(chan protocol.Frame, 64),
 		out:       make(chan protocol.Frame, 32),
 		done:      make(chan struct{}),
 	}
@@ -365,39 +365,38 @@ func (s *Session) Outbox() <-chan protocol.Frame { return s.out }
 // callers wait on this after pushing a Close intent into s.in.
 func (s *Session) Done() <-chan struct{} { return s.done }
 
-// Submit pushes a frame onto the session's inbox without crashing
-// on a closed channel and without hanging on a full one. Three
-// exit paths:
+// Submit dispatches a frame to the session's inbox asynchronously
+// and returns a "settled" channel that closes when the send has
+// landed, the session terminated, or ctx fired. Callers that
+// don't need delivery confirmation discard the returned channel
+// (`_ = sess.Submit(...)`); callers that do wait on it
+// (`<-sess.Submit(...)`).
 //
-//   - ctx done → caller wants to bail out (shutdown timeout, API
-//     cancel). Returns false so the caller can decide whether to
-//     report or move on.
-//   - Done closed → the session goroutine has exited; the frame
-//     can never be delivered. Returns false.
-//   - successful send → returns true.
+// The channel does NOT distinguish delivered from cancelled —
+// caller must post-check IsClosed / ctx.Err() if that matters.
+// Most cross-session sends (cascade SessionClose, broadcast
+// fan-out, whiteboard message) are best-effort and don't care.
 //
-// A "send on closed channel" panic is caught by recover so a race
-// between the goroutine's exit defer and our send doesn't crash
-// the process; the recovered case also maps to ok=false.
+// A "send on closed channel" panic during teardown is recovered
+// silently so a race between the goroutine's exit defer and the
+// pending send doesn't crash the process.
 //
-// External callers (Manager.Close, Manager.Suspend, Stop,
-// adapters) use Submit instead of touching s.in directly so the
-// "in writes belong to the session goroutine" invariant has a
-// single, audit-friendly entry point.
-func (s *Session) Submit(ctx context.Context, f protocol.Frame) (ok bool) {
-	defer func() {
-		if r := recover(); r != nil {
-			ok = false
+// External callers (Manager.Close, Stop, adapters) use Submit
+// instead of touching s.in directly so the "in writes belong to
+// the session goroutine" invariant has a single audit-friendly
+// entry point.
+func (s *Session) Submit(ctx context.Context, f protocol.Frame) <-chan struct{} {
+	settled := make(chan struct{})
+	go func() {
+		defer close(settled)
+		defer func() { _ = recover() }()
+		select {
+		case s.in <- f:
+		case <-s.done:
+		case <-ctx.Done():
 		}
 	}()
-	select {
-	case s.in <- f:
-		return true
-	case <-s.done:
-		return false
-	case <-ctx.Done():
-		return false
-	}
+	return settled
 }
 
 // Tools exposes the per-session ToolManager. This is the child
@@ -1019,7 +1018,10 @@ func (s *Session) emitSubagentResultToParent(persistCtx context.Context, reason 
 			SessionID: s.id,
 			Reason:    reason,
 		})
-	if parent.Submit(persistCtx, result) {
+	if !parent.IsClosed() {
+		<-parent.Submit(persistCtx, result)
+	}
+	if !parent.IsClosed() {
 		return
 	}
 	// Parent inbox closed — fall back to direct store append.
@@ -1065,11 +1067,11 @@ func (s *Session) handleSubagentResult(ctx context.Context, f *protocol.Subagent
 		return
 	}
 	closeFrame := protocol.NewSessionClose(child.id, s.agent.Participant(), "subagent_done")
-	if !child.Submit(ctx, closeFrame) {
-		// Child goroutine already exited (Done channel closed) — its
-		// teardown wrote session_terminated; we just need to clean
-		// the child entry below.
-	}
+	// Fire-and-forget: if the child goroutine already exited the
+	// recover in Submit absorbs the closed-channel send and the
+	// frame is dropped silently. We wait on child.Done() below
+	// regardless — that's the actual lifecycle signal.
+	_ = child.Submit(ctx, closeFrame)
 	select {
 	case <-child.Done():
 	case <-ctx.Done():

@@ -326,6 +326,25 @@ func TestHandleFrame_MemberBroadcast(t *testing.T) {
 		t.Errorf("local write frames = %d, want 1", len(writeFrames))
 	}
 
+	// Synthetic init must be persisted ahead of the write so
+	// Recovery on restart can rebuild the projection (Apply drops
+	// writes against an inactive whiteboard). Init+write order in
+	// the emitted log is load-bearing.
+	initFrames := state_extensionFrames(member.Emitted(), OpInit)
+	if len(initFrames) != 1 {
+		t.Errorf("synthetic init frames = %d, want 1", len(initFrames))
+	}
+	emitted := member.Emitted()
+	if len(emitted) >= 2 {
+		first, _ := emitted[0].(*protocol.ExtensionFrame)
+		second, _ := emitted[1].(*protocol.ExtensionFrame)
+		if first == nil || first.Payload.Op != OpInit ||
+			second == nil || second.Payload.Op != OpWrite {
+			t.Errorf("emit order = %+v / %+v, want init→write",
+				first.Payload, second.Payload)
+		}
+	}
+
 	inbox := member.Inbox()
 	if len(inbox) != 1 {
 		t.Fatalf("self-inbox = %d, want 1 (system_message routed back)", len(inbox))
