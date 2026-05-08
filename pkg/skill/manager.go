@@ -6,35 +6,52 @@ import (
 	"io/fs"
 	"log/slog"
 	"slices"
-	"sort"
 	"sync"
 	"sync/atomic"
 )
 
-// SkillManager is the per-runtime registry of loaded skills,
-// scoped per-Session. One instance per agent process; per-session
-// state lives in sessionState.
+// SkillManager is the agent-level façade over a [SkillStore]. It
+// reads / refreshes / publishes skill manifests and broadcasts
+// catalog-level events to registered sinks; it does NOT own
+// per-session state.
 //
-// Bindings(sessionID) returns a per-Turn snapshot keyed by a
-// monotonic generation counter; ToolManager rebuilds its
-// catalogue when the generation moves. In-flight tool calls
-// finish against the snapshot they started with.
+// Per-session state — which skills are loaded, the rendered
+// Bindings snapshot, the per-session generation counter — lives on
+// the session-scoped [github.com/hugr-lab/hugen/pkg/extension/skill.SessionSkill]
+// handle (the skill extension's per-session projection). Sinks
+// register / deregister via [RegisterSink] so the manager can
+// broadcast Refresh events without owning session state.
 type SkillManager struct {
 	store SkillStore
 	log   *slog.Logger
 
-	mu       sync.RWMutex
-	sessions map[string]*sessionState
-
+	// gen is the agent-level monotonic counter the manager bumps on
+	// every Refresh / Publish. Per-session handles read it via
+	// [BumpGen] / [Gen]; their own Bindings.Generation rides this
+	// value so the snapshot cache key invalidates correctly.
 	gen atomic.Int64
+
+	sinksMu sync.Mutex
+	sinks   []SessionSink
 
 	subscribersMu sync.Mutex
 	subscribers   []*subscriber
 }
 
-type sessionState struct {
-	loaded   map[string]Skill // by manifest name
-	gen      int64            // bumps on any change in this session
+// SessionSink is the narrow callback surface the manager invokes
+// on Refresh / RefreshAll. The skill extension's per-session
+// handle implements it; pkg/skill imports nothing from the
+// extension package.
+type SessionSink interface {
+	// SessionID identifies the sink for deregistration.
+	SessionID() string
+
+	// OnSkillRefreshed is called when [SkillManager.Refresh] /
+	// [SkillManager.RefreshAll] re-reads `skill` from the store.
+	// Sinks should update any in-memory copy of the skill they
+	// hold for this session and bump their per-session generation
+	// so the next Bindings call sees the fresh manifest.
+	OnSkillRefreshed(skill Skill)
 }
 
 type subscriber struct {
@@ -42,9 +59,8 @@ type subscriber struct {
 	ch  chan SkillChange
 }
 
-// SkillChange is what Subscribe streams. ToolManager listens to
-// bump its policy_gen; adapters surface significant entries as
-// audit Frames.
+// SkillChange is what Subscribe streams. Adapters surface
+// significant entries as audit Frames.
 type SkillChange struct {
 	Kind       SkillChangeKind
 	SessionID  string // empty for global events (catalogue refresh, publish)
@@ -80,246 +96,139 @@ func (k SkillChangeKind) String() string {
 	}
 }
 
-// NewSkillManager constructs the registry. log may be nil for
+// NewSkillManager constructs the manager. log may be nil for
 // tests — the manager substitutes a discard logger.
 func NewSkillManager(store SkillStore, log *slog.Logger) *SkillManager {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &SkillManager{
-		store:    store,
-		log:      log,
-		sessions: make(map[string]*sessionState),
-	}
+	return &SkillManager{store: store, log: log}
 }
 
 // List returns every skill across every backend with their
-// origins. Pass an empty filter to receive everything.
+// origins.
 func (m *SkillManager) List(ctx context.Context) ([]Skill, error) {
 	return m.store.List(ctx)
 }
 
-// Load resolves the metadata.hugen.requires closure for `name`
-// and binds the resolved skills (the named one plus its
-// transitive deps) to `sessionID`. Cycles return ErrSkillCycle.
-// Unresolved skill references return a wrapped ErrSkillNotFound.
+// Get returns the skill named `name` from the store. Returns
+// ErrSkillNotFound when no backend has it.
+func (m *SkillManager) Get(ctx context.Context, name string) (Skill, error) {
+	return m.store.Get(ctx, name)
+}
+
+// Gen returns the current agent-level generation counter — the
+// monotonic stamp [SkillManager.Refresh] / [SkillManager.Publish]
+// bumps. Per-session handles use this to compute their own
+// Bindings.Generation token.
+func (m *SkillManager) Gen() int64 { return m.gen.Load() }
+
+// BumpGen increments the agent-level generation counter and
+// returns the new value. Per-session handles call this on every
+// Load / Unload that mutates their loaded set.
+func (m *SkillManager) BumpGen() int64 { return m.gen.Add(1) }
+
+// EmitChange broadcasts ev to every active Subscribe channel.
+// Per-session handles call this after Load / Unload so adapters
+// see the same audit-shaped events the legacy SkillManager.Load
+// emitted; the manager itself fires it on Refresh / Publish.
+func (m *SkillManager) EmitChange(ev SkillChange) { m.emit(ev) }
+
+// ResolveClosure walks the metadata.hugen.requires graph from
+// `root` outward, in DFS order, collecting every reachable skill.
+// Cycles return ErrSkillCycle wrapping the cycle path. Returns
+// the closure ordered so dependencies precede dependents.
 //
-// Caller is responsible for separately checking that every
-// granted tool's provider is registered with ToolManager —
-// SkillManager only resolves skill→skill dependencies, not
-// skill→tool grants.
-func (m *SkillManager) Load(ctx context.Context, sessionID, name string) error {
-	if sessionID == "" {
-		return fmt.Errorf("skill: load: empty session id")
-	}
-	resolved, err := m.resolveClosure(ctx, name)
-	if err != nil {
-		return err
-	}
+// Per-session handlers call this once per Load to fetch the
+// transitive set of skills they should bind into the session.
+func (m *SkillManager) ResolveClosure(ctx context.Context, root string) ([]Skill, error) {
+	visited := map[string]bool{}
+	visiting := map[string]bool{}
+	var order []Skill
 
-	m.mu.Lock()
-	st, ok := m.sessions[sessionID]
-	if !ok {
-		st = &sessionState{loaded: make(map[string]Skill)}
-		m.sessions[sessionID] = st
-	}
-	for _, s := range resolved {
-		st.loaded[s.Manifest.Name] = s
-	}
-	st.gen = m.gen.Add(1)
-	m.mu.Unlock()
-
-	for _, s := range resolved {
-		m.emit(SkillChange{
-			Kind:       SkillLoaded,
-			SessionID:  sessionID,
-			SkillName:  s.Manifest.Name,
-			Generation: st.gen,
-		})
-	}
-	return nil
-}
-
-// Unload removes `name` from the session. Idempotent — unloading
-// a skill that was not loaded is not an error. Dependents
-// (skills that listed `name` in metadata.hugen.requires) are NOT
-// auto-unloaded; the caller decides cascade policy.
-func (m *SkillManager) Unload(ctx context.Context, sessionID, name string) error {
-	m.mu.Lock()
-	st, ok := m.sessions[sessionID]
-	if !ok {
-		m.mu.Unlock()
-		return nil
-	}
-	if _, present := st.loaded[name]; !present {
-		m.mu.Unlock()
-		return nil
-	}
-	delete(st.loaded, name)
-	st.gen = m.gen.Add(1)
-	m.mu.Unlock()
-
-	m.emit(SkillChange{
-		Kind:       SkillUnloaded,
-		SessionID:  sessionID,
-		SkillName:  name,
-		Generation: st.gen,
-	})
-	return nil
-}
-
-// Bindings returns the per-Turn snapshot for `sessionID`. The
-// Generation token lets ToolManager rebuild its catalogue when
-// it changes; callers MUST use the same Generation across all
-// Turn-internal decisions to keep the snapshot stable.
-func (m *SkillManager) Bindings(ctx context.Context, sessionID string) (Bindings, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	st, ok := m.sessions[sessionID]
-	if !ok {
-		return Bindings{Generation: 0}, nil
-	}
-	out := Bindings{Generation: st.gen}
-	memCats := map[string]MemoryCategory{}
-	// Iterate `loaded` in name-sorted order. The system prompt is
-	// composed from skill bodies + AllowedTools — random map order
-	// would change the prompt byte-for-byte each Turn, defeating
-	// the upstream prompt-cache (Anthropic / OpenAI key cache by
-	// prefix bytes). Cheap insurance against quiet token cost.
-	names := make([]string, 0, len(st.loaded))
-	for n := range st.loaded {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	for _, n := range names {
-		s := st.loaded[n]
-		out.AllowedTools = append(out.AllowedTools, s.Manifest.AllowedTools...)
-		out.SubAgentRoles = append(out.SubAgentRoles, s.Manifest.Hugen.SubAgents...)
-		if s.Manifest.Hugen.MaxTurns > out.MaxTurns {
-			out.MaxTurns = s.Manifest.Hugen.MaxTurns
+	var visit func(name, parent string) error
+	visit = func(name, parent string) error {
+		if visited[name] {
+			return nil
 		}
-		if s.Manifest.Hugen.MaxTurnsHard > out.MaxTurnsHard {
-			out.MaxTurnsHard = s.Manifest.Hugen.MaxTurnsHard
+		if visiting[name] {
+			return fmt.Errorf("%w: %s -> %s", ErrSkillCycle, parent, name)
 		}
-		// Stuck detection: a single skill explicitly disabling the
-		// detectors is enough to silence them for the session — the
-		// loosest setting wins by intent, not by max(N). Phase-4
-		// commit-8 only surfaces the Enabled tri-state; per-pattern
-		// tuning (RepeatedHash, TightDensityCount, …) lands when an
-		// operator actually needs to override defaults.
-		if !s.Manifest.Hugen.StuckDetection.IsEnabled() {
-			out.StuckDetectionDisabled = true
+		visiting[name] = true
+		s, err := m.store.Get(ctx, name)
+		if err != nil {
+			return fmt.Errorf("skill: load %s: %w", name, err)
 		}
-		for k, v := range s.Manifest.Hugen.Memory {
-			memCats[k] = v
-		}
-		if len(s.Manifest.Body) > 0 {
-			if out.Instructions != "" {
-				out.Instructions += "\n\n"
+		for _, dep := range s.Manifest.Hugen.AllRequires() {
+			if err := visit(dep, name); err != nil {
+				return err
 			}
-			out.Instructions += string(s.Manifest.Body)
+		}
+		visiting[name] = false
+		visited[name] = true
+		order = append(order, s)
+		return nil
+	}
+
+	if err := visit(root, ""); err != nil {
+		return nil, err
+	}
+	return order, nil
+}
+
+// RegisterSink adds sink to the broadcast list. Idempotent for
+// the same SessionID — a re-register replaces the prior entry so
+// extensions can re-init without duplicate callbacks. Called
+// from skill extension InitState.
+func (m *SkillManager) RegisterSink(sink SessionSink) {
+	if sink == nil {
+		return
+	}
+	m.sinksMu.Lock()
+	defer m.sinksMu.Unlock()
+	id := sink.SessionID()
+	for i, s := range m.sinks {
+		if s.SessionID() == id {
+			m.sinks[i] = sink
+			return
 		}
 	}
-	if len(memCats) > 0 {
-		out.MemoryCategories = memCats
-	}
-	return out, nil
+	m.sinks = append(m.sinks, sink)
 }
 
-// UnavailableProvider tags a tool grant whose provider is not
-// registered in the active ToolManager. Populated by
-// AnnotateUnavailable on a Bindings snapshot — used by the
-// no-Hugr (US5) deployment path so the model and operators can
-// see which skills declared grants nobody is serving.
-type UnavailableProvider struct {
-	Provider string
-	Tools    []string // tool patterns from the skill's allowed-tools
+// DeregisterSink removes the sink for sessionID. Idempotent.
+// Called from skill extension CloseSession.
+func (m *SkillManager) DeregisterSink(sessionID string) {
+	m.sinksMu.Lock()
+	defer m.sinksMu.Unlock()
+	for i, s := range m.sinks {
+		if s.SessionID() == sessionID {
+			m.sinks = slices.Delete(m.sinks, i, i+1)
+			return
+		}
+	}
 }
 
-// Bindings is the per-Turn snapshot SkillManager hands ToolManager
-// and the runtime's prompt builder.
-type Bindings struct {
-	Generation       int64
-	Instructions     string                    // concatenated SKILL.md bodies
-	AllowedTools     []ToolGrant               // union across loaded skills
-	Unavailable      []UnavailableProvider     // grants whose provider is not registered (US5)
-	SubAgentRoles    []SubAgentRole            // phase 4 dispatch source
-	MemoryCategories map[string]MemoryCategory // for memory dispatch
-	// MaxTurns is the largest metadata.hugen.max_turns across
-	// every loaded skill. 0 when no skill specifies one — the
-	// runtime then falls back to its default cap. Taking the max
-	// is the principle of least surprise: an explorer skill
-	// raising the budget shouldn't be undone by a co-loaded
-	// utility skill keeping the default.
-	MaxTurns int
-
-	// MaxTurnsHard is the largest metadata.hugen.max_turns_hard
-	// across loaded skills. 0 → runtime falls back to MaxTurns*2
-	// (or defaultMaxToolIterations*2 when neither is set). See
-	// phase-4-spec §8.2.
-	MaxTurnsHard int
-
-	// StuckDetectionDisabled is true when at least one loaded skill
-	// explicitly sets metadata.hugen.stuck_detection.enabled=false.
-	// The loosest skill wins so an analyst skill that legitimately
-	// loops can opt the whole session out of nudges. Default
-	// (no manifest opinion) keeps detectors active.
-	StuckDetectionDisabled bool
+// snapshotSinks returns a defensive copy of the sink list under
+// lock; callers iterate without holding the manager lock.
+func (m *SkillManager) snapshotSinks() []SessionSink {
+	m.sinksMu.Lock()
+	defer m.sinksMu.Unlock()
+	return slices.Clone(m.sinks)
 }
 
-// LoadedSkill returns the Skill named `name` if loaded into
-// `sessionID`. Returns ErrSkillNotFound otherwise.
-func (m *SkillManager) LoadedSkill(ctx context.Context, sessionID, name string) (Skill, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	st, ok := m.sessions[sessionID]
-	if !ok {
-		return Skill{}, ErrSkillNotFound
-	}
-	s, ok := st.loaded[name]
-	if !ok {
-		return Skill{}, ErrSkillNotFound
-	}
-	return s, nil
-}
-
-// LoadedNames returns the names of every skill currently loaded
-// for sessionID, sorted lexically. Empty slice (not nil) when
-// the session has no skills loaded — distinguishable from "no
-// skills configured" only by checking the slice length.
-func (m *SkillManager) LoadedNames(_ context.Context, sessionID string) []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	st, ok := m.sessions[sessionID]
-	if !ok {
-		return []string{}
-	}
-	out := make([]string, 0, len(st.loaded))
-	for n := range st.loaded {
-		out = append(out, n)
-	}
-	slices.Sort(out)
-	return out
-}
-
-// Refresh re-reads `name` from the store and updates every
-// session that has it loaded. Returns the new generation token.
+// Refresh re-reads `name` from the store, broadcasts the fresh
+// Skill to every registered SessionSink, and emits a
+// SkillRefreshed event. Returns the new generation token.
 func (m *SkillManager) Refresh(ctx context.Context, name string) (int64, error) {
 	skill, err := m.store.Get(ctx, name)
 	if err != nil {
 		return 0, err
 	}
-
-	m.mu.Lock()
 	gen := m.gen.Add(1)
-	for _, st := range m.sessions {
-		if _, ok := st.loaded[name]; ok {
-			st.loaded[name] = skill
-			st.gen = gen
-		}
+	for _, sink := range m.snapshotSinks() {
+		sink.OnSkillRefreshed(skill)
 	}
-	m.mu.Unlock()
-
 	m.emit(SkillChange{
 		Kind:       SkillRefreshed,
 		SkillName:  name,
@@ -328,33 +237,26 @@ func (m *SkillManager) Refresh(ctx context.Context, name string) (int64, error) 
 	return gen, nil
 }
 
-// RefreshAll re-reads every loaded skill across every session
-// and bumps the generation.
+// RefreshAll re-reads every skill the store knows about and
+// broadcasts each to every sink. Mismatched skills (in the store
+// but not loaded by any sink) cost only one Get; the sink decides
+// whether the refresh is relevant.
 func (m *SkillManager) RefreshAll(ctx context.Context) (int64, error) {
-	m.mu.Lock()
-	names := map[string]struct{}{}
-	for _, st := range m.sessions {
-		for n := range st.loaded {
-			names[n] = struct{}{}
-		}
+	all, err := m.store.List(ctx)
+	if err != nil {
+		return 0, err
 	}
-	m.mu.Unlock()
-
 	gen := m.gen.Add(1)
-	for n := range names {
-		s, err := m.store.Get(ctx, n)
-		if err != nil {
-			m.log.Warn("skill: refresh failed", "name", n, "err", err)
+	sinks := m.snapshotSinks()
+	for _, s := range all {
+		fresh, gerr := m.store.Get(ctx, s.Manifest.Name)
+		if gerr != nil {
+			m.log.Warn("skill: refresh failed", "name", s.Manifest.Name, "err", gerr)
 			continue
 		}
-		m.mu.Lock()
-		for _, st := range m.sessions {
-			if _, ok := st.loaded[n]; ok {
-				st.loaded[n] = s
-				st.gen = gen
-			}
+		for _, sink := range sinks {
+			sink.OnSkillRefreshed(fresh)
 		}
-		m.mu.Unlock()
 	}
 	m.emit(SkillChange{Kind: SkillRefreshed, Generation: gen})
 	return gen, nil
@@ -413,43 +315,39 @@ func (m *SkillManager) emit(ev SkillChange) {
 	}
 }
 
-// resolveClosure walks the metadata.hugen.requires graph from
-// `root` outward, in DFS order, collecting every reachable skill.
-// Cycles return ErrSkillCycle wrapping the cycle path. Returns
-// the closure ordered so that dependencies precede dependents.
-func (m *SkillManager) resolveClosure(ctx context.Context, root string) ([]Skill, error) {
-	visited := map[string]bool{}
-	visiting := map[string]bool{}
-	var order []Skill
+// UnavailableProvider tags a tool grant whose provider is not
+// registered in the active ToolManager. Populated by
+// AnnotateUnavailable on a Bindings snapshot — used by the
+// no-Hugr (US5) deployment path so the model and operators can
+// see which skills declared grants nobody is serving.
+type UnavailableProvider struct {
+	Provider string
+	Tools    []string // tool patterns from the skill's allowed-tools
+}
 
-	var visit func(name, parent string) error
-	visit = func(name, parent string) error {
-		if visited[name] {
-			return nil
-		}
-		if visiting[name] {
-			return fmt.Errorf("%w: %s -> %s", ErrSkillCycle, parent, name)
-		}
-		visiting[name] = true
-		s, err := m.store.Get(ctx, name)
-		if err != nil {
-			return fmt.Errorf("skill: load %s: %w", name, err)
-		}
-		for _, dep := range s.Manifest.Hugen.AllRequires() {
-			if err := visit(dep, name); err != nil {
-				return err
-			}
-		}
-		visiting[name] = false
-		visited[name] = true
-		order = append(order, s)
-		return nil
-	}
+// Bindings is the per-Turn snapshot the skill extension hands the
+// runtime's prompt builder + ToolPolicyAdvisor. Composed on the
+// per-session [SessionSkill] handle from the manager's loaded
+// skills.
+type Bindings struct {
+	Generation       int64
+	Instructions     string                    // concatenated SKILL.md bodies
+	AllowedTools     []ToolGrant               // union across loaded skills
+	Unavailable      []UnavailableProvider     // grants whose provider is not registered (US5)
+	SubAgentRoles    []SubAgentRole            // phase 4 dispatch source
+	MemoryCategories map[string]MemoryCategory // for memory dispatch
+	// MaxTurns is the largest metadata.hugen.max_turns across
+	// every loaded skill. 0 when no skill specifies one — the
+	// runtime then falls back to its default cap.
+	MaxTurns int
 
-	if err := visit(root, ""); err != nil {
-		return nil, err
-	}
-	return order, nil
+	// MaxTurnsHard is the largest metadata.hugen.max_turns_hard
+	// across loaded skills. 0 → runtime falls back to MaxTurns*2.
+	MaxTurnsHard int
+
+	// StuckDetectionDisabled is true when at least one loaded skill
+	// explicitly sets metadata.hugen.stuck_detection.enabled=false.
+	StuckDetectionDisabled bool
 }
 
 // AnnotateUnavailable tags every allowed-tool grant in `b` whose

@@ -56,10 +56,10 @@ reasoning, not display it to the end user verbatim.
 
 ## What this skill does NOT grant
 
-- `session:whiteboard_init` / `session:whiteboard_stop` — the
+- `whiteboard:init` / `whiteboard:stop` — the
   whiteboard host role is reserved for sub-agents that themselves
   spawn deeper children. The `_whiteboard` skill (when it loads)
   upgrades you to the host surface.
-- `session:plan_*` — the planner surface lands as a separate skill
+- `plan:*` — the planner surface lands as a separate skill
   (`_planner`) you require explicitly when planning is part of your
   workflow.

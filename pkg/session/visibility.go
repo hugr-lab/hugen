@@ -35,19 +35,12 @@ import (
 //   - SystemMessage       — rendered as [system: <Kind>] <Content>;
 //                           runtime-injected nudges (soft_warning,
 //                           stuck_nudge, whiteboard, spawned_note).
-//   - WhiteboardMessage   — defensive: in steady state the member-side
-//                           internal handler converts these into a
-//                           local SystemMessage{kind:"whiteboard"} and
-//                           the original Frame never lands in pending-
-//                           Inbound. Folded here for crash-safety in
-//                           case a future caller pushes one through
-//                           RouteBuffered.
 //
 // Everything else falls through. Tool calls / tool results, raw
 // reasoning frames, sub-agent's own system_messages, and sub-agent
-// plan_op / whiteboard_op events stay out of the parent's history per
-// §11 ("stays in the originating session's events; only surfaces via
-// subagent_runs").
+// plan_op / extension_frame events stay out of the parent's history
+// per §11 ("stays in the originating session's events; only
+// surfaces via subagent_runs").
 func projectFrameToHistory(f protocol.Frame) (model.Message, bool) {
 	switch v := f.(type) {
 	case *protocol.UserMessage:
@@ -70,11 +63,6 @@ func projectFrameToHistory(f protocol.Frame) (model.Message, bool) {
 		return model.Message{Role: model.RoleUser, Content: text}, true
 	case *protocol.SystemMessage:
 		text := fmt.Sprintf("[system: %s] %s", v.Payload.Kind, v.Payload.Content)
-		return model.Message{Role: model.RoleUser, Content: text}, true
-	case *protocol.WhiteboardMessage:
-		text := fmt.Sprintf("[system: %s] %s (%s): %s",
-			protocol.SystemMessageWhiteboard,
-			v.Payload.FromRole, v.Payload.FromSessionID, v.Payload.Text)
 		return model.Message{Role: model.RoleUser, Content: text}, true
 	}
 	return model.Message{}, false

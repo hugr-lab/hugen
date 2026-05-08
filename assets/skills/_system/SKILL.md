@@ -11,13 +11,15 @@ allowed-tools:
       - bash.write_file
       - bash.list_dir
       - bash.sed
-  - provider: session
+  - provider: skill
     tools:
-      - notepad_append
-      - skill_load
-      - skill_unload
-      - skill_ref
-      - skill_files
+      - load
+      - unload
+      - ref
+      - files
+  - provider: notepad
+    tools:
+      - append
   - provider: policy
     tools:
       - save
@@ -92,14 +94,14 @@ shell tools and file tools see exactly the same paths.
 
 ## meta tools
 
-- `notepad_append` — append to the per-session scratchpad. Use it
+- `notepad:append` — append to the per-session scratchpad. Use it
   to log intermediate findings the user may ask about later.
-- `skill_load` / `skill_unload` — load or release a skill mid-
+- `skill:load` / `skill:unload` — load or release a skill mid-
   session. Inspect the available skills index in your system
   prompt before loading.
-- `skill_ref` — read a reference document that ships with a
+- `skill:ref` — read a reference document that ships with a
   loaded skill (`references/<name>.md`).
-- `skill_files` — list the on-disk files of a loaded skill with
+- `skill:files` — list the on-disk files of a loaded skill with
   relative + absolute paths so other tools (`bash.read_file`,
   `python-mcp:run_script`, `duckdb-mcp:execute_query`) can address
   them directly. Optional `subdir` / `glob` filters narrow the
@@ -128,21 +130,21 @@ the whole story. Skills ship references, sample data, scripts, and
 templates under their own filesystem root. The standard discovery
 flow:
 
-1. **`skill_files(name="<skill>")`** — list every file the skill
+1. **`skill:files(name="<skill>")`** — list every file the skill
    ships, with relative + absolute paths, size, and mode. Optional
    `subdir` (e.g. `"references"`) and `glob` (e.g. `"*.md"`) narrow
    the listing.
-2. **`skill_ref(skill="<skill>", ref="<base>")`** — convenience for
+2. **`skill:ref(skill="<skill>", ref="<base>")`** — convenience for
    reference docs: reads `references/<base>.md` directly without
    needing the absolute path.
 3. **`bash.read_file <abs path>`** — for any other bundled file
-   (sample data, scripts, templates) once `skill_files` gave you
+   (sample data, scripts, templates) once `skill:files` gave you
    the path.
 
 Skill bodies SHOULD point at the references they consider important
 in narrative form, but you do NOT have to wait for an explicit
 mention. If a workflow looks underspecified or a reference may
-exist, run `skill_files` and read what is there.
+exist, run `skill:files` and read what is there.
 
 ## Operator policy
 

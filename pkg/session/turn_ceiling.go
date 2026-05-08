@@ -6,6 +6,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 // turn_ceiling.go implements phase-4-spec §8.1 + §8.2: a soft-warning
@@ -20,7 +21,7 @@ import (
 // (event-sourcing rule §4.3) — a restart that loses the in-memory
 // state must rebuild it from events to keep the once-per-session
 // invariant honest. Cheap: events are already loaded for replay.
-func (s *Session) reloadSoftWarningFlag(rows []EventRow) {
+func (s *Session) reloadSoftWarningFlag(rows []store.EventRow) {
 	for _, ev := range rows {
 		if ev.EventType != string(protocol.KindSystemMessage) {
 			continue
@@ -51,19 +52,18 @@ func (s *Session) roleAndTaskForNudge(ctx context.Context) (role, task string) {
 			}
 		}
 		if s.parent.id != "" {
-			if rows, err := s.store.ListEvents(ctx, s.parent.id, ListEventsOpts{}); err == nil {
-				for _, ev := range rows {
-					if ev.EventType != string(protocol.KindSubagentStarted) {
-						continue
-					}
-					childID, _ := ev.Metadata["child_session_id"].(string)
-					if childID != s.id {
-						continue
-					}
-					if t, _ := ev.Metadata["task"].(string); t != "" {
-						task = t
-					}
-					break
+			// Tight DB-side scan: parent's subagent_started row whose
+			// metadata.child_session_id == this session's id. The
+			// metadata.contains filter compiles to PostgreSQL `@>`,
+			// so the result set is at most one row.
+			rows, err := s.store.ListEvents(ctx, s.parent.id, store.ListEventsOpts{
+				Kinds:            []string{string(protocol.KindSubagentStarted)},
+				MetadataContains: map[string]any{"child_session_id": s.id},
+				Limit:            1,
+			})
+			if err == nil && len(rows) > 0 {
+				if t, _ := rows[0].Metadata["task"].(string); t != "" {
+					task = t
 				}
 			}
 		}
@@ -91,8 +91,8 @@ func (s *Session) maybeInjectSoftWarning(runCtx context.Context) {
 		return
 	}
 	role, task := s.roleAndTaskForNudge(runCtx)
-	canSpawnDeeper := s.deps == nil || s.deps.maxDepth <= 0 ||
-		s.depth+1 <= s.deps.maxDepth
+	canSpawnDeeper := s.deps == nil || s.deps.MaxDepth <= 0 ||
+		s.depth+1 <= s.deps.MaxDepth
 	text := softWarningText(role, task, st.iter, canSpawnDeeper)
 	frame := protocol.NewSystemMessage(s.id, s.agent.Participant(),
 		protocol.SystemMessageSoftWarning, text)
@@ -135,25 +135,20 @@ func softWarningText(role, task string, turns int, canSpawnDeeper bool) string {
 }
 
 // triggerHardCeiling invokes the §8.2 termination path. The session
-// goroutine calls s.terminate(reason="hard_ceiling") on itself
-// (mirroring Manager.Terminate's body without the root-only lookup);
-// the deferred teardown sequence in Session.Run writes the canonical
-// session_terminated{reason:"hard_ceiling"} event and, for sub-agents,
-// surfaces a subagent_result{reason:"hard_ceiling"} Frame to the
-// parent. A system_marker{subject:"hard_ceiling_hit"} also lands so
-// the adapter / operator dashboards surface the event without parsing
-// the terminal record.
-func (s *Session) triggerHardCeiling(runCtx context.Context, turnsUsed int) {
-	mk := protocol.NewSystemMarker(s.id, s.agent.Participant(),
-		protocol.SubjectHardCeilingHit,
-		map[string]any{"turns_used": turnsUsed})
-	if err := s.emit(runCtx, mk); err != nil {
-		s.logger.Warn("session: emit hard_ceiling_hit marker",
-			"session", s.id, "err", err)
-	}
-	s.terminate(&terminationCause{
-		reason:    protocol.TerminationHardCeiling,
-		emitClose: true,
-		writeCtx:  runCtx,
-	})
+// goroutine calls requestClose(reason="hard_ceiling") on itself; for
+// roots the OnCloseRequest hook spawns Manager.Terminate which
+// Submits SessionClose, and for subagents emitSubagentResultToParent
+// fires so the parent's handleSubagentResult issues SessionClose
+// back. The deferred teardown in Session.Run writes the canonical
+// session_terminated{reason:"hard_ceiling"} event.
+//
+// Phase 4.1b-pre stage B (O8) drops the standalone hard_ceiling_hit
+// system_marker emit — requestClose already records the close trigger
+// via close_requested{reason:"hard_ceiling"}, the unified
+// observability signal. The exact iteration count at which the
+// ceiling fired is recoverable from the events log
+// (count tool_call rows in the active turn); not threaded into the
+// marker today since no consumer depends on it.
+func (s *Session) triggerHardCeiling(runCtx context.Context) {
+	s.requestClose(runCtx, protocol.TerminationHardCeiling)
 }

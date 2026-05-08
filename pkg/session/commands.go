@@ -29,13 +29,16 @@ var nameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 // I/O outside of CommandEnv.
 type CommandHandler func(ctx context.Context, env CommandEnv, args []string) ([]protocol.Frame, error)
 
-// CommandEnv carries the references a handler may need.
+// CommandEnv carries the references a handler may need. Anything
+// per-session (notepad handle, plan, whiteboard, …) lives in
+// Session.Value(<extension-name>) — handlers fetch via the
+// extension's FromState helper instead of reaching for a typed
+// field here.
 type CommandEnv struct {
 	Session     *Session
 	Author      protocol.ParticipantInfo
 	AgentAuthor protocol.ParticipantInfo
 	Models      *model.ModelRouter
-	Notepad     *Notepad
 	Logger      *slog.Logger
 	// Description is set by Register for the /help listing.
 	Description string

@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -10,159 +9,9 @@ import (
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
-
-// fakeStore is a minimal in-memory RuntimeStore. It supports multiple
-// sessions so phase-4 spawn / restart tests can build small parent /
-// child trees against it.
-//
-// Single-session tests still work: the legacy `session` field aliases
-// the first OpenSession call so any test that opens one session and
-// reads via LoadSession/UpdateSessionStatus continues to behave as
-// before (for backward compatibility with phase 1-3.5 test cases).
-type fakeStore struct {
-	mu       sync.Mutex
-	events   map[string][]EventRow // by sessionID
-	notes    []NoteRow
-	sessions map[string]SessionRow // by sessionID
-	seq      map[string]int        // per-session seq cursor
-}
-
-func newFakeStore() *fakeStore {
-	return &fakeStore{
-		events:   make(map[string][]EventRow),
-		sessions: make(map[string]SessionRow),
-		seq:      make(map[string]int),
-	}
-}
-
-func (s *fakeStore) OpenSession(_ context.Context, row SessionRow) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sessions[row.ID] = row
-	return nil
-}
-
-func (s *fakeStore) LoadSession(_ context.Context, id string) (SessionRow, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	row, ok := s.sessions[id]
-	if !ok {
-		return SessionRow{}, ErrSessionNotFound
-	}
-	return row, nil
-}
-
-func (s *fakeStore) UpdateSessionStatus(_ context.Context, id, status string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	row, ok := s.sessions[id]
-	if !ok {
-		return ErrSessionNotFound
-	}
-	row.Status = status
-	s.sessions[id] = row
-	return nil
-}
-
-func (s *fakeStore) AppendEvent(_ context.Context, ev EventRow, _ string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.seq[ev.SessionID]++
-	ev.Seq = s.seq[ev.SessionID]
-	s.events[ev.SessionID] = append(s.events[ev.SessionID], ev)
-	return nil
-}
-
-func (s *fakeStore) ListEvents(_ context.Context, sessionID string, opts ListEventsOpts) ([]EventRow, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	src := s.events[sessionID]
-	out := make([]EventRow, 0, len(src))
-	for _, ev := range src {
-		if opts.MinSeq > 0 && ev.Seq <= opts.MinSeq {
-			continue
-		}
-		out = append(out, ev)
-	}
-	if opts.Limit > 0 && len(out) > opts.Limit {
-		out = out[:opts.Limit]
-	}
-	return out, nil
-}
-
-func (s *fakeStore) NextSeq(_ context.Context, sessionID string) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.seq[sessionID] + 1, nil
-}
-
-func (s *fakeStore) AppendNote(_ context.Context, n NoteRow) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.notes = append(s.notes, n)
-	return nil
-}
-
-func (s *fakeStore) ListNotes(_ context.Context, _ string, _ int) ([]NoteRow, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]NoteRow(nil), s.notes...), nil
-}
-
-func (s *fakeStore) ListSessions(_ context.Context, _, _ string) ([]SessionRow, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.sessions) == 0 {
-		return nil, nil
-	}
-	out := make([]SessionRow, 0, len(s.sessions))
-	for _, row := range s.sessions {
-		out = append(out, row)
-	}
-	return out, nil
-}
-
-func (s *fakeStore) ListChildren(_ context.Context, parentID string) ([]SessionRow, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]SessionRow, 0)
-	for _, row := range s.sessions {
-		if row.ParentSessionID == parentID {
-			out = append(out, row)
-		}
-	}
-	return out, nil
-}
-
-func (s *fakeStore) recordedKinds() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// Existing single-session callers expect a flat list of event types
-	// in arrival order. With the map backing, sort by sessionID + seq
-	// to keep the output deterministic across runs.
-	type rec struct {
-		sid string
-		ev  EventRow
-	}
-	all := make([]rec, 0)
-	for sid, evs := range s.events {
-		for _, e := range evs {
-			all = append(all, rec{sid: sid, ev: e})
-		}
-	}
-	sort.Slice(all, func(i, j int) bool {
-		if all[i].sid != all[j].sid {
-			return all[i].sid < all[j].sid
-		}
-		return all[i].ev.Seq < all[j].ev.Seq
-	})
-	out := make([]string, 0, len(all))
-	for _, r := range all {
-		out = append(out, r.ev.EventType)
-	}
-	return out
-}
 
 // scriptedModel emits a fixed sequence of chunks then ends.
 type scriptedModel struct {
@@ -255,7 +104,8 @@ func newTestSession(t *testing.T, store RuntimeStore, mdl model.Model) (*Session
 		},
 	})
 	codec := protocol.NewCodec()
-	sess := NewSession("s1", agent, store, router, cmds, codec, nil)
+	tm := tool.NewToolManager(permsAllow{}, nil, nil)
+	sess := NewSession("s1", agent, store, router, cmds, codec, tm, nil)
 	sess.materialised.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = sess.Run(ctx) }()
@@ -263,8 +113,8 @@ func newTestSession(t *testing.T, store RuntimeStore, mdl model.Model) (*Session
 }
 
 func TestSession_HappyPathTurn_FrameSequence(t *testing.T) {
-	store := newFakeStore()
-	_ = store.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
+	testStore := fixture.NewTestStore()
+	_ = testStore.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
 
 	mdl := &scriptedModel{
 		chunks: []model.Chunk{
@@ -273,7 +123,7 @@ func TestSession_HappyPathTurn_FrameSequence(t *testing.T) {
 			{Content: ptr(", world!"), Final: true},
 		},
 	}
-	sess, cancel := newTestSession(t, store, mdl)
+	sess, cancel := newTestSession(t, testStore, mdl)
 	defer cancel()
 
 	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser, Name: "alice"}
@@ -299,6 +149,7 @@ func TestSession_HappyPathTurn_FrameSequence(t *testing.T) {
 done:
 
 	wantOrder := []string{
+		string(protocol.KindSessionStatus), // active marker emitted by startTurn
 		string(protocol.KindUserMessage),
 		string(protocol.KindReasoning),
 		string(protocol.KindAgentMessage),
@@ -315,17 +166,38 @@ done:
 	if mdl.callCount() != 1 {
 		t.Errorf("model.Generate calls = %d, want 1", mdl.callCount())
 	}
-	rec := store.recordedKinds()
-	if len(rec) < len(seen) {
-		t.Errorf("persistence rows %d < emitted frames %d", len(rec), len(seen))
+	rec := testStore.RecordedKinds()
+	// Streaming chunks (Reasoning + AgentMessage with Consolidated=false)
+	// are outbox-only by design: live UX renders them, but only the
+	// per-iteration consolidated AgentMessage row lands in the store.
+	// So persistence rows are a SUBSET of outbox frames; we assert the
+	// non-streaming frames are all present.
+	if got, want := countKind(rec, string(protocol.KindAgentMessage)), 1; got != want {
+		t.Errorf("persisted agent_message rows = %d, want %d (consolidated only)", got, want)
+	}
+	if got := countKind(rec, string(protocol.KindReasoning)); got != 0 {
+		t.Errorf("persisted reasoning rows = %d, want 0 (chunks are outbox-only)", got)
+	}
+	if !contains(rec, string(protocol.KindUserMessage)) {
+		t.Errorf("persisted rows missing user_message: %v", rec)
 	}
 }
 
+func countKind(kinds []string, want string) int {
+	n := 0
+	for _, k := range kinds {
+		if k == want {
+			n++
+		}
+	}
+	return n
+}
+
 func TestSession_NoModelInvocationForSlashCommand(t *testing.T) {
-	store := newFakeStore()
-	_ = store.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
+	testStore := fixture.NewTestStore()
+	_ = testStore.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
 	mdl := &scriptedModel{}
-	sess, cancel := newTestSession(t, store, mdl)
+	sess, cancel := newTestSession(t, testStore, mdl)
 	defer cancel()
 
 	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
@@ -349,10 +221,10 @@ func TestSession_NoModelInvocationForSlashCommand(t *testing.T) {
 }
 
 func TestSession_UnknownSlashCommandEmitsError(t *testing.T) {
-	store := newFakeStore()
-	_ = store.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
+	testStore := fixture.NewTestStore()
+	_ = testStore.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
 	mdl := &scriptedModel{}
-	sess, cancel := newTestSession(t, store, mdl)
+	sess, cancel := newTestSession(t, testStore, mdl)
 	defer cancel()
 
 	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}

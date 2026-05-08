@@ -2,20 +2,24 @@
 // runtime supervisor. Phase 1 ships pkg/adapter/console; later
 // phases add SSE (phase 2) and a2a (phase 10).
 //
-// The Adapter and AdapterHost types live in pkg/runtime so the
-// runtime can implement AdapterHost without an import cycle. This
-// file is a thin shim that re-exports them for callers who want to
-// import "pkg/adapter" rather than "pkg/runtime".
+// Adapter and AdapterHost live in pkg/session/manager (the
+// supervisor); OpenRequest stays in pkg/session because Session
+// constructors consume it. This file is a thin shim that re-exports
+// the trio for callers who want to import "pkg/adapter" rather than
+// reach into the runtime/session split.
 package adapter
 
-import "github.com/hugr-lab/hugen/pkg/session"
+import (
+	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/manager"
+)
 
-// Adapter is an alias for session.Adapter — the interface every
+// Adapter is an alias for manager.Adapter — the interface every
 // adapter implementation must satisfy.
-type Adapter = session.Adapter
+type Adapter = manager.Adapter
 
 // Host is the adapter-side view of the session.
-type Host = session.AdapterHost
+type Host = manager.AdapterHost
 
 // OpenRequest is the parameter shape for Host.OpenSession.
 type OpenRequest = session.OpenRequest

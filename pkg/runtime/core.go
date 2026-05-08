@@ -9,10 +9,12 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/manager"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/hugen/pkg/tool/providers/policies"
@@ -63,12 +65,17 @@ type Core struct {
 	Permissions perm.Service
 
 	// Phase 8 (tools).
-	Workspace *session.Workspace
-	Tools     *tool.ToolManager
-	Policies  *policies.Policies
+	Tools    *tool.ToolManager
+	Policies *policies.Policies
+
+	// Phase 8.5 (extensions). Built by phaseExtensions; consumed by
+	// phaseSessionManager via session.WithExtensions. Each extension
+	// implementing tool.ToolProvider is also registered on Tools so
+	// its catalogue surfaces to Snapshot/Resolve/Dispatch.
+	Extensions []extension.Extension
 
 	// Phase 9 (session_manager).
-	Manager *session.Manager
+	Manager *manager.Manager
 
 	// cleanups stacks per-phase teardown closures in registration
 	// order. cleanupPartial (failure path) and Shutdown (success

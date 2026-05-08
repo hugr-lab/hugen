@@ -21,8 +21,7 @@ func TestRouteFor_DefaultsBuffered(t *testing.T) {
 	}{
 		{"subagent_result is RouteToolFeed", protocol.KindSubagentResult, RouteToolFeed},
 		{"subagent_started default RouteBuffered", protocol.KindSubagentStarted, RouteBuffered},
-		{"whiteboard_op host-internal", protocol.KindWhiteboardOp, RouteInternal},
-		{"whiteboard_message member-internal", protocol.KindWhiteboardMessage, RouteInternal},
+		{"extension_frame is RouteInternal", protocol.KindExtensionFrame, RouteInternal},
 		{"agent_message default RouteBuffered", protocol.KindAgentMessage, RouteBuffered},
 		{"system_message default RouteBuffered", protocol.KindSystemMessage, RouteBuffered},
 		{"unknown future kind defaults RouteBuffered", protocol.Kind("future_hitl_request"), RouteBuffered},

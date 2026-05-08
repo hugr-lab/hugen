@@ -6,18 +6,78 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 // ErrDepthExceeded is returned by parent.Spawn when the new
-// sub-agent's depth would exceed deps.maxDepth.
+// sub-agent's depth would exceed deps.MaxDepth.
 var ErrDepthExceeded = errors.New("session: max sub-agent depth exceeded")
+
+var (
+	ErrSessionClosed   = store.ErrSessionClosed
+	ErrSessionNotFound = store.ErrSessionNotFound
+)
+
+const (
+	StatusActive     = store.StatusActive
+	StatusTerminated = store.StatusTerminated
+)
+
+type (
+	EventRow       = store.EventRow
+	SessionRow     = store.SessionRow
+	ResumableRoot  = store.ResumableRoot
+	ListEventsOpts = store.ListEventsOpts
+	RuntimeStore   = store.RuntimeStore
+)
+
+var (
+	EventRowToFrame = store.EventRowToFrame
+	FrameToEventRow = store.FrameToEventRow
+)
+
+type (
+	NoteRow = store.NoteRow
+)
+
+// New creates a fresh root Session. Thin public wrapper over the
+// package-private newSession constructor; exists so the upcoming
+// pkg/session/manager subpackage can construct roots without
+// reaching into package internals.
+//
+// req.ParentSessionID must be empty — pass through NewChild for
+// sub-agents (or use parent.Spawn, which keeps the children-map +
+// SubagentStarted bookkeeping intact).
+func New(ctx context.Context, deps *Deps, req OpenRequest) (*Session, error) {
+	return newSession(ctx, nil, deps, req)
+}
+
+// NewChild creates a sub-agent Session as a child of parent. Public
+// wrapper over newSession with a non-nil parent; the caller is
+// responsible for any side effects Spawn normally performs
+// (children-map registration, SubagentStarted emit, childWG.Add).
+// Most production code should call parent.Spawn instead.
+func NewChild(ctx context.Context, parent *Session, req OpenRequest) (*Session, error) {
+	if parent == nil {
+		return nil, fmt.Errorf("session: NewChild requires a parent")
+	}
+	return newSession(ctx, parent, parent.deps, req)
+}
+
+// NewRestore re-creates a root Session from an existing sessions
+// row. Thin public wrapper over newSessionRestore; phase 4 only
+// restores roots, so parent is implicitly nil.
+func NewRestore(ctx context.Context, id string, deps *Deps) (*Session, error) {
+	return newSessionRestore(ctx, id, nil, deps)
+}
 
 // newSession creates a fresh Session (root or sub-agent), writes its
 // initial sessions row, runs lifecycle.Acquire, and emits a
 // SessionOpened frame. The returned Session is ready for s.start.
 //
-//   - parent == nil → root: ctx derived from deps.rootCtx, depth = 0,
+//   - parent == nil → root: ctx derived from deps.RootCtx, depth = 0,
 //     SessionType = "root".
 //   - parent != nil → sub-agent: ctx derived from parent.ctx, depth =
 //     parent.depth + 1, SessionType = "subagent". Caller is
@@ -30,7 +90,7 @@ var ErrDepthExceeded = errors.New("session: max sub-agent depth exceeded")
 // the row was written, newSession appends a session_terminated
 // {reason="acquire_failed"} event so the orphaned row is unambiguously
 // terminal on next boot.
-func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req OpenRequest) (*Session, error) {
+func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenRequest) (*Session, error) {
 	id := newSessionID()
 	depth := 0
 	sessionType := "root"
@@ -40,10 +100,10 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 		sessionType = "subagent"
 		parentCtx = parent.ctx
 	} else {
-		parentCtx = deps.rootCtx
+		parentCtx = deps.RootCtx
 	}
 	if parentCtx == nil {
-		// Defensive: should never happen post-pivot; deps.rootCtx is
+		// Defensive: should never happen post-pivot; deps.RootCtx is
 		// always set by NewManager.
 		parentCtx = context.Background()
 	}
@@ -56,9 +116,9 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 	// 2. Persist the initial row (the only sessions-row WRITE on the
 	// open path; future writes touch session_events instead).
 	now := time.Now().UTC()
-	row := SessionRow{
+	row := store.SessionRow{
 		ID:                 id,
-		AgentID:            deps.agent.ID(),
+		AgentID:            deps.Agent.ID(),
 		OwnerID:            req.OwnerID,
 		ParentSessionID:    req.ParentSessionID,
 		SessionType:        sessionType,
@@ -68,31 +128,27 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
-	if err := deps.store.OpenSession(ctx, row); err != nil {
+	if err := deps.Store.OpenSession(ctx, row); err != nil {
 		cancel(nil)
 		return nil, fmt.Errorf("session: open row: %w", err)
 	}
 	s.openedAt = now
 	s.ownerID = req.OwnerID
 
-	// 3. Lifecycle.Acquire (workspace dir, autoload skills, per_session
-	// MCPs). Failure here means the row exists but no goroutine —
-	// mark the row terminal so restart-walker doesn't try to resume
-	// it.
-	if deps.lifecycle != nil {
-		if err := deps.lifecycle.Acquire(ctx, id); err != nil {
-			s.appendTerminal(ctx, "acquire_failed")
-			cancel(nil)
-			return nil, fmt.Errorf("session: acquire: %w", err)
+	// 3. Extension InitState — let every registered extension stash
+	// its per-session typed handle in s state via SetValue. Order is
+	// preserved: a later extension can read state an earlier one
+	// stored. Errors are logged and the session continues — extensions
+	// must be best-effort at startup; tool dispatch surfaces specific
+	// failures later if the handle is missing.
+	for _, ext := range deps.Extensions {
+		init, ok := ext.(extension.StateInitializer)
+		if !ok {
+			continue
 		}
-		// Phase 4.1a stage A step 9: per_session providers now live
-		// on a child ToolManager owned by Lifecycle. Swap the
-		// session's tools to that child so Dispatch / Snapshot walk
-		// child→root for unknown-provider lookups. Lifecycle
-		// implementations without per-session scoping return nil —
-		// the constructor-time tools (root) stay in place.
-		if child := deps.lifecycle.SessionTools(id); child != nil {
-			s.tools = child
+		if err := init.InitState(ctx, s); err != nil {
+			deps.Logger.Warn("session: extension InitState",
+				"session", id, "extension", ext.Name(), "err", err)
 		}
 	}
 
@@ -103,13 +159,21 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 	if parent == nil {
 		parts := req.Participants
 		if len(parts) == 0 {
-			parts = []protocol.ParticipantInfo{deps.agent.Participant()}
+			parts = []protocol.ParticipantInfo{deps.Agent.Participant()}
 		}
-		opened := protocol.NewSessionOpened(id, deps.agent.Participant(), parts)
+		opened := protocol.NewSessionOpened(id, deps.Agent.Participant(), parts)
 		if err := s.emit(ctx, opened); err != nil && !errors.Is(err, ErrSessionClosed) {
-			deps.logger.Warn("session: emit session_opened", "session", id, "err", err)
+			deps.Logger.Warn("session: emit session_opened", "session", id, "err", err)
 		}
 	}
+	// Initial lifecycle marker — fresh session (root or sub-agent)
+	// starts idle: no turn, no children. Roots: restart classifier
+	// reads this as "session opened cleanly, awaiting first input".
+	// Sub-agents: parent.Spawn flips this to active immediately
+	// after newSession returns; the symmetric initial marker keeps
+	// Status() non-empty for any caller introspecting a child
+	// before its first turn.
+	s.markStatus(ctx, protocol.SessionStatusIdle, "session_opened")
 
 	// Mark in-memory materialise flag so the first inbound Frame
 	// doesn't trigger a redundant store walk for a session with no
@@ -133,12 +197,12 @@ func newSession(ctx context.Context, parent *Session, deps *sessionDeps, req Ope
 //
 // Returns ErrSessionClosed if the session has a session_terminated
 // event already (caller handles as "session is gone, no resume").
-func newSessionRestore(ctx context.Context, id string, parent *Session, deps *sessionDeps) (*Session, error) {
-	row, err := deps.store.LoadSession(ctx, id)
+func newSessionRestore(ctx context.Context, id string, parent *Session, deps *Deps) (*Session, error) {
+	row, err := deps.Store.LoadSession(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if hasTerminated(ctx, deps.store, id) {
+	if row.Status == store.StatusTerminated {
 		return nil, ErrSessionClosed
 	}
 
@@ -149,7 +213,7 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 	// Idempotent — second call (e.g. RestoreActive then Resume on the
 	// same root) finds the rows already there and writes nothing.
 	if _, err := settleDanglingSubagents(ctx, deps, id); err != nil {
-		deps.logger.Warn("session: restore settle dangling",
+		deps.Logger.Warn("session: restore settle dangling",
 			"session", id, "err", err)
 	}
 
@@ -158,7 +222,7 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 	if parent != nil {
 		parentCtx = parent.ctx
 	} else {
-		parentCtx = deps.rootCtx
+		parentCtx = deps.RootCtx
 	}
 	if parentCtx == nil {
 		parentCtx = context.Background()
@@ -169,34 +233,29 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 	s.openedAt = row.CreatedAt
 	s.ownerID = row.OwnerID
 
-	// Re-Acquire on the resume path: workspace dir is idempotent
-	// (mkdir is a no-op when present), autoload re-binds the skill
-	// catalogue, and per_session MCP providers re-spawn since they
-	// don't survive a process exit. NOT idempotent under concurrent
-	// resume of the same id — Lifecycle.AddSessionProvider rejects
-	// duplicate (sessionID, name) registrations, so two adapters
-	// racing Manager.Resume on the same id can leave one with a
-	// half-built provider set. Manager.Resume's m.live double-check
-	// at the end keeps the live tree clean (loser's session is
-	// cancelled), but the brief window during construction is a
-	// known follow-up — see review note L2.
-	if deps.lifecycle != nil {
-		if err := deps.lifecycle.Acquire(ctx, id); err != nil {
-			cancel(nil)
-			return nil, fmt.Errorf("session: re-acquire: %w", err)
+	// Extension InitState — every extension allocates a fresh
+	// per-session handle. For resumed sessions Recovery (lazy on the
+	// first inbound frame inside materialise) replays events INTO
+	// the handle that InitState seeded; the order keeps handle
+	// pointers stable across the session's lifetime.
+	for _, ext := range deps.Extensions {
+		init, ok := ext.(extension.StateInitializer)
+		if !ok {
+			continue
 		}
-		if child := deps.lifecycle.SessionTools(id); child != nil {
-			s.tools = child
+		if err := init.InitState(ctx, s); err != nil {
+			deps.Logger.Warn("session: extension InitState (resume)",
+				"session", id, "extension", ext.Name(), "err", err)
 		}
 	}
 
 	// Emit a system_marker so adapters can render "session resumed"
 	// in the transcript. Materialisation of in-memory projections
 	// happens lazily on the first inbound Frame via s.materialise().
-	marker := protocol.NewSystemMarker(id, deps.agent.Participant(), "session_resumed",
+	marker := protocol.NewSystemMarker(id, deps.Agent.Participant(), "session_resumed",
 		map[string]any{"prior_status": row.Status})
 	if err := s.emit(ctx, marker); err != nil && !errors.Is(err, ErrSessionClosed) {
-		deps.logger.Warn("session: emit session_resumed marker", "session", id, "err", err)
+		deps.Logger.Warn("session: emit session_resumed marker", "session", id, "err", err)
 	}
 
 	return s, nil
@@ -205,8 +264,8 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *se
 // buildSessionShell constructs the *Session struct populated with the
 // shared deps + tree links + ctx, but performs no IO. Used by both
 // constructors so the field-init pattern stays single-sourced.
-func buildSessionShell(id string, depth int, parent *Session, deps *sessionDeps, sessCtx context.Context, cancel context.CancelCauseFunc) *Session {
-	s := NewSession(id, deps.agent, deps.store, deps.models, deps.commands, deps.codec, deps.logger, deps.opts...)
+func buildSessionShell(id string, depth int, parent *Session, deps *Deps, sessCtx context.Context, cancel context.CancelCauseFunc) *Session {
+	s := NewSession(id, deps.Agent, deps.Store, deps.Models, deps.Commands, deps.Codec, deps.Tools, deps.Logger, deps.Opts...)
 	s.depth = depth
 	s.deps = deps
 	s.parent = parent
@@ -216,49 +275,50 @@ func buildSessionShell(id string, depth int, parent *Session, deps *sessionDeps,
 	return s
 }
 
-// start launches the session's Run goroutine. onExit (optional) is
-// invoked after Run returns and after wg.Done — the caller uses it to
-// remove the session from its parent's children map (or from
-// Manager's m.live for roots).
-func (s *Session) start(onExit func()) {
-	if s.deps == nil || s.deps.wg == nil {
-		// Legacy NewSession callers that haven't migrated to the
-		// pivot constructors — they manage goroutines themselves.
-		// This path is rare (test fixtures only).
+// Start launches the session's Run goroutine. The session's own
+// internal ctx (s.ctx — derived from deps.RootCtx for roots and from
+// parent.ctx for sub-agents) drives Run; the ctx parameter exists for
+// future symmetry with idiomatic Start(ctx) APIs and for short-lived
+// setup hooks. Today it is unused.
+//
+// Bookkeeping handled inline so callers carry no closures (Stage B
+// retired the old `onExit` plumbing — parent.children deregister
+// moves to handleSubagentResult; the only remaining hook was
+// childWG.Done, now folded into the goroutine itself):
+//
+//   - deps.WG accounts for every session goroutine in the forest;
+//     Manager.Stop waits on it.
+//   - For sub-agents (s.parent != nil) the parent's childWG tracks
+//     this child's goroutine so the parent's teardown can wait
+//     specifically for ITS direct children to exit before running
+//     its own lifecycle.Release / handleExit.
+//
+// Sessions built without deps (legacy NewSession test fixtures) do
+// nothing — those callers manage goroutines themselves.
+func (s *Session) Start(_ context.Context) {
+	if s.deps == nil || s.deps.WG == nil {
 		return
 	}
-	s.deps.wg.Add(1)
+	s.deps.WG.Add(1)
+	if s.parent != nil {
+		s.parent.childWG.Add(1)
+	}
 	go func() {
-		defer s.deps.wg.Done()
-		if onExit != nil {
-			defer onExit()
+		defer s.deps.WG.Done()
+		if s.parent != nil {
+			defer s.parent.childWG.Done()
 		}
 		if err := s.Run(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
-			s.deps.logger.Warn("session loop exited", "session", s.id, "err", err)
+			s.deps.Logger.Warn("session loop exited", "session", s.id, "err", err)
 		}
 	}()
 }
 
-// hasTerminated returns true iff the session has at least one
-// session_terminated event in its events. Cheap read-only walk used
-// by Resume / Recover to gate "is this session gone?".
-func hasTerminated(ctx context.Context, store RuntimeStore, id string) bool {
-	events, err := store.ListEvents(ctx, id, ListEventsOpts{Limit: 1000})
-	if err != nil {
-		return false
-	}
-	for _, ev := range events {
-		if ev.EventType == string(protocol.KindSessionTerminated) {
-			return true
-		}
-	}
-	return false
-}
 
 // depthFromRow extracts metadata.depth from a SessionRow, handling
 // both int and float64 (JSON unmarshal default) forms. Returns 0 if
 // missing.
-func depthFromRow(row SessionRow) int {
+func depthFromRow(row store.SessionRow) int {
 	if row.Metadata == nil {
 		return 0
 	}
@@ -269,24 +329,5 @@ func depthFromRow(row SessionRow) int {
 		return int(df)
 	}
 	return 0
-}
-
-// appendTerminal appends a session_terminated event to the session's
-// own events. Used on construction-failure paths (acquire_failed) and
-// on goroutine exit when a terminationCause was attached. Best-effort:
-// errors logged but not returned, since the caller is already
-// returning an error of its own.
-func (s *Session) appendTerminal(ctx context.Context, reason string) {
-	terminal := protocol.NewSessionTerminated(s.id, s.deps.agent.Participant(), protocol.SessionTerminatedPayload{
-		Reason: reason,
-	})
-	row, summary, err := FrameToEventRow(terminal, s.deps.agent.ID())
-	if err != nil {
-		s.deps.logger.Warn("session: project terminal frame", "session", s.id, "err", err)
-		return
-	}
-	if err := s.deps.store.AppendEvent(ctx, row, summary); err != nil {
-		s.deps.logger.Warn("session: append terminal event", "session", s.id, "err", err)
-	}
 }
 

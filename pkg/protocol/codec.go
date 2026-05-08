@@ -178,30 +178,36 @@ func (c *Codec) materialise(base BaseFrame, payload []byte) (Frame, error) {
 			return nil, err
 		}
 		return &PlanOp{BaseFrame: base, Payload: p}, nil
-	case KindWhiteboardOp:
-		var p WhiteboardOpPayload
-		if err := unmarshalPayload(payload, &p); err != nil {
-			return nil, err
-		}
-		return &WhiteboardOp{BaseFrame: base, Payload: p}, nil
-	case KindWhiteboardMessage:
-		var p WhiteboardMessagePayload
-		if err := unmarshalPayload(payload, &p); err != nil {
-			return nil, err
-		}
-		return &WhiteboardMessage{BaseFrame: base, Payload: p}, nil
 	case KindSessionTerminated:
 		var p SessionTerminatedPayload
 		if err := unmarshalPayload(payload, &p); err != nil {
 			return nil, err
 		}
 		return &SessionTerminated{BaseFrame: base, Payload: p}, nil
+	case KindSessionClose:
+		var p SessionClosePayload
+		if err := unmarshalPayload(payload, &p); err != nil {
+			return nil, err
+		}
+		return &SessionClose{BaseFrame: base, Payload: p}, nil
 	case KindSystemMessage:
 		var p SystemMessagePayload
 		if err := unmarshalPayload(payload, &p); err != nil {
 			return nil, err
 		}
 		return &SystemMessage{BaseFrame: base, Payload: p}, nil
+	case KindSessionStatus:
+		var p SessionStatusPayload
+		if err := unmarshalPayload(payload, &p); err != nil {
+			return nil, err
+		}
+		return &SessionStatus{BaseFrame: base, Payload: p}, nil
+	case KindExtensionFrame:
+		var p ExtensionFramePayload
+		if err := unmarshalPayload(payload, &p); err != nil {
+			return nil, err
+		}
+		return &ExtensionFrame{BaseFrame: base, Payload: p}, nil
 	}
 	// Phase 2 (R-Plan-26 / FR-024): non-empty unknown kinds round-trip
 	// as *OpaqueFrame so future-phase variants survive the wire even

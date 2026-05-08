@@ -12,6 +12,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -83,8 +84,8 @@ func (permsDeny) Subscribe(_ context.Context) (<-chan perm.RefreshEvent, error) 
 
 func newToolSession(t *testing.T, mdl model.Model, perms perm.Service, providers ...tool.ToolProvider) (*Session, context.CancelFunc) {
 	t.Helper()
-	store := newFakeStore()
-	_ = store.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
+	testStore := fixture.NewTestStore()
+	_ = testStore.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
 
 	tm := tool.NewToolManager(perms, nil, nil)
 	for _, p := range providers {
@@ -98,7 +99,7 @@ func newToolSession(t *testing.T, mdl model.Model, perms perm.Service, providers
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
-	sess := NewSession("s1", agent, store, router, NewCommandRegistry(), protocol.NewCodec(), nil, WithTools(tm))
+	sess := NewSession("s1", agent, testStore, router, NewCommandRegistry(), protocol.NewCodec(), tm, nil)
 	sess.materialised.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = sess.Run(ctx) }()
@@ -245,7 +246,7 @@ func contains(ss []string, want string) bool {
 // turnCtx to dispatch goroutines so /cancel cleanly aborts both
 // model and tools").
 type blockingProvider struct {
-	tools  []tool.Tool
+	tools           []tool.Tool
 	dispatchEntered chan struct{} // closed on first Call entry
 }
 

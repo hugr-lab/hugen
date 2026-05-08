@@ -141,8 +141,15 @@ func (a *Adapter) runInput(ctx context.Context) error {
 					a.logger.Warn("submit /end on EOF", "err", subErr)
 					return nil
 				}
+				// Wait for the session goroutine to fully exit
+				// (s.done closes after teardown writes
+				// session_terminated). Returning on a.closed —
+				// the SessionClosed FRAME — is too early: the
+				// goroutine is still mid-requestClose, and our
+				// caller's deferred runtime.Shutdown would race
+				// rootCancel against the in-flight emit.
 				select {
-				case <-a.closed:
+				case <-a.session.Done():
 				case <-ctx.Done():
 				}
 				return nil
@@ -165,11 +172,15 @@ func (a *Adapter) runInput(ctx context.Context) error {
 			fmt.Fprintf(a.err, "submit: %v\n", err)
 		}
 		// /end short-circuits the input loop — wait for the session
-		// to actually emit session_closed before returning so any
-		// in-flight turn can finish persisting.
+		// goroutine to fully exit (Done closes after teardown
+		// writes session_terminated). Waiting on the SessionClosed
+		// FRAME (a.closed) is too early: the goroutine is still
+		// mid-requestClose and the caller's deferred
+		// runtime.Shutdown would race rootCancel against the
+		// in-flight emit.
 		if pc, ok := f.(*protocol.SlashCommand); ok && pc.Payload.Name == "end" {
 			select {
-			case <-a.closed:
+			case <-a.session.Done():
 			case <-ctx.Done():
 			}
 			return nil
@@ -203,6 +214,22 @@ func (a *Adapter) render(f protocol.Frame) {
 		// showed it.
 		_ = v
 	case *protocol.AgentMessage:
+		// Consolidated rows carry the same text already streamed via
+		// chunks (Consolidated=false). Re-printing would duplicate
+		// the assistant's output on screen. Treat them as markers:
+		// Final=true draws the newline + prompt cut; Final=false
+		// (tool-iteration) is silent — the dispatcher's tool_call
+		// rendering follows.
+		if v.Payload.Consolidated {
+			if v.Payload.Final {
+				if a.currentSection != "" {
+					fmt.Fprintln(a.out)
+				}
+				a.currentSection = ""
+				fmt.Fprint(a.out, "> ")
+			}
+			break
+		}
 		if a.currentSection != "agent" {
 			if a.currentSection != "" {
 				fmt.Fprintln(a.out)
@@ -210,11 +237,6 @@ func (a *Adapter) render(f protocol.Frame) {
 			a.currentSection = "agent"
 		}
 		fmt.Fprint(a.out, v.Payload.Text)
-		if v.Payload.Final {
-			fmt.Fprintln(a.out)
-			a.currentSection = ""
-			fmt.Fprint(a.out, "> ")
-		}
 	case *protocol.Reasoning:
 		if a.currentSection != "reasoning" {
 			if a.currentSection != "" {

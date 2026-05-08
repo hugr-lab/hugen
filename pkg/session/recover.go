@@ -5,7 +5,17 @@ import (
 	"fmt"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 )
+
+// SettleDanglingSubagents is the cross-package entry point used by
+// pkg/session/manager.Manager.RestoreActive. Delegates to the
+// in-package settleDanglingSubagents so newSessionRestore (which
+// also calls settle, internally) stays a single-package
+// implementation.
+func SettleDanglingSubagents(ctx context.Context, deps *Deps, parentID string) (int, error) {
+	return settleDanglingSubagents(ctx, deps, parentID)
+}
 
 // settleDanglingSubagents reconciles a parent session's child set with
 // its events at restore time. For every row in
@@ -38,11 +48,11 @@ import (
 // the parent in this pass — exactly the count of children that needed
 // settle, regardless of whether the child was clean-terminated or not.
 // Callers use it as boot-time activity probe.
-func settleDanglingSubagents(ctx context.Context, deps *sessionDeps, parentID string) (int, error) {
+func settleDanglingSubagents(ctx context.Context, deps *Deps, parentID string) (int, error) {
 	if deps == nil {
 		return 0, fmt.Errorf("session: settle requires deps")
 	}
-	children, err := deps.store.ListChildren(ctx, parentID)
+	children, err := deps.Store.ListChildren(ctx, parentID)
 	if err != nil {
 		return 0, fmt.Errorf("session: settle list-children: %w", err)
 	}
@@ -50,15 +60,18 @@ func settleDanglingSubagents(ctx context.Context, deps *sessionDeps, parentID st
 		return 0, nil
 	}
 
-	parentEvents, err := deps.store.ListEvents(ctx, parentID, ListEventsOpts{})
+	// Pull only subagent_result rows from the parent's log instead
+	// of paging the whole transcript: each parent has at most one
+	// such row per child it ever spawned, so the result set is a
+	// tiny fraction of the events table.
+	parentEvents, err := deps.Store.ListEvents(ctx, parentID, store.ListEventsOpts{
+		Kinds: []string{string(protocol.KindSubagentResult)},
+	})
 	if err != nil {
 		return 0, fmt.Errorf("session: settle list-events: %w", err)
 	}
-	settled := make(map[string]struct{})
+	settled := make(map[string]struct{}, len(parentEvents))
 	for _, ev := range parentEvents {
-		if ev.EventType != string(protocol.KindSubagentResult) {
-			continue
-		}
 		cid, _ := ev.Metadata["session_id"].(string)
 		if cid == "" {
 			continue
@@ -71,7 +84,7 @@ func settleDanglingSubagents(ctx context.Context, deps *sessionDeps, parentID st
 		if _, ok := settled[child.ID]; ok {
 			continue
 		}
-		reason := lookupChildTerminationReason(ctx, deps.store, child.ID)
+		reason := lookupChildTerminationReason(ctx, deps.Store, child.ID)
 		if reason == "" {
 			// Non-terminal child — bury it with restart_died first so a
 			// future read sees a coherent "child gone" state regardless
@@ -86,45 +99,47 @@ func settleDanglingSubagents(ctx context.Context, deps *sessionDeps, parentID st
 	return written, nil
 }
 
-// lookupChildTerminationReason returns the reason field of the child's
-// own `session_terminated` event, or "" if the child has no terminal
-// event yet (i.e. it never exited gracefully). Reads only — no writes.
-func lookupChildTerminationReason(ctx context.Context, store RuntimeStore, childID string) string {
-	rows, err := store.ListEvents(ctx, childID, ListEventsOpts{Limit: 1000})
-	if err != nil {
+// lookupChildTerminationReason returns the reason field of the
+// child's own `session_terminated` event, or "" if the child has no
+// terminal event yet (i.e. it never exited gracefully). Single
+// indexed probe via [store.RuntimeStore.LatestEventOfKinds] — no
+// full-table walk.
+func lookupChildTerminationReason(ctx context.Context, rs store.RuntimeStore, childID string) string {
+	row, ok, err := rs.LatestEventOfKinds(ctx, childID, []string{string(protocol.KindSessionTerminated)})
+	if err != nil || !ok {
 		return ""
 	}
-	for _, r := range rows {
-		if r.EventType != string(protocol.KindSessionTerminated) {
-			continue
-		}
-		if reason, _ := r.Metadata["reason"].(string); reason != "" {
-			return reason
-		}
-		// Fallback: store.go FrameToEventRow stashes the reason in
-		// row.Content for SessionTerminated frames.
-		if r.Content != "" {
-			return r.Content
-		}
+	if reason, _ := row.Metadata["reason"].(string); reason != "" {
+		return reason
 	}
-	return ""
+	// Fallback: store.go FrameToEventRow stashes the reason in
+	// row.Content for SessionTerminated frames.
+	return row.Content
 }
 
-// appendChildTerminal best-effort writes session_terminated{reason} on
-// the child's events. Errors are logged; callers continue regardless
-// (the parent-side subagent_result still gets written, which is the
-// load-bearing piece for the parent's view).
-func appendChildTerminal(ctx context.Context, deps *sessionDeps, childID, reason string) {
-	terminal := protocol.NewSessionTerminated(childID, deps.agent.Participant(),
+// appendChildTerminal best-effort writes session_terminated{reason}
+// on the child's events AND flips the child's `sessions.status`
+// column to Terminated so list/visibility queries that key off the
+// column see the orphan as dead. Symmetric with [Session.handleExit]
+// for live sessions: event first (durability), column second (cache).
+// Errors are logged; callers continue regardless — the parent-side
+// subagent_result still gets written, which is the load-bearing
+// piece for the parent's view.
+func appendChildTerminal(ctx context.Context, deps *Deps, childID, reason string) {
+	terminal := protocol.NewSessionTerminated(childID, deps.Agent.Participant(),
 		protocol.SessionTerminatedPayload{Reason: reason})
-	row, summary, err := FrameToEventRow(terminal, deps.agent.ID())
+	row, summary, err := store.FrameToEventRow(terminal, deps.Agent.ID())
 	if err != nil {
-		deps.logger.Warn("session: settle project child terminal",
+		deps.Logger.Warn("session: settle project child terminal",
 			"child", childID, "err", err)
 		return
 	}
-	if err := deps.store.AppendEvent(ctx, row, summary); err != nil {
-		deps.logger.Warn("session: settle append child terminal",
+	if err := deps.Store.AppendEvent(ctx, row, summary); err != nil {
+		deps.Logger.Warn("session: settle append child terminal",
+			"child", childID, "err", err)
+	}
+	if err := deps.Store.UpdateSessionStatus(ctx, childID, store.StatusTerminated); err != nil {
+		deps.Logger.Warn("session: settle update child status",
 			"child", childID, "err", err)
 	}
 }
@@ -135,79 +150,27 @@ func appendChildTerminal(ctx context.Context, deps *sessionDeps, childID, reason
 // generic — "did not deliver, re-spawn if relevant" — so the model
 // gets a clear instruction without runtime needing to know skill /
 // role / task. Returns true on a successful append.
-func appendParentSubagentResult(ctx context.Context, deps *sessionDeps, parentID, childID, reason string) bool {
+func appendParentSubagentResult(ctx context.Context, deps *Deps, parentID, childID, reason string) bool {
 	body := fmt.Sprintf(
 		"Sub-agent %s did not deliver a result before the previous process exited (reason: %s). If the work is still relevant, re-spawn a fresh sub-agent for it.",
 		childID, reason,
 	)
-	result := protocol.NewSubagentResult(parentID, childID, deps.agent.Participant(),
+	result := protocol.NewSubagentResult(parentID, childID, deps.Agent.Participant(),
 		protocol.SubagentResultPayload{
 			SessionID: childID,
 			Reason:    reason,
 			Result:    body,
 		})
-	row, summary, err := FrameToEventRow(result, deps.agent.ID())
+	row, summary, err := store.FrameToEventRow(result, deps.Agent.ID())
 	if err != nil {
-		deps.logger.Warn("session: settle project subagent_result",
+		deps.Logger.Warn("session: settle project subagent_result",
 			"parent", parentID, "child", childID, "err", err)
 		return false
 	}
-	if err := deps.store.AppendEvent(ctx, row, summary); err != nil {
-		deps.logger.Warn("session: settle append subagent_result",
+	if err := deps.Store.AppendEvent(ctx, row, summary); err != nil {
+		deps.Logger.Warn("session: settle append subagent_result",
 			"parent", parentID, "child", childID, "err", err)
 		return false
 	}
 	return true
-}
-
-// RestoreActive runs at process boot. For every non-terminal root
-// session belonging to this agent it:
-//
-//  1. Calls settleDanglingSubagents — synthesises a subagent_result
-//     on the parent for any child whose result didn't make it to
-//     parent.events on the previous run (and writes a session_terminated
-//     {restart_died} on non-terminal children before doing so).
-//  2. If settle wrote anything (active root) → calls Manager.Resume to
-//     reattach a goroutine. If it wrote nothing (idle root) → skips;
-//     the session stays dormant in DB and an adapter that asks for it
-//     later will trigger Manager.Resume on demand. Same code path,
-//     same `newSessionRestore`, same lifecycle.Acquire — boot is just
-//     the eager case.
-//
-// Sub-agents are NOT restored — the synthetic subagent_result on the
-// parent is the contract. The model decides whether to spawn a fresh
-// sub-agent for the same task on its next turn (no runtime auto-
-// spawn). Phase-4 spec §12.
-//
-// Errors from individual roots are logged but do not abort the loop.
-func (m *Manager) RestoreActive(ctx context.Context) error {
-	rows, err := m.store.ListSessions(ctx, m.agent.ID(), "")
-	if err != nil {
-		return fmt.Errorf("manager: restore-active list: %w", err)
-	}
-	for _, row := range rows {
-		if row.SessionType != "" && row.SessionType != "root" {
-			continue
-		}
-		if hasTerminated(ctx, m.store, row.ID) {
-			continue
-		}
-		written, err := settleDanglingSubagents(ctx, m.deps, row.ID)
-		if err != nil {
-			m.logger.Warn("manager: restore-active settle",
-				"session", row.ID, "err", err)
-			continue
-		}
-		if written == 0 {
-			// Idle root — no dangling sub-agents, no eager goroutine.
-			// Adapter Resume will rebuild on demand using the same
-			// newSessionRestore path.
-			continue
-		}
-		if _, err := m.Resume(ctx, row.ID); err != nil {
-			m.logger.Warn("manager: restore-active resume",
-				"session", row.ID, "err", err)
-		}
-	}
-	return nil
 }

@@ -168,42 +168,6 @@ allowed-tools:
 	}
 }
 
-// TestParse_LegacySystemRenameHints asserts the validator points
-// manifest authors at the post-step-25 owner when they still
-// reference legacy `system:foo` tool names.
-func TestParse_LegacySystemRenameHints(t *testing.T) {
-	cases := []struct {
-		legacyTool string
-		newName    string
-	}{
-		{"notepad_append", "session:notepad_append"},
-		{"skill_load", "session:skill_load"},
-		{"policy_save", "policy:save"},
-		{"mcp_add_server", "tool:provider_add"},
-		{"runtime_reload", "runtime:reload"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.legacyTool, func(t *testing.T) {
-			src := `---
-name: legacy
-description: refs an old name
-license: MIT
-allowed-tools:
-  - provider: system
-    tools: [` + tc.legacyTool + `]
----
-`
-			_, err := Parse([]byte(src))
-			if err == nil {
-				t.Fatalf("Parse: expected migration error for system:%s", tc.legacyTool)
-			}
-			if !strings.Contains(err.Error(), tc.newName) {
-				t.Errorf("err = %v, want hint pointing at %q", err, tc.newName)
-			}
-		})
-	}
-}
-
 func TestParse_UnknownTopLevelKeysPreserved(t *testing.T) {
 	src := `---
 name: ok

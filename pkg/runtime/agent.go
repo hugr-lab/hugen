@@ -67,8 +67,11 @@ func LoadConstitution(stateDir string, log *slog.Logger) (string, error) {
 	return string(current), nil
 }
 
-// RegisterBuiltinCommands wires the Phase-1 set of slash commands
-// onto the registry: /help, /note, /cancel, /end, /model.
+// RegisterBuiltinCommands wires the session-core slash commands onto
+// the registry: /help, /cancel, /end, /model. Extension-owned
+// commands (e.g. /note from notepad, /skill from skill) are
+// registered separately by phaseExtensions via the
+// [extension.Commander] capability.
 func RegisterBuiltinCommands(reg *session.CommandRegistry, logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -79,7 +82,6 @@ func RegisterBuiltinCommands(reg *session.CommandRegistry, logger *slog.Logger) 
 		handler     session.CommandHandler
 	}{
 		{"help", "list available commands", helpHandler(reg)},
-		{"note", "save a note to the session notepad: /note <text>", noteHandler()},
 		{"cancel", "cancel the in-flight turn", cancelHandler()},
 		{"end", "close the current session", endHandler()},
 		{"model", "switch the model for this session: /model use <intent|provider/name>", modelHandler()},
@@ -101,28 +103,6 @@ func helpHandler(reg *session.CommandRegistry) session.CommandHandler {
 		body := "Available commands:\n" + reg.Describe()
 		return []protocol.Frame{
 			protocol.NewAgentMessage(env.Session.ID(), env.AgentAuthor, body, 0, true),
-		}, nil
-	}
-}
-
-func noteHandler() session.CommandHandler {
-	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
-		if len(args) == 0 {
-			return []protocol.Frame{
-				protocol.NewError(env.Session.ID(), env.AgentAuthor, "empty_note",
-					"usage: /note <text>", false),
-			}, nil
-		}
-		text := joinArgs(args)
-		id, err := env.Notepad.Append(ctx, env.Author.ID, text)
-		if err != nil {
-			return []protocol.Frame{
-				protocol.NewError(env.Session.ID(), env.AgentAuthor, "note_failed", err.Error(), true),
-			}, nil
-		}
-		return []protocol.Frame{
-			protocol.NewSystemMarker(env.Session.ID(), env.AgentAuthor, "note_added",
-				map[string]any{"note_id": id}),
 		}, nil
 	}
 }

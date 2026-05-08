@@ -11,6 +11,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/manager"
 )
 
 // allowedKinds enumerates the inbound Frame kinds the API accepts on
@@ -49,7 +50,7 @@ func (a *Adapter) decodeBody(w stdhttp.ResponseWriter, r *stdhttp.Request, v any
 }
 
 // handleOpenSession serves POST /api/v1/sessions.
-func (a *Adapter) handleOpenSession(host session.AdapterHost) stdhttp.HandlerFunc {
+func (a *Adapter) handleOpenSession(host manager.AdapterHost) stdhttp.HandlerFunc {
 	return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		var req OpenSessionRequest
 		if !a.decodeBody(w, r, &req) {
@@ -75,12 +76,12 @@ func (a *Adapter) handleOpenSession(host session.AdapterHost) stdhttp.HandlerFun
 }
 
 // handleListSessions serves GET /api/v1/sessions.
-func (a *Adapter) handleListSessions(host session.AdapterHost) stdhttp.HandlerFunc {
+func (a *Adapter) handleListSessions(host manager.AdapterHost) stdhttp.HandlerFunc {
 	return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		q := r.URL.Query()
 		status := q.Get("status")
 		switch status {
-		case "", session.StatusActive, session.StatusSuspended, session.StatusClosed:
+		case "", session.StatusActive, session.StatusTerminated:
 			// ok
 		default:
 			writeError(w, stdhttp.StatusBadRequest, "bad_query", "unknown status: "+status)
@@ -120,7 +121,7 @@ func (a *Adapter) handleListSessions(host session.AdapterHost) stdhttp.HandlerFu
 // mutation, then decodes the same bytes into the typed
 // PostFrameRequest. MaxBytesReader caps the body size; oversize
 // → 413 payload_too_large.
-func (a *Adapter) handlePostFrame(host session.AdapterHost) stdhttp.HandlerFunc {
+func (a *Adapter) handlePostFrame(host manager.AdapterHost) stdhttp.HandlerFunc {
 	return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		sessionID := r.PathValue("id")
 		if sessionID == "" {
@@ -202,7 +203,7 @@ func (a *Adapter) handlePostFrame(host session.AdapterHost) stdhttp.HandlerFunc 
 //
 // Idempotent (FR-013): closing an already-closed session returns 200
 // with the original closed_at when known.
-func (a *Adapter) handleCloseSession(host session.AdapterHost) stdhttp.HandlerFunc {
+func (a *Adapter) handleCloseSession(host manager.AdapterHost) stdhttp.HandlerFunc {
 	return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		sessionID := r.PathValue("id")
 		if sessionID == "" {
@@ -224,7 +225,7 @@ func (a *Adapter) handleCloseSession(host session.AdapterHost) stdhttp.HandlerFu
 		}
 		writeJSON(w, stdhttp.StatusOK, CloseSessionResponse{
 			SessionID: sessionID,
-			Status:    session.StatusClosed,
+			Status:    session.StatusTerminated,
 			ClosedAt:  closedAt,
 		})
 	}
@@ -237,7 +238,7 @@ func (a *Adapter) handleCloseSession(host session.AdapterHost) stdhttp.HandlerFu
 // subscriber on the runtime fan-out BEFORE reading the replay block,
 // so any frame produced during the replay window is queued on the
 // live channel rather than dropped.
-func (a *Adapter) handleStream(host session.AdapterHost) stdhttp.HandlerFunc {
+func (a *Adapter) handleStream(host manager.AdapterHost) stdhttp.HandlerFunc {
 	return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		sessionID := r.PathValue("id")
 		if sessionID == "" {

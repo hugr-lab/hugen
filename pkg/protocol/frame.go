@@ -32,14 +32,29 @@ const (
 	KindError         Kind = "error"
 	KindSystemMarker  Kind = "system_marker"
 
-	// Phase-4 kinds (sub-agents, plan, whiteboard, runtime injections).
-	KindSubagentStarted    Kind = "subagent_started"
-	KindSubagentResult     Kind = "subagent_result"
-	KindPlanOp             Kind = "plan_op"
-	KindWhiteboardOp       Kind = "whiteboard_op"
-	KindWhiteboardMessage  Kind = "whiteboard_message"
-	KindSessionTerminated  Kind = "session_terminated"
-	KindSystemMessage      Kind = "system_message"
+	// Phase-4 kinds (sub-agents, plan, runtime injections). Whiteboard
+	// state-change events ride [KindExtensionFrame] with
+	// Extension="whiteboard" instead of dedicated kinds.
+	KindSubagentStarted   Kind = "subagent_started"
+	KindSubagentResult    Kind = "subagent_result"
+	KindPlanOp            Kind = "plan_op"
+	KindSessionTerminated Kind = "session_terminated"
+	KindSystemMessage     Kind = "system_message"
+
+	// KindSessionStatus is the persisted lifecycle marker emitted by
+	// Session at every state transition (idle ↔ active ↔ wait_*).
+	// Newest event in the log is authoritative for restart
+	// classification — see [SessionStatusPayload]. Default-deny in
+	// the visibility filter; never reaches the model prompt.
+	KindSessionStatus Kind = "session_status"
+
+	// Phase-4.1b-pre kind: SessionClose is the internal frame the
+	// session loop receives to begin teardown. It is NOT a transcript
+	// event — handleExit translates it into the persisted
+	// session_terminated row, optionally followed by SessionClosed for
+	// adapter back-compat. Producers: Manager.Terminate (root),
+	// parent.handleSubagentResult (subagent), parent.teardown (cascade).
+	KindSessionClose       Kind = "session_close"
 )
 
 // ParticipantInfo identifies who emitted (or is addressed by) a Frame.
@@ -156,7 +171,26 @@ type UserMessagePayload struct {
 type AgentMessagePayload struct {
 	Text     string `json:"text"`
 	ChunkSeq int    `json:"chunk_seq"`
-	Final    bool   `json:"final"`
+	// Final marks the end of the assistant TURN (not iteration) — adapters
+	// use it to render newline + prompt cuts. Set on the consolidated
+	// row for the model iteration that retires the turn (i.e. produced
+	// no tool calls). Tool-call iterations retire later, after the
+	// dispatcher's results land.
+	Final bool `json:"final"`
+	// Consolidated marks the per-iteration "complete assistant record"
+	// row that lands in the persisted event log: assembled text + tool
+	// calls + reasoning state for ONE model iteration. Live streaming
+	// chunks are emitted with Consolidated=false and stay outbox-only
+	// (adapters render them incrementally; never persisted). Replay
+	// reads only Consolidated=true rows so model.Message history
+	// reconstructs exactly the per-iteration assistant turns the runtime
+	// originally appended — no chunk reassembly, no orphan tool_calls.
+	Consolidated bool `json:"consolidated,omitempty"`
+	// Consolidated-only fields. Carry the assistant iteration's tool
+	// calls + reasoning state alongside the assembled text.
+	ToolCalls        []ToolCallPayload `json:"tool_calls,omitempty"`
+	Thinking         string            `json:"thinking,omitempty"`
+	ThoughtSignature string            `json:"thought_signature,omitempty"`
 }
 
 type ReasoningPayload struct {
@@ -209,6 +243,16 @@ type SessionOpenedPayload struct {
 }
 
 type SessionClosedPayload struct {
+	Reason string `json:"reason"`
+}
+
+// SessionClosePayload is the trigger Frame for the session goroutine
+// to begin teardown. Reason is the verbatim string written into the
+// persisted session_terminated event when the Run loop exits in
+// response. SessionClose is internal control plane: producers are
+// Manager.Terminate, parent.handleSubagentResult, parent.teardown,
+// and self-close paths via Session.requestClose.
+type SessionClosePayload struct {
 	Reason string `json:"reason"`
 }
 
@@ -344,14 +388,13 @@ type SystemMarker struct {
 // child sub-agent session is spawned. Inputs is arbitrary JSON the
 // parent passes to the child via spawn_subagent.
 type SubagentStartedPayload struct {
-	ChildSessionID            string    `json:"child_session_id"`
-	Skill                     string    `json:"skill,omitempty"`
-	Role                      string    `json:"role,omitempty"`
-	Task                      string    `json:"task"`
-	Depth                     int       `json:"depth"`
-	StartedAt                 time.Time `json:"started_at"`
-	Inputs                    any       `json:"inputs,omitempty"`
-	ParentWhiteboardActive    bool      `json:"parent_whiteboard_active,omitempty"`
+	ChildSessionID string    `json:"child_session_id"`
+	Skill          string    `json:"skill,omitempty"`
+	Role           string    `json:"role,omitempty"`
+	Task           string    `json:"task"`
+	Depth          int       `json:"depth"`
+	StartedAt      time.Time `json:"started_at"`
+	Inputs         any       `json:"inputs,omitempty"`
 }
 
 // SubagentResultPayload is delivered to the parent's inbox as a Frame
@@ -375,29 +418,6 @@ type PlanOpPayload struct {
 	CurrentStep string `json:"current_step,omitempty"`
 }
 
-// WhiteboardOpPayload is appended to a host's events on
-// init/write/stop and to each receiving member's events on receipt of
-// a whiteboard_message Frame at turn-boundary drain. Seq is
-// host-monotonic; FromSessionID + FromRole + Text apply only to
-// op="write".
-type WhiteboardOpPayload struct {
-	Op             string `json:"op"`
-	Seq            int64  `json:"seq,omitempty"`
-	FromSessionID  string `json:"from_session_id,omitempty"`
-	FromRole       string `json:"from_role,omitempty"`
-	Text           string `json:"text,omitempty"`
-	Truncated      bool   `json:"truncated,omitempty"`
-}
-
-// WhiteboardMessagePayload is the host→member broadcast Frame; each
-// member persists its own WhiteboardOp{op:"write"} on receipt.
-type WhiteboardMessagePayload struct {
-	FromSessionID string `json:"from_session_id"`
-	FromRole      string `json:"from_role"`
-	Seq           int64  `json:"seq"`
-	Text          string `json:"text"`
-}
-
 // SessionTerminatedPayload is the sole terminal write for any
 // session. Reason is free-form; phase-4 writers use:
 // "completed", "hard_ceiling", "subagent_cancel: <rationale>",
@@ -406,6 +426,36 @@ type SessionTerminatedPayload struct {
 	Reason    string `json:"reason"`
 	Result    string `json:"result,omitempty"`
 	TurnsUsed int    `json:"turns_used,omitempty"`
+}
+
+// SessionStatus state values mark the session's lifecycle stage in
+// its own events log. Idle = quiescent (turn closed, no live work).
+// Active = a turn is in progress. The wait_* values mark explicit
+// runtime pauses; phase-5 HITL plumbing will start emitting them.
+const (
+	SessionStatusIdle          = "idle"
+	SessionStatusActive        = "active"
+	SessionStatusWaitSubagents = "wait_subagents"
+	// Phase-5 HITL placeholders — declared now so the protocol surface
+	// is stable; today no runtime code emits them.
+	SessionStatusWaitApproval  = "wait_approval"
+	SessionStatusWaitUserInput = "wait_user_input"
+)
+
+// SessionStatusPayload is the lifecycle marker the Session emits at
+// every state transition. The NEWEST KindSessionStatus event in a
+// session's log is authoritative for restart classification —
+// Manager.RestoreActive reads it to decide whether to re-attach a
+// goroutine eagerly (active / wait_*) or leave the session dormant
+// until an adapter Resume (idle).
+//
+// State is one of the SessionStatus* constants. Reason is a short
+// free-form trigger label ("user_message", "wait_subagents tool",
+// "turn quiescent", …) used purely for diagnostics and the audit
+// log; the runtime never branches on it.
+type SessionStatusPayload struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // SystemMessagePayload is a model-visible runtime injection (distinct
@@ -469,24 +519,29 @@ type PlanOp struct {
 	Payload PlanOpPayload
 }
 
-type WhiteboardOp struct {
-	BaseFrame
-	Payload WhiteboardOpPayload
-}
-
-type WhiteboardMessage struct {
-	BaseFrame
-	Payload WhiteboardMessagePayload
-}
-
 type SessionTerminated struct {
 	BaseFrame
 	Payload SessionTerminatedPayload
 }
 
+// SessionClose is the trigger Frame for session teardown. See
+// SessionClosePayload. The receiving session's Run loop translates
+// SessionClose into a persisted session_terminated row.
+type SessionClose struct {
+	BaseFrame
+	Payload SessionClosePayload
+}
+
 type SystemMessage struct {
 	BaseFrame
 	Payload SystemMessagePayload
+}
+
+// SessionStatus is the lifecycle marker frame. See
+// [SessionStatusPayload].
+type SessionStatus struct {
+	BaseFrame
+	Payload SessionStatusPayload
 }
 
 // OpaqueFrame represents a Frame variant the codec does not know.
@@ -521,10 +576,10 @@ func (f SystemMarker) payload() any      { return f.Payload }
 func (f SubagentStarted) payload() any   { return f.Payload }
 func (f SubagentResult) payload() any    { return f.Payload }
 func (f PlanOp) payload() any            { return f.Payload }
-func (f WhiteboardOp) payload() any      { return f.Payload }
-func (f WhiteboardMessage) payload() any { return f.Payload }
 func (f SessionTerminated) payload() any { return f.Payload }
+func (f SessionClose) payload() any      { return f.Payload }
 func (f SystemMessage) payload() any     { return f.Payload }
+func (f SessionStatus) payload() any     { return f.Payload }
 func (f OpaqueFrame) payload() any       { return f.RawPayload }
 
 // newOpaqueFrame is package-private so only the codec materialises
@@ -559,6 +614,30 @@ func NewAgentMessage(sessionID string, author ParticipantInfo, text string, seq 
 	return &AgentMessage{
 		BaseFrame: newBase(sessionID, KindAgentMessage, author),
 		Payload:   AgentMessagePayload{Text: text, ChunkSeq: seq, Final: final},
+	}
+}
+
+// NewAgentMessageConsolidated constructs the per-iteration assistant
+// turn record: full assembled text + tool calls + reasoning state.
+// Consolidated=true is implied. Final reflects whether this iteration
+// retires the assistant turn — true when there are no tool calls to
+// dispatch (next iteration would be a fresh user input, not another
+// model call), false when tool calls follow. Emitted once per model
+// iteration by foldAssistantAndMaybeDispatch; this is the only
+// AgentMessage shape that lands in the persisted event log.
+func NewAgentMessageConsolidated(sessionID string, author ParticipantInfo, text string, seq int, final bool,
+	toolCalls []ToolCallPayload, thinking, thoughtSignature string) *AgentMessage {
+	return &AgentMessage{
+		BaseFrame: newBase(sessionID, KindAgentMessage, author),
+		Payload: AgentMessagePayload{
+			Text:             text,
+			ChunkSeq:         seq,
+			Final:            final,
+			Consolidated:     true,
+			ToolCalls:        toolCalls,
+			Thinking:         thinking,
+			ThoughtSignature: thoughtSignature,
+		},
 	}
 }
 
@@ -666,26 +745,6 @@ func NewPlanOp(sessionID string, author ParticipantInfo, p PlanOpPayload) *PlanO
 	}
 }
 
-// NewWhiteboardOp builds a whiteboard_op Frame. fromSessionID is the
-// author's session id for op="write" (echoed in BaseFrame.FromSession
-// for cross-session writes; empty for the host's own op="init"/"stop").
-func NewWhiteboardOp(sessionID, fromSessionID string, author ParticipantInfo, p WhiteboardOpPayload) *WhiteboardOp {
-	base := newBase(sessionID, KindWhiteboardOp, author)
-	if fromSessionID != "" {
-		base.FromSession = fromSessionID
-	}
-	return &WhiteboardOp{BaseFrame: base, Payload: p}
-}
-
-// NewWhiteboardMessage builds the host→member broadcast Frame.
-// hostSessionID is the broadcasting host (BaseFrame.FromSession).
-// recipientSessionID is the addressed sibling (BaseFrame.SessionID).
-func NewWhiteboardMessage(hostSessionID, recipientSessionID string, author ParticipantInfo, p WhiteboardMessagePayload) *WhiteboardMessage {
-	base := newBase(recipientSessionID, KindWhiteboardMessage, author)
-	base.FromSession = hostSessionID
-	return &WhiteboardMessage{BaseFrame: base, Payload: p}
-}
-
 func NewSessionTerminated(sessionID string, author ParticipantInfo, p SessionTerminatedPayload) *SessionTerminated {
 	return &SessionTerminated{
 		BaseFrame: newBase(sessionID, KindSessionTerminated, author),
@@ -693,10 +752,32 @@ func NewSessionTerminated(sessionID string, author ParticipantInfo, p SessionTer
 	}
 }
 
+// NewSessionClose builds the internal teardown trigger Frame.
+// Producers: Manager.Terminate, parent.handleSubagentResult,
+// parent.teardown (cascade). The receiving session's Run loop
+// translates this into a persisted session_terminated row with the
+// supplied reason and exits.
+func NewSessionClose(sessionID string, author ParticipantInfo, reason string) *SessionClose {
+	return &SessionClose{
+		BaseFrame: newBase(sessionID, KindSessionClose, author),
+		Payload:   SessionClosePayload{Reason: reason},
+	}
+}
+
 func NewSystemMessage(sessionID string, author ParticipantInfo, kind, content string) *SystemMessage {
 	return &SystemMessage{
 		BaseFrame: newBase(sessionID, KindSystemMessage, author),
 		Payload:   SystemMessagePayload{Kind: kind, Content: content},
+	}
+}
+
+// NewSessionStatus builds a lifecycle marker frame for state with an
+// optional reason label. Author is the agent's participant info —
+// the runtime stamps its own status, not a user.
+func NewSessionStatus(sessionID string, author ParticipantInfo, state, reason string) *SessionStatus {
+	return &SessionStatus{
+		BaseFrame: newBase(sessionID, KindSessionStatus, author),
+		Payload:   SessionStatusPayload{State: state, Reason: reason},
 	}
 }
 
@@ -753,23 +834,25 @@ func Validate(f Frame) error {
 		default:
 			return fmt.Errorf("protocol: plan_op invalid op %q", v.Payload.Op)
 		}
-	case *WhiteboardOp:
-		switch v.Payload.Op {
-		case "init", "write", "stop":
-		default:
-			return fmt.Errorf("protocol: whiteboard_op invalid op %q", v.Payload.Op)
-		}
-	case *WhiteboardMessage:
-		if v.Payload.FromSessionID == "" {
-			return fmt.Errorf("protocol: whiteboard_message missing from_session_id")
-		}
 	case *SessionTerminated:
 		if v.Payload.Reason == "" {
 			return fmt.Errorf("protocol: session_terminated missing reason")
 		}
+	case *SessionClose:
+		if v.Payload.Reason == "" {
+			return fmt.Errorf("protocol: session_close missing reason")
+		}
 	case *SystemMessage:
 		if v.Payload.Kind == "" {
 			return fmt.Errorf("protocol: system_message missing kind")
+		}
+	case *SessionStatus:
+		switch v.Payload.State {
+		case SessionStatusIdle, SessionStatusActive,
+			SessionStatusWaitSubagents, SessionStatusWaitApproval,
+			SessionStatusWaitUserInput:
+		default:
+			return fmt.Errorf("protocol: session_status invalid state %q", v.Payload.State)
 		}
 	case *OpaqueFrame:
 		// OpaqueFrame round-trips deferred kinds the binary doesn't

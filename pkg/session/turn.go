@@ -88,8 +88,9 @@ type toolResultEvent struct {
 
 // ToolFeed reserves the slot a phase-4 blocking system tool (the
 // canonical example is wait_subagents) uses to consume Frames the
-// session would otherwise buffer. C5 keeps the type + s.activeToolFeed
-// field as a stub; first wired in C7 alongside the sub-agent tools.
+// session would otherwise buffer. Tools register a feed via
+// [Session.registerToolFeed] for the duration of the block and
+// release it on return.
 type ToolFeed struct {
 	// Consumes returns true for Frame Kinds the active tool wants to
 	// receive. The Run loop checks this before falling back to
@@ -98,6 +99,18 @@ type ToolFeed struct {
 	// Feed delivers a matching Frame to the tool's blocking handler.
 	// Must be non-blocking (the loop is single-goroutine).
 	Feed func(protocol.Frame)
+	// BlockingState is the [protocol.SessionStatus] state value the
+	// session should transition to while this feed is registered.
+	// Empty string skips the lifecycle transition (the feed is
+	// "active" but not separately observable). Today
+	// callWaitSubagents fills in SessionStatusWaitSubagents; the
+	// phase-5 HITL approval / clarification tools will fill
+	// SessionStatusWaitApproval / SessionStatusWaitUserInput.
+	BlockingState string
+	// BlockingReason is the diagnostic label the lifecycle marker
+	// records alongside the state transition. Free-form, never
+	// branched on.
+	BlockingReason string
 }
 
 // startTurn moves the Session from idle to "model goroutine running".
@@ -115,6 +128,11 @@ type ToolFeed struct {
 //     without tearing down the session.
 //   - The model goroutine launches; chunks fan in over s.modelChunks.
 func (s *Session) startTurn(runCtx context.Context, f *protocol.UserMessage) {
+	// Lifecycle: leaving idle for active. Emit BEFORE persisting the
+	// user message so a restart that crashes between markActive and
+	// the user_message emit still observes the session as active and
+	// classifies it eagerly.
+	s.markStatus(runCtx, protocol.SessionStatusActive, "user_message")
 	if err := s.emit(runCtx, f); err != nil {
 		s.logger.Debug("startTurn: emit user", "session", s.id, "err", err)
 		return
@@ -267,6 +285,11 @@ func (s *Session) handleModelEvent(runCtx context.Context, ev modelChunkEvent) {
 // applyChunk emits Reasoning + AgentMessage frames for one streamed
 // chunk and folds tool_calls + reasoning state into turnState. Mirrors
 // the pre-C5 streamTurn body, minus the loop wrapper.
+//
+// Streamed chunks always carry Final=false — they're outbox-only for
+// live rendering. The single Final=true frame for the turn is emitted
+// by foldAssistantAndMaybeDispatch with the assembled text + tool
+// calls + reasoning state, and that one IS persisted. See emit().
 func (s *Session) applyChunk(runCtx context.Context, chunk model.Chunk) {
 	st := s.turnState
 	if chunk.Reasoning != nil && *chunk.Reasoning != "" {
@@ -281,7 +304,7 @@ func (s *Session) applyChunk(runCtx context.Context, chunk model.Chunk) {
 	if chunk.Content != nil && *chunk.Content != "" {
 		st.finalText += *chunk.Content
 		af := protocol.NewAgentMessage(s.id, s.agent.Participant(),
-			*chunk.Content, st.agentSeq, chunk.Final)
+			*chunk.Content, st.agentSeq, false)
 		if err := s.emit(runCtx, af); err != nil {
 			st.streamErr = err
 			return
@@ -397,26 +420,36 @@ func (s *Session) turnComplete() bool {
 // next view of s.history. The drain runs each Frame through the §11
 // visibility filter (visibility.go::projectFrameToHistory) — default-
 // deny except the explicit allow-list (UserMessage, SubagentStarted,
-// SubagentResult, SystemMessage, WhiteboardMessage).
+// SubagentResult, SystemMessage).
 func (s *Session) advanceOrFinish(runCtx context.Context) {
 	st := s.turnState
 	if st == nil {
 		return
 	}
 
-	// /cancel — turnCtx cancelled.
+	// /cancel — turnCtx cancelled. Mark idle if quiescent so the
+	// restart classifier won't eagerly resume a session that just
+	// idled out of an aborted turn.
 	if s.turnCtx != nil && s.turnCtx.Err() != nil {
 		s.rollbackTurn()
 		s.retireTurn()
+		if s.isQuiescent() {
+			s.markStatus(runCtx, protocol.SessionStatusIdle, "cancelled")
+		}
 		return
 	}
 	// Stream / Generate error — fold a stream_error frame and bail.
+	// Same idle-on-quiescent treatment as cancel: the session is no
+	// longer working, even though the turn ended on an error.
 	if st.streamErr != nil {
 		s.rollbackTurn()
 		errFrame := protocol.NewError(s.id, s.agent.Participant(),
 			"stream_error", st.streamErr.Error(), true)
 		_ = s.emit(runCtx, errFrame)
 		s.retireTurn()
+		if s.isQuiescent() {
+			s.markStatus(runCtx, protocol.SessionStatusIdle, "stream_error")
+		}
 		return
 	}
 
@@ -434,10 +467,18 @@ func (s *Session) advanceOrFinish(runCtx context.Context) {
 	// explicit-cancel teardown path. The deferred handleExit writes
 	// session_terminated{reason:"hard_ceiling"} and (for sub-agents)
 	// surfaces a clean subagent_result to the parent.
+	//
+	// No lifecycle marker is emitted on this path: the session is
+	// terminating, not idling. The session_terminated event is the
+	// final state; Manager.RestoreActive's narrow probe sees that
+	// terminal row first (it's the newest of the
+	// session_terminated|session_status pair) and skips the
+	// session, so the persisted "active" marker that immediately
+	// precedes session_terminated never reaches the classifier.
 	if st.capHard > 0 && st.iter >= st.capHard {
 		s.logger.Warn("session: tool re-call hard ceiling hit",
 			"session", s.id, "max_hard", st.capHard, "iter", st.iter)
-		s.triggerHardCeiling(runCtx, st.iter)
+		s.triggerHardCeiling(runCtx)
 		s.retireTurn()
 		return
 	}
@@ -480,20 +521,33 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 			ThoughtSignature: st.thoughtSignature,
 		})
 	}
-	// Stream ended without an explicit final-flagged content chunk
-	// AND with no tool calls: emit a zero-text closer so subscribers
-	// can detect the boundary. Skipped when the stream produced only
-	// tool calls — another model turn is coming.
-	if st.agentSeq > 0 && !st.sawFinal && !hasToolCalls {
-		closer := protocol.NewAgentMessage(s.id, s.agent.Participant(),
-			"", st.agentSeq, true)
-		_ = s.emit(runCtx, closer)
+	// Persist one consolidated AgentMessage per model iteration: full
+	// assembled text + tool calls + reasoning state. Streaming chunks
+	// stayed outbox-only — this row is the canonical assistant
+	// iteration record that replay reads. Final=true marks the turn
+	// boundary (no tool calls; turn retires after this); Final=false
+	// is a tool-iteration that hands off to the dispatcher and
+	// expects another model iteration after results return. Skipped
+	// when the iteration produced nothing.
+	if st.agentSeq > 0 || hasToolCalls || st.finalText != "" {
+		consolidated := protocol.NewAgentMessageConsolidated(s.id, s.agent.Participant(),
+			st.finalText, st.agentSeq, !hasToolCalls,
+			toolCallPayloads(st.toolCalls),
+			st.thinking, st.thoughtSignature)
+		_ = s.emit(runCtx, consolidated)
 	}
 	st.assistantFolded = true
 
 	if !hasToolCalls {
 		s.drainPendingInbound(runCtx)
 		s.retireTurn()
+		// Lifecycle: turn closed cleanly. Mark idle iff fully
+		// quiescent — subagents still running keep the session
+		// active (idle requires len(s.children) == 0). retireTurn
+		// just nilled turnState; isQuiescent checks the rest.
+		if s.isQuiescent() {
+			s.markStatus(runCtx, protocol.SessionStatusIdle, "turn_complete")
+		}
 		return
 	}
 
@@ -553,6 +607,20 @@ func (s *Session) retireTurn() {
 	s.modelChunks = nil
 	s.toolResults = nil
 	s.turnState = nil
+}
+
+// toolCallPayloads projects model.ChunkToolCall slices onto the
+// protocol.ToolCallPayload shape used in the consolidated final
+// AgentMessage. Drops Hash (used only by the live stuck-detector).
+func toolCallPayloads(calls []model.ChunkToolCall) []protocol.ToolCallPayload {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]protocol.ToolCallPayload, len(calls))
+	for i, c := range calls {
+		out[i] = protocol.ToolCallPayload{ToolID: c.ID, Name: c.Name, Args: c.Args}
+	}
+	return out
 }
 
 // drainPendingInbound runs at every turn boundary. Buffered frames

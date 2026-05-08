@@ -12,11 +12,10 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/plan"
-	"github.com/hugr-lab/hugen/pkg/session/whiteboard"
-	"github.com/hugr-lab/hugen/pkg/skill"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -33,21 +32,32 @@ import (
 // the same shared bundle so new constructors can inject everything
 // in one go.
 type Session struct {
-	id           string
-	ownerID      string              // owner from SessionRow.OwnerID; inherited by subagents
-	depth        int                 // 0 for root; parent.depth+1 for subagent
-	deps         *sessionDeps        // shared bundle; nil only in legacy NewSession callers
-	agent        *Agent
-	store        RuntimeStore
-	models       *model.ModelRouter
-	codec        *protocol.Codec
-	cmds         *CommandRegistry
-	notepad      *Notepad
-	tools        *tool.ToolManager   // optional; nil disables tool dispatch
-	skills       *skill.SkillManager // optional; consulted for per-skill max_turns
-	maxToolIters     int             // 0 → defaultMaxToolIterations
-	maxToolItersHard int             // 0 → 2 × resolved soft cap
-	logger       *slog.Logger
+	id               string
+	ownerID          string // owner from SessionRow.OwnerID; inherited by subagents
+	depth            int    // 0 for root; parent.depth+1 for subagent
+	deps             *Deps  // shared bundle; nil only in legacy NewSession callers
+	agent            *Agent
+	store            store.RuntimeStore
+	models           *model.ModelRouter
+	codec            *protocol.Codec
+	cmds             *CommandRegistry
+	tools            *tool.ToolManager   // per-session child manager; required (NewSession derives it)
+	rootTools        *tool.ToolManager   // parent (agent-level) manager; passed to subagents
+	perms            perm.Service        // optional; consulted by tool handlers (skill_files etc.)
+	maxToolIters     int                 // 0 → defaultMaxToolIterations
+	maxToolItersHard int                 // 0 → 2 × resolved soft cap
+	logger           *slog.Logger
+
+	// sessionTools is the static dispatch table. tools_subagent.go's
+	// initSubagent registers the entries at session construction; the
+	// table is read-only after initTools so dispatch needs no lock.
+	// Whiteboard / plan / notepad / skill ops left this table when
+	// they migrated to pkg/extension/<name>/ — only sub-agent
+	// orchestration tools live here.
+	sessionTools map[string]sessionToolDescriptor
+
+	// state
+	state sync.Map // string → any; for tool handlers to stash arbitrary bits without a dedicated field in Session. Not persisted; lost on restart.
 
 	// Per-session tool snapshot cache. Phase 4.1a stage A step 8
 	// moved skill-bindings filtering and per-session caching out
@@ -76,17 +86,6 @@ type Session struct {
 	// Set by newSession / newSessionRestore so Manager.Open / Resume
 	// can echo it back to the caller without an extra LoadSession.
 	openedAt time.Time
-	// explicitTerminate distinguishes "I called s.terminate(cause)"
-	// from "my parent's ctx was cancelled and I'm cascading down".
-	// Set by s.terminate() before s.cancel() fires; read by
-	// handleExit to pick the session_terminated reason:
-	//
-	//   - explicitTerminate=true  → write tc.reason verbatim ("user:/end",
-	//     "subagent_cancel: ...", "completed", etc.)
-	//   - explicitTerminate=false → write protocol.TerminationCancelCascade
-	//     (the parent's terminate caused our ctx to fire).
-	explicitTerminate atomic.Bool
-
 	// Per-session model overrides. /model use mutates this. The
 	// overridesMu lock survives the C5 select-loop refactor because
 	// SetModelOverride is reachable from CommandEnv handlers and from
@@ -149,28 +148,6 @@ type Session struct {
 	matOnce      sync.Once
 	history      []model.Message
 
-	// plan is the projection of plan_op events for this session
-	// (US2). Built once at materialise and updated incrementally
-	// by the four plan_* tool handlers. planMu serialises the
-	// emit-then-Apply sequence so concurrent tool handlers can't
-	// race the in-memory mirror; the persisted events remain the
-	// source of truth so a desync (handler crashed mid-update,
-	// say) self-heals on the next materialise / restart.
-	planMu sync.Mutex
-	plan   plan.Plan
-
-	// whiteboard is the in-memory projection of whiteboard_op
-	// events (US3). On a host session it carries the canonical
-	// message log + NextSeq; on a member session it carries the
-	// member's own snapshot of broadcasts received. Built once at
-	// materialise and updated by the four whiteboard_* tool
-	// handlers (host side) and the member-side internal handler
-	// for inbound whiteboard_message Frames. whiteboardMu serialises
-	// the seq-allocate + emit + Apply sequence on the host so two
-	// concurrent broadcasts can't reuse the same seq.
-	whiteboardMu sync.Mutex
-	whiteboard   whiteboard.Whiteboard
-
 	// stuck is the in-memory rising-edge state for the three stuck-
 	// detection heuristics (phase-4-spec §8.3). Owned by Run; mutated
 	// only by handleToolResult / drainPendingInbound on the same
@@ -187,67 +164,78 @@ type Session struct {
 	// session_events on materialise.
 	softWarningDone atomic.Bool
 
+	// lifecycleState is the current SessionStatus value as last
+	// emitted by markStatus. Reads via Status(); writes only through
+	// markStatus, which serialises emit-then-store under
+	// statusMu so transitions persist in the events log in the same
+	// order the in-memory state mirror reflects them. Restart reads
+	// the latest KindSessionStatus event from store, not this field.
+	statusMu       sync.Mutex
+	lifecycleState string
+
 	in     chan protocol.Frame
 	out    chan protocol.Frame
 	closed atomic.Bool
+
+	// closeReason is the verbatim reason the next SessionClose-driven
+	// teardown writes into the persisted session_terminated row. Set
+	// by routeInbound just before returning the close sentinel; read
+	// by teardown as the event-driven counterpart to context.Cause.
+	// Owned by the Run goroutine — no lock needed.
+	closeReason string
+
+	// closing transitions to true the moment the session decides
+	// (or is told) to terminate, but BEFORE the goroutine has actually
+	// torn down. Phase 4.1b-pre stage B introduces this idle gate so a
+	// session that has emitted close_requested can keep its Run loop
+	// alive (in-flight tool dispatches, subagent_result Submit on
+	// parent, etc.) while rejecting any new UserMessage. closed=true
+	// is the strictly later transition, set in handleExit after the
+	// session_terminated row lands.
+	closing atomic.Bool
+
+	// subagentResultSent is set the first time emitSubagentResultToParent
+	// fires for this session. requestClose on a subagent fires the
+	// emit early so the parent can route SessionClose back; handleExit
+	// on the SessionClose-driven exit must NOT re-emit. Cancel-
+	// initiated paths (parent_cascade, subagent_cancel via SessionClose)
+	// reach handleExit without requestClose having fired locally — so
+	// handleExit emits there, and the flag flips at that point too.
+	subagentResultSent atomic.Bool
 	// done is closed by Run on exit. External callers (Manager.Terminate,
-	// ShutdownAll) wait on it to know the session goroutine has
+	// Stop) wait on it to know the session goroutine has
 	// finished its exit handler — including any session_terminated
 	// event append.
 	done chan struct{}
-
 }
 
 // terminationCause is the cancel cause attached to a per-session ctx
-// when Manager.Terminate, the /end slash command, /cancel cascade, or
-// callSubagentCancel wants the session goroutine to append a
-// `session_terminated` event on exit. Graceful process shutdown
-// (rootCancel without cause) attaches nothing, so the goroutine
-// distinguishes the two paths via context.Cause(ctx) and writes
-// nothing on graceful shutdown (FR-028 / FR-029).
+// when teardown wants to write a `session_terminated` event on exit.
+// Phase 4.1b-pre stage B replaces the old s.terminate(cancel-with-cause)
+// path with the SessionClose Frame protocol; the only remaining
+// producer of *terminationCause is teardown itself, synthesising one
+// from s.closeReason so handleExit's existing logic (write reason,
+// optional SessionClosed) continues to work.
 //
-// Fields:
-//
-//   - reason — written verbatim into session_terminated.reason (or
-//     overridden to TerminationCancelCascade by handleExit when
-//     explicitTerminate is false: a parent terminated us through ctx
-//     cascade, so the concrete mechanism is "cancel_cascade", not the
-//     parent's caller-supplied reason).
-//   - emitClose — when true the goroutine also pushes a SessionClosed
-//     Frame to its outbox. /end leaves this false because the slash-
-//     command handler already emitted SessionClosed for the transcript;
-//     Manager.Terminate sets it true so adapters waiting on the outbox
-//     see a clean close.
-//   - writeCtx — the caller's ctx used for every store write inside
-//     the teardown sequence (persist pending inbound, lifecycle
-//     Release, append session_terminated, optional SessionClosed
-//     append, parent Submit / fallback append). Threaded through so
-//     a still-honest deadline reaches the store; never replaced with
-//     context.Background — if the caller cancelled, we cancel.
+// Graceful shutdown (rootCancel without cause AND no closeReason)
+// leaves tc nil so the goroutine writes nothing (FR-028 / FR-029).
 type terminationCause struct {
 	reason    string
 	emitClose bool
 	writeCtx  context.Context
 }
 
-func (c *terminationCause) Error() string { return "session terminated: " + c.reason }
+// sessionCloseSignal is the sentinel error routeInbound returns when
+// it observes an inbound *protocol.SessionClose. The Run loop catches
+// it via errors.As, copies the reason to s.closeReason, and exits
+// the select after running teardown — replacing the historic
+// ctx.Done()-driven exit for explicit terminations.
+type sessionCloseSignal struct {
+	reason string
+}
 
-// terminate is the explicit-cancel path: called from Manager.Terminate
-// and from handleSlashCommand on /end. It sets explicitTerminate=true
-// before cancelling so handleExit knows to write the caller's reason
-// verbatim instead of falling back to "cancel_cascade".
-//
-// No-op for Sessions constructed via legacy NewSession that haven't
-// run buildSessionShell (no s.cancel wired up). Idempotent: a second
-// call after the ctx is already cancelled is harmless — the first
-// cause wins per context semantics, and explicitTerminate just stays
-// true.
-func (s *Session) terminate(cause *terminationCause) {
-	if s == nil || s.cancel == nil {
-		return
-	}
-	s.explicitTerminate.Store(true)
-	s.cancel(cause)
+func (e *sessionCloseSignal) Error() string {
+	return "session: SessionClose received: " + e.reason
 }
 
 // modelSwitch records a pending /model use until the next turn so
@@ -263,15 +251,6 @@ type SessionOption func(*Session)
 // WithSessionLogger sets a per-session logger (useful in tests).
 func WithSessionLogger(l *slog.Logger) SessionOption {
 	return func(s *Session) { s.logger = l }
-}
-
-// WithTools attaches a ToolManager to the session so the Turn loop
-// can dispatch model-emitted tool calls. Sessions constructed
-// without WithTools simply skip the tool dispatch branch — the
-// model can stream its tool_call chunks but they're surfaced as
-// tool_error{code: not_found} so the LLM gets a clean signal.
-func WithTools(tm *tool.ToolManager) SessionOption {
-	return func(s *Session) { s.tools = tm }
 }
 
 // WithMaxToolIterations overrides the per-Turn cap on
@@ -300,28 +279,43 @@ func WithMaxToolIterationsHard(n int) SessionOption {
 	}
 }
 
-// WithSkills attaches a SkillManager to the session so the Turn
-// loop can read per-skill metadata (currently max_turns; phase-4
-// adds sub-agent dispatch state). Optional — sessions without
-// WithSkills behave the same as before, just without skill-driven
-// caps.
-func WithSkills(sm *skill.SkillManager) SessionOption {
-	return func(s *Session) { s.skills = sm }
+// WithPerms attaches a perm.Service the session-scoped tool
+// handlers consult (today only `skill_files` for the per-skill
+// gate). Sessions opened without WithPerms see s.perms == nil and
+// gates that depend on it return ErrPermissionDenied or skip the
+// check, depending on the handler.
+func WithPerms(p perm.Service) SessionOption {
+	return func(s *Session) { s.perms = p }
 }
 
-// NewSession constructs a Session bound to its dependencies.
+// NewSession constructs a Session bound to its dependencies. The
+// passed *tool.ToolManager is the agent-level (root) manager —
+// NewSession immediately derives a per-session child via
+// tools.NewChild(), registers the session itself as a
+// ToolProvider on that child, and stores both views: the child as
+// s.tools (consumed by Dispatch / Snapshot) and the root as
+// s.rootTools (passed forward when the session spawns sub-agents,
+// each of which derives its own child off the same root).
 func NewSession(
 	id string,
 	agent *Agent,
-	store RuntimeStore,
+	store store.RuntimeStore,
 	models *model.ModelRouter,
 	cmds *CommandRegistry,
 	codec *protocol.Codec,
+	tools *tool.ToolManager,
 	logger *slog.Logger,
 	opts ...SessionOption,
 ) *Session {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if tools == nil {
+		// Tests that need a tool-less session can pass an empty root
+		// (NewToolManager with no providers) — a nil here is a
+		// programming error. Panic so the misuse surfaces at
+		// construction rather than the first dispatch attempt.
+		panic("session: NewSession requires a non-nil *tool.ToolManager")
 	}
 	s := &Session{
 		id:        id,
@@ -330,15 +324,29 @@ func NewSession(
 		models:    models,
 		codec:     codec,
 		cmds:      cmds,
-		notepad:   NewNotepad(store, agent.ID(), id),
+		rootTools: tools,
+		tools:     tools.NewChild(),
 		logger:    logger,
 		overrides: make(map[model.Intent]model.ModelSpec),
-		in:        make(chan protocol.Frame, 16),
+		in:        make(chan protocol.Frame, 64),
 		out:       make(chan protocol.Frame, 32),
 		done:      make(chan struct{}),
 	}
 	for _, o := range opts {
 		o(s)
+	}
+	// Register the session as a ToolProvider on its own child
+	// manager — handlers dispatch back to s.callXxx methods. Done
+	// after options run so any option that flips a field the
+	// provider consumes (perms, skills) sees the final state.
+	s.initTools()
+
+	if err := s.tools.AddProvider(s); err != nil {
+		// Self-registration failure indicates a name collision in
+		// the parent manager (someone already registered "session").
+		// That's a programming error in the boot wiring; surface it
+		// loudly.
+		panic(fmt.Sprintf("session: register self on child tool manager: %v", err))
 	}
 	return s
 }
@@ -357,51 +365,115 @@ func (s *Session) Outbox() <-chan protocol.Frame { return s.out }
 // callers wait on this after pushing a Close intent into s.in.
 func (s *Session) Done() <-chan struct{} { return s.done }
 
-// Submit pushes a frame onto the session's inbox without crashing
-// on a closed channel and without hanging on a full one. Three
-// exit paths:
+// Submit dispatches a frame to the session's inbox asynchronously
+// and returns a "settled" channel that closes when the send has
+// landed, the session terminated, or ctx fired. Callers that
+// don't need delivery confirmation discard the returned channel
+// (`_ = sess.Submit(...)`); callers that do wait on it
+// (`<-sess.Submit(...)`).
 //
-//   - ctx done → caller wants to bail out (shutdown timeout, API
-//     cancel). Returns false so the caller can decide whether to
-//     report or move on.
-//   - Done closed → the session goroutine has exited; the frame
-//     can never be delivered. Returns false.
-//   - successful send → returns true.
+// The channel does NOT distinguish delivered from cancelled —
+// caller must post-check IsClosed / ctx.Err() if that matters.
+// Most cross-session sends (cascade SessionClose, broadcast
+// fan-out, whiteboard message) are best-effort and don't care.
 //
-// A "send on closed channel" panic is caught by recover so a race
-// between the goroutine's exit defer and our send doesn't crash
-// the process; the recovered case also maps to ok=false.
+// A "send on closed channel" panic during teardown is recovered
+// silently so a race between the goroutine's exit defer and the
+// pending send doesn't crash the process.
 //
-// External callers (Manager.Close, Manager.Suspend, ShutdownAll,
-// adapters) use Submit instead of touching s.in directly so the
-// "in writes belong to the session goroutine" invariant has a
-// single, audit-friendly entry point.
-func (s *Session) Submit(ctx context.Context, f protocol.Frame) (ok bool) {
-	defer func() {
-		if r := recover(); r != nil {
-			ok = false
+// External callers (Manager.Close, Stop, adapters) use Submit
+// instead of touching s.in directly so the "in writes belong to
+// the session goroutine" invariant has a single audit-friendly
+// entry point.
+func (s *Session) Submit(ctx context.Context, f protocol.Frame) <-chan struct{} {
+	settled := make(chan struct{})
+	go func() {
+		defer close(settled)
+		defer func() { _ = recover() }()
+		select {
+		case s.in <- f:
+		case <-s.done:
+		case <-ctx.Done():
 		}
 	}()
-	select {
-	case s.in <- f:
-		return true
-	case <-s.done:
-		return false
-	case <-ctx.Done():
-		return false
+	return settled
+}
+
+// Tools exposes the per-session ToolManager. This is the child
+// manager NewSession derived off the root passed at construction:
+// per_session providers register on the child; child.Resolve /
+// Dispatch / Snapshot walk to the agent-level root for unknown
+// providers.
+func (s *Session) Tools() *tool.ToolManager { return s.tools }
+
+// RootTools exposes the agent-level (root) ToolManager passed at
+// construction. parent.Spawn passes this to the child session's
+// constructor so each subagent derives its own per-session child
+// off the same root — the per_agent providers (hugr-main,
+// duckdb-mcp, …) stay singletons; per_session providers spawn
+// once per session.
+func (s *Session) RootTools() *tool.ToolManager { return s.rootTools }
+
+// OpenedAt returns the timestamp the session row was first written
+// (CreatedAt on SessionRow). Useful for callers that want to echo
+// the persisted opened_at without an extra LoadSession.
+func (s *Session) OpenedAt() time.Time { return s.openedAt }
+
+// Depth returns the sub-agent depth: 0 for roots, parent.Depth()+1
+// for children. Read-only; depth is set at construction and never
+// mutated.
+func (s *Session) Depth() int { return s.depth }
+
+// Discard cancels the session's per-session ctx without writing
+// any terminal event. Used for race-loser disposal of a freshly-
+// built session whose registration in Manager.live lost to an
+// existing entry — the row is on disk and the SessionOpened frame
+// was emitted, but no goroutine is running for this loser instance.
+// Don't call after Start; Run owns the cancel after that point.
+func (s *Session) Discard() {
+	if s.cancel != nil {
+		s.cancel(nil)
 	}
 }
 
-// Notepad returns the session's notepad handle.
-func (s *Session) Notepad() *Notepad { return s.notepad }
+// Materialise lazily reconstructs the session's working window
+// from session_events on the first inbound Frame after open or
+// resume. Idempotent — second call observes the materialised flag
+// and returns nil. Tests that need to bring a freshly-resumed
+// session into a model-visible state can call this directly
+// instead of routing a frame through Submit.
+func (s *Session) Materialise(ctx context.Context) error {
+	return s.materialise(ctx)
+}
 
-// Tools exposes the per-session ToolManager. After phase 4.1a
-// stage A step 9 this is a child Manager owned by Lifecycle —
-// per_session providers register on the child; child.Resolve /
-// Dispatch / Snapshot walk to the agent-level root for unknown
-// providers. nil → no tools wired (legacy NewSession callers /
-// tests that disabled dispatch).
-func (s *Session) Tools() *tool.ToolManager { return s.tools }
+// MarkMaterialised sets the in-memory materialised flag without
+// running the event walk. Useful for tests that want to skip
+// projection rebuilding for a session whose history doesn't matter
+// for the assertion under test.
+func (s *Session) MarkMaterialised() { s.materialised.Store(true) }
+
+// SystemPrompt renders the system prompt the session would feed
+// into the next turn given its current state (skills, plan,
+// whiteboard projection, identity). The result is the same string
+// the model sees on its next turn — tests can assert prompt
+// composition without driving a full turn.
+func (s *Session) SystemPrompt(ctx context.Context) string {
+	return s.systemPrompt(ctx)
+}
+
+// ActiveToolFeed returns the currently-registered ToolFeed for the
+// session, or nil if no blocking system tool is in flight. Tests
+// poll this to observe the activeToolFeed slot transition without
+// reaching into the atomic pointer field.
+func (s *Session) ActiveToolFeed() *ToolFeed {
+	return s.activeToolFeed.Load()
+}
+
+// MarkClosed forces the session-closed flag on. Tests use this to
+// drive tool handlers down the `session_gone` branch without
+// running a full teardown. Production code never calls this — Run
+// owns s.closed via teardown.
+func (s *Session) MarkClosed() { s.closed.Store(true) }
 
 // SetModelOverride records a per-session model preference. The next
 // turn will route through it and emit a system_marker.
@@ -437,11 +509,23 @@ func (s *Session) sessionModels() map[model.Intent]model.ModelSpec {
 // happens before delivery so observers can't see anything that
 // failed to durably land. Emitting after the session has exited
 // (Outbox closed) returns ErrSessionClosed instead of panicking.
+//
+// One exception: streaming AgentMessage chunks (Final=false) and
+// streaming Reasoning chunks (Final=false) are outbox-only —
+// adapters render them live, but the row that lands in
+// session_events is the consolidated Final=true frame
+// foldAssistantAndMaybeDispatch emits at turn end (carrying full
+// text + tool_calls + thinking). Replay reads only the consolidated
+// row, so model.Message history is well-formed after resume without
+// reassembling chunks or scanning sibling tool_call rows.
 func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 	if s.closed.Load() {
 		return ErrSessionClosed
 	}
-	row, summary, perr := FrameToEventRow(f, s.agent.ID())
+	if isStreamingChunk(f) {
+		return s.outboxOnly(ctx, f)
+	}
+	row, summary, perr := store.FrameToEventRow(f, s.agent.ID())
 	if perr != nil {
 		return fmt.Errorf("session %s: project frame: %w", s.id, perr)
 	}
@@ -474,6 +558,41 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 		if r := recover(); r != nil {
 			// Outbox was closed concurrently; treat as a graceful
 			// shutdown signal rather than a crash.
+			err = ErrSessionClosed
+		}
+	}()
+	select {
+	case s.out <- f:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// isStreamingChunk returns true for outbox-only intermediate frames
+// — the streaming text deltas adapters render live but never replay.
+// See emit's doc comment for why these aren't persisted. AgentMessage
+// rows pass through to the store only when marked Consolidated=true
+// (the per-iteration assistant turn record); Reasoning chunks are
+// always outbox-only because their thinking/signature lives in the
+// consolidated AgentMessage's metadata instead.
+func isStreamingChunk(f protocol.Frame) bool {
+	switch v := f.(type) {
+	case *protocol.AgentMessage:
+		return !v.Payload.Consolidated
+	case *protocol.Reasoning:
+		return !v.Payload.Final
+	default:
+		return false
+	}
+}
+
+// outboxOnly pushes a Frame onto the outbox without seq allocation
+// or persistence. Mirrors emit's outbox semantics including the
+// closed-channel recover.
+func (s *Session) outboxOnly(ctx context.Context, f protocol.Frame) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
 			err = ErrSessionClosed
 		}
 	}()
@@ -542,6 +661,15 @@ func (s *Session) Run(ctx context.Context) error {
 				return nil
 			}
 			if err := s.routeInbound(ctx, f); err != nil {
+				if cs, ok := errors.AsType[*sessionCloseSignal](err); ok {
+					// Phase 4.1b-pre stage B: event-driven teardown. The
+					// SessionClose Frame is the unified close trigger;
+					// teardown reads s.closeReason as the reason for the
+					// persisted session_terminated row.
+					s.closeReason = cs.reason
+					s.teardown(ctx)
+					return nil
+				}
 				s.logger.Debug("session frame handler", "session", s.id, "err", err)
 			}
 		case ev, ok := <-s.modelChunks:
@@ -564,20 +692,23 @@ func (s *Session) Run(ctx context.Context) error {
 }
 
 // teardown is the ordered shutdown sequence run when the per-session
-// ctx fires. See Run for the prose contract.
+// ctx fires OR a SessionClose Frame is observed inbound. See Run for
+// the prose contract.
 //
 // Two paths:
 //
-//   - graceful (cause==nil): step 1 (turn cancel + wait) and step 2
-//     (children exit + inbox drain) still run because every running
-//     goroutine must release its slot before the binary can exit, but
-//     no events are persisted and no Release is called. This matches
-//     the phase-4 promise that graceful shutdown writes nothing —
-//     orphaned sessions are the restart-walker's job on next boot.
-//   - explicit (cause is *terminationCause): every step runs. Steps
-//     3–5 use tc.writeCtx so a still-honest deadline reaches the
-//     store; cancellation of the writeCtx aborts the persist, which
-//     is the caller's choice.
+//   - graceful (ctx.Done with no cause AND s.closeReason==""): step 1
+//     (turn cancel + wait) and step 2 (children exit + inbox drain)
+//     still run because every running goroutine must release its slot
+//     before the binary can exit, but no events are persisted and no
+//     Release is called. This matches the phase-4 promise that graceful
+//     shutdown writes nothing — orphaned sessions are the restart
+//     walker's job on next boot.
+//   - explicit (s.closeReason set by routeInbound on SessionClose, OR
+//     legacy ctx.Cause(*terminationCause) for sites still using
+//     s.terminate): every step runs. Steps 3–5 use tc.writeCtx so a
+//     still-honest deadline reaches the store; cancellation of the
+//     writeCtx aborts the persist, which is the caller's choice.
 func (s *Session) teardown(runCtx context.Context) {
 	// 1) Stop the in-flight turn.
 	if s.turnCancel != nil {
@@ -585,8 +716,30 @@ func (s *Session) teardown(runCtx context.Context) {
 	}
 	s.turnWG.Wait()
 
-	cause := context.Cause(runCtx)
-	tc, _ := cause.(*terminationCause)
+	// Phase 4.1b-pre stage B: explicit close is signalled by an
+	// inbound SessionClose Frame whose reason routeInbound stashed in
+	// s.closeReason. Synthesise a terminationCause so handleExit's
+	// existing reason-handling logic stays unchanged. Graceful
+	// shutdown leaves closeReason empty → tc nil → no terminal write.
+	var tc *terminationCause
+	if s.closeReason != "" {
+		tc = &terminationCause{
+			reason:    s.closeReason,
+			emitClose: emitSessionClosedForReason(s.closeReason),
+			writeCtx:  runCtx,
+		}
+	}
+
+	// Cascade: forward SessionClose to every direct child so their
+	// Run loops exit teardown via the same event path. Without this
+	// the SessionClose-driven teardown deadlocks waiting on childWG —
+	// children's ctx is no longer the cascade signal under D6.
+	// Graceful (tc==nil) path skips forwarding: rootCtx cancellation
+	// already propagates through every session ctx so children see
+	// their own ctx.Done and run a graceful (write-nothing) teardown.
+	if tc != nil {
+		s.cascadeSessionCloseToChildren(tc.writeCtx, tc.reason)
+	}
 
 	// 2) Wait for direct children, draining inbox concurrently so a
 	// child's last Submit (subagent_result, etc.) lands on us instead
@@ -610,12 +763,21 @@ func (s *Session) teardown(runCtx context.Context) {
 	}
 	s.pendingInbound = nil
 
-	// 4) Release per-session resources before we write the terminal
-	// event so a future restart-walker reading session_terminated
-	// doesn't see a row whose resources are still alive.
-	if s.deps != nil && s.deps.lifecycle != nil {
-		if err := s.deps.lifecycle.Release(tc.writeCtx, s.id); err != nil {
-			s.logger.Warn("session: lifecycle release on teardown",
+	// 4) Extension Closer dispatch in REVERSE registration order so
+	// later extensions whose state depends on earlier ones release
+	// first (mcp closes its providers before workspace removes the
+	// session dir; skill drops its sink before tool catalog goes
+	// away). Errors are logged warn-not-fatal — a misbehaving
+	// extension must not block teardown / terminal write.
+	s.dispatchExtensionClosers(tc.writeCtx)
+
+	// 4.5) Close the per-session ToolManager child after extensions
+	// dropped their references; agent-level providers stay live on
+	// the parent. NewSession created the child via
+	// rootTools.NewChild, so closing it here completes the chain.
+	if s.tools != nil {
+		if err := s.tools.Close(); err != nil {
+			s.logger.Warn("session: per-session tool manager close",
 				"session", s.id, "err", err)
 		}
 	}
@@ -623,7 +785,80 @@ func (s *Session) teardown(runCtx context.Context) {
 	// 5) handleExit appends session_terminated, emits subagent_result
 	// to the parent (if any), and (optionally) the SessionClosed
 	// outbox frame.
-	s.handleExit(runCtx)
+	s.handleExit(runCtx, tc)
+}
+
+// dispatchExtensionClosers runs every Closer-implementing extension's
+// Close in reverse registration order. Errors are logged.
+func (s *Session) dispatchExtensionClosers(ctx context.Context) {
+	if s.deps == nil {
+		return
+	}
+	exts := s.deps.Extensions
+	for i := len(exts) - 1; i >= 0; i-- {
+		closer, ok := exts[i].(extension.Closer)
+		if !ok {
+			continue
+		}
+		if err := closer.CloseSession(ctx, s); err != nil && s.deps.Logger != nil {
+			s.deps.Logger.Warn("session: extension close failed",
+				"session", s.id, "extension", exts[i].Name(), "err", err)
+		}
+	}
+}
+
+// cascadeSessionCloseToChildren forwards a SessionClose Frame to
+// every direct child so the cascade flows through the event path
+// (phase-4.1b-pre stage B / D6 step 22). Each child's Run loop
+// receives the Frame, runs teardown with reason="parent_cascade",
+// writes its own session_terminated row, and exits — childWG.Done
+// fires through the spawn closure regardless of cascade origin.
+//
+// Idempotent at the child level: a child already in teardown (its
+// goroutine has begun closing the Done channel) accepts the Submit
+// as a no-op. The Submit's defer-recover handles the brief window
+// where s.in is closed but Done has not yet been signalled.
+func (s *Session) cascadeSessionCloseToChildren(ctx context.Context, _ string) {
+	s.childMu.Lock()
+	children := make([]*Session, 0, len(s.children))
+	for _, c := range s.children {
+		children = append(children, c)
+	}
+	s.childMu.Unlock()
+	for _, c := range children {
+		if c.IsClosed() {
+			continue
+		}
+		f := protocol.NewSessionClose(c.id, s.agent.Participant(),
+			protocol.TerminationCancelCascade)
+		c.Submit(ctx, f)
+	}
+}
+
+// emitSessionClosedForReason maps a SessionClose reason to whether the
+// session should also emit a transcript-visible SessionClosed Frame.
+// Reasons that originate from a transcript-side action (handleSlashCommand
+// /end already emitted SessionClosed; subagent paths surface via
+// subagent_result; cascade is internal lifecycle only) suppress the
+// extra frame; everything else (Manager.Terminate, hard_ceiling,
+// stream_error) emits.
+func emitSessionClosedForReason(reason string) bool {
+	switch {
+	case reason == "":
+		return false
+	case strings.HasPrefix(reason, "user:"):
+		return false
+	case reason == protocol.TerminationCancelCascade:
+		return false
+	case strings.HasPrefix(reason, protocol.TerminationSubagentCancelPrefix):
+		return false
+	case reason == "subagent_done":
+		return false
+	case reason == "parent_cascade":
+		return false
+	default:
+		return true
+	}
 }
 
 // drainOnTeardown blocks until s.childWG fires (every direct child's
@@ -675,7 +910,7 @@ func (s *Session) drainOnTeardown() {
 // before handleExit writes the terminal row. Mirrors emit's seq
 // allocation so seq monotonicity holds across the boundary.
 func (s *Session) persistOnly(ctx context.Context, f protocol.Frame) error {
-	row, summary, err := FrameToEventRow(f, s.agent.ID())
+	row, summary, err := store.FrameToEventRow(f, s.agent.ID())
 	if err != nil {
 		return fmt.Errorf("session %s: project frame on teardown: %w", s.id, err)
 	}
@@ -714,10 +949,15 @@ func (s *Session) persistOnly(ctx context.Context, f protocol.Frame) error {
 // All store writes use tc.writeCtx (the caller's ctx threaded
 // through terminate). A cancelled writeCtx aborts the persist; that
 // is the caller's choice and we honour it.
-func (s *Session) handleExit(runCtx context.Context) {
-	cause := context.Cause(runCtx)
-	tc, ok := cause.(*terminationCause)
-	if !ok {
+//
+// Phase 4.1b-pre stage B: tc is now passed in by teardown rather than
+// recovered from context.Cause. The SessionClose-driven path
+// synthesises tc from s.closeReason without cancelling runCtx; the
+// legacy s.terminate path still attaches *terminationCause via
+// context.WithCancelCause. teardown unifies both into the tc param.
+func (s *Session) handleExit(runCtx context.Context, tc *terminationCause) {
+	_ = runCtx
+	if tc == nil {
 		return
 	}
 	if s.closed.Load() {
@@ -725,12 +965,6 @@ func (s *Session) handleExit(runCtx context.Context) {
 	}
 	reason := tc.reason
 	emitClose := tc.emitClose
-	if !s.explicitTerminate.Load() {
-		// Cascade from a terminated parent. Override the inherited
-		// cause so the persisted reason names the actual mechanism.
-		reason = protocol.TerminationCancelCascade
-		emitClose = false
-	}
 	writeCtx := tc.writeCtx
 	// Persist session_terminated directly through the store: emit()
 	// short-circuits on s.closed (guarding against post-exit writes
@@ -740,7 +974,7 @@ func (s *Session) handleExit(runCtx context.Context) {
 	terminal := protocol.NewSessionTerminated(s.id, s.agent.Participant(), protocol.SessionTerminatedPayload{
 		Reason: reason,
 	})
-	if termRow, summary, perr := FrameToEventRow(terminal, s.agent.ID()); perr == nil {
+	if termRow, summary, perr := store.FrameToEventRow(terminal, s.agent.ID()); perr == nil {
 		if nextSeq, serr := s.store.NextSeq(writeCtx, s.id); serr == nil {
 			termRow.Seq = nextSeq
 			if setter, ok := any(terminal).(protocol.SeqSetter); ok {
@@ -752,6 +986,16 @@ func (s *Session) handleExit(runCtx context.Context) {
 		}
 	} else {
 		s.logger.Warn("session: project session_terminated", "session", s.id, "err", perr)
+	}
+	// Flip the row's status column to terminated so list paths
+	// (ListResumableRoots, HTTP /sessions?status=) can filter by an
+	// indexed scalar instead of probing the event log. The
+	// authoritative event was already written above; this column is
+	// a queryable cache. Best-effort: a failure here leaves the row
+	// "stuck" on Active — the next live close (or a future
+	// reconciliation sweep) flips it.
+	if err := s.store.UpdateSessionStatus(writeCtx, s.id, store.StatusTerminated); err != nil {
+		s.logger.Warn("session: update status terminated", "session", s.id, "err", err)
 	}
 	s.closed.Store(true)
 	// Surface subagent_result to the parent on every explicit
@@ -775,7 +1019,7 @@ func (s *Session) handleExit(runCtx context.Context) {
 	// and emit will recover-safely panic on a closed outbox.
 	if emitClose {
 		closed := protocol.NewSessionClosed(s.id, s.agent.Participant(), reason)
-		if cRow, cSum, perr := FrameToEventRow(closed, s.agent.ID()); perr == nil {
+		if cRow, cSum, perr := store.FrameToEventRow(closed, s.agent.ID()); perr == nil {
 			if nextSeq, serr := s.store.NextSeq(writeCtx, s.id); serr == nil {
 				cRow.Seq = nextSeq
 				if setter, ok := any(closed).(protocol.SeqSetter); ok {
@@ -820,16 +1064,25 @@ func (s *Session) emitSubagentResultToParent(persistCtx context.Context, reason 
 	if parent == nil {
 		return
 	}
+	if !s.subagentResultSent.CompareAndSwap(false, true) {
+		// Phase 4.1b-pre stage B: requestClose may emit the result
+		// early so the parent's handleSubagentResult can issue
+		// SessionClose back. handleExit must not duplicate the row.
+		return
+	}
 	result := protocol.NewSubagentResult(parent.id, s.id, s.agent.Participant(),
 		protocol.SubagentResultPayload{
 			SessionID: s.id,
 			Reason:    reason,
 		})
-	if parent.Submit(persistCtx, result) {
+	if !parent.IsClosed() {
+		<-parent.Submit(persistCtx, result)
+	}
+	if !parent.IsClosed() {
 		return
 	}
 	// Parent inbox closed — fall back to direct store append.
-	resRow, summary, err := FrameToEventRow(result, s.agent.ID())
+	resRow, summary, err := store.FrameToEventRow(result, s.agent.ID())
 	if err != nil {
 		s.logger.Warn("session: project subagent_result for parent",
 			"parent", parent.id, "child", s.id, "err", err)
@@ -844,18 +1097,73 @@ func (s *Session) emitSubagentResultToParent(persistCtx context.Context, reason 
 	}
 }
 
+// handleSubagentResult is the parent-side reaction to a child's
+// terminal result (phase-4.1b-pre stage B / D6). The child has
+// already called requestClose, emitting subagent_result and
+// markClosing — its Run loop is idle waiting for the SessionClose
+// trigger. Parent issues that trigger here, waits for the child's
+// goroutine to exit (instant teardown since the child is already
+// idle), and deregisters from s.children before returning.
+//
+// Subsequent routing of the SubagentResult Frame itself happens in
+// routeInbound's RouteToolFeed / RouteBuffered fallthrough so
+// wait_subagents (or the next turn boundary's drain) still observes
+// the frame.
+//
+// Idempotent: a second result for the same childID after the first
+// has cleaned up the child entry is a no-op (lookup misses).
+func (s *Session) handleSubagentResult(ctx context.Context, f *protocol.SubagentResult) {
+	childID := f.Payload.SessionID
+	if childID == "" {
+		childID = f.FromSessionID()
+	}
+	s.childMu.Lock()
+	child, ok := s.children[childID]
+	s.childMu.Unlock()
+	if !ok {
+		return
+	}
+	closeFrame := protocol.NewSessionClose(child.id, s.agent.Participant(), "subagent_done")
+	// Fire-and-forget: if the child goroutine already exited the
+	// recover in Submit absorbs the closed-channel send and the
+	// frame is dropped silently. We wait on child.Done() below
+	// regardless — that's the actual lifecycle signal.
+	_ = child.Submit(ctx, closeFrame)
+	select {
+	case <-child.Done():
+	case <-ctx.Done():
+		// Caller cancelled — leave the entry; another routeInbound
+		// pass (or graceful shutdown) will mop up.
+		return
+	}
+	s.childMu.Lock()
+	if cur, ok := s.children[childID]; ok && cur == child {
+		delete(s.children, childID)
+	}
+	s.childMu.Unlock()
+
+	// Lifecycle: a child just deregistered. If the parent's own turn
+	// already closed and no other children remain (and no buffered
+	// pending frames / active feed), this is the canonical transition
+	// point back to idle.
+	if s.isQuiescent() {
+		s.markStatus(ctx, protocol.SessionStatusIdle, "subagent_drained")
+	}
+}
+
 // routeInbound dispatches a single inbound Frame.
 //
 // Control frames (Cancel, SlashCommand, UserMessage) handle inline:
 // they're the session-lifecycle triggers, not session-to-session
 // data, and the phase-4 three-route model (§10.2) targets multi-
-// session frames (subagent_*, whiteboard_*, future hitl_*).
+// session frames (subagent_*, extension_frame, future hitl_*).
 //
 // Everything else routes through routeFor (pkg/session/routes.go):
 //   - RouteInternal → dispatchInternal runs a sync side-effect
 //     handler from internalHandlers; the Frame never reaches
-//     s.history. C6 ships an empty handler table — phase-4 step
-//     10 (whiteboard primitive) fills it in.
+//     s.history. Stage-7.2 maps KindExtensionFrame here so
+//     dispatchExtensionFrame can hand the frame to the addressed
+//     extension.FrameRouter (whiteboard is the canonical consumer).
 //   - RouteToolFeed → if s.activeToolFeed is registered AND its
 //     Consumes predicate matches the kind, the Frame is forwarded
 //     to the blocking tool's feed; otherwise falls back to
@@ -865,17 +1173,44 @@ func (s *Session) emitSubagentResultToParent(persistCtx context.Context, reason 
 //     pass-through so transcript stays consistent (no turn means
 //     no boundary to drain into).
 //
+// SessionClose Frames trigger event-driven teardown (phase-4.1b-pre
+// stage B / D6): the routeInbound contract returns a sentinel
+// errSessionCloseSignal carrying the payload reason; the Run loop
+// stores it on s.closeReason and runs teardown without cancelling
+// runCtx. This replaces the historic ctx.Cause(*terminationCause)
+// path for explicit terminations. Graceful shutdown still flows
+// through ctx.Done with no cause.
+//
 // SessionClosed Frames observed inbound (e.g. legacy /end handler
 // returning a SessionClosed frame directly) flow through the buffered
 // path so adapters still see them in the transcript; the actual
-// termination is triggered by handleSlashCommand calling s.terminate.
+// termination is triggered separately by the SessionClose Frame the
+// /end handler also produces.
 func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 	switch v := f.(type) {
+	case *protocol.SessionClose:
+		s.markClosing()
+		return &sessionCloseSignal{reason: v.Payload.Reason}
+	case *protocol.SubagentResult:
+		// Phase 4.1b-pre stage B: parent issues SessionClose back to
+		// the child + waits for its goroutine to exit + deregisters
+		// from s.children. The frame itself then continues through the
+		// normal RouteToolFeed / RouteBuffered path so wait_subagents
+		// (or the next turn's drainPendingInbound) sees it.
+		s.handleSubagentResult(ctx, v)
 	case *protocol.Cancel:
 		return s.handleCancel(ctx, v)
 	case *protocol.SlashCommand:
 		return s.handleSlashCommand(ctx, v)
 	case *protocol.UserMessage:
+		if s.IsClosing() {
+			// Phase 4.1b-pre stage B: the session is on its way out;
+			// drop new user input on the floor with a transcript-visible
+			// system_marker so the operator sees what happened.
+			marker := protocol.NewSystemMarker(s.id, s.agent.Participant(),
+				"user_message_rejected_closing", map[string]any{"author": v.Author().ID})
+			return s.emit(ctx, marker)
+		}
 		// Concurrent UserMessage during a turn is unusual (UI typically
 		// gates on AgentMessage{Final:true}). Buffer it; advanceOrFinish
 		// will fold it into history at the next turn boundary so the
@@ -954,11 +1289,9 @@ func (s *Session) cascadeCancelChildren(ctx context.Context) {
 		if c.IsClosed() {
 			continue
 		}
-		c.terminate(&terminationCause{
-			reason:    protocol.TerminationCancelCascade,
-			emitClose: false,
-			writeCtx:  ctx,
-		})
+		f := protocol.NewSessionClose(c.id, s.agent.Participant(),
+			protocol.TerminationCancelCascade)
+		c.Submit(ctx, f)
 	}
 }
 
@@ -977,7 +1310,6 @@ func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashComma
 		Author:      f.Author(),
 		AgentAuthor: s.agent.Participant(),
 		Models:      s.models,
-		Notepad:     s.notepad,
 		Logger:      s.logger,
 		Description: spec.Description,
 	}
@@ -998,32 +1330,57 @@ func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashComma
 		}
 	}
 	// If a handler emitted SessionClosed (e.g. /end), trigger the
-	// per-session ctx-cancel via s.terminate so the Run loop's
-	// handleExit appends a session_terminated event and exits.
-	// emitClose=false: the handler already emitted the SessionClosed
-	// Frame for the transcript; the exit handler must NOT emit a
-	// duplicate.
+	// event-driven teardown via requestClose. For roots the OnCloseRequest
+	// hook spawns a goroutine that Submits SessionClose back through
+	// Manager.Terminate; for subagents requestClose surfaces
+	// subagent_result to the parent so handleSubagentResult issues
+	// SessionClose. handleExit will skip the duplicate SessionClosed
+	// emit because the reason starts with "user:" — emitSessionClosedForReason
+	// suppresses it.
 	if sawClose {
-		s.terminate(&terminationCause{
-			reason:    "user:" + f.Payload.Name + " " + closeReason,
-			emitClose: false,
-			writeCtx:  ctx,
-		})
+		s.requestClose(ctx, "user:"+f.Payload.Name+" "+closeReason)
 	}
 	return nil
 }
 
-// resolveToolIterCap picks the tool-iteration cap for one user
-// Turn. Precedence: loaded skills' max(metadata.hugen.max_turns)
-// → session-level WithMaxToolIterations override → runtime
-// default. Sampled once at the top of the user turn so the cap
-// stays stable through the loop even if a tool call mutates the
-// loaded skills mid-turn.
-func (s *Session) resolveToolIterCap(ctx context.Context) int {
-	if s.skills != nil {
-		if b, err := s.skills.Bindings(ctx, s.id); err == nil && b.MaxTurns > 0 {
-			return b.MaxTurns
+// gatherToolPolicy walks every [extension.ToolPolicyAdvisor]
+// extension once and composes their recommendations: take the
+// largest non-zero SoftCap / HardCeiling, OR over
+// DisableStuckNudges. Empty advisors yield the zero policy
+// (callers fall back to runtime defaults).
+func (s *Session) gatherToolPolicy(ctx context.Context) extension.ToolIterPolicy {
+	if s.deps == nil {
+		return extension.ToolIterPolicy{}
+	}
+	var p extension.ToolIterPolicy
+	for _, ext := range s.deps.Extensions {
+		adv, ok := ext.(extension.ToolPolicyAdvisor)
+		if !ok {
+			continue
 		}
+		got := adv.AdviseToolPolicy(ctx, s)
+		if got.SoftCap > p.SoftCap {
+			p.SoftCap = got.SoftCap
+		}
+		if got.HardCeiling > p.HardCeiling {
+			p.HardCeiling = got.HardCeiling
+		}
+		if got.DisableStuckNudges {
+			p.DisableStuckNudges = true
+		}
+	}
+	return p
+}
+
+// resolveToolIterCap picks the tool-iteration cap for one user
+// Turn. Precedence: ToolPolicyAdvisor recommendation (skills'
+// max(metadata.hugen.max_turns) today) → session-level
+// WithMaxToolIterations override → runtime default. Sampled once
+// at the top of the user turn so the cap stays stable through
+// the loop even if a tool call mutates extension state mid-turn.
+func (s *Session) resolveToolIterCap(ctx context.Context) int {
+	if cap := s.gatherToolPolicy(ctx).SoftCap; cap > 0 {
+		return cap
 	}
 	if s.maxToolIters > 0 {
 		return s.maxToolIters
@@ -1033,15 +1390,11 @@ func (s *Session) resolveToolIterCap(ctx context.Context) int {
 
 // resolveHardCeiling picks the per-Turn hard ceiling at which the
 // session terminates with reason "hard_ceiling" (phase-4-spec §8.2).
-// Precedence: loaded skills' max(metadata.hugen.max_turns_hard) →
-// 2 × resolved soft cap (the spec's documented default). Sampled
-// once at the top of the user turn alongside the soft cap so the
-// two stay coherent through the loop.
+// Precedence: ToolPolicyAdvisor HardCeiling → session override →
+// 2 × resolved soft cap.
 func (s *Session) resolveHardCeiling(ctx context.Context, softCap int) int {
-	if s.skills != nil {
-		if b, err := s.skills.Bindings(ctx, s.id); err == nil && b.MaxTurnsHard > 0 {
-			return b.MaxTurnsHard
-		}
+	if hard := s.gatherToolPolicy(ctx).HardCeiling; hard > 0 {
+		return hard
 	}
 	if s.maxToolItersHard > 0 {
 		return s.maxToolItersHard
@@ -1053,18 +1406,10 @@ func (s *Session) resolveHardCeiling(ctx context.Context, softCap int) int {
 }
 
 // stuckDetectionEnabled reports whether the heuristic stuck-detection
-// nudges are active for this session. Returns false only when a loaded
-// skill explicitly disables them (Bindings.StuckDetectionDisabled).
-// Sessions without a SkillManager keep the conservative default ON.
+// nudges are active for this session. Disabled when any
+// ToolPolicyAdvisor sets DisableStuckNudges. Default ON.
 func (s *Session) stuckDetectionEnabled(ctx context.Context) bool {
-	if s.skills == nil {
-		return true
-	}
-	b, err := s.skills.Bindings(ctx, s.id)
-	if err != nil {
-		return true
-	}
-	return !b.StuckDetectionDisabled
+	return !s.gatherToolPolicy(ctx).DisableStuckNudges
 }
 
 // buildMessages prepends the per-Turn system message (agent
@@ -1084,79 +1429,34 @@ func (s *Session) buildMessages(ctx context.Context) []model.Message {
 
 // systemPrompt assembles the system-prompt body for the next
 // model.Generate call. Order:
-//  1. Active plan block (when set; renders body + current-step
-//     pointer at the top so it survives history truncation —
-//     phase-4 spec §6.5 + contracts/tools-plan.md "Prompt-rendering
-//     contract").
-//  2. Agent constitution (universal rules).
-//  3. Body of every skill currently loaded into the session
-//     (concrete tool-usage instructions for the active toolset).
-//  4. Catalogue of every skill the agent can reach — both loaded
-//     and unloaded — so the model picks the right one and calls
-//     skill_load without a separate discovery tool round-trip.
-//     Loaded skills are tagged so the model doesn't reload them.
+//  1. Agent constitution (universal rules).
+//  2. Extension Advertiser sections — registration order. Plan ext
+//     advertises the active-plan block (registered before skill so
+//     it lands ahead of skill instructions / catalogue); skill ext
+//     contributes (a) the body of every loaded skill and (b) the
+//     catalogue of every skill the agent can reach.
 func (s *Session) systemPrompt(ctx context.Context) string {
 	var parts []string
-	if block := s.renderPlanBlock(); block != "" {
-		parts = append(parts, block)
-	}
 	if s.agent != nil {
 		if c := s.agent.Constitution(); c != "" {
 			parts = append(parts, c)
 		}
 	}
-	if s.skills != nil {
-		if b, err := s.skills.Bindings(ctx, s.id); err == nil && b.Instructions != "" {
-			parts = append(parts, b.Instructions)
-		}
-		if catalogue := s.skillCatalogue(ctx); catalogue != "" {
-			parts = append(parts, catalogue)
+	if s.deps != nil {
+		for _, ext := range s.deps.Extensions {
+			adv, ok := ext.(extension.Advertiser)
+			if !ok {
+				continue
+			}
+			if section := adv.AdvertiseSystemPrompt(ctx, s); section != "" {
+				parts = append(parts, section)
+			}
 		}
 	}
 	if len(parts) == 0 {
 		return ""
 	}
 	return strings.Join(parts, "\n\n")
-}
-
-// renderPlanBlock returns the system-prompt-friendly rendering of
-// this session's plan projection — empty when no plan is active.
-// Holding planMu briefly ensures the read sees a consistent
-// snapshot even if a tool handler is mid-Apply on another goroutine.
-func (s *Session) renderPlanBlock() string {
-	s.planMu.Lock()
-	defer s.planMu.Unlock()
-	return plan.Render(s.plan)
-}
-
-// skillCatalogue renders one bullet per skill in the store using
-// the manifest's frontmatter `description` (capped at ~120 tokens
-// by the manifest validator). Loaded skills carry a `(loaded)` tag
-// so the model sees its current toolset alongside everything else
-// available. Returns "" when the store is empty.
-func (s *Session) skillCatalogue(ctx context.Context) string {
-	all, err := s.skills.List(ctx)
-	if err != nil || len(all) == 0 {
-		return ""
-	}
-	loadedSet := map[string]struct{}{}
-	for _, n := range s.skills.LoadedNames(ctx, s.id) {
-		loadedSet[n] = struct{}{}
-	}
-	var b strings.Builder
-	b.WriteString("## Available skills\n\nLoad any of these via the `skill_load` tool when their domain becomes relevant. Already-loaded skills are tagged `(loaded)`.\n\n")
-	for _, sk := range all {
-		b.WriteString("- `")
-		b.WriteString(sk.Manifest.Name)
-		b.WriteString("`")
-		if _, on := loadedSet[sk.Manifest.Name]; on {
-			b.WriteString(" (loaded)")
-		}
-		b.WriteString(" — ")
-		b.WriteString(strings.TrimSpace(sk.Manifest.Description))
-		b.WriteString("\n")
-	}
-	return b.String()
 }
 
 // modelToolsForSession converts the per-session ToolManager
@@ -1221,12 +1521,12 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 		return "", true
 	}
 	dispatchCtx := perm.WithSession(turnCtx, perm.SessionContext{SessionID: s.id})
-	// Wire the live *Session into the dispatch ctx so session-scoped
-	// ToolProviders (Manager-as-ToolProvider, skill_files, …) can
-	// recover the caller without going through Manager.Get — Manager
-	// is root-only after pivot 4, so a sub-agent caller would not be
-	// findable that way.
-	dispatchCtx = WithSession(dispatchCtx, s)
+	// Extension ToolProviders (notepad, plan, whiteboard, skill, …)
+	// recover the calling SessionState via
+	// extension.SessionStateFromContext. *Session satisfies
+	// extension.SessionState directly, so the same value flows
+	// through.
+	dispatchCtx = extension.WithSessionState(dispatchCtx, s)
 
 	rawArgs := marshalToolArgs(tc.Args)
 	callFrame := protocol.NewToolCall(s.id, s.agent.Participant(), tc.ID, tc.Name, tc.Args)
@@ -1394,6 +1694,69 @@ func (s *Session) emitPendingSwitch(ctx context.Context) error {
 
 // IsClosed reports whether the session has been closed.
 func (s *Session) IsClosed() bool { return s.closed.Load() }
+
+// IsClosing reports whether the session has begun teardown (a
+// SessionClose Frame has been requested, either by the session
+// itself via requestClose or by an external producer about to
+// Submit one). closing transitions to true strictly before
+// closed; once true, new UserMessage frames are rejected (the
+// session is on its way out).
+func (s *Session) IsClosing() bool { return s.closing.Load() }
+
+// markClosing flips the closing flag. Used by requestClose and by
+// teardown after a SessionClose Frame is observed inbound. Idempotent.
+func (s *Session) markClosing() { s.closing.Store(true) }
+
+// requestClose triggers session teardown through the event-driven
+// SessionClose protocol (phase-4.1b-pre §6 Stage B / D6). It emits a
+// close_requested system_marker for observability, marks the session
+// closing (so subsequent UserMessages are refused), and dispatches
+// the close trigger to whoever owns the session's termination:
+//
+//   - root sessions: deps.OnCloseRequest fires (Manager wiring spawns
+//     a goroutine that Submits SessionClose back to the root via
+//     Manager.Terminate). The hook never blocks the caller.
+//   - subagent sessions: emit subagent_result to the parent's inbox
+//     so the parent's handleSubagentResult issues the SessionClose
+//     trigger back. The Run loop then sits idle until the trigger
+//     arrives.
+//
+// Idempotent: a second call after closing=true is a no-op (Store is
+// already set; OnCloseRequest fires once; subagent_result is gated
+// by subagentResultSent).
+//
+// ctx is the caller's request-scoped context (typically the Run
+// loop's runCtx or a turnCtx). Implementations of OnCloseRequest
+// decide whether to inherit or detach (context.WithoutCancel) from
+// its cancel chain — the hook in pkg/runtime detaches so Manager
+// .Terminate survives the Run loop's own teardown.
+func (s *Session) requestClose(ctx context.Context, reason string) {
+	if s == nil {
+		return
+	}
+	if !s.closing.CompareAndSwap(false, true) {
+		return
+	}
+	marker := protocol.NewSystemMarker(s.id, s.agent.Participant(),
+		"close_requested", map[string]any{"reason": reason})
+	if err := s.emit(ctx, marker); err != nil && !errors.Is(err, ErrSessionClosed) {
+		s.logger.Warn("session: emit close_requested marker",
+			"session", s.id, "reason", reason, "err", err)
+	}
+	if s.parent != nil {
+		// Subagent path: surface the terminal result to the parent so
+		// its handleSubagentResult can issue SessionClose back. The
+		// Run loop stays alive until the SessionClose Frame arrives.
+		s.emitSubagentResultToParent(ctx, reason)
+		return
+	}
+	// Root path: hand the close request to whoever owns this tree's
+	// termination (Manager). Optional — tests with no Manager wiring
+	// must drive teardown via the SessionClose Frame directly.
+	if s.deps != nil && s.deps.OnCloseRequest != nil {
+		s.deps.OnCloseRequest(ctx, s.id, reason)
+	}
+}
 
 // LastActive returns time.Now (placeholder; Phase 4 fills this in
 // from updated_at if needed).

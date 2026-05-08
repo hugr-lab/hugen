@@ -69,11 +69,13 @@ type Snapshot struct {
 	Tools       []Tool
 }
 
-// Generations is the (skill_gen, tool_gen, policy_gen) triple
-// keying each Snapshot. ToolManager rebuilds when any field
-// moves.
+// Generations is the (tool_gen, policy_gen) pair keying each
+// Snapshot. ToolManager rebuilds when either field moves.
+// Skill-bindings generation moved off this struct in phase
+// 4.1b-pre stage 2 — it now flows through the generic
+// [extension.GenerationProvider] capability owned by the skill
+// extension.
 type Generations struct {
-	Skill  int64
 	Tool   int64
 	Policy int64
 }
@@ -368,10 +370,6 @@ func (m *ToolManager) ToolGen() int64 { return m.toolGen.Load() }
 func (m *ToolManager) PolicyGen() int64 { return m.policyGen.Load() }
 
 func (m *ToolManager) currentGenerations(_ context.Context, _ string) (Generations, error) {
-	// Phase 4.1a stage A step 7c moved skill-bindings reading to
-	// pkg/session — Manager only owns Tool / Policy gens. The
-	// Skill field stays on the struct for caller-side cache keys
-	// (pkg/session populates it) but Manager always returns 0.
 	return Generations{
 		Tool:   m.toolGen.Load(),
 		Policy: m.policyGen.Load(),

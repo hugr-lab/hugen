@@ -42,21 +42,24 @@ func TestCodec_RoundTrip(t *testing.T) {
 			Op: "comment", Text: "found A,B,C", CurrentStep: "step 2",
 		})},
 		{"plan_op_clear", NewPlanOp("s1", testAgent, PlanOpPayload{Op: "clear"})},
-		{"whiteboard_op_init", NewWhiteboardOp("s1", "", testAgent, WhiteboardOpPayload{Op: "init"})},
-		{"whiteboard_op_write", NewWhiteboardOp("s1", "s2", testAgent, WhiteboardOpPayload{
-			Op: "write", Seq: 7, FromSessionID: "s2", FromRole: "explorer", Text: "found auth_logs",
-		})},
-		{"whiteboard_op_stop", NewWhiteboardOp("s1", "", testAgent, WhiteboardOpPayload{Op: "stop"})},
-		{"whiteboard_message", NewWhiteboardMessage("s1", "s3", testAgent, WhiteboardMessagePayload{
-			FromSessionID: "s2", FromRole: "explorer", Seq: 7, Text: "found auth_logs",
-		})},
 		{"session_terminated", NewSessionTerminated("s1", testAgent, SessionTerminatedPayload{
 			Reason: TerminationHardCeiling, TurnsUsed: 30,
 		})},
+		{"session_close", NewSessionClose("s1", testAgent, TerminationHardCeiling)},
 		{"system_message_soft_warning", NewSystemMessage("s1", testAgent,
 			SystemMessageSoftWarning, "you have used N turns")},
 		{"system_message_whiteboard", NewSystemMessage("s1", testAgent,
 			SystemMessageWhiteboard, "[whiteboard] explorer (s2): found auth_logs")},
+		{"session_status_idle", NewSessionStatus("s1", testAgent,
+			SessionStatusIdle, "newSession")},
+		{"session_status_active", NewSessionStatus("s1", testAgent,
+			SessionStatusActive, "user_message")},
+		{"session_status_wait_subagents", NewSessionStatus("s1", testAgent,
+			SessionStatusWaitSubagents, "tool=wait_subagents")},
+		{"session_status_wait_approval_phase5_placeholder", NewSessionStatus("s1", testAgent,
+			SessionStatusWaitApproval, "")},
+		{"session_status_wait_user_input_phase5_placeholder", NewSessionStatus("s1", testAgent,
+			SessionStatusWaitUserInput, "")},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -180,7 +183,6 @@ func TestCodec_PayloadIntegrity_Phase4(t *testing.T) {
 		in := NewSubagentStarted("p", testAgent, SubagentStartedPayload{
 			ChildSessionID: "c", Skill: "hugr-data", Role: "explorer",
 			Task: "do thing", Depth: 2, Inputs: map[string]any{"k": float64(1)},
-			ParentWhiteboardActive: true,
 		})
 		data, _ := codec.EncodeFrame(in)
 		out, err := codec.DecodeFrame(data)
@@ -189,7 +191,7 @@ func TestCodec_PayloadIntegrity_Phase4(t *testing.T) {
 		}
 		got := out.(*SubagentStarted).Payload
 		if got.ChildSessionID != "c" || got.Skill != "hugr-data" || got.Role != "explorer" ||
-			got.Task != "do thing" || got.Depth != 2 || !got.ParentWhiteboardActive {
+			got.Task != "do thing" || got.Depth != 2 {
 			t.Errorf("payload drift: %+v", got)
 		}
 	})
@@ -200,17 +202,6 @@ func TestCodec_PayloadIntegrity_Phase4(t *testing.T) {
 		got := out.(*PlanOp).Payload
 		if got.Op != "clear" || got.Text != "" || got.CurrentStep != "" {
 			t.Errorf("clear payload drift: %+v", got)
-		}
-	})
-	t.Run("whiteboard_op_truncated_flag", func(t *testing.T) {
-		in := NewWhiteboardOp("h", "c", testAgent, WhiteboardOpPayload{
-			Op: "write", Seq: 99, FromSessionID: "c", FromRole: "x", Text: "y", Truncated: true,
-		})
-		data, _ := codec.EncodeFrame(in)
-		out, _ := codec.DecodeFrame(data)
-		got := out.(*WhiteboardOp).Payload
-		if !got.Truncated || got.Seq != 99 {
-			t.Errorf("write payload drift: %+v", got)
 		}
 	})
 	t.Run("session_terminated_with_result", func(t *testing.T) {
@@ -243,10 +234,11 @@ func TestValidate_Phase4(t *testing.T) {
 			SessionID: "c",
 		}), true},
 		{"plan_op_invalid_op", NewPlanOp("s", testAgent, PlanOpPayload{Op: "rename"}), true},
-		{"whiteboard_op_invalid_op", NewWhiteboardOp("s", "", testAgent, WhiteboardOpPayload{Op: "spin"}), true},
-		{"whiteboard_message_missing_from", NewWhiteboardMessage("h", "r", testAgent, WhiteboardMessagePayload{}), true},
 		{"session_terminated_missing_reason", NewSessionTerminated("s", testAgent, SessionTerminatedPayload{}), true},
 		{"system_message_missing_kind", NewSystemMessage("s", testAgent, "", "x"), true},
+		{"session_status_idle_ok", NewSessionStatus("s", testAgent, SessionStatusIdle, ""), false},
+		{"session_status_invalid_state", NewSessionStatus("s", testAgent, "running", ""), true},
+		{"session_status_empty_state", NewSessionStatus("s", testAgent, "", ""), true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

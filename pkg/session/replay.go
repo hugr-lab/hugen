@@ -2,13 +2,12 @@ package session
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session/plan"
-	"github.com/hugr-lab/hugen/pkg/session/whiteboard"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 // defaultHistoryWindow is the number of most-recent events the
@@ -24,151 +23,51 @@ const defaultHistoryWindow = 50
 // Re-derived projections (phase-4):
 //   - history: most-recent user/agent text messages within the
 //     window cap (placeholder for phase-5 compactor).
-//   - plan: full plan_op replay through pkg/session/plan.Project.
-//     The plan survives history truncation — its source is the
-//     full event log, not the windowed history.
-//   - whiteboard: full whiteboard_op replay through
-//     pkg/session/whiteboard.Project. Like the plan, the board
-//     reads the full event log so it survives history truncation
-//     and process restart.
+//
+// Extension-owned projections (plan, whiteboard, skill, …) ride
+// the [extension.Recovery] hook below — every Recovery-implementing
+// extension sees the same full event slice and rebuilds its own
+// state.
 func (s *Session) materialise(ctx context.Context) error {
 	if s.materialised.Load() {
 		return nil
 	}
 	var firstErr error
 	s.matOnce.Do(func() {
-		rows, err := s.store.ListEvents(ctx, s.id, ListEventsOpts{})
+		rows, err := s.store.ListEvents(ctx, s.id, store.ListEventsOpts{})
 		if err != nil {
 			firstErr = fmt.Errorf("session %s: list events: %w", s.id, err)
 			return
 		}
 		s.history = projectHistory(rows, defaultHistoryWindow)
 
-		s.planMu.Lock()
-		s.plan = plan.Project(planEventsFrom(rows))
-		s.planMu.Unlock()
-
-		s.whiteboardMu.Lock()
-		s.whiteboard = whiteboard.Project(whiteboardEventsFrom(rows))
-		s.whiteboardMu.Unlock()
-
 		// Soft-warning idempotency derives from the event log so a
 		// restart that loses in-memory state still skips re-emission.
 		s.reloadSoftWarningFlag(rows)
 
+		// Extension recovery: every Recovery-implementing extension
+		// rebuilds its per-session projection from the same event
+		// list. Errors are logged warn-not-fatal — recovery is
+		// best-effort and must not block session start. Order
+		// follows registration order; an extension's recovery sees
+		// the projections set up by InitState plus whatever earlier
+		// recoveries wrote into state.
+		if s.deps != nil {
+			for _, ext := range s.deps.Extensions {
+				rec, ok := ext.(extension.Recovery)
+				if !ok {
+					continue
+				}
+				if err := rec.Recover(ctx, s, rows); err != nil && s.deps.Logger != nil {
+					s.deps.Logger.Warn("session: extension recovery failed",
+						"session", s.id, "extension", ext.Name(), "err", err)
+				}
+			}
+		}
+
 		s.materialised.Store(true)
 	})
 	return firstErr
-}
-
-// whiteboardEventsFrom selects whiteboard_op rows from the session's
-// full event list and converts each into a whiteboard.ProjectEvent.
-// The session package owns this conversion so pkg/session/whiteboard
-// stays free of EventRow / store imports.
-func whiteboardEventsFrom(rows []EventRow) []whiteboard.ProjectEvent {
-	out := make([]whiteboard.ProjectEvent, 0)
-	for _, r := range rows {
-		if protocol.Kind(r.EventType) != protocol.KindWhiteboardOp {
-			continue
-		}
-		ev := whiteboard.ProjectEvent{At: r.CreatedAt}
-		if r.Metadata != nil {
-			if v, ok := r.Metadata["op"].(string); ok {
-				ev.Op = v
-			}
-			if v, ok := r.Metadata["text"].(string); ok {
-				ev.Text = v
-			}
-			if v, ok := r.Metadata["from_session_id"].(string); ok {
-				ev.FromSessionID = v
-			}
-			if v, ok := r.Metadata["from_role"].(string); ok {
-				ev.FromRole = v
-			}
-			if v, ok := r.Metadata["truncated"].(bool); ok {
-				ev.Truncated = v
-			}
-			if v, ok := r.Metadata["seq"]; ok {
-				switch t := v.(type) {
-				case float64:
-					ev.Seq = int64(t)
-				case int64:
-					ev.Seq = t
-				case int:
-					ev.Seq = int64(t)
-				}
-			}
-		}
-		if ev.Op == "" {
-			if raw, ok := r.Metadata["payload"]; ok {
-				b, _ := json.Marshal(raw)
-				var p protocol.WhiteboardOpPayload
-				if json.Unmarshal(b, &p) == nil {
-					ev.Op = p.Op
-					ev.Text = p.Text
-					ev.FromSessionID = p.FromSessionID
-					ev.FromRole = p.FromRole
-					ev.Truncated = p.Truncated
-					ev.Seq = p.Seq
-				}
-			}
-		}
-		if ev.Op == "" {
-			continue
-		}
-		out = append(out, ev)
-	}
-	return out
-}
-
-// planEventsFrom selects plan_op rows from the session's full event
-// list and converts each into a plan.ProjectEvent. The session
-// package owns this conversion so pkg/session/plan stays free of
-// EventRow / store imports.
-func planEventsFrom(rows []EventRow) []plan.ProjectEvent {
-	out := make([]plan.ProjectEvent, 0)
-	for _, r := range rows {
-		if protocol.Kind(r.EventType) != protocol.KindPlanOp {
-			continue
-		}
-		ev := plan.ProjectEvent{At: r.CreatedAt}
-		// Payload travels two ways: a structured PlanOpPayload stashed
-		// directly in Metadata (newer rows) or just Content carrying
-		// the body (older / minimal rows). Try the structured shape
-		// first; fall back to columnar fields.
-		if r.Metadata != nil {
-			if v, ok := r.Metadata["op"].(string); ok {
-				ev.Op = v
-			}
-			if v, ok := r.Metadata["text"].(string); ok {
-				ev.Text = v
-			}
-			if v, ok := r.Metadata["current_step"].(string); ok {
-				ev.CurrentStep = v
-			}
-		}
-		if ev.Op == "" {
-			// Defensive fallback: serialised payload may have used a
-			// `payload` envelope rather than top-level keys.
-			if raw, ok := r.Metadata["payload"]; ok {
-				b, _ := json.Marshal(raw)
-				var p protocol.PlanOpPayload
-				if json.Unmarshal(b, &p) == nil {
-					ev.Op = p.Op
-					ev.Text = p.Text
-					ev.CurrentStep = p.CurrentStep
-				}
-			}
-		}
-		if ev.Text == "" {
-			ev.Text = r.Content
-		}
-		if ev.Op == "" {
-			continue
-		}
-		out = append(out, ev)
-	}
-	return out
 }
 
 // projectHistory walks events newest-last and keeps the most recent
@@ -176,8 +75,21 @@ func planEventsFrom(rows []EventRow) []plan.ProjectEvent {
 // slice.
 //
 // Reasoning frames are excluded — phase 1 doesn't replay reasoning
-// to the model; the model emits its own reasoning per turn. Tool
-// calls are excluded too (Phase 3+ tools emit their own frames).
+// to the model from per-chunk rows; the consolidated final
+// agent_message carries the Anthropic/Gemini thinking + signature
+// fields directly when set, so the chain continues across resume.
+//
+// AgentMessage rows are only consolidated finals (Final=true with
+// full assembled text). Streaming chunks (Final=false) are
+// outbox-only and never persisted — see emit() in session.go. So
+// reading Content directly gives the full assistant text and lifting
+// tool_calls / thinking from metadata gives a well-formed
+// model.Message with no chunk reassembly.
+//
+// tool_result rows replay as RoleTool messages, paired with the
+// tool_call id from the consolidated assistant turn that requested
+// them. Standalone tool_call rows are skipped — the assistant
+// message already lists them in ToolCalls.
 //
 // system_message rows ARE projected — as RoleUser with the same
 // "[system: <kind>] <content>" prefix the live visibility filter
@@ -187,7 +99,7 @@ func planEventsFrom(rows []EventRow) []plan.ProjectEvent {
 // would be invisible to the model after a process restart.
 // Reading the same shape live and after replay keeps the model's
 // mental model continuous across the cut.
-func projectHistory(rows []EventRow, window int) []model.Message {
+func projectHistory(rows []store.EventRow, window int) []model.Message {
 	if window <= 0 {
 		window = defaultHistoryWindow
 	}
@@ -198,12 +110,34 @@ func projectHistory(rows []EventRow, window int) []model.Message {
 		case protocol.KindUserMessage:
 			all = append(all, model.Message{Role: model.RoleUser, Content: r.Content})
 		case protocol.KindAgentMessage:
-			// Only keep the final chunk per turn — partial deltas
-			// aren't needed for replay. The "final" flag lives in
-			// metadata; if missing we fall back to non-empty content.
-			if final, _ := metadataBool(r.Metadata, "final"); final {
-				all = append(all, model.Message{Role: model.RoleAssistant, Content: r.Content})
+			// Persisted AgentMessage rows are per-iteration consolidated
+			// records (see session.emit); streaming chunks are
+			// outbox-only and never reach us here. Defensive: if a
+			// pre-this-change DB has chunk rows mixed in, the absence
+			// of "consolidated" metadata is the discriminator — skip
+			// them so we don't replay partial deltas as turns.
+			if cons, _ := metadataBool(r.Metadata, "consolidated"); !cons {
+				continue
 			}
+			msg := model.Message{
+				Role:             model.RoleAssistant,
+				Content:          r.Content,
+				ToolCalls:        decodeToolCalls(r.Metadata),
+				Thinking:         metadataString(r.Metadata, "thinking"),
+				ThoughtSignature: metadataString(r.Metadata, "thought_signature"),
+			}
+			all = append(all, msg)
+		case protocol.KindToolResult:
+			toolID := metadataString(r.Metadata, "tool_id")
+			body := r.ToolResult
+			if body == "" {
+				body = r.Content
+			}
+			all = append(all, model.Message{
+				Role:       model.RoleTool,
+				ToolCallID: toolID,
+				Content:    body,
+			})
 		case protocol.KindSystemMessage:
 			kind, _ := r.Metadata["kind"].(string)
 			if kind == "" {
@@ -274,4 +208,38 @@ func metadataBool(m map[string]any, key string) (bool, bool) {
 	}
 	b, ok := v.(bool)
 	return b, ok
+}
+
+func metadataString(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	s, _ := m[key].(string)
+	return s
+}
+
+// decodeToolCalls lifts the tool_calls array stashed in the
+// consolidated final AgentMessage's metadata back into
+// model.ChunkToolCall — the shape model.Message.ToolCalls expects so
+// the model can resume its conversation knowing what it requested.
+// Returns nil when absent or malformed.
+func decodeToolCalls(m map[string]any) []model.ChunkToolCall {
+	raw, ok := m["tool_calls"].([]any)
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	out := make([]model.ChunkToolCall, 0, len(raw))
+	for _, e := range raw {
+		obj, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		call := model.ChunkToolCall{
+			ID:   metadataString(obj, "tool_id"),
+			Name: metadataString(obj, "name"),
+		}
+		call.Args = obj["args"]
+		out = append(out, call)
+	}
+	return out
 }

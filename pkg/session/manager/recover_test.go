@@ -1,0 +1,450 @@
+package manager
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session"
+)
+
+// TestSettleDangling_NonTerminalChild_RestartDied: a child row exists,
+// has no terminal event, and no subagent_result is on the parent's
+// events. Settle must (1) write session_terminated{restart_died} on
+// the child's events, (2) write a subagent_result{restart_died} on the
+// parent with a clear instruction body, and (3) report written=1.
+func TestSettleDangling_NonTerminalChild_RestartDied(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	parentID, childID := "root1", "sub1"
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: parentID, AgentID: "a1", SessionType: "root", Status: session.StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: childID, AgentID: "a1", ParentSessionID: parentID,
+		SessionType: "subagent", Status: session.StatusActive,
+		Metadata:  map[string]any{"depth": 1},
+		CreatedAt: now, UpdatedAt: now,
+	})
+
+	mgr := newTestManager(t, store)
+	written, err := session.SettleDanglingSubagents(ctx, mgr.deps, parentID)
+	if err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if written != 1 {
+		t.Fatalf("written = %d, want 1", written)
+	}
+
+	if !containsKindWithReason(must(store.ListEvents(ctx, childID, session.ListEventsOpts{})),
+		protocol.KindSessionTerminated, protocol.TerminationRestartDied) {
+		t.Errorf("child missing session_terminated{restart_died}")
+	}
+	parentEvents := must(store.ListEvents(ctx, parentID, session.ListEventsOpts{}))
+	var foundResult bool
+	for _, ev := range parentEvents {
+		if ev.EventType != string(protocol.KindSubagentResult) {
+			continue
+		}
+		if ev.Metadata["session_id"] != childID {
+			continue
+		}
+		if ev.Metadata["reason"] != protocol.TerminationRestartDied {
+			t.Errorf("subagent_result reason = %v, want %s",
+				ev.Metadata["reason"], protocol.TerminationRestartDied)
+		}
+		// Result body is generic but must reference the child id and the reason.
+		body := ev.Content
+		if body == "" {
+			body, _ = ev.Metadata["result"].(string)
+		}
+		if body == "" {
+			t.Errorf("subagent_result has empty Result body")
+		}
+		foundResult = true
+		break
+	}
+	if !foundResult {
+		t.Errorf("parent missing subagent_result for child %s", childID)
+	}
+}
+
+// TestSettleDangling_CleanlyTerminatedChild_PreservesReason: a child
+// has its own session_terminated{completed} event but the
+// subagent_result frame was lost in flight (parent.events has none).
+// Settle must propagate the child's REAL reason ("completed") into the
+// synthetic parent-side subagent_result — never fake "restart_died" for
+// a child that exited cleanly.
+func TestSettleDangling_CleanlyTerminatedChild_PreservesReason(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	parentID, childID := "root1", "sub1"
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: parentID, AgentID: "a1", SessionType: "root", Status: session.StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: childID, AgentID: "a1", ParentSessionID: parentID,
+		SessionType: "subagent", Status: session.StatusActive,
+		Metadata:  map[string]any{"depth": 1},
+		CreatedAt: now, UpdatedAt: now,
+	})
+	// Pre-seed child as cleanly terminated.
+	terminal := protocol.NewSessionTerminated(childID,
+		protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent},
+		protocol.SessionTerminatedPayload{Reason: protocol.TerminationCompleted})
+	tRow, tSum, err := session.FrameToEventRow(terminal, "a1")
+	if err != nil {
+		t.Fatalf("project terminal: %v", err)
+	}
+	if err := store.AppendEvent(ctx, tRow, tSum); err != nil {
+		t.Fatalf("append child terminal: %v", err)
+	}
+
+	mgr := newTestManager(t, store)
+	written, err := session.SettleDanglingSubagents(ctx, mgr.deps, parentID)
+	if err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if written != 1 {
+		t.Fatalf("written = %d, want 1", written)
+	}
+
+	parentEvents := must(store.ListEvents(ctx, parentID, session.ListEventsOpts{}))
+	var sawCorrectReason bool
+	for _, ev := range parentEvents {
+		if ev.EventType != string(protocol.KindSubagentResult) {
+			continue
+		}
+		if ev.Metadata["session_id"] != childID {
+			continue
+		}
+		if ev.Metadata["reason"] == protocol.TerminationCompleted {
+			sawCorrectReason = true
+		} else {
+			t.Errorf("subagent_result reason = %v, want %s (clean exit must preserve)",
+				ev.Metadata["reason"], protocol.TerminationCompleted)
+		}
+	}
+	if !sawCorrectReason {
+		t.Errorf("parent missing subagent_result{completed} for cleanly-terminated child")
+	}
+	// The child's existing session_terminated{completed} must NOT be
+	// overwritten by a synthetic restart_died (idempotent on terminal).
+	childEvents := must(store.ListEvents(ctx, childID, session.ListEventsOpts{}))
+	termCount := 0
+	for _, ev := range childEvents {
+		if ev.EventType == string(protocol.KindSessionTerminated) {
+			termCount++
+		}
+	}
+	if termCount != 1 {
+		t.Errorf("child has %d session_terminated events, want exactly 1", termCount)
+	}
+}
+
+// TestSettleDangling_AlreadySettled_NoOp: parent already has a
+// subagent_result for the child. Settle must NOT write anything more —
+// neither on parent nor on child — and report written=0.
+func TestSettleDangling_AlreadySettled_NoOp(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	parentID, childID := "root1", "sub1"
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: parentID, AgentID: "a1", SessionType: "root", Status: session.StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: childID, AgentID: "a1", ParentSessionID: parentID,
+		SessionType: "subagent", Status: session.StatusActive,
+		Metadata:  map[string]any{"depth": 1},
+		CreatedAt: now, UpdatedAt: now,
+	})
+	// Pre-seed the parent with an existing subagent_result.
+	pre := protocol.NewSubagentResult(parentID, childID,
+		protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent},
+		protocol.SubagentResultPayload{
+			SessionID: childID,
+			Reason:    protocol.TerminationCompleted,
+			Result:    "ok",
+		})
+	row, sum, err := session.FrameToEventRow(pre, "a1")
+	if err != nil {
+		t.Fatalf("project pre-result: %v", err)
+	}
+	if err := store.AppendEvent(ctx, row, sum); err != nil {
+		t.Fatalf("append pre-result: %v", err)
+	}
+
+	mgr := newTestManager(t, store)
+	written, err := session.SettleDanglingSubagents(ctx, mgr.deps, parentID)
+	if err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if written != 0 {
+		t.Errorf("written = %d on already-settled parent, want 0", written)
+	}
+	// Child must NOT have gained a session_terminated row.
+	for _, ev := range must(store.ListEvents(ctx, childID, session.ListEventsOpts{})) {
+		if ev.EventType == string(protocol.KindSessionTerminated) {
+			t.Errorf("idempotent settle wrote a child terminal: %v", ev)
+		}
+	}
+}
+
+// TestRestoreActive_SkipsIdleRoot: a root with no children is idle.
+// RestoreActive must not bring up its goroutine (no entry in
+// SessionsLive) — adapter Resume on demand handles it later.
+func TestRestoreActive_SkipsIdleRoot(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root_idle", AgentID: "a1", SessionType: "root", Status: session.StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	mustWriteStatus(t, store, ctx, "root_idle", protocol.SessionStatusIdle)
+
+	mgr := newTestManager(t, store)
+	if err := mgr.RestoreActive(ctx); err != nil {
+		t.Fatalf("RestoreActive: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	if live := mgr.SessionsLive(); len(live) != 0 {
+		t.Errorf("idle root brought up at boot: live=%v", live)
+	}
+}
+
+// TestRestoreActive_RestoresActiveRoot: a root with one dangling
+// non-terminal child is active. RestoreActive must (1) settle the
+// child, (2) bring up the root's goroutine.
+func TestRestoreActive_RestoresActiveRoot(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root_active", AgentID: "a1", SessionType: "root", Status: session.StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	mustWriteStatus(t, store, ctx, "root_active", protocol.SessionStatusActive)
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "sub1", AgentID: "a1", ParentSessionID: "root_active",
+		SessionType: "subagent", Status: session.StatusActive,
+		Metadata:  map[string]any{"depth": 1},
+		CreatedAt: now, UpdatedAt: now,
+	})
+
+	mgr := newTestManager(t, store)
+	if err := mgr.RestoreActive(ctx); err != nil {
+		t.Fatalf("RestoreActive: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	live := mgr.SessionsLive()
+	if len(live) != 1 || live[0] != "root_active" {
+		t.Errorf("active root not in SessionsLive: live=%v", live)
+	}
+
+	// Settle wrote a subagent_result for the dangling child.
+	parentEvents := must(store.ListEvents(ctx, "root_active", session.ListEventsOpts{}))
+	var saw bool
+	for _, ev := range parentEvents {
+		if ev.EventType == string(protocol.KindSubagentResult) &&
+			ev.Metadata["session_id"] == "sub1" &&
+			ev.Metadata["reason"] == protocol.TerminationRestartDied {
+			saw = true
+			break
+		}
+	}
+	if !saw {
+		t.Errorf("active root missing settle subagent_result for sub1")
+	}
+}
+
+// TestRestoreActive_PromotesStaleWaitMarker covers the convergence
+// fix: a root whose last persisted lifecycle marker is wait_subagents
+// (and whose children all delivered before the crash, so settle has
+// nothing to write) must be eagerly resumed AND have its marker
+// promoted back to active. Without the promotion the next boot
+// sees the same wait_subagents marker and re-eagerly-resumes
+// indefinitely.
+func TestRestoreActive_PromotesStaleWaitMarker(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root_wait", AgentID: "a1", SessionType: "root", Status: session.StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	mustWriteStatus(t, store, ctx, "root_wait", protocol.SessionStatusWaitSubagents)
+
+	mgr := newTestManager(t, store)
+	if err := mgr.RestoreActive(ctx); err != nil {
+		t.Fatalf("RestoreActive: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	rows, err := store.ListEvents(ctx, "root_wait", session.ListEventsOpts{})
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if got := session.LookupLatestStatusEvent(rows); got != protocol.SessionStatusActive {
+		t.Errorf("post-resume marker = %q, want active (promotion missing)", got)
+	}
+}
+
+// TestRestoreActive_SkipsUnknownState covers the defensive branch
+// for a future enum value that the running binary doesn't
+// recognise — log and skip rather than panic.
+func TestRestoreActive_SkipsUnknownState(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root_unknown", AgentID: "a1", SessionType: "root", Status: session.StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	// Synthetic raw row with a state value the enum doesn't list —
+	// bypasses session.FrameToEventRow's Validate so we exercise the
+	// classifier's defensive default branch on a row that the codec
+	// itself wouldn't produce today.
+	if err := store.AppendEvent(ctx, session.EventRow{
+		ID: "future-state-1", SessionID: "root_unknown", AgentID: "a1",
+		EventType: string(protocol.KindSessionStatus),
+		Author:    "a1", CreatedAt: now,
+		Metadata: map[string]any{"state": "future_state"},
+	}, ""); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	mgr := newTestManager(t, store)
+	if err := mgr.RestoreActive(ctx); err != nil {
+		t.Fatalf("RestoreActive: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	if live := mgr.SessionsLive(); len(live) != 0 {
+		t.Errorf("unknown-state root brought up at boot: live=%v", live)
+	}
+}
+
+// TestResume_RejectsSubAgentID confirms the Manager.Resume invariant
+// that m.live is root-only (phase-4-tree-ctx-routing ADR D4): passing
+// a sub-agent id surfaces ErrNotRootSession instead of registering
+// the row in m.live as a fake root. Sub-agents are reachable only
+// through their parent's children map.
+func TestResume_RejectsSubAgentID(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root1", AgentID: "a1", SessionType: "root", Status: session.StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "sub1", AgentID: "a1", ParentSessionID: "root1",
+		SessionType: "subagent", Status: session.StatusActive,
+		Metadata:  map[string]any{"depth": 1},
+		CreatedAt: now, UpdatedAt: now,
+	})
+
+	mgr := newTestManager(t, store)
+	defer mgr.Stop(ctx)
+
+	if _, err := mgr.Resume(ctx, "sub1"); err == nil {
+		t.Fatalf("Resume(subagent) returned nil error, want ErrNotRootSession")
+	} else if !errors.Is(err, ErrNotRootSession) {
+		t.Errorf("Resume(subagent) err = %v, want to wrap ErrNotRootSession", err)
+	}
+	for _, id := range mgr.SessionsLive() {
+		if id == "sub1" {
+			t.Errorf("sub-agent leaked into m.live after rejected Resume")
+		}
+	}
+}
+
+// TestRestoreActive_SkipsTerminalRoots: a root with its own
+// session_terminated event is dead. RestoreActive must skip it,
+// even if it had children (which stay as orphan rows in DB —
+// no parent ever wakes up to read them).
+func TestRestoreActive_SkipsTerminalRoots(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	mustOpen(t, store, ctx, session.SessionRow{
+		ID: "root_dead", AgentID: "a1", SessionType: "root", Status: session.StatusActive,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	dead := protocol.NewSessionTerminated("root_dead",
+		protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent},
+		protocol.SessionTerminatedPayload{Reason: protocol.TerminationUserEnd})
+	dRow, dSum, _ := session.FrameToEventRow(dead, "a1")
+	_ = store.AppendEvent(ctx, dRow, dSum)
+
+	mgr := newTestManager(t, store)
+	if err := mgr.RestoreActive(ctx); err != nil {
+		t.Fatalf("RestoreActive: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	if live := mgr.SessionsLive(); len(live) != 0 {
+		t.Errorf("terminal root resurrected: live=%v", live)
+	}
+}
+
+// helpers
+
+func mustOpen(t *testing.T, store session.RuntimeStore, ctx context.Context, row session.SessionRow) {
+	t.Helper()
+	if err := store.OpenSession(ctx, row); err != nil {
+		t.Fatalf("OpenSession %s: %v", row.ID, err)
+	}
+}
+
+// mustWriteStatus persists a synthetic [protocol.KindSessionStatus]
+// event for sessionID — replaces the missing newSession path in
+// tests that build sessions via mustOpen directly. RestoreActive
+// keys off this marker.
+func mustWriteStatus(t *testing.T, store session.RuntimeStore, ctx context.Context, sessionID, state string) {
+	t.Helper()
+	frame := protocol.NewSessionStatus(sessionID,
+		protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent},
+		state, "test_setup")
+	row, summary, err := session.FrameToEventRow(frame, "a1")
+	if err != nil {
+		t.Fatalf("session.FrameToEventRow %s/%s: %v", sessionID, state, err)
+	}
+	if err := store.AppendEvent(ctx, row, summary); err != nil {
+		t.Fatalf("AppendEvent %s/%s: %v", sessionID, state, err)
+	}
+}
+
+func must(events []session.EventRow, _ error) []session.EventRow { return events }
+
+func containsKindWithReason(events []session.EventRow, kind protocol.Kind, reason string) bool {
+	for _, ev := range events {
+		if ev.EventType == string(kind) {
+			if r, _ := ev.Metadata["reason"].(string); r == reason {
+				return true
+			}
+		}
+	}
+	return false
+}
