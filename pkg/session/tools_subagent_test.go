@@ -136,7 +136,10 @@ func TestCallSpawnSubagent_SessionGone(t *testing.T) {
 // TestCallWaitSubagents_Happy_LiveResult drives wait_subagents
 // through a synthetic SubagentResult Submit. The test runs the call
 // in a goroutine and feeds the result Frame into the parent's inbox
-// via Submit; the routing layer hands it to activeToolFeed.
+// via Submit; the routing layer hands it to activeToolFeed. The
+// Submit here simulates what the parent's pump does in production
+// after observing a child's terminal AgentMessage / SessionTerminated
+// (phase 4.1c) — wait_subagents is the consumer either way.
 func TestCallWaitSubagents_Happy_LiveResult(t *testing.T) {
 	parent, cleanup := newTestParent(t, withTestRunLoop())
 	defer cleanup()
