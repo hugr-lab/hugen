@@ -126,16 +126,22 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 				fmt.Sprintf("subagents[%d]: spawn: %v", i, err))
 		}
 		// Apply the per-role spawn hint (skill manifest's role.intent →
-		// child's default-intent override). Best-effort: a missing
-		// hint or unknown intent leaves the child on the parent's
-		// default. The actual intent → spec resolution happens at
-		// every turn boundary inside ModelRouter.Resolve, so a typo
-		// in the manifest surfaces as a model_unavailable error on
-		// the child's first turn (visible to operator) rather than a
-		// silent fallback.
+		// child's default-intent override). Validate the intent
+		// against the parent's model router HERE so a manifest typo
+		// surfaces as a single warn at spawn rather than a
+		// model_unavailable on the child's first turn (cleaner story
+		// for operators tailing the log: cause + effect adjacent).
+		// Unknown intent → no override; child runs on parent's default.
 		if e.Skill != "" {
 			if hint := subagentSpawnHint(ctx, parent, e.Skill, e.Role); hint.Intent != "" {
-				child.SetDefaultIntent(model.Intent(hint.Intent))
+				intent := model.Intent(hint.Intent)
+				if _, ok := parent.models.SpecFor(intent); ok {
+					child.SetDefaultIntent(intent)
+				} else {
+					parent.logger.Warn("session: spawn_subagent: skill role intent unknown to model router; child stays on default",
+						"parent", parent.id, "child", child.ID(),
+						"skill", e.Skill, "role", e.Role, "intent", hint.Intent)
+				}
 			}
 		}
 		out = append(out, spawnSubagentResult{

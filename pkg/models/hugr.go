@@ -280,7 +280,16 @@ func (m *HugrModel) runWithRetry(ctx context.Context, vars map[string]any, out c
 // on the failure path AND on canceled (caller distinguishes via
 // isCanceled). Does NOT close out — runWithRetry owns the lifetime
 // since it may re-enter this call on retry.
+//
+// The subscription's underlying websocket is released before this
+// function returns regardless of outcome (sub.Cancel is idempotent
+// per types.Subscription contract). Without the explicit cancel,
+// retry would leak one ws-connection-equivalent per failed attempt
+// for the lifetime of the parent ctx (typically the whole Generate
+// call); on a 10-retry rate-limit storm that is 10 stranded
+// subscriptions held until the caller's stream closes.
 func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscription, out chan<- streamItem, subscribeStart time.Time) (bool, error) {
+	defer sub.Cancel()
 	const completionPath = ""
 	var finishEv types.LLMStreamEvent
 	var sawFinish bool

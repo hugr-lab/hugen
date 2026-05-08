@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -145,56 +146,74 @@ func (e *Extension) AdviseToolPolicy(ctx context.Context, state extension.Sessio
 // or SubagentSkillFoundRoleMissing. Returns SubagentUnknown when
 // no skill in the catalog matches the requested name.
 func (e *Extension) DescribeSubagent(ctx context.Context, state extension.SessionState, skillName, roleName string) (extension.SubagentValidation, error) {
+	skillFound, role, err := lookupSkillRole(ctx, state, skillName, roleName)
+	if err != nil {
+		return extension.SubagentUnknown, err
+	}
+	if !skillFound {
+		return extension.SubagentUnknown, nil
+	}
+	if roleName == "" || role != nil {
+		return extension.SubagentValid, nil
+	}
+	return extension.SubagentSkillFoundRoleMissing, nil
+}
+
+// SubagentSpawnHint implements [extension.SubagentSpawnHinter]. Returns
+// the manifest-declared Intent for (skill, role) — empty string when
+// not set, when the skill / role is unknown, or when called without a
+// role (skill-level calls have no role to inspect). Spawn-time
+// validation against the runtime's model router is the caller's job
+// (tools_subagent_spawn): a typo here surfaces as a "intent unknown"
+// warn at spawn, not as a model_unavailable error on the child's
+// first turn.
+func (e *Extension) SubagentSpawnHint(ctx context.Context, state extension.SessionState, skillName, roleName string) (extension.SubagentSpawnHint, error) {
+	if roleName == "" {
+		return extension.SubagentSpawnHint{}, nil
+	}
+	_, role, err := lookupSkillRole(ctx, state, skillName, roleName)
+	if err != nil || role == nil {
+		return extension.SubagentSpawnHint{}, err
+	}
+	return extension.SubagentSpawnHint{Intent: role.Intent}, nil
+}
+
+// lookupSkillRole walks the loaded skill catalog once to locate a
+// (skill, role) pair. Returns (skillFound, role, err):
+//   - skillFound is true iff a skill with skillName exists in the
+//     catalog (regardless of role match).
+//   - role is non-nil when both the skill and the named role exist.
+//   - err propagates manager.List failures verbatim.
+//
+// Empty roleName short-circuits role lookup (skillFound only).
+// The manager-less path (no SkillManager wired — fixture / no-skill
+// tests) returns (false, nil, nil) so callers fall back to their
+// no-validation default.
+func lookupSkillRole(ctx context.Context, state extension.SessionState, skillName, roleName string) (bool, *skillpkg.SubAgentRole, error) {
 	h := FromState(state)
 	if h == nil || h.manager == nil {
-		return extension.SubagentUnknown, nil
+		return false, nil, nil
 	}
 	all, err := h.manager.List(ctx)
 	if err != nil {
-		return extension.SubagentUnknown, err
+		return false, nil, err
 	}
 	for _, s := range all {
 		if s.Manifest.Name != skillName {
 			continue
 		}
 		if roleName == "" {
-			return extension.SubagentValid, nil
+			return true, nil, nil
 		}
-		for _, r := range s.Manifest.Hugen.SubAgents {
+		for i := range s.Manifest.Hugen.SubAgents {
+			r := &s.Manifest.Hugen.SubAgents[i]
 			if r.Name == roleName {
-				return extension.SubagentValid, nil
+				return true, r, nil
 			}
 		}
-		return extension.SubagentSkillFoundRoleMissing, nil
+		return true, nil, nil
 	}
-	return extension.SubagentUnknown, nil
-}
-
-// SubagentSpawnHint implements [extension.SubagentSpawnHinter]. Walks
-// the manager's catalog for the requested (skill, role) and returns
-// the role's manifest-declared Intent (empty string when not set or
-// when the skill / role is unknown). Skill-level (no role) calls
-// always return zero — only role authors can pin an intent.
-func (e *Extension) SubagentSpawnHint(ctx context.Context, state extension.SessionState, skillName, roleName string) (extension.SubagentSpawnHint, error) {
-	h := FromState(state)
-	if h == nil || h.manager == nil || roleName == "" {
-		return extension.SubagentSpawnHint{}, nil
-	}
-	all, err := h.manager.List(ctx)
-	if err != nil {
-		return extension.SubagentSpawnHint{}, err
-	}
-	for _, s := range all {
-		if s.Manifest.Name != skillName {
-			continue
-		}
-		for _, r := range s.Manifest.Hugen.SubAgents {
-			if r.Name == roleName {
-				return extension.SubagentSpawnHint{Intent: r.Intent}, nil
-			}
-		}
-	}
-	return extension.SubagentSpawnHint{}, nil
+	return false, nil, nil
 }
 
 // Generation implements [extension.GenerationProvider]. Returns

@@ -20,9 +20,9 @@ import (
 //
 // Fire-and-forget. No WaitGroup, no synchronisation with parent's
 // teardown — channel close IS the lifecycle signal. Parent-close
-// race is covered by the parent.IsClosed guard inside projectToParent
-// which falls back to appendSubagentResultRow (direct-store-append)
-// when parent's inbox is gone.
+// race: projectToParent's IsClosed guard drops the projection on
+// the floor; restart's settleDanglingSubagents reconciles the
+// dangling child via the same path that recovers from kill -9.
 //
 // If the range loop exits without the pump ever projecting a terminal
 // SubagentResult (cancel cascade / hard ceiling / panic — paths where
@@ -156,20 +156,25 @@ func (s *Session) projectAbnormalClose(child *Session, consolidatedSeen int) {
 // child.Done() + cleanup) → RouteToolFeed (wait_subagents feed)
 // pipeline, identical to today's flow with the producer changed.
 //
-// If parent's inbox is already closed at entry, fall back to direct
-// store append via appendSubagentResultRow so the row still lands
-// for the next restart's settleDanglingSubagents sweep. Submit's own
-// done-channel guard makes the post-Submit IsClosed re-check
-// best-effort: a parent that closed mid-Submit may already be tearing
-// down before the frame reaches routeInbound, so we persist again.
-// The store's seq dedup absorbs any duplicate.
+// Fire-and-forget — pump does not wait on the returned settled
+// channel. The pump goroutine emits at most ONE SubagentResult per
+// child (st.projected gate), so there is no in-pump ordering to
+// preserve, and waiting would couple pump's progress to the parent's
+// teardown of *this same child*: handleSubagentResult on the parent
+// blocks on child.Done(), which (for graceful exits) needs
+// child.handleExit to push SessionTerminated to outbox via outboxOnly,
+// which blocks if the outbox buffer is full and the pump — its only
+// consumer — is itself stuck in this Submit. Decoupling avoids that
+// latent deadlock; Submit's own goroutine handles delivery + closed-
+// channel recovery without our intervention.
+//
+// Closed-parent path: drop the projection. Once parent.IsClosed() we
+// have no live consumer; the dangling child surfaces on the next
+// restart via Manager.RestoreActive → settleDanglingSubagents (same
+// path that recovers from kill -9).
 func (s *Session) projectToParent(sr *protocol.SubagentResult) {
 	if s.IsClosed() {
-		appendSubagentResultRow(s.ctx, s.deps, sr)
 		return
 	}
-	<-s.Submit(s.ctx, sr)
-	if s.IsClosed() {
-		appendSubagentResultRow(s.ctx, s.deps, sr)
-	}
+	_ = s.Submit(s.ctx, sr)
 }

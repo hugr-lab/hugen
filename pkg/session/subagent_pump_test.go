@@ -337,15 +337,15 @@ func TestPump_OnlyOneProjection(t *testing.T) {
 	}
 }
 
-// TestPump_OfflineParentFallback exercises the IsClosed guard: when
-// parent has already terminated, projectToParent skips Submit and
-// writes the SubagentResult directly to the events store via
-// appendSubagentResultRow. The recovery path's settleDanglingSubagents
-// finds it on the next restart.
-func TestPump_OfflineParentFallback(t *testing.T) {
-	// No runLoop — we want a parent that's IsClosed before the pump
-	// fires its projection. MarkClosed flips the flag without going
-	// through teardown so the test stays deterministic.
+// TestPump_OfflineParentDropsProjection asserts the IsClosed guard:
+// when parent has already terminated, projectToParent drops the
+// SubagentResult on the floor — no Submit attempt, no store write,
+// no panic. Restart's settleDanglingSubagents reconciles the
+// dangling child (same recovery path as kill -9). Phase-4.1c-pre-PR
+// review: the explicit live-fallback was removed because s.ctx is
+// cancelled when IsClosed flips, so the would-be AppendEvent would
+// no-op anyway — the live path can't beat the restart sweep.
+func TestPump_OfflineParentDropsProjection(t *testing.T) {
 	parent, cleanup := newTestParent(t)
 	defer cleanup()
 	parent.MarkClosed()
@@ -357,25 +357,20 @@ func TestPump_OfflineParentFallback(t *testing.T) {
 		"answered before parent died", 0, true, nil, "", "")
 	close(child.out)
 
-	// Wait for pump goroutine to land its store write.
-	waitFor(t, func() bool {
-		rows, err := parent.deps.Store.ListEvents(context.Background(), parent.id,
-			store.ListEventsOpts{
-				Kinds: []string{string(protocol.KindSubagentResult)},
-			})
-		return err == nil && len(rows) >= 1
-	}, 2*time.Second)
+	// Pump should exit without touching the store. Wait a bit (long
+	// enough for a hypothetical AppendEvent to land) and then assert
+	// the events table is still empty for SubagentResult.
+	time.Sleep(100 * time.Millisecond)
 
-	rows, _ := parent.deps.Store.ListEvents(context.Background(), parent.id,
+	rows, err := parent.deps.Store.ListEvents(context.Background(), parent.id,
 		store.ListEventsOpts{
 			Kinds: []string{string(protocol.KindSubagentResult)},
 		})
-	if len(rows) != 1 {
-		t.Fatalf("rows = %d, want 1 SubagentResult on parent's events", len(rows))
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
 	}
-	got, _ := rows[0].Metadata["session_id"].(string)
-	if got != child.id {
-		t.Errorf("metadata.session_id = %q, want %q", got, child.id)
+	if len(rows) != 0 {
+		t.Fatalf("rows = %d, want 0 (offline parent → drop, restart settles via settleDanglingSubagents)", len(rows))
 	}
 }
 
