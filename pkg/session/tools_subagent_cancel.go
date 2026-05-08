@@ -61,11 +61,11 @@ func (parent *Session) callSubagentCancel(ctx context.Context, args json.RawMess
 			return json.Marshal(subagentCancelOutput{OK: true})
 		}
 		reason := protocol.TerminationSubagentCancelPrefix + strings.TrimSpace(in.Reason)
-		// Phase 4.1b-pre stage B: cancel travels through the
-		// SessionClose Frame so the child's Run loop drives its own
-		// teardown (writes session_terminated with the prefixed
-		// reason; emits subagent_result back to parent via handleExit's
-		// subagentResultSent gate).
+		// Cancel travels through the SessionClose Frame so the
+		// child's Run loop drives its own teardown (writes
+		// session_terminated with the prefixed reason and pushes it
+		// onto the outbox where the parent's pump projects a
+		// SubagentResult — phase 4.1c).
 		closeFrame := protocol.NewSessionClose(child.id, parent.agent.Participant(), reason)
 		child.Submit(ctx, closeFrame)
 		select {
@@ -73,10 +73,10 @@ func (parent *Session) callSubagentCancel(ctx context.Context, args json.RawMess
 		case <-ctx.Done():
 			return toolErr("cancelled", ctx.Err().Error())
 		}
-		// parent.children cleanup: handleSubagentResult will fire when
-		// child.handleExit emits its subagent_result. We let that
-		// callback do the deregister so the invariant stays single-
-		// sourced.
+		// parent.children cleanup: handleSubagentResult fires when
+		// the projected SubagentResult arrives on parent's inbox. We
+		// let that callback do the deregister so the invariant stays
+		// single-sourced.
 		return json.Marshal(subagentCancelOutput{OK: true})
 	}
 
