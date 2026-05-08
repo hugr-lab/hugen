@@ -51,17 +51,23 @@ steps:
           }
         vars: { sid: "$sid" }
 
-      # Children-side whiteboard ops: each sub-agent's view of the
-      # whiteboard chain. The schema exposes `events` as the
-      # references_query on session (not session_events nested
-      # under sessions) — reads ALL events on the child, the jq
-      # filter narrows to whiteboard extension_frame rows.
-      - name: whiteboard_ops_children
+      # Cross-session whiteboard ops: root + every child in one
+      # union. Hugr filter syntax uses _or (underscore prefix) per
+      # ../hugr-lab.github.io/docs/5-graphql/1-queries/3-filtering.md.
+      # The references_query on a session row is `events`
+      # (not `session_events`); jq narrows event_type to
+      # extension_frame and metadata.extension to whiteboard.
+      - name: whiteboard_ops_tree
         graphql: |
           query ($sid: String!) {
             jq(query: ".hub.db.agent.sessions | map({id, status, ops: (.events // []) | map(select(.event_type == \"extension_frame\" and .metadata.extension == \"whiteboard\")) | map({seq, op: .metadata.op, category: .metadata.category, data: .metadata.data})})") {
               hub { db { agent {
-                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                sessions(filter: {
+                  _or: [
+                    {id: {eq: $sid}},
+                    {parent_session_id: {eq: $sid}}
+                  ]
+                }) {
                   id status
                   events(order_by: [{field: "seq", direction: ASC}]) {
                     seq event_type metadata
