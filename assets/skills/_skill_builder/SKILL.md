@@ -101,11 +101,18 @@ matching the parameter shape, not just what the user did right now.
 
 **Reference bundled files in body via `${SKILL_DIR}`.** The loaded
 skill's directory appears in your system prompt under "Loaded
-skill bundles" → `directory:`. Use it as the on-disk path:
+skill bundles" → `directory:`. Use it as the on-disk path. The
+exact bash / python tool name depends on operator config — read
+your tool catalogue before composing the call. Generic shape:
 
 ```text
-bash:run python ${SKILL_DIR}/scripts/query_movement.py --material {material_code}
+<bash-provider>:<run-tool> python ${SKILL_DIR}/scripts/query_movement.py --material {material_code}
 ```
+
+Common defaults: `bash:run`, `bash-mcp:bash_shell`, `python:run_script`.
+Never hard-code one provider name in the saved body — let the
+future model substitute its actual tool name from the catalogue
+at the call site.
 
 **Ground `allowed-tools` against the deployment.** Call
 `skill:tools_catalog` to confirm tool names actually exist. Don't

@@ -306,6 +306,87 @@ func TestCallSave_OverwriteReplacesContents(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(localRoot, "ow", "references", "v2.md")); err != nil {
 		t.Errorf("v2.md missing after overwrite: %v", err)
 	}
+	// Auto-load after overwrite must surface the v2 manifest, not
+	// the cached v1 — the SkillManager generation token is the
+	// invalidation seam for downstream snapshot caches.
+	loaded, err := FromState(state).LoadedSkill(context.Background(), "ow")
+	if err != nil {
+		t.Fatalf("LoadedSkill after overwrite: %v", err)
+	}
+	if loaded.Manifest.Description != "v2." {
+		t.Errorf("after overwrite: loaded skill description = %q, want \"v2.\" (cache may not be invalidating)", loaded.Manifest.Description)
+	}
+}
+
+// TestCallSave_AutoloadFailureSurfacesPartialSuccess proves that
+// when the post-Publish auto-load fails (most common cause:
+// requires_skills resolves to an unknown name), the tool returns
+// an actionable error referencing the skill name + the manual
+// recovery path. The skill stays on disk.
+func TestCallSave_AutoloadFailureSurfacesPartialSuccess(t *testing.T) {
+	ext, state, _, localRoot := newSaveFixture(t)
+	args := json.RawMessage(`{"skill_md": "---\nname: orphan\ndescription: missing dep.\nlicense: MIT\nmetadata:\n  hugen:\n    requires_skills: [definitely-not-a-real-skill]\n---\n"}`)
+	_, err := ext.Call(newCallCtx(state), "skill:save", args)
+	if err == nil {
+		t.Fatal("expected error from auto-load with missing dep, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "orphan") {
+		t.Errorf("error should reference skill name: %q", msg)
+	}
+	if !strings.Contains(msg, "/skill load") {
+		t.Errorf("error should suggest manual recovery via /skill load: %q", msg)
+	}
+	// Skill file persisted on disk despite the auto-load failure.
+	if _, statErr := os.Stat(filepath.Join(localRoot, "orphan", "SKILL.md")); statErr != nil {
+		t.Errorf("orphan SKILL.md missing on disk: %v", statErr)
+	}
+}
+
+// TestCallSave_ErrorSentinelsPropagate locks down the
+// errors.Is chain through fmt.Errorf wrapping in callSave —
+// session.go's dispatch error handler maps these sentinels to
+// typed ToolError codes (ToolErrorSkillExists / SkillBadManifest /
+// SkillBadPath / SkillAutoload). If a future refactor of the
+// wrap chain breaks errors.Is, the typed-code mapping silently
+// degrades to "io" — this test prevents that regression.
+func TestCallSave_ErrorSentinelsPropagate(t *testing.T) {
+	ext, state, _, _ := newSaveFixture(t)
+
+	// autoload:true → ErrAutoloadReserved
+	_, err := ext.Call(newCallCtx(state), "skill:save",
+		json.RawMessage(`{"skill_md": "---\nname: a\ndescription: x.\nlicense: MIT\nmetadata:\n  hugen:\n    autoload: true\n---\n"}`))
+	if !errors.Is(err, skillpkg.ErrAutoloadReserved) {
+		t.Errorf("autoload err = %v, want errors.Is ErrAutoloadReserved", err)
+	}
+
+	// invalid path → ErrInvalidPath
+	_, err = ext.Call(newCallCtx(state), "skill:save",
+		json.RawMessage(`{"skill_md": "---\nname: b\ndescription: x.\nlicense: MIT\n---\n","references":{"../escape.md":"x"}}`))
+	if !errors.Is(err, skillpkg.ErrInvalidPath) {
+		t.Errorf("path err = %v, want errors.Is ErrInvalidPath", err)
+	}
+
+	// invalid manifest (no description) → ErrManifestInvalid
+	_, err = ext.Call(newCallCtx(state), "skill:save",
+		json.RawMessage(`{"skill_md": "---\nname: c\nlicense: MIT\n---\n"}`))
+	if !errors.Is(err, skillpkg.ErrManifestInvalid) {
+		t.Errorf("manifest err = %v, want errors.Is ErrManifestInvalid", err)
+	}
+
+	// collision: first save OK, second without overwrite →
+	// ErrSkillExists. Sentinel must survive the action-oriented
+	// wrapping in callSave.
+	_, err = ext.Call(newCallCtx(state), "skill:save",
+		json.RawMessage(`{"skill_md": "---\nname: dup\ndescription: x.\nlicense: MIT\n---\n"}`))
+	if err != nil {
+		t.Fatalf("first dup save: %v", err)
+	}
+	_, err = ext.Call(newCallCtx(state), "skill:save",
+		json.RawMessage(`{"skill_md": "---\nname: dup\ndescription: y.\nlicense: MIT\n---\n"}`))
+	if !errors.Is(err, skillpkg.ErrSkillExists) {
+		t.Errorf("collision err = %v, want errors.Is ErrSkillExists", err)
+	}
 }
 
 func TestCallSave_PathTraversalRejected(t *testing.T) {

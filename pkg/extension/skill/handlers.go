@@ -325,14 +325,20 @@ func (h *SessionSkill) callSave(ctx context.Context, args json.RawMessage) (json
 
 	// Auto-load the freshly-saved skill so the model can use it
 	// immediately in this session and run the validation loop
-	// against bundled scripts.
+	// against bundled scripts. If auto-load fails (most likely:
+	// requires_skills resolves a missing dependency), the skill
+	// is already on disk — surface the partial-success path with
+	// a clear hint instead of leaving the model to wonder. The
+	// model's recovery: tell the user, suggest manual `/skill
+	// load <name>` after fixing the dependency.
 	if err := h.Load(ctx, manifest.Name); err != nil {
-		return nil, fmt.Errorf("skill:save: persisted but auto-load failed: %w", err)
+		return nil, fmt.Errorf("skill:save: skill %q saved to local store but auto-load in this session failed (likely a missing requires_skills dependency); you can `/skill load %s` after resolving the dependency: %w",
+			manifest.Name, manifest.Name, err)
 	}
 
 	loaded, err := h.LoadedSkill(ctx, manifest.Name)
 	if err != nil {
-		return nil, fmt.Errorf("skill:save: persisted but lookup failed: %w", err)
+		return nil, fmt.Errorf("skill:save: skill %q saved and loaded but lookup for the result envelope failed: %w", manifest.Name, err)
 	}
 
 	files := []string{}

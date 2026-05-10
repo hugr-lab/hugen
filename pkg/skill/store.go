@@ -332,35 +332,56 @@ func (b *dirBackend) Publish(ctx context.Context, m Manifest, body fs.FS, opts P
 		return ErrUnsupportedBackend
 	}
 	dir := filepath.Join(b.root, m.Name)
+	// Atomicity: build the bundle in a sibling tmp directory, then
+	// swap it in via rename. Concurrent Get(name) reads see either
+	// the previous version or the new one — never a half-written
+	// state. If a previous Publish was interrupted leaving a tmp
+	// directory behind, clear it on entry.
+	tmpDir := dir + ".tmp"
+	if err := os.RemoveAll(tmpDir); err != nil {
+		return fmt.Errorf("clear stale %s: %w", tmpDir, err)
+	}
 	switch _, err := os.Stat(dir); {
 	case err == nil:
 		if !opts.Overwrite {
 			return ErrSkillExists
 		}
-		// Wipe the directory so removed bundle files don't linger
-		// from the previous version. Re-create below.
-		if err := os.RemoveAll(dir); err != nil {
-			return fmt.Errorf("clear %s for overwrite: %w", dir, err)
-		}
 	case errors.Is(err, fs.ErrNotExist):
-		// fresh directory — nothing to clear.
+		// fresh directory — nothing to swap.
 	default:
 		return fmt.Errorf("stat %s: %w", dir, err)
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", tmpDir, err)
 	}
 	// SKILL.md = original frontmatter (m.Raw) + body (m.Body) when
 	// present; otherwise re-emit minimal frontmatter from the
-	// validated manifest.
-	manifestPath := filepath.Join(dir, "SKILL.md")
+	// validated manifest. Write into tmpDir; the atomic swap
+	// happens at the end.
+	manifestPath := filepath.Join(tmpDir, "SKILL.md")
 	if err := os.WriteFile(manifestPath, encodeManifest(m), 0o644); err != nil {
+		_ = os.RemoveAll(tmpDir)
 		return fmt.Errorf("write %s: %w", manifestPath, err)
 	}
 	if body != nil {
-		if err := copyFS(dir, body); err != nil {
+		if err := copyFS(tmpDir, body); err != nil {
+			_ = os.RemoveAll(tmpDir)
 			return fmt.Errorf("copy body: %w", err)
 		}
+	}
+	// Atomic swap: remove the existing dir (we're here only if
+	// !exists or Overwrite=true) and rename tmpDir into place.
+	// The window between RemoveAll and Rename is the only point
+	// where a concurrent Get() can see ErrSkillNotFound; on
+	// single-tenant local store this is acceptable. On the same
+	// filesystem rename is atomic on POSIX.
+	if err := os.RemoveAll(dir); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return fmt.Errorf("clear %s for swap: %w", dir, err)
+	}
+	if err := os.Rename(tmpDir, dir); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return fmt.Errorf("swap %s → %s: %w", tmpDir, dir, err)
 	}
 	return nil
 }

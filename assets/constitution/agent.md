@@ -16,7 +16,7 @@ skills, managing references, reclaiming context). Follow them — they
 are the authoritative source for workflow rules.
 
 If you do not see a tool that would help, list available skills with
-`skill_ref`, load the relevant one with `skill_load`, and only then
+`skill:ref`, load the relevant one with `skill:load`, and only then
 attempt the operation.
 
 For non-trivial requests (analytical, reporting, multi-step

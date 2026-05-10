@@ -87,8 +87,13 @@ OK examples: `foo.md`, `sub/foo.py`, `a-b_c.md`, `templates/r1.tmpl`.
 
 The runtime does NOT auto-substitute `${SKILL_DIR}` in tool args.
 Read the actual `directory:` value from the "Loaded skill bundles"
-block in your system prompt and inline it when you emit
-`bash:run` / `python:run_script` calls. Example:
+block in your system prompt and inline it when you emit bash /
+python tool calls.
+
+The exact bash / python tool name depends on operator config —
+the catalogue may show `bash:run`, `bash-mcp:bash_shell`,
+`python:run_script`, etc. Read it from your tool catalogue, do
+not hard-code one form. Example with directory substituted:
 
 System prompt shows:
 
@@ -99,10 +104,10 @@ Loaded skill: `material-movement-report`
     - scripts/query_movement.py
 ```
 
-You emit:
+You emit (whichever tool name the catalogue exposes):
 
 ```json
-bash:run {
+{
   "command": "python /home/user/.local/state/hugen/skills/local/material-movement-report/scripts/query_movement.py --material XYZ-9999"
 }
 ```
