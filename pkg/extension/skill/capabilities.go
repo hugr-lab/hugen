@@ -2,6 +2,8 @@ package skill
 
 import (
 	"context"
+	"io/fs"
+	"sort"
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
@@ -37,10 +39,19 @@ var (
 )
 
 // AdvertiseSystemPrompt implements [extension.Advertiser].
-// Composes two sections: bindings.Instructions (the rendered body
-// of every loaded skill — concrete tool-usage guidance) and the
-// available-skills catalogue (one bullet per skill in the store
-// with a `(loaded)` tag for skills already loaded into the session).
+// Composes three sections in order:
+//   - Loaded-skills metadata block: per-skill header with directory
+//     and bundled-files listing (scripts/references/assets) so the
+//     model can invoke artefacts via existing bash:run /
+//     python:run_script with `${SKILL_DIR}/scripts/foo.py` etc.
+//     Phase 4.2 §3.4. Skills with no on-disk Root (inline) emit only
+//     name + description.
+//   - bindings.Instructions: the rendered body of every loaded skill
+//     (concrete tool-usage guidance).
+//   - Available-skills catalogue: one bullet per skill in the store
+//     with a `(loaded)` tag for skills already loaded into the
+//     session.
+//
 // Returns "" when nothing to render so the runtime skips the empty
 // section.
 func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.SessionState) string {
@@ -49,6 +60,9 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 		return ""
 	}
 	var parts []string
+	if meta := renderLoadedSkillsMeta(h); meta != "" {
+		parts = append(parts, meta)
+	}
 	if b, err := h.Bindings(ctx); err == nil && b.Instructions != "" {
 		parts = append(parts, b.Instructions)
 	}
@@ -59,6 +73,89 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 		return ""
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// renderLoadedSkillsMeta produces the per-loaded-skill metadata
+// block: directory path + bundled files listing (scripts /
+// references / assets, only the categories that are non-empty).
+// Phase 4.2 §3.4 — lets the model invoke `${SKILL_DIR}/scripts/foo.py`
+// via existing bash:run / python:run_script providers.
+//
+// Inline skills (no on-disk Root) emit only the name + description
+// header — there are no bundled files to list.
+func renderLoadedSkillsMeta(h *SessionSkill) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if len(h.loaded) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(h.loaded))
+	for n := range h.loaded {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteString("## Loaded skill bundles\n\n")
+	for _, n := range names {
+		sk := h.loaded[n]
+		b.WriteString("Loaded skill: `")
+		b.WriteString(sk.Manifest.Name)
+		b.WriteString("`\n")
+		if sk.Root != "" {
+			b.WriteString("  directory: ")
+			b.WriteString(sk.Root)
+			b.WriteString("\n")
+		}
+		if desc := strings.TrimSpace(sk.Manifest.Description); desc != "" {
+			b.WriteString("  description: ")
+			b.WriteString(desc)
+			b.WriteString("\n")
+		}
+		if sk.FS != nil {
+			writeBundleCategory(&b, sk.FS, "scripts")
+			writeBundleCategory(&b, sk.FS, "references")
+			writeBundleCategory(&b, sk.FS, "assets")
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// writeBundleCategory enumerates files under a single subdirectory
+// of the skill bundle (scripts/, references/, assets/) and renders
+// them as a sorted bullet list. Silent when the category dir is
+// missing or empty — keeps the prompt block tight.
+func writeBundleCategory(b *strings.Builder, sfs fs.FS, category string) {
+	var paths []string
+	_ = fs.WalkDir(sfs, category, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// Category root absent → fs.WalkDir returns the error
+			// from the initial Stat. Swallow — empty category is
+			// the common case.
+			if p == category {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		paths = append(paths, p)
+		return nil
+	})
+	if len(paths) == 0 {
+		return
+	}
+	sort.Strings(paths)
+	b.WriteString("  ")
+	b.WriteString(category)
+	b.WriteString(":\n")
+	for _, p := range paths {
+		b.WriteString("    - ")
+		b.WriteString(p)
+		b.WriteString("\n")
+	}
 }
 
 // renderCatalogue produces the "## Available skills" section of
@@ -100,6 +197,15 @@ func renderCatalogue(ctx context.Context, h *SessionSkill) string {
 //     catalogue collapses to empty (allowedSet.match returns false
 //     for every name).
 //   - populated set → returns matching tools.
+//
+// Phase-4.2 tri-state union: union resolution happens implicitly at
+// the bindings layer (pkg/extension/skill/extension.go::collectBindings).
+// A loaded skill with absent allowed-tools (Manifest.AllowedTools ==
+// nil) contributes nothing to Bindings.AllowedTools; admission is
+// "any loaded skill admits this tool", so absent skills don't reduce
+// the catalogue but also don't extend it on their own — equivalent
+// to "inheriting the union of other loaded skills' explicit grants".
+// No special FilterTools logic needed for the union.
 func (e *Extension) FilterTools(ctx context.Context, state extension.SessionState, all []tool.Tool) []tool.Tool {
 	h := FromState(state)
 	if h == nil || h.manager == nil {

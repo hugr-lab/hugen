@@ -17,9 +17,40 @@ import (
 // keys are preserved in Metadata so skills authored against a
 // future spec revision still parse.
 type Manifest struct {
-	Name         string         `json:"name"`
-	Description  string         `json:"description"`
-	License      string         `json:"license"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	License     string `json:"license"`
+
+	// AllowedTools is tri-state per agentskills.io semantics. Slice
+	// nil-vs-empty is load-bearing — UnmarshalJSON preserves the
+	// distinction explicitly:
+	//
+	//   - nil                          — manifest has no
+	//                                    `allowed-tools` key. Skill
+	//                                    claims no explicit grants
+	//                                    of its own; under union
+	//                                    resolution it inherits the
+	//                                    catalogue every other
+	//                                    loaded skill admits. Used
+	//                                    by community skills
+	//                                    authored against the
+	//                                    agentskills.io standard
+	//                                    (absent = "do not
+	//                                    restrict").
+	//   - non-nil, len(...) == 0       — manifest has explicit
+	//                                    `allowed-tools: []`.
+	//                                    Reference-only skill:
+	//                                    contributes nothing to
+	//                                    the model-facing tool
+	//                                    catalogue.
+	//   - non-nil, len(...) > 0        — explicit grants; admits
+	//                                    exactly those tools.
+	//
+	// Probe with `m.AllowedTools == nil` for absent;
+	// `len(m.AllowedTools) == 0 && m.AllowedTools != nil` for
+	// explicit empty; `len(m.AllowedTools) > 0` for populated.
+	//
+	// See design/002-runtime-canonical/phase-4.2-spec.md §3.1.
 	AllowedTools AllowedTools   `json:"allowed-tools,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
 

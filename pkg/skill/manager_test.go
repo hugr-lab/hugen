@@ -271,12 +271,12 @@ func TestPublishEmitsEvent(t *testing.T) {
 		Name:        "published-skill",
 		Description: "test",
 		License:     "MIT",
-		AllowedTools: []ToolGrant{
+		AllowedTools: AllowedTools{
 			{Provider: "bash-mcp", Tools: []string{"bash.read_file"}},
 		},
 	}
 	body := fstest.MapFS{}
-	if err := m.Publish(ctx, manifest, body); err != nil {
+	if err := m.Publish(ctx, manifest, body, PublishOptions{}); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	select {

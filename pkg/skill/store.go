@@ -6,9 +6,53 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 )
+
+// CleanRelPath validates a user-supplied relative path for use as
+// a key inside a skill bundle (references/scripts/assets entries
+// in skill:save). Returns the cleaned slash-separated path or
+// wraps ErrInvalidPath. Rejects:
+//
+//   - empty paths;
+//   - absolute paths (leading "/");
+//   - paths containing ".." segments (escapes bundle root);
+//   - paths containing NUL bytes or backslashes (cross-OS safety);
+//   - hidden paths (segments starting with ".") — keeps the
+//     bundle layout transparent;
+//   - non-normalised paths (path.Clean(p) != p), so the bundle's
+//     on-disk shape matches what the manifest body references.
+//
+// The bundle's category prefix (e.g. "scripts/") is the caller's
+// responsibility — CleanRelPath operates on the path WITHIN the
+// category map.
+func CleanRelPath(p string) (string, error) {
+	if p == "" {
+		return "", fmt.Errorf("%w: empty path", ErrInvalidPath)
+	}
+	if strings.ContainsAny(p, "\x00\\") {
+		return "", fmt.Errorf("%w: %q contains NUL or backslash", ErrInvalidPath, p)
+	}
+	if strings.HasPrefix(p, "/") || path.IsAbs(p) {
+		return "", fmt.Errorf("%w: %q is absolute", ErrInvalidPath, p)
+	}
+	cleaned := path.Clean(p)
+	if cleaned != p {
+		return "", fmt.Errorf("%w: %q is not normalised (cleaned to %q)", ErrInvalidPath, p, cleaned)
+	}
+	for _, seg := range strings.Split(cleaned, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", fmt.Errorf("%w: %q contains forbidden segment %q", ErrInvalidPath, p, seg)
+		}
+		if strings.HasPrefix(seg, ".") {
+			return "", fmt.Errorf("%w: %q has hidden segment %q", ErrInvalidPath, p, seg)
+		}
+	}
+	return cleaned, nil
+}
 
 // SkillStore is the consumer-facing aggregate over backends.
 // Implementations should not panic on a single backend failure;
@@ -27,8 +71,22 @@ type SkillStore interface {
 	Get(ctx context.Context, name string) (Skill, error)
 
 	// Publish writes a skill to the local:// backend. Returns
-	// ErrUnsupportedBackend if the store has no writable backend.
-	Publish(ctx context.Context, m Manifest, body fs.FS) error
+	// ErrUnsupportedBackend if the store has no writable backend;
+	// ErrSkillExists if a skill with this name already exists and
+	// opts.Overwrite is false.
+	Publish(ctx context.Context, m Manifest, body fs.FS, opts PublishOptions) error
+}
+
+// PublishOptions controls how SkillStore.Publish handles edge
+// cases. Zero value = safe defaults (no overwrite).
+type PublishOptions struct {
+	// Overwrite, when true, replaces an existing bundle of the
+	// same name (the existing directory is removed first to avoid
+	// stale leftovers). Default false — collision returns
+	// ErrSkillExists. The save protocol asks the user explicitly
+	// before retrying with Overwrite=true; the post-save
+	// validation iteration loop sets it without prompting.
+	Overwrite bool
 }
 
 // Backend is one origin of skills (system / community / local /
@@ -45,8 +103,9 @@ type Backend interface {
 	List(ctx context.Context) ([]Skill, error)
 	Get(ctx context.Context, name string) (Skill, error)
 	// Publish optional; backends that don't support write return
-	// ErrUnsupportedBackend.
-	Publish(ctx context.Context, m Manifest, body fs.FS) error
+	// ErrUnsupportedBackend. Honour opts.Overwrite per the
+	// SkillStore.Publish contract.
+	Publish(ctx context.Context, m Manifest, body fs.FS, opts PublishOptions) error
 }
 
 // Options groups the directory/inline configuration that
@@ -171,9 +230,9 @@ func (s *Store) Get(ctx context.Context, name string) (Skill, error) {
 	return Skill{}, ErrSkillNotFound
 }
 
-func (s *Store) Publish(ctx context.Context, m Manifest, body fs.FS) error {
+func (s *Store) Publish(ctx context.Context, m Manifest, body fs.FS, opts PublishOptions) error {
 	for _, b := range s.backends {
-		err := b.Publish(ctx, m, body)
+		err := b.Publish(ctx, m, body, opts)
 		if err == nil {
 			s.Refresh()
 			return nil
@@ -265,7 +324,7 @@ func (b *dirBackend) readSkillDir(dir string) (Skill, error) {
 	}, nil
 }
 
-func (b *dirBackend) Publish(ctx context.Context, m Manifest, body fs.FS) error {
+func (b *dirBackend) Publish(ctx context.Context, m Manifest, body fs.FS, opts PublishOptions) error {
 	if !b.writable {
 		return ErrUnsupportedBackend
 	}
@@ -273,6 +332,21 @@ func (b *dirBackend) Publish(ctx context.Context, m Manifest, body fs.FS) error 
 		return ErrUnsupportedBackend
 	}
 	dir := filepath.Join(b.root, m.Name)
+	switch _, err := os.Stat(dir); {
+	case err == nil:
+		if !opts.Overwrite {
+			return ErrSkillExists
+		}
+		// Wipe the directory so removed bundle files don't linger
+		// from the previous version. Re-create below.
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("clear %s for overwrite: %w", dir, err)
+		}
+	case errors.Is(err, fs.ErrNotExist):
+		// fresh directory — nothing to clear.
+	default:
+		return fmt.Errorf("stat %s: %w", dir, err)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
@@ -383,7 +457,7 @@ func (b *inlineBackend) Get(ctx context.Context, name string) (Skill, error) {
 	return s, nil
 }
 
-func (b *inlineBackend) Publish(ctx context.Context, m Manifest, body fs.FS) error {
+func (b *inlineBackend) Publish(ctx context.Context, m Manifest, body fs.FS, opts PublishOptions) error {
 	return ErrUnsupportedBackend
 }
 
@@ -396,6 +470,6 @@ func (b *hubBackend) List(ctx context.Context) ([]Skill, error)        { return 
 func (b *hubBackend) Get(ctx context.Context, name string) (Skill, error) {
 	return Skill{}, ErrSkillNotFound
 }
-func (b *hubBackend) Publish(ctx context.Context, m Manifest, body fs.FS) error {
+func (b *hubBackend) Publish(ctx context.Context, m Manifest, body fs.FS, opts PublishOptions) error {
 	return ErrUnsupportedBackend
 }
