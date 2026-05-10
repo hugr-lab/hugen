@@ -63,16 +63,20 @@ steps:
           }
         vars: { sid: "$sid" }
 
-      # The skill:save tool_result envelope — should contain
-      # `directory:` and `files:` listing scripts/<name>.py.
-      - name: skill_save_result
+      # All tool_result rows in this session — store doesn't carry
+      # tool_name on tool_result rows (it's only set on tool_call),
+      # so the observer correlates by seq adjacency: tool_call
+      # `skill_save` at seq N is followed by tool_result at seq N+1
+      # whose `tool_result` field carries the saved skill's
+      # {name, directory, files: [...]} envelope.
+      - name: tool_results
         graphql: |
           query ($sid: String!) {
             hub { db { agent {
               session_events(
-                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_result"}, tool_name: {eq: "skill:save"}}
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_result"}}
                 order_by: [{field: "seq", direction: ASC}]
-              ) { seq tool_name tool_result }
+              ) { seq tool_result }
             }}}
           }
         vars: { sid: "$sid" }

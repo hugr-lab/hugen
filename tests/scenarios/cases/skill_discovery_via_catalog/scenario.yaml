@@ -35,36 +35,36 @@ steps:
     budget: 240s
 
     queries:
-      # Confirm save happened with the distinctive description.
-      - name: save_result
+      # All tool_result rows — observer reads the skill_save
+      # envelope at seq adjacent to the skill_save tool_call.
+      # (Store doesn't carry tool_name on tool_result rows.)
+      - name: tool_results
         graphql: |
           query ($sid: String!) {
             hub { db { agent {
               session_events(
-                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_result"}, tool_name: {eq: "skill:save"}}
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_result"}}
                 order_by: [{field: "seq", direction: ASC}]
-              ) { seq tool_name tool_result }
+              ) { seq tool_result }
             }}}
           }
         vars: { sid: "$sid" }
 
-      # The skill should now be discoverable in this same session
-      # via skill:tools_catalog — bash:run admits the saved skill
-      # via available_in_skills.
-      - name: catalog_after_save
+      # All tool_call rows — confirms skill_save was invoked with
+      # distinctive description, plus any subsequent
+      # skill_tools_catalog calls (if the model decided to verify
+      # discoverability inside the same session).
+      - name: tool_calls
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.session_events | map(select(.tool_name == \"skill:tools_catalog\")) | last") {
-              hub { db { agent {
-                session_events(
-                  filter: {session_id: {eq: $sid}, event_type: {eq: "tool_result"}, tool_name: {eq: "skill:tools_catalog"}}
-                  order_by: [{field: "seq", direction: ASC}]
-                ) { seq tool_name tool_result }
-              }}}
-            }
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
           }
         vars: { sid: "$sid" }
-        path: extensions.jq.jq
 
   # Manual restart-leg verification:
   #

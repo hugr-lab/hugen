@@ -22,15 +22,17 @@ steps:
     budget: 180s
 
     queries:
-      # First-save attempt — should succeed.
-      - name: first_save
+      # All tool_result rows from turn 1 — observer correlates by
+      # seq adjacency to the preceding skill_save tool_call. The
+      # store doesn't carry tool_name on tool_result rows.
+      - name: turn1_tool_results
         graphql: |
           query ($sid: String!) {
             hub { db { agent {
               session_events(
-                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_result"}, tool_name: {eq: "skill:save"}}
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_result"}}
                 order_by: [{field: "seq", direction: ASC}]
-              ) { seq tool_name tool_result }
+              ) { seq tool_result }
             }}}
           }
         vars: { sid: "$sid" }
@@ -42,16 +44,18 @@ steps:
     budget: 180s
 
     queries:
-      # Both save attempts visible — second should have error in
-      # tool_result envelope (skill: already exists).
-      - name: all_saves
+      # All tool_result rows in the session — the second save's
+      # error envelope should appear after the second skill_save
+      # tool_call. The store doesn't carry tool_name on
+      # tool_result rows; observer correlates by seq adjacency.
+      - name: all_tool_results
         graphql: |
           query ($sid: String!) {
             hub { db { agent {
               session_events(
-                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_result"}, tool_name: {eq: "skill:save"}}
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_result"}}
                 order_by: [{field: "seq", direction: ASC}]
-              ) { seq tool_name tool_result }
+              ) { seq tool_result }
             }}}
           }
         vars: { sid: "$sid" }
@@ -64,7 +68,7 @@ steps:
           query ($sid: String!) {
             hub { db { agent {
               session_events(
-                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}, tool_name: {eq: "skill:save"}}
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}, tool_name: {eq: "skill_save"}}
                 order_by: [{field: "seq", direction: ASC}]
               ) { seq tool_name tool_args }
             }}}
