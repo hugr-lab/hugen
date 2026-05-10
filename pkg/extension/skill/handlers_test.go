@@ -85,12 +85,24 @@ func TestExtension_List_CoreTools(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	want := map[string]bool{
-		"skill:load":           false,
-		"skill:unload":         false,
-		"skill:save":           false,
-		"skill:files":          false,
-		"skill:ref":            false,
-		"skill:tools_catalog":  false,
+		"skill:load":          false,
+		"skill:unload":        false,
+		"skill:save":          false,
+		"skill:files":         false,
+		"skill:ref":           false,
+		"skill:tools_catalog": false,
+	}
+	// Every tool's ArgSchema must conform to the cross-provider
+	// chat-completion subset (see pkg/tool/validate.go). Gemini in
+	// particular rejects additionalProperties / $ref / oneOf /
+	// anyOf / allOf — surfaced as a 400 from the API and a hard
+	// stream_error in the harness. Validate at unit-test time so
+	// the regression breaks the build instead of leaking to a
+	// scenario run.
+	for _, tl := range tools {
+		if err := tool.ValidateLLMSchema(tl.ArgSchema); err != nil {
+			t.Errorf("%s schema invalid: %v", tl.Name, err)
+		}
 	}
 	for _, tt := range tools {
 		if _, ok := want[tt.Name]; ok {

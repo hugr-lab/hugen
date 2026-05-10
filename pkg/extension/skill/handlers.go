@@ -54,6 +54,12 @@ const (
   "required": ["name"]
 }`
 
+	// saveSchema deliberately omits `additionalProperties` on
+	// references/scripts/assets — Gemini's tool-schema subset
+	// rejects it (see pkg/tool/validate.go and the cross-provider
+	// conformance test). The inner shape (open-ended string→string
+	// map) is described in each field's `description` so the model
+	// picks the right call shape from there.
 	saveSchema = `{
   "type": "object",
   "properties": {
@@ -63,18 +69,15 @@ const (
     },
     "references": {
       "type": "object",
-      "additionalProperties": {"type": "string"},
-      "description": "Optional map of relative path under references/ → file content (markdown notes)."
+      "description": "Optional. Map: relative path under references/ (string) → markdown file content (string). Example: {\"howto.md\":\"step-by-step notes\",\"deep/dive.md\":\"appendix\"}. Subdirs allowed; absolute paths and parent-dir references rejected."
     },
     "scripts": {
       "type": "object",
-      "additionalProperties": {"type": "string"},
-      "description": "Optional map of relative path under scripts/ → executable artefact content (e.g. python scripts the saved skill body invokes via ${SKILL_DIR}/scripts/foo.py)."
+      "description": "Optional. Map: relative path under scripts/ (string) → executable artefact content (string). Example: {\"query.py\":\"print('q')\"}. The saved skill body invokes them via ${SKILL_DIR}/scripts/foo.py + bash:run / python:run_script."
     },
     "assets": {
       "type": "object",
-      "additionalProperties": {"type": "string"},
-      "description": "Optional map of relative path under assets/ → text data (templates, configs). Binary assets are not supported in v1."
+      "description": "Optional. Map: relative path under assets/ (string) → text data file content (string). Example: {\"template.html.tmpl\":\"<html/>\"}. Binary assets are NOT supported in v1."
     },
     "overwrite": {
       "type": "boolean",
