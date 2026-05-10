@@ -179,12 +179,23 @@ flow. First saves always honour the user's choice.
 
 ## Errors from skill:save
 
-| Error | What it means | What to do |
-|-------|---------------|------------|
-| `ErrManifestInvalid` | SKILL.md doesn't parse / lacks required fields | fix manifest, re-save |
-| `ErrAutoloadReserved` | manifest has `metadata.hugen.autoload: true` | remove autoload, re-save |
-| `ErrSkillExists` | name collision and `overwrite=false` | ask user (see above) |
-| `ErrInvalidPath` | a key in references / scripts / assets is unsafe | use simple `name.ext` keys, no `..`, no leading `/`, no leading `.` |
+The `tool_result` envelope from a failed skill:save carries
+`{is_error: true, code: <code>, message: <text>}`. Branch on
+`code` — each one points at a specific recovery path:
+
+| `code`                | Meaning | Action |
+|-----------------------|---------|--------|
+| `skill_bad_manifest`  | SKILL.md doesn't parse or lacks required fields | Fix manifest, re-save. |
+| `skill_autoload`      | Manifest has `metadata.hugen.autoload: true` | Remove the autoload field, re-save. Autoload is reserved for system / admin skills. |
+| `skill_exists`        | Name collision and `overwrite: false` | **ASK THE USER explicitly** before retrying with `overwrite: true`, OR pick a different name. Do NOT silently retry — this is the load-bearing collision protocol. |
+| `skill_bad_path`      | A key in references / scripts / assets is unsafe | Use simple `name.ext` keys (sub/dir.ext is fine). No `..`, no leading `/`, no hidden segments (`.env`). |
+| (anything else)       | Unexpected error | Surface it to the user and ask how to proceed. |
+
+**Important**: a failed skill:save is NOT a no-op. The
+returned envelope has `is_error: true` — treat it as an error
+that needs recovery, never as "the operation completed
+silently". If the message text mentions "already exists",
+"autoload", "manifest", or "path", branch as above.
 
 ## What this skill does NOT do
 

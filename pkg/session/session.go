@@ -16,6 +16,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
+	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -1581,6 +1582,14 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 			code = protocol.ToolErrorNotFound
 		case errors.Is(err, tool.ErrProviderRemoved):
 			code = protocol.ToolErrorProviderRemoved
+		case errors.Is(err, skillpkg.ErrSkillExists):
+			code = protocol.ToolErrorSkillExists
+		case errors.Is(err, skillpkg.ErrAutoloadReserved):
+			code = protocol.ToolErrorSkillAutoload
+		case errors.Is(err, skillpkg.ErrInvalidPath):
+			code = protocol.ToolErrorSkillBadPath
+		case errors.Is(err, skillpkg.ErrManifestInvalid):
+			code = protocol.ToolErrorSkillBadManifest
 		}
 		s.logger.Warn("tool result error",
 			"session", s.id, "tool", tc.Name, "code", code, "err", err)

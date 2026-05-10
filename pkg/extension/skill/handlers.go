@@ -287,10 +287,10 @@ func (h *SessionSkill) callSave(ctx context.Context, args json.RawMessage) (json
 
 	manifest, err := skillpkg.Parse([]byte(in.SkillMD))
 	if err != nil {
-		return nil, fmt.Errorf("skill:save: %w", err)
+		return nil, fmt.Errorf("skill:save: manifest does not parse — fix the SKILL.md frontmatter and re-save: %w", err)
 	}
 	if manifest.Hugen.Autoload {
-		return nil, fmt.Errorf("skill:save: %w", skillpkg.ErrAutoloadReserved)
+		return nil, fmt.Errorf("skill:save: %w — drop `metadata.hugen.autoload` from the manifest and re-save (autoload is reserved for system / admin skills compiled into the binary; local skills load on demand)", skillpkg.ErrAutoloadReserved)
 	}
 
 	bundle := fstest.MapFS{}
@@ -305,13 +305,21 @@ func (h *SessionSkill) callSave(ctx context.Context, args json.RawMessage) (json
 		for k, v := range cat.files {
 			cleaned, err := skillpkg.CleanRelPath(k)
 			if err != nil {
-				return nil, fmt.Errorf("skill:save: %s/%s: %w", cat.name, k, err)
+				return nil, fmt.Errorf("skill:save: bundle key %q under %s/ rejected — use simple relative paths (no leading /, no .., no hidden segments): %w", k, cat.name, err)
 			}
 			bundle[cat.name+"/"+cleaned] = &fstest.MapFile{Data: []byte(v)}
 		}
 	}
 
 	if err := h.manager.Publish(ctx, manifest, bundle, skillpkg.PublishOptions{Overwrite: in.Overwrite}); err != nil {
+		if errors.Is(err, skillpkg.ErrSkillExists) {
+			// Action-oriented message — both gemma and claude
+			// rationalised the prior generic "io: already
+			// exists" envelope as "no-op" or "success". The
+			// explicit hint about asking the user + overwrite
+			// flag makes the recovery path obvious.
+			return nil, fmt.Errorf("skill:save: %w — skill %q is already in the local store; ASK THE USER before retrying with `overwrite: true`, OR pick a different name. Do NOT silently retry", skillpkg.ErrSkillExists, manifest.Name)
+		}
 		return nil, fmt.Errorf("skill:save: %w", err)
 	}
 
