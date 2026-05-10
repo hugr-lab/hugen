@@ -35,6 +35,9 @@ runs:
       - python_analysis_subagent
       - hugr_data_explorer
       - full_analyst_workflow
+      - skill_save_bundle
+      - skill_save_overwrite_collision
+      - skill_discovery_via_catalog
 
   - name: gemini-pro
     llm: configs/llm-gemini-pro.yaml
@@ -50,6 +53,9 @@ runs:
       - hugr_data_explorer
       - plan_survives_restart
       - full_analyst_workflow
+      - skill_save_bundle
+      - skill_save_overwrite_collision
+      - skill_discovery_via_catalog
 
   - name: gpt-5-4
     llm: configs/llm-gpt-5-4.yaml
@@ -59,6 +65,7 @@ runs:
       - single_explorer
       - delegation_required
       - full_analyst_workflow
+      - skill_save_bundle
 
   - name: gemma4-26b
     llm: configs/llm-gemma4-26b.yaml
@@ -73,3 +80,6 @@ runs:
       - python_analysis_subagent
       - hugr_data_explorer
       - plan_survives_restart
+      - skill_save_bundle
+      - skill_save_overwrite_collision
+      - skill_discovery_via_catalog

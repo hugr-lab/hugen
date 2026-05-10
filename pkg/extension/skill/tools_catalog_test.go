@@ -220,6 +220,92 @@ func TestToolsCatalog_PatternFilter(t *testing.T) {
 	}
 }
 
+// TestToolsCatalog_AbsentAllowAppearsInAvailableForEveryTool verifies
+// phase-4.2 §3.3.2: skills with absent allowed-tools appear in
+// available_in_skills for EVERY registered tool — they're discovery
+// candidates the model can `skill:load` to evaluate via the union.
+// Skills with explicit empty `[]` (reference-only) must NOT appear.
+func TestToolsCatalog_AbsentAllowAppearsInAvailableForEveryTool(t *testing.T) {
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"alpha": []byte(`---
+name: alpha
+description: alpha grants data-* on hugr-main.
+allowed-tools:
+  - provider: hugr-main
+    tools: [data-*]
+---
+body
+`),
+		"absent-skill": []byte(`---
+name: absent-skill
+description: agentskills.io "do not restrict" — should appear for every tool.
+---
+body
+`),
+		"empty-skill": []byte(`---
+name: empty-skill
+description: explicit empty — reference-only, must NOT appear.
+allowed-tools: []
+---
+body
+`),
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+
+	tm := tool.NewToolManager(catTestPerms{}, nil, nil)
+	prov := &fakeProvider{
+		name: "hugr-main",
+		life: tool.LifetimePerAgent,
+		tools: []tool.Tool{
+			{Name: "hugr-main:discovery-list", Provider: "hugr-main", PermissionObject: "hugen:tool:hugr-main:discovery-list"},
+			{Name: "hugr-main:data-query", Provider: "hugr-main", PermissionObject: "hugen:tool:hugr-main:data-query"},
+		},
+	}
+	if err := tm.AddProvider(prov); err != nil {
+		t.Fatalf("AddProvider: %v", err)
+	}
+	ext := NewExtension(mgr, nil, "agent-absent")
+	state := fixture.NewTestSessionState("ses-absent")
+	state.SetTools(tm)
+	if err := ext.InitState(context.Background(), state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+
+	out, err := ext.Call(extension.WithSessionState(context.Background(), state),
+		"skill:tools_catalog", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	var got toolsCatalogResult
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	if len(got.Providers) != 1 {
+		t.Fatalf("providers = %d, want 1", len(got.Providers))
+	}
+	for _, entry := range got.Providers[0].Tools {
+		// absent-skill must appear for every tool.
+		if !contains(entry.AvailableInSkills, "absent-skill") {
+			t.Errorf("tool %q: absent-skill missing from AvailableInSkills %v",
+				entry.Name, entry.AvailableInSkills)
+		}
+		// empty-skill must NOT appear for any tool.
+		if contains(entry.AvailableInSkills, "empty-skill") {
+			t.Errorf("tool %q: empty-skill leaked into AvailableInSkills %v",
+				entry.Name, entry.AvailableInSkills)
+		}
+	}
+	// alpha contributes via wildcard data-* to data-query specifically.
+	for _, entry := range got.Providers[0].Tools {
+		if entry.Name == "hugr-main:data-query" && !contains(entry.AvailableInSkills, "alpha") {
+			t.Errorf("data-query AvailableInSkills missing alpha: %v", entry.AvailableInSkills)
+		}
+		if entry.Name == "hugr-main:discovery-list" && contains(entry.AvailableInSkills, "alpha") {
+			t.Errorf("discovery-list AvailableInSkills contains alpha but alpha grants data-* only: %v", entry.AvailableInSkills)
+		}
+	}
+}
+
 func TestToolsCatalog_BadRequest(t *testing.T) {
 	ext, state, _ := newCatalogFixture(t, false)
 	_, err := ext.Call(extension.WithSessionState(context.Background(), state),

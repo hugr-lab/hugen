@@ -11,7 +11,7 @@
 #   session:parent_context
 #   plan:set / plan:comment / plan:show / plan:clear
 #   whiteboard:init / whiteboard:read / whiteboard:write / whiteboard:stop
-#   skill:tools_catalog / skill:load / skill:unload / skill:files / skill:ref / skill:publish
+#   skill:tools_catalog / skill:load / skill:unload / skill:files / skill:ref / skill:save
 #   notepad:append
 #
 # Anything else on the ROOT (hugr-main:*, python:*, bash:*, duckdb:*)

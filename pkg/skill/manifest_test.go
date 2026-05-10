@@ -407,3 +407,71 @@ func TestAutoloadEligible_SubAgent_WhiteboardGate(t *testing.T) {
 		t.Error("AutoloadEligible(no whiteboard) = true, want false")
 	}
 }
+
+// TestParse_AllowedTools_TriState verifies the load-bearing
+// nil-vs-empty distinction on Manifest.AllowedTools that
+// phase-4.2 §3.1 depends on. Three states must be
+// distinguishable after Parse:
+//   - absent (`allowed-tools` key missing) → nil slice.
+//   - explicit empty (`allowed-tools: []`) → non-nil empty.
+//   - populated → non-nil populated.
+func TestParse_AllowedTools_TriState(t *testing.T) {
+	cases := []struct {
+		name      string
+		src       string
+		wantNil   bool
+		wantLen   int
+	}{
+		{
+			name: "absent",
+			src: `---
+name: absent-skill
+description: no allowed-tools key.
+license: MIT
+---
+`,
+			wantNil: true,
+			wantLen: 0,
+		},
+		{
+			name: "explicit_empty",
+			src: `---
+name: empty-skill
+description: explicit empty list.
+license: MIT
+allowed-tools: []
+---
+`,
+			wantNil: false,
+			wantLen: 0,
+		},
+		{
+			name: "populated",
+			src: `---
+name: populated-skill
+description: explicit grant.
+license: MIT
+allowed-tools:
+  - bash-mcp:bash.run
+---
+`,
+			wantNil: false,
+			wantLen: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := Parse([]byte(tc.src))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			gotNil := m.AllowedTools == nil
+			if gotNil != tc.wantNil {
+				t.Errorf("AllowedTools nil = %v, want %v", gotNil, tc.wantNil)
+			}
+			if got := len(m.AllowedTools); got != tc.wantLen {
+				t.Errorf("len(AllowedTools) = %d, want %d", got, tc.wantLen)
+			}
+		})
+	}
+}

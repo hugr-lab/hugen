@@ -2,6 +2,8 @@ package skill
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -203,6 +205,351 @@ func TestAdvertiseSystemPrompt_LoadedTaggedAndInstructionsPrepended(t *testing.T
 	idxHeading := strings.Index(out, "## Available skills")
 	if idxBody < 0 || idxHeading < 0 || idxBody >= idxHeading {
 		t.Errorf("instructions block must precede catalogue: body@%d heading@%d", idxBody, idxHeading)
+	}
+}
+
+// TestFilterTools_TriStateUnion verifies the four cases of
+// phase-4.2 §3.1.2 union resolution. Union semantics fall out
+// implicitly at the bindings layer (extension.go::collectBindings):
+// absent allowed-tools contribute nothing, so admission =
+// "any explicit grant from any loaded skill admits".
+func TestFilterTools_TriStateUnion(t *testing.T) {
+	const explicitFooManifest = `---
+name: explicit-foo
+description: explicit grant.
+allowed-tools:
+  - bash-mcp:bash.run
+---
+`
+	const explicitEmptyManifest = `---
+name: explicit-empty
+description: explicit empty list — reference-only.
+allowed-tools: []
+---
+`
+	const absentManifest = `---
+name: absent-grants
+description: agentskills.io "do not restrict" — inherits union.
+---
+`
+	const explicitBarManifest = `---
+name: explicit-bar
+description: another explicit grant.
+allowed-tools:
+  - hugr-main:discovery-list
+---
+`
+
+	in := []tool.Tool{
+		{Name: "bash-mcp:bash.run", Provider: "bash-mcp"},
+		{Name: "hugr-main:discovery-list", Provider: "hugr-main"},
+		{Name: "python:run_code", Provider: "python"},
+	}
+
+	cases := []struct {
+		name      string
+		toLoad    []string
+		manifests map[string][]byte
+		want      []string
+	}{
+		{
+			name:   "absent_alone_grants_nothing",
+			toLoad: []string{"absent-grants"},
+			manifests: map[string][]byte{
+				"absent-grants": []byte(absentManifest),
+			},
+			want: nil,
+		},
+		{
+			name:   "absent_plus_explicit_inherits_via_union",
+			toLoad: []string{"absent-grants", "explicit-foo"},
+			manifests: map[string][]byte{
+				"absent-grants": []byte(absentManifest),
+				"explicit-foo":  []byte(explicitFooManifest),
+			},
+			want: []string{"bash-mcp:bash.run"},
+		},
+		{
+			name:   "explicit_empty_alone_grants_nothing",
+			toLoad: []string{"explicit-empty"},
+			manifests: map[string][]byte{
+				"explicit-empty": []byte(explicitEmptyManifest),
+			},
+			want: nil,
+		},
+		{
+			name:   "explicit_empty_plus_explicit_only_explicit_grants",
+			toLoad: []string{"explicit-empty", "explicit-foo"},
+			manifests: map[string][]byte{
+				"explicit-empty": []byte(explicitEmptyManifest),
+				"explicit-foo":   []byte(explicitFooManifest),
+			},
+			want: []string{"bash-mcp:bash.run"},
+		},
+		{
+			name:   "two_explicit_no_cross_contribution",
+			toLoad: []string{"explicit-foo", "explicit-bar"},
+			manifests: map[string][]byte{
+				"explicit-foo": []byte(explicitFooManifest),
+				"explicit-bar": []byte(explicitBarManifest),
+			},
+			want: []string{"bash-mcp:bash.run", "hugr-main:discovery-list"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := skillpkg.NewSkillStore(skillpkg.Options{Inline: tc.manifests})
+			mgr := skillpkg.NewSkillManager(store, nil)
+			ext := NewExtension(mgr, nil, "agent-tri-"+tc.name)
+			state := fixture.NewTestSessionState("ses-tri-" + tc.name)
+			if err := ext.InitState(ctx, state); err != nil {
+				t.Fatalf("InitState: %v", err)
+			}
+			for _, n := range tc.toLoad {
+				if err := FromState(state).Load(ctx, n); err != nil {
+					t.Fatalf("Load %q: %v", n, err)
+				}
+			}
+			out := ext.FilterTools(ctx, state, in)
+			got := map[string]bool{}
+			for _, t := range out {
+				got[t.Name] = true
+			}
+			for _, w := range tc.want {
+				if !got[w] {
+					t.Errorf("missing %q in filtered set; got %v", w, got)
+				}
+			}
+			for n := range got {
+				found := false
+				for _, w := range tc.want {
+					if n == w {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("unexpected %q in filtered set", n)
+				}
+			}
+		})
+	}
+}
+
+// TestAdvertise_LoadedSkillsMeta_SkippedWhenNoneLoaded verifies the
+// new "## Loaded skill bundles" block is omitted when no skill is
+// loaded — the catalogue alone surfaces.
+func TestAdvertise_LoadedSkillsMeta_SkippedWhenNoneLoaded(t *testing.T) {
+	ctx := context.Background()
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"alpha": []byte(inlineAlphaManifest)}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a-meta-empty")
+	state := fixture.NewTestSessionState("ses-meta-empty")
+	if err := ext.InitState(ctx, state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	out := ext.AdvertiseSystemPrompt(ctx, state)
+	if strings.Contains(out, "## Loaded skill bundles") {
+		t.Errorf("loaded-skills meta block surfaced with no skills loaded:\n%s", out)
+	}
+}
+
+// TestAdvertise_LoadedSkillsMeta_InlineSkill_HeaderOnly verifies an
+// inline (no on-disk Root, no FS) loaded skill emits the header line
+// + description but no directory: / scripts: / etc.
+func TestAdvertise_LoadedSkillsMeta_InlineSkill_HeaderOnly(t *testing.T) {
+	ctx := context.Background()
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"alpha": []byte(inlineAlphaManifest)}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a-meta-inline")
+	state := fixture.NewTestSessionState("ses-meta-inline")
+	if err := ext.InitState(ctx, state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	if err := FromState(state).Load(ctx, "alpha"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	out := ext.AdvertiseSystemPrompt(ctx, state)
+	if !strings.Contains(out, "## Loaded skill bundles") {
+		t.Errorf("meta block missing for loaded inline skill:\n%s", out)
+	}
+	if !strings.Contains(out, "Loaded skill: `alpha`") {
+		t.Errorf("alpha header missing:\n%s", out)
+	}
+	// Inline skill has no on-disk directory or files.
+	if strings.Contains(out, "  directory:") {
+		t.Errorf("inline skill should not have directory line:\n%s", out)
+	}
+	if strings.Contains(out, "  scripts:") || strings.Contains(out, "  references:") || strings.Contains(out, "  assets:") {
+		t.Errorf("inline skill should not have category listings:\n%s", out)
+	}
+}
+
+// TestAdvertise_LoadedSkillsMeta_OnDiskFullBundle verifies an
+// on-disk skill with all three categories emits directory + each
+// category section with sorted file paths.
+func TestAdvertise_LoadedSkillsMeta_OnDiskFullBundle(t *testing.T) {
+	ctx := context.Background()
+	root := writeBundledSkill(t, "delta", `---
+name: delta
+description: full bundle on disk.
+license: MIT
+---
+delta body
+`, map[string][]byte{
+		"scripts/run.py":         []byte("print('run')"),
+		"scripts/helper.py":      []byte("print('help')"),
+		"references/howto.md":    []byte("how"),
+		"references/deep/why.md": []byte("why"),
+		"assets/template.html":   []byte("<html/>"),
+	})
+
+	store := skillpkg.NewSkillStore(skillpkg.Options{LocalRoot: root})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a-meta-full")
+	state := fixture.NewTestSessionState("ses-meta-full")
+	if err := ext.InitState(ctx, state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	if err := FromState(state).Load(ctx, "delta"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	out := ext.AdvertiseSystemPrompt(ctx, state)
+
+	checks := []string{
+		"Loaded skill: `delta`",
+		"  directory: ",
+		"  description: full bundle on disk.",
+		"  scripts:",
+		"    - scripts/helper.py",
+		"    - scripts/run.py",
+		"  references:",
+		"    - references/deep/why.md",
+		"    - references/howto.md",
+		"  assets:",
+		"    - assets/template.html",
+	}
+	for _, c := range checks {
+		if !strings.Contains(out, c) {
+			t.Errorf("output missing %q\nfull output:\n%s", c, out)
+		}
+	}
+	// scripts must appear before references (sorted-by-category-name
+	// in writeBundleCategory's invocation order: scripts, references,
+	// assets).
+	idxS := strings.Index(out, "  scripts:")
+	idxR := strings.Index(out, "  references:")
+	idxA := strings.Index(out, "  assets:")
+	if !(idxS < idxR && idxR < idxA) {
+		t.Errorf("category order wrong: scripts@%d references@%d assets@%d", idxS, idxR, idxA)
+	}
+}
+
+// TestAdvertise_LoadedSkillsMeta_PartialCategories verifies only
+// non-empty categories surface — a skill with only scripts/ has no
+// references: or assets: lines.
+func TestAdvertise_LoadedSkillsMeta_PartialCategories(t *testing.T) {
+	ctx := context.Background()
+	root := writeBundledSkill(t, "scripts-only", `---
+name: scripts-only
+description: just scripts.
+license: MIT
+---
+`, map[string][]byte{
+		"scripts/just.py": []byte("print('only')"),
+	})
+	store := skillpkg.NewSkillStore(skillpkg.Options{LocalRoot: root})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a-meta-partial")
+	state := fixture.NewTestSessionState("ses-meta-partial")
+	if err := ext.InitState(ctx, state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	if err := FromState(state).Load(ctx, "scripts-only"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	out := ext.AdvertiseSystemPrompt(ctx, state)
+
+	if !strings.Contains(out, "  scripts:") {
+		t.Errorf("expected scripts: section:\n%s", out)
+	}
+	if strings.Contains(out, "  references:") {
+		t.Errorf("references: leaked when none present:\n%s", out)
+	}
+	if strings.Contains(out, "  assets:") {
+		t.Errorf("assets: leaked when none present:\n%s", out)
+	}
+}
+
+// TestAdvertise_LoadedSkillsMeta_StableOrder — multiple loaded
+// skills appear in name-sorted order so prefix-cache is not
+// disturbed.
+func TestAdvertise_LoadedSkillsMeta_StableOrder(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	for _, name := range []string{"zeta", "beta", "iota"} {
+		writeBundledSkillInto(t, root, name, `---
+name: `+name+`
+description: order check.
+license: MIT
+---
+`, nil)
+	}
+	store := skillpkg.NewSkillStore(skillpkg.Options{LocalRoot: root})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a-meta-order")
+	state := fixture.NewTestSessionState("ses-meta-order")
+	if err := ext.InitState(ctx, state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	for _, n := range []string{"zeta", "beta", "iota"} {
+		if err := FromState(state).Load(ctx, n); err != nil {
+			t.Fatalf("Load %s: %v", n, err)
+		}
+	}
+	out := ext.AdvertiseSystemPrompt(ctx, state)
+	// Sorted by name → beta, iota, zeta.
+	idxBeta := strings.Index(out, "Loaded skill: `beta`")
+	idxIota := strings.Index(out, "Loaded skill: `iota`")
+	idxZeta := strings.Index(out, "Loaded skill: `zeta`")
+	if !(idxBeta < idxIota && idxIota < idxZeta) {
+		t.Errorf("loaded-skills order wrong: beta@%d iota@%d zeta@%d", idxBeta, idxIota, idxZeta)
+	}
+}
+
+// writeBundledSkill creates a fresh temp dir, writes a skill named
+// `name` under it with SKILL.md + the supplied bundle files, and
+// returns the temp dir (suitable for SkillStore Options.LocalRoot
+// or SystemRoot).
+func writeBundledSkill(t *testing.T, name, manifest string, files map[string][]byte) string {
+	t.Helper()
+	root := t.TempDir()
+	writeBundledSkillInto(t, root, name, manifest, files)
+	return root
+}
+
+// writeBundledSkillInto writes a skill named `name` under root with
+// SKILL.md + bundle files. Used when several skills share one root
+// (TestAdvertise_LoadedSkillsMeta_StableOrder).
+func writeBundledSkillInto(t *testing.T, root, name, manifest string, files map[string][]byte) {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	for rel, data := range files {
+		full := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(full), err)
+		}
+		if err := os.WriteFile(full, data, 0o644); err != nil {
+			t.Fatalf("write %s: %v", full, err)
+		}
 	}
 }
 

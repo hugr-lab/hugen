@@ -140,7 +140,7 @@ license: MIT
 		"references/extra.md": &fstest.MapFile{Data: []byte("extra reference")},
 	}
 
-	if err := s.Publish(context.Background(), manifest, body); err != nil {
+	if err := s.Publish(context.Background(), manifest, body, PublishOptions{}); err != nil {
 		t.Fatalf("Publish error: %v", err)
 	}
 
@@ -179,7 +179,7 @@ license: MIT
 		t.Fatalf("Parse error: %v", err)
 	}
 	manifest, _ := Parse([]byte("---\nname: x\ndescription: y\nlicense: MIT\n---\n"))
-	err = s.Publish(context.Background(), manifest, nil)
+	err = s.Publish(context.Background(), manifest, nil, PublishOptions{})
 	if !errors.Is(err, ErrUnsupportedBackend) {
 		t.Fatalf("err = %v, want ErrUnsupportedBackend", err)
 	}
@@ -212,6 +212,105 @@ license: MIT
 	}
 	if len(listed) != 1 || listed[0].Manifest.Name != "good" {
 		t.Errorf("listed = %+v, want [good]", listed)
+	}
+}
+
+// TestStore_PublishCollision verifies that a second Publish under
+// the same name without overwrite returns ErrSkillExists, and that
+// overwrite=true replaces the existing bundle (removing files that
+// were present in the previous version but not in the new bundle).
+func TestStore_PublishCollision(t *testing.T) {
+	localRoot := t.TempDir()
+	s := NewSkillStore(Options{LocalRoot: localRoot})
+
+	manifest, err := Parse([]byte(`---
+name: collision
+description: collision-test skill.
+license: MIT
+---
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	v1 := fstest.MapFS{
+		"references/v1.md": &fstest.MapFile{Data: []byte("v1 contents")},
+	}
+	if err := s.Publish(context.Background(), manifest, v1, PublishOptions{}); err != nil {
+		t.Fatalf("first Publish: %v", err)
+	}
+
+	// Second publish without overwrite must fail.
+	v2 := fstest.MapFS{
+		"references/v2.md": &fstest.MapFile{Data: []byte("v2 contents")},
+	}
+	err = s.Publish(context.Background(), manifest, v2, PublishOptions{Overwrite: false})
+	if !errors.Is(err, ErrSkillExists) {
+		t.Fatalf("second Publish err = %v, want ErrSkillExists", err)
+	}
+
+	// Existing v1 file must still be there.
+	v1Path := filepath.Join(localRoot, "collision", "references", "v1.md")
+	if _, err := os.Stat(v1Path); err != nil {
+		t.Errorf("v1 file gone after rejected overwrite: %v", err)
+	}
+
+	// Third publish WITH overwrite must succeed and replace contents.
+	if err := s.Publish(context.Background(), manifest, v2, PublishOptions{Overwrite: true}); err != nil {
+		t.Fatalf("overwrite Publish: %v", err)
+	}
+
+	// v1 file should be gone (full directory replacement).
+	if _, err := os.Stat(v1Path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("v1 file lingered after overwrite: stat err = %v", err)
+	}
+	// v2 file should be present.
+	v2Path := filepath.Join(localRoot, "collision", "references", "v2.md")
+	if _, err := os.Stat(v2Path); err != nil {
+		t.Errorf("v2 file missing after overwrite: %v", err)
+	}
+}
+
+// TestCleanRelPath_RejectsUnsafeKeys covers the path-safety rules
+// skill:save uses to validate references/scripts/assets keys.
+func TestCleanRelPath_RejectsUnsafeKeys(t *testing.T) {
+	bad := []string{
+		"",                  // empty
+		"/etc/passwd",       // absolute
+		"../escape.md",      // parent-dir
+		"foo/../bar.md",     // parent-dir mid-path (also non-normalised)
+		"./foo.md",          // hidden via leading dot (also non-normalised)
+		".env",              // hidden segment
+		"foo/.hidden/bar",   // hidden mid-path
+		"foo\x00.md",        // NUL byte
+		"foo\\bar.md",       // backslash
+		"foo//bar.md",       // double slash (non-normalised)
+		"foo/",              // trailing slash (non-normalised)
+		".",                 // pure dot
+		"..",                // pure parent
+	}
+	for _, p := range bad {
+		if _, err := CleanRelPath(p); err == nil {
+			t.Errorf("CleanRelPath(%q) accepted, want ErrInvalidPath", p)
+		} else if !errors.Is(err, ErrInvalidPath) {
+			t.Errorf("CleanRelPath(%q) err = %v, want ErrInvalidPath wrap", p, err)
+		}
+	}
+
+	good := []string{
+		"foo.md",
+		"sub/foo.py",
+		"sub/dir/file.json",
+		"a-b_c.md",
+	}
+	for _, p := range good {
+		got, err := CleanRelPath(p)
+		if err != nil {
+			t.Errorf("CleanRelPath(%q) err = %v, want nil", p, err)
+		}
+		if got != p {
+			t.Errorf("CleanRelPath(%q) = %q, want unchanged", p, got)
+		}
 	}
 }
 

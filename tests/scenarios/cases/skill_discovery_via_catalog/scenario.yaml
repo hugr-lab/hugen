@@ -1,0 +1,90 @@
+# skill_discovery_via_catalog — saves a skill in this session with a
+# distinctive description; verifies the discovery channel works in a
+# FRESH session against the same memory.db (manual restart leg, same
+# pattern as plan_survives_restart).
+#
+# This scenario writes; the by-eye verification is:
+#
+#   1. Run this scenario; note the .data/run-<ts>/<run>/state path.
+#   2. Re-boot hugen against that state dir
+#      (HUGEN_STATE=.data/<...>/state ./bin/hugen).
+#   3. In the fresh root session, ask: "хочу probe-timestamp
+#      report для path X" or similar — anything that should match
+#      the saved skill's `description` field.
+#   4. The model should:
+#        a. NOT immediately compose a procedure from scratch.
+#        b. Call skill:tools_catalog (with a pattern keyword
+#           from the request).
+#        c. Inspect available_in_skills, find `probe-skill-disco`.
+#        d. Call skill:load probe-skill-disco.
+#        e. Follow the saved procedure with the user's parameter.
+#
+# When the harness gains restart-aware step primitives this YAML
+# grows automated checks (currently both legs of the test live in
+# operator workflow).
+name: skill_discovery_via_catalog
+requires: []
+
+steps:
+  - say: |
+      Write the current UTC timestamp to a temp file (parameter:
+      output path, default to a tmp path). Then save the procedure
+      as a skill called `probe-skill-disco` with a distinctive
+      description like "diagnostic timestamp probe — writes UTC
+      time to a file path argument". Validate it works.
+    budget: 240s
+
+    queries:
+      # All tool_result rows — observer reads the skill_save
+      # envelope at seq adjacent to the skill_save tool_call.
+      # (Store doesn't carry tool_name on tool_result rows.)
+      - name: tool_results
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_result"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_result }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # All tool_call rows — confirms skill_save was invoked with
+      # distinctive description, plus any subsequent
+      # skill_tools_catalog calls (if the model decided to verify
+      # discoverability inside the same session).
+      - name: tool_calls
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+  # Manual restart-leg verification:
+  #
+  # Re-boot hugen against the same state dir. In the fresh session,
+  # type a message like "make a timestamp probe report for /tmp/x".
+  # The agent should:
+  #   - call skill:tools_catalog (any reasonable pattern keyword);
+  #   - find probe-skill-disco in available_in_skills;
+  #   - skill:load probe-skill-disco;
+  #   - follow the saved procedure.
+  #
+  # The DuckDB query the operator runs to confirm in the fresh
+  # session would be:
+  #
+  #   SELECT seq, tool_name, tool_args
+  #   FROM hub.db.agent.session_events
+  #   WHERE event_type = 'tool_call'
+  #     AND tool_name IN ('skill:tools_catalog', 'skill:load')
+  #   ORDER BY seq;
+  #
+  # Expected order in the fresh session:
+  #   1. skill:tools_catalog (with `pattern` arg)
+  #   2. skill:load name=probe-skill-disco

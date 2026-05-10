@@ -74,4 +74,24 @@ var (
 	// when the targeted backend is read-only (system, community,
 	// hub, inline).
 	ErrUnsupportedBackend = errors.New("skill: backend does not support operation")
+
+	// ErrAutoloadReserved is returned by skill:save when a manifest
+	// sets metadata.hugen.autoload — autoload is reserved for
+	// system / admin skills compiled into the binary, and local
+	// skills authored via skill:save must load on demand. See
+	// design/002-runtime-canonical/phase-4.2-spec.md §3.2.2.
+	ErrAutoloadReserved = errors.New("skill: autoload is reserved for system / admin skills")
+
+	// ErrSkillExists is returned by SkillStore.Publish when a skill
+	// with the same name already exists in the writable backend
+	// and PublishOptions.Overwrite is false. The save protocol
+	// (`_skill_builder`) instructs the agent to ask the user
+	// before retrying with Overwrite=true.
+	ErrSkillExists = errors.New("skill: already exists")
+
+	// ErrInvalidPath is returned by skill:save when a relative key
+	// in the bundle (references/scripts/assets) escapes the skill
+	// directory or contains otherwise unsafe characters. See
+	// pkg/skill.CleanRelPath for the validation rules.
+	ErrInvalidPath = errors.New("skill: invalid bundle path")
 )

@@ -140,6 +140,19 @@ func (h *SessionSkill) callToolsCatalog(ctx context.Context, args json.RawMessag
 type skillToolsIndex struct {
 	exact    map[string][]string
 	patterns []skillToolPattern
+
+	// inheriting lists skills with absent allowed-tools (the
+	// Manifest.AllowedTools == nil tri-state branch). Per
+	// design/002-runtime-canonical/phase-4.2-spec.md §3.3.2,
+	// these surface in available_in_skills for EVERY registered
+	// tool — they're agentskills.io "do not restrict" skills,
+	// and the discovery channel must let the model see them as
+	// candidates regardless of which specific tool the model is
+	// looking for. Loading such a skill grants the tool only if
+	// the union (other loaded skills' explicit grants) admits
+	// it, but surfacing here lets the model evaluate by skill
+	// description before deciding.
+	inheriting []string
 }
 
 type skillToolPattern struct {
@@ -157,6 +170,18 @@ func buildSkillToolsIndex(ctx context.Context, sm *skillpkg.SkillManager) *skill
 		return idx
 	}
 	for _, sk := range all {
+		// Tri-state AllowedTools:
+		//   - nil       → absent. Skill inherits union; surface
+		//                 in available_in_skills for every tool
+		//                 via idx.inheriting.
+		//   - non-nil   → explicit (possibly empty []). The loop
+		//                 below indexes only what's listed; an
+		//                 explicit empty slice is reference-only
+		//                 and contributes nothing.
+		if sk.Manifest.AllowedTools == nil {
+			idx.inheriting = append(idx.inheriting, sk.Manifest.Name)
+			continue
+		}
 		for _, g := range sk.Manifest.AllowedTools {
 			for _, t := range g.Tools {
 				full := g.Provider + ":" + t
@@ -171,12 +196,16 @@ func buildSkillToolsIndex(ctx context.Context, sm *skillpkg.SkillManager) *skill
 			}
 		}
 	}
+	sort.Strings(idx.inheriting)
 	return idx
 }
 
 // matching returns the skill names whose allowed-tools admit the
 // fully-qualified tool name (e.g. "hugr-main:discovery-list"),
-// in stable alphabetical order, deduped.
+// in stable alphabetical order, deduped. Skills with absent
+// allowed-tools (idx.inheriting) appear in EVERY tool's result
+// per phase-4.2-spec.md §3.3.2 — they're discovery candidates the
+// model can `skill:load` to evaluate via the union.
 func (idx *skillToolsIndex) matching(name string) []string {
 	if idx == nil {
 		return nil
@@ -189,6 +218,9 @@ func (idx *skillToolsIndex) matching(name string) []string {
 		if strings.HasPrefix(name, p.prefix) {
 			set[p.skill] = struct{}{}
 		}
+	}
+	for _, s := range idx.inheriting {
+		set[s] = struct{}{}
 	}
 	if len(set) == 0 {
 		return nil

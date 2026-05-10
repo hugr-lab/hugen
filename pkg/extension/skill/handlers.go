@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"testing/fstest"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/extension"
@@ -23,11 +24,11 @@ import (
 // without rewrites. skill_files additionally consults
 // hugen:command:skill_files:<skill> for fine-grained gating.
 const (
-	permObjectLoad        = "hugen:tool:system"
-	permObjectUnload      = "hugen:tool:system"
-	permObjectPublish     = "hugen:tool:system"
-	permObjectFiles       = "hugen:tool:system"
-	permObjectRef         = "hugen:tool:system"
+	permObjectLoad          = "hugen:tool:system"
+	permObjectUnload        = "hugen:tool:system"
+	permObjectSave          = "hugen:tool:system"
+	permObjectFiles         = "hugen:tool:system"
+	permObjectRef           = "hugen:tool:system"
 	permObjectFilesPerSkill = "hugen:command:skill_files"
 )
 
@@ -53,13 +54,37 @@ const (
   "required": ["name"]
 }`
 
-	publishSchema = `{
+	// saveSchema deliberately omits `additionalProperties` on
+	// references/scripts/assets — Gemini's tool-schema subset
+	// rejects it (see pkg/tool/validate.go and the cross-provider
+	// conformance test). The inner shape (open-ended string→string
+	// map) is described in each field's `description` so the model
+	// picks the right call shape from there.
+	saveSchema = `{
   "type": "object",
   "properties": {
-    "name": {"type": "string"},
-    "body": {"type": "string", "description": "Full SKILL.md contents (frontmatter + body)."}
+    "skill_md": {
+      "type": "string",
+      "description": "Full SKILL.md content (frontmatter + body markdown). Required. Must parse as a valid Manifest. The manifest must NOT set metadata.hugen.autoload — autoload is reserved for system / admin skills."
+    },
+    "references": {
+      "type": "object",
+      "description": "Optional. Map: relative path under references/ (string) → markdown file content (string). Example: {\"howto.md\":\"step-by-step notes\",\"deep/dive.md\":\"appendix\"}. Subdirs allowed; absolute paths and parent-dir references rejected."
+    },
+    "scripts": {
+      "type": "object",
+      "description": "Optional. Map: relative path under scripts/ (string) → executable artefact content (string). Example: {\"query.py\":\"print('q')\"}. The saved skill body invokes them via ${SKILL_DIR}/scripts/foo.py + bash:run / python:run_script."
+    },
+    "assets": {
+      "type": "object",
+      "description": "Optional. Map: relative path under assets/ (string) → text data file content (string). Example: {\"template.html.tmpl\":\"<html/>\"}. Binary assets are NOT supported in v1."
+    },
+    "overwrite": {
+      "type": "boolean",
+      "description": "Default false — collision returns ErrSkillExists; ask the user before retrying with overwrite=true. Within the post-save validation iteration loop the agent may set this without asking."
+    }
   },
-  "required": ["name", "body"]
+  "required": ["skill_md"]
 }`
 
 	filesSchema = `{
@@ -100,11 +125,11 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 			ArgSchema:        json.RawMessage(unloadSchema),
 		},
 		{
-			Name:             providerName + ":publish",
-			Description:      "Publish a skill manifest+body into the local store.",
+			Name:             providerName + ":save",
+			Description:      "Persist a complete skill bundle (SKILL.md + optional references / scripts / assets) to the local skill store. Auto-loads the saved skill in the current session for immediate use. User-initiated only — do NOT propose this. Follow the `_skill_builder` protocol for naming, generalisation, and mandatory post-save validation.",
 			Provider:         providerName,
-			PermissionObject: permObjectPublish,
-			ArgSchema:        json.RawMessage(publishSchema),
+			PermissionObject: permObjectSave,
+			ArgSchema:        json.RawMessage(saveSchema),
 		},
 		{
 			Name:             providerName + ":files",
@@ -150,8 +175,8 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 		return h.callLoad(ctx, args)
 	case "unload":
 		return h.callUnload(ctx, args)
-	case "publish":
-		return h.callPublish(ctx, args)
+	case "save":
+		return h.callSave(ctx, args)
 	case "files":
 		return h.callFiles(ctx, args)
 	case "ref":
@@ -214,14 +239,125 @@ func (h *SessionSkill) callUnload(ctx context.Context, args json.RawMessage) (js
 	return json.RawMessage(`{"unloaded":true}`), nil
 }
 
-// ---------- skill:publish ----------
+// ---------- skill:save ----------
 
-// callPublish remains a stub matching the legacy SystemProvider
-// behaviour: inline-body wiring is still pending (deferred to T039
-// in the original phase-3 spec). Returning ErrSystemUnavailable
-// keeps callers' UX unchanged across the move.
-func (h *SessionSkill) callPublish(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
-	return nil, fmt.Errorf("%w: skill:publish requires inline body wiring (deferred to T039)", tool.ErrSystemUnavailable)
+// saveInput is the parsed argument shape; mirrors saveSchema.
+type saveInput struct {
+	SkillMD    string            `json:"skill_md"`
+	References map[string]string `json:"references,omitempty"`
+	Scripts    map[string]string `json:"scripts,omitempty"`
+	Assets     map[string]string `json:"assets,omitempty"`
+	Overwrite  bool              `json:"overwrite,omitempty"`
+}
+
+// saveResult is the JSON envelope returned to the LLM after a
+// successful save. The model uses Files to drive its mandatory
+// post-save validation (run scripts/* against test parameters);
+// Directory is the on-disk root the saved-skill body's
+// ${SKILL_DIR}/... references resolve against.
+type saveResult struct {
+	Name      string   `json:"name"`
+	Directory string   `json:"directory,omitempty"`
+	Files     []string `json:"files"`
+}
+
+// callSave persists a skill bundle to the local store and
+// auto-loads it in the current session. See
+// design/002-runtime-canonical/phase-4.2-spec.md §3.2.
+//
+// Error mapping (errors.Is-checkable for the LLM consumer via the
+// runtime's tool-error envelope):
+//   - tool.ErrArgValidation        — malformed args.
+//   - skillpkg.ErrManifestInvalid  — skill_md fails Parse.
+//   - skillpkg.ErrAutoloadReserved — manifest sets autoload:true.
+//   - skillpkg.ErrInvalidPath      — bundle key escapes safety.
+//   - skillpkg.ErrSkillExists      — name collision and !overwrite.
+//   - tool.ErrSystemUnavailable    — manager not wired.
+func (h *SessionSkill) callSave(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	if h.manager == nil {
+		return nil, tool.ErrSystemUnavailable
+	}
+	var in saveInput
+	if err := json.Unmarshal(args, &in); err != nil {
+		return nil, fmt.Errorf("%w: skill:save: %v", tool.ErrArgValidation, err)
+	}
+	if strings.TrimSpace(in.SkillMD) == "" {
+		return nil, fmt.Errorf("%w: skill:save: skill_md is required", tool.ErrArgValidation)
+	}
+
+	manifest, err := skillpkg.Parse([]byte(in.SkillMD))
+	if err != nil {
+		return nil, fmt.Errorf("skill:save: manifest does not parse — fix the SKILL.md frontmatter and re-save: %w", err)
+	}
+	if manifest.Hugen.Autoload {
+		return nil, fmt.Errorf("skill:save: %w — drop `metadata.hugen.autoload` from the manifest and re-save (autoload is reserved for system / admin skills compiled into the binary; local skills load on demand)", skillpkg.ErrAutoloadReserved)
+	}
+
+	bundle := fstest.MapFS{}
+	for _, cat := range []struct {
+		name  string
+		files map[string]string
+	}{
+		{"references", in.References},
+		{"scripts", in.Scripts},
+		{"assets", in.Assets},
+	} {
+		for k, v := range cat.files {
+			cleaned, err := skillpkg.CleanRelPath(k)
+			if err != nil {
+				return nil, fmt.Errorf("skill:save: bundle key %q under %s/ rejected — use simple relative paths (no leading /, no .., no hidden segments): %w", k, cat.name, err)
+			}
+			bundle[cat.name+"/"+cleaned] = &fstest.MapFile{Data: []byte(v)}
+		}
+	}
+
+	if err := h.manager.Publish(ctx, manifest, bundle, skillpkg.PublishOptions{Overwrite: in.Overwrite}); err != nil {
+		if errors.Is(err, skillpkg.ErrSkillExists) {
+			// Action-oriented message — both gemma and claude
+			// rationalised the prior generic "io: already
+			// exists" envelope as "no-op" or "success". The
+			// explicit hint about asking the user + overwrite
+			// flag makes the recovery path obvious.
+			return nil, fmt.Errorf("skill:save: %w — skill %q is already in the local store; ASK THE USER before retrying with `overwrite: true`, OR pick a different name. Do NOT silently retry", skillpkg.ErrSkillExists, manifest.Name)
+		}
+		return nil, fmt.Errorf("skill:save: %w", err)
+	}
+
+	// Auto-load the freshly-saved skill so the model can use it
+	// immediately in this session and run the validation loop
+	// against bundled scripts. If auto-load fails (most likely:
+	// requires_skills resolves a missing dependency), the skill
+	// is already on disk — surface the partial-success path with
+	// a clear hint instead of leaving the model to wonder. The
+	// model's recovery: tell the user, suggest manual `/skill
+	// load <name>` after fixing the dependency.
+	if err := h.Load(ctx, manifest.Name); err != nil {
+		return nil, fmt.Errorf("skill:save: skill %q saved to local store but auto-load in this session failed (likely a missing requires_skills dependency); you can `/skill load %s` after resolving the dependency: %w",
+			manifest.Name, manifest.Name, err)
+	}
+
+	loaded, err := h.LoadedSkill(ctx, manifest.Name)
+	if err != nil {
+		return nil, fmt.Errorf("skill:save: skill %q saved and loaded but lookup for the result envelope failed: %w", manifest.Name, err)
+	}
+
+	files := []string{}
+	if loaded.FS != nil {
+		_ = fs.WalkDir(loaded.FS, ".", func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || p == "." {
+				return nil
+			}
+			files = append(files, p)
+			return nil
+		})
+		sort.Strings(files)
+	}
+
+	return json.Marshal(saveResult{
+		Name:      manifest.Name,
+		Directory: loaded.Root,
+		Files:     files,
+	})
 }
 
 // ---------- skill:ref ----------

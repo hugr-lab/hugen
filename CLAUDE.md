@@ -19,15 +19,21 @@ authoritative (see `.specify/memory/constitution.md` and
 
 ## Where we are
 
-We are mid-execution of **design 001 — Hugr Agent Runtime**
-(`design/001-agent-runtime/design.md`).
+We are mid-execution of **design 001 — Hugr Agent Runtime**.
+The canonical, up-to-date design lives in
+`design/002-runtime-canonical/` (rewrite as of 2026-05-10);
+`design/001-agent-runtime/` is preserved as the historical
+record of *why* each phase ended up the way it did.
 
-**Architecture-of-record**: `design/001-agent-runtime/architecture.md`
-is the current-state snapshot — read this first before touching
-session / extension / tool / skill internals. Phase docs remain
-authoritative as historical record of *why* each piece ended up
-where it did, but `architecture.md` wins on questions of *how
-things actually work today and where to plug in*.
+**Read first** when touching session / extension / tool / skill
+internals:
+
+- `design/002-runtime-canonical/architecture.md` — state-of-the-tree
+  map; §11 is the extension recipe book.
+- `design/002-runtime-canonical/design.md` — vision + phase plan.
+- `design/002-runtime-canonical/phase-4.2-spec.md` — active phase.
+
+When 002 and a 001 phase doc disagree, 002 wins.
 
 Phase plan:
 
@@ -37,11 +43,12 @@ Phase plan:
 | 2. HTTP/SSE + webui + ADK eviction | shipped |
 | 3. Action layer (skills + tools + 3-tier permissions + bash/hugr-mcp) | shipped |
 | 3.5. Analyst toolkit (duckdb-mcp + python-mcp + analyst skills) | shipped |
-| **4. Sub-agents + plan + whiteboard + event-driven session loop** | **spec drafted v2** (`phase-4-spec.md`, ready for `/speckit.specify`); architecture decisions in `phase-4-architecture.md` |
+| 4. Sub-agents + plan + whiteboard + event-driven session loop | shipped |
 | 4.1a. Extract `pkg/runtime` + dissolve `SystemProvider` (tools onto domain `ToolProvider`s; absorbs ex-4.3) | shipped (`33a0bc3`) |
 | 4.1b. Observational scenario harness (port `../agent/tests/scenarios/` pattern; live LLM + real Hugr; ~8 scenarios v1) | shipped (`109f6b9`); 7 of 9 scenarios validated on gemini-pro + gemma4-26b, claude-sonnet canary green; `full_analyst_workflow` deferred → 4.2 |
 | 4.1c. Subagent-as-adapter: parent observes child's outbox; eliminates child→parent.Submit cross-session shortcut. Surfaced by 4.1b harness (every sub-agent hung mid-flight). | shipped (`109f6b9`) — pump + retry + per-skill intent + plan envelope migration all in same merge |
-| 4.2. Analyst mega-skill + role sub-agents + `skill_builder` + community-skill enablement (tri-state `allowed-tools`, `system:tool_catalog`) **+ task-complexity routing** (auto-classify when a task warrants a sub-agent vs. inline tool calls vs. just answering — gates `spawn_subagent` so root doesn't fan out trivial requests) | spec drafted v0 (`phase-4.2-spec.md`); follows 4.1c. Scope expanded 2026-05-08 to absorb the routing question that came out of 4.1b harness runs (root sometimes spawns when it shouldn't, sometimes does data work itself when it should delegate). |
+| 4.2. **Skill creation infrastructure** — closes the save → discover → reuse loop. Tri-state `AllowedTools` (nil≠empty) + union resolution (also wires existing `tools_catalog.available_in_skills` → discovery channel for unloaded local skills); `skill:save` (structured bundle, manifest validation, autoload-rejection, collision-handling, path-safety); skill `Advertiser` exports `directory` + bundled-files listing; `_skill_builder` system skill (autoload root) holds discovery + save protocols with mandatory validation. `skill:tools_catalog` already exists, no code change. | spec v3 (`design/002-runtime-canonical/phase-4.2-spec.md`); ~640 LOC code + ~440 LOC tests + content, ~1 week. Routing-as-structural-mechanism cancelled 2026-05-10 (was over-engineered); analyst content moved out to 4.2.2. |
+| 4.2.2. **Analyst mega-skill** — bundled `_analyst` skill with 4 roles in `sub_agents:` (`data-explorer`, `sql-analyst`, `python-postprocessor`, `report-builder`); re-enable `full_analyst_workflow` harness scenario; tune preamble until passes consistently across Claude / Gemini / Gemma. Authored inline via 4.2's `skill:save` first, then promoted. | spec v1 (`design/002-runtime-canonical/phase-4.2.2-spec.md`); ~700 LOC content, 1.5-2 weeks of harness iteration. Pure content + scenario tuning; no `pkg/*` changes. Depends on 4.2. |
 | ~~4.3~~ | **cancelled 2026-05-08** — historical scope was Manager-as-ToolProvider generalisation; superseded by 4.1a (`SystemProvider` already dissolved) and the per-domain ToolProvider pattern that landed with it. |
 | 5. Compactor + HITL: approvals + clarifications (compactor first within the phase; replaces the phase-3 `defaultHistoryWindow=50` stop-gap) | open |
 | 6. Cron + scheduler | open |
@@ -65,30 +72,60 @@ plan→ExtensionFrame migration all landed with phase 4.1c. 4.3 is
 **cancelled** (its scope was Manager-as-ToolProvider, which 4.1a
 already absorbed).
 
-Next phase is **4.2 — analyst skill + skill_builder + community
-enablement + task-complexity routing**. The routing piece
-(automatically deciding "spawn a sub-agent vs. answer inline vs.
-do the tool call directly") was added on 2026-05-08 after 4.1b
-runs showed every LLM family makes routing mistakes, but each in
-a different way (Claude over-spawns trivial requests, gemma
-sometimes under-delegates and tries to do data work itself).
+Next phase is **4.2 — skill creation infrastructure**. Spec
+v3 at `design/002-runtime-canonical/phase-4.2-spec.md`. Closes
+the **save → discover → reuse** loop with minimal new code by
+leaning on what already exists. ~640 LOC code + ~440 LOC tests
++ ~200 lines content, ~1 week PR:
 
-Spec: `design/001-agent-runtime/phase-4.2-spec.md` (v0 draft).
-Needs revision before implementation to spell out:
+1. **Tri-state `AllowedTools` (nil≠empty)** — `nil` (absent → inherit
+   via union), non-nil empty (explicit empty), populated.
+   Unblocks community-skill onboarding AND propagates into
+   the existing `tools_catalog`'s `granted_to_session` /
+   `available_in_skills` projections — wiring the discovery
+   channel correctly.
+2. **`skill:save`** tool — structured bundle (`skill_md` +
+   `references` + `scripts` + `assets`), manifest
+   validation, rejects `autoload: true` (reserved for
+   system / admin), `overwrite: false` default with explicit
+   collision error, path-safety on relative keys. Auto-loads
+   in current session.
+3. **Skill `Advertiser`** — exports loaded skill's
+   `directory` + bundled-files listing into system prompt;
+   model invokes bundled scripts/templates via existing
+   `bash:run` / `python:run_script` with `${SKILL_DIR}/...`.
+4. **`_skill_builder` system skill** (autoload root) — two
+   protocols. **Discovery**: before composing a procedure
+   from scratch on a non-trivial request, call
+   `skill:tools_catalog(pattern=...)`, scan
+   `available_in_skills` for unloaded local skills,
+   `skill:load` if a fit. **Save**: on user-initiated save —
+   clarify, generalise, ground, mandatory post-save
+   validation loop (test with synthetic params → if fail
+   unload+fix+resave with `overwrite=true`), naming-collision
+   handling.
 
-1. The classifier signal — system-prompt nudges only, or a
-   dedicated `task_classify` tool the LLM calls before deciding,
-   or a heuristic gate that fires before `spawn_subagent` is
-   even visible. Open question.
-2. The skill / role catalogue — what shape `analyst-mega-skill`
-   takes, how role sub-agents declare their cost class
-   (`Intent` already wired, but role description needs richer
-   "when to use me" text).
-3. `skill_builder` — author tooling for users to create their
-   own skills + community publication path.
+**`skill:tools_catalog` is NOT new** — it already exists at
+`pkg/extension/skill/tools_catalog.go` with `granted_to_session`
++ `available_in_skills`. Phase 4.2 only verifies tri-state
+union is correctly reflected (mainly the `available_in_skills`
+indexer needs to handle absent-allow skills per spec §3.3.2).
 
-Treat 4.2 as an open discussion until the spec is revised — the
-harness is the regression net, but the design isn't locked.
+**Cancelled mid-discussion** (was in earlier drafts):
+`task_classify` tool, `pkg/extension/router/`, ToolFilter
+routing gate, 4-class taxonomy, `skill_builder` mega-skill
+walkthrough, strict validation hardening, brand-new
+`skill:tools_catalog` (already exists). Rationale: lean on
+what's there; routing stays as constitution-level guidance
+per skill, not a structural mechanism.
+
+After 4.2 → **4.2.2 (analyst mega-skill)**: spec at
+`design/002-runtime-canonical/phase-4.2.2-spec.md`. One
+bundled `_analyst` skill with 4 roles in `sub_agents:`,
+authored inline via 4.2's `skill:save` first (eat our own
+dogfood), then promoted to `assets/skills/_analyst/` once
+harness scenarios pass consistently across Claude / Gemini /
+Gemma. Pure content + scenario tuning; no `pkg/*` changes.
 
 ## Project structure
 
@@ -116,7 +153,8 @@ assets/
 └── skills/                       # bundled skills: _system, hugr-data, duckdb-data, duckdb-docs, python-runner
 vendor/
 └── mcp-server-motherduck/        # vendored MotherDuck DuckDB MCP (git submodule, MIT)
-design/001-agent-runtime/         # design + per-phase specs (gitignored after promotion)
+design/001-agent-runtime/         # historical: per-phase specs, original design, original architecture (gitignored)
+design/002-runtime-canonical/     # canonical: design.md, architecture.md, active phase-N-spec.md (gitignored)
 specs/<NNN-feature-name>/         # per-feature speckit artefacts (gitignored)
 .specify/memory/constitution.md   # Go code constitution (load-bearing rules)
 ```
@@ -148,11 +186,11 @@ deliberate decision, not a drift:
 2. **Discuss before editing.** Architecture / goal pivots are
    discussed before code lands — even when the patch is small.
 3. **Record and justify.** The decision goes into the relevant
-   `design/001-agent-runtime/*.md` (or a new ADR-style note alongside
-   it) with the *why*, the alternative considered, and what it
-   supersedes. Implementation memos go into the per-phase spec's
-   "Implementation update" footer (the pattern phase 3.5 used after
-   `2026-05-01`).
+   `design/002-runtime-canonical/*.md` (or a new ADR-style note
+   alongside it) with the *why*, the alternative considered, and
+   what it supersedes. Implementation memos for active phases go
+   into the per-phase spec's "Implementation update" footer (the
+   pattern phase 3.5 used after `2026-05-01`).
 4. **No silent rewrites.** Refactoring code that touches a documented
    contract requires updating the contract in the same PR or in an
    immediately-visible follow-up.

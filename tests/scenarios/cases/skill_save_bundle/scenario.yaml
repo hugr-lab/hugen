@@ -1,0 +1,97 @@
+# skill_save_bundle — user does a small task, then asks the agent to
+# save it as a reusable skill. Exercises the full save protocol from
+# `_skill_builder`: clarify → compose bundle → save → auto-load →
+# mandatory validation → report ready.
+#
+# By-eye / queries verify:
+#   - skill:save was called once with a non-empty `scripts` map.
+#   - skill:load was called immediately after (auto-load from save).
+#   - At least one bash:run / python:run_script invocation followed
+#     skill:save — that's the validation step running the bundled
+#     script with synthetic params.
+#   - Final assistant message says something like "saved as
+#     <name>, tested ... ready".
+#
+# requires: empty — the task is intentionally trivial (tmp file
+# write + read). No Hugr / DB required.
+name: skill_save_bundle
+requires: []
+
+steps:
+  - say: |
+      Write the current UTC timestamp into a temp file, then read it
+      back to confirm. Use bash:run twice — once to write, once to
+      read.
+    budget: 90s
+
+    queries:
+      # The setup turn — should show 2 bash:run calls before any
+      # skill:save activity.
+      - name: setup_tool_calls
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+  - say: |
+      Save this as a skill called `timestamp-probe` so I can repeat
+      it in future sessions. Make it parameterised — accept an
+      optional file path argument (default to a tmp path the script
+      generates). Validate it works after saving.
+    budget: 240s
+
+    queries:
+      # After the second turn, expect:
+      #   - skill:save called (with non-empty scripts map)
+      #   - skill:load called immediately after (auto from save)
+      #   - bash:run during validation step
+      - name: tool_calls_after_save
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # All tool_result rows in this session — store doesn't carry
+      # tool_name on tool_result rows (it's only set on tool_call),
+      # so the observer correlates by seq adjacency: tool_call
+      # `skill_save` at seq N is followed by tool_result at seq N+1
+      # whose `tool_result` field carries the saved skill's
+      # {name, directory, files: [...]} envelope.
+      - name: tool_results
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_result"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_result }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Final agent message — should explicitly mention validation
+      # ("tested with sample params" or similar) and announce ready.
+      - name: final_agent_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 1
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }

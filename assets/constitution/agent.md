@@ -16,8 +16,17 @@ skills, managing references, reclaiming context). Follow them — they
 are the authoritative source for workflow rules.
 
 If you do not see a tool that would help, list available skills with
-`skill_ref`, load the relevant one with `skill_load`, and only then
+`skill:ref`, load the relevant one with `skill:load`, and only then
 attempt the operation.
+
+For non-trivial requests (analytical, reporting, multi-step
+data-fetch patterns), check `skill:tools_catalog` for an existing
+local skill that already covers the request before composing a
+procedure from scratch — local skills do not autoload, but their
+names appear in `available_in_skills`. When the user explicitly
+asks to save current session work as a reusable skill, follow the
+`_skill_builder` protocol (clarify, generalise, save, validate).
+Never propose saving a skill yourself — that decision is the user's.
 
 ## Tool naming
 

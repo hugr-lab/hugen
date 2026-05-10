@@ -266,8 +266,12 @@ func (m *SkillManager) RefreshAll(ctx context.Context) (int64, error) {
 // local://) via the underlying SkillStore. The freshly-published
 // skill becomes discoverable via List/Get on the same store;
 // consumers must Load it explicitly to bind it to a session.
-func (m *SkillManager) Publish(ctx context.Context, manifest Manifest, body fs.FS) error {
-	if err := m.store.Publish(ctx, manifest, body); err != nil {
+//
+// PublishOptions.Overwrite=false (default) returns ErrSkillExists
+// on collision; set Overwrite=true within the skill:save
+// validation iteration loop only.
+func (m *SkillManager) Publish(ctx context.Context, manifest Manifest, body fs.FS, opts PublishOptions) error {
+	if err := m.store.Publish(ctx, manifest, body, opts); err != nil {
 		return err
 	}
 	m.emit(SkillChange{

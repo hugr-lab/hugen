@@ -224,6 +224,13 @@ func (h *SessionSkill) Bindings(_ context.Context) (skillpkg.Bindings, error) {
 	sort.Strings(names)
 	for _, n := range names {
 		s := h.loaded[n]
+		// Tri-state AllowedTools: nil means "absent" (skill inherits
+		// the union of other loaded skills' explicit grants — falls
+		// out naturally because admission tests against the
+		// aggregated explicit-grants list); non-nil empty means
+		// "reference-only"; populated contributes those. Both
+		// nil and empty contribute nothing to the union here.
+		// See manifest.go::Manifest.AllowedTools.
 		out.AllowedTools = append(out.AllowedTools, s.Manifest.AllowedTools...)
 		out.SubAgentRoles = append(out.SubAgentRoles, s.Manifest.Hugen.SubAgents...)
 		if s.Manifest.Hugen.MaxTurns > out.MaxTurns {
