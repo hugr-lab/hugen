@@ -66,9 +66,27 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 		return mErr.toolError()
 	}
 
+	parent.logger.Debug("session: spawn_mission: entry",
+		"parent", parent.id,
+		"skill_arg", in.Skill,
+		"resolved_skill", skillName,
+		"goal_len", len(in.Goal))
+
 	// Resolve on_start block — produces rendered plan body /
 	// whiteboard flag / first-message override.
 	block := resolveMissionStartBlock(ctx, parent, skillName, in.Goal, in.Inputs)
+	if block != nil {
+		parent.logger.Debug("session: spawn_mission: on_start resolved",
+			"parent", parent.id,
+			"skill", skillName,
+			"plan_text_len", len(block.PlanText),
+			"plan_current_step", block.PlanCurrentStep,
+			"whiteboard_init", block.WhiteboardInit,
+			"first_message_override_len", len(block.FirstMessageOverride))
+	} else {
+		parent.logger.Debug("session: spawn_mission: no on_start block",
+			"parent", parent.id, "skill", skillName)
+	}
 
 	// Effective task: override from on_start wins; otherwise the
 	// caller-supplied goal.
@@ -202,29 +220,49 @@ func applyMissionStartWrites(ctx context.Context, parent *Session, child *Sessio
 		return
 	}
 	if block.PlanText != "" {
+		var ran bool
 		for _, ext := range parent.deps.Extensions {
 			writer, ok := ext.(extension.PlanSystemWriter)
 			if !ok {
 				continue
 			}
+			ran = true
 			if err := writer.SystemSet(ctx, child, block.PlanText, block.PlanCurrentStep); err != nil {
 				parent.logger.Warn("session: spawn_mission: plan.SystemSet failed",
 					"parent", parent.id, "child", child.id, "err", err)
+			} else {
+				parent.logger.Debug("session: spawn_mission: plan.SystemSet applied",
+					"parent", parent.id, "child", child.id,
+					"plan_text_len", len(block.PlanText),
+					"current_step", block.PlanCurrentStep)
 			}
 			break
 		}
+		if !ran {
+			parent.logger.Warn("session: spawn_mission: no PlanSystemWriter registered; plan body discarded",
+				"parent", parent.id, "child", child.id)
+		}
 	}
 	if block.WhiteboardInit {
+		var ran bool
 		for _, ext := range parent.deps.Extensions {
 			writer, ok := ext.(extension.WhiteboardSystemWriter)
 			if !ok {
 				continue
 			}
+			ran = true
 			if err := writer.SystemInit(ctx, child); err != nil {
 				parent.logger.Warn("session: spawn_mission: whiteboard.SystemInit failed",
 					"parent", parent.id, "child", child.id, "err", err)
+			} else {
+				parent.logger.Debug("session: spawn_mission: whiteboard.SystemInit applied",
+					"parent", parent.id, "child", child.id)
 			}
 			break
+		}
+		if !ran {
+			parent.logger.Warn("session: spawn_mission: no WhiteboardSystemWriter registered; init skipped",
+				"parent", parent.id, "child", child.id)
 		}
 	}
 }

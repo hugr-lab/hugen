@@ -37,8 +37,12 @@ steps:
   - say: |
       What is 2 + 2? Give the number plus a one-sentence
       explanation of why.
-    budget: 240s
-    wait_for_subagents: 180s
+    # gemini-pro takes 40-50s per LLM turn; a trivial Q&A through
+    # root → mission → worker → mission → root needs 5-7 turns.
+    # 8-minute budget gives comfortable margin until tier_intents
+    # let us pin root/mission to a cheaper model.
+    budget: 480s
+    wait_for_subagents: 360s
 
     queries:
       # Root's tool calls. The pain-point: anything other than
@@ -91,18 +95,21 @@ steps:
         vars: { sid: "$sid" }
         path: extensions.jq.jq
 
-      # Mission's children — at least one worker. Tag the worker's
-      # spawn_role so we know which analyst role mission picked
-      # (simple-answerer for a trivial Q&A).
-      - name: workers_under_mission
+      # Subagent activity inside the mission(s) — every
+      # subagent_started event the mission(s) emitted, with the
+      # spawn skill + role the model chose. For δ.A this should
+      # show one row with skill="analyst", role="simple-answerer".
+      # Walks mission events via the cross-session
+      # `events` reference on each child of root.
+      - name: subagent_started_in_missions
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, workers: (.children // []) | map({id, spawn_skill: .metadata.spawn_skill, spawn_role: .metadata.spawn_role, status})})") {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, spawns: (.events // []) | map(select(.event_type == \"subagent_started\")) | map({seq, child: .metadata.child_session_id, skill: .metadata.skill, role: .metadata.role, task_head: .metadata.task | tostring | .[0:80]})})") {
               hub { db { agent {
                 sessions(filter: {parent_session_id: {eq: $sid}}) {
                   id
-                  children: sessions(filter: {parent_session_id: {neq: ""}}) {
-                    id metadata status
+                  events(filter: {event_type: {eq: "subagent_started"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq event_type metadata
                   }
                 }
               }}}

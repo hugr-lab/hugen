@@ -54,6 +54,14 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("session: spawn: %w", err)
 	}
+	s.logger.Debug("session: spawn: child constructed",
+		"parent", s.id,
+		"child", child.id,
+		"parent_depth", s.depth,
+		"child_depth", child.depth,
+		"spawn_skill", spec.Skill,
+		"spawn_role", spec.Role,
+		"task_len", len(spec.Task))
 	s.childMu.Lock()
 	if s.children == nil {
 		s.children = make(map[string]*Session)

@@ -44,19 +44,50 @@ metadata:
           template: |
             User goal (delegated by root): {{ .UserGoal }}
 
-            Run the analyst playbook:
-              Wave 1 — spawn one or more `data-explorer` workers to
-                       gather the relevant context. For trivial
-                       knowledge / arithmetic questions a single
-                       `simple-answerer` worker is enough.
-              Wave 2 — when wave-1 findings are sufficient, optionally
-                       spawn `sql-analyst` workers for focused queries
-                       or `python-postprocessor` for computation.
-              Wave 3 — spawn `report-builder` to assemble the final
-                       answer; return its result.
+            You are running the `analyst` mission. Your role
+            catalogue is on the `analyst` skill: every
+            `session:spawn_wave` entry MUST set `skill: "analyst"`
+            so the runtime resolves the role from this skill's
+            sub_agents block. Do NOT pass `skill: "_worker"` or any
+            system skill — those are runtime primitives, not role
+            catalogues.
 
-            ALWAYS spawn at least one worker. Even trivial questions
-            go through a worker (cheap intent, single turn).
+            Run the analyst playbook (always one or more workers,
+            never answer inline — even for trivial questions):
+
+              Wave 1
+                Trivial Q&A (e.g. "what is 2+2"):
+                  spawn ONE `simple-answerer` worker, return its
+                  result directly.
+                Data work (e.g. "describe northwind"):
+                  spawn one or more `data-explorer` workers in
+                  parallel; each gathers context for one module.
+
+              Wave 2 (data work only)
+                If wave-1 findings need focused queries or
+                computation, spawn `sql-analyst` (focused GraphQL /
+                SQL) workers.
+
+              Wave 3 (data work only)
+                Spawn one `report-builder` worker to synthesise
+                the whiteboard contents into the final answer.
+
+            Concrete call shape (substitute role + task per worker):
+
+              session:spawn_wave({
+                wave_label: "explore",
+                subagents: [
+                  {
+                    skill: "analyst",
+                    role:  "simple-answerer",
+                    task:  "Compute 2+2 and explain in one sentence."
+                  }
+                ]
+              })
+
+            After each wave, read the whiteboard, comment on the
+            plan, and decide the next step (or return the final
+            result to root).
 
     sub_agents:
       - name: simple-answerer

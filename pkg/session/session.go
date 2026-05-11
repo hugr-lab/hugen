@@ -1451,6 +1451,18 @@ func (s *Session) modelToolsForSession(ctx context.Context) ([]model.Tool, error
 	if err != nil {
 		return nil, err
 	}
+	if s.logger != nil && s.logger.Enabled(ctx, slog.LevelDebug) {
+		names := make([]string, 0, len(snap.Tools))
+		for _, t := range snap.Tools {
+			names = append(names, t.Name)
+		}
+		s.logger.Debug("session: tool snapshot",
+			"session", s.id,
+			"tier", skillpkg.TierFromDepth(s.depth),
+			"depth", s.depth,
+			"count", len(snap.Tools),
+			"tools", names)
+	}
 	out := make([]model.Tool, 0, len(snap.Tools))
 	for _, t := range snap.Tools {
 		var schema map[string]any
