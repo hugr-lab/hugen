@@ -205,6 +205,27 @@ metadata:
             tools: ['*']
           - provider: whiteboard
             tools: [write, read]
+        # Phase 4.2.3 ε — schema-explorer's close turn records
+        # the non-obvious schema facts it surfaced. Narrow,
+        # role-specific prompt outperforms the generic
+        # _worker fallback for weak models.
+        on_close:
+          notepad:
+            prompt: |
+              You're a schema-explorer worker wrapping up. Look at the
+              schema-map you wrote to the whiteboard. For each
+              NON-OBVIOUS fact a future mission would have to
+              re-discover — soft-delete columns, status enums,
+              status enum values, FK shapes between modules, naming
+              conventions — call `notepad:append` once with
+              `category: "schema-finding"` and a one-line
+              `content` phrased as an observation (e.g.
+              `orders.deleted_at appears to mark soft-deletes`).
+              Skip obvious facts (a column being a primary key,
+              a type being String). If nothing surprising was
+              found, reply "done" without tool calls.
+            skip_if_idle: true
+            max_turns: 3
 
       - name: query-builder
         description: >
@@ -221,6 +242,20 @@ metadata:
             tools: ['*']
           - provider: whiteboard
             tools: [write, read]
+        on_close:
+          notepad:
+            prompt: |
+              You're a query-builder worker wrapping up. The query
+              you validated is on the whiteboard — its SHAPE
+              (which module, which fields, which filters) is
+              stable. Call `notepad:append` once with
+              `category: "query-pattern"` and a one-line
+              `content` describing the shape — NOT its current
+              result values. Example: `count active orders =
+              northwind.orders aggregation with filter
+              deleted_at: { is_null: true }`. Skip if the query
+              was a trivial one-off. Then reply "done".
+            skip_if_idle: true
 
       - name: data-analyst
         description: >

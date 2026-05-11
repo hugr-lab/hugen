@@ -59,6 +59,12 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("session: spawn: %w", err)
 	}
+	// Phase 4.2.3 ε — duplicate spawn metadata on the in-memory
+	// child handle so the close-turn resolver can pick
+	// per-role on_close overrides without re-reading the row
+	// from the store.
+	child.spawnSkill = spec.Skill
+	child.spawnRole = spec.Role
 	s.logger.Debug("session: spawn: child constructed",
 		"parent", s.id,
 		"child", child.id,

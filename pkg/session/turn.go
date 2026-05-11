@@ -541,6 +541,18 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 	if !hasToolCalls {
 		s.drainPendingInbound(runCtx)
 		s.retireTurn()
+		// Phase 4.2.3 ε — close-turn finalization. The synthetic
+		// close turn completes when the model emits an iteration
+		// with no tool calls (i.e. it's "done" recording). Stash
+		// the deferred reason and flag Run for teardown; the outer
+		// loop's forceExit check handles the actual exit path.
+		if s.closeTurn != nil {
+			reason := s.closeTurn.PendingReason
+			s.closeTurn = nil
+			s.closeReason = reason
+			s.forceExit.Store(true)
+			return
+		}
 		// Lifecycle: turn closed cleanly. Mark idle iff fully
 		// quiescent — subagents still running keep the session
 		// active (idle requires len(s.children) == 0). retireTurn
@@ -549,6 +561,14 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 			s.markStatus(runCtx, protocol.SessionStatusIdle, "turn_complete")
 		}
 		return
+	}
+	// Phase 4.2.3 ε — track main-task tool-call count for the
+	// SkipIfIdle gate. Close-turn dispatches don't count (we're
+	// already past the close-turn entry check at this point if
+	// closeTurn != nil; but mainToolCalls is only consulted at
+	// the gate, so a guard here keeps it semantically clean).
+	if s.closeTurn == nil {
+		s.mainToolCalls.Add(int64(len(st.toolCalls)))
 	}
 
 	// Observe each dispatched call for stuck-detection BEFORE the

@@ -49,6 +49,18 @@ metadata:
               hint: Stated by the user — region, currency, time zone, naming or formatting preference. Stable for the conversation.
             - name: deferred-question
               hint: An open question worth answering in a follow-up mission; deferred to keep the current task focused.
+      # Phase 4.2.3 ε — deterministic close turn. Every mission
+      # gets one constrained turn before SessionTerminated whose
+      # only job is to persist findings to the notepad. The empty
+      # `notepad: {}` block opts in with all runtime defaults:
+      # AllowedTools = [notepad:append], MaxTurns = 2, prompt =
+      # the runtime's built-in "review your work; record stable
+      # findings" copy. SkipIfIdle: true short-circuits when the
+      # mission emitted no tool calls (trivial paths like
+      # simple-answerer with one cheap turn).
+      on_close:
+        notepad:
+          skip_if_idle: true
 compatibility:
   model: any
   runtime: hugen-phase-4

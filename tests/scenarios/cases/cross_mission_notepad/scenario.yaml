@@ -1,38 +1,42 @@
 # cross_mission_notepad — phase 4.2.3 δ acceptance gate.
 #
 # Two sequential analyst missions inside one root session. Mission
-# A explores the `northwind.orders` schema and records its
-# discoveries into the session notepad; mission B answers a
-# follow-up that depends on those discoveries and is expected to
-# either read the notepad explicitly or pick the facts up from
-# Block B (the auto-rendered snapshot in its first system prompt).
+# A explores the `northwind.orders` schema; mission B answers a
+# follow-up that depends on those discoveries. The cross-mission
+# memory is persisted **via the ε on_close turn**, not by the
+# model calling notepad:append in its main task — at session
+# teardown the runtime fires one constrained model turn whose
+# only allowed tool is notepad:append, with a narrow per-role
+# prompt that asks "what's worth recording?".
 #
 # By-eye assertions (queries below):
 #
-#   1. Step 1 — ≥1 row in session_notes under the root with
-#      category="schema-finding" and content mentioning the
-#      soft-delete column (deleted_at, soft-delete, etc.).
-#      author_role should be `mission` (the analyst mission
-#      consolidates worker findings and writes the note).
+#   1. After step 1 — ≥1 session_notes row exists under the root
+#      written by a worker (`author_role = "worker"`, from
+#      schema-explorer's close turn) AND/OR by the mission
+#      (`author_role = "mission"`, from the analyst mission's
+#      close turn). category="schema-finding" expected on at
+#      least one. Content references something soft-delete /
+#      deleted_at / column-related.
 #
-#   2. Step 1 — the analyst mission's tool_calls include at
-#      least one `notepad:append`. Workers (schema-explorer)
-#      do NOT need to write — the mission curates after the
-#      wave completes. This stays consistent with workers having
-#      read-only notepad by default.
+#   2. After step 1 — somewhere in the session tree
+#      (mission OR worker, doesn't matter which exactly) a
+#      `notepad:append` tool_call exists. This is the close-turn
+#      surfacing — workers' main-task tool surfaces don't include
+#      notepad write, but the close-turn narrows + opens it for
+#      one constrained turn.
 #
 #   3. Step 2 — the new analyst mission's first system prompt
 #      carried Block B (the runtime auto-rendered the notepad
-#      snapshot before the mission's first turn). We assert
-#      this indirectly: the mission either calls
-#      `notepad:read` / `notepad:search` to confirm OR its
-#      worker's query references the soft-delete column it
-#      could only know about from the snapshot.
+#      snapshot before the mission's first turn). Asserted
+#      indirectly: the step-2 mission either calls
+#      `notepad:read` / `notepad:search` OR its workers'
+#      queries reference the soft-delete column from step 1.
 #
 #   4. Step 2 — root's final answer is a count (a number) and
 #      mentions either "deleted_at" / "soft-delete" / "active"
-#      (case-insensitive) so we know the schema knowledge
-#      flowed end-to-end.
+#      (case-insensitive), proving the schema knowledge flowed
+#      end-to-end.
 #
 # requires: [hugr] — northwind orders table provided by the live
 # Hugr instance the harness connects to.

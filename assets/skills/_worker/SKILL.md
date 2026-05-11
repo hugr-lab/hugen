@@ -24,6 +24,17 @@ metadata:
     autoload: true
     autoload_for: [worker]
     tier_compatibility: [worker]
+    # Phase 4.2.3 ε — worker close turn. Same shape as the
+    # mission tier (default prompt + [notepad:append] surface
+    # + 2-iter cap), but the per-role on_close on the
+    # dispatching skill (analyst's schema-explorer /
+    # query-builder / data-analyst) generally provides a more
+    # specific prompt. Skip the close turn for idle workers
+    # (simple-answerer that returned text without tools).
+    mission:
+      on_close:
+        notepad:
+          skip_if_idle: true
 compatibility:
   model: any
   runtime: hugen-phase-4
