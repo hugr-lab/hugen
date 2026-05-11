@@ -75,33 +75,43 @@ metadata:
             Run the analyst playbook (always one or more workers,
             never answer inline — even for trivial questions):
 
-              Wave 1
-                Trivial Q&A (e.g. "what is 2+2"):
-                  spawn ONE `simple-answerer` worker, return its
-                  result directly.
-                Data work (e.g. "summarise three tables"):
-                  spawn one or more `data-explorer` workers in
-                  parallel; each gathers context for one module
-                  or one entity. In each worker's `task`, NAME the
-                  domain skill they should load (e.g. "Load
-                  hugr-data; read references/start +
-                  references/query-patterns; then describe the
-                  orders table in `northwind` and count rows.").
+              Trivial Q&A (e.g. "what is 2+2"):
+                ONE wave. Spawn ONE `simple-answerer`. Return its
+                result directly.
 
-              Wave 2 (data work only — RE-PLAN based on wave-1)
-                Read the whiteboard. Did explorers find what you
-                expected? If yes and the goal is satisfied, skip
-                to wave 3. If aggregates / computation are needed,
-                spawn `sql-analyst` workers; in their task, pass
-                the concrete entity names + columns explorers
-                surfaced + the reference(s) that explain the
-                query syntax (`references/aggregations.md`,
-                `references/queries-deep-dive.md`).
+              Data work — staged pipeline (Hugr default):
 
-              Wave 3 (data work only)
-                Spawn one `report-builder` worker to synthesise
-                the whiteboard contents into the final answer
-                (no data tool calls — it just reads + composes).
+                Wave 1 — SCHEMA DISCOVERY
+                  Spawn `schema-explorer` workers (one per module
+                  or per entity scoped in the goal). They run
+                  `discovery-*` / `schema-*` tools ONLY and write
+                  a structured schema map to the whiteboard.
+                  Cheap intent — no real queries here.
+
+                Wave 2 — QUERY COMPOSITION + VALIDATION
+                  Spawn ONE `query-builder` worker per distinct
+                  result set the goal needs (often just one).
+                  It reads wave-1 whiteboard findings, composes
+                  one GraphQL query, validates it with a small
+                  test call (count-only or LIMIT 1), and writes
+                  the validated query + sample row to the
+                  whiteboard.
+
+                Wave 3 — EXECUTION (optional, only if more rows /
+                aggregates / post-processing than the validation
+                pass returned are needed). Spawn `data-analyst`
+                workers — they reuse wave-2's validated query
+                syntax to fetch real result sets, and (if the goal
+                needs it) post-process via DuckDB SQL or Python.
+
+                Wave 4 — SYNTHESIS
+                  Spawn ONE `report-builder` worker. It reads the
+                  whiteboard ONLY (no data tools) and composes
+                  the final answer for root.
+
+              For simple "describe a table" / "schema summary"
+              goals, waves 2-3 are often unnecessary — wave-1
+              schema findings + wave-4 synthesis is enough.
 
             Concrete call shape (substitute role + task per worker):
 
@@ -110,8 +120,8 @@ metadata:
                 subagents: [
                   {
                     skill: "analyst",
-                    role:  "data-explorer",
-                    task:  "Load hugr-data; skill:ref(skill=\"hugr-data\", ref=\"start\") AND ref=\"overview\". Describe the `orders` table in data source `northwind` (one-line) and report its row count."
+                    role:  "schema-explorer",
+                    task:  "Load hugr-data; skill:ref(skill=\"hugr-data\", ref=\"start\") AND ref=\"overview\". Using ONLY discovery-* / schema-* tools, map the `orders` entity in data source `northwind`: list its fields, types, and key relationships. Write a structured schema-map to the whiteboard."
                   }
                 ]
               })
@@ -135,11 +145,14 @@ metadata:
           - provider: whiteboard
             tools: [write, read]
 
-      - name: data-explorer
+      - name: schema-explorer
         description: >
-          Discovers schemas, samples, edge cases for one Hugr module
-          (or one DuckDB file). Returns a structured finding plus a
-          whiteboard note so siblings + the mission see it.
+          Discovers Hugr schema structure for one module / entity —
+          types, fields, relationships, edge cases. ONLY uses
+          discovery-* / schema-* tools; never executes data
+          queries. Writes a tight structured schema-map to the
+          whiteboard so query-builder + sql-analyst can compose
+          accurate queries on top.
         intent: cheap
         can_spawn: false
         tools:
@@ -148,10 +161,14 @@ metadata:
           - provider: whiteboard
             tools: [write, read]
 
-      - name: sql-analyst
+      - name: query-builder
         description: >
-          Runs focused GraphQL / SQL queries using explorer findings
-          to compute aggregates or pull narrow result sets.
+          Composes ONE focused GraphQL query against the schema
+          findings from prior waves on the whiteboard. Validates
+          syntax by running it once (small limit / count-only) and
+          fixes any errors before promoting. Writes the validated
+          query + a one-row sample to the whiteboard for
+          sql-analyst to expand.
         intent: tool_calling
         can_spawn: false
         tools:
@@ -160,14 +177,41 @@ metadata:
           - provider: whiteboard
             tools: [write, read]
 
+      - name: data-analyst
+        description: >
+          Executes validated queries against real data and runs
+          any computation / post-processing needed: Hugr GraphQL
+          (via hugr-data), local DuckDB SQL (via duckdb-data),
+          Python scripts for transformations / charts (via
+          python-runner). Reuses the syntax query-builder already
+          proved out; focuses on results, not schema. The right
+          tool depends on the task — Hugr for federated data,
+          DuckDB for local files, Python for shaping / plotting.
+        intent: tool_calling
+        can_spawn: false
+        tools:
+          - provider: hugr-data
+            tools: ['*']
+          - provider: duckdb-data
+            tools: ['*']
+          - provider: python-runner
+            tools: ['*']
+          - provider: whiteboard
+            tools: [write, read]
+
       - name: report-builder
         description: >
           Synthesises whiteboard contents + the mission's goal into
           a tight final answer for root — quote-then-explain format,
-          no inventing facts.
+          no inventing facts. May invoke python-runner to render
+          charts / tables / formatted output when the goal calls
+          for visualisation. Does NOT run new data queries; reads
+          whiteboard and post-shapes.
         intent: default
         can_spawn: false
         tools:
+          - provider: python-runner
+            tools: ['*']
           - provider: whiteboard
             tools: [read]
 compatibility:
@@ -219,13 +263,24 @@ or violates a constraint you cannot satisfy), call
 
 - **simple-answerer** — trivial knowledge / arithmetic / formatting.
   No data tools. Single cheap turn. Returns plain text.
-- **data-explorer** — schemas + samples + edge cases for one Hugr
-  module. Cheap intent. Writes one structured finding to the
-  whiteboard.
-- **sql-analyst** — focused GraphQL / SQL queries using explorer
-  findings. Tool-calling intent. Writes results to the whiteboard.
-- **report-builder** — synthesises whiteboard + goal into the final
-  answer. Default intent. Reads-only on whiteboard.
+- **schema-explorer** — discovers Hugr schema structure for one
+  module / entity. Uses ONLY `discovery-*` / `schema-*` tools;
+  never runs data queries. Cheap intent. Writes a structured
+  schema-map for downstream workers.
+- **query-builder** — composes ONE focused Hugr GraphQL query
+  from the schema-map on the whiteboard, validates it with a
+  small test call (count-only or LIMIT 1), writes the validated
+  query + sample row back. Tool-calling intent.
+- **data-analyst** — executes the validated query (or its
+  aggregate variant) for real result sets AND runs post-
+  processing when needed: Hugr GraphQL (hugr-data), local DuckDB
+  SQL (duckdb-data), Python scripts (python-runner). Picks the
+  right backend per task. Tool-calling intent.
+- **report-builder** — synthesises whiteboard + goal into the
+  final answer. Default intent. Reads-only on whiteboard for
+  data; may load python-runner to render charts / tables /
+  formatted output when the goal calls for visualisation.
+  Never runs new data queries.
 
 ## Wave patterns
 
