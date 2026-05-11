@@ -28,7 +28,7 @@ metadata:
         - chart
         - aggregate
         - schema
-        - northwind
+        - hugr
 
       on_start:
         plan:
@@ -44,13 +44,33 @@ metadata:
           template: |
             User goal (delegated by root): {{ .UserGoal }}
 
-            You are running the `analyst` mission. Your role
-            catalogue is on the `analyst` skill: every
-            `session:spawn_wave` entry MUST set `skill: "analyst"`
-            so the runtime resolves the role from this skill's
-            sub_agents block. Do NOT pass `skill: "_worker"` or any
-            system skill — those are runtime primitives, not role
-            catalogues.
+            You are running the `analyst` mission. Two structural
+            rules you MUST follow:
+
+            ──────────────────────────────────────────────────────
+            1. Role catalogue lives on `analyst`. Every
+               `session:spawn_wave` entry sets `skill: "analyst"`
+               and picks one of {simple-answerer, data-explorer,
+               sql-analyst, report-builder}. Do NOT pass
+               `skill: "_worker"` — that's a runtime primitive.
+
+            2. Read the manual before deciding waves. Before wave
+               1 on any DATA task, load + skim the relevant domain
+               skill so you understand what schemas exist and what
+               queries are realistic:
+
+                 skill:load("hugr-data")
+                 skill:files(name="hugr-data", subdir="references")
+                 skill:ref(skill="hugr-data", ref="start")
+                 skill:ref(skill="hugr-data", ref="overview")
+                 # then per task: query-patterns / aggregations /
+                 # filter-guide / queries-deep-dive as appropriate
+
+               Loading hugr-data at mission tier gives you the
+               documentation surface; DO NOT call hugr-main:* /
+               hugr-query:* tools yourself — workers do that.
+               Mission coordinates; workers execute.
+            ──────────────────────────────────────────────────────
 
             Run the analyst playbook (always one or more workers,
             never answer inline — even for trivial questions):
@@ -59,18 +79,29 @@ metadata:
                 Trivial Q&A (e.g. "what is 2+2"):
                   spawn ONE `simple-answerer` worker, return its
                   result directly.
-                Data work (e.g. "describe northwind"):
+                Data work (e.g. "summarise three tables"):
                   spawn one or more `data-explorer` workers in
-                  parallel; each gathers context for one module.
+                  parallel; each gathers context for one module
+                  or one entity. In each worker's `task`, NAME the
+                  domain skill they should load (e.g. "Load
+                  hugr-data; read references/start +
+                  references/query-patterns; then describe the
+                  orders table in `northwind` and count rows.").
 
-              Wave 2 (data work only)
-                If wave-1 findings need focused queries or
-                computation, spawn `sql-analyst` (focused GraphQL /
-                SQL) workers.
+              Wave 2 (data work only — RE-PLAN based on wave-1)
+                Read the whiteboard. Did explorers find what you
+                expected? If yes and the goal is satisfied, skip
+                to wave 3. If aggregates / computation are needed,
+                spawn `sql-analyst` workers; in their task, pass
+                the concrete entity names + columns explorers
+                surfaced + the reference(s) that explain the
+                query syntax (`references/aggregations.md`,
+                `references/queries-deep-dive.md`).
 
               Wave 3 (data work only)
                 Spawn one `report-builder` worker to synthesise
-                the whiteboard contents into the final answer.
+                the whiteboard contents into the final answer
+                (no data tool calls — it just reads + composes).
 
             Concrete call shape (substitute role + task per worker):
 
@@ -79,15 +110,17 @@ metadata:
                 subagents: [
                   {
                     skill: "analyst",
-                    role:  "simple-answerer",
-                    task:  "Compute 2+2 and explain in one sentence."
+                    role:  "data-explorer",
+                    task:  "Load hugr-data; skill:ref(skill=\"hugr-data\", ref=\"start\") AND ref=\"overview\". Describe the `orders` table in data source `northwind` (one-line) and report its row count."
                   }
                 ]
               })
 
-            After each wave, read the whiteboard, comment on the
-            plan, and decide the next step (or return the final
-            result to root).
+            After each wave: `whiteboard:read` to gather findings,
+            `plan:comment` to log progress, and DECIDE whether to
+            launch another wave or finalize. Re-plan freely — if
+            wave-1 surprises you, drop the original wave-2 idea
+            and spawn something better suited.
 
     sub_agents:
       - name: simple-answerer
@@ -163,6 +196,12 @@ Your `_mission` skill gives you the wave-based fan-out primitive:
   between waves to inform the next decomposition.
 - `session:parent_context` — only consult this if the spawn `goal`
   and `inputs` from root are genuinely insufficient (rare).
+- `skill:load` / `skill:files` / `skill:ref` — before launching
+  workers, load the relevant domain skill and read its references
+  so you understand what schemas / queries / functions exist.
+  This is read-only at mission tier — never call the data tools
+  yourself. The reference-reading step is what lets you write
+  workers' task strings with accurate, actionable directives.
 
 ## The minimum invariant
 

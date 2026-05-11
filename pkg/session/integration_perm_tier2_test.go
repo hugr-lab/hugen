@@ -119,7 +119,7 @@ func us4NewSession(t *testing.T, mdl model.Model, perms perm.Service, agentID st
 		}
 	}
 	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent(agentID, "hugen", &fakeIdentity{id: agentID}, "")
+	agent, err := NewAgent(agentID, "hugen", &fakeIdentity{id: agentID}, "", nil)
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}

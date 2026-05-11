@@ -91,7 +91,7 @@ func TestNoHugr_NoHugr_BashFlowWorks(t *testing.T) {
 	}
 
 	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent("ag01", "hugen", &fakeIdentity{id: "ag01"}, "")
+	agent, err := NewAgent("ag01", "hugen", &fakeIdentity{id: "ag01"}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,47 +1,60 @@
-# delegation_required — the user-facing pain point check.
+# delegation_required — the user-facing pain-point check, 3-tier
+# edition. The user asks for a clear "fan out, gather, conclude"
+# task; the runtime must make the model push that work through
+# root → mission → 3 workers, NEVER calling data tools at root or
+# mission directly. Phase 4.2.2 §2 + §6 + §13 in one bundle.
 #
-# A clear "fan out, gather, conclude" task that should NOT be done
-# inline by the root agent. By-eye assertion: tool_calls_root's
-# tool_name set is a subset of:
+# By-eye assertions (queries below):
 #
-#   session:spawn_subagent
-#   session:wait_subagents
-#   session:subagent_runs
-#   session:subagent_cancel
-#   session:parent_context
-#   plan:set / plan:comment / plan:show / plan:clear
-#   whiteboard:init / whiteboard:read / whiteboard:write / whiteboard:stop
-#   skill:tools_catalog / skill:load / skill:unload / skill:files / skill:ref / skill:save
-#   notepad:append
+# 1. Root's tool_calls contains exactly one `session:spawn_mission`
+#    (with skill="analyst") plus `session:wait_subagents`. NO
+#    `session:spawn_subagent` (narrowed in β). NO hugr-* / bash-* /
+#    python-* / duckdb-* (data work is for workers).
 #
-# Anything else on the ROOT (hugr-main:*, python:*, bash:*, duckdb:*)
-# means the root did data work it should have delegated. Run this
-# scenario across every LLM in runs.yaml — failure mode is
-# non-deterministic and worth catching across model classes.
+# 2. Exactly one mission session lives as a direct child of root
+#    with metadata.spawn_skill="analyst". (parent_session_id
+#    persisted correctly per δ.A.fix.)
+#
+# 3. Mission's on_mission_start fires before its first tool_call:
+#    plan:set + whiteboard:init extension_frames at low seq.
+#
+# 4. Mission spawns 3 workers in one or more waves via
+#    `session:spawn_wave`, each carrying skill="analyst" and a
+#    `data-explorer` role (or `simple-answerer` if the model
+#    decided trivial). Workers are grandchildren of root.
+#
+# 5. Each worker either loads hugr-data and queries it, OR — for
+#    the simple-answerer shape — answers from knowledge. At least
+#    ONE worker should have made a `hugr-main:*` call to count as
+#    "real delegated data work".
+#
+# Cross-tier invariant: no data tool ever called at depth ≤ 1.
 name: delegation_required
-requires: []
+requires: [hugr]
 
 steps:
   - say: |
       I need a brief comparative summary of three tables in our
       "northwind" data source: orders, customers, returns.
 
-      For each table, spawn a separate sub-agent using the
-      hugr-data skill (no role needed) that returns a one-line
-      description plus a row count. Then, AFTER you have all three
-      sub-agent results, write a final 3-bullet summary directly to
-      me.
-
-      Important: do NOT call any data-source tools yourself. Your
-      job is to delegate, gather, and synthesise. The explorers
-      do the lookups.
-    budget: 480s
-    wait_for_subagents: 360s
+      For each table, return a one-line description plus a row
+      count. After you have all three results, write a final
+      3-bullet summary directly to me.
+    # Each LLM turn on gemini-pro is ~30-50s; 3-tier traversal with
+    # 3 workers in parallel hits ~10-12 LLM turns total. 12-min
+    # budget gives margin.
+    budget: 720s
+    wait_for_subagents: 600s
 
     queries:
-      # The pain-point query. Read this list — anything that isn't
-      # session:* / plan:* / whiteboard:* / skill:* / notepad:*
-      # is a delegation failure for this scenario.
+      # Root's tool calls. The pain-point list:
+      # ALLOWED: session:spawn_mission, session:wait_subagents,
+      # session:subagent_runs, session:subagent_cancel,
+      # plan:comment, plan:show, whiteboard:read, skill:*,
+      # notepad:append.
+      # FORBIDDEN: any hugr-*, bash-*, python-*, duckdb-*,
+      # session:spawn_subagent (β-narrow), plan:set/clear,
+      # whiteboard:init/write/stop.
       - name: tool_calls_root
         graphql: |
           query ($sid: String!) {
@@ -54,8 +67,9 @@ steps:
           }
         vars: { sid: "$sid" }
 
-      # Should be 3 sub-agent rows.
-      - name: subagent_rows
+      # Mission row — should be exactly one child with
+      # spawn_skill="analyst".
+      - name: mission_row
         graphql: |
           query ($sid: String!) {
             hub { db { agent {
@@ -66,20 +80,70 @@ steps:
           }
         vars: { sid: "$sid" }
 
-      # subagent_started + subagent_result frames on root —
-      # confirms each child finished cleanly (or surfaces the
-      # reason if not).
-      - name: subagent_lifecycle_root
+      # on_mission_start frames + mission's own plan/whiteboard
+      # ops + tool calls — proves the runtime fired the scaffolding
+      # before the mission did anything, and that the mission then
+      # used the wave primitive.
+      - name: mission_activity
         graphql: |
           query ($sid: String!) {
-            hub { db { agent {
-              session_events(
-                filter: {
-                  session_id: {eq: $sid},
-                  event_type: {in: ["subagent_started", "subagent_result"]}
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, frames: (.events // []) | map(select(.event_type == \"extension_frame\")) | map({seq, ext: .metadata.extension, op: .metadata.op}), tool_calls: (.events // []) | map(select(.event_type == \"tool_call\")) | map({seq, tool: .tool_name})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(order_by: [{field: "seq", direction: ASC}]) {
+                    seq event_type metadata tool_name
+                  }
                 }
-                order_by: [{field: "seq", direction: ASC}]
-              ) { seq event_type content metadata }
-            }}}
+              }}}
+            }
           }
         vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Workers — subagent_started events the mission emitted.
+      # Must show 3 spawns (or one wave with 3 subagents). Surface
+      # spawn skill + role per spawn so we can check delegation
+      # shape.
+      - name: workers_from_mission
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, spawns: (.events // []) | map(select(.event_type == \"subagent_started\")) | map({seq, child: .metadata.child_session_id, skill: .metadata.skill, role: .metadata.role})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "subagent_started"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq event_type metadata
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Worker subtree — every session in this scenario's tree.
+      # Walks via `sessions.children` reverse-reference. Then jq
+      # narrows to workers (session_type=subagent AND depth=2),
+      # surfacing their tool_name set. Empty `tools` array on every
+      # worker means no real data work — partial failure (mission
+      # picked simple-answerer or workers never queried).
+      - name: worker_tool_calls
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission: .id, workers: (.child_sessions // []) | map({id, depth: .metadata.depth, role: .metadata.spawn_role, tools: (.events // []) | map(select(.event_type == \"tool_call\")) | map(.tool_name) | unique})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  child_sessions {
+                    id metadata
+                    events(filter: {event_type: {eq: "tool_call"}}) {
+                      tool_name
+                    }
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq

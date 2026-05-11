@@ -215,7 +215,7 @@ func newTestParent(t *testing.T, opts ...testParentOpt) (*Session, func()) {
 	}
 	mdl := &scriptedModel{}
 	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
+	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "", nil)
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}

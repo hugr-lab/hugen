@@ -13,7 +13,7 @@ metadata:
   hugen:
     requires_skills: []
     autoload: true
-    autoload_for: [root, mission, worker]
+    autoload_for: [mission, worker]
     tier_compatibility: [root, mission, worker]
 compatibility:
   model: any

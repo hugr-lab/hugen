@@ -1416,9 +1416,10 @@ func (s *Session) buildMessages(ctx context.Context) []model.Message {
 //     catalogue of every skill the agent can reach.
 func (s *Session) systemPrompt(ctx context.Context) string {
 	var parts []string
-	parts = append(parts, "Session tier: "+skillpkg.TierFromDepth(s.depth))
+	tier := skillpkg.TierFromDepth(s.depth)
+	parts = append(parts, "Session tier: "+tier)
 	if s.agent != nil {
-		if c := s.agent.Constitution(); c != "" {
+		if c := s.agent.ConstitutionFor(tier); c != "" {
 			parts = append(parts, c)
 		}
 	}

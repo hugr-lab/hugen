@@ -40,7 +40,7 @@ func (stubIdentity) Permission(_ context.Context, _, _ string) (identity.Permiss
 }
 
 func newTestAgent() *session.Agent {
-	a, err := session.NewAgent("agent-test", "hugen-test", stubIdentity{}, "")
+	a, err := session.NewAgent("agent-test", "hugen-test", stubIdentity{}, "", nil)
 	if err != nil {
 		panic(err)
 	}
