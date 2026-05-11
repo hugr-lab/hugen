@@ -446,6 +446,7 @@ type MissionOnStart struct {
 	Plan         MissionOnStartPlan         `json:"plan,omitempty" yaml:"plan,omitempty"`
 	Whiteboard   MissionOnStartWhiteboard   `json:"whiteboard,omitempty" yaml:"whiteboard,omitempty"`
 	FirstMessage MissionOnStartFirstMessage `json:"first_message,omitempty" yaml:"first_message,omitempty"`
+	Notepad      MissionOnStartNotepad      `json:"notepad,omitempty" yaml:"notepad,omitempty"`
 }
 
 // MissionOnStartPlan declares the plan body the runtime sets on
@@ -470,6 +471,24 @@ type MissionOnStartWhiteboard struct {
 // spawn_mission as the first user message.
 type MissionOnStartFirstMessage struct {
 	Template string `json:"template,omitempty" yaml:"template,omitempty"`
+}
+
+// MissionOnStartNotepad advertises recommended categories the
+// mission's worker pool tends to use. Phase 4.2.3 — the runtime
+// surfaces Tags into the mission's system prompt (Block A) so
+// the model uses consistent labels at notepad:append time.
+// Pure recommendation: notepad:append accepts any category string;
+// these are listed for retrieval coherence.
+type MissionOnStartNotepad struct {
+	Tags []NotepadTagDecl `json:"tags,omitempty" yaml:"tags,omitempty"`
+}
+
+// NotepadTagDecl is one recommended category. Hint is the
+// one-line description that goes into the system prompt next to
+// the name.
+type NotepadTagDecl struct {
+	Name string `json:"name" yaml:"name"`
+	Hint string `json:"hint,omitempty" yaml:"hint,omitempty"`
 }
 
 var (

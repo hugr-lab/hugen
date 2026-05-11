@@ -40,6 +40,23 @@ metadata:
           current_step: Explore
         whiteboard:
           init: true
+        # Phase 4.2.3 notepad — recommended categories for working
+        # notes recorded across the mission's worker waves. The list
+        # is advisory; notepad:append accepts any category string.
+        # Workers should use these labels so subsequent missions in
+        # the same root conversation find prior findings.
+        notepad:
+          tags:
+            - name: schema-finding
+              hint: Discovered table structures, field semantics, soft-delete columns, naming conventions.
+            - name: data-quality-issue
+              hint: Anomalies, nulls, inconsistencies, suspicious cardinalities found while exploring.
+            - name: query-pattern
+              hint: A working SQL/GraphQL snippet (or its shape) that produced useful results — reuse before re-deriving.
+            - name: user-preference
+              hint: Stated by the user — region, currency, time zone, preferred units, naming preferences.
+            - name: deferred-question
+              hint: An open question worth answering in a follow-up mission; deferred to keep the current task focused.
         first_message:
           template: |
             User goal (delegated by root): {{ .UserGoal }}

@@ -318,6 +318,75 @@ func ageLabel(d time.Duration) string {
 	}
 }
 
+// renderSnapshot produces the model-facing notepad block (Block
+// B per phase 4.2.3 §5). Differs from formatForUser in three
+// ways: (1) header signals "system-injected", (2) caps to ≤8
+// tags + 1 inline snippet per tag, (3) prepends a "treat as
+// hypotheses" reminder so weak models don't take notepad rows
+// as ground truth. Total output is clamped to ≤2KB to keep the
+// per-turn prompt budget predictable.
+func renderSnapshot(notes []Note, window time.Duration) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	type group struct {
+		category string
+		notes    []Note
+	}
+	var groups []group
+	idx := map[string]int{}
+	for _, n := range notes {
+		cat := n.Category
+		if cat == "" {
+			cat = "(uncategorised)"
+		}
+		i, ok := idx[cat]
+		if !ok {
+			groups = append(groups, group{category: cat})
+			i = len(groups) - 1
+			idx[cat] = i
+		}
+		groups[i].notes = append(groups[i].notes, n)
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		return groups[i].notes[0].CreatedAt.After(groups[j].notes[0].CreatedAt)
+	})
+	const (
+		maxTagsInBlock = 8
+		maxBlockBytes  = 2048
+	)
+	truncated := false
+	if len(groups) > maxTagsInBlock {
+		groups = groups[:maxTagsInBlock]
+		truncated = true
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Notepad snapshot — last %s\n\n", windowLabel(window))
+	b.WriteString("Working hypotheses recorded across the conversation. Treat as\n")
+	b.WriteString("observations under uncertainty, not validated facts. Call\n")
+	b.WriteString("`notepad:search(query=...)` or `notepad:read(category=...)` for\n")
+	b.WriteString("full content.\n\n")
+	for _, g := range groups {
+		first := g.notes[0]
+		snippet := oneLineSnippet(first.Text, 80)
+		more := ""
+		if len(g.notes) > 1 {
+			more = fmt.Sprintf(" [+%d more]", len(g.notes)-1)
+		}
+		fmt.Fprintf(&b, "- **%s** (%d): \"%s\" (%s, %s ago)%s\n",
+			g.category, len(g.notes), snippet, first.AuthorRole,
+			ageLabel(time.Since(first.CreatedAt)), more)
+	}
+	if truncated {
+		b.WriteString("- … additional categories elided; query with notepad:search.\n")
+	}
+	out := b.String()
+	if len(out) > maxBlockBytes {
+		out = out[:maxBlockBytes-3] + "..."
+	}
+	return out
+}
+
 func windowLabel(d time.Duration) string {
 	switch {
 	case d <= 0:

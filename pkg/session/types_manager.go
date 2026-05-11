@@ -44,6 +44,13 @@ type OpenRequest struct {
 
 	ParentSessionID    string
 	SpawnedFromEventID string
+	// Mission is the formal goal recorded on the sessions row's
+	// `mission` column at OpenSession time. Phase 4.2.3 — spawn
+	// paths pass SpawnSpec.Task here so observability queries
+	// (hub.db.agent.sessions) and the upcoming Block B "current
+	// mission context" header can see the mission's purpose
+	// without scanning the event log. Empty for root sessions.
+	Mission string
 }
 
 // SpawnSpec is the input to Session.Spawn. Carries the model-supplied

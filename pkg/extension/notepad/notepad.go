@@ -71,11 +71,32 @@ func NewExtension(s Store, agentID string, cfg Config) *Extension {
 var (
 	_ extension.Extension        = (*Extension)(nil)
 	_ extension.StateInitializer = (*Extension)(nil)
+	_ extension.Advertiser       = (*Extension)(nil)
 	_ tool.ToolProvider          = (*Extension)(nil)
 )
 
-func (e *Extension) Name() string             { return providerName }
-func (e *Extension) Lifetime() tool.Lifetime  { return tool.LifetimePerAgent }
+func (e *Extension) Name() string            { return providerName }
+func (e *Extension) Lifetime() tool.Lifetime { return tool.LifetimePerAgent }
+
+// AdvertiseSystemPrompt implements [extension.Advertiser] —
+// Block B per phase 4.2.3 §5. Returns a compact snapshot of
+// recent notes (within the configured window), grouped by
+// category, ordered by most-recent-write. Capped to keep the
+// prompt budget tight; the model is expected to call
+// notepad:search / notepad:read for full content when relevant.
+// Empty string when the notepad is empty or the state handle is
+// missing.
+func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.SessionState) string {
+	np := FromState(state)
+	if np == nil {
+		return ""
+	}
+	notes, err := np.Read(ctx, ReadInput{Limit: maxReadLimit})
+	if err != nil || len(notes) == 0 {
+		return ""
+	}
+	return renderSnapshot(notes, np.Window())
+}
 
 // InitState allocates a fresh [Notepad] for the calling session.
 // rootID is resolved once via the parent-chain walk and the

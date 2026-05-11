@@ -180,6 +180,12 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	if cat := renderCatalogue(ctx, h); cat != "" {
 		parts = append(parts, cat)
 	}
+	// Phase 4.2.3 Block A — recommended notepad tags advertised
+	// by the loaded mission dispatcher(s). Empty when no loaded
+	// skill is mission-enabled or carries a tag list.
+	if tags := renderNotepadTagAdvice(h); tags != "" {
+		parts = append(parts, tags)
+	}
 	if len(parts) == 0 {
 		return ""
 	}
@@ -237,6 +243,69 @@ func renderAvailableMissions(ctx context.Context, h *SessionSkill) string {
 //
 // Inline skills (no on-disk Root) emit only the name + description
 // header — there are no bundled files to list.
+// renderNotepadTagAdvice produces Block A — a "## Notepad —
+// recommended tags" prompt section listing the notepad categories
+// that the loaded mission dispatcher(s) advertise via
+// metadata.hugen.mission.on_start.notepad.tags. Phase 4.2.3 §5.
+//
+// Walks loaded skills, picks the mission-enabled ones, de-dupes
+// tag names (first hint wins), preserves declaration order within
+// the first defining skill. Empty when no loaded skill carries
+// tag declarations — workers and root sessions without a mission
+// dispatcher loaded see nothing here.
+func renderNotepadTagAdvice(h *SessionSkill) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if len(h.loaded) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(h.loaded))
+	for n := range h.loaded {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	seen := map[string]string{}
+	var order []string
+	for _, n := range names {
+		sk := h.loaded[n]
+		if !sk.Manifest.Hugen.Mission.Enabled {
+			continue
+		}
+		for _, t := range sk.Manifest.Hugen.Mission.OnStart.Notepad.Tags {
+			name := strings.TrimSpace(t.Name)
+			if name == "" {
+				continue
+			}
+			if _, present := seen[name]; present {
+				continue
+			}
+			seen[name] = strings.TrimSpace(t.Hint)
+			order = append(order, name)
+		}
+	}
+	if len(order) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Notepad — recommended tags for this mission\n\n")
+	b.WriteString("The notepad accepts any category string; the dispatching skill\n")
+	b.WriteString("recommends these for retrieval coherence across worker waves:\n\n")
+	for _, name := range order {
+		if hint := seen[name]; hint != "" {
+			b.WriteString("- `")
+			b.WriteString(name)
+			b.WriteString("` — ")
+			b.WriteString(hint)
+			b.WriteString("\n")
+		} else {
+			b.WriteString("- `")
+			b.WriteString(name)
+			b.WriteString("`\n")
+		}
+	}
+	return b.String()
+}
+
 func renderLoadedSkillsMeta(h *SessionSkill) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

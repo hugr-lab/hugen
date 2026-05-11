@@ -240,6 +240,55 @@ func TestCallAppend_NoSessionInContext(t *testing.T) {
 	}
 }
 
+// ---------- Advertise / Block B ----------
+
+func TestAdvertise_RendersSnapshot(t *testing.T) {
+	ext, state, _ := newFixture(t)
+	ctx := extension.WithSessionState(context.Background(), state)
+
+	// Seed two notes across two categories.
+	for _, in := range []AppendInput{
+		{Content: "orders.deleted_at appears to soft-delete", Category: "schema-finding"},
+		{Content: "EMEA region focus, EUR amounts", Category: "user-preference"},
+	} {
+		args, _ := json.Marshal(in)
+		if _, err := ext.Call(ctx, "notepad:append", args); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	out := ext.AdvertiseSystemPrompt(context.Background(), state)
+	if out == "" {
+		t.Fatal("expected non-empty Advertise output")
+	}
+	for _, want := range []string{
+		"## Notepad snapshot",
+		"hypotheses",
+		"**schema-finding** (1)",
+		"**user-preference** (1)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("snapshot missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+func TestAdvertise_EmptyWhenNoNotes(t *testing.T) {
+	ext, state, _ := newFixture(t)
+	if out := ext.AdvertiseSystemPrompt(context.Background(), state); out != "" {
+		t.Errorf("expected empty Advertise, got %q", out)
+	}
+}
+
+func TestAdvertise_NilStateHandle(t *testing.T) {
+	// Bare state without InitState — FromState returns nil.
+	ext := NewExtension(fixture.NewTestStore(), "a1", Config{})
+	state := fixture.NewTestSessionState("ses-bare")
+	if out := ext.AdvertiseSystemPrompt(context.Background(), state); out != "" {
+		t.Errorf("expected empty Advertise for missing state, got %q", out)
+	}
+}
+
 func TestCall_UnknownOp(t *testing.T) {
 	ext, state, _ := newFixture(t)
 	ctx := extension.WithSessionState(context.Background(), state)

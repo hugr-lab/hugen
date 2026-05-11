@@ -222,6 +222,97 @@ body
 	}
 }
 
+// TestAdvertiseSystemPrompt_NotepadTagsBlockA verifies the phase
+// 4.2.3 Block A section ("## Notepad — recommended tags") appears
+// when a mission-enabled skill with on_start.notepad.tags is
+// loaded into the session.
+func TestAdvertiseSystemPrompt_NotepadTagsBlockA(t *testing.T) {
+	ctx := context.Background()
+	missionWithTags := `---
+name: analyst
+description: data analysis skill.
+metadata:
+  hugen:
+    tier_compatibility: [mission]
+    mission:
+      enabled: true
+      summary: Data analysis, queries, reports.
+      on_start:
+        notepad:
+          tags:
+            - name: schema-finding
+              hint: Discovered table structures or field semantics.
+            - name: data-quality-issue
+              hint: Anomalies, nulls, suspicious cardinalities.
+            - name: deferred-question
+---
+body
+`
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"analyst": []byte(missionWithTags),
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a1")
+
+	missState := fixture.NewTestSessionState("ses-m").WithDepth(1)
+	if err := ext.InitState(ctx, missState); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	if err := FromState(missState).Load(ctx, "analyst"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	out := ext.AdvertiseSystemPrompt(ctx, missState)
+	for _, want := range []string{
+		"## Notepad — recommended tags for this mission",
+		"`schema-finding`",
+		"Discovered table structures",
+		"`data-quality-issue`",
+		"`deferred-question`",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Block A missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// TestAdvertiseSystemPrompt_NotepadTagsEmptyWhenNoMissionSkill —
+// Block A omits entirely when no loaded skill declares notepad
+// tags (e.g. workers, or missions whose dispatcher doesn't use
+// the field).
+func TestAdvertiseSystemPrompt_NotepadTagsEmptyWhenNoMissionSkill(t *testing.T) {
+	ctx := context.Background()
+	noTags := `---
+name: analyst
+description: bare mission skill.
+metadata:
+  hugen:
+    tier_compatibility: [mission]
+    mission:
+      enabled: true
+      summary: bare.
+---
+body
+`
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"analyst": []byte(noTags),
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a1")
+
+	missState := fixture.NewTestSessionState("ses-m").WithDepth(1)
+	if err := ext.InitState(ctx, missState); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	if err := FromState(missState).Load(ctx, "analyst"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	out := ext.AdvertiseSystemPrompt(ctx, missState)
+	if strings.Contains(out, "## Notepad — recommended tags") {
+		t.Errorf("expected no Block A when no tags declared; got:\n%s", out)
+	}
+}
+
 // TestAdvertiseSystemPrompt_NoMissionsSkipsBlock verifies the
 // section is omitted entirely when no installed skill declares
 // mission.enabled.

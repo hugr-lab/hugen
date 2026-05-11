@@ -125,6 +125,7 @@ func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenReques
 		SessionType:        sessionType,
 		SpawnedFromEventID: req.SpawnedFromEventID,
 		Status:             StatusActive,
+		Mission:            req.Mission,
 		Metadata:           req.Metadata,
 		CreatedAt:          now,
 		UpdatedAt:          now,

@@ -43,6 +43,18 @@ metadata:
           current_step: Explore
         whiteboard:
           init: true
+        # Phase 4.2.3 — _general is the catch-all; tags are broad
+        # to support whatever ad-hoc work the worker ends up doing.
+        # The dispatching skill advertises these so workers in the
+        # mission use consistent labels.
+        notepad:
+          tags:
+            - name: user-preference
+              hint: User-stated preference relevant beyond this single request (locale, format, tooling).
+            - name: tool-result
+              hint: A useful tool output that's worth recalling rather than re-running (timestamps, env values, file paths).
+            - name: deferred-question
+              hint: Open question worth answering in a follow-up mission.
         first_message:
           template: |
             User goal (delegated by root): {{ .UserGoal }}

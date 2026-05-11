@@ -49,6 +49,11 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 		ParentSessionID:    s.id,
 		SpawnedFromEventID: spec.EventID,
 		Metadata:           childMeta,
+		// Phase 4.2.3 — record the spawn task as the child's
+		// formal mission on the sessions row so observability
+		// queries and prompt-time Block B "current mission" can
+		// surface it without scanning events.
+		Mission: spec.Task,
 	}
 	child, err := newSession(ctx, s, s.deps, req)
 	if err != nil {
