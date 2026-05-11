@@ -237,6 +237,76 @@ type SubagentSpawnHinter interface {
 	SubagentSpawnHint(ctx context.Context, state SessionState, skill, role string) (SubagentSpawnHint, error)
 }
 
+// MissionDispatcher extensions own a skill catalogue and can
+// answer whether a given skill name is registered AND declares
+// itself mission-eligible (metadata.hugen.mission.enabled:true).
+// session:spawn_mission consults this interface to validate the
+// caller's `skill` argument before spawning a child.
+//
+// The runtime calls every registered dispatcher; the first
+// affirmative answer wins (deterministic registration order). A
+// session with no dispatcher registered short-circuits to "skill
+// accepted" — preserves the pre-γ behaviour for fixture tests
+// that never wire a SkillManager. Phase 4.2.2 §6.
+type MissionDispatcher interface {
+	// MissionSkillExists reports whether `skill` is installed AND
+	// declares metadata.hugen.mission.enabled:true. Empty `skill`
+	// always returns (false, nil) — empty-argument resolution is
+	// the caller's concern via deps.DefaultMissionSkill.
+	MissionSkillExists(ctx context.Context, skill string) (bool, error)
+}
+
+// MissionStartBlock carries the rendered on_start instructions a
+// MissionStartLookup returns at mission boot. All fields are
+// post-template strings; consumers (runtime) apply them without
+// further templating. Phase 4.2.2 §7.
+type MissionStartBlock struct {
+	// PlanText is the rendered plan body to seed via PlanSystemWriter.
+	// Empty skips the plan step.
+	PlanText string
+
+	// PlanCurrentStep is the focus pointer accompanying PlanText.
+	PlanCurrentStep string
+
+	// WhiteboardInit, when true, triggers a WhiteboardSystemWriter
+	// call before the mission's first turn. Idempotent on already-
+	// active boards.
+	WhiteboardInit bool
+
+	// FirstMessageOverride replaces the bare `goal` string as the
+	// mission's first user-role message. Empty defers to the
+	// caller-provided goal.
+	FirstMessageOverride string
+}
+
+// MissionStartLookup extensions resolve the on_start block for a
+// dispatching skill at spawn time, running any per-skill template
+// substitutions before returning. Returns (nil, nil) when the
+// skill is not mission-enabled or declares no on_start. Phase
+// 4.2.2 §7.
+//
+// Skill ext is the canonical implementor (it owns the manifest).
+type MissionStartLookup interface {
+	ResolveMissionStart(ctx context.Context, skill, goal string, inputs any) (*MissionStartBlock, error)
+}
+
+// PlanSystemWriter extensions expose a direct in-process plan-set
+// path bypassing the ToolManager — the runtime uses it to seed a
+// mission's plan from on_mission_start. Not callable from LLM
+// tool dispatch; the runtime is the sole authorised caller.
+// Phase 4.2.2 §7.
+type PlanSystemWriter interface {
+	SystemSet(ctx context.Context, state SessionState, text, currentStep string) error
+}
+
+// WhiteboardSystemWriter extensions expose a direct in-process
+// whiteboard-init path bypassing the ToolManager — the runtime
+// uses it to open a mission's whiteboard from on_mission_start.
+// Phase 4.2.2 §7.
+type WhiteboardSystemWriter interface {
+	SystemInit(ctx context.Context, state SessionState) error
+}
+
 // FrameRouter extensions handle inbound [protocol.ExtensionFrame]
 // addressed to them (Frame.Extension == ext.Name()). The session's
 // route loop dispatches by Extension name; each name maps to at

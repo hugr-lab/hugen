@@ -29,11 +29,11 @@ func us1WithSession(parent *Session) context.Context {
 // hood and returns a single object (not an array) shaped like
 // spawnSubagentResult.
 func TestCallSpawnMission_Happy(t *testing.T) {
-	parent, cleanup := newTestParent(t)
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
 	defer cleanup()
 
 	out, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"analyse northwind"}`))
+		json.RawMessage(`{"goal":"analyse northwind","skill":"analyst"}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -50,6 +50,65 @@ func TestCallSpawnMission_Happy(t *testing.T) {
 	if !inChildren {
 		t.Errorf("spawned mission %q not in parent.children", got.SessionID)
 	}
+}
+
+// TestCallSpawnMission_NoMissionSkill_NoArg_NoDefault verifies a
+// missing skill argument with no operator default surfaces a
+// structured no_mission_skill envelope and does not spawn anything.
+// Phase 4.2.2 §6.
+func TestCallSpawnMission_NoMissionSkill_NoArg_NoDefault(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+
+	out, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"analyse northwind"}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	mgr_assertErrorCode(t, out, "no_mission_skill")
+	parent.childMu.Lock()
+	defer parent.childMu.Unlock()
+	if len(parent.children) != 0 {
+		t.Errorf("parent.children = %d after no_mission_skill, want 0", len(parent.children))
+	}
+}
+
+// TestCallSpawnMission_DispatchByDefault verifies an empty skill
+// argument falls back to deps.DefaultMissionSkill when the
+// dispatcher catalogue has that name registered. Phase 4.2.2 §6.
+func TestCallSpawnMission_DispatchByDefault(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+	parent.deps.DefaultMissionSkill = "analyst"
+
+	out, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"analyse northwind"}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var got spawnSubagentResult
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v\noutput=%s", err, out)
+	}
+	if got.SessionID == "" {
+		t.Errorf("default-dispatch spawn empty: %s", out)
+	}
+}
+
+// TestCallSpawnMission_RejectsNonDispatcherSkill verifies an
+// explicit skill argument naming a non-registered mission
+// dispatcher is rejected with no_mission_skill — root cannot
+// invent skill names. Phase 4.2.2 §6.
+func TestCallSpawnMission_RejectsNonDispatcherSkill(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+
+	out, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"x","skill":"non-existent-skill"}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	mgr_assertErrorCode(t, out, "no_mission_skill")
 }
 
 // TestCallSpawnMission_GoalRequired verifies the goal field is
@@ -70,6 +129,55 @@ func TestCallSpawnMission_GoalRequired(t *testing.T) {
 	defer parent.childMu.Unlock()
 	if len(parent.children) != 0 {
 		t.Errorf("parent.children = %d after validation failure, want 0", len(parent.children))
+	}
+}
+
+// TestCallSpawnMission_OnStartHook_AppliesScaffolding verifies the
+// γ on_mission_start hook fires plan.SystemSet + whiteboard.SystemInit
+// between Spawn and Submit, AND that a FirstMessageOverride in the
+// resolved block replaces the bare goal as the child's first user
+// message. Phase 4.2.2 §7.
+func TestCallSpawnMission_OnStartHook_AppliesScaffolding(t *testing.T) {
+	block := &extension.MissionStartBlock{
+		PlanText:             "# Analyse northwind\n1. Explore\n2. Synthesize",
+		PlanCurrentStep:      "Explore",
+		WhiteboardInit:       true,
+		FirstMessageOverride: "User goal: analyse northwind. Start with wave 1.",
+	}
+	planStub := &stubPlanWriter{}
+	wbStub := &stubWhiteboardWriter{}
+	parent, cleanup := newTestParent(t,
+		withMissionDispatcher("analyst"),
+		withMissionStartLookup("analyst", block),
+		withPlanSystemWriter(planStub),
+		withWhiteboardSystemWriter(wbStub),
+	)
+	defer cleanup()
+
+	out, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"analyse northwind","skill":"analyst"}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var got spawnSubagentResult
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v\noutput=%s", err, out)
+	}
+	if got.SessionID == "" {
+		t.Fatalf("no child spawned: %s", out)
+	}
+
+	if len(planStub.calls) != 1 {
+		t.Fatalf("plan.SystemSet calls = %d, want 1", len(planStub.calls))
+	}
+	if planStub.calls[0].Text != block.PlanText {
+		t.Errorf("plan body = %q, want %q", planStub.calls[0].Text, block.PlanText)
+	}
+	if planStub.calls[0].CurrentStep != "Explore" {
+		t.Errorf("plan current_step = %q, want Explore", planStub.calls[0].CurrentStep)
+	}
+	if wbStub.calls != 1 {
+		t.Errorf("whiteboard.SystemInit calls = %d, want 1", wbStub.calls)
 	}
 }
 
@@ -258,6 +366,61 @@ func TestCallSpawnSubagent_RoleIntentOverride(t *testing.T) {
 	}
 	if want, got := "cheap", string(child.DefaultIntent()); got != want {
 		t.Errorf("child.DefaultIntent() = %q, want %q", got, want)
+	}
+}
+
+// TestCallSpawnSubagent_TierIntent_AppliesAtSpawn verifies the
+// γ tier-intent default: when deps.TierIntents has an entry for
+// the spawned child's tier, applyChildIntent uses it as the
+// default before per-role overrides. Phase 4.2.2 §11.
+func TestCallSpawnSubagent_TierIntent_AppliesAtSpawn(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+	parent.deps.TierIntents = map[string]string{
+		"mission": "cheap", // child is depth 1 → tier=mission
+	}
+
+	out, err := parent.callSpawnSubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagents":[{"task":"t"}]}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var got []spawnSubagentResult
+	_ = json.Unmarshal(out, &got)
+	parent.childMu.Lock()
+	child := parent.children[got[0].SessionID]
+	parent.childMu.Unlock()
+	if child == nil {
+		t.Fatalf("child missing")
+	}
+	if want, got := "cheap", string(child.DefaultIntent()); got != want {
+		t.Errorf("child.DefaultIntent() = %q, want %q (tier-intent default)", got, want)
+	}
+}
+
+// TestCallSpawnSubagent_RoleIntent_OverridesTierIntent verifies
+// the override precedence: per-role intent from a skill manifest
+// wins over the tier-intent default. Phase 4.2.2 §11.
+func TestCallSpawnSubagent_RoleIntent_OverridesTierIntent(t *testing.T) {
+	hinter := &stubSpawnHinter{skill: "hugr-data", role: "explorer", intent: "cheap"}
+	parent, cleanup := newTestParent(t, withTestExtensions(hinter))
+	defer cleanup()
+	parent.deps.TierIntents = map[string]string{
+		"mission": "default", // role's "cheap" must override this
+	}
+
+	out, err := parent.callSpawnSubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagents":[{"skill":"hugr-data","role":"explorer","task":"t"}]}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var got []spawnSubagentResult
+	_ = json.Unmarshal(out, &got)
+	parent.childMu.Lock()
+	child := parent.children[got[0].SessionID]
+	parent.childMu.Unlock()
+	if want, got := "cheap", string(child.DefaultIntent()); got != want {
+		t.Errorf("child.DefaultIntent() = %q, want %q (role override of tier intent)", got, want)
 	}
 }
 

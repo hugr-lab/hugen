@@ -620,6 +620,91 @@ metadata:
 	}
 }
 
+// TestParse_MissionBlock_HappyPath verifies the mission dispatch
+// block parses end-to-end with summary, keywords, and a full
+// on_start sub-tree (plan body_template + current_step + whiteboard
+// init + first_message template). Phase 4.2.2 §6+§7.
+func TestParse_MissionBlock_HappyPath(t *testing.T) {
+	src := `---
+name: analyst
+description: Mission dispatcher for data analysis.
+license: MIT
+metadata:
+  hugen:
+    tier_compatibility: [mission]
+    mission:
+      enabled: true
+      summary: Data analysis, queries, reports.
+      keywords: [data, query, report]
+      on_start:
+        plan:
+          body_template: |
+            # {{ .UserGoal }}
+            1. Explore
+            2. Synthesize
+          current_step: Explore
+        whiteboard:
+          init: true
+        first_message:
+          template: |
+            Goal: {{ .UserGoal }}
+            Run the playbook.
+---
+`
+	m, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !m.Hugen.Mission.Enabled {
+		t.Errorf("Mission.Enabled = false, want true")
+	}
+	if m.Hugen.Mission.Summary == "" {
+		t.Errorf("Mission.Summary empty, want non-empty")
+	}
+	if len(m.Hugen.Mission.Keywords) != 3 {
+		t.Errorf("Mission.Keywords len = %d, want 3", len(m.Hugen.Mission.Keywords))
+	}
+	if m.Hugen.Mission.OnStart.Plan.CurrentStep != "Explore" {
+		t.Errorf("Mission.OnStart.Plan.CurrentStep = %q, want Explore", m.Hugen.Mission.OnStart.Plan.CurrentStep)
+	}
+	if !strings.Contains(m.Hugen.Mission.OnStart.Plan.BodyTemplate, "{{ .UserGoal }}") {
+		t.Errorf("Mission.OnStart.Plan.BodyTemplate missing template var: %q", m.Hugen.Mission.OnStart.Plan.BodyTemplate)
+	}
+	if !m.Hugen.Mission.OnStart.Whiteboard.Init {
+		t.Errorf("Mission.OnStart.Whiteboard.Init = false, want true")
+	}
+	if !strings.Contains(m.Hugen.Mission.OnStart.FirstMessage.Template, "{{ .UserGoal }}") {
+		t.Errorf("Mission.OnStart.FirstMessage.Template missing template var")
+	}
+}
+
+// TestParse_MissionEnabledRejectsSystemSkill verifies mission.enabled
+// is rejected on `_`-prefixed names. System skills are runtime
+// primitives, not mission dispatch targets (phase 4.2.2 §6).
+func TestParse_MissionEnabledRejectsSystemSkill(t *testing.T) {
+	src := `---
+name: _analyst
+description: System skill trying to claim mission dispatch.
+license: MIT
+metadata:
+  hugen:
+    autoload: true
+    autoload_for: [mission]
+    tier_compatibility: [mission]
+    mission:
+      enabled: true
+      summary: Data analysis.
+---
+`
+	_, err := Parse([]byte(src))
+	if err == nil || !errors.Is(err, ErrManifestInvalid) {
+		t.Fatalf("Parse: err = %v, want ErrManifestInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "mission.enabled") {
+		t.Errorf("err message should mention mission.enabled: %v", err)
+	}
+}
+
 // TestParse_TierCompatibilityValidAll exercises the happy path
 // for every tier value plus the absent-field default-[worker]
 // fallback at parse time.

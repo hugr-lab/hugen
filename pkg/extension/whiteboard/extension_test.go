@@ -96,6 +96,42 @@ func TestCallInit_Happy(t *testing.T) {
 	}
 }
 
+// TestSystemInit_BypassesToolDispatch verifies the runtime's direct
+// write path: SystemInit activates the projection AND emits an
+// ExtensionFrame{op:init} without going through the ToolManager.
+// Used to seed a mission's whiteboard from on_mission_start.
+// Phase 4.2.2 §7.
+func TestSystemInit_BypassesToolDispatch(t *testing.T) {
+	e := newExt()
+	state := initState(t, e, "ses-sys")
+
+	if err := e.SystemInit(context.Background(), state); err != nil {
+		t.Fatalf("SystemInit: %v", err)
+	}
+	if h := FromState(state); !h.Snapshot().Active {
+		t.Errorf("handle not active after SystemInit")
+	}
+	emitted := state.Emitted()
+	if len(emitted) != 1 {
+		t.Fatalf("emitted=%d, want 1", len(emitted))
+	}
+	ef, ok := emitted[0].(*protocol.ExtensionFrame)
+	if !ok {
+		t.Fatalf("emitted type %T, want *ExtensionFrame", emitted[0])
+	}
+	if ef.Payload.Extension != providerName || ef.Payload.Op != OpInit {
+		t.Errorf("emitted = %+v", ef.Payload)
+	}
+
+	// Second call is idempotent — no extra event.
+	if err := e.SystemInit(context.Background(), state); err != nil {
+		t.Fatalf("SystemInit repeat: %v", err)
+	}
+	if got := len(state.Emitted()); got != 1 {
+		t.Errorf("SystemInit not idempotent; emitted=%d, want 1", got)
+	}
+}
+
 // TestCallInit_Idempotent: second init on an active board is a
 // no-op — no extra event.
 func TestCallInit_Idempotent(t *testing.T) {

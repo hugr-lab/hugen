@@ -1,8 +1,10 @@
 package plan
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -51,6 +53,7 @@ var (
 	_ extension.StateInitializer = (*Extension)(nil)
 	_ extension.Advertiser       = (*Extension)(nil)
 	_ extension.Recovery         = (*Extension)(nil)
+	_ extension.PlanSystemWriter = (*Extension)(nil)
 	_ tool.ToolProvider          = (*Extension)(nil)
 )
 
@@ -275,6 +278,44 @@ type toolErrorResponse struct {
 
 func toolErr(code, msg string) (json.RawMessage, error) {
 	return json.Marshal(toolErrorResponse{Error: toolError{Code: code, Message: msg}})
+}
+
+// SystemSet writes the plan body on the calling session's state
+// via the system principal — no ToolManager dispatch, no LLM
+// round-trip, no permission gate. Used by the runtime to seed a
+// mission's plan from its skill's metadata.hugen.mission.on_start.plan
+// block before the mission's first model turn (phase 4.2.2 §7).
+//
+// Authorised callers: pkg/session/spawn.go only. Exposed as a
+// method (not a top-level function) so the test infrastructure can
+// still register an Extension instance and verify the write path
+// through the standard ToolFilter / Advertiser pipeline.
+func (e *Extension) SystemSet(ctx context.Context, state extension.SessionState, text, currentStep string) error {
+	if state == nil {
+		return errors.New("plan: SystemSet: state is nil")
+	}
+	h := FromState(state)
+	if h == nil {
+		return errors.New("plan: SystemSet: no plan handle on session state")
+	}
+	out, err := persistAndApply(ctx, state, h, OpSet, text, currentStep, false)
+	if err != nil {
+		return err
+	}
+	// persistAndApply may surface bad_request / io as a tool_error
+	// envelope returning (bytes, nil). For the system path we lift
+	// that into a real error so the runtime can fail-fast.
+	if isToolErrorEnvelope(out) {
+		return fmt.Errorf("plan: SystemSet: %s", out)
+	}
+	return nil
+}
+
+// isToolErrorEnvelope is a cheap discriminator: persistAndApply's
+// success body is `{"ok":true}`; the envelope body always carries
+// an "error" key.
+func isToolErrorEnvelope(b []byte) bool {
+	return len(b) > 0 && bytes.Contains(b, []byte(`"error":`))
 }
 
 func (e *Extension) callSet(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {

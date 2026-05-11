@@ -45,6 +45,37 @@ func errResponse(t *testing.T, raw json.RawMessage) string {
 
 // ---------- plan:set ----------
 
+// TestSystemSet_BypassesToolDispatch verifies the runtime's direct
+// write path: SystemSet activates the plan AND emits an
+// ExtensionFrame{op:set} without going through the ToolManager.
+// Used to seed a mission's plan from on_mission_start. Phase 4.2.2 §7.
+func TestSystemSet_BypassesToolDispatch(t *testing.T) {
+	ext, state := newReadyExt(t)
+
+	if err := ext.SystemSet(context.Background(), state,
+		"# Goal\n1. Explore\n2. Synthesize", "Explore"); err != nil {
+		t.Fatalf("SystemSet: %v", err)
+	}
+
+	h := FromState(state)
+	snap := h.Snapshot()
+	if !snap.Active {
+		t.Errorf("plan not active after SystemSet")
+	}
+	if !strings.Contains(snap.Text, "Goal") || snap.CurrentStep != "Explore" {
+		t.Errorf("snapshot = %+v", snap)
+	}
+
+	emitted := state.Emitted()
+	if len(emitted) != 1 {
+		t.Fatalf("emitted = %d, want 1", len(emitted))
+	}
+	pf := emitted[0].(*protocol.ExtensionFrame)
+	if pf.Payload.Extension != providerName || pf.Payload.Op != "set" {
+		t.Errorf("emitted = %+v", pf.Payload)
+	}
+}
+
 func TestCallSet_Happy(t *testing.T) {
 	ext, state := newReadyExt(t)
 

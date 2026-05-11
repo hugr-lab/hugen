@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"testing"
@@ -9,8 +10,8 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/extension"
-	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -77,6 +78,119 @@ func withTestExtensions(exts ...extension.Extension) testParentOpt {
 // the activeToolFeed slot.
 func withTestRunLoop() testParentOpt {
 	return func(c *testParentCfg) { c.runLoop = true }
+}
+
+// withMissionDispatcher registers a stub extension that implements
+// [extension.MissionDispatcher] and answers true for every name in
+// `eligible`. spawn_mission catalogue validation tests use this to
+// distinguish "skill registered as mission" from "non-existent".
+func withMissionDispatcher(eligible ...string) testParentOpt {
+	return func(c *testParentCfg) {
+		set := map[string]struct{}{}
+		for _, n := range eligible {
+			set[n] = struct{}{}
+		}
+		c.extensions = append(c.extensions, &stubMissionDispatcher{eligible: set})
+	}
+}
+
+// stubMissionDispatcher is a minimal [extension.Extension]
+// implementing [extension.MissionDispatcher] for tests. Every
+// other capability method is absent — the dispatcher branches in
+// spawn_mission only consume MissionSkillExists.
+type stubMissionDispatcher struct {
+	eligible map[string]struct{}
+}
+
+func (s *stubMissionDispatcher) Name() string { return "mission-dispatcher-stub" }
+
+func (s *stubMissionDispatcher) List(context.Context) ([]tool.Tool, error) {
+	return nil, nil
+}
+
+func (s *stubMissionDispatcher) Call(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+	return nil, nil
+}
+
+func (s *stubMissionDispatcher) MissionSkillExists(_ context.Context, name string) (bool, error) {
+	_, ok := s.eligible[name]
+	return ok, nil
+}
+
+// withMissionStartLookup registers a stub extension implementing
+// [extension.MissionStartLookup] that returns `block` for every
+// matching skill name. Tests use it to verify the on_mission_start
+// hook resolves and applies the rendered scaffolding.
+func withMissionStartLookup(skill string, block *extension.MissionStartBlock) testParentOpt {
+	return func(c *testParentCfg) {
+		c.extensions = append(c.extensions, &stubMissionStartLookup{skill: skill, block: block})
+	}
+}
+
+type stubMissionStartLookup struct {
+	skill string
+	block *extension.MissionStartBlock
+}
+
+func (s *stubMissionStartLookup) Name() string { return "mission-start-stub" }
+
+func (s *stubMissionStartLookup) List(context.Context) ([]tool.Tool, error) {
+	return nil, nil
+}
+
+func (s *stubMissionStartLookup) Call(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+	return nil, nil
+}
+
+func (s *stubMissionStartLookup) ResolveMissionStart(_ context.Context, skill, _ string, _ any) (*extension.MissionStartBlock, error) {
+	if skill == s.skill {
+		return s.block, nil
+	}
+	return nil, nil
+}
+
+// withPlanSystemWriter and withWhiteboardSystemWriter register
+// stub extensions implementing the system-principal write paths.
+// They record every call into the stub so tests can assert the
+// runtime invoked them in the right order.
+func withPlanSystemWriter(stub *stubPlanWriter) testParentOpt {
+	return func(c *testParentCfg) { c.extensions = append(c.extensions, stub) }
+}
+
+func withWhiteboardSystemWriter(stub *stubWhiteboardWriter) testParentOpt {
+	return func(c *testParentCfg) { c.extensions = append(c.extensions, stub) }
+}
+
+type stubPlanWriter struct {
+	calls []struct{ Text, CurrentStep string }
+}
+
+func (s *stubPlanWriter) Name() string { return "plan-writer-stub" }
+func (s *stubPlanWriter) List(context.Context) ([]tool.Tool, error) {
+	return nil, nil
+}
+func (s *stubPlanWriter) Call(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+	return nil, nil
+}
+func (s *stubPlanWriter) SystemSet(_ context.Context, _ extension.SessionState, text, currentStep string) error {
+	s.calls = append(s.calls, struct{ Text, CurrentStep string }{text, currentStep})
+	return nil
+}
+
+type stubWhiteboardWriter struct {
+	calls int
+}
+
+func (s *stubWhiteboardWriter) Name() string { return "whiteboard-writer-stub" }
+func (s *stubWhiteboardWriter) List(context.Context) ([]tool.Tool, error) {
+	return nil, nil
+}
+func (s *stubWhiteboardWriter) Call(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+	return nil, nil
+}
+func (s *stubWhiteboardWriter) SystemInit(_ context.Context, _ extension.SessionState) error {
+	s.calls++
+	return nil
 }
 
 // newTestParent builds a *Session ready for tool-handler tests

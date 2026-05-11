@@ -170,6 +170,14 @@ type HugenMetadata struct {
 	SubAgents []SubAgentRole            `json:"sub_agents,omitempty"`
 	Memory    map[string]MemoryCategory `json:"memory,omitempty"`
 
+	// Mission, when Enabled, declares the skill as a mission
+	// dispatcher: root sees its Summary in the "Available
+	// missions" prompt block and may pass it to session:spawn_mission.
+	// Phase 4.2.2 §6. The block is enforceable only on extensions
+	// (non-`_` names) — system skills are runtime primitives, not
+	// dispatch targets.
+	Mission MissionBlock `json:"mission,omitempty" yaml:"mission,omitempty"`
+
 	// MaxTurns / MaxTurnsHard / StuckDetection are conceptually
 	// per-session-tier, not per-skill — they tune the turn-loop and
 	// stuck-detect heuristics, which depend on the session's role
@@ -412,6 +420,59 @@ type MemoryCategory struct {
 	SummariseAt int    `json:"summarise_at,omitempty"`
 }
 
+// MissionBlock is the dispatch-eligibility metadata for an
+// extension that wants to be selectable as a mission via
+// session:spawn_mission. Phase 4.2.2 §6.
+//
+// Enabled is the gate: only skills with Enabled=true appear in
+// root's "Available missions" prompt block and pass spawn_mission's
+// catalogue validation. Summary is what root sees per skill;
+// Keywords is optional hint material consumed by the same prompt
+// builder. OnStart fires synthetically before the mission's first
+// model turn so the mission boots with plan/whiteboard already
+// in place (phase 4.2.2 §7).
+type MissionBlock struct {
+	Enabled  bool           `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Summary  string         `json:"summary,omitempty" yaml:"summary,omitempty"`
+	Keywords []string       `json:"keywords,omitempty" yaml:"keywords,omitempty"`
+	OnStart  MissionOnStart `json:"on_start,omitempty" yaml:"on_start,omitempty"`
+}
+
+// MissionOnStart describes the per-skill boot sequence the runtime
+// fires before the spawned mission's first model turn. All three
+// sub-blocks are optional: omit any to skip that step. Templates
+// use text/template with a fixed vocabulary (.UserGoal,
+// .ParentSkill, .Inputs). Phase 4.2.2 §7.
+type MissionOnStart struct {
+	Plan         MissionOnStartPlan         `json:"plan,omitempty" yaml:"plan,omitempty"`
+	Whiteboard   MissionOnStartWhiteboard   `json:"whiteboard,omitempty" yaml:"whiteboard,omitempty"`
+	FirstMessage MissionOnStartFirstMessage `json:"first_message,omitempty" yaml:"first_message,omitempty"`
+}
+
+// MissionOnStartPlan declares the plan body the runtime sets on
+// the mission via the system-principal plan write path before
+// the mission's first turn. BodyTemplate runs through text/template;
+// CurrentStep is the literal focus step (no template).
+type MissionOnStartPlan struct {
+	BodyTemplate string `json:"body_template,omitempty" yaml:"body_template,omitempty"`
+	CurrentStep  string `json:"current_step,omitempty" yaml:"current_step,omitempty"`
+}
+
+// MissionOnStartWhiteboard toggles a synthetic whiteboard:init
+// at mission boot. Only Init is meaningful today (true → init);
+// future fields may carry initial categories / retention overrides.
+type MissionOnStartWhiteboard struct {
+	Init bool `json:"init,omitempty" yaml:"init,omitempty"`
+}
+
+// MissionOnStartFirstMessage optionally overrides the mission's
+// first user-role message. Template runs through text/template.
+// When omitted the runtime uses the bare `goal` string from
+// spawn_mission as the first user message.
+type MissionOnStartFirstMessage struct {
+	Template string `json:"template,omitempty" yaml:"template,omitempty"`
+}
+
 var (
 	// agentskills.io: name is [A-Za-z0-9_-]{1,64}.
 	nameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -487,6 +548,10 @@ func (m *Manifest) validateHugen() error {
 		if len(m.Hugen.AutoloadFor) == 0 {
 			return errors.New("metadata.hugen.autoload: true requires explicit metadata.hugen.autoload_for")
 		}
+	}
+	if m.Hugen.Mission.Enabled && strings.HasPrefix(m.Name, "_") {
+		return fmt.Errorf("metadata.hugen.mission.enabled: true is reserved for extension skills (name must NOT start with %q, got %q) — system skills are runtime primitives, not mission dispatch targets",
+			"_", m.Name)
 	}
 
 	// autoload_for ⊆ effective tier_compatibility — a skill cannot

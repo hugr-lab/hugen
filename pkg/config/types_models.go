@@ -31,6 +31,13 @@ type ModelsConfig struct {
 	RetryMaxAttempts    int                     `mapstructure:"retry_max_attempts"`
 	RetryInitialBackoff time.Duration           `mapstructure:"retry_initial_backoff"`
 	Routes              map[string]ModelsConfig `mapstructure:"routes"`
+
+	// TierIntents maps a session tier (root/mission/worker) to the
+	// model-router intent the runtime applies as the spawned child's
+	// default. Empty or missing entries fall back to the router's
+	// default. Per-role overrides (SubAgentRole.Intent in skill
+	// manifests) still win over the tier default. Phase 4.2.2 §11.
+	TierIntents map[string]string `mapstructure:"tier_intents" yaml:"tier_intents,omitempty"`
 }
 
 const (

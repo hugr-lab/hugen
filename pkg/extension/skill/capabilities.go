@@ -2,9 +2,11 @@ package skill
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"sort"
 	"strings"
+	"text/template"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
@@ -30,13 +32,113 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ extension.Advertiser         = (*Extension)(nil)
-	_ extension.ToolFilter         = (*Extension)(nil)
-	_ extension.GenerationProvider = (*Extension)(nil)
-	_ extension.ToolPolicyAdvisor  = (*Extension)(nil)
-	_ extension.SubagentDescriber  = (*Extension)(nil)
+	_ extension.Advertiser          = (*Extension)(nil)
+	_ extension.ToolFilter          = (*Extension)(nil)
+	_ extension.GenerationProvider  = (*Extension)(nil)
+	_ extension.ToolPolicyAdvisor   = (*Extension)(nil)
+	_ extension.SubagentDescriber   = (*Extension)(nil)
 	_ extension.SubagentSpawnHinter = (*Extension)(nil)
+	_ extension.MissionDispatcher   = (*Extension)(nil)
+	_ extension.MissionStartLookup  = (*Extension)(nil)
 )
+
+// MissionSkillExists implements [extension.MissionDispatcher].
+// Returns (true, nil) when the named skill is installed AND its
+// manifest declares metadata.hugen.mission.enabled:true. Phase
+// 4.2.2 §6.
+func (e *Extension) MissionSkillExists(ctx context.Context, skill string) (bool, error) {
+	if skill == "" || e.manager == nil {
+		return false, nil
+	}
+	all, err := e.manager.List(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, sk := range all {
+		if sk.Manifest.Name == skill && sk.Manifest.Hugen.Mission.Enabled {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// missionStartTemplateData is the fixed-vocabulary context the
+// on_start templates render against. Limited vocabulary by design
+// — complex logic lives in code, not in templates. Phase 4.2.2 §7.
+type missionStartTemplateData struct {
+	UserGoal    string
+	ParentSkill string
+	Inputs      any
+}
+
+// ResolveMissionStart implements [extension.MissionStartLookup].
+// Looks up the named skill, returns nil if it is not mission-enabled
+// or declares no on_start, otherwise renders the on_start templates
+// against the supplied (goal, inputs) and returns the post-render
+// MissionStartBlock the runtime applies. Phase 4.2.2 §7.
+func (e *Extension) ResolveMissionStart(ctx context.Context, skill, goal string, inputs any) (*extension.MissionStartBlock, error) {
+	if skill == "" || e.manager == nil {
+		return nil, nil
+	}
+	all, err := e.manager.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var found *skillpkg.Skill
+	for i, sk := range all {
+		if sk.Manifest.Name == skill {
+			found = &all[i]
+			break
+		}
+	}
+	if found == nil || !found.Manifest.Hugen.Mission.Enabled {
+		return nil, nil
+	}
+	on := found.Manifest.Hugen.Mission.OnStart
+	if on.Plan.BodyTemplate == "" && !on.Whiteboard.Init && on.FirstMessage.Template == "" {
+		return nil, nil
+	}
+	data := missionStartTemplateData{
+		UserGoal:    goal,
+		ParentSkill: skill,
+		Inputs:      inputs,
+	}
+	out := &extension.MissionStartBlock{
+		PlanCurrentStep: on.Plan.CurrentStep,
+		WhiteboardInit:  on.Whiteboard.Init,
+	}
+	if on.Plan.BodyTemplate != "" {
+		body, err := renderMissionTemplate("plan.body_template", on.Plan.BodyTemplate, data)
+		if err != nil {
+			return nil, err
+		}
+		out.PlanText = body
+	}
+	if on.FirstMessage.Template != "" {
+		msg, err := renderMissionTemplate("first_message.template", on.FirstMessage.Template, data)
+		if err != nil {
+			return nil, err
+		}
+		out.FirstMessageOverride = msg
+	}
+	return out, nil
+}
+
+// renderMissionTemplate runs `body` through text/template with the
+// fixed mission-start vocabulary (UserGoal / ParentSkill / Inputs).
+// Errors propagate with the field name so a malformed template
+// surfaces a precise diagnostic at spawn time. Phase 4.2.2 §7.
+func renderMissionTemplate(field, body string, data missionStartTemplateData) (string, error) {
+	tpl, err := template.New(field).Parse(body)
+	if err != nil {
+		return "", fmt.Errorf("mission.on_start.%s: parse: %w", field, err)
+	}
+	var buf strings.Builder
+	if err := tpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("mission.on_start.%s: execute: %w", field, err)
+	}
+	return buf.String(), nil
+}
 
 // AdvertiseSystemPrompt implements [extension.Advertiser].
 // Composes three sections in order:
@@ -60,6 +162,15 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 		return ""
 	}
 	var parts []string
+	// Available missions — root-only block listing every
+	// dispatch-eligible skill (mission.enabled:true) with its
+	// Summary so the root model can pick a skill argument for
+	// session:spawn_mission. Phase 4.2.2 §6.
+	if h.tier == skillpkg.TierRoot {
+		if missions := renderAvailableMissions(ctx, h); missions != "" {
+			parts = append(parts, missions)
+		}
+	}
 	if meta := renderLoadedSkillsMeta(h); meta != "" {
 		parts = append(parts, meta)
 	}
@@ -73,6 +184,49 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 		return ""
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// renderAvailableMissions enumerates every skill in the manager's
+// store with metadata.hugen.mission.enabled:true and renders a
+// "## Available missions" prompt section listing each by name +
+// Summary. Returns "" when no mission-enabled skills are installed
+// — root then has no dispatch options and spawn_mission surfaces
+// `no_mission_skill`. Phase 4.2.2 §6.
+func renderAvailableMissions(ctx context.Context, h *SessionSkill) string {
+	all, err := h.manager.List(ctx)
+	if err != nil {
+		return ""
+	}
+	var picked []skillpkg.Skill
+	for _, sk := range all {
+		if sk.Manifest.Hugen.Mission.Enabled {
+			picked = append(picked, sk)
+		}
+	}
+	if len(picked) == 0 {
+		return ""
+	}
+	sort.Slice(picked, func(i, j int) bool {
+		return picked[i].Manifest.Name < picked[j].Manifest.Name
+	})
+	var b strings.Builder
+	b.WriteString("## Available missions\n\n")
+	b.WriteString("When the user asks for information, computation, or any work beyond\n")
+	b.WriteString("greeting / clarification / formatting, delegate via\n")
+	b.WriteString("`session:spawn_mission` and pass the `skill` argument naming the\n")
+	b.WriteString("dispatcher whose summary best matches the request:\n\n")
+	for _, sk := range picked {
+		summary := strings.TrimSpace(sk.Manifest.Hugen.Mission.Summary)
+		if summary == "" {
+			summary = strings.TrimSpace(sk.Manifest.Description)
+		}
+		b.WriteString("- `")
+		b.WriteString(sk.Manifest.Name)
+		b.WriteString("` — ")
+		b.WriteString(summary)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // renderLoadedSkillsMeta produces the per-loaded-skill metadata
