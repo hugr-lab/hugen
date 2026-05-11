@@ -22,6 +22,98 @@ func us1WithSession(parent *Session) context.Context {
 	return extension.WithSessionState(context.Background(), parent)
 }
 
+// ---------- spawn_mission ----------
+
+// TestCallSpawnMission_Happy verifies the singular spawn variant
+// adapts a goal/inputs payload into a one-entry batch under the
+// hood and returns a single object (not an array) shaped like
+// spawnSubagentResult.
+func TestCallSpawnMission_Happy(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+
+	out, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"analyse northwind"}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var got spawnSubagentResult
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal singular result: %v\noutput=%s", err, out)
+	}
+	if got.SessionID == "" || got.Depth != 1 {
+		t.Errorf("unexpected result %+v", got)
+	}
+	parent.childMu.Lock()
+	_, inChildren := parent.children[got.SessionID]
+	parent.childMu.Unlock()
+	if !inChildren {
+		t.Errorf("spawned mission %q not in parent.children", got.SessionID)
+	}
+}
+
+// TestCallSpawnMission_GoalRequired verifies the goal field is
+// validated before any spawn happens.
+func TestCallSpawnMission_GoalRequired(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+
+	out, _ := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":""}`))
+	mgr_assertErrorCode(t, out, "bad_request")
+
+	out, _ = parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{}`))
+	mgr_assertErrorCode(t, out, "bad_request")
+
+	parent.childMu.Lock()
+	defer parent.childMu.Unlock()
+	if len(parent.children) != 0 {
+		t.Errorf("parent.children = %d after validation failure, want 0", len(parent.children))
+	}
+}
+
+// ---------- spawn_wave ----------
+
+// TestCallSpawnWave_BadRequest covers the empty-subagents and
+// invalid-JSON refusals before any spawn happens.
+func TestCallSpawnWave_BadRequest(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+
+	out, _ := parent.callSpawnWave(us1WithSession(parent),
+		json.RawMessage(`{"subagents":[]}`))
+	mgr_assertErrorCode(t, out, "bad_request")
+
+	out, _ = parent.callSpawnWave(us1WithSession(parent),
+		json.RawMessage(`{not-json`))
+	mgr_assertErrorCode(t, out, "bad_request")
+
+	parent.childMu.Lock()
+	defer parent.childMu.Unlock()
+	if len(parent.children) != 0 {
+		t.Errorf("parent.children = %d after spawn_wave validation failure, want 0", len(parent.children))
+	}
+}
+
+// TestCallSpawnWave_PropagatesSpawnError verifies the wave tool
+// surfaces a spawn-phase validation refusal as the underlying
+// tool_error envelope (depth_exceeded here) without entering the
+// wait phase.
+func TestCallSpawnWave_PropagatesSpawnError(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+	parent.deps.MaxDepth = 0
+	parent.depth = 5
+
+	out, err := parent.callSpawnWave(us1WithSession(parent),
+		json.RawMessage(`{"wave_label":"explore","subagents":[{"task":"x"}]}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	mgr_assertErrorCode(t, out, "depth_exceeded")
+}
+
 // ---------- spawn_subagent ----------
 
 // TestCallSpawnSubagent_Happy verifies the simplest path: a single
