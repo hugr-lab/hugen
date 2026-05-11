@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -376,20 +377,45 @@ func (s *TestStore) AppendNote(_ context.Context, n store.NoteRow) error {
 	return nil
 }
 
-func (s *TestStore) ListNotes(_ context.Context, sessionID string, limit int) ([]store.NoteRow, error) {
+func (s *TestStore) ListNotes(_ context.Context, sessionID string, opts store.ListNotesOpts) ([]store.NoteRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	cutoff := time.Time{}
+	if opts.Window > 0 {
+		cutoff = time.Now().UTC().Add(-opts.Window)
+	}
+	// Snapshot newest-first; the production store's GraphQL query
+	// uses created_at DESC. The fixture iterates in append order so
+	// reverse on the way out.
 	out := make([]store.NoteRow, 0, len(s.Notes))
-	for _, n := range s.Notes {
+	for i := len(s.Notes) - 1; i >= 0; i-- {
+		n := s.Notes[i]
 		if sessionID != "" && n.SessionID != sessionID {
 			continue
 		}
+		if opts.Category != "" && n.Category != opts.Category {
+			continue
+		}
+		if !cutoff.IsZero() && n.CreatedAt.Before(cutoff) {
+			continue
+		}
 		out = append(out, n)
-		if limit > 0 && len(out) >= limit {
+		if len(out) >= limit {
 			break
 		}
 	}
 	return out, nil
+}
+
+// SearchNotes — fixture implementation has no embedder, so it
+// degrades to ErrNoEmbedder. Tests that want a real semantic
+// path use the live local store with an embedder data source.
+func (s *TestStore) SearchNotes(_ context.Context, _, _ string, _ store.ListNotesOpts) ([]store.NoteRow, error) {
+	return nil, store.ErrNoEmbedder
 }
 
 func (s *TestStore) ListSessions(_ context.Context, _, _ string) ([]store.SessionRow, error) {

@@ -17,7 +17,10 @@ import (
 type errStore struct{ err error }
 
 func (e errStore) AppendNote(_ context.Context, _ store.NoteRow) error { return e.err }
-func (e errStore) ListNotes(_ context.Context, _ string, _ int) ([]store.NoteRow, error) {
+func (e errStore) ListNotes(_ context.Context, _ string, _ store.ListNotesOpts) ([]store.NoteRow, error) {
+	return nil, e.err
+}
+func (e errStore) SearchNotes(_ context.Context, _, _ string, _ store.ListNotesOpts) ([]store.NoteRow, error) {
 	return nil, e.err
 }
 
@@ -77,7 +80,9 @@ func TestList_ReturnsRowsForSession(t *testing.T) {
 	if len(notes) != 2 {
 		t.Fatalf("expected 2 notes for sess-1, got %d", len(notes))
 	}
-	if notes[0].Text != "a" || notes[1].Text != "c" {
+	// Phase 4.2.3: ListNotes returns DESC by created_at; newest
+	// (n3 / "c") first, oldest second.
+	if notes[0].Text != "c" || notes[1].Text != "a" {
 		t.Errorf("unexpected texts: %v %v", notes[0].Text, notes[1].Text)
 	}
 }

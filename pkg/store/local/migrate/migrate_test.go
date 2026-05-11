@@ -145,7 +145,7 @@ func TestEnsure_v002_AdditiveColumns(t *testing.T) {
 	require.NoError(t, conn.QueryRow(
 		`SELECT version FROM version WHERE name = 'schema'`,
 	).Scan(&ver))
-	assert.Equal(t, "0.0.5", ver)
+	assert.Equal(t, "0.0.6", ver)
 
 	// spec 008 / migration 0.0.3 — artifacts + artifact_grants tables
 	// land additively. Both must exist on a fresh DuckDB provision.
@@ -194,6 +194,32 @@ func TestEnsure_v002_AdditiveColumns(t *testing.T) {
          WHERE table_name IN ('approvals','tool_policies')`,
 	).Scan(&phase4IdxCount))
 	assert.Equal(t, 0, phase4IdxCount, "DuckDB must have zero indexes on approvals / tool_policies")
+
+	// Phase 4.2.3 / migration 0.0.6 — session_notes gets four new
+	// columns (category, author_role, mission, embedding). Verified
+	// here on a fresh provision so the schema template stays in sync
+	// with the ALTER-based migration.
+	for _, col := range []string{"category", "author_role", "mission"} {
+		t.Run("notepad-cols/"+col, func(t *testing.T) {
+			var n int
+			err := conn.QueryRow(
+				`SELECT count(*) FROM information_schema.columns
+                 WHERE table_name = 'session_notes' AND column_name = ?`,
+				col,
+			).Scan(&n)
+			require.NoError(t, err)
+			assert.Equalf(t, 1, n, "expected session_notes.%s after 0.0.6", col)
+		})
+	}
+	// Embedding column lands only when VectorSize > 0; this run uses
+	// the default seed config (which has VectorSize = 768 in
+	// mustFreshConn). Mirrors the session_events check below.
+	var notepadEmbed int
+	require.NoError(t, conn.QueryRow(
+		`SELECT count(*) FROM information_schema.columns
+         WHERE table_name = 'session_notes' AND column_name = 'embedding'`,
+	).Scan(&notepadEmbed))
+	assert.Equal(t, 1, notepadEmbed, "session_notes.embedding should exist when VectorSize > 0")
 }
 
 // TestEnsure_v002_NoVectorColumnWhenDisabled — when VectorSize == 0
@@ -228,4 +254,24 @@ func TestEnsure_v002_NoVectorColumnWhenDisabled(t *testing.T) {
          WHERE table_name = 'session_events' AND column_name = 'embedding'`,
 	).Scan(&n))
 	assert.Equal(t, 0, n, "embedding column should not exist when VectorSize=0")
+
+	// Phase 4.2.3 — session_notes.embedding must also be gated by
+	// VectorSize. The 0.0.6 ALTER block sits inside a
+	// {{ if gt .VectorSize 0 }} guard; without it, the migration
+	// would attempt to add a vector column to a non-vector build.
+	require.NoError(t, conn.QueryRow(
+		`SELECT count(*) FROM information_schema.columns
+         WHERE table_name = 'session_notes' AND column_name = 'embedding'`,
+	).Scan(&n))
+	assert.Equal(t, 0, n, "session_notes.embedding should not exist when VectorSize=0")
+
+	// But the three text columns DO exist (gate is on embedding only).
+	for _, col := range []string{"category", "author_role", "mission"} {
+		require.NoError(t, conn.QueryRow(
+			`SELECT count(*) FROM information_schema.columns
+             WHERE table_name = 'session_notes' AND column_name = ?`,
+			col,
+		).Scan(&n))
+		assert.Equalf(t, 1, n, "session_notes.%s should exist regardless of VectorSize", col)
+	}
 }

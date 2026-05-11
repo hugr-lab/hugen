@@ -28,7 +28,8 @@ type Note struct {
 // session/store.RuntimeStore satisfies it implicitly.
 type Store interface {
 	AppendNote(ctx context.Context, row store.NoteRow) error
-	ListNotes(ctx context.Context, sessionID string, limit int) ([]store.NoteRow, error)
+	ListNotes(ctx context.Context, sessionID string, opts store.ListNotesOpts) ([]store.NoteRow, error)
+	SearchNotes(ctx context.Context, sessionID, query string, opts store.ListNotesOpts) ([]store.NoteRow, error)
 }
 
 // Notepad gives a Session a typed handle on its notes table. All
@@ -71,9 +72,13 @@ func (n *Notepad) Append(ctx context.Context, authorID, text string) (string, er
 	return id, nil
 }
 
-// List returns up to limit notes ordered by created_at ASC.
+// List returns up to limit notes ordered by created_at DESC
+// (newest first). Phase-4.2.3 thin wrapper around the store; the
+// notepad surface (`notepad:read` / `notepad:search`) lands in
+// milestone β and replaces this call site with a richer
+// Read / Search / Show split.
 func (n *Notepad) List(ctx context.Context, limit int) ([]Note, error) {
-	rows, err := n.store.ListNotes(ctx, n.sessionID, limit)
+	rows, err := n.store.ListNotes(ctx, n.sessionID, store.ListNotesOpts{Limit: limit})
 	if err != nil {
 		return nil, err
 	}

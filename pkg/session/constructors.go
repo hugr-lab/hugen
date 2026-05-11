@@ -39,7 +39,8 @@ var (
 )
 
 type (
-	NoteRow = store.NoteRow
+	NoteRow       = store.NoteRow
+	ListNotesOpts = store.ListNotesOpts
 )
 
 // New creates a fresh root Session. Thin public wrapper over the

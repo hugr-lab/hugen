@@ -19,13 +19,36 @@ import (
 // in-memory Note type and the higher-level wrapper around this
 // shape; the row itself stays here next to RuntimeStore.AppendNote
 // so the persistence column stays the single source of truth.
+//
+// Phase 4.2.3 added Category / AuthorRole / Mission. The embedding
+// Vector column on the table is intentionally absent from this
+// struct — Hugr populates it server-side via the `summary:`
+// mutation argument and the runtime never reads the raw vector
+// back into Go.
 type NoteRow struct {
 	ID              string    `json:"id"`
 	AgentID         string    `json:"agent_id"`
 	SessionID       string    `json:"session_id"`
 	AuthorSessionID string    `json:"author_session_id"`
+	Category        string    `json:"category,omitempty"`
+	AuthorRole      string    `json:"author_role,omitempty"`
+	Mission         string    `json:"mission,omitempty"`
 	Content         string    `json:"content"`
 	CreatedAt       time.Time `json:"created_at"`
+}
+
+// ListNotesOpts narrows the result set returned by ListNotes /
+// SearchNotes. Phase 4.2.3 — short-term-memory framing relies on
+// `Window` for natural eviction (no archival, no DELETE).
+//
+//   - Window: maximum age of returned notes; zero = no time cutoff.
+//   - Category: open-string filter; empty = all categories.
+//   - Limit: max rows; <=0 = implementation default (50 for
+//     ListNotes, 5 for SearchNotes).
+type ListNotesOpts struct {
+	Window   time.Duration
+	Category string
+	Limit    int
 }
 
 // Sentinel errors returned by RuntimeStore implementations.
@@ -34,6 +57,11 @@ var (
 	ErrSessionDuplicate = errors.New("runtime: session already exists")
 	ErrInvalidStatus    = errors.New("runtime: invalid session status")
 	ErrSessionClosed    = errors.New("runtime: session is closed")
+	// ErrNoEmbedder is returned by SearchNotes when the runtime
+	// store has no embedder data source attached — semantic search
+	// is impossible. Callers typically fall back to ListNotes
+	// ordered by recency.
+	ErrNoEmbedder = errors.New("runtime: no embedder attached")
 )
 
 // Session lifecycle states. Stored on `sessions.status`.
@@ -176,8 +204,24 @@ type RuntimeStore interface {
 	// without loading its full event log.
 	LatestEventOfKinds(ctx context.Context, sessionID string, kinds []string) (EventRow, bool, error)
 	NextSeq(ctx context.Context, sessionID string) (int, error)
+	// AppendNote inserts a note row. When the underlying store has
+	// an embedder attached, note.Content is also passed as the
+	// `summary:` mutation argument so Hugr generates and stores
+	// the vector embedding atomically.
 	AppendNote(ctx context.Context, note NoteRow) error
-	ListNotes(ctx context.Context, sessionID string, limit int) ([]NoteRow, error)
+	// ListNotes returns notes for sessionID filtered by opts. Order:
+	// created_at DESC (newest first). opts.Window applies a
+	// `created_at >= NOW() - Window` cutoff; opts.Category narrows
+	// further when non-empty; opts.Limit caps the row count.
+	ListNotes(ctx context.Context, sessionID string, opts ListNotesOpts) ([]NoteRow, error)
+	// SearchNotes runs a semantic search for notes belonging to
+	// sessionID via Hugr's `semantic: {query, limit}` top-level
+	// argument. The query string is embedded server-side under the
+	// @embeddings directive on session_notes. Without an embedder
+	// attached the method returns ErrNoEmbedder so the caller can
+	// fall back to ListNotes. Same Window/Category/Limit semantics
+	// as ListNotes; ordering is by similarity DESC.
+	SearchNotes(ctx context.Context, sessionID, query string, opts ListNotesOpts) ([]NoteRow, error)
 	ListSessions(ctx context.Context, agentID, status string) ([]SessionRow, error)
 	// ListResumableRoots returns every root session for agentID
 	// whose `status` column is Active. Each row carries its most
@@ -533,33 +577,63 @@ func (s *RuntimeStoreLocal) AppendNote(ctx context.Context, note NoteRow) error 
 		"author_session_id": note.AuthorSessionID,
 		"content":           note.Content,
 	}
+	if note.Category != "" {
+		data["category"] = note.Category
+	}
+	if note.AuthorRole != "" {
+		data["author_role"] = note.AuthorRole
+	}
+	if note.Mission != "" {
+		data["mission"] = note.Mission
+	}
+	if !s.embedderEnabled {
+		return queries.RunMutation(ctx, s.querier,
+			`mutation ($data: hub_db_session_notes_mut_input_data!) {
+				hub { db { agent {
+					insert_session_notes(data: $data) { id }
+				}}}
+			}`,
+			map[string]any{"data": data},
+		)
+	}
+	// summary: triggers server-side embedding generation per the
+	// @embeddings directive on session_notes. The note's content
+	// is short and self-contained — use it verbatim as the summary.
 	return queries.RunMutation(ctx, s.querier,
-		`mutation ($data: hub_db_session_notes_mut_input_data!) {
+		`mutation ($data: hub_db_session_notes_mut_input_data!, $summary: String) {
 			hub { db { agent {
-				insert_session_notes(data: $data) { id }
+				insert_session_notes(data: $data, summary: $summary) { id }
 			}}}
 		}`,
-		map[string]any{"data": data},
+		map[string]any{"data": data, "summary": note.Content},
 	)
 }
 
-func (s *RuntimeStoreLocal) ListNotes(ctx context.Context, sessionID string, limit int) ([]NoteRow, error) {
+// notesProjection is the column set ListNotes and SearchNotes
+// project. Kept as a constant so the two paths stay in sync.
+const notesProjection = `
+	id agent_id session_id author_session_id
+	category author_role mission
+	content created_at
+`
+
+func (s *RuntimeStoreLocal) ListNotes(ctx context.Context, sessionID string, opts ListNotesOpts) ([]NoteRow, error) {
+	limit := opts.Limit
 	if limit <= 0 {
-		limit = 100
+		limit = 50
 	}
+	filter := buildNotesFilter(sessionID, opts)
 	rows, err := queries.RunQuery[[]NoteRow](ctx, s.querier,
-		`query ($sid: String!, $limit: Int) {
+		`query ($filter: hub_db_session_notes_filter, $limit: Int) {
 			hub { db { agent {
 				session_notes(
-					filter: {session_id: {eq: $sid}},
-					order_by: [{field: "created_at", direction: ASC}],
+					filter: $filter,
+					order_by: [{field: "created_at", direction: DESC}],
 					limit: $limit
-				) {
-					id agent_id session_id author_session_id content created_at
-				}
+				) {`+notesProjection+`}
 			}}}
 		}`,
-		map[string]any{"sid": sessionID, "limit": limit},
+		map[string]any{"filter": filter, "limit": limit},
 		"hub.db.agent.session_notes",
 	)
 	if err != nil {
@@ -569,6 +643,56 @@ func (s *RuntimeStoreLocal) ListNotes(ctx context.Context, sessionID string, lim
 		return nil, err
 	}
 	return rows, nil
+}
+
+func (s *RuntimeStoreLocal) SearchNotes(ctx context.Context, sessionID, query string, opts ListNotesOpts) ([]NoteRow, error) {
+	if !s.embedderEnabled {
+		return nil, ErrNoEmbedder
+	}
+	if query == "" {
+		return nil, fmt.Errorf("runtime store: SearchNotes requires non-empty query")
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 5
+	}
+	filter := buildNotesFilter(sessionID, opts)
+	rows, err := queries.RunQuery[[]NoteRow](ctx, s.querier,
+		`query ($filter: hub_db_session_notes_filter, $semantic: SemanticSearchInput) {
+			hub { db { agent {
+				session_notes(filter: $filter, semantic: $semantic) {`+notesProjection+`}
+			}}}
+		}`,
+		map[string]any{
+			"filter":   filter,
+			"semantic": map[string]any{"query": query, "limit": limit},
+		},
+		"hub.db.agent.session_notes",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return rows, nil
+}
+
+// buildNotesFilter constructs the hub_db_session_notes_filter map
+// shared by ListNotes and SearchNotes. Phase 4.2.3 — sessionID is
+// always the storage location (root after climb-to-root); the
+// optional Window applies a created_at cutoff and Category narrows
+// by tag.
+func buildNotesFilter(sessionID string, opts ListNotesOpts) map[string]any {
+	filter := map[string]any{"session_id": map[string]any{"eq": sessionID}}
+	if opts.Window > 0 {
+		cutoff := time.Now().UTC().Add(-opts.Window).Format(time.RFC3339Nano)
+		filter["created_at"] = map[string]any{"gte": cutoff}
+	}
+	if opts.Category != "" {
+		filter["category"] = map[string]any{"eq": opts.Category}
+	}
+	return filter
 }
 
 func (s *RuntimeStoreLocal) ListChildren(ctx context.Context, parentID string) ([]SessionRow, error) {

@@ -275,15 +275,30 @@ CREATE INDEX IF NOT EXISTS session_events_vss
 CREATE TABLE IF NOT EXISTS session_notes (
     id                VARCHAR   PRIMARY KEY,
     agent_id          VARCHAR   NOT NULL,
+    -- Phase 4.2.3 — session_id is always the ROOT of the writing
+    -- session's parent chain. The notepad extension climbs
+    -- RootAncestor() before AppendNote so every session in the tree
+    -- sees the same notepad. session_notes_chain view preserves the
+    -- legacy parent-walk surface for observability.
     session_id        VARCHAR   NOT NULL,
-    -- spec 006 (schema 0.0.2): session that AUTHORED the note. Equals
-    -- session_id for self-scoped writes; differs when a sub-agent
-    -- promotes a note up the parent chain via memory_note(scope:"parent"
-    -- or "ancestors"). Drives author-only delete authority at the LLM
-    -- tool surface (memory_clear_note in pkg/memory/service.go).
+    -- Session that actually wrote the note. May differ from
+    -- session_id when a sub-agent's notepad:append climbs to root
+    -- for storage. Audit trail only — never used for visibility.
     author_session_id VARCHAR,
+    -- Phase 4.2.3 — open-string filtering tag, model-supplied at
+    -- notepad:append time; skills may advertise recommended values.
+    category          VARCHAR,
+    -- Tier of authoring session at write time: agent | coordinator
+    -- | worker. Set by runtime from author's tier.
+    author_role       VARCHAR,
+    -- Model-supplied short context phrase — what the writing
+    -- session thinks it is working on. Optional.
+    mission           VARCHAR,
     content           VARCHAR   NOT NULL,
     created_at        {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }}
+    {{ if gt .VectorSize 0 }}
+    ,embedding        {{ if isPostgres }}vector({{ .VectorSize }}){{ else }}FLOAT[{{ .VectorSize }}]{{ end }}
+    {{ end }}
 );
 
 {{ if isPostgres }}
