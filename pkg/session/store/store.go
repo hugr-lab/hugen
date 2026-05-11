@@ -233,6 +233,17 @@ func (s *RuntimeStoreLocal) OpenSession(ctx context.Context, row SessionRow) err
 	if row.OwnerID != "" {
 		data["owner_id"] = row.OwnerID
 	}
+	// Pre-existing bug fix (caught phase 4.2.2 δ.A): the parent
+	// linkage fields must reach the insert mutation, otherwise
+	// every subagent row lands with parent_session_id=NULL and
+	// sessions(filter: parent_session_id: eq) finds no children
+	// even though the spawn tree is correct in memory.
+	if row.ParentSessionID != "" {
+		data["parent_session_id"] = row.ParentSessionID
+	}
+	if row.SpawnedFromEventID != "" {
+		data["spawned_from_event_id"] = row.SpawnedFromEventID
+	}
 	if row.Metadata != nil {
 		data["metadata"] = row.Metadata
 	}
