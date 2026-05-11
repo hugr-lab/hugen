@@ -1,0 +1,112 @@
+# trivial_question_via_mission — δ.A smoke test for the 3-tier
+# topology. A simple non-data question that nevertheless must
+# traverse root → mission → worker per phase 4.2.2 §2 (deterministic
+# shape: root never answers directly; mission always spawns ≥1
+# worker even on trivial questions).
+#
+# By-eye assertions (queries below):
+#
+# 1. Root's tool_calls contains exactly one `session:spawn_mission`
+#    and one `session:wait_subagents`. Specifically NOT
+#    `session:spawn_subagent` (narrowed at β) and NOT any data tool
+#    (hugr-*, python-*, duckdb-*, bash-*).
+#
+# 2. Root has exactly one child session with metadata.spawn_skill
+#    set to "analyst". That child is the mission.
+#
+# 3. The mission's events include the on_mission_start scaffolding:
+#    a plan:set extension_frame (from MissionStartLookup +
+#    PlanSystemWriter), a whiteboard:init extension_frame (from
+#    WhiteboardSystemWriter). Both must precede the mission's
+#    first tool_call.
+#
+# 4. The mission's tool_calls contains `session:spawn_wave`. The
+#    mission has at least one child session (the worker handling
+#    the trivial Q&A).
+#
+# 5. Final session_terminated cascade: root terminates with reason
+#    "completed" (or "user:end_session" depending on harness
+#    shutdown). The mission and worker terminate cleanly too.
+#
+# Does NOT require hugr — the worker (analyst role
+# "simple-answerer") answers from LLM knowledge alone.
+name: trivial_question_via_mission
+requires: []
+
+steps:
+  - say: |
+      What is 2 + 2? Give the number plus a one-sentence
+      explanation of why.
+    budget: 240s
+    wait_for_subagents: 180s
+
+    queries:
+      # Root's tool calls. The pain-point: anything other than
+      # session:spawn_mission / session:wait_subagents /
+      # session:subagent_runs / plan:comment / plan:show /
+      # whiteboard:read here is a delegation failure for δ.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # The mission session — must be exactly one child with
+      # spawn_skill="analyst".
+      - name: mission_row
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # on_mission_start scaffolding in the mission's own events.
+      # Filters to extension_frame{plan, whiteboard} so the
+      # by-eye reviewer sees the plan:set + whiteboard:init the
+      # runtime fired before the mission's first model turn.
+      - name: mission_on_start_frames
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({id, frames: (.events // []) | map(select(.event_type == \"extension_frame\" and (.metadata.extension == \"plan\" or .metadata.extension == \"whiteboard\"))) | map({seq, extension: .metadata.extension, op: .metadata.op})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(order_by: [{field: "seq", direction: ASC}]) {
+                    seq event_type metadata
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Mission's children — at least one worker. Tag the worker's
+      # spawn_role so we know which analyst role mission picked
+      # (simple-answerer for a trivial Q&A).
+      - name: workers_under_mission
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, workers: (.children // []) | map({id, spawn_skill: .metadata.spawn_skill, spawn_role: .metadata.spawn_role, status})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  children: sessions(filter: {parent_session_id: {neq: ""}}) {
+                    id metadata status
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
