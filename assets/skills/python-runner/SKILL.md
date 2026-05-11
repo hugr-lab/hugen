@@ -23,7 +23,7 @@ metadata:
     requires: []
     autoload: false
     autoload_for: []
-    tier_compatibility: [root, mission, worker]
+    tier_compatibility: [mission, worker]
     sub_agents: []
 compatibility:
   model: any

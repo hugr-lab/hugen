@@ -23,7 +23,7 @@ metadata:
     requires: [_system]
     autoload: false
     autoload_for: []
-    tier_compatibility: [root, mission, worker]
+    tier_compatibility: [mission, worker]
     sub_agents: []
     intents: [data_query, file_analysis, spatial_analysis]
 compatibility:

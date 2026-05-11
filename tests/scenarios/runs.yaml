@@ -50,6 +50,10 @@ runs:
       - whiteboard_fanout3
       - graphql_query_builder
       - full_analyst_workflow
+      # η.2 — `_general` universal mission skill (catch-all fallback
+      # for non-data work; root must dispatch via `_general`, not
+      # `analyst`).
+      - general_shell_lookup
       # skill-machinery scenarios — independent of tier topology.
       - skill_save_bundle
       - skill_save_overwrite_collision

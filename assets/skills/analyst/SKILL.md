@@ -44,10 +44,54 @@ metadata:
           template: |
             User goal (delegated by root): {{ .UserGoal }}
 
-            You are running the `analyst` mission. Two structural
-            rules you MUST follow:
+            ══════════════════════════════════════════════════════
+            PRE-FLIGHT CHECKLIST — do this BEFORE the first
+            spawn_wave. Skipping these steps is the #1 source of
+            wasted latency.
 
-            ──────────────────────────────────────────────────────
+            ☐ A. COUNT independent angles in the user goal.
+              An "angle" = one entity / table / module / question
+              that can be explored without waiting on another.
+              Examples:
+                "Describe X"                     → N = 1
+                "Describe X, Y, Z"               → N = 3
+                "What does <DS> track + main
+                 entities + best aggregate"      → N = 3
+
+            ☐ B. PUBLISH N to the plan.
+              Call `plan:comment` with the literal text
+              "Wave 1 decomposition: N=<number>, angles=[<list>]"
+              BEFORE the first spawn_wave. This makes the count
+              auditable.
+
+            ☐ C. WAVE 1 = ONE spawn_wave call with N entries.
+              Multiple entries in a single call run IN PARALLEL.
+              YOU CANNOT fake parallelism with N sequential
+              spawn_wave calls — the second call only starts
+              after the first returns, costing N× the latency
+              for zero benefit.
+
+              ✘ ANTI-PATTERN (do NOT do this):
+                  spawn_wave({subagents: [{task: "explore X"}]})
+                  spawn_wave({subagents: [{task: "explore Y"}]})
+                  spawn_wave({subagents: [{task: "explore Z"}]})
+
+              ✔ CORRECT (single call, 3 entries):
+                  spawn_wave({subagents: [
+                    {task: "explore X"},
+                    {task: "explore Y"},
+                    {task: "explore Z"}
+                  ]})
+
+            ☐ D. Sequential waves are ONLY for true dependencies:
+                schema → query (query needs schema)
+                query → execute (execute needs query)
+                execute → report (report needs results)
+              Within a wave, parallelise everything independent.
+            ══════════════════════════════════════════════════════
+
+            Two more structural rules:
+
             1. Role catalogue lives on `analyst`. Every
                `session:spawn_wave` entry sets `skill: "analyst"`
                and picks one of {simple-answerer, schema-explorer,
@@ -55,9 +99,9 @@ metadata:
                NOT pass `skill: "_worker"` — that's a runtime
                primitive.
 
-            2. Read the manual before deciding waves. Before wave
-               1 on any DATA task, load + skim the relevant domain
-               skill so you understand what schemas exist and what
+            2. For DATA tasks, read the manual before deciding
+               waves. Load + skim the relevant domain skill so
+               you understand what schemas exist and what
                queries are realistic:
 
                  skill:load("hugr-data")
@@ -71,7 +115,6 @@ metadata:
                documentation surface; DO NOT call hugr-main:* /
                hugr-query:* tools yourself — workers do that.
                Mission coordinates; workers execute.
-            ──────────────────────────────────────────────────────
 
             Run the analyst playbook (always one or more workers,
             never answer inline — even for trivial questions):
@@ -82,41 +125,9 @@ metadata:
 
               Data work — staged pipeline (Hugr default):
 
-              **STEP 0 — DECOMPOSE THE GOAL BEFORE WAVE 1.**
-              Read the user's goal sentence by sentence and count
-              the INDEPENDENT angles / entities / tables / modules
-              it names. Write that decomposition into the plan
-              first via `plan:comment` so you can see it.
-              Generic examples (substitute the user's actual
-              entity / module / dataset names):
-
-                "Describe the <ENTITY> table in <DATASOURCE>"
-                  → 1 angle  → wave-1 has 1 schema-explorer.
-
-                "Describe <ENTITY_A>, <ENTITY_B>, <ENTITY_C> in
-                 <DATASOURCE>"
-                  → 3 angles → wave-1 has 3 schema-explorers IN
-                    PARALLEL (one spawn_wave call, 3 entries —
-                    one per entity).
-
-                "What does <DATASOURCE> track + main entities +
-                 an informative aggregate"
-                  → 3 angles → wave-1 has 3 schema-explorers IN
-                    PARALLEL (domain overview / entities map /
-                    candidate aggregate fields).
-
-              **STEP 1 — PARALLELISE within each wave.** A wave is
-              a SINGLE `session:spawn_wave` call with an array of
-              N entries that run concurrently. **DO NOT fire N
-              successive waves with one worker each — sequential
-              waves cost N× the latency for no gain.** Sequential
-              waves are valid ONLY when wave-K depends on
-              wave-(K-1)'s findings (schema → query → execute);
-              within a wave, parallelise everything independent.
-
                 Wave 1 — SCHEMA DISCOVERY (parallel × N angles)
                   ONE spawn_wave call with N `schema-explorer`
-                  entries, N = the decomposition count from STEP 0.
+                  entries, N = the count published in checklist B.
                   Each entry's `task` scopes to one angle. They
                   run `discovery-*` / `schema-*` tools ONLY and
                   each writes a structured schema-map to the
@@ -140,40 +151,12 @@ metadata:
                 Wave 4 — SYNTHESIS (sequential by nature)
                   ONE `report-builder` worker. Reads the whiteboard
                   ONLY (no data tools) and composes the final
-                  answer for root.
-
-              For simple "describe a table" / "schema summary"
-              goals, waves 2-3 are often unnecessary — wave-1
-              schema findings + wave-4 synthesis is enough.
-
-            Concrete call shapes:
-
-            Single-entity goal (N=1):
-
-              session:spawn_wave({
-                wave_label: "explore",
-                subagents: [
-                  {
-                    skill: "analyst",
-                    role:  "schema-explorer",
-                    task:  "Load hugr-data; skill:ref(skill=\"hugr-data\", ref=\"start\") + ref=\"overview\". Using ONLY discovery-* / schema-* tools, map the `<ENTITY>` entity in data source `<DATASOURCE>`: list its fields, types, and key relationships. Write a structured schema-map to the whiteboard."
-                  }
-                ]
-              })
-
-            Multi-entity goal (N=3) — ONE call, 3 entries:
-
-              session:spawn_wave({
-                wave_label: "explore-N",
-                subagents: [
-                  { skill: "analyst", role: "schema-explorer",
-                    task: "...map `<ENTITY_A>` in `<DATASOURCE>`..." },
-                  { skill: "analyst", role: "schema-explorer",
-                    task: "...map `<ENTITY_B>` in `<DATASOURCE>`..." },
-                  { skill: "analyst", role: "schema-explorer",
-                    task: "...map `<ENTITY_C>` in `<DATASOURCE>`..." }
-                ]
-              })
+                  answer for root. SKIP wave 4 entirely when the
+                  user explicitly says "no long report" or the
+                  deliverable is already complete on the
+                  whiteboard (e.g. "give me the validated query
+                  + a sample row" — query-builder's whiteboard
+                  output IS the deliverable).
 
             After each wave: `whiteboard:read` to gather findings,
             `plan:comment` to log progress, and DECIDE whether to

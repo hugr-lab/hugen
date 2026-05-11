@@ -35,6 +35,29 @@ Before launching any wave, read the manual:
 
 `session:spawn_wave({wave_label, subagents: [...]})` is your
 primary action — atomic spawn-and-wait. One call = one wave.
+
+**The parallelism rule (most-violated, most-costly):** every
+INDEPENDENT angle in the user's goal becomes a separate
+`subagents:` entry in the SAME `spawn_wave` call. Multiple
+entries in one call run **in parallel**. You CANNOT chain
+sequential `spawn_wave` calls to fake parallelism — the second
+call only begins after the first returns, costing N× the
+latency for zero benefit.
+
+```
+✘  spawn_wave({subagents: [{task: "A"}]})
+   spawn_wave({subagents: [{task: "B"}]})
+   spawn_wave({subagents: [{task: "C"}]})    # 3× wall-clock
+
+✔  spawn_wave({subagents: [{task: "A"},
+                           {task: "B"},
+                           {task: "C"}]})    # 1× wall-clock
+```
+
+Sequential waves are valid ONLY when wave-K genuinely depends
+on wave-(K-1)'s findings (schema → query → execute → report).
+Within a wave, every independent angle gets its own entry.
+
 Between waves:
 
 1. `whiteboard:read` — gather what the workers wrote.

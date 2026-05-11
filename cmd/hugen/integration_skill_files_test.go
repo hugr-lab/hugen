@@ -99,15 +99,21 @@ func TestSkill_FilesRoundTrip(t *testing.T) {
 	)
 
 	ctx := context.Background()
-	sess, _, err := mgr.Open(ctx, session.OpenRequest{OwnerID: "u"})
+	rootSess, _, err := mgr.Open(ctx, session.OpenRequest{OwnerID: "u"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { _ = mgr.Terminate(ctx, sess.ID(), "user:/end") })
+	t.Cleanup(func() { _ = mgr.Terminate(ctx, rootSess.ID(), "user:/end") })
 
-	// Load duckdb-data into the session via the skill extension's
-	// per-session handle (stage 5: state lives on *SessionSkill,
-	// not on the manager).
+	// duckdb-data is tier_compatibility:[mission, worker]; load it on
+	// a depth-1 child (mission tier), not on root. Spawn a child via
+	// session.Spawn — its Run loop will idle on an empty inbox until
+	// cleanup terminates the tree.
+	sess, err := rootSess.Spawn(ctx, session.SpawnSpec{Skill: "_general", Role: "test"})
+	if err != nil {
+		t.Fatalf("Spawn mission-tier child: %v", err)
+	}
+
 	if err := skillext.FromState(sess).Load(ctx, "duckdb-data"); err != nil {
 		t.Fatalf("Load duckdb-data: %v", err)
 	}
