@@ -1,71 +1,45 @@
-# full_analyst_workflow — the big one. Plan + whiteboard + 3
-# explorers + final report against real Hugr. This is the
-# scenario phase-4.2 analyst-skill iteration uses as its
-# regression line.
+# full_analyst_workflow — the flagship δ scenario; the full
+# 3-tier analyst pipeline against real Hugr. Mission decomposes
+# into multiple waves: schema discovery → query composition →
+# (optional) execution → synthesis. Phase 4.2.2 §13 + §6.
 #
-# By-eye:
-#   - Did root invoke the planner skill (plan:set + ≥3 plan:comment)?
-#   - Did root init a whiteboard?
-#   - Did root spawn 3 explorers (delegation, no direct hugr-main:*)?
-#   - Did each child write to the whiteboard?
-#   - Did root produce a final synthesis?
+# Topology:
+#   root              → spawn_mission(analyst)
+#   mission           → on_mission_start scaffolding
+#                     → wave 1: schema-explorer × N (parallel)
+#                     → wave 2: query-builder × M (parallel)
+#                     → wave 3: data-analyst × K (optional, parallel)
+#                     → wave 4: report-builder × 1 (synthesis)
+#                     → return synthesised final to root
+#   workers           → per-role tools (per analyst sub_agents)
 #
-# Requires hugr — same gating as hugr_data_explorer.
+# By-eye assertions: root narrow surface; mission picks waves
+# correctly; workers' role distribution matches the pipeline
+# stages; final answer cites actual data from the workers.
 name: full_analyst_workflow
 requires: [hugr]
 
 steps:
   - say: |
-      I want a high-level analysis of "northwind" — what it tracks,
-      who the stakeholders are, what aggregate metrics matter.
+      I want a high-level analysis of "northwind" data source:
+        - What does it track (the domain)?
+        - Who are the main entities and how do they relate?
+        - What aggregate metric is most informative (e.g. total
+          orders, average order value, top customer)? Compute it
+          and quote the actual number.
 
-      Use the analyst pattern:
-        1) Draft a 3-step plan via the planner skill.
-        2) Initialise a whiteboard.
-        3) Spawn 3 sub-agents using the hugr-data skill (no role
-           needed); each takes one of: entities, relationships,
-           aggregates. Each writes its findings to the whiteboard.
-        4) Read the whiteboard. Produce a final summary.
-
-      You are the orchestrator. Do not call hugr-main:* tools
-      yourself.
-    budget: 600s
-    wait_for_subagents: 300s
+      Use the analyst pattern: plan, fan out workers across the
+      stages of the pipeline, synthesise a structured 3-section
+      summary at the end.
+    # Multi-wave pipeline can take 8-12 min on gemini-pro even
+    # with the cheap-route for root/mission tier_intents. Generous
+    # budget; on the η Gemma run we tighten.
+    budget: 900s
+    wait_for_subagents: 780s
 
     queries:
-      # Plan ops — should show plan:set + 3+ plan:comment.
-      # Plan rides KindExtensionFrame with metadata.extension="plan".
-      - name: plan_ops
-        graphql: |
-          query ($sid: String!) {
-            jq(query: ".hub.db.agent.session_events | map(select(.metadata.extension == \"plan\")) | map({seq, op: .metadata.op, current_step: .metadata.data.current_step, text: .metadata.data.text})") {
-              hub { db { agent {
-                session_events(
-                  filter: {session_id: {eq: $sid}, event_type: {eq: "extension_frame"}}
-                  order_by: [{field: "seq", direction: ASC}]
-                ) { seq metadata }
-              }}}
-            }
-          }
-        vars: { sid: "$sid" }
-        path: extensions.jq.jq
-
-      # 3 children expected.
-      - name: subagent_rows
-        graphql: |
-          query ($sid: String!) {
-            hub { db { agent {
-              sessions(filter: {parent_session_id: {eq: $sid}}) {
-                id status session_type metadata
-              }
-            }}}
-          }
-        vars: { sid: "$sid" }
-
-      # Root tool calls — should be plan:* + whiteboard:* +
-      # session:spawn_subagent + session:wait_subagents +
-      # whiteboard:read + (optionally) skill:tools_catalog. NO
-      # hugr-main:* on root.
+      # Root: still narrow — spawn_mission + wait_subagents + at
+      # most a plan:comment.
       - name: tool_calls_root
         graphql: |
           query ($sid: String!) {
@@ -78,17 +52,83 @@ steps:
           }
         vars: { sid: "$sid" }
 
-      # Children tool calls — these SHOULD show hugr-main:* +
-      # whiteboard:write + (optionally) other data tools.
-      - name: tool_calls_children
+      # Mission's tool sequence — should show:
+      # skill_load → skill_files / skill_ref → plan_set →
+      # spawn_wave (wave 1) → whiteboard_read → plan_comment →
+      # spawn_wave (wave 2) → ... etc.
+      - name: mission_tool_sequence
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.sessions | map({id, calls: (.events // []) | map(select(.event_type == \"tool_call\")) | map({seq, tool_name})})") {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, tools: (.events // []) | map({seq, tool: .tool_name})})") {
               hub { db { agent {
                 sessions(filter: {parent_session_id: {eq: $sid}}) {
                   id
-                  events(order_by: [{field: "seq", direction: ASC}]) {
-                    seq event_type tool_name
+                  events(filter: {event_type: {eq: "tool_call"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq tool_name
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Per-wave subagent_started — confirms wave shape (one wave
+      # = one batched spawn). Each subagent_started carries the
+      # role the mission picked.
+      - name: spawns_per_wave
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, spawns: (.events // []) | map({seq, role: .metadata.role, skill: .metadata.skill})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "subagent_started"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq metadata
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Worker subtree — every spawned worker with its role +
+      # status + tool-call count. The proper full-pipeline shape
+      # has at least one of each role: schema-explorer, query-
+      # builder, data-analyst (optional), report-builder.
+      - name: worker_subtree
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission: .id, workers: (.child_sessions // []) | map({id, role: .metadata.spawn_role, status, tool_count: (.events // []) | length})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  child_sessions {
+                    id metadata status
+                    events(filter: {event_type: {eq: "tool_call"}}) {
+                      tool_name
+                    }
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Mission's plan trajectory — proves the playbook was used:
+      # plan:set at boot (from on_start) + comments at each wave
+      # boundary.
+      - name: plan_ops_mission
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, ops: (.events // []) | map(select(.event_type == \"extension_frame\" and .metadata.extension == \"plan\")) | map({seq, op: .metadata.op, current_step: .metadata.data.current_step})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "extension_frame"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq event_type metadata
                   }
                 }
               }}}

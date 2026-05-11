@@ -128,7 +128,7 @@ func makeRouter(t *testing.T) (*model.ModelRouter, *session.Agent) {
 	if err != nil {
 		t.Fatalf("router: %v", err)
 	}
-	agent, err := session.NewAgent("agent-it", "hugen", staticIdentity{id: "agent-it"}, "")
+	agent, err := session.NewAgent("agent-it", "hugen", staticIdentity{id: "agent-it"}, "", nil)
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}

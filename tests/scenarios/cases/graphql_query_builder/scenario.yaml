@@ -1,0 +1,89 @@
+# graphql_query_builder — user wants a validated GraphQL query
+# (not just data), abstract dataset / entity terminology. Tests
+# the "query-building task" wave pattern from the analyst body:
+# schema-explorer(s) → query-builder. Stop after wave 2.
+#
+# The prompt is deliberately abstract — no `northwind`, no
+# hard-coded table names — so we exercise the model's ability to
+# (a) decompose the goal, (b) discover the actual schema via
+# tools, (c) compose a real query from what it finds.
+#
+# Topology:
+#   root          → spawn_mission(analyst)
+#   mission       → on_start scaffolding
+#                 → wave 1: schema-explorer(s) per angle (parallel)
+#                 → wave 2: query-builder × 1 (composes + validates)
+#                 → return validated query + sample to root
+#
+# By-eye: at least one query-builder worker spawned; mission's
+# tool sequence shows schema → query path; final answer contains
+# a GraphQL query string the user can copy.
+name: graphql_query_builder
+requires: [hugr]
+
+steps:
+  - say: |
+      Build me a Hugr GraphQL query that returns payments and
+      providers aggregated data in the "op2023" data source. I
+      want the query itself plus a one-row sample so I can see
+      it works. You don't need a long report — the query + sample
+      is the deliverable.
+    # query-building flow: ~6-9 LLM turns through schema discovery
+    # + query composition + validation. Generous budget.
+    budget: 720s
+    wait_for_subagents: 600s
+
+    queries:
+      # Root narrow surface.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Mission's tool sequence — should show schema-read /
+      # plan-set / spawn_wave (wave 1) / whiteboard-read / spawn_wave
+      # (wave 2). Two waves expected; a third would be over-shaped
+      # for "give me a query + sample".
+      - name: mission_tool_sequence
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, tools: (.events // []) | map({seq, tool: .tool_name})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "tool_call"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq tool_name
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Worker subtree — at least one schema-explorer + one
+      # query-builder. report-builder optional for this scenario;
+      # the validated query + sample-row already answer the goal.
+      - name: worker_subtree
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission: .id, workers: (.child_sessions // []) | map({id, role: .metadata.spawn_role, status})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  child_sessions {
+                    id metadata status
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq

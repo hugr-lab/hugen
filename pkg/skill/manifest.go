@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/oasdiff/yaml"
@@ -168,20 +169,39 @@ type HugenMetadata struct {
 	Intents   []string                  `json:"intents,omitempty"`
 	SubAgents []SubAgentRole            `json:"sub_agents,omitempty"`
 	Memory    map[string]MemoryCategory `json:"memory,omitempty"`
+
+	// Mission, when Enabled, declares the skill as a mission
+	// dispatcher: root sees its Summary in the "Available
+	// missions" prompt block and may pass it to session:spawn_mission.
+	// Phase 4.2.2 §6. The block is enforceable only on extensions
+	// (non-`_` names) — system skills are runtime primitives, not
+	// dispatch targets.
+	Mission MissionBlock `json:"mission,omitempty" yaml:"mission,omitempty"`
+
+	// MaxTurns / MaxTurnsHard / StuckDetection are conceptually
+	// per-session-tier, not per-skill — they tune the turn-loop and
+	// stuck-detect heuristics, which depend on the session's role
+	// (root=routing, mission=coordination, worker=execution), not on
+	// which skill is loaded. They live on the manifest today as a
+	// phase-4 artefact, when sessions had no tier.
+	//
+	// DEFERRED to phase 5: migrate to per-tier defaults in
+	// config.yaml.session.tier_defaults + per-role overrides on
+	// SubAgentRole. Until then the runtime keeps the current
+	// "max across loaded skills" composition with bumped defaults
+	// (defaultMaxToolIterations = 40, hard = 80) sized for the
+	// 3-tier topology landed in phase 4.2.2.
+
 	// MaxTurns is the per-skill cap on the model→tool→model loop
-	// inside a single user turn. Different skills warrant different
-	// budgets — explorer/analyst skills routinely need 25+ tool
-	// turns, while a quick-task skill may want a tight 3 to fail
-	// fast. The runtime takes the max across loaded skills; 0 (or
-	// absent) defers to the runtime default (defaultMaxToolIterations,
-	// currently 15).
+	// inside a single user turn. 0 (absent) defers to the runtime
+	// default (defaultMaxToolIterations).
 	MaxTurns int `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
 
 	// MaxTurnsHard is the per-skill hard ceiling on the model→tool
 	// →model loop, after which the runtime calls
 	// Manager.Terminate(self, "hard_ceiling") rather than soft-
-	// nudge the model. 0 (or absent) defers to the runtime default
-	// (MaxTurns * 2). See phase-4-spec §8.2.
+	// nudge the model. 0 (absent) defers to defaultMaxToolIterations
+	// * 2. See phase-4-spec §8.2.
 	MaxTurnsHard int `json:"max_turns_hard,omitempty" yaml:"max_turns_hard,omitempty"`
 
 	// StuckDetection tunes the per-pattern detectors operating
@@ -192,35 +212,33 @@ type HugenMetadata struct {
 	StuckDetection StuckDetectionPolicy `json:"stuck_detection,omitempty" yaml:"stuck_detection,omitempty"`
 
 	// Autoload, when true, tells the SessionManager to load this
-	// skill into every newly opened session whose type appears in
+	// skill into every newly opened session whose tier appears in
 	// AutoloadFor. Loading is idempotent — manual /skill load of
 	// the same name is a no-op.
+	//
+	// Reserved for system skills: a manifest with autoload:true
+	// whose Name does not begin with "_" is rejected at parse time
+	// (phase 4.2.2 §1). The "_" prefix is the structural marker
+	// that distinguishes core/runtime skills from extensions.
 	Autoload bool `json:"autoload,omitempty" yaml:"autoload,omitempty"`
 
-	// AutoloadFor is the list of session types in which Autoload
-	// fires. Recognised values:
-	//   - "root"     — sessions where the user talks to the main
-	//                  agent (the only kind in phase 3).
-	//   - "subagent" — sessions where the main agent talks to a
-	//                  spawned sub-agent (phase 4).
-	// Empty defaults to ["root"] — the conservative behaviour that
-	// keeps autoload skills out of sub-agent sessions until an
-	// author opts in.
+	// AutoloadFor is the list of tiers in which Autoload fires.
+	// Recognised values: "root", "mission", "worker" (phase 4.2.2
+	// §2). An entry outside that set is rejected at parse time.
+	// Required when Autoload is true; the runtime never infers a
+	// default tier — authors declare placement deliberately.
 	AutoloadFor []string `json:"autoload_for,omitempty" yaml:"autoload_for,omitempty"`
 
-	// AutoloadWhenRoleCanSpawn gates autoload on the sub-agent's
-	// role having CanSpawn=true. Used by skills that only make
-	// sense for orchestrators (e.g. _whiteboard for a sub-agent
-	// that itself spawns deeper children). No-op for root
-	// sessions. Phase-4-spec §3 step 8 + §7.7.
-	AutoloadWhenRoleCanSpawn bool `json:"autoload_when_role_can_spawn,omitempty" yaml:"autoload_when_role_can_spawn,omitempty"`
-
-	// AutoloadWhenParentHasActiveWhiteboard gates autoload on the
-	// parent session currently owning an active whiteboard. The
-	// canonical user is _whiteboard for sub-agents — the skill is
-	// only useful when a broadcast channel exists upstream.
-	// Phase-4-spec §3 step 8 + §7.7.
-	AutoloadWhenParentHasActiveWhiteboard bool `json:"autoload_when_parent_has_active_whiteboard,omitempty" yaml:"autoload_when_parent_has_active_whiteboard,omitempty"`
+	// TierCompatibility lists the tiers where the skill may be
+	// loaded at all, whether via autoload or via explicit
+	// skill:load. Outside this set the skill is invisible: it does
+	// not appear in skill:tools_catalog.available_in_skills and a
+	// direct skill:load surfaces tool_error{code:"tier_forbidden"}.
+	// Empty defaults to ["worker"] — the safest tier where domain
+	// tools are useful. Invariant: AutoloadFor ⊆ TierCompatibility
+	// (a skill cannot auto-load where it would be forbidden
+	// manually). Phase 4.2.2 §3.
+	TierCompatibility []string `json:"tier_compatibility,omitempty" yaml:"tier_compatibility,omitempty"`
 }
 
 // AllRequires returns the merged transitive-dependency list,
@@ -280,83 +298,83 @@ func (p StuckDetectionPolicy) IsEnabled() bool {
 	return *p.Enabled
 }
 
-// AutoloadIn reports whether the manifest opts into autoload for
-// the given session type, ignoring phase-4 conditional gates. Use
+// AutoloadInTier reports whether the manifest opts into autoload
+// for the given tier, ignoring phase-4 conditional gates. Use
 // AutoloadEligible when the conditional flags
 // (AutoloadWhenRoleCanSpawn / AutoloadWhenParentHasActiveWhiteboard)
-// matter — typically at sub-agent spawn time.
+// matter — typically at spawn time.
 //
-// Resolves the empty-AutoloadFor default ([root]) so callers don't
-// repeat the rule.
-func (m *Manifest) AutoloadIn(sessionType string) bool {
+// Phase 4.2.2: AutoloadFor must be explicit when Autoload is true
+// (parse-time invariant). No empty-defaults — authors declare tier
+// placement deliberately.
+func (m *Manifest) AutoloadInTier(tier string) bool {
 	if !m.Hugen.Autoload {
 		return false
 	}
-	if len(m.Hugen.AutoloadFor) == 0 {
-		return sessionType == SessionTypeRoot
-	}
-	for _, t := range m.Hugen.AutoloadFor {
-		if t == sessionType {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(m.Hugen.AutoloadFor, tier)
 }
 
-// AutoloadContext carries the per-session signals AutoloadEligible
-// consults to evaluate the phase-4 conditional autoload flags.
-// Callers populate it from session/role state at the autoload
-// decision point (sub-agent spawn for the conditional flags,
-// session open for plain autoload). Zero-value fields are safe —
-// they map to "no conditional restriction satisfied" so a manifest
-// requiring the gate stays out of the session.
-type AutoloadContext struct {
-	// SessionType is one of SessionTypeRoot / SessionTypeSubAgent.
-	// Required.
-	SessionType string
-
-	// RoleCanSpawn is the SubAgentRole.CanSpawnEffective() value of
-	// the role this sub-agent was spawned with. Ignored for root
-	// sessions. Consumed only by manifests that set
-	// AutoloadWhenRoleCanSpawn.
-	RoleCanSpawn bool
-
-	// ParentHasActiveWhiteboard is whether the parent session
-	// currently owns an active whiteboard at spawn time. Consumed
-	// only by manifests that set
-	// AutoloadWhenParentHasActiveWhiteboard.
-	ParentHasActiveWhiteboard bool
+// EffectiveTierCompatibility returns the set of tiers where the
+// skill is loadable. Falls back to [TierWorker] when the manifest
+// omits the field — the default per phase 4.2.2 §3.3.2 (safest
+// tier where domain tools are useful; matches every existing
+// bundled extension's intent).
+func (m *Manifest) EffectiveTierCompatibility() []string {
+	if len(m.Hugen.TierCompatibility) > 0 {
+		return m.Hugen.TierCompatibility
+	}
+	return []string{TierWorker}
 }
 
-// AutoloadEligible reports whether the manifest should be autoloaded
-// into a session described by ctx. Combines the base AutoloadIn
-// predicate with the phase-4 conditional gates: each "AutoloadWhen…"
-// flag, when true, ANDs an extra precondition on top of the base
-// autoload check.
-//
-// Conditional flags are skipped for root sessions — they target
-// sub-agent autoload semantics by definition.
-func (m *Manifest) AutoloadEligible(ctx AutoloadContext) bool {
-	if !m.AutoloadIn(ctx.SessionType) {
-		return false
-	}
-	if ctx.SessionType != SessionTypeSubAgent {
-		return true
-	}
-	if m.Hugen.AutoloadWhenRoleCanSpawn && !ctx.RoleCanSpawn {
-		return false
-	}
-	if m.Hugen.AutoloadWhenParentHasActiveWhiteboard && !ctx.ParentHasActiveWhiteboard {
-		return false
-	}
-	return true
+// LoadableInTier reports whether the skill may be loaded into a
+// session at the given tier. Consulted by skill:load and
+// skill:tools_catalog gates — outside the returned set, the skill
+// is invisible from the model's perspective.
+func (m *Manifest) LoadableInTier(tier string) bool {
+	return slices.Contains(m.EffectiveTierCompatibility(), tier)
 }
 
-// SessionType labels for Manifest.AutoloadFor entries.
+// AutoloadEligible reports whether the manifest should be
+// autoloaded into a session at the given tier. Phase 4.2.2 §3.3.1
+// — the phase-4 conditional gates (AutoloadWhenRoleCanSpawn /
+// AutoloadWhenParentHasActiveWhiteboard) are gone; tier_compatibility
+// + the on_mission_start hook (phase γ) cover the same semantics
+// declaratively.
+func (m *Manifest) AutoloadEligible(tier string) bool {
+	return m.AutoloadInTier(tier)
+}
+
+// Tier labels accepted in autoload_for / tier_compatibility entries
+// and returned by TierFromDepth. The set is closed: the parser
+// rejects any other value.
 const (
-	SessionTypeRoot     = "root"
-	SessionTypeSubAgent = "subagent"
+	TierRoot    = "root"
+	TierMission = "mission"
+	TierWorker  = "worker"
 )
+
+// validTiers is the closed set of tier labels the manifest parser
+// accepts in autoload_for / tier_compatibility entries.
+var validTiers = map[string]struct{}{
+	TierRoot:    {},
+	TierMission: {},
+	TierWorker:  {},
+}
+
+// TierFromDepth maps a session's depth to its tier. depth 0 is
+// the user-facing root, depth 1 is the mission root spawns, and
+// depth ≥ 2 is a worker (spawned by a mission, or by another
+// worker via opt-in can_spawn:true). Phase 4.2.2 §2.
+func TierFromDepth(depth int) string {
+	switch {
+	case depth <= 0:
+		return TierRoot
+	case depth == 1:
+		return TierMission
+	default:
+		return TierWorker
+	}
+}
 
 // SubAgentRole is the manifest shape phase-3 validates and
 // phase-4 dispatches.
@@ -401,6 +419,59 @@ type MemoryCategory struct {
 	SummariseAt int    `json:"summarise_at,omitempty"`
 }
 
+// MissionBlock is the dispatch-eligibility metadata for an
+// extension that wants to be selectable as a mission via
+// session:spawn_mission. Phase 4.2.2 §6.
+//
+// Enabled is the gate: only skills with Enabled=true appear in
+// root's "Available missions" prompt block and pass spawn_mission's
+// catalogue validation. Summary is what root sees per skill;
+// Keywords is optional hint material consumed by the same prompt
+// builder. OnStart fires synthetically before the mission's first
+// model turn so the mission boots with plan/whiteboard already
+// in place (phase 4.2.2 §7).
+type MissionBlock struct {
+	Enabled  bool           `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Summary  string         `json:"summary,omitempty" yaml:"summary,omitempty"`
+	Keywords []string       `json:"keywords,omitempty" yaml:"keywords,omitempty"`
+	OnStart  MissionOnStart `json:"on_start,omitempty" yaml:"on_start,omitempty"`
+}
+
+// MissionOnStart describes the per-skill boot sequence the runtime
+// fires before the spawned mission's first model turn. All three
+// sub-blocks are optional: omit any to skip that step. Templates
+// use text/template with a fixed vocabulary (.UserGoal,
+// .ParentSkill, .Inputs). Phase 4.2.2 §7.
+type MissionOnStart struct {
+	Plan         MissionOnStartPlan         `json:"plan,omitempty" yaml:"plan,omitempty"`
+	Whiteboard   MissionOnStartWhiteboard   `json:"whiteboard,omitempty" yaml:"whiteboard,omitempty"`
+	FirstMessage MissionOnStartFirstMessage `json:"first_message,omitempty" yaml:"first_message,omitempty"`
+}
+
+// MissionOnStartPlan declares the plan body the runtime sets on
+// the mission via the system-principal plan write path before
+// the mission's first turn. BodyTemplate runs through text/template;
+// CurrentStep is the literal focus step (no template).
+type MissionOnStartPlan struct {
+	BodyTemplate string `json:"body_template,omitempty" yaml:"body_template,omitempty"`
+	CurrentStep  string `json:"current_step,omitempty" yaml:"current_step,omitempty"`
+}
+
+// MissionOnStartWhiteboard toggles a synthetic whiteboard:init
+// at mission boot. Only Init is meaningful today (true → init);
+// future fields may carry initial categories / retention overrides.
+type MissionOnStartWhiteboard struct {
+	Init bool `json:"init,omitempty" yaml:"init,omitempty"`
+}
+
+// MissionOnStartFirstMessage optionally overrides the mission's
+// first user-role message. Template runs through text/template.
+// When omitted the runtime uses the bare `goal` string from
+// spawn_mission as the first user message.
+type MissionOnStartFirstMessage struct {
+	Template string `json:"template,omitempty" yaml:"template,omitempty"`
+}
+
 var (
 	// agentskills.io: name is [A-Za-z0-9_-]{1,64}.
 	nameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -441,7 +512,68 @@ func Parse(content []byte) (Manifest, error) {
 		return m, fmt.Errorf("%w: %v", ErrManifestInvalid, err)
 	}
 	m.Hugen = hugen
+
+	if err := m.validateHugen(); err != nil {
+		// errors.Join so both ErrManifestInvalid and any inner
+		// sentinel (e.g. ErrAutoloadReserved) reach errors.Is.
+		return m, errors.Join(ErrManifestInvalid, err)
+	}
 	return m, nil
+}
+
+// validateHugen runs the parse-time invariants that depend on the
+// typed Hugen projection. Separate from validate() because
+// extractHugen runs after the top-level validate; folding these
+// into validate would couple ordering. Phase 4.2.2 §3.3.
+func (m *Manifest) validateHugen() error {
+	for i, t := range m.Hugen.AutoloadFor {
+		if _, ok := validTiers[t]; !ok {
+			return fmt.Errorf("metadata.hugen.autoload_for[%d] = %q: must be one of [%s,%s,%s]",
+				i, t, TierRoot, TierMission, TierWorker)
+		}
+	}
+	for i, t := range m.Hugen.TierCompatibility {
+		if _, ok := validTiers[t]; !ok {
+			return fmt.Errorf("metadata.hugen.tier_compatibility[%d] = %q: must be one of [%s,%s,%s]",
+				i, t, TierRoot, TierMission, TierWorker)
+		}
+	}
+
+	if m.Hugen.Autoload {
+		if !strings.HasPrefix(m.Name, "_") {
+			return fmt.Errorf("metadata.hugen.autoload: true is reserved for system skills (name must start with %q, got %q): %w",
+				"_", m.Name, ErrAutoloadReserved)
+		}
+		if len(m.Hugen.AutoloadFor) == 0 {
+			return errors.New("metadata.hugen.autoload: true requires explicit metadata.hugen.autoload_for")
+		}
+	}
+	// mission.enabled is permitted on both `_`-prefixed (system)
+	// and bare-named (extension) skills. The former covers
+	// runtime-bundled universal mission dispatchers (e.g.
+	// `_general` — the catch-all fallback mission for tasks that
+	// don't fit a specialised skill). The latter covers
+	// operator/community-contributed mission skills like
+	// `analyst`, `coder`, `writer`. Autoload is the only `_`-only
+	// invariant — see the m.Hugen.Autoload check above. Phase 4.2.2
+	// §6 (revised).
+
+	// autoload_for ⊆ effective tier_compatibility — a skill cannot
+	// auto-load into a tier where skill:load would reject it.
+	if len(m.Hugen.AutoloadFor) > 0 {
+		compat := m.EffectiveTierCompatibility()
+		compatSet := make(map[string]struct{}, len(compat))
+		for _, t := range compat {
+			compatSet[t] = struct{}{}
+		}
+		for _, t := range m.Hugen.AutoloadFor {
+			if _, ok := compatSet[t]; !ok {
+				return fmt.Errorf("metadata.hugen.autoload_for contains %q but tier_compatibility (effective %v) does not — autoload_for must be a subset of tier_compatibility",
+					t, compat)
+			}
+		}
+	}
+	return nil
 }
 
 // ParseReader is a convenience wrapper around Parse for io.Reader.

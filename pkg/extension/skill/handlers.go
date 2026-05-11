@@ -214,6 +214,23 @@ func (h *SessionSkill) callLoad(ctx context.Context, args json.RawMessage) (json
 		return nil, fmt.Errorf("%w: skill:load: name required", tool.ErrArgValidation)
 	}
 	if err := h.Load(ctx, in.Name); err != nil {
+		// Tier mismatch is the only error the LLM can productively
+		// recover from — surface it as a structured envelope so the
+		// model sees code + hint without parsing the Go error
+		// string. Other errors (cycle, not_found, perm) keep the
+		// existing native-error path.
+		if errors.Is(err, skillpkg.ErrTierForbidden) {
+			body, mErr := json.Marshal(map[string]any{
+				"error": map[string]string{
+					"code":    "tier_forbidden",
+					"message": err.Error(),
+				},
+			})
+			if mErr != nil {
+				return nil, err
+			}
+			return body, nil
+		}
 		return nil, err
 	}
 	h.emitOp(ctx, OpLoad, in.Name)

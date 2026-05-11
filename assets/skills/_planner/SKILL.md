@@ -13,7 +13,8 @@ metadata:
   hugen:
     requires_skills: []
     autoload: true
-    autoload_for: [root]
+    autoload_for: [mission, worker]
+    tier_compatibility: [root, mission, worker]
 compatibility:
   model: any
   runtime: hugen-phase-4
@@ -89,16 +90,25 @@ overhead bounded; a 30-comment log doesn't bloat every prompt.
 When you exceed any cap the runtime appends a small truncation
 marker in the visible projection.
 
-## Working with sub-agents
+## Tier-specific use
 
-If you spawn sub-agents that themselves do significant work, opt
-those sub-agent skills into `_planner` via `requires_skills:
-[_planner]` so each child has its own independent plan. The plans
-do not share state — every session has its own.
+- **Root** does not autoload `_planner` (phase 4.2.2). Root is a
+  pure router with `plan:comment` + `plan:show` only via `_root`
+  — it borrows the mission's narrative for breadcrumbs and never
+  owns a plan body.
+- **Mission** owns the plan body (auto-populated by your
+  dispatching skill's `on_mission_start`); use `plan:comment`
+  at every wave boundary, `plan:set` only when scope materially
+  changes (rare — you usually re-decompose via a new wave).
+- **Worker** has its OWN plan, isolated from the mission's.
+  Use it for multi-step domain work (10+ tool calls, branching
+  exploration) so a tight turn-loop doesn't lose the thread.
+  For 1-2-turn trivial tasks (e.g. `simple-answerer`) skip the
+  plan — overhead beats benefit.
 
 ## What this skill does NOT grant
 
 - The `_planner` skill itself doesn't authorise sub-agent spawn,
   whiteboard, or any other orchestration primitive — it's a pure
-  planning surface. Combine with `_root` / `_subagent` / `_whiteboard`
+  planning surface. Combine with `_root` / `_mission` / `_worker`
   for the rest.

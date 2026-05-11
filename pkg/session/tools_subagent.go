@@ -29,6 +29,20 @@ func (s *Session) initSubagent() {
 		ArgSchema:        json.RawMessage(spawnSubagentSchema),
 		Handler:          s.callSpawnSubagent,
 	}
+	s.sessionTools["spawn_mission"] = sessionToolDescriptor{
+		Name:             "spawn_mission",
+		Description:      "Delegate the current user request to a single mission coordinator. Singular — root spawns one mission per request, never fans out directly.",
+		PermissionObject: permObjectSubagentSpawn,
+		ArgSchema:        json.RawMessage(spawnMissionSchema),
+		Handler:          s.callSpawnMission,
+	}
+	s.sessionTools["spawn_wave"] = sessionToolDescriptor{
+		Name:             "spawn_wave",
+		Description:      "Atomic spawn+wait: fan out a set of workers and block until each terminates. The mission's coordination primitive — one call per wave, returns per-worker results.",
+		PermissionObject: permObjectSubagentSpawn,
+		ArgSchema:        json.RawMessage(spawnWaveSchema),
+		Handler:          s.callSpawnWave,
+	}
 	s.sessionTools["wait_subagents"] = sessionToolDescriptor{
 		Name:             "wait_subagents",
 		Description:      "Block until each listed sub-agent produces a terminal result. Returns one row per id.",

@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/tool"
 	"github.com/hugr-lab/hugen/pkg/tool/providers/policies"
 	"github.com/hugr-lab/query-engine/types"
@@ -195,7 +195,7 @@ func us3NewSession(t *testing.T, mdl model.Model, perms perm.Service, agentID st
 	}
 
 	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent(agentID, "hugen", &fakeIdentity{id: agentID}, "")
+	agent, err := NewAgent(agentID, "hugen", &fakeIdentity{id: agentID}, "", nil)
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}

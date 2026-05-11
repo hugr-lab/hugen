@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/identity"
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -90,7 +90,7 @@ func ptr[T any](v T) *T { return &v }
 func newTestSession(t *testing.T, store RuntimeStore, mdl model.Model) (*Session, context.CancelFunc) {
 	t.Helper()
 	router := newRouterWithModel(t, mdl)
-	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
+	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "", nil)
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}

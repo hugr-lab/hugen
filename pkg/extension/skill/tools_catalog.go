@@ -35,10 +35,10 @@ import (
 //     case-insensitive substring filter.
 
 const (
-	toolNameToolsCatalog       = providerName + ":tools_catalog"
-	permObjectToolsCatalog     = "hugen:tool:system"
-	toolDescToolsCatalog       = "Returns the catalogue of every provider and tool the agent process has registered. `granted_to_session` reflects whether the calling session's loaded skills admit each tool. `available_in_skills` lists every skill in the catalogue whose allowed-tools admit it (use one of those names with `skill:load` to enable the tool when `granted_to_session=false`). Optional filters: `provider` (exact name) + `pattern` (case-insensitive substring on tool name)."
-	toolsCatalogSchema         = `{
+	toolNameToolsCatalog   = providerName + ":tools_catalog"
+	permObjectToolsCatalog = "hugen:tool:system"
+	toolDescToolsCatalog   = "Returns the catalogue of every provider and tool the agent process has registered. `granted_to_session` reflects whether the calling session's loaded skills admit each tool. `available_in_skills` lists every skill in the catalogue whose allowed-tools admit it (use one of those names with `skill:load` to enable the tool when `granted_to_session=false`). Optional filters: `provider` (exact name) + `pattern` (case-insensitive substring on tool name)."
+	toolsCatalogSchema     = `{
   "type": "object",
   "properties": {
     "provider": {"type": "string", "description": "Optional provider name filter (e.g. \"hugr-main\"). Returns all providers when omitted."},
@@ -96,7 +96,11 @@ func (h *SessionSkill) callToolsCatalog(ctx context.Context, args json.RawMessag
 	// granted_to_session: tools the loaded skills admit (the same
 	// allow-set FilterTools applies to the model-facing snapshot).
 	allowed := allowedFromHandle(ctx, h)
-	skillIndex := buildSkillToolsIndex(ctx, h.manager)
+	// Tier filter on available_in_skills (phase 4.2.2 §3.3.3): the
+	// discovery channel hides skills the caller's tier cannot load.
+	// Out of sight, out of mind for weak models that would
+	// otherwise try skill:load and get tier_forbidden back.
+	skillIndex := buildSkillToolsIndex(ctx, h.manager, h.tier)
 
 	groups := make(map[string][]toolsCatalogEntry)
 	for _, t := range snap.Tools {
@@ -160,7 +164,7 @@ type skillToolPattern struct {
 	skill  string
 }
 
-func buildSkillToolsIndex(ctx context.Context, sm *skillpkg.SkillManager) *skillToolsIndex {
+func buildSkillToolsIndex(ctx context.Context, sm *skillpkg.SkillManager, callerTier string) *skillToolsIndex {
 	idx := &skillToolsIndex{exact: map[string][]string{}}
 	if sm == nil {
 		return idx
@@ -170,6 +174,15 @@ func buildSkillToolsIndex(ctx context.Context, sm *skillpkg.SkillManager) *skill
 		return idx
 	}
 	for _, sk := range all {
+		// Tier filter: hide skills the caller's tier cannot load.
+		// Per phase 4.2.2 §3.3.3 the catalogue is the primary line
+		// of defence — if the model never sees the skill name, it
+		// never tries to skill:load it. The skill:load gate
+		// remains the secondary check (manual loads still get a
+		// structured tier_forbidden envelope).
+		if callerTier != "" && !sk.Manifest.LoadableInTier(callerTier) {
+			continue
+		}
 		// Tri-state AllowedTools:
 		//   - nil       → absent. Skill inherits union; surface
 		//                 in available_in_skills for every tool

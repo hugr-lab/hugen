@@ -42,11 +42,11 @@ type Session struct {
 	models           *model.ModelRouter
 	codec            *protocol.Codec
 	cmds             *CommandRegistry
-	tools            *tool.ToolManager   // per-session child manager; required (NewSession derives it)
-	rootTools        *tool.ToolManager   // parent (agent-level) manager; passed to subagents
-	perms            perm.Service        // optional; consulted by tool handlers (skill_files etc.)
-	maxToolIters     int                 // 0 → defaultMaxToolIterations
-	maxToolItersHard int                 // 0 → 2 × resolved soft cap
+	tools            *tool.ToolManager // per-session child manager; required (NewSession derives it)
+	rootTools        *tool.ToolManager // parent (agent-level) manager; passed to subagents
+	perms            perm.Service      // optional; consulted by tool handlers (skill_files etc.)
+	maxToolIters     int               // 0 → defaultMaxToolIterations
+	maxToolItersHard int               // 0 → 2 × resolved soft cap
 	logger           *slog.Logger
 
 	// sessionTools is the static dispatch table. tools_subagent.go's
@@ -1405,16 +1405,21 @@ func (s *Session) buildMessages(ctx context.Context) []model.Message {
 
 // systemPrompt assembles the system-prompt body for the next
 // model.Generate call. Order:
-//  1. Agent constitution (universal rules).
-//  2. Extension Advertiser sections — registration order. Plan ext
+//  1. Session tier header — "Session tier: <tier>" line that
+//     anchors the constitution's Session-tier section to the
+//     concrete tier of this session (phase 4.2.2 §9).
+//  2. Agent constitution (universal rules + Session tier section).
+//  3. Extension Advertiser sections — registration order. Plan ext
 //     advertises the active-plan block (registered before skill so
 //     it lands ahead of skill instructions / catalogue); skill ext
 //     contributes (a) the body of every loaded skill and (b) the
 //     catalogue of every skill the agent can reach.
 func (s *Session) systemPrompt(ctx context.Context) string {
 	var parts []string
+	tier := skillpkg.TierFromDepth(s.depth)
+	parts = append(parts, "Session tier: "+tier)
 	if s.agent != nil {
-		if c := s.agent.Constitution(); c != "" {
+		if c := s.agent.ConstitutionFor(tier); c != "" {
 			parts = append(parts, c)
 		}
 	}
@@ -1447,6 +1452,18 @@ func (s *Session) modelToolsForSession(ctx context.Context) ([]model.Tool, error
 	if err != nil {
 		return nil, err
 	}
+	if s.logger != nil && s.logger.Enabled(ctx, slog.LevelDebug) {
+		names := make([]string, 0, len(snap.Tools))
+		for _, t := range snap.Tools {
+			names = append(names, t.Name)
+		}
+		s.logger.Debug("session: tool snapshot",
+			"session", s.id,
+			"tier", skillpkg.TierFromDepth(s.depth),
+			"depth", s.depth,
+			"count", len(snap.Tools),
+			"tools", names)
+	}
 	out := make([]model.Tool, 0, len(snap.Tools))
 	for _, t := range snap.Tools {
 		var schema map[string]any
@@ -1468,11 +1485,21 @@ func (s *Session) modelToolsForSession(ctx context.Context) ([]model.Tool, error
 
 // defaultMaxToolIterations is the per-Turn cap on
 // model→tool→model loops applied when the session was
-// constructed without WithMaxToolIterations. 20 covers
-// hugr-data exploration patterns where the model legitimately
-// chains discovery → schema lookup → query validate → query
-// without hitting the cap on a single user request.
-const defaultMaxToolIterations = 20
+// constructed without WithMaxToolIterations. 40 covers the
+// 3-tier topology (phase 4.2.2) where a worker may chain
+// discovery → schema → validate → query → refine across the
+// course of one wave, and mission may iterate over multiple
+// wave + synthesis turns inside a single user request. The
+// hard ceiling is defaultMaxToolIterations * 2.
+//
+// TODO(phase 5): replace with per-tier defaults
+// (root=10 / mission=30 / worker=40-ish) plus per-role
+// override on SubAgentRole. Same migration applies to
+// HugenMetadata.MaxTurns / MaxTurnsHard / StuckDetection —
+// all three are conceptually per-session-tier, not per-skill.
+// See open question in phase 4.2.2 spec + phase 5 compactor
+// + HITL plan.
+const defaultMaxToolIterations = 40
 
 // dispatchToolCall handles one model-emitted tool call: emits the
 // tool_call frame, runs Tier-1 permission resolution, and either

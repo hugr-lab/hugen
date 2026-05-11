@@ -43,14 +43,14 @@ import (
 // Outside this module nobody should be assembling a Deps by hand —
 // the public surface for that is NewManager.
 type Deps struct {
-	Store     store.RuntimeStore
-	Agent     *Agent
-	Models    *model.ModelRouter
-	Commands  *CommandRegistry
-	Codec     *protocol.Codec
-	Tools     *tool.ToolManager
-	Logger    *slog.Logger
-	Opts      []SessionOption
+	Store    store.RuntimeStore
+	Agent    *Agent
+	Models   *model.ModelRouter
+	Commands *CommandRegistry
+	Codec    *protocol.Codec
+	Tools    *tool.ToolManager
+	Logger   *slog.Logger
+	Opts     []SessionOption
 
 	// Extensions is the agent-level set of registered extensions.
 	// NewSession iterates this list and dispatches each extension to
@@ -69,6 +69,23 @@ type Deps struct {
 	// keep working before the config view lands). Constructors
 	// without a configured value fall back to DefaultMaxDepth.
 	MaxDepth int
+
+	// DefaultMissionSkill is the fallback skill name for
+	// session:spawn_mission when the model omits the `skill`
+	// argument or no mission-enabled skills resolve. Empty means
+	// no fallback — a missing skill argument with no installed
+	// mission dispatcher surfaces tool_error{code:"no_mission_skill"}.
+	// Phase 4.2.2 §6.
+	DefaultMissionSkill string
+
+	// TierIntents maps a session tier (root/mission/worker, per
+	// skill.TierFromDepth) to the model-router intent the runtime
+	// applies as the spawned child's default. Per-role overrides
+	// (SubAgentRole.Intent) still win — TierIntents is the tier-
+	// level fallback when no role specifies one. Missing tier keys
+	// or unknown intents fall back to the router's default. Phase
+	// 4.2.2 §11.
+	TierIntents map[string]string
 
 	// OnCloseRequest is the optional outbound hook a root session
 	// fires from requestClose (phase-4.1b-pre stage B / D6). The hook

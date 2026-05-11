@@ -42,6 +42,17 @@ type Manager struct {
 	sessionOpts []session.SessionOption
 	extensions  []extension.Extension
 
+	// defaultMissionSkill is the fallback skill name for
+	// session:spawn_mission when the root model omits the `skill`
+	// argument. Set via WithDefaultMissionSkill; propagates into
+	// Deps so spawn_mission can resolve it. Phase 4.2.2 §6.
+	defaultMissionSkill string
+
+	// tierIntents maps session tier → model-router intent.
+	// Set via WithTierIntents; propagates into Deps so per-tier
+	// model routing applies at spawn time. Phase 4.2.2 §11.
+	tierIntents map[string]string
+
 	// deps mirrors the per-session dependency bundle passed by
 	// reference to every Session in this Manager's tree (root +
 	// subagents). Populated by NewManager from the same arguments
@@ -93,6 +104,34 @@ func WithExtensions(exts ...extension.Extension) ManagerOption {
 	}
 }
 
+// WithDefaultMissionSkill sets the fallback skill name for
+// session:spawn_mission when the root model omits the `skill`
+// argument. Empty (default) means no fallback — spawn_mission
+// requires the model to specify a skill explicitly. Phase 4.2.2
+// §6.
+func WithDefaultMissionSkill(name string) ManagerOption {
+	return func(m *Manager) {
+		m.defaultMissionSkill = name
+	}
+}
+
+// WithTierIntents sets the per-tier model-router intent defaults
+// (root / mission / worker → intent name) the runtime applies to
+// spawned children before per-role overrides. Phase 4.2.2 §11.
+func WithTierIntents(intents map[string]string) ManagerOption {
+	return func(m *Manager) {
+		if len(intents) == 0 {
+			return
+		}
+		if m.tierIntents == nil {
+			m.tierIntents = make(map[string]string, len(intents))
+		}
+		for k, v := range intents {
+			m.tierIntents[k] = v
+		}
+	}
+}
+
 // NewManager constructs the manager. All required deps are
 // passed in (constitution principle II). The manager owns a root
 // context (separate from any adapter's errgroup context) that scopes
@@ -134,18 +173,20 @@ func NewManager(
 	// m.extensions are reflected in the bundle that newSession /
 	// newSessionRestore see.
 	m.deps = &session.Deps{
-		Store:      m.store,
-		Agent:      m.agent,
-		Models:     m.models,
-		Commands:   m.commands,
-		Codec:      m.codec,
-		Tools:      m.tools,
-		Logger:     m.logger,
-		Extensions: m.extensions,
-		Opts:       m.sessionOpts,
-		RootCtx:    m.rootCtx,
-		WG:         &m.wg,
-		MaxDepth:   session.DefaultMaxDepth,
+		Store:               m.store,
+		Agent:               m.agent,
+		Models:              m.models,
+		Commands:            m.commands,
+		Codec:               m.codec,
+		Tools:               m.tools,
+		Logger:              m.logger,
+		Extensions:          m.extensions,
+		Opts:                m.sessionOpts,
+		RootCtx:             m.rootCtx,
+		WG:                  &m.wg,
+		MaxDepth:            session.DefaultMaxDepth,
+		DefaultMissionSkill: m.defaultMissionSkill,
+		TierIntents:         m.tierIntents,
 	}
 	// Phase 4.1b-pre stage B / D6: a root session calling
 	// requestClose hands the close request to Manager via this hook.

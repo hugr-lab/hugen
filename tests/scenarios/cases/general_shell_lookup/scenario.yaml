@@ -1,0 +1,102 @@
+# general_shell_lookup — η.2 smoke for the `_general` universal
+# mission skill. A non-data request that REQUIRES tool execution
+# (running a shell command — not conversational, not reformatting
+# of prior content) must traverse root → `_general` mission →
+# generic-worker, never touching `analyst` (data-specific
+# dispatcher) and never answering inline at root.
+#
+# By-eye assertions:
+#
+# 1. Root's tool_calls contains exactly one `session:spawn_mission`
+#    with skill="_general" (NOT "analyst"). Plus
+#    `session:wait_subagents`.
+#
+# 2. Mission row has metadata.spawn_skill="_general".
+#
+# 3. Mission spawns ≥1 generic-worker via `session:spawn_wave`
+#    (one wave is the canonical shape for a single-angle task).
+#
+# 4. Worker calls `bash:run` (or `bash:*`) — only path to actually
+#    execute the date command.
+#
+# Does NOT require hugr — only bash-mcp.
+name: general_shell_lookup
+requires: []
+
+steps:
+  - say: |
+      Run the shell command `date -u +%Y-%m-%d` and tell me the
+      output verbatim. I want the actual current UTC date on this
+      host, not your model's training cutoff.
+    # Simple text task: root → mission → 1 worker → mission → root.
+    # ~5-7 LLM turns at ~30-50s each on gemini-pro = 6-min budget
+    # with comfortable margin.
+    budget: 480s
+    wait_for_subagents: 360s
+
+    queries:
+      # Root's tool calls. Must dispatch via spawn_mission(skill=
+      # "_general"); never call data tools or answer inline.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Mission row — must be exactly one child with
+      # spawn_skill="_general".
+      - name: mission_row
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Mission's tool sequence — at minimum a plan:comment
+      # (from STEP B of the on_start checklist), a spawn_wave,
+      # whiteboard:read after, and nothing in hugr/duckdb/python.
+      - name: mission_tool_sequence
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, tools: (.events // []) | map({seq, tool: .tool_name})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "tool_call"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq tool_name
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Worker subtree — should show 1 generic-worker child of
+      # the mission, with role="generic-worker".
+      - name: workers_from_mission
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, spawns: (.events // []) | map(select(.event_type == \"subagent_started\")) | map({seq, child: .metadata.child_session_id, skill: .metadata.skill, role: .metadata.role})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "subagent_started"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq event_type metadata
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq

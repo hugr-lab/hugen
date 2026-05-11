@@ -3,6 +3,7 @@ package whiteboard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -48,11 +49,12 @@ func NewExtension(agentID string) *Extension {
 }
 
 var (
-	_ extension.Extension        = (*Extension)(nil)
-	_ extension.StateInitializer = (*Extension)(nil)
-	_ extension.Recovery         = (*Extension)(nil)
-	_ extension.FrameRouter      = (*Extension)(nil)
-	_ tool.ToolProvider          = (*Extension)(nil)
+	_ extension.Extension              = (*Extension)(nil)
+	_ extension.StateInitializer       = (*Extension)(nil)
+	_ extension.Recovery               = (*Extension)(nil)
+	_ extension.FrameRouter            = (*Extension)(nil)
+	_ extension.WhiteboardSystemWriter = (*Extension)(nil)
+	_ tool.ToolProvider                = (*Extension)(nil)
 )
 
 // Name implements [extension.Extension] and [tool.ToolProvider].
@@ -259,6 +261,41 @@ type toolErrorResponse struct {
 
 func toolErr(code, msg string) (json.RawMessage, error) {
 	return json.Marshal(toolErrorResponse{Error: toolError{Code: code, Message: msg}})
+}
+
+// SystemInit opens a whiteboard on the calling session's state
+// via the system principal — no ToolManager dispatch, no LLM
+// round-trip, no permission gate. Used by the runtime to seed a
+// mission's whiteboard from its skill's metadata.hugen.mission.on_start.whiteboard
+// block before the mission's first model turn (phase 4.2.2 §7).
+// Idempotent — re-init on an active board is a no-op.
+//
+// Authorised callers: pkg/session/spawn.go only.
+func (e *Extension) SystemInit(ctx context.Context, state extension.SessionState) error {
+	if state == nil {
+		return errors.New("whiteboard: SystemInit: state is nil")
+	}
+	h := FromState(state)
+	if h == nil {
+		return errors.New("whiteboard: SystemInit: no whiteboard handle on session state")
+	}
+	h.mu.Lock()
+	already := h.wb.Active
+	h.mu.Unlock()
+	if already {
+		return nil
+	}
+	frame, err := newOpFrame(state.SessionID(), "", e.agentParticipant(), OpInit, nil)
+	if err != nil {
+		return fmt.Errorf("whiteboard: SystemInit: build frame: %w", err)
+	}
+	if err := state.Emit(ctx, frame); err != nil {
+		return fmt.Errorf("whiteboard: SystemInit: emit: %w", err)
+	}
+	h.mu.Lock()
+	h.wb = Apply(h.wb, ProjectEvent{Op: OpInit, At: frame.OccurredAt()})
+	h.mu.Unlock()
+	return nil
 }
 
 func (e *Extension) callInit(ctx context.Context, state extension.SessionState, h *SessionWhiteboard) (json.RawMessage, error) {

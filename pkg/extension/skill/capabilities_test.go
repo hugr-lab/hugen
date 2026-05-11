@@ -37,7 +37,7 @@ func TestFilterTools_WildcardAndExact(t *testing.T) {
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"dataset": []byte(inlineDatasetManifest)}})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "agent-test")
-	state := fixture.NewTestSessionState("ses-fil")
+	state := fixture.NewTestSessionState("ses-fil").WithDepth(2)
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestFilterTools_WildcardAndExact(t *testing.T) {
 // nil SkillManager → no filter (every tool surfaces).
 func TestFilterTools_NilManagerExposesEverything(t *testing.T) {
 	ext := NewExtension(nil, nil, "a1")
-	state := fixture.NewTestSessionState("ses-nil")
+	state := fixture.NewTestSessionState("ses-nil").WithDepth(2)
 	in := []tool.Tool{{Name: "a:x", Provider: "a"}, {Name: "b:y", Provider: "b"}}
 	out := ext.FilterTools(context.Background(), state, in)
 	if len(out) != 2 {
@@ -96,7 +96,7 @@ func TestFilterTools_NoSkillLoadedYieldsEmpty(t *testing.T) {
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{}})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a1")
-	state := fixture.NewTestSessionState("ses-empty")
+	state := fixture.NewTestSessionState("ses-empty").WithDepth(2)
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestGeneration_BumpsOnLoadUnload(t *testing.T) {
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"alpha": []byte(inlineAlphaManifest)}})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a1")
-	state := fixture.NewTestSessionState("ses-gen")
+	state := fixture.NewTestSessionState("ses-gen").WithDepth(2)
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -160,6 +160,88 @@ func TestGeneration_BumpsOnLoadUnload(t *testing.T) {
 	}
 }
 
+// TestAdvertiseSystemPrompt_AvailableMissions_RootOnly verifies the
+// "## Available missions" block appears in root-tier sessions only
+// — mission/worker tier never see the dispatch catalogue because
+// they cannot call session:spawn_mission. Phase 4.2.2 §6.
+func TestAdvertiseSystemPrompt_AvailableMissions_RootOnly(t *testing.T) {
+	ctx := context.Background()
+	missionSkill := `---
+name: analyst
+description: data analysis skill.
+metadata:
+  hugen:
+    tier_compatibility: [mission]
+    mission:
+      enabled: true
+      summary: Data analysis, queries, reports.
+---
+body
+`
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"analyst": []byte(missionSkill),
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a1")
+
+	// root tier: block must render.
+	rootState := fixture.NewTestSessionState("ses-root").WithDepth(0)
+	if err := ext.InitState(ctx, rootState); err != nil {
+		t.Fatalf("InitState root: %v", err)
+	}
+	rootOut := ext.AdvertiseSystemPrompt(ctx, rootState)
+	if !strings.Contains(rootOut, "## Available missions") {
+		t.Errorf("root prompt missing Available missions heading: %s", rootOut)
+	}
+	if !strings.Contains(rootOut, "`analyst`") {
+		t.Errorf("root prompt missing analyst bullet: %s", rootOut)
+	}
+	if !strings.Contains(rootOut, "Data analysis") {
+		t.Errorf("root prompt missing analyst summary: %s", rootOut)
+	}
+
+	// mission tier: block must NOT appear (mission cannot spawn
+	// another mission; the catalogue is dead weight there).
+	missState := fixture.NewTestSessionState("ses-mission").WithDepth(1)
+	if err := ext.InitState(ctx, missState); err != nil {
+		t.Fatalf("InitState mission: %v", err)
+	}
+	missOut := ext.AdvertiseSystemPrompt(ctx, missState)
+	if strings.Contains(missOut, "## Available missions") {
+		t.Errorf("mission prompt leaked Available missions: %s", missOut)
+	}
+
+	// worker tier: also no.
+	wkState := fixture.NewTestSessionState("ses-worker").WithDepth(2)
+	if err := ext.InitState(ctx, wkState); err != nil {
+		t.Fatalf("InitState worker: %v", err)
+	}
+	wkOut := ext.AdvertiseSystemPrompt(ctx, wkState)
+	if strings.Contains(wkOut, "## Available missions") {
+		t.Errorf("worker prompt leaked Available missions: %s", wkOut)
+	}
+}
+
+// TestAdvertiseSystemPrompt_NoMissionsSkipsBlock verifies the
+// section is omitted entirely when no installed skill declares
+// mission.enabled.
+func TestAdvertiseSystemPrompt_NoMissionsSkipsBlock(t *testing.T) {
+	ctx := context.Background()
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"alpha": []byte(inlineAlphaManifest),
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a1")
+	rootState := fixture.NewTestSessionState("ses-root2").WithDepth(0)
+	if err := ext.InitState(ctx, rootState); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	out := ext.AdvertiseSystemPrompt(ctx, rootState)
+	if strings.Contains(out, "## Available missions") {
+		t.Errorf("Available missions rendered with no mission.enabled skills: %s", out)
+	}
+}
+
 // Advertiser concatenates Bindings.Instructions with the catalogue
 // section. With no skill loaded only the catalogue surfaces.
 func TestAdvertiseSystemPrompt_CatalogueOnly(t *testing.T) {
@@ -167,7 +249,7 @@ func TestAdvertiseSystemPrompt_CatalogueOnly(t *testing.T) {
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"alpha": []byte(inlineAlphaManifest)}})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a1")
-	state := fixture.NewTestSessionState("ses-adv")
+	state := fixture.NewTestSessionState("ses-adv").WithDepth(2)
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -190,7 +272,7 @@ func TestAdvertiseSystemPrompt_LoadedTaggedAndInstructionsPrepended(t *testing.T
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"alpha": []byte(inlineAlphaManifest)}})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a1")
-	state := fixture.NewTestSessionState("ses-adv2")
+	state := fixture.NewTestSessionState("ses-adv2").WithDepth(2)
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -303,7 +385,7 @@ allowed-tools:
 			store := skillpkg.NewSkillStore(skillpkg.Options{Inline: tc.manifests})
 			mgr := skillpkg.NewSkillManager(store, nil)
 			ext := NewExtension(mgr, nil, "agent-tri-"+tc.name)
-			state := fixture.NewTestSessionState("ses-tri-" + tc.name)
+			state := fixture.NewTestSessionState("ses-tri-" + tc.name).WithDepth(2)
 			if err := ext.InitState(ctx, state); err != nil {
 				t.Fatalf("InitState: %v", err)
 			}
@@ -346,7 +428,7 @@ func TestAdvertise_LoadedSkillsMeta_SkippedWhenNoneLoaded(t *testing.T) {
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"alpha": []byte(inlineAlphaManifest)}})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a-meta-empty")
-	state := fixture.NewTestSessionState("ses-meta-empty")
+	state := fixture.NewTestSessionState("ses-meta-empty").WithDepth(2)
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -364,7 +446,7 @@ func TestAdvertise_LoadedSkillsMeta_InlineSkill_HeaderOnly(t *testing.T) {
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"alpha": []byte(inlineAlphaManifest)}})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a-meta-inline")
-	state := fixture.NewTestSessionState("ses-meta-inline")
+	state := fixture.NewTestSessionState("ses-meta-inline").WithDepth(2)
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -409,7 +491,7 @@ delta body
 	store := skillpkg.NewSkillStore(skillpkg.Options{LocalRoot: root})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a-meta-full")
-	state := fixture.NewTestSessionState("ses-meta-full")
+	state := fixture.NewTestSessionState("ses-meta-full").WithDepth(2)
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -463,7 +545,7 @@ license: MIT
 	store := skillpkg.NewSkillStore(skillpkg.Options{LocalRoot: root})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a-meta-partial")
-	state := fixture.NewTestSessionState("ses-meta-partial")
+	state := fixture.NewTestSessionState("ses-meta-partial").WithDepth(2)
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -500,7 +582,7 @@ license: MIT
 	store := skillpkg.NewSkillStore(skillpkg.Options{LocalRoot: root})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a-meta-order")
-	state := fixture.NewTestSessionState("ses-meta-order")
+	state := fixture.NewTestSessionState("ses-meta-order").WithDepth(2)
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -558,7 +640,7 @@ func TestAdvertiseSystemPrompt_EmptyStore(t *testing.T) {
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{}})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a1")
-	state := fixture.NewTestSessionState("ses-empty")
+	state := fixture.NewTestSessionState("ses-empty").WithDepth(2)
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}

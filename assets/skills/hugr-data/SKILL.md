@@ -25,6 +25,14 @@ metadata:
     requires: []
     autoload: false
     autoload_for: []
+    # Mission may load this skill for read-only reference grounding
+    # (skill:files / skill:ref) before fan-out; workers load it to
+    # execute real queries. Root has no path to load it — the
+    # tier_forbidden envelope on skill:load steers root back to
+    # session:spawn_mission. Phase 4.2.2 §3 narrow. Stays [mission,
+    # worker] (not pure [worker]) until mission no longer needs to
+    # ground worker tasks in schema docs — η or later.
+    tier_compatibility: [mission, worker]
     sub_agents: []
     memory:
       categories:

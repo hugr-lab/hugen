@@ -27,13 +27,11 @@ runs:
     topology: configs/topology-external-hugr.yaml
     requires: [anthropic, hugr]
     scenarios:
+      - trivial_question_via_mission
+      - root_refuses_load_data_skill
       - single_explorer
       - delegation_required
-      - three_parallel
-      - plan_root_solo
       - whiteboard_fanout3
-      - python_analysis_subagent
-      - hugr_data_explorer
       - full_analyst_workflow
       - skill_save_bundle
       - skill_save_overwrite_collision
@@ -44,18 +42,30 @@ runs:
     topology: configs/topology-external-hugr.yaml
     requires: [gemini, hugr]
     scenarios:
+      # δ.B 3-tier scenarios — verify mission/worker pipeline.
+      - trivial_question_via_mission
+      - root_refuses_load_data_skill
       - single_explorer
       - delegation_required
-      - three_parallel
-      - plan_root_solo
       - whiteboard_fanout3
-      - python_analysis_subagent
-      - hugr_data_explorer
-      - plan_survives_restart
+      - graphql_query_builder
       - full_analyst_workflow
+      # η.2 — `_general` universal mission skill (catch-all fallback
+      # for non-data work; root must dispatch via `_general`, not
+      # `analyst`).
+      - general_shell_lookup
+      # skill-machinery scenarios — independent of tier topology.
       - skill_save_bundle
       - skill_save_overwrite_collision
       - skill_discovery_via_catalog
+      # Retired in δ.B (legacy 2-tier patterns):
+      # - three_parallel             — superseded by whiteboard_fanout3
+      # - plan_root_solo             — root no longer owns plan:set/clear
+      # - python_analysis_subagent   — covered by full_analyst_workflow's
+      #                                data-analyst role
+      # - hugr_data_explorer         — superseded by single_explorer
+      # - plan_survives_restart      — restart with active plan; mission-
+      #                                level rework deferred to η/phase-5
 
   - name: gpt-5-4
     llm: configs/llm-gpt-5-4.yaml
@@ -72,14 +82,13 @@ runs:
     topology: configs/topology-external-hugr.yaml
     requires: [local, hugr]
     scenarios:
+      # δ.B 3-tier core — anchor scenarios for the η Gemma gate.
+      - trivial_question_via_mission
+      - root_refuses_load_data_skill
       - single_explorer
       - delegation_required
-      - three_parallel
-      - plan_root_solo
       - whiteboard_fanout3
-      - python_analysis_subagent
-      - hugr_data_explorer
-      - plan_survives_restart
+      - full_analyst_workflow
       - skill_save_bundle
       - skill_save_overwrite_collision
       - skill_discovery_via_catalog

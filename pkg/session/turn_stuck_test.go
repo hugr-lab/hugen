@@ -15,7 +15,7 @@ import (
 // stuck.* fields BEFORE calling emit, so the flag transitions still
 // surface correctly even though no Frame ever lands in the store.
 func newStuckTestSession() *Session {
-	agent, _ := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
+	agent, _ := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "", nil)
 	s := &Session{
 		id:     "s1",
 		agent:  agent,

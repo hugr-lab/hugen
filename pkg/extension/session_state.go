@@ -29,10 +29,17 @@ type SessionState interface {
 	Value(name string) (any, bool)
 	SetValue(name string, value any)
 
-	// Parent returns the parent session's state for sub-agents and
-	// (nil, false) for root sessions. Callers read parent's
-	// SessionID / Value directly off the returned handle —
-	// transparently traverses any depth.
+	// Depth returns this session's depth in the spawn tree: 0 for
+	// the user-facing root, 1 for the mission root spawned, ≥2 for
+	// workers spawned by missions (or by workers via opt-in
+	// can_spawn). The tier vocabulary (root/mission/worker) is
+	// derived from depth via skill.TierFromDepth. Phase 4.2.2 §2.
+	Depth() int
+
+	// Parent returns the parent session's state for spawned
+	// sessions and (nil, false) for root sessions. Callers read
+	// parent's SessionID / Value directly off the returned handle
+	// — transparently traverses any depth.
 	Parent() (SessionState, bool)
 
 	// Children returns a snapshot of the direct child sessions'

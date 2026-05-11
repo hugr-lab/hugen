@@ -25,6 +25,7 @@ type TestSessionState struct {
 	id        string
 	tools     *tool.ToolManager
 	parentRef *TestSessionState
+	depth     int
 	state     sync.Map
 
 	childMu  sync.Mutex
@@ -46,11 +47,30 @@ func NewTestSessionState(sessionID string) *TestSessionState {
 }
 
 // WithParent wires a parent TestSessionState so Parent() returns
-// it. Returns the receiver so callers can chain.
+// it; also bumps Depth() one above the parent's so tier-aware
+// extensions resolve correctly under test. Returns the receiver
+// so callers can chain.
 func (s *TestSessionState) WithParent(parent *TestSessionState) *TestSessionState {
 	s.parentRef = parent
+	if parent != nil {
+		s.depth = parent.depth + 1
+	}
 	return s
 }
+
+// WithDepth overrides Depth() directly — useful when a test needs
+// to simulate a tier mid-tree (e.g. a worker at depth 2) without
+// constructing the full parent chain. Returns the receiver so
+// callers can chain.
+func (s *TestSessionState) WithDepth(depth int) *TestSessionState {
+	s.depth = depth
+	return s
+}
+
+// Depth implements [extension.SessionState]. Returns whatever was
+// configured via [TestSessionState.WithParent] (parent.depth+1)
+// or [TestSessionState.WithDepth]; 0 by default.
+func (s *TestSessionState) Depth() int { return s.depth }
 
 // AppendChild registers child as a direct child so Children()
 // returns it. Idempotent on duplicate appends. Returns the
@@ -129,7 +149,6 @@ func (s *TestSessionState) Children() []extension.SessionState {
 // Tools implements [extension.SessionState]. Returns whatever was
 // installed via [TestSessionState.SetTools]; nil by default.
 func (s *TestSessionState) Tools() *tool.ToolManager { return s.tools }
-
 
 // Emit implements [extension.SessionState]. Records the frame in
 // memory so tests can assert what an extension emitted; the

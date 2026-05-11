@@ -1,41 +1,43 @@
-# single_explorer — root spawns ONE sub-agent and waits for its
-# result. By-eye check: did the model call session:spawn_subagent
-# exactly once with skill=hugr-data? Did it session:wait_subagents
-# or trust the synchronous return?
+# single_explorer — minimal data-delegation: root spawns one
+# mission, mission spawns ONE data-explorer worker, worker queries
+# Hugr and returns a single finding. The cheapest scenario that
+# exercises the full ref-reading boot sequence on a worker.
 #
-# Note on roles: shipped skills (assets/skills/<name>/SKILL.md) all
-# declare `sub_agents: []` — no role taxonomy yet (phase 4.2 adds
-# explorer / analyst / etc to the analyst mega-skill). For v1
-# scenarios pass an empty role; the model just supplies skill.
+# By-eye assertions:
+#
+# 1. Root: exactly one session:spawn_mission(skill="analyst") +
+#    one session:wait_subagents. No data tools (hugr-*, bash-*,
+#    python-*, duckdb-*).
+#
+# 2. Mission: exactly one session:spawn_wave call, naming
+#    skill="analyst" + role="data-explorer" with one entry.
+#    Mission ALSO calls skill:ref before the wave (mandatory
+#    boot per tier-mission constitution).
+#
+# 3. Worker (depth 2): the boot sequence — skill:load("hugr-data"),
+#    skill:files / skill:ref on hugr-data references, then
+#    hugr-main:* / hugr-query:* call(s). Finally whiteboard:write
+#    once with the schema summary.
+#
+# 4. End-to-end: root receives a SubagentResult from the mission,
+#    delivers a final assistant message containing the schema
+#    summary the worker produced.
 name: single_explorer
-requires: []
+requires: [hugr]
 
 steps:
   - say: |
-      I have a data source named "northwind". Spawn ONE sub-agent
-      using the hugr-data skill (no role) to summarise its schema
-      in two sentences. Don't answer yourself — delegate, wait for
-      the specialist's reply, then relay it.
-    budget: 240s
+      I have a data source named "northwind". Summarise its
+      schema for me in two sentences — what it tracks and what
+      the main entities are. Cite actual table names you see.
+    # Single-worker flow: ~6-8 LLM turns. 8-min budget covers
+    # gemini-pro + cheap-route latency.
+    budget: 480s
+    wait_for_subagents: 360s
 
     queries:
-      # Children of the root session — should be exactly 1.
-      - name: subagent_rows
-        graphql: |
-          query ($sid: String!) {
-            hub { db { agent {
-              sessions(filter: {parent_session_id: {eq: $sid}}) {
-                id status session_type metadata
-              }
-            }}}
-          }
-        vars: { sid: "$sid" }
-
-      # Every tool the root called, in order. For single_explorer,
-      # the only entries should be session:spawn_subagent /
-      # session:wait_subagents / session:subagent_runs / plan:* /
-      # skill:tools_catalog. Anything else (hugr-main:* etc) means
-      # root did the work itself instead of delegating.
+      # Root's tool calls — must be the narrow spawn_mission /
+      # wait_subagents pair. seq selected for sort.
       - name: tool_calls_root
         graphql: |
           query ($sid: String!) {
@@ -48,16 +50,56 @@ steps:
           }
         vars: { sid: "$sid" }
 
-      # Session lifecycle state machine — useful to confirm the
-      # session went through wait_subagents and back to active.
-      - name: lifecycle_status
+      # Mission row — exactly one child with spawn_skill="analyst".
+      - name: mission_row
         graphql: |
           query ($sid: String!) {
             hub { db { agent {
-              session_events(
-                filter: {session_id: {eq: $sid}, event_type: {eq: "session_status"}}
-                order_by: [{field: "seq", direction: ASC}]
-              ) { seq metadata }
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
             }}}
           }
         vars: { sid: "$sid" }
+
+      # Mission's tool sequence — proves skill:ref happened before
+      # the first spawn_wave, and that exactly one wave spawned.
+      - name: mission_tool_calls
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, tools: (.events // []) | map({seq, tool: .tool_name})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "tool_call"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq tool_name
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Worker subtree — depth-2 sessions with spawn_role and
+      # the tool sequence they ran. Boot sequence MUST start with
+      # skill:load + skill:files / skill:ref before any hugr-* call.
+      - name: worker_subtree
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission: .id, workers: (.child_sessions // []) | map({id, role: .metadata.spawn_role, status, tools: (.events // []) | map({seq, tool: .tool_name})})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  child_sessions {
+                    id metadata status
+                    events(filter: {event_type: {eq: "tool_call"}}, order_by: [{field: "seq", direction: ASC}]) {
+                      seq tool_name
+                    }
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq

@@ -23,8 +23,8 @@ type fakeProvider struct {
 	tools []tool.Tool
 }
 
-func (f *fakeProvider) Name() string                         { return f.name }
-func (f *fakeProvider) Lifetime() tool.Lifetime              { return f.life }
+func (f *fakeProvider) Name() string                              { return f.name }
+func (f *fakeProvider) Lifetime() tool.Lifetime                   { return f.life }
 func (f *fakeProvider) List(context.Context) ([]tool.Tool, error) { return f.tools, nil }
 func (f *fakeProvider) Call(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 	return nil, errors.New("fakeProvider: not callable")
@@ -107,7 +107,7 @@ body
 	}
 
 	ext := NewExtension(mgr, nil, "agent-cat")
-	state := fixture.NewTestSessionState("ses-cat")
+	state := fixture.NewTestSessionState("ses-cat").WithDepth(2)
 	state.SetTools(tm)
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
@@ -265,7 +265,7 @@ body
 		t.Fatalf("AddProvider: %v", err)
 	}
 	ext := NewExtension(mgr, nil, "agent-absent")
-	state := fixture.NewTestSessionState("ses-absent")
+	state := fixture.NewTestSessionState("ses-absent").WithDepth(2)
 	state.SetTools(tm)
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
@@ -315,6 +315,112 @@ func TestToolsCatalog_BadRequest(t *testing.T) {
 	}
 	if !errors.Is(err, tool.ErrArgValidation) {
 		t.Errorf("expected ErrArgValidation, got %v", err)
+	}
+}
+
+// TestToolsCatalog_TierFilter verifies the available_in_skills
+// projection hides skills the caller's tier cannot load (phase
+// 4.2.2 §3.3.3). A root-tier session must not see worker-only
+// skills in the discovery channel even though the worker-only
+// skill's allowed-tools list includes a tool the catalogue lists.
+func TestToolsCatalog_TierFilter(t *testing.T) {
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"worker-only-skill": []byte(`---
+name: worker-only-skill
+description: worker-tier exclusive grant.
+allowed-tools:
+  - provider: hugr-main
+    tools: [data-query]
+metadata:
+  hugen:
+    tier_compatibility: [worker]
+---
+body
+`),
+		"everywhere": []byte(`---
+name: everywhere
+description: loadable in every tier.
+allowed-tools:
+  - provider: hugr-main
+    tools: [discovery-list]
+metadata:
+  hugen:
+    tier_compatibility: [root, mission, worker]
+---
+body
+`),
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	tm := tool.NewToolManager(catTestPerms{}, nil, nil)
+	prov := &fakeProvider{
+		name: "hugr-main",
+		life: tool.LifetimePerAgent,
+		tools: []tool.Tool{
+			{Name: "hugr-main:discovery-list", Provider: "hugr-main", PermissionObject: "hugen:tool:hugr-main:discovery-list"},
+			{Name: "hugr-main:data-query", Provider: "hugr-main", PermissionObject: "hugen:tool:hugr-main:data-query"},
+		},
+	}
+	if err := tm.AddProvider(prov); err != nil {
+		t.Fatalf("AddProvider: %v", err)
+	}
+	ext := NewExtension(mgr, nil, "agent-tier-cat")
+
+	for _, tc := range []struct {
+		name              string
+		depth             int
+		wantHidden        []string // skills that MUST NOT appear in any AvailableInSkills
+		wantAtLeastOneIn  string   // skill that SHOULD appear for the catalogue entry below
+		wantAtLeastOneFor string   // tool name to find wantAtLeastOneIn under
+	}{
+		{
+			name:              "root_hides_worker_only",
+			depth:             0,
+			wantHidden:        []string{"worker-only-skill"},
+			wantAtLeastOneIn:  "everywhere",
+			wantAtLeastOneFor: "hugr-main:discovery-list",
+		},
+		{
+			name:              "worker_sees_both",
+			depth:             2,
+			wantHidden:        nil,
+			wantAtLeastOneIn:  "worker-only-skill",
+			wantAtLeastOneFor: "hugr-main:data-query",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := fixture.NewTestSessionState("ses-" + tc.name).WithDepth(tc.depth)
+			state.SetTools(tm)
+			if err := ext.InitState(context.Background(), state); err != nil {
+				t.Fatalf("InitState: %v", err)
+			}
+			out, err := ext.Call(extension.WithSessionState(context.Background(), state),
+				"skill:tools_catalog", json.RawMessage(`{}`))
+			if err != nil {
+				t.Fatalf("Call: %v", err)
+			}
+			var got toolsCatalogResult
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("unmarshal: %v\n%s", err, out)
+			}
+			seenAt := false
+			for _, p := range got.Providers {
+				for _, e := range p.Tools {
+					for _, hidden := range tc.wantHidden {
+						if contains(e.AvailableInSkills, hidden) {
+							t.Errorf("tier filter failed: %s appears under %s.AvailableInSkills = %v",
+								hidden, e.Name, e.AvailableInSkills)
+						}
+					}
+					if e.Name == tc.wantAtLeastOneFor && contains(e.AvailableInSkills, tc.wantAtLeastOneIn) {
+						seenAt = true
+					}
+				}
+			}
+			if !seenAt {
+				t.Errorf("expected %q in AvailableInSkills under %q; got %+v",
+					tc.wantAtLeastOneIn, tc.wantAtLeastOneFor, got)
+			}
+		})
 	}
 }
 

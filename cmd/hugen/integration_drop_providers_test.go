@@ -24,8 +24,8 @@ import (
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/extension"
 	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
-	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
+	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session"
@@ -92,11 +92,18 @@ func TestAdmin_DropProviders(t *testing.T) {
 	)
 
 	ctx := context.Background()
-	sess, _, err := mgr.Open(ctx, session.OpenRequest{OwnerID: "u"})
+	rootSess, _, err := mgr.Open(ctx, session.OpenRequest{OwnerID: "u"})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { _ = mgr.Terminate(ctx, sess.ID(), "user:/end") })
+	t.Cleanup(func() { _ = mgr.Terminate(ctx, rootSess.ID(), "user:/end") })
+
+	// duckdb-data is tier_compatibility:[mission, worker]; load it on
+	// a depth-1 child (mission tier), not on root.
+	sess, err := rootSess.Spawn(ctx, session.SpawnSpec{Skill: "_general", Role: "test"})
+	if err != nil {
+		t.Fatalf("Spawn mission-tier child: %v", err)
+	}
 
 	// Loading duckdb-data must succeed even though duckdb-mcp is
 	// absent — phase-3 path: skill manifest validates, allowed-tools

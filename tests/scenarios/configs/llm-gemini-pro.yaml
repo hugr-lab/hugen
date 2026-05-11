@@ -1,8 +1,11 @@
-# Cloud Google Gemini Pro 3.1. Requires GEMINI_API_KEY in
-# the harness's .test.env. Same max_tokens story as
-# llm-claude-sonnet.yaml — provider URL pins thinking_budget so
-# the cheap route's inherited 2048 from base.config.yaml fails
-# the >budget check; we override explicitly.
+# Cloud Google Gemini Pro 3.1 for `default` / `tool_calling`.
+# Cheap route → local gemma-small for low-latency root + mission
+# turns (phase 4.2.2 §11 tier_intents — root and mission do pure
+# routing / coordination, no heavy reasoning). Requires
+# GEMINI_API_KEY + LLM_LOCAL_URL in the harness's .test.env.
+# Same max_tokens story as llm-claude-sonnet.yaml — provider URL
+# pins thinking_budget so the cheap route's inherited 2048 from
+# base.config.yaml fails the >budget check; we override explicitly.
 models:
   mode: local
   model: gemini-pro-3-1
@@ -10,5 +13,8 @@ models:
   routes:
     cheap:
       mode: local
-      model: gemini-pro-3-1
-      max_tokens: 8192
+      model: gemma4-26b
+      max_tokens: 4096
+  tier_intents:
+    root:    cheap
+    mission: cheap

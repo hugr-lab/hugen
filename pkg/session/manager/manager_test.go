@@ -29,7 +29,7 @@ func newTestManager(t *testing.T, store session.RuntimeStore) *Manager {
 	t.Helper()
 	mdl := &scriptedModel{}
 	router := newRouterWithModel(t, mdl)
-	agent, err := session.NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "")
+	agent, err := session.NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "", nil)
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}

@@ -82,6 +82,14 @@ var (
 	// design/002-runtime-canonical/phase-4.2-spec.md §3.2.2.
 	ErrAutoloadReserved = errors.New("skill: autoload is reserved for system / admin skills")
 
+	// ErrTierForbidden is returned by skill load when the calling
+	// session's tier (resolved from depth) is not in the manifest's
+	// tier_compatibility set. Surfaces to the LLM as
+	// tool_error{code:"tier_forbidden"} so the model can react with
+	// the appropriate alternative (delegate via spawn_*, load
+	// elsewhere, etc.). Phase 4.2.2 §3.3.3.
+	ErrTierForbidden = errors.New("skill: tier forbidden")
+
 	// ErrSkillExists is returned by SkillStore.Publish when a skill
 	// with the same name already exists in the writable backend
 	// and PublishOptions.Overwrite is false. The save protocol
