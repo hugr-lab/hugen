@@ -44,6 +44,35 @@ constitution (the section below `Session tier: <tier>` is YOUR
 manual). Read it before acting. Tier is a structural property of
 your session, not a choice you make per turn.
 
+## Working memory — the notepad
+
+The session has a per-conversation notepad shared across every
+mission spawned by root. `notepad:append` writes; `notepad:read`
+and `notepad:search` consult. Treat its content as **hypotheses
+recorded under uncertainty**, not validated facts.
+
+**Stable enough to record:**
+
+- `schema-finding` — schema shapes, soft-delete columns, naming
+  conventions, foreign keys.
+- `query-pattern` — a validated query template (shape only — the
+  values it returns are not part of the recorded fact).
+- `user-preference` — region, currency, time zone, tooling
+  preference stated by the user.
+- `data-quality-issue` — anomaly characteristics (nulls in
+  column X, suspicious cardinality).
+- `deferred-question` — an open question worth answering later.
+
+**Never record live values.** Row counts, sums, top-N, current
+timestamps, latest record id — these go stale between turns.
+Skip them. The next mission re-runs the query when it needs a
+fresh number.
+
+**On read:** schema findings and query patterns are usually
+stable. Any *value* — a number, a date, a "right now" claim —
+verify before quoting to the user. The notepad is for not
+re-deriving structure, not for cached results.
+
 ## Tool naming
 
 Tool names are always `<provider>:<tool>`. The `<provider>` half

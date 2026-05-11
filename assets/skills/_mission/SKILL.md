@@ -34,6 +34,21 @@ metadata:
     autoload: true
     autoload_for: [mission]
     tier_compatibility: [mission]
+    # Phase 4.2.3 — universal notepad categories advertised on
+    # every mission regardless of dispatcher. Domain-specific
+    # tags (schema-finding, query-pattern, …) live on the
+    # dispatching skill (analyst, _general). Block A's renderer
+    # walks all loaded skills and de-dupes by name, so listing
+    # the conversation-level categories here keeps every mission
+    # consistent without each dispatcher repeating them.
+    mission:
+      on_start:
+        notepad:
+          tags:
+            - name: user-preference
+              hint: Stated by the user — region, currency, time zone, naming or formatting preference. Stable for the conversation.
+            - name: deferred-question
+              hint: An open question worth answering in a follow-up mission; deferred to keep the current task focused.
 compatibility:
   model: any
   runtime: hugen-phase-4

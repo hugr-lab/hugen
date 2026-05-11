@@ -40,23 +40,19 @@ metadata:
           current_step: Explore
         whiteboard:
           init: true
-        # Phase 4.2.3 notepad — recommended categories for working
-        # notes recorded across the mission's worker waves. The list
-        # is advisory; notepad:append accepts any category string.
-        # Workers should use these labels so subsequent missions in
-        # the same root conversation find prior findings.
+        # Phase 4.2.3 notepad — analyst-domain categories for
+        # working notes. Universal categories (user-preference,
+        # deferred-question) come from `_mission` skill; this
+        # block lists the data-domain ones the renderer composes
+        # alongside them via de-duplication.
         notepad:
           tags:
             - name: schema-finding
               hint: Discovered table structures, field semantics, soft-delete columns, naming conventions.
-            - name: data-quality-issue
-              hint: Anomalies, nulls, inconsistencies, suspicious cardinalities found while exploring.
             - name: query-pattern
-              hint: A working SQL/GraphQL snippet (or its shape) that produced useful results — reuse before re-deriving.
-            - name: user-preference
-              hint: Stated by the user — region, currency, time zone, preferred units, naming preferences.
-            - name: deferred-question
-              hint: An open question worth answering in a follow-up mission; deferred to keep the current task focused.
+              hint: A validated SQL/GraphQL template (shape only) that produced useful results — reuse before re-deriving.
+            - name: data-quality-issue
+              hint: Anomalies, nulls, suspicious cardinalities observed during exploration.
         first_message:
           template: |
             User goal (delegated by root): {{ .UserGoal }}
@@ -356,6 +352,21 @@ and asking root for clarification.
 Your final assistant message is what root sees as the mission
 result via `wait_subagents`. Keep it tight, structured, and
 self-contained — root will quote it to the user with light
-framing. If your output has a useful `notes` section (short facts
-worth remembering across user turns), include it as a `notes:` JSON
-field in the final message so root's notepad gets seeded.
+framing.
+
+## Recording cross-mission findings
+
+Before you finalise your result, append to the session notepad
+anything the **next** mission would otherwise re-derive — schema
+shapes (`schema-finding`), validated query templates
+(`query-pattern`), data-quality flags (`data-quality-issue`),
+user preferences (`user-preference`). Phrase as observation
+("orders.deleted_at appears to mark soft-deletes"), keep it one
+line.
+
+**Do not record live values** — counts, sums, top-N, current
+timestamps. They go stale between turns; the next mission
+re-runs the query when it needs a fresh number. If you must
+reference a value, prefer "at time T we measured X" or skip the
+note entirely. See the constitution's "Working memory" section
+for the full taxonomy.

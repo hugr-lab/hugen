@@ -399,6 +399,16 @@ type SubAgentRole struct {
 	// the spawn flow calls child.SetDefaultIntent(model.Intent(role.Intent))
 	// when this field is set.
 	Intent string `json:"intent,omitempty" yaml:"intent,omitempty"`
+
+	// OnClose configures the deterministic pre-teardown turn the
+	// runtime fires for this role's worker sessions before
+	// emitting SessionTerminated. Phase 4.2.3 ε — gives a narrow
+	// "what's worth recording?" prompt with a restricted tool
+	// surface so even weak models reliably persist their findings
+	// to the notepad. When zero / absent, the runtime falls back
+	// to the dispatching skill's mission-level on_close, then to
+	// the autoloaded `_worker` base. Per-role override wins.
+	OnClose MissionOnClose `json:"on_close,omitempty" yaml:"on_close,omitempty"`
 }
 
 // CanSpawnEffective resolves SubAgentRole.CanSpawn to the boolean
@@ -435,6 +445,14 @@ type MissionBlock struct {
 	Summary  string         `json:"summary,omitempty" yaml:"summary,omitempty"`
 	Keywords []string       `json:"keywords,omitempty" yaml:"keywords,omitempty"`
 	OnStart  MissionOnStart `json:"on_start,omitempty" yaml:"on_start,omitempty"`
+	// OnClose configures the deterministic pre-teardown turn
+	// fired for mission-tier sessions before emitting
+	// SessionTerminated. Phase 4.2.3 ε. Per-role overrides at
+	// SubAgentRole.OnClose win when the closing session is a
+	// worker spawned with that role; this field is used for the
+	// mission-tier session itself (and as fallback for workers
+	// whose role doesn't override).
+	OnClose MissionOnClose `json:"on_close,omitempty" yaml:"on_close,omitempty"`
 }
 
 // MissionOnStart describes the per-skill boot sequence the runtime
@@ -489,6 +507,71 @@ type MissionOnStartNotepad struct {
 type NotepadTagDecl struct {
 	Name string `json:"name" yaml:"name"`
 	Hint string `json:"hint,omitempty" yaml:"hint,omitempty"`
+}
+
+// MissionOnClose declares per-skill / per-role configuration for
+// the deterministic close turn the runtime fires before
+// SessionTerminated. Phase 4.2.3 ε — the goal is to give weak
+// models a narrow, well-prompted final moment to persist findings
+// to the notepad, instead of relying on them to remember to call
+// notepad:append during their main task.
+//
+// All sub-blocks are optional; an entirely empty MissionOnClose
+// signals "no close turn" for this scope. The first capability
+// to be wired is Notepad, but the block is structured so future
+// per-extension close hooks (whiteboard digest, plan summary)
+// can land alongside without churn.
+type MissionOnClose struct {
+	Notepad MissionOnCloseNotepad `json:"notepad,omitempty" yaml:"notepad,omitempty"`
+}
+
+// MissionOnCloseNotepad configures the notepad close turn. When
+// any field is non-zero the runtime treats the block as opt-in:
+// at session teardown time it fires one constrained model turn
+// with AllowedTools as the tool-surface filter and Prompt as the
+// system-prompt addendum (an extension-provided default kicks
+// in when Prompt is empty).
+//
+//   - Prompt: complete system prompt for the close turn. Empty
+//     falls back to the notepad extension's built-in default
+//     (generic "before close, record what's worth keeping").
+//   - AllowedTools: tool-name allow-list (e.g.
+//     ["notepad:append"]) that narrows the snapshot for this
+//     turn only. Empty falls back to the extension default
+//     (typically just notepad:append) so the model can't drift
+//     into another tool category.
+//   - MaxTurns: cap on close-turn LLM iterations. Zero falls
+//     back to the extension default (2 — one append wave +
+//     ack). Independent of the session's regular max_turns
+//     budget; the close-turn budget is not counted against the
+//     main task.
+//   - SkipIfIdle: when true, the runtime skips the close turn
+//     entirely if the session emitted no tool calls during its
+//     main task. Cheap path for trivial sessions
+//     (simple-answerer, /end at root).
+type MissionOnCloseNotepad struct {
+	Prompt       string   `json:"prompt,omitempty" yaml:"prompt,omitempty"`
+	AllowedTools []string `json:"allowed_tools,omitempty" yaml:"allowed_tools,omitempty"`
+	MaxTurns     int      `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
+	SkipIfIdle   bool     `json:"skip_if_idle,omitempty" yaml:"skip_if_idle,omitempty"`
+}
+
+// IsZero reports whether the MissionOnCloseNotepad is the
+// zero-value (no field set). Callers use it to distinguish
+// "manifest said nothing" from "manifest opted in with all
+// defaults" (which would be an explicit `notepad: {}` block).
+func (n MissionOnCloseNotepad) IsZero() bool {
+	return n.Prompt == "" &&
+		len(n.AllowedTools) == 0 &&
+		n.MaxTurns == 0 &&
+		!n.SkipIfIdle
+}
+
+// IsZero on MissionOnClose returns true when none of its
+// sub-blocks are set. Used by the CloseTurnLookup resolver to
+// short-circuit fallback chains.
+func (c MissionOnClose) IsZero() bool {
+	return c.Notepad.IsZero()
 }
 
 var (

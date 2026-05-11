@@ -40,6 +40,7 @@ var (
 	_ extension.SubagentSpawnHinter = (*Extension)(nil)
 	_ extension.MissionDispatcher   = (*Extension)(nil)
 	_ extension.MissionStartLookup  = (*Extension)(nil)
+	_ extension.CloseTurnLookup     = (*Extension)(nil)
 )
 
 // MissionSkillExists implements [extension.MissionDispatcher].
@@ -138,6 +139,99 @@ func renderMissionTemplate(field, body string, data missionStartTemplateData) (s
 		return "", fmt.Errorf("mission.on_start.%s: execute: %w", field, err)
 	}
 	return buf.String(), nil
+}
+
+// ResolveCloseTurn implements [extension.CloseTurnLookup]. Walks
+// the calling session's loaded skills and returns the most-
+// specific on_close configuration. Phase 4.2.3 ε.
+//
+// Precedence (first non-zero block wins):
+//
+//  1. Sub-agent role override — a loaded skill's
+//     metadata.hugen.sub_agents[i].on_close where i.Name matches
+//     spawnRole.
+//  2. Mission-level config — metadata.hugen.mission.on_close
+//     on the dispatching skill (matched by spawnSkill).
+//  3. Generic fallback — metadata.hugen.mission.on_close on any
+//     other loaded skill that's not the dispatcher (typically
+//     the autoloaded `_mission` or `_worker` base skill).
+//
+// Returns ({}, nil) when no loaded skill opts in. Caller gates
+// via CloseTurnBlock.IsEmpty().
+func (e *Extension) ResolveCloseTurn(_ context.Context, state extension.SessionState, spawnSkill, spawnRole string) (extension.CloseTurnBlock, error) {
+	h := FromState(state)
+	if h == nil {
+		return extension.CloseTurnBlock{}, nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if len(h.loaded) == 0 {
+		return extension.CloseTurnBlock{}, nil
+	}
+
+	// Stable iteration so the precedence-2 / precedence-3
+	// fallback chain is deterministic across runs.
+	names := make([]string, 0, len(h.loaded))
+	for n := range h.loaded {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	// (1) role override — any loaded skill whose sub_agents
+	// declare an entry matching spawnRole with a non-zero
+	// on_close.
+	if spawnRole != "" {
+		for _, n := range names {
+			sk := h.loaded[n]
+			for _, role := range sk.Manifest.Hugen.SubAgents {
+				if role.Name != spawnRole {
+					continue
+				}
+				if role.OnClose.IsZero() {
+					continue
+				}
+				return closeBlockFromManifest(role.OnClose), nil
+			}
+		}
+	}
+
+	// (2) dispatcher mission-level override.
+	if spawnSkill != "" {
+		if sk, ok := h.loaded[spawnSkill]; ok && !sk.Manifest.Hugen.Mission.OnClose.IsZero() {
+			return closeBlockFromManifest(sk.Manifest.Hugen.Mission.OnClose), nil
+		}
+	}
+
+	// (3) first generic fallback — any other loaded skill with
+	// a non-zero mission.on_close. Stable order (name-sorted)
+	// means `_mission` / `_worker` consistently win on tie when
+	// no domain override is present.
+	for _, n := range names {
+		if n == spawnSkill {
+			continue
+		}
+		sk := h.loaded[n]
+		if sk.Manifest.Hugen.Mission.OnClose.IsZero() {
+			continue
+		}
+		return closeBlockFromManifest(sk.Manifest.Hugen.Mission.OnClose), nil
+	}
+
+	return extension.CloseTurnBlock{}, nil
+}
+
+// closeBlockFromManifest projects the manifest's
+// MissionOnClose into the runtime-facing CloseTurnBlock. Only
+// the notepad sub-block is wired today; other sub-blocks land
+// alongside without changing this shape.
+func closeBlockFromManifest(c skillpkg.MissionOnClose) extension.CloseTurnBlock {
+	n := c.Notepad
+	return extension.CloseTurnBlock{
+		SystemPrompt: n.Prompt,
+		AllowedTools: append([]string(nil), n.AllowedTools...),
+		MaxTurns:     n.MaxTurns,
+		SkipIfIdle:   n.SkipIfIdle,
+	}
 }
 
 // AdvertiseSystemPrompt implements [extension.Advertiser].
@@ -245,14 +339,16 @@ func renderAvailableMissions(ctx context.Context, h *SessionSkill) string {
 // header — there are no bundled files to list.
 // renderNotepadTagAdvice produces Block A — a "## Notepad —
 // recommended tags" prompt section listing the notepad categories
-// that the loaded mission dispatcher(s) advertise via
+// that any loaded skill advertises via
 // metadata.hugen.mission.on_start.notepad.tags. Phase 4.2.3 §5.
 //
-// Walks loaded skills, picks the mission-enabled ones, de-dupes
-// tag names (first hint wins), preserves declaration order within
-// the first defining skill. Empty when no loaded skill carries
-// tag declarations — workers and root sessions without a mission
-// dispatcher loaded see nothing here.
+// Walks every loaded skill (no mission.enabled filter — universal
+// tags live on the autoloaded tier skill `_mission`, domain tags
+// live on the dispatcher like `analyst` / `_general`). De-dupes
+// tag names (first hint wins, sort order is name-stable so the
+// "first" is the alphabetically-first skill defining it), and
+// preserves declaration order within each contributing skill.
+// Empty when no loaded skill carries tag declarations.
 func renderNotepadTagAdvice(h *SessionSkill) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -268,9 +364,6 @@ func renderNotepadTagAdvice(h *SessionSkill) string {
 	var order []string
 	for _, n := range names {
 		sk := h.loaded[n]
-		if !sk.Manifest.Hugen.Mission.Enabled {
-			continue
-		}
 		for _, t := range sk.Manifest.Hugen.Mission.OnStart.Notepad.Tags {
 			name := strings.TrimSpace(t.Name)
 			if name == "" {

@@ -263,7 +263,8 @@ func TestAdvertise_RendersSnapshot(t *testing.T) {
 	}
 	for _, want := range []string{
 		"## Notepad snapshot",
-		"hypotheses",
+		"Hypotheses",
+		"re-verify",
 		"**schema-finding** (1)",
 		"**user-preference** (1)",
 	} {

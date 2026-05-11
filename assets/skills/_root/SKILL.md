@@ -16,8 +16,12 @@ allowed-tools:
   - provider: whiteboard
     tools:
       - read
-  # Phase 4.2.3 — root has the full notepad surface; `show` is
-  # root-only by design (formats for the user, not for the model).
+  # Phase 4.2.3 — root has the full notepad surface. `append`
+  # is intentionally available at root so user-driven memory
+  # updates ("remember this for our conversation") do not
+  # require a spawn_mission round-trip — recording an
+  # observation is not "execution" under the constitution.
+  # `show` is root-only by design (user-facing rendering).
   - provider: notepad
     tools:
       - append

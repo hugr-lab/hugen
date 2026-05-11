@@ -362,8 +362,9 @@ func renderSnapshot(notes []Note, window time.Duration) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Notepad snapshot — last %s\n\n", windowLabel(window))
-	b.WriteString("Working hypotheses recorded across the conversation. Treat as\n")
-	b.WriteString("observations under uncertainty, not validated facts. Call\n")
+	b.WriteString("Hypotheses recorded across the conversation. Structural facts\n")
+	b.WriteString("stay stable; concrete values (counts, sums, timestamps) may\n")
+	b.WriteString("have drifted since the write — re-verify before quoting. Call\n")
 	b.WriteString("`notepad:search(query=...)` or `notepad:read(category=...)` for\n")
 	b.WriteString("full content.\n\n")
 	for _, g := range groups {
