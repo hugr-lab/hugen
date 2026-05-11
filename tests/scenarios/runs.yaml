@@ -45,6 +45,7 @@ runs:
     requires: [gemini, hugr]
     scenarios:
       - trivial_question_via_mission
+      - root_refuses_load_data_skill
       - single_explorer
       - delegation_required
       - three_parallel

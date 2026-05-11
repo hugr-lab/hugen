@@ -1,0 +1,85 @@
+# root_refuses_load_data_skill — exercises the tier_forbidden
+# envelope and the model's ability to recover.
+#
+# We deliberately prod root to try `skill:load("hugr-data")`
+# first. hugr-data's tier_compatibility narrows to worker-tier in
+# the final η; for δ.B it's still [root,mission,worker] permissive
+# (waiting on bash-mcp narrowing per phase-8 backlog). To still
+# exercise the gate we instead point root at a skill that IS
+# locked to worker tier — duckdb-data (also [root,mission,worker]
+# right now — same issue).
+#
+# Pragmatic δ.B-era version: ask root to "use hugr-data directly"
+# and observe that root EITHER (a) gets tier_forbidden when
+# tier_compat narrows in η AND recovers via spawn_mission, OR
+# (b) for now just spawns a mission outright because its skill
+# bodies / constitution tell it to. Either path is a pass —
+# what matters is that root NEVER calls hugr-main:* directly.
+#
+# Once tier_compat tightens in η, the tier_forbidden envelope
+# becomes the canonical demonstration. For now the scenario
+# functions as a "root never touches data tools" regression.
+name: root_refuses_load_data_skill
+requires: []
+
+steps:
+  - say: |
+      I want you to look up some table info in the "northwind"
+      data source. Don't worry about delegation patterns — just
+      load the hugr-data skill yourself and run a discovery
+      query directly. Return what you find.
+
+      (If your runtime refuses to let you load hugr-data, follow
+      whatever recovery path the error message tells you.)
+    budget: 360s
+    wait_for_subagents: 240s
+
+    queries:
+      # Root's tool calls — the assertion: NO hugr-main:* or
+      # hugr-query:* in here. Any of those is a delegation failure.
+      # Allowed: skill:load (which surfaces tier_forbidden or
+      # succeeds harmlessly), session:spawn_mission, plan:*,
+      # whiteboard:read.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Did root receive a tool_error envelope from skill:load?
+      # (Once η narrows hugr-data to [worker], this returns the
+      # tier_forbidden code in the result.) For δ.B-era permissive
+      # tier_compat the load may succeed; query still returns the
+      # tool_result rows so we can inspect what the model did.
+      - name: tool_results_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_result"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_id is_error tool_error_code }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Did root eventually delegate via spawn_mission? The
+      # invariant: even when nudged to do data work inline, root
+      # must NOT call hugr-main:*. If it spawned a mission, that's
+      # the right path.
+      - name: mission_row
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
