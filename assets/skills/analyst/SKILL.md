@@ -81,37 +81,50 @@ metadata:
 
               Data work — staged pipeline (Hugr default):
 
-                Wave 1 — SCHEMA DISCOVERY
-                  Spawn `schema-explorer` workers (one per module
-                  or per entity scoped in the goal). They run
-                  `discovery-*` / `schema-*` tools ONLY and write
-                  a structured schema map to the whiteboard.
-                  Cheap intent — no real queries here.
+              **PARALLELISE within each wave.** A wave is a SINGLE
+              `session:spawn_wave` call with an array of subagents
+              that run concurrently. If the goal mentions N
+              independent entities / tables / modules, put N
+              entries in the wave's `subagents` array — DO NOT
+              fire N successive waves with one worker each.
+              Sequential waves cost N× the latency for no gain.
 
-                Wave 2 — QUERY COMPOSITION + VALIDATION
-                  Spawn ONE `query-builder` worker per distinct
-                  result set the goal needs (often just one).
-                  It reads wave-1 whiteboard findings, composes
-                  one GraphQL query, validates it with a small
-                  test call (count-only or LIMIT 1), and writes
-                  the validated query + sample row to the
-                  whiteboard.
+                Wave 1 — SCHEMA DISCOVERY (parallel)
+                  ONE wave with M `schema-explorer` entries, M =
+                  number of independent entities the goal names.
+                  Each entry's `task` scopes to one entity. They
+                  run `discovery-*` / `schema-*` tools ONLY and
+                  each writes a structured schema-map to the
+                  whiteboard. Cheap intent.
 
-                Wave 3 — EXECUTION (optional, only if more rows /
-                aggregates / post-processing than the validation
-                pass returned are needed). Spawn `data-analyst`
-                workers — they reuse wave-2's validated query
-                syntax to fetch real result sets, and (if the goal
-                needs it) post-process via DuckDB SQL or Python.
+                Wave 2 — QUERY COMPOSITION + VALIDATION (parallel)
+                  ONE wave with M `query-builder` entries (often
+                  M=1, but use M>1 when the goal needs distinct
+                  query shapes). Each reads its scope's schema-map
+                  from wave-1's whiteboard, composes one GraphQL
+                  query, validates with a small test call
+                  (count-only or LIMIT 1), and writes the
+                  validated query + sample row back.
 
-                Wave 4 — SYNTHESIS
-                  Spawn ONE `report-builder` worker. It reads the
-                  whiteboard ONLY (no data tools) and composes
-                  the final answer for root.
+                Wave 3 — EXECUTION (parallel, optional)
+                  Only if more rows / aggregates / post-processing
+                  than the validation pass returned are needed.
+                  ONE wave with M `data-analyst` entries running
+                  the validated queries from wave-2.
+
+                Wave 4 — SYNTHESIS (sequential by nature)
+                  ONE `report-builder` worker. Reads the whiteboard
+                  ONLY (no data tools) and composes the final
+                  answer for root.
 
               For simple "describe a table" / "schema summary"
               goals, waves 2-3 are often unnecessary — wave-1
               schema findings + wave-4 synthesis is enough.
+
+              Sequential waves are valid ONLY when wave-K depends
+              on wave-(K-1)'s findings (schema → query → execute).
+              Inside a single wave: parallelise everything that's
+              independent.
 
             Concrete call shape (substitute role + task per worker):
 
