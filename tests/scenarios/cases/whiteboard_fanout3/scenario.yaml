@@ -1,75 +1,104 @@
-# whiteboard_fanout3 — root inits a whiteboard, spawns 3 explorer
-# children, each writes one finding, root reads back all writes.
-# By-eye: do siblings see each other's writes (whiteboard:message
-# extension_frame in their session_events)? Does whiteboard:read
-# from root return all 3 writes in monotonic seq?
+# whiteboard_fanout3 — exercises wave parallelism + whiteboard
+# cross-worker visibility. Three workers in ONE wave should write
+# independent findings to the mission's shared whiteboard;
+# siblings see each other's writes as the wave runs.
+#
+# 3-tier topology:
+#   root           → spawn_mission(analyst)
+#   mission        → on_mission_start: plan + whiteboard:init
+#                  → spawn_wave([3 schema-explorers, parallel])
+#                  → whiteboard:read after wave returns
+#                  → final assistant message (or wave 4 report-builder)
+#   each worker    → boot sequence + discovery-* + whiteboard:write
+#
+# By-eye assertions: 3 workers spawned in ONE wave (single
+# spawn_wave call), each writes once to the whiteboard.
 name: whiteboard_fanout3
-requires: []
+requires: [hugr]
 
 steps:
   - say: |
-      Initialise a shared whiteboard. Then spawn 3 sub-agents
-      using the hugr-data skill (no role needed); each child's
-      task is to write one short finding about the "northwind"
-      data source to the whiteboard via whiteboard:write
-      (different fact each).
-
-      After all children finish, call whiteboard:read and report
-      back what's on the board.
+      I want three independent facts about the "northwind" data
+      source — different aspects each. Pick three distinct
+      angles (e.g. entities, relationships, aggregations,
+      sample row counts, key fields) and gather one short fact
+      per angle in parallel. Then summarise them for me as three
+      bullets.
+    # Parallel fan-out should make this fast — under 6 min even
+    # on gemini-pro since wave-1 runs 3 workers concurrently
+    # rather than sequentially.
     budget: 480s
     wait_for_subagents: 360s
 
     queries:
-      # Whiteboard ops on the root: init + read should appear here;
-      # writes themselves originated from children but the host
-      # session also receives the relayed extension_frame (category
-      # message) per pkg/extension/whiteboard.
-      - name: whiteboard_ops_root
+      # Root: must be only spawn_mission + wait_subagents.
+      - name: tool_calls_root
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.session_events | map(select(.metadata.extension == \"whiteboard\")) | map({seq, op: .metadata.op, category: .metadata.category, data: .metadata.data})") {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Mission: exactly ONE spawn_wave call (parallel fan-out).
+      # Two or more = mission picked sequential waves (η tuning
+      # needed). The wave_label is helpful for the by-eye reader.
+      - name: mission_tool_sequence
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, tools: (.events // []) | map({seq, tool: .tool_name})})") {
               hub { db { agent {
-                session_events(
-                  filter: {session_id: {eq: $sid}, event_type: {eq: "extension_frame"}}
-                  order_by: [{field: "seq", direction: ASC}]
-                ) { seq metadata }
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "tool_call"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq tool_name
+                  }
+                }
               }}}
             }
           }
         vars: { sid: "$sid" }
         path: extensions.jq.jq
 
-      # Children — useful to confirm 3 sub-agent rows.
-      - name: subagent_rows
+      # Worker subtree — three depth-2 schema-explorer sessions
+      # is the ideal shape. Surface each worker's spawn_role and
+      # tool sequence so we can check the boot sequence happened.
+      - name: worker_subtree
         graphql: |
           query ($sid: String!) {
-            hub { db { agent {
-              sessions(filter: {parent_session_id: {eq: $sid}}) {
-                id status session_type metadata
-              }
-            }}}
+            jq(query: ".hub.db.agent.sessions | map({mission: .id, workers: (.child_sessions // []) | map({id, role: .metadata.spawn_role, status, tools: (.events // []) | map({seq, tool: .tool_name})})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  child_sessions {
+                    id metadata status
+                    events(filter: {event_type: {eq: "tool_call"}}, order_by: [{field: "seq", direction: ASC}]) {
+                      seq tool_name
+                    }
+                  }
+                }
+              }}}
+            }
           }
         vars: { sid: "$sid" }
+        path: extensions.jq.jq
 
-      # Cross-session whiteboard ops: root + every child in one
-      # union. Hugr filter syntax uses _or (underscore prefix) per
-      # ../hugr-lab.github.io/docs/5-graphql/1-queries/3-filtering.md.
-      # The references_query on a session row is `events`
-      # (not `session_events`); jq narrows event_type to
-      # extension_frame and metadata.extension to whiteboard.
-      - name: whiteboard_ops_tree
+      # Whiteboard ops on the mission — init from on_start, plus
+      # cross-session relayed writes from each worker. Should
+      # show 1 init + 3 writes (one per worker) + ≥1 read by
+      # mission between/after the wave.
+      - name: whiteboard_ops_mission
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.sessions | map({id, status, ops: (.events // []) | map(select(.event_type == \"extension_frame\" and .metadata.extension == \"whiteboard\")) | map({seq, op: .metadata.op, category: .metadata.category, data: .metadata.data})})") {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, ops: (.events // []) | map(select(.event_type == \"extension_frame\" and .metadata.extension == \"whiteboard\")) | map({seq, op: .metadata.op, category: .metadata.category})})") {
               hub { db { agent {
-                sessions(filter: {
-                  _or: [
-                    {id: {eq: $sid}},
-                    {parent_session_id: {eq: $sid}}
-                  ]
-                }) {
-                  id status
-                  events(order_by: [{field: "seq", direction: ASC}]) {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "extension_frame"}}, order_by: [{field: "seq", direction: ASC}]) {
                     seq event_type metadata
                   }
                 }
