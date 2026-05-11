@@ -8,18 +8,15 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // newFixture builds an Extension + a state seeded by InitState so
-// every test starts from "fresh, ready-to-call" — same shape the
-// runtime gives a brand-new session. Uses the shared
-// [fixture.TestStore] for persistence and
-// [fixture.TestSessionState] for session state so every extension
-// migration reuses the same fakes.
+// every test starts from "fresh, ready-to-call".
 func newFixture(t *testing.T) (*Extension, *fixture.TestSessionState, *fixture.TestStore) {
 	t.Helper()
 	store := fixture.NewTestStore()
-	ext := NewExtension(store, "agent-test")
+	ext := NewExtension(store, "agent-test", Config{})
 	state := fixture.NewTestSessionState("ses-test")
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
@@ -28,44 +25,69 @@ func newFixture(t *testing.T) (*Extension, *fixture.TestSessionState, *fixture.T
 }
 
 func TestExtension_Name(t *testing.T) {
-	ext := NewExtension(fixture.NewTestStore(), "a1")
+	ext := NewExtension(fixture.NewTestStore(), "a1", Config{})
 	if got := ext.Name(); got != "notepad" {
 		t.Errorf("Name = %q, want notepad", got)
 	}
 }
 
-func TestExtension_List(t *testing.T) {
-	ext := NewExtension(fixture.NewTestStore(), "a1")
+func TestExtension_List_FourTools(t *testing.T) {
+	ext := NewExtension(fixture.NewTestStore(), "a1", Config{})
 	tools, err := ext.List(context.Background())
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(tools) != 1 {
-		t.Fatalf("len(tools) = %d, want 1", len(tools))
+	want := []string{"notepad:append", "notepad:read", "notepad:search", "notepad:show"}
+	if len(tools) != len(want) {
+		t.Fatalf("len(tools) = %d, want %d", len(tools), len(want))
 	}
-	if tools[0].Name != "notepad:append" {
-		t.Errorf("tool name = %q, want notepad:append", tools[0].Name)
+	got := make(map[string]string, len(tools))
+	for _, tl := range tools {
+		got[tl.Name] = tl.PermissionObject
 	}
-	if tools[0].PermissionObject != PermObject {
-		t.Errorf("perm object = %q, want %q", tools[0].PermissionObject, PermObject)
+	for _, name := range want {
+		if _, ok := got[name]; !ok {
+			t.Errorf("missing tool %q", name)
+		}
+	}
+	if got["notepad:append"] != PermAppend {
+		t.Errorf("append perm = %q, want %q", got["notepad:append"], PermAppend)
 	}
 }
 
-func TestExtension_InitState_StashesNotepad(t *testing.T) {
-	_, state, _ := newFixture(t)
-	np := FromState(state)
+func TestExtension_InitState_SnapshotsRootAndRole(t *testing.T) {
+	store := fixture.NewTestStore()
+	ext := NewExtension(store, "agent-test", Config{})
+	// Construct a worker (depth 2) state with a real parent chain
+	// so InitState walks to the root.
+	root := fixture.NewTestSessionState("ses-root")
+	mission := fixture.NewTestSessionState("ses-mission").WithParent(root)
+	worker := fixture.NewTestSessionState("ses-worker").WithParent(mission)
+
+	if err := ext.InitState(context.Background(), worker); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	np := FromState(worker)
 	if np == nil {
 		t.Fatal("FromState returned nil after InitState")
 	}
+	if np.RootID() != "ses-root" {
+		t.Errorf("RootID = %q, want ses-root", np.RootID())
+	}
+	if np.Role() != skill.TierWorker {
+		t.Errorf("Role = %q, want %q", np.Role(), skill.TierWorker)
+	}
 }
 
-// TestCallAppend_Happy drives the tool through Call (the
-// dispatcher path) and verifies the row landed in the store.
 func TestCallAppend_Happy(t *testing.T) {
 	ext, state, store := newFixture(t)
 	ctx := extension.WithSessionState(context.Background(), state)
 
-	args, _ := json.Marshal(appendInput{Text: "remember this"})
+	args, _ := json.Marshal(AppendInput{
+		Content:  "remember this",
+		Category: "schema-finding",
+		Mission:  "exploring northwind",
+	})
 	out, err := ext.Call(ctx, "notepad:append", args)
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -77,9 +99,11 @@ func TestCallAppend_Happy(t *testing.T) {
 	if got["id"] == "" {
 		t.Fatalf("empty id; out=%s", out)
 	}
-
-	if len(store.Notes) != 1 || store.Notes[0].Content != "remember this" {
-		t.Errorf("store rows = %+v, want one with our text", store.Notes)
+	if len(store.Notes) != 1 ||
+		store.Notes[0].Content != "remember this" ||
+		store.Notes[0].Category != "schema-finding" ||
+		store.Notes[0].Mission != "exploring northwind" {
+		t.Errorf("store row mismatch: %+v", store.Notes)
 	}
 }
 
@@ -96,23 +120,117 @@ func TestCallAppend_BadRequest(t *testing.T) {
 	}
 }
 
-func TestCallAppend_EmptyText(t *testing.T) {
+func TestCallAppend_EmptyContent(t *testing.T) {
 	ext, state, _ := newFixture(t)
 	ctx := extension.WithSessionState(context.Background(), state)
 
-	args, _ := json.Marshal(appendInput{Text: ""})
+	args, _ := json.Marshal(AppendInput{Content: ""})
 	out, err := ext.Call(ctx, "notepad:append", args)
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
 	if !strings.Contains(string(out), `"code":"io"`) {
-		t.Errorf("expected io error from empty text, got %s", out)
+		t.Errorf("expected io error from empty content, got %s", out)
+	}
+}
+
+func TestCallRead_ReturnsNotes(t *testing.T) {
+	ext, state, store := newFixture(t)
+	ctx := extension.WithSessionState(context.Background(), state)
+
+	// Pre-seed two notes.
+	for _, content := range []string{"first", "second"} {
+		args, _ := json.Marshal(AppendInput{Content: content, Category: "test"})
+		if _, err := ext.Call(ctx, "notepad:append", args); err != nil {
+			t.Fatalf("seed append: %v", err)
+		}
+	}
+	if len(store.Notes) != 2 {
+		t.Fatalf("expected 2 seeded notes, got %d", len(store.Notes))
+	}
+
+	args, _ := json.Marshal(ReadInput{})
+	out, err := ext.Call(ctx, "notepad:read", args)
+	if err != nil {
+		t.Fatalf("Call read: %v", err)
+	}
+	var got struct {
+		Notes []wireNote `json:"notes"`
+	}
+	if uerr := json.Unmarshal(out, &got); uerr != nil {
+		t.Fatalf("unmarshal: %v", uerr)
+	}
+	if len(got.Notes) != 2 {
+		t.Errorf("expected 2 notes from read, got %+v", got.Notes)
+	}
+}
+
+func TestCallSearch_FallbackOnNoEmbedder(t *testing.T) {
+	ext, state, _ := newFixture(t)
+	ctx := extension.WithSessionState(context.Background(), state)
+
+	// Seed one note.
+	seedArgs, _ := json.Marshal(AppendInput{Content: "queryable hypothesis"})
+	if _, err := ext.Call(ctx, "notepad:append", seedArgs); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	args, _ := json.Marshal(SearchInput{Query: "anything"})
+	out, err := ext.Call(ctx, "notepad:search", args)
+	if err != nil {
+		t.Fatalf("Call search: %v", err)
+	}
+	var got struct {
+		Notes []wireNote `json:"notes"`
+	}
+	if uerr := json.Unmarshal(out, &got); uerr != nil {
+		t.Fatalf("unmarshal: %v", uerr)
+	}
+	if len(got.Notes) != 1 {
+		t.Errorf("expected fallback recency listing to return 1 note, got %+v", got.Notes)
+	}
+}
+
+func TestCallSearch_RequiresQuery(t *testing.T) {
+	ext, state, _ := newFixture(t)
+	ctx := extension.WithSessionState(context.Background(), state)
+
+	args, _ := json.Marshal(SearchInput{Query: ""})
+	out, err := ext.Call(ctx, "notepad:search", args)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(string(out), `"code":"io"`) {
+		t.Errorf("expected io error on empty query, got %s", out)
+	}
+}
+
+func TestCallShow_FormatsForUser(t *testing.T) {
+	ext, state, _ := newFixture(t)
+	ctx := extension.WithSessionState(context.Background(), state)
+
+	seedArgs, _ := json.Marshal(AppendInput{Content: "hypothesis A", Category: "x"})
+	if _, err := ext.Call(ctx, "notepad:append", seedArgs); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	args, _ := json.Marshal(ShowInput{})
+	out, err := ext.Call(ctx, "notepad:show", args)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	var got map[string]string
+	if uerr := json.Unmarshal(out, &got); uerr != nil {
+		t.Fatalf("unmarshal: %v", uerr)
+	}
+	if !strings.Contains(got["text"], "## x (1)") {
+		t.Errorf("expected category bucket header in formatted text, got %q", got["text"])
 	}
 }
 
 func TestCallAppend_NoSessionInContext(t *testing.T) {
-	ext := NewExtension(fixture.NewTestStore(), "a1")
-	args, _ := json.Marshal(appendInput{Text: "x"})
+	ext := NewExtension(fixture.NewTestStore(), "a1", Config{})
+	args, _ := json.Marshal(AppendInput{Content: "x"})
 	out, err := ext.Call(context.Background(), "notepad:append", args)
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -122,7 +240,7 @@ func TestCallAppend_NoSessionInContext(t *testing.T) {
 	}
 }
 
-func TestCallAppend_UnknownOp(t *testing.T) {
+func TestCall_UnknownOp(t *testing.T) {
 	ext, state, _ := newFixture(t)
 	ctx := extension.WithSessionState(context.Background(), state)
 

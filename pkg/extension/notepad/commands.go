@@ -15,7 +15,10 @@ var _ extension.Commander = (*Extension)(nil)
 
 // Commands implements [extension.Commander]. Notepad contributes
 // `/note <text>` — the human-typed counterpart to the
-// notepad:append tool.
+// notepad:append tool. Phase 4.2.3 wraps the new AppendInput
+// shape; the slash command sets category to "user" so direct
+// /note entries are easy to filter out from model-generated
+// observations later.
 func (e *Extension) Commands() []extension.Command {
 	return []extension.Command{{
 		Name:        "note",
@@ -23,6 +26,8 @@ func (e *Extension) Commands() []extension.Command {
 		Handler:     e.cmdNote,
 	}}
 }
+
+const userNoteCategory = "user"
 
 func (e *Extension) cmdNote(ctx context.Context, state extension.SessionState, env extension.CommandContext, args []string) ([]protocol.Frame, error) {
 	sessionID := state.SessionID()
@@ -39,7 +44,10 @@ func (e *Extension) cmdNote(ctx context.Context, state extension.SessionState, e
 				"notepad extension not registered on this session", false),
 		}, nil
 	}
-	id, err := np.Append(ctx, env.Author.ID, strings.Join(args, " "))
+	id, err := np.Append(ctx, AppendInput{
+		Content:  strings.Join(args, " "),
+		Category: userNoteCategory,
+	})
 	if err != nil {
 		return []protocol.Frame{
 			protocol.NewError(sessionID, env.AgentAuthor, "note_failed", err.Error(), true),
