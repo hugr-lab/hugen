@@ -54,6 +54,10 @@ runs:
       # for non-data work; root must dispatch via `_general`, not
       # `analyst`).
       - general_shell_lookup
+      # 4.2.3 δ — cross-mission notepad acceptance gate. Two
+      # sequential user turns prove notes from mission A surface
+      # to mission B via climb-to-root storage + the 48h window.
+      - cross_mission_notepad
       # skill-machinery scenarios — independent of tier topology.
       - skill_save_bundle
       - skill_save_overwrite_collision
@@ -89,6 +93,11 @@ runs:
       - delegation_required
       - whiteboard_fanout3
       - full_analyst_workflow
+      # 4.2.3 δ — cross-mission notepad. Gemma 26B 7/10 gate per
+      # phase-4.2.3 spec milestone δ. Sequential two-step;
+      # validates that working memory survives spawn_mission
+      # boundaries via climb-to-root storage.
+      - cross_mission_notepad
       - skill_save_bundle
       - skill_save_overwrite_collision
       - skill_discovery_via_catalog

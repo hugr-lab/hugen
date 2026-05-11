@@ -16,6 +16,14 @@ allowed-tools:
   - provider: whiteboard
     tools:
       - read
+  # Phase 4.2.3 — root has the full notepad surface; `show` is
+  # root-only by design (formats for the user, not for the model).
+  - provider: notepad
+    tools:
+      - append
+      - read
+      - search
+      - show
 metadata:
   hugen:
     requires_skills: []

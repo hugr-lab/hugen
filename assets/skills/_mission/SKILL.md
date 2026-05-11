@@ -21,6 +21,13 @@ allowed-tools:
       - write
       - read
       - stop
+  # Phase 4.2.3 — missions append working hypotheses across waves
+  # and read prior session findings. `show` is root-only.
+  - provider: notepad
+    tools:
+      - append
+      - read
+      - search
 metadata:
   hugen:
     requires_skills: []

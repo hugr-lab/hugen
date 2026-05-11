@@ -10,6 +10,14 @@ allowed-tools:
     tools:
       - write
       - read
+  # Phase 4.2.3 — workers read prior cross-mission findings but
+  # do not write by default. Roles that need write capability can
+  # extend allowed-tools at the role level (sub_agents block in
+  # the dispatching skill).
+  - provider: notepad
+    tools:
+      - read
+      - search
 metadata:
   hugen:
     requires_skills: []

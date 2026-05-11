@@ -1,0 +1,178 @@
+# cross_mission_notepad — phase 4.2.3 δ acceptance gate.
+#
+# Two sequential user turns in one root session prove that notes
+# written by mission A are visible to mission B (and the model
+# actually uses them instead of re-asking). Storage climbs to the
+# root via the extension's WalkToRootID snapshot in InitState; the
+# 48h read window keeps both turns inside scope.
+#
+# Step 1 — user states a personal preference. Root delegates to
+# `_general` (catch-all dispatcher; not data work). The mission
+# session has `notepad:append` via the autoloaded `_mission`
+# skill grant, and the dispatching skill's Block A advertises
+# `user-preference` as a recommended category. Expected behaviour:
+# the mission calls notepad:append({category: "user-preference",
+# content: "<some phrasing of EMEA/EUR>"}) before returning a
+# brief ack to root.
+#
+# Step 2 — user asks a follow-up that depends on the prior
+# preference. Root spawns a fresh mission. The mission's first
+# system prompt now carries Block B (the notepad snapshot) which
+# lists the user-preference entry from step 1. Mission can either
+# read Block B directly or call notepad:search/read explicitly.
+# Either way the final answer surfaces "EUR" / "EMEA" / similar
+# — the model is not allowed to ask the user to re-state it.
+#
+# By-eye assertions (queries below):
+#
+#   1. Step 1 — at least one session_notes row exists with
+#      session_id = root.id, category = "user-preference",
+#      author_role ∈ {coordinator, mission, root}. The content
+#      mentions EUR or EMEA.
+#
+#   2. Step 1 — one of the missions made a notepad:append tool
+#      call. (We don't pin which mission since model may collapse
+#      step 1 into a single mission spawn.)
+#
+#   3. Step 2 — the second mission either calls notepad:search /
+#      notepad:read OR the runtime's Block B snapshot in the
+#      mission's system prompt rendered the user-preference
+#      entry. We assert the easier one: a notepad:read or
+#      notepad:search tool_call exists somewhere in this turn's
+#      mission tree.
+#
+#   4. Step 2 — root's final assistant message mentions EUR
+#      (case-insensitive). If the model paraphrases ("euros",
+#      "euro" — both also start with "eur"), the substring still
+#      matches.
+#
+# Does NOT require hugr — the conversation is pure-LLM with
+# notepad as the cross-mission channel.
+name: cross_mission_notepad
+requires: []
+
+steps:
+  # ──────────────────── Step 1 ────────────────────
+  - say: |
+      I work mostly in EMEA (UTC+1) and prefer financial figures
+      in EUR. Please remember this for our conversation — I do
+      not want to repeat it on every follow-up.
+
+      Once you have noted it, send me a one-line acknowledgement.
+    # Single mission, one notepad:append, ack reply. 4-5 LLM turns
+    # at 30-50s each on gemini-pro = 5-min budget with margin.
+    budget: 360s
+    wait_for_subagents: 300s
+
+    queries:
+      # Notes written under this root after step 1. Should be at
+      # least one row with category="user-preference" and
+      # content mentioning EMEA or EUR.
+      - name: notes_after_step1
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_notes(
+                filter: {session_id: {eq: $sid}}
+                order_by: [{field: "created_at", direction: ASC}]
+              ) { id author_session_id author_role category mission content }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Mission tool_calls — should include at least one
+      # notepad:append. Walks all mission sessions
+      # (parent_session_id = root) and projects their
+      # tool_call event_type rows.
+      - name: tool_calls_in_missions_step1
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, tools: (.events // []) | map({seq, tool: .tool_name})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "tool_call"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq tool_name
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+  # ──────────────────── Step 2 ────────────────────
+  - say: |
+      Quick check — what currency did I tell you to use, and what
+      region am I in? Recall this from our prior exchange; do not
+      ask me to repeat.
+
+  # New mission spawned for step 2. Mission's system prompt
+  # carries Block B (notepad snapshot) listing the user-preference
+  # note from step 1. Mission may also call notepad:search to
+  # confirm. Final root answer should mention EUR.
+    budget: 360s
+    wait_for_subagents: 300s
+
+    queries:
+      # All notepad-related tool calls anywhere in the second
+      # turn's mission tree. We expect at least one of:
+      # notepad:read, notepad:search. Renders all tool calls so
+      # the reviewer also sees the absence of redundant
+      # notepad:append (recording the same preference twice
+      # would be wasteful).
+      - name: notepad_tool_calls_step2
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, notepad_tools: (.events // []) | map(select(.tool_name | startswith(\"notepad:\"))) | map({seq, tool: .tool_name})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "tool_call"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq tool_name
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Root's most recent assistant message — final answer the
+      # user would see. We grep this for EUR + EMEA in the by-eye
+      # review. Filtered to consolidated agent_message rows from
+      # the root session.
+      - name: root_final_message_step2
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map({seq, content})") {
+              hub { db { agent {
+                session_events(
+                  filter: {
+                    session_id: {eq: $sid}
+                    event_type: {eq: "agent_message"}
+                  }
+                  order_by: [{field: "seq", direction: DESC}]
+                  limit: 3
+                ) { seq content }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Final snapshot of all notes — verifies no UPDATEs / deletes
+      # happened and step-1 row survived. Phase 4.2.3 is append-
+      # only, so this row count should equal the cumulative number
+      # of notepad:append calls across both steps.
+      - name: all_notes_final
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_notes(
+                filter: {session_id: {eq: $sid}}
+                order_by: [{field: "created_at", direction: ASC}]
+              ) { id author_session_id author_role category content }
+            }}}
+          }
+        vars: { sid: "$sid" }
