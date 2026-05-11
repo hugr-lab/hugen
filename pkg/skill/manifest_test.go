@@ -678,30 +678,31 @@ metadata:
 	}
 }
 
-// TestParse_MissionEnabledRejectsSystemSkill verifies mission.enabled
-// is rejected on `_`-prefixed names. System skills are runtime
-// primitives, not mission dispatch targets (phase 4.2.2 §6).
-func TestParse_MissionEnabledRejectsSystemSkill(t *testing.T) {
+// TestParse_MissionEnabledOnSystemSkill_OK verifies the relaxed
+// invariant (phase 4.2.2 §6 revision): mission.enabled is permitted
+// on `_`-prefixed system skills (e.g. `_general`, the runtime's
+// catch-all fallback mission dispatcher). Autoload remains
+// independently `_`-prefix-only.
+func TestParse_MissionEnabledOnSystemSkill_OK(t *testing.T) {
 	src := `---
-name: _analyst
-description: System skill trying to claim mission dispatch.
+name: _general
+description: Universal fallback mission dispatcher.
 license: MIT
 metadata:
   hugen:
-    autoload: true
-    autoload_for: [mission]
+    autoload: false
     tier_compatibility: [mission]
     mission:
       enabled: true
-      summary: Data analysis.
+      summary: Generic catch-all coordinator.
 ---
 `
-	_, err := Parse([]byte(src))
-	if err == nil || !errors.Is(err, ErrManifestInvalid) {
-		t.Fatalf("Parse: err = %v, want ErrManifestInvalid", err)
+	m, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
 	}
-	if !strings.Contains(err.Error(), "mission.enabled") {
-		t.Errorf("err message should mention mission.enabled: %v", err)
+	if !m.Hugen.Mission.Enabled {
+		t.Errorf("Mission.Enabled = false, want true")
 	}
 }
 

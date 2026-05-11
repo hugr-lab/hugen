@@ -549,10 +549,15 @@ func (m *Manifest) validateHugen() error {
 			return errors.New("metadata.hugen.autoload: true requires explicit metadata.hugen.autoload_for")
 		}
 	}
-	if m.Hugen.Mission.Enabled && strings.HasPrefix(m.Name, "_") {
-		return fmt.Errorf("metadata.hugen.mission.enabled: true is reserved for extension skills (name must NOT start with %q, got %q) — system skills are runtime primitives, not mission dispatch targets",
-			"_", m.Name)
-	}
+	// mission.enabled is permitted on both `_`-prefixed (system)
+	// and bare-named (extension) skills. The former covers
+	// runtime-bundled universal mission dispatchers (e.g.
+	// `_general` — the catch-all fallback mission for tasks that
+	// don't fit a specialised skill). The latter covers
+	// operator/community-contributed mission skills like
+	// `analyst`, `coder`, `writer`. Autoload is the only `_`-only
+	// invariant — see the m.Hugen.Autoload check above. Phase 4.2.2
+	// §6 (revised).
 
 	// autoload_for ⊆ effective tier_compatibility — a skill cannot
 	// auto-load into a tier where skill:load would reject it.
