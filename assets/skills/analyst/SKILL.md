@@ -50,9 +50,10 @@ metadata:
             ──────────────────────────────────────────────────────
             1. Role catalogue lives on `analyst`. Every
                `session:spawn_wave` entry sets `skill: "analyst"`
-               and picks one of {simple-answerer, data-explorer,
-               sql-analyst, report-builder}. Do NOT pass
-               `skill: "_worker"` — that's a runtime primitive.
+               and picks one of {simple-answerer, schema-explorer,
+               query-builder, data-analyst, report-builder}. Do
+               NOT pass `skill: "_worker"` — that's a runtime
+               primitive.
 
             2. Read the manual before deciding waves. Before wave
                1 on any DATA task, load + skim the relevant domain
@@ -81,36 +82,60 @@ metadata:
 
               Data work — staged pipeline (Hugr default):
 
-              **PARALLELISE within each wave.** A wave is a SINGLE
-              `session:spawn_wave` call with an array of subagents
-              that run concurrently. If the goal mentions N
-              independent entities / tables / modules, put N
-              entries in the wave's `subagents` array — DO NOT
-              fire N successive waves with one worker each.
-              Sequential waves cost N× the latency for no gain.
+              **STEP 0 — DECOMPOSE THE GOAL BEFORE WAVE 1.**
+              Read the user's goal sentence by sentence and count
+              the INDEPENDENT angles / entities / tables / modules
+              it names. Write that decomposition into the plan
+              first via `plan:comment` so you can see it.
+              Generic examples (substitute the user's actual
+              entity / module / dataset names):
 
-                Wave 1 — SCHEMA DISCOVERY (parallel)
-                  ONE wave with M `schema-explorer` entries, M =
-                  number of independent entities the goal names.
-                  Each entry's `task` scopes to one entity. They
+                "Describe the <ENTITY> table in <DATASOURCE>"
+                  → 1 angle  → wave-1 has 1 schema-explorer.
+
+                "Describe <ENTITY_A>, <ENTITY_B>, <ENTITY_C> in
+                 <DATASOURCE>"
+                  → 3 angles → wave-1 has 3 schema-explorers IN
+                    PARALLEL (one spawn_wave call, 3 entries —
+                    one per entity).
+
+                "What does <DATASOURCE> track + main entities +
+                 an informative aggregate"
+                  → 3 angles → wave-1 has 3 schema-explorers IN
+                    PARALLEL (domain overview / entities map /
+                    candidate aggregate fields).
+
+              **STEP 1 — PARALLELISE within each wave.** A wave is
+              a SINGLE `session:spawn_wave` call with an array of
+              N entries that run concurrently. **DO NOT fire N
+              successive waves with one worker each — sequential
+              waves cost N× the latency for no gain.** Sequential
+              waves are valid ONLY when wave-K depends on
+              wave-(K-1)'s findings (schema → query → execute);
+              within a wave, parallelise everything independent.
+
+                Wave 1 — SCHEMA DISCOVERY (parallel × N angles)
+                  ONE spawn_wave call with N `schema-explorer`
+                  entries, N = the decomposition count from STEP 0.
+                  Each entry's `task` scopes to one angle. They
                   run `discovery-*` / `schema-*` tools ONLY and
                   each writes a structured schema-map to the
                   whiteboard. Cheap intent.
 
                 Wave 2 — QUERY COMPOSITION + VALIDATION (parallel)
-                  ONE wave with M `query-builder` entries (often
-                  M=1, but use M>1 when the goal needs distinct
-                  query shapes). Each reads its scope's schema-map
-                  from wave-1's whiteboard, composes one GraphQL
-                  query, validates with a small test call
-                  (count-only or LIMIT 1), and writes the
+                  ONE spawn_wave with M `query-builder` entries
+                  (often M=1; use M>1 when the goal needs M
+                  distinct query shapes). Each reads its scope's
+                  schema-map from wave-1's whiteboard, composes
+                  one GraphQL query, validates with a small test
+                  call (count-only or LIMIT 1), and writes the
                   validated query + sample row back.
 
                 Wave 3 — EXECUTION (parallel, optional)
                   Only if more rows / aggregates / post-processing
                   than the validation pass returned are needed.
-                  ONE wave with M `data-analyst` entries running
-                  the validated queries from wave-2.
+                  ONE spawn_wave with K `data-analyst` entries
+                  running the validated queries from wave-2.
 
                 Wave 4 — SYNTHESIS (sequential by nature)
                   ONE `report-builder` worker. Reads the whiteboard
@@ -121,12 +146,9 @@ metadata:
               goals, waves 2-3 are often unnecessary — wave-1
               schema findings + wave-4 synthesis is enough.
 
-              Sequential waves are valid ONLY when wave-K depends
-              on wave-(K-1)'s findings (schema → query → execute).
-              Inside a single wave: parallelise everything that's
-              independent.
+            Concrete call shapes:
 
-            Concrete call shape (substitute role + task per worker):
+            Single-entity goal (N=1):
 
               session:spawn_wave({
                 wave_label: "explore",
@@ -134,8 +156,22 @@ metadata:
                   {
                     skill: "analyst",
                     role:  "schema-explorer",
-                    task:  "Load hugr-data; skill:ref(skill=\"hugr-data\", ref=\"start\") AND ref=\"overview\". Using ONLY discovery-* / schema-* tools, map the `orders` entity in data source `northwind`: list its fields, types, and key relationships. Write a structured schema-map to the whiteboard."
+                    task:  "Load hugr-data; skill:ref(skill=\"hugr-data\", ref=\"start\") + ref=\"overview\". Using ONLY discovery-* / schema-* tools, map the `<ENTITY>` entity in data source `<DATASOURCE>`: list its fields, types, and key relationships. Write a structured schema-map to the whiteboard."
                   }
+                ]
+              })
+
+            Multi-entity goal (N=3) — ONE call, 3 entries:
+
+              session:spawn_wave({
+                wave_label: "explore-N",
+                subagents: [
+                  { skill: "analyst", role: "schema-explorer",
+                    task: "...map `<ENTITY_A>` in `<DATASOURCE>`..." },
+                  { skill: "analyst", role: "schema-explorer",
+                    task: "...map `<ENTITY_B>` in `<DATASOURCE>`..." },
+                  { skill: "analyst", role: "schema-explorer",
+                    task: "...map `<ENTITY_C>` in `<DATASOURCE>`..." }
                 ]
               })
 
@@ -164,7 +200,7 @@ metadata:
           types, fields, relationships, edge cases. ONLY uses
           discovery-* / schema-* tools; never executes data
           queries. Writes a tight structured schema-map to the
-          whiteboard so query-builder + sql-analyst can compose
+          whiteboard so query-builder + data-analyst can compose
           accurate queries on top.
         intent: cheap
         can_spawn: false
@@ -181,7 +217,7 @@ metadata:
           syntax by running it once (small limit / count-only) and
           fixes any errors before promoting. Writes the validated
           query + a one-row sample to the whiteboard for
-          sql-analyst to expand.
+          data-analyst to expand.
         intent: tool_calling
         can_spawn: false
         tools:
@@ -297,17 +333,22 @@ or violates a constraint you cannot satisfy), call
 
 ## Wave patterns
 
-- **Trivial Q&A**: one wave, one `simple-answerer`. Return its result
-  directly.
-- **Simple data lookup**: one wave with one or more `data-explorer`s
-  in parallel. Maybe a second wave with a `report-builder` if the
-  user wants prose.
-- **Multi-step analysis**: Explore (data-explorers) → Analyze
-  (sql-analysts) → Synthesize (one report-builder). Two or three
-  waves; comment on the plan between each.
+- **Trivial Q&A**: one wave, one `simple-answerer`. Return its
+  result directly.
+- **Simple schema summary**: one wave with N `schema-explorer`s
+  in parallel (one per entity / angle), maybe a follow-up
+  `report-builder` for prose synthesis.
+- **Query-building task**: schema-explorer(s) → query-builder.
+  Stop there if the user just wanted the validated query; the
+  query + sample-row on the whiteboard IS the deliverable.
+- **Full analysis**: schema-explorer(s) → query-builder(s) →
+  data-analyst(s) (execute / post-process) → report-builder.
+  Up to four waves; comment on the plan between each. Always
+  parallelise inside a wave — sequential waves are only for
+  cross-wave dependencies.
 
-Keep waves short — at most three. If you find yourself iterating
-past wave 3, you probably need to re-scope; consider abstaining
+Keep waves short — at most four. If you find yourself iterating
+past wave 4, you probably need to re-scope; consider abstaining
 and asking root for clarification.
 
 ## Returning to root

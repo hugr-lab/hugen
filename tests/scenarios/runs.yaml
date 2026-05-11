@@ -48,6 +48,7 @@ runs:
       - single_explorer
       - delegation_required
       - whiteboard_fanout3
+      - graphql_query_builder
       - full_analyst_workflow
       # skill-machinery scenarios — independent of tier topology.
       - skill_save_bundle
