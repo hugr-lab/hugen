@@ -13,7 +13,8 @@ metadata:
   hugen:
     requires_skills: []
     autoload: true
-    autoload_for: [root, subagent]
+    autoload_for: [root, mission, worker]
+    tier_compatibility: [root, mission, worker]
 compatibility:
   model: any
   runtime: hugen-phase-4

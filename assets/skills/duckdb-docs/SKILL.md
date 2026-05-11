@@ -13,6 +13,7 @@ metadata:
     requires: []
     autoload: false
     autoload_for: []
+    tier_compatibility: [root, mission, worker]
     sub_agents: []
     intents: [documentation]
 compatibility:

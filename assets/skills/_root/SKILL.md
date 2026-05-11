@@ -20,6 +20,7 @@ metadata:
     requires_skills: []
     autoload: true
     autoload_for: [root]
+    tier_compatibility: [root]
 compatibility:
   model: any
   runtime: hugen-phase-4

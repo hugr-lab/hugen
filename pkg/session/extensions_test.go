@@ -179,6 +179,20 @@ func TestExtensionCloser_DispatchedReverseOrder(t *testing.T) {
 	}
 }
 
+// TestSystemPrompt_TierHeader asserts the system prompt opens
+// with a `Session tier: <tier>` line resolved from the session's
+// depth (phase 4.2.2 §9). The root constructor leaves depth 0, so
+// the header reads "root"; that's the only tier reachable via
+// newTestParent without a real spawn.
+func TestSystemPrompt_TierHeader(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+	body := parent.systemPrompt(context.Background())
+	if !strings.HasPrefix(body, "Session tier: root") {
+		t.Errorf("systemPrompt prefix missing tier header; got: %q", body)
+	}
+}
+
 // TestExtensionAdvertiser_AppendsSection asserts non-empty
 // Advertiser sections land in the system prompt body in
 // registration order, and empty sections are skipped.

@@ -42,6 +42,9 @@ license: MIT
 allowed-tools:
   - provider: bash-mcp
     tools: [bash.read_file]
+metadata:
+  hugen:
+    tier_compatibility: [root, mission, worker]
 ---
 body
 `
@@ -62,7 +65,7 @@ func newAlphaFixture(t *testing.T, perms perm.Service) (*Extension, *fixture.Tes
 	}})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, perms, "agent-test")
-	state := fixture.NewTestSessionState("ses-test")
+	state := fixture.NewTestSessionState("ses-test").WithDepth(2)
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -148,6 +151,92 @@ func TestCallLoad_NoSessionInContext(t *testing.T) {
 	}
 }
 
+// inlineWorkerSkillManifest declares tier_compatibility: [worker]
+// — used by tier_forbidden tests to verify a root session is
+// refused with the structured envelope.
+const inlineWorkerSkillManifest = `---
+name: worker-only
+description: Worker-tier-only skill for tier_forbidden tests.
+license: MIT
+allowed-tools:
+  - provider: bash-mcp
+    tools: [bash.read_file]
+metadata:
+  hugen:
+    tier_compatibility: [worker]
+---
+body
+`
+
+// newTierFixture wires the extension over a manager that knows
+// both alpha (loadable everywhere — default [worker], but the
+// test only uses it via direct Manifest.LoadableInTier) and
+// worker-only (tier_compatibility: [worker]). Returns the
+// session at the supplied depth so tests can pick the caller
+// tier deterministically.
+func newTierFixture(t *testing.T, depth int) (*Extension, *fixture.TestSessionState) {
+	t.Helper()
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"worker-only": []byte(inlineWorkerSkillManifest),
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "agent-tier")
+	state := fixture.NewTestSessionState("ses-tier").WithDepth(depth)
+	if err := ext.InitState(context.Background(), state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	return ext, state
+}
+
+// TestCallLoad_TierForbidden_Root verifies a root-tier session
+// trying to load a worker-only skill gets the structured envelope
+// tool_error{code:"tier_forbidden"} with the alternative-path hint
+// pointing at spawn_subagent. Phase 4.2.2 §3.3.3.
+func TestCallLoad_TierForbidden_Root(t *testing.T) {
+	ext, state := newTierFixture(t, 0) // depth 0 → root tier
+	out, err := ext.Call(newCallCtx(state), "skill:load", json.RawMessage(`{"name":"worker-only"}`))
+	if err != nil {
+		t.Fatalf("Call returned error %v; want JSON envelope", err)
+	}
+	if !strings.Contains(string(out), `"tier_forbidden"`) {
+		t.Errorf("envelope missing tier_forbidden code: %s", out)
+	}
+	if !strings.Contains(string(out), "spawn_subagent") {
+		t.Errorf("envelope missing root-tier hint (spawn_subagent): %s", out)
+	}
+}
+
+// TestCallLoad_TierAllowed_Worker verifies a worker-tier session
+// can load the same skill — proves the gate is selective, not
+// blanket-reject.
+func TestCallLoad_TierAllowed_Worker(t *testing.T) {
+	ext, state := newTierFixture(t, 2) // depth 2 → worker tier
+	out, err := ext.Call(newCallCtx(state), "skill:load", json.RawMessage(`{"name":"worker-only"}`))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(string(out), `"loaded":true`) {
+		t.Errorf("out = %s, want loaded:true", out)
+	}
+}
+
+// TestCallLoad_TierForbidden_Mission verifies the mission-tier
+// hint points at spawning a worker (rather than at spawn_mission,
+// which is root's path).
+func TestCallLoad_TierForbidden_Mission(t *testing.T) {
+	ext, state := newTierFixture(t, 1) // depth 1 → mission tier
+	out, err := ext.Call(newCallCtx(state), "skill:load", json.RawMessage(`{"name":"worker-only"}`))
+	if err != nil {
+		t.Fatalf("Call returned error %v; want JSON envelope", err)
+	}
+	if !strings.Contains(string(out), `"tier_forbidden"`) {
+		t.Errorf("envelope missing tier_forbidden code: %s", out)
+	}
+	if !strings.Contains(string(out), "spawn a worker") {
+		t.Errorf("envelope missing mission-tier hint (spawn a worker): %s", out)
+	}
+}
+
 // ---------- skill:unload ----------
 
 func TestCallUnload_Idempotent(t *testing.T) {
@@ -174,7 +263,7 @@ func newSaveFixture(t *testing.T) (*Extension, *fixture.TestSessionState, *skill
 	})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "agent-save")
-	state := fixture.NewTestSessionState("ses-save")
+	state := fixture.NewTestSessionState("ses-save").WithDepth(2)
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -497,7 +586,7 @@ func newGammaFixture(t *testing.T, perms perm.Service) (*Extension, *fixture.Tes
 	store := skillpkg.NewSkillStore(skillpkg.Options{LocalRoot: root})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, perms, "agent-test")
-	state := fixture.NewTestSessionState("ses-test")
+	state := fixture.NewTestSessionState("ses-test").WithDepth(2)
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -559,7 +648,7 @@ func TestCallFiles_NotLoaded(t *testing.T) {
 	store := skillpkg.NewSkillStore(skillpkg.Options{LocalRoot: root})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a1")
-	state := fixture.NewTestSessionState("ses-test")
+	state := fixture.NewTestSessionState("ses-test").WithDepth(2)
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}

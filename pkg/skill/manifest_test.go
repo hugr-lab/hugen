@@ -286,11 +286,12 @@ metadata:
 	}
 }
 
-// TestParse_PhaseFourFlags exercises the new manifest fields:
-// max_turns_hard, stuck_detection, can_spawn, autoload_when_*.
+// TestParse_PhaseFourFlags exercises the runtime manifest fields:
+// max_turns_hard, stuck_detection, can_spawn, autoload_for /
+// tier_compatibility (phase 4.2.2 tier vocab).
 func TestParse_PhaseFourFlags(t *testing.T) {
 	src := `---
-name: heavy-explorer
+name: _heavy-explorer
 description: Phase-4 fields exercised end-to-end.
 license: MIT
 metadata:
@@ -307,9 +308,8 @@ metadata:
         description: leaf
         can_spawn: false
     autoload: true
-    autoload_for: [subagent]
-    autoload_when_role_can_spawn: true
-    autoload_when_parent_has_active_whiteboard: true
+    autoload_for: [mission, worker]
+    tier_compatibility: [mission, worker]
 ---
 `
 	m, err := Parse([]byte(src))
@@ -330,12 +330,6 @@ metadata:
 	}
 	if got := m.Hugen.SubAgents[0]; got.CanSpawnEffective() {
 		t.Errorf("SubAgent.CanSpawnEffective = true, want false (explicit can_spawn: false)")
-	}
-	if !m.Hugen.AutoloadWhenRoleCanSpawn {
-		t.Errorf("AutoloadWhenRoleCanSpawn not parsed")
-	}
-	if !m.Hugen.AutoloadWhenParentHasActiveWhiteboard {
-		t.Errorf("AutoloadWhenParentHasActiveWhiteboard not parsed")
 	}
 }
 
@@ -359,52 +353,26 @@ func TestStuckDetection_DefaultEnabled(t *testing.T) {
 	}
 }
 
-// TestAutoloadEligible_RootIgnoresConditional verifies the
-// conditional flags are silently ignored for root sessions —
-// they target sub-agent autoload semantics by definition.
-func TestAutoloadEligible_RootIgnoresConditional(t *testing.T) {
+// TestAutoloadEligible covers the tier-only autoload decision
+// after phase 4.2.2 removed the conditional gates. The simple
+// rule: a tier in autoload_for fires; otherwise no.
+func TestAutoloadEligible(t *testing.T) {
 	m := &Manifest{}
 	m.Hugen.Autoload = true
-	m.Hugen.AutoloadWhenRoleCanSpawn = true
-	if !m.AutoloadEligible(AutoloadContext{SessionType: SessionTypeRoot}) {
-		t.Error("AutoloadEligible(root) = false; conditional flags should not apply to roots")
+	m.Hugen.AutoloadFor = []string{TierMission, TierWorker}
+	if !m.AutoloadEligible(TierMission) {
+		t.Error("AutoloadEligible(mission) = false, want true")
 	}
-}
-
-// TestAutoloadEligible_SubAgent_RoleCanSpawnGate exercises the
-// AutoloadWhenRoleCanSpawn gate: the manifest only autoloads when
-// the spawned role's CanSpawn is true.
-func TestAutoloadEligible_SubAgent_RoleCanSpawnGate(t *testing.T) {
-	m := &Manifest{}
-	m.Hugen.Autoload = true
-	m.Hugen.AutoloadFor = []string{SessionTypeSubAgent}
-	m.Hugen.AutoloadWhenRoleCanSpawn = true
-
-	yes := AutoloadContext{SessionType: SessionTypeSubAgent, RoleCanSpawn: true}
-	if !m.AutoloadEligible(yes) {
-		t.Error("AutoloadEligible(role can spawn) = false, want true")
+	if !m.AutoloadEligible(TierWorker) {
+		t.Error("AutoloadEligible(worker) = false, want true")
 	}
-	no := AutoloadContext{SessionType: SessionTypeSubAgent, RoleCanSpawn: false}
-	if m.AutoloadEligible(no) {
-		t.Error("AutoloadEligible(role cannot spawn) = true, want false")
+	if m.AutoloadEligible(TierRoot) {
+		t.Error("AutoloadEligible(root) = true, want false (not in autoload_for)")
 	}
-}
 
-// TestAutoloadEligible_SubAgent_WhiteboardGate exercises the
-// AutoloadWhenParentHasActiveWhiteboard gate.
-func TestAutoloadEligible_SubAgent_WhiteboardGate(t *testing.T) {
-	m := &Manifest{}
-	m.Hugen.Autoload = true
-	m.Hugen.AutoloadFor = []string{SessionTypeSubAgent}
-	m.Hugen.AutoloadWhenParentHasActiveWhiteboard = true
-
-	yes := AutoloadContext{SessionType: SessionTypeSubAgent, ParentHasActiveWhiteboard: true}
-	if !m.AutoloadEligible(yes) {
-		t.Error("AutoloadEligible(active whiteboard) = false, want true")
-	}
-	no := AutoloadContext{SessionType: SessionTypeSubAgent, ParentHasActiveWhiteboard: false}
-	if m.AutoloadEligible(no) {
-		t.Error("AutoloadEligible(no whiteboard) = true, want false")
+	m.Hugen.Autoload = false
+	if m.AutoloadEligible(TierMission) {
+		t.Error("AutoloadEligible with autoload:false should always be false")
 	}
 }
 
@@ -473,5 +441,205 @@ allowed-tools:
 				t.Errorf("len(AllowedTools) = %d, want %d", got, tc.wantLen)
 			}
 		})
+	}
+}
+
+// TestTierFromDepth covers the depth → tier mapping (phase 4.2.2
+// §2). Negative depth maps to root (defensive — the constructor
+// never produces negative depth, but the helper is robust).
+func TestTierFromDepth(t *testing.T) {
+	for _, tc := range []struct {
+		depth int
+		want  string
+	}{
+		{-1, TierRoot},
+		{0, TierRoot},
+		{1, TierMission},
+		{2, TierWorker},
+		{3, TierWorker},
+		{10, TierWorker},
+	} {
+		if got := TierFromDepth(tc.depth); got != tc.want {
+			t.Errorf("TierFromDepth(%d) = %q, want %q", tc.depth, got, tc.want)
+		}
+	}
+}
+
+// TestEffectiveTierCompatibility verifies the default-[worker]
+// fallback when the manifest omits tier_compatibility (phase 4.2.2
+// §3.3.2).
+func TestEffectiveTierCompatibility(t *testing.T) {
+	var m Manifest
+	got := m.EffectiveTierCompatibility()
+	if len(got) != 1 || got[0] != TierWorker {
+		t.Errorf("EffectiveTierCompatibility absent = %v, want [%s]", got, TierWorker)
+	}
+	m.Hugen.TierCompatibility = []string{TierMission}
+	got = m.EffectiveTierCompatibility()
+	if len(got) != 1 || got[0] != TierMission {
+		t.Errorf("EffectiveTierCompatibility explicit = %v, want [%s]", got, TierMission)
+	}
+}
+
+// TestLoadableInTier covers tier_compatibility membership lookup
+// including the absent-field default-[worker] fallback.
+func TestLoadableInTier(t *testing.T) {
+	var m Manifest
+	if !m.LoadableInTier(TierWorker) {
+		t.Errorf("absent tier_compatibility: LoadableInTier(worker) = false, want true (default)")
+	}
+	if m.LoadableInTier(TierRoot) {
+		t.Errorf("absent tier_compatibility: LoadableInTier(root) = true, want false")
+	}
+	m.Hugen.TierCompatibility = []string{TierRoot, TierMission}
+	if !m.LoadableInTier(TierRoot) || !m.LoadableInTier(TierMission) {
+		t.Errorf("explicit [root,mission]: missing membership")
+	}
+	if m.LoadableInTier(TierWorker) {
+		t.Errorf("explicit [root,mission]: LoadableInTier(worker) = true, want false")
+	}
+}
+
+// TestParse_AutoloadRequiresUnderscorePrefix verifies the phase
+// 4.2.2 §1 invariant: autoload:true is reserved for system skills
+// (name must start with "_"). The error must satisfy
+// errors.Is(err, ErrAutoloadReserved) so handlers can recover the
+// sentinel for user-friendly messaging.
+func TestParse_AutoloadRequiresUnderscorePrefix(t *testing.T) {
+	src := `---
+name: community-skill
+description: Community-authored skill trying to claim autoload.
+license: MIT
+metadata:
+  hugen:
+    autoload: true
+    autoload_for: [worker]
+    tier_compatibility: [worker]
+---
+`
+	_, err := Parse([]byte(src))
+	if err == nil {
+		t.Fatal("Parse: nil err, want ErrAutoloadReserved")
+	}
+	if !errors.Is(err, ErrAutoloadReserved) {
+		t.Errorf("err = %v, want errors.Is ErrAutoloadReserved", err)
+	}
+	if !errors.Is(err, ErrManifestInvalid) {
+		t.Errorf("err = %v, want errors.Is ErrManifestInvalid (parse-time)", err)
+	}
+}
+
+// TestParse_AutoloadRequiresExplicitAutoloadFor verifies the
+// phase 4.2.2 §3 invariant: when autoload:true the manifest must
+// declare autoload_for explicitly — no [root] fallback.
+func TestParse_AutoloadRequiresExplicitAutoloadFor(t *testing.T) {
+	src := `---
+name: _ghost
+description: Autoload without an explicit autoload_for.
+license: MIT
+metadata:
+  hugen:
+    autoload: true
+    tier_compatibility: [root]
+---
+`
+	_, err := Parse([]byte(src))
+	if err == nil || !errors.Is(err, ErrManifestInvalid) {
+		t.Fatalf("Parse: err = %v, want ErrManifestInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "autoload_for") {
+		t.Errorf("err message should reference autoload_for: %v", err)
+	}
+}
+
+// TestParse_AutoloadForSubsetOfTierCompatibility verifies the
+// invariant autoload_for ⊆ tier_compatibility. A skill that
+// declares autoload_for:[root] but tier_compatibility:[worker]
+// would auto-load where skill:load would reject it — caught at
+// parse time.
+func TestParse_AutoloadForSubsetOfTierCompatibility(t *testing.T) {
+	src := `---
+name: _mismatch
+description: autoload_for not subset of tier_compatibility.
+license: MIT
+metadata:
+  hugen:
+    autoload: true
+    autoload_for: [root]
+    tier_compatibility: [worker]
+---
+`
+	_, err := Parse([]byte(src))
+	if err == nil || !errors.Is(err, ErrManifestInvalid) {
+		t.Fatalf("Parse: err = %v, want ErrManifestInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "tier_compatibility") {
+		t.Errorf("err message should mention tier_compatibility subset: %v", err)
+	}
+}
+
+// TestParse_RejectsLegacyTierVocab verifies the aggressive cleanup
+// per phase 4.2.2 §Migration: the legacy [subagent] alias is gone
+// — autoload_for must use the new [root, mission, worker] vocab.
+func TestParse_RejectsLegacyTierVocab(t *testing.T) {
+	src := `---
+name: _legacy
+description: Uses the dropped [subagent] vocabulary.
+license: MIT
+metadata:
+  hugen:
+    autoload: true
+    autoload_for: [subagent]
+    tier_compatibility: [subagent]
+---
+`
+	_, err := Parse([]byte(src))
+	if err == nil || !errors.Is(err, ErrManifestInvalid) {
+		t.Fatalf("Parse: err = %v, want ErrManifestInvalid", err)
+	}
+}
+
+// TestParse_RejectsInvalidTierEntry verifies tier_compatibility
+// entries are checked against {root, mission, worker}.
+func TestParse_RejectsInvalidTierEntry(t *testing.T) {
+	src := `---
+name: _bad-tier
+description: tier_compatibility has an unknown value.
+license: MIT
+metadata:
+  hugen:
+    tier_compatibility: [shaman]
+---
+`
+	_, err := Parse([]byte(src))
+	if err == nil || !errors.Is(err, ErrManifestInvalid) {
+		t.Fatalf("Parse: err = %v, want ErrManifestInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "shaman") {
+		t.Errorf("err should name the offending value: %v", err)
+	}
+}
+
+// TestParse_TierCompatibilityValidAll exercises the happy path
+// for every tier value plus the absent-field default-[worker]
+// fallback at parse time.
+func TestParse_TierCompatibilityValidAll(t *testing.T) {
+	src := `---
+name: _allgood
+description: tier_compatibility uses every tier value.
+license: MIT
+metadata:
+  hugen:
+    autoload: true
+    autoload_for: [root, mission, worker]
+    tier_compatibility: [root, mission, worker]
+---
+`
+	m, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(m.Hugen.TierCompatibility) != 3 {
+		t.Errorf("TierCompatibility = %v, want 3 entries", m.Hugen.TierCompatibility)
 	}
 }

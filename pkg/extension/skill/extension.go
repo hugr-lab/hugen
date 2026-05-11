@@ -11,6 +11,7 @@ package skill
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 
@@ -20,6 +21,27 @@ import (
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
+
+// tierForbiddenHint produces a short per-tier instruction the LLM
+// can act on when its skill:load is rejected. The hint names the
+// canonical alternative for each calling tier: root delegates via
+// session:spawn_subagent (later spawn_mission); mission spawns
+// workers; workers tell the user the work doesn't fit a worker.
+//
+// Kept here (next to Load) so the test for the gate can check the
+// shape without reflecting through the manifest package.
+func tierForbiddenHint(callerTier, skillName string) string {
+	switch callerTier {
+	case skillpkg.TierRoot:
+		return fmt.Sprintf("delegate via session:spawn_subagent so the work happens at the tier where %q is loadable", skillName)
+	case skillpkg.TierMission:
+		return fmt.Sprintf("spawn a worker via session:spawn_subagent that loads %q itself; mission coordinates, workers do data work", skillName)
+	case skillpkg.TierWorker:
+		return fmt.Sprintf("%q is not available at the worker tier; abstain via session:abstain or return what you have", skillName)
+	default:
+		return "tier mismatch — check session tier vs skill tier_compatibility"
+	}
+}
 
 // StateKey is the [extension.SessionState] key the extension stores
 // its per-session [*SessionSkill] handle under. Exported so callers
@@ -75,16 +97,16 @@ func (e *Extension) Lifetime() tool.Lifetime { return tool.LifetimePerAgent }
 // fresh [SessionSkill] handle for the calling session, stashes it
 // under [StateKey], registers it as a [skillpkg.SessionSink] so
 // manager-level Refresh broadcasts find it, and runs autoload
-// (skills with metadata.hugen.autoload_in matching this session's
-// derived type — root or subagent based on parent linkage).
+// (skills whose metadata.hugen.autoload_for contains this
+// session's tier — root/mission/worker resolved from depth).
 func (e *Extension) InitState(ctx context.Context, state extension.SessionState) error {
 	h := &SessionSkill{
-		manager:     e.manager,
-		perms:       e.perms,
-		sessionID:   state.SessionID(),
-		author:      e.agentParticipant(),
-		loaded:      map[string]skillpkg.Skill{},
-		sessionType: deriveSessionType(state),
+		manager:   e.manager,
+		perms:     e.perms,
+		sessionID: state.SessionID(),
+		author:    e.agentParticipant(),
+		loaded:    map[string]skillpkg.Skill{},
+		tier:      skillpkg.TierFromDepth(state.Depth()),
 	}
 	state.SetValue(StateKey, h)
 	if e.manager == nil {
@@ -95,21 +117,10 @@ func (e *Extension) InitState(ctx context.Context, state extension.SessionState)
 	return nil
 }
 
-// deriveSessionType picks SessionType from the session's parent
-// linkage: a session with no parent is the agent's root session;
-// anything spawned via Spawn is a subagent. Mirrors the
-// constructors.go classification that ends up on store.SessionRow.
-func deriveSessionType(state extension.SessionState) string {
-	if _, hasParent := state.Parent(); hasParent {
-		return skillpkg.SessionTypeSubAgent
-	}
-	return skillpkg.SessionTypeRoot
-}
-
 // autoload binds every skill that opts into autoload for this
-// session's derived type. Per-skill failures log via the
-// manager's logger and continue; one bad bundle must not deny the
-// session its working tool surface.
+// session's tier. Per-skill failures log via the manager's logger
+// and continue; one bad bundle must not deny the session its
+// working tool surface.
 func (h *SessionSkill) autoload(ctx context.Context) {
 	if h.manager == nil {
 		return
@@ -119,7 +130,7 @@ func (h *SessionSkill) autoload(ctx context.Context) {
 		return
 	}
 	for _, sk := range all {
-		if !sk.Manifest.AutoloadIn(h.sessionType) {
+		if !sk.Manifest.AutoloadInTier(h.tier) {
 			continue
 		}
 		_ = h.Load(ctx, sk.Manifest.Name)
@@ -132,11 +143,11 @@ func (h *SessionSkill) autoload(ctx context.Context) {
 // pkg/skill.SkillManager used to keep in its m.sessions map until
 // stage 5 of phase 4.1b-pre dissolved that field.
 type SessionSkill struct {
-	manager     *skillpkg.SkillManager
-	perms       perm.Service
-	sessionID   string
-	author      protocol.ParticipantInfo
-	sessionType string // skill.SessionTypeRoot / SessionTypeSubAgent
+	manager   *skillpkg.SkillManager
+	perms     perm.Service
+	sessionID string
+	author    protocol.ParticipantInfo
+	tier      string // skill.TierRoot / skill.TierMission / skill.TierWorker
 
 	mu     sync.RWMutex
 	loaded map[string]skillpkg.Skill // by manifest name
@@ -158,6 +169,21 @@ func (h *SessionSkill) Load(ctx context.Context, name string) error {
 	resolved, err := h.manager.ResolveClosure(ctx, name)
 	if err != nil {
 		return err
+	}
+	// Tier-restricted load — every resolved skill (the requested
+	// one plus transitive deps) must be loadable in the calling
+	// session's tier. Reject as a single envelope so the LLM gets
+	// a precise alternative path rather than discovering the
+	// constraint deep in the dependency closure. Phase 4.2.2 §3.3.3.
+	for _, s := range resolved {
+		if !s.Manifest.LoadableInTier(h.tier) {
+			return fmt.Errorf("skill %q is loadable only in %v; this is a %s session — %s: %w",
+				s.Manifest.Name,
+				s.Manifest.EffectiveTierCompatibility(),
+				h.tier,
+				tierForbiddenHint(h.tier, s.Manifest.Name),
+				skillpkg.ErrTierForbidden)
+		}
 	}
 	h.mu.Lock()
 	for _, s := range resolved {

@@ -21,7 +21,7 @@ func TestCallLoad_EmitsExtensionFrame(t *testing.T) {
 	}})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "agent-emit")
-	state := fixture.NewTestSessionState("ses-emit")
+	state := fixture.NewTestSessionState("ses-emit").WithDepth(2)
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestCallUnload_EmitsExtensionFrame(t *testing.T) {
 	}})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a1")
-	state := fixture.NewTestSessionState("ses-u")
+	state := fixture.NewTestSessionState("ses-u").WithDepth(2)
 	_ = ext.InitState(ctx, state)
 	_, _ = ext.Call(newCallCtx(state), "skill:load", json.RawMessage(`{"name":"alpha"}`))
 	if _, err := ext.Call(newCallCtx(state), "skill:unload", json.RawMessage(`{"name":"alpha"}`)); err != nil {
@@ -95,7 +95,7 @@ func TestRecover_LoadsThenUnloadsRebuildsState(t *testing.T) {
 	}})
 	mgr := skillpkg.NewSkillManager(mgrSt, nil)
 	ext := NewExtension(mgr, nil, "a1")
-	state := fixture.NewTestSessionState("ses-rec")
+	state := fixture.NewTestSessionState("ses-rec").WithDepth(2)
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestRecover_LoadsThenUnloadsRebuildsState(t *testing.T) {
 
 	// Now replay an unload event — final state should be empty.
 	rows = append(rows, newSkillEventRow(t, OpUnload, "alpha"))
-	state2 := fixture.NewTestSessionState("ses-rec2")
+	state2 := fixture.NewTestSessionState("ses-rec2").WithDepth(2)
 	_ = ext.InitState(ctx, state2)
 	if err := ext.Recover(ctx, state2, rows); err != nil {
 		t.Fatalf("Recover 2: %v", err)
@@ -131,7 +131,7 @@ func TestRecover_IgnoresNonSkillEvents(t *testing.T) {
 	mgrSt := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{}})
 	mgr := skillpkg.NewSkillManager(mgrSt, nil)
 	ext := NewExtension(mgr, nil, "a1")
-	state := fixture.NewTestSessionState("ses-skip")
+	state := fixture.NewTestSessionState("ses-skip").WithDepth(2)
 	_ = ext.InitState(ctx, state)
 
 	rows := []store.EventRow{
@@ -169,7 +169,7 @@ func TestCloseSession_DeregistersFromManagerBroadcast(t *testing.T) {
 	}})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a1")
-	state := fixture.NewTestSessionState("ses-cl")
+	state := fixture.NewTestSessionState("ses-cl").WithDepth(2)
 	_ = ext.InitState(ctx, state)
 	if err := FromState(state).Load(ctx, "alpha"); err != nil {
 		t.Fatalf("Load: %v", err)

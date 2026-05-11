@@ -1405,14 +1405,18 @@ func (s *Session) buildMessages(ctx context.Context) []model.Message {
 
 // systemPrompt assembles the system-prompt body for the next
 // model.Generate call. Order:
-//  1. Agent constitution (universal rules).
-//  2. Extension Advertiser sections — registration order. Plan ext
+//  1. Session tier header — "Session tier: <tier>" line that
+//     anchors the constitution's Session-tier section to the
+//     concrete tier of this session (phase 4.2.2 §9).
+//  2. Agent constitution (universal rules + Session tier section).
+//  3. Extension Advertiser sections — registration order. Plan ext
 //     advertises the active-plan block (registered before skill so
 //     it lands ahead of skill instructions / catalogue); skill ext
 //     contributes (a) the body of every loaded skill and (b) the
 //     catalogue of every skill the agent can reach.
 func (s *Session) systemPrompt(ctx context.Context) string {
 	var parts []string
+	parts = append(parts, "Session tier: "+skillpkg.TierFromDepth(s.depth))
 	if s.agent != nil {
 		if c := s.agent.Constitution(); c != "" {
 			parts = append(parts, c)
