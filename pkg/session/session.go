@@ -1472,11 +1472,21 @@ func (s *Session) modelToolsForSession(ctx context.Context) ([]model.Tool, error
 
 // defaultMaxToolIterations is the per-Turn cap on
 // model→tool→model loops applied when the session was
-// constructed without WithMaxToolIterations. 20 covers
-// hugr-data exploration patterns where the model legitimately
-// chains discovery → schema lookup → query validate → query
-// without hitting the cap on a single user request.
-const defaultMaxToolIterations = 20
+// constructed without WithMaxToolIterations. 40 covers the
+// 3-tier topology (phase 4.2.2) where a worker may chain
+// discovery → schema → validate → query → refine across the
+// course of one wave, and mission may iterate over multiple
+// wave + synthesis turns inside a single user request. The
+// hard ceiling is defaultMaxToolIterations * 2.
+//
+// TODO(phase 5): replace with per-tier defaults
+// (root=10 / mission=30 / worker=40-ish) plus per-role
+// override on SubAgentRole. Same migration applies to
+// HugenMetadata.MaxTurns / MaxTurnsHard / StuckDetection —
+// all three are conceptually per-session-tier, not per-skill.
+// See open question in phase 4.2.2 spec + phase 5 compactor
+// + HITL plan.
+const defaultMaxToolIterations = 40
 
 // dispatchToolCall handles one model-emitted tool call: emits the
 // tool_call frame, runs Tier-1 permission resolution, and either
