@@ -21,11 +21,11 @@ import (
 //     mission / worker operating manuals. Selected via
 //     ConstitutionFor(tier).
 type Agent struct {
-	id              string
-	name            string
-	src             identity.Source
-	universal       string
-	tierManuals     map[string]string
+	id          string
+	name        string
+	src         identity.Source
+	universal   string
+	tierManuals map[string]string
 }
 
 // NewAgent constructs an Agent. id and name are the persisted

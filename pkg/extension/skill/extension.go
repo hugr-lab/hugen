@@ -25,17 +25,18 @@ import (
 // tierForbiddenHint produces a short per-tier instruction the LLM
 // can act on when its skill:load is rejected. The hint names the
 // canonical alternative for each calling tier: root delegates via
-// session:spawn_subagent (later spawn_mission); mission spawns
-// workers; workers tell the user the work doesn't fit a worker.
+// session:spawn_mission (3-tier topology); mission fans out workers
+// via session:spawn_wave; workers tell the user the work doesn't
+// fit a worker.
 //
 // Kept here (next to Load) so the test for the gate can check the
 // shape without reflecting through the manifest package.
 func tierForbiddenHint(callerTier, skillName string) string {
 	switch callerTier {
 	case skillpkg.TierRoot:
-		return fmt.Sprintf("delegate via session:spawn_subagent so the work happens at the tier where %q is loadable", skillName)
+		return fmt.Sprintf("delegate via session:spawn_mission so the mission can fan out workers that load %q themselves", skillName)
 	case skillpkg.TierMission:
-		return fmt.Sprintf("spawn a worker via session:spawn_subagent that loads %q itself; mission coordinates, workers do data work", skillName)
+		return fmt.Sprintf("spawn a worker via session:spawn_wave that loads %q itself; mission coordinates, workers do data work", skillName)
 	case skillpkg.TierWorker:
 		return fmt.Sprintf("%q is not available at the worker tier; abstain via session:abstain or return what you have", skillName)
 	default:

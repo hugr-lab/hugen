@@ -23,8 +23,8 @@ type fakeProvider struct {
 	tools []tool.Tool
 }
 
-func (f *fakeProvider) Name() string                         { return f.name }
-func (f *fakeProvider) Lifetime() tool.Lifetime              { return f.life }
+func (f *fakeProvider) Name() string                              { return f.name }
+func (f *fakeProvider) Lifetime() tool.Lifetime                   { return f.life }
 func (f *fakeProvider) List(context.Context) ([]tool.Tool, error) { return f.tools, nil }
 func (f *fakeProvider) Call(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 	return nil, errors.New("fakeProvider: not callable")

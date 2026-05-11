@@ -191,7 +191,7 @@ func newTierFixture(t *testing.T, depth int) (*Extension, *fixture.TestSessionSt
 // TestCallLoad_TierForbidden_Root verifies a root-tier session
 // trying to load a worker-only skill gets the structured envelope
 // tool_error{code:"tier_forbidden"} with the alternative-path hint
-// pointing at spawn_subagent. Phase 4.2.2 §3.3.3.
+// pointing at spawn_mission. Phase 4.2.2 §3.3.3.
 func TestCallLoad_TierForbidden_Root(t *testing.T) {
 	ext, state := newTierFixture(t, 0) // depth 0 → root tier
 	out, err := ext.Call(newCallCtx(state), "skill:load", json.RawMessage(`{"name":"worker-only"}`))
@@ -201,8 +201,8 @@ func TestCallLoad_TierForbidden_Root(t *testing.T) {
 	if !strings.Contains(string(out), `"tier_forbidden"`) {
 		t.Errorf("envelope missing tier_forbidden code: %s", out)
 	}
-	if !strings.Contains(string(out), "spawn_subagent") {
-		t.Errorf("envelope missing root-tier hint (spawn_subagent): %s", out)
+	if !strings.Contains(string(out), "spawn_mission") {
+		t.Errorf("envelope missing root-tier hint (spawn_mission): %s", out)
 	}
 }
 

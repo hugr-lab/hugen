@@ -239,7 +239,6 @@ type HugenMetadata struct {
 	// (a skill cannot auto-load where it would be forbidden
 	// manually). Phase 4.2.2 §3.
 	TierCompatibility []string `json:"tier_compatibility,omitempty" yaml:"tier_compatibility,omitempty"`
-
 }
 
 // AllRequires returns the merged transitive-dependency list,

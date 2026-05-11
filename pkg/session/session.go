@@ -42,11 +42,11 @@ type Session struct {
 	models           *model.ModelRouter
 	codec            *protocol.Codec
 	cmds             *CommandRegistry
-	tools            *tool.ToolManager   // per-session child manager; required (NewSession derives it)
-	rootTools        *tool.ToolManager   // parent (agent-level) manager; passed to subagents
-	perms            perm.Service        // optional; consulted by tool handlers (skill_files etc.)
-	maxToolIters     int                 // 0 → defaultMaxToolIterations
-	maxToolItersHard int                 // 0 → 2 × resolved soft cap
+	tools            *tool.ToolManager // per-session child manager; required (NewSession derives it)
+	rootTools        *tool.ToolManager // parent (agent-level) manager; passed to subagents
+	perms            perm.Service      // optional; consulted by tool handlers (skill_files etc.)
+	maxToolIters     int               // 0 → defaultMaxToolIterations
+	maxToolItersHard int               // 0 → 2 × resolved soft cap
 	logger           *slog.Logger
 
 	// sessionTools is the static dispatch table. tools_subagent.go's

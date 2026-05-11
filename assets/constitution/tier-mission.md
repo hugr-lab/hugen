@@ -27,9 +27,11 @@ Before launching any wave, read the manual:
    the **reference surface only**. You MUST NOT call the data
    tools yourself — that's the workers' job. Mission coordinates;
    workers execute.
-3. Read the autoloaded mission-skill body (your dispatching skill,
-   e.g. `analyst`). It tells you the role catalogue + wave
-   patterns for this kind of work.
+3. Read your dispatching skill's body (e.g. `analyst`) — it's
+   loaded into your session at mission start by the runtime
+   (the skill that root passed to `session:spawn_mission`).
+   The body declares the role catalogue + wave patterns for
+   this kind of work.
 
 ### The wave-based loop
 

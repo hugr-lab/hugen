@@ -35,10 +35,10 @@ import (
 //     case-insensitive substring filter.
 
 const (
-	toolNameToolsCatalog       = providerName + ":tools_catalog"
-	permObjectToolsCatalog     = "hugen:tool:system"
-	toolDescToolsCatalog       = "Returns the catalogue of every provider and tool the agent process has registered. `granted_to_session` reflects whether the calling session's loaded skills admit each tool. `available_in_skills` lists every skill in the catalogue whose allowed-tools admit it (use one of those names with `skill:load` to enable the tool when `granted_to_session=false`). Optional filters: `provider` (exact name) + `pattern` (case-insensitive substring on tool name)."
-	toolsCatalogSchema         = `{
+	toolNameToolsCatalog   = providerName + ":tools_catalog"
+	permObjectToolsCatalog = "hugen:tool:system"
+	toolDescToolsCatalog   = "Returns the catalogue of every provider and tool the agent process has registered. `granted_to_session` reflects whether the calling session's loaded skills admit each tool. `available_in_skills` lists every skill in the catalogue whose allowed-tools admit it (use one of those names with `skill:load` to enable the tool when `granted_to_session=false`). Optional filters: `provider` (exact name) + `pattern` (case-insensitive substring on tool name)."
+	toolsCatalogSchema     = `{
   "type": "object",
   "properties": {
     "provider": {"type": "string", "description": "Optional provider name filter (e.g. \"hugr-main\"). Returns all providers when omitted."},

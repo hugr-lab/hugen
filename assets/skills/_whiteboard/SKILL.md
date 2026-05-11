@@ -82,7 +82,7 @@ Members do not need to call `whiteboard_read` to see live broadcasts
 
 ## What this skill does NOT grant
 
-- Sub-agent spawn — combine with `_root` / `_subagent` for that.
+- Sub-agent spawn — combine with `_root` / `_mission` / `_worker` for that.
 - Plan / notepad / parent-context — those are separate skills.
 
 The whiteboard is a coordination primitive, nothing more. Let the

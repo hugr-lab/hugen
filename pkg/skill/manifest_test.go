@@ -385,10 +385,10 @@ func TestAutoloadEligible(t *testing.T) {
 //   - populated → non-nil populated.
 func TestParse_AllowedTools_TriState(t *testing.T) {
 	cases := []struct {
-		name      string
-		src       string
-		wantNil   bool
-		wantLen   int
+		name    string
+		src     string
+		wantNil bool
+		wantLen int
 	}{
 		{
 			name: "absent",

@@ -150,7 +150,6 @@ func (s *TestSessionState) Children() []extension.SessionState {
 // installed via [TestSessionState.SetTools]; nil by default.
 func (s *TestSessionState) Tools() *tool.ToolManager { return s.tools }
 
-
 // Emit implements [extension.SessionState]. Records the frame in
 // memory so tests can assert what an extension emitted; the
 // fixture is not wired to any real event store.

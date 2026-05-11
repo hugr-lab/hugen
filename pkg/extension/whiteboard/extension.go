@@ -54,7 +54,7 @@ var (
 	_ extension.Recovery               = (*Extension)(nil)
 	_ extension.FrameRouter            = (*Extension)(nil)
 	_ extension.WhiteboardSystemWriter = (*Extension)(nil)
-	_ tool.ToolProvider          = (*Extension)(nil)
+	_ tool.ToolProvider                = (*Extension)(nil)
 )
 
 // Name implements [extension.Extension] and [tool.ToolProvider].

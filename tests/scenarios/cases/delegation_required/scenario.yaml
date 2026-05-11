@@ -131,7 +131,7 @@ steps:
       - name: worker_tool_calls
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.sessions | map({mission: .id, workers: (.child_sessions // []) | map({id, depth: .metadata.depth, role: .metadata.spawn_role, tools: (.events // []) | map(select(.event_type == \"tool_call\")) | map(.tool_name) | unique})})") {
+            jq(query: ".hub.db.agent.sessions | map({mission: .id, workers: (.child_sessions // []) | map({id, depth: .metadata.depth, role: .metadata.spawn_role, tools: (.events // []) | map(.tool_name) | unique})})") {
               hub { db { agent {
                 sessions(filter: {parent_session_id: {eq: $sid}}) {
                   id

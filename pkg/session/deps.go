@@ -43,14 +43,14 @@ import (
 // Outside this module nobody should be assembling a Deps by hand —
 // the public surface for that is NewManager.
 type Deps struct {
-	Store     store.RuntimeStore
-	Agent     *Agent
-	Models    *model.ModelRouter
-	Commands  *CommandRegistry
-	Codec     *protocol.Codec
-	Tools     *tool.ToolManager
-	Logger    *slog.Logger
-	Opts      []SessionOption
+	Store    store.RuntimeStore
+	Agent    *Agent
+	Models   *model.ModelRouter
+	Commands *CommandRegistry
+	Codec    *protocol.Codec
+	Tools    *tool.ToolManager
+	Logger   *slog.Logger
+	Opts     []SessionOption
 
 	// Extensions is the agent-level set of registered extensions.
 	// NewSession iterates this list and dispatches each extension to

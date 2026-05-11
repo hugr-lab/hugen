@@ -173,14 +173,14 @@ func NewManager(
 	// m.extensions are reflected in the bundle that newSession /
 	// newSessionRestore see.
 	m.deps = &session.Deps{
-		Store:      m.store,
-		Agent:      m.agent,
-		Models:     m.models,
-		Commands:   m.commands,
-		Codec:      m.codec,
-		Tools:      m.tools,
-		Logger:     m.logger,
-		Extensions: m.extensions,
+		Store:               m.store,
+		Agent:               m.agent,
+		Models:              m.models,
+		Commands:            m.commands,
+		Codec:               m.codec,
+		Tools:               m.tools,
+		Logger:              m.logger,
+		Extensions:          m.extensions,
 		Opts:                m.sessionOpts,
 		RootCtx:             m.rootCtx,
 		WG:                  &m.wg,

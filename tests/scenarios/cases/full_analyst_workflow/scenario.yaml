@@ -79,7 +79,7 @@ steps:
       - name: spawns_per_wave
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, spawns: (.events // []) | map(select(.event_type == \"subagent_started\")) | map({seq, role: .metadata.role, skill: .metadata.skill})})") {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, spawns: (.events // []) | map({seq, role: .metadata.role, skill: .metadata.skill})})") {
               hub { db { agent {
                 sessions(filter: {parent_session_id: {eq: $sid}}) {
                   id
@@ -100,7 +100,7 @@ steps:
       - name: worker_subtree
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.sessions | map({mission: .id, workers: (.child_sessions // []) | map({id, role: .metadata.spawn_role, status, tool_count: (.events // []) | map(select(.event_type == \"tool_call\")) | length})})") {
+            jq(query: ".hub.db.agent.sessions | map({mission: .id, workers: (.child_sessions // []) | map({id, role: .metadata.spawn_role, status, tool_count: (.events // []) | length})})") {
               hub { db { agent {
                 sessions(filter: {parent_session_id: {eq: $sid}}) {
                   id

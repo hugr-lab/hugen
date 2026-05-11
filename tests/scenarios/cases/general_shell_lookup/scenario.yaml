@@ -68,7 +68,7 @@ steps:
       - name: mission_tool_sequence
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, tools: (.events // []) | map(select(.event_type == \"tool_call\")) | map({seq, tool: .tool_name})})") {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, tools: (.events // []) | map({seq, tool: .tool_name})})") {
               hub { db { agent {
                 sessions(filter: {parent_session_id: {eq: $sid}}) {
                   id

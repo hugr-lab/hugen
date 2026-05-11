@@ -550,4 +550,3 @@ func allowedFromHandle(ctx context.Context, h *SessionSkill) *allowedSet {
 	}
 	return out
 }
-

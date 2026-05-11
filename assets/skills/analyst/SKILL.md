@@ -341,6 +341,4 @@ result via `wait_subagents`. Keep it tight, structured, and
 self-contained — root will quote it to the user with light
 framing. If your output has a useful `notes` section (short facts
 worth remembering across user turns), include it as a `notes:` JSON
-field in the final message so root's notepad gets seeded. The
-exact `expected_outputs` contract lands with phase 4.2.2 ε; for δ
-return prose plus optional `notes`.
+field in the final message so root's notepad gets seeded.
