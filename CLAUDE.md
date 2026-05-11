@@ -31,7 +31,7 @@ internals:
 - `design/002-runtime-canonical/architecture.md` — state-of-the-tree
   map; §11 is the extension recipe book.
 - `design/002-runtime-canonical/design.md` — vision + phase plan.
-- `design/002-runtime-canonical/phase-4.2-spec.md` — active phase.
+- `design/002-runtime-canonical/phase-4.2.3-cross-mission-notepad.md` — active phase (with 2026-05-11 implementation-notes footer).
 
 When 002 and a 001 phase doc disagree, 002 wins.
 
@@ -47,12 +47,13 @@ Phase plan:
 | 4.1a. Extract `pkg/runtime` + dissolve `SystemProvider` (tools onto domain `ToolProvider`s; absorbs ex-4.3) | shipped (`33a0bc3`) |
 | 4.1b. Observational scenario harness (port `../agent/tests/scenarios/` pattern; live LLM + real Hugr; ~8 scenarios v1) | shipped (`109f6b9`); 7 of 9 scenarios validated on gemini-pro + gemma4-26b, claude-sonnet canary green; `full_analyst_workflow` deferred → 4.2 |
 | 4.1c. Subagent-as-adapter: parent observes child's outbox; eliminates child→parent.Submit cross-session shortcut. Surfaced by 4.1b harness (every sub-agent hung mid-flight). | shipped (`109f6b9`) — pump + retry + per-skill intent + plan envelope migration all in same merge |
-| 4.2. **Skill creation infrastructure** — closes the save → discover → reuse loop. Tri-state `AllowedTools` (nil≠empty) + union resolution (also wires existing `tools_catalog.available_in_skills` → discovery channel for unloaded local skills); `skill:save` (structured bundle, manifest validation, autoload-rejection, collision-handling, path-safety); skill `Advertiser` exports `directory` + bundled-files listing; `_skill_builder` system skill (autoload root) holds discovery + save protocols with mandatory validation. `skill:tools_catalog` already exists, no code change. | spec v3 (`design/002-runtime-canonical/phase-4.2-spec.md`); ~640 LOC code + ~440 LOC tests + content, ~1 week. Routing-as-structural-mechanism cancelled 2026-05-10 (was over-engineered); analyst content moved out to 4.2.2. |
-| 4.2.2. **Analyst mega-skill** — bundled `_analyst` skill with 4 roles in `sub_agents:` (`data-explorer`, `sql-analyst`, `python-postprocessor`, `report-builder`); re-enable `full_analyst_workflow` harness scenario; tune preamble until passes consistently across Claude / Gemini / Gemma. Authored inline via 4.2's `skill:save` first, then promoted. | spec v1 (`design/002-runtime-canonical/phase-4.2.2-spec.md`); ~700 LOC content, 1.5-2 weeks of harness iteration. Pure content + scenario tuning; no `pkg/*` changes. Depends on 4.2. |
+| 4.2. Skill creation infrastructure (tri-state `AllowedTools` + `skill:save` + skill Advertiser + `_skill_builder`). | shipped (`1fc4e59`, 2026-05-10) |
+| 4.2.2. Three-tier mandatory delegation (root → mission → worker); `session:spawn_mission` singular + `session:spawn_wave` atomic; per-tier constitutions (`agent.md` + `tier-{root,mission,worker}.md`); `analyst` + `_general` mission dispatchers; Gemma 26B 20/20 acceptance gate. | shipped (`53ab909`, 2026-05-11) |
+| 4.2.3. **Session-scoped working notepad** — climb-to-root in extension; 4 new columns on `session_notes` (`category`, `author_role`, `mission`, `embedding`); `notepad:append/read/search/show` (no clear / no archive — append-only constitution); configurable read window (default 48h); semantic search via Hugr `@embeddings` + `semantic:` top-level arg + `summary:` mutation; auto-snapshot at mission spawn. Bounded to single root session — cross-conversation distillation is phase 7. | spec at `design/002-runtime-canonical/phase-4.2.3-cross-mission-notepad.md` with 2026-05-11 implementation-notes footer; ~530 LOC; depends on 4.2.2 (shipped). |
 | ~~4.3~~ | **cancelled 2026-05-08** — historical scope was Manager-as-ToolProvider generalisation; superseded by 4.1a (`SystemProvider` already dissolved) and the per-domain ToolProvider pattern that landed with it. |
 | 5. Compactor + HITL: approvals + clarifications (compactor first within the phase; replaces the phase-3 `defaultHistoryWindow=50` stop-gap) | open |
 | 6. Cron + scheduler | open |
-| 7. Memory pipeline + LLM Wiki (short + long-term) | open |
+| 7. Memory pipeline + LLM Wiki — cross-conversation distilled knowledge (validated facts, advisor sub-agent). Reads phase-4.2.3 notepad as input; session-scoped working memory is owned by 4.2.3 (phase 7 does not duplicate that taxonomy). | open |
 | 8. Artifacts | open |
 | 9. A2A adapter | open (defer until needed) |
 | 10. Multi-party Workspaces (human + agent) | open — external interaction surface; lands after A2A so participant model is shaken out |
@@ -63,69 +64,76 @@ Goal: finish design-001 cleanly, then move to **hub integration**
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
 
-## Active focus — phase 4.2
+## Active focus — phase 4.2.3
 
-Phases 4 / 4.1a / 4.1b-pre / 4.1b / 4.1c all shipped to `main`
-(latest merge `109f6b9`). The scenario harness lives in
-`tests/scenarios/`; subagent pump + retry + per-skill intent +
-plan→ExtensionFrame migration all landed with phase 4.1c. 4.3 is
-**cancelled** (its scope was Manager-as-ToolProvider, which 4.1a
-already absorbed).
+Phases 4.2 (PR #11, `1fc4e59`, 2026-05-10) and 4.2.2 (PR #12,
+`53ab909`, 2026-05-11) shipped to `main`. Three-tier mandatory
+delegation (root → mission → worker) is live; `analyst` +
+`_general` dispatchers green on the Gemma 26B 20/20 acceptance
+gate.
 
-Next phase is **4.2 — skill creation infrastructure**. Spec
-v3 at `design/002-runtime-canonical/phase-4.2-spec.md`. Closes
-the **save → discover → reuse** loop with minimal new code by
-leaning on what already exists. ~640 LOC code + ~440 LOC tests
-+ ~200 lines content, ~1 week PR:
+Next phase is **4.2.3 — session-scoped working notepad**. Spec
+at `design/002-runtime-canonical/phase-4.2.3-cross-mission-notepad.md`
+with **2026-05-11 implementation-notes footer** (read the footer
+first — it overrides several decisions in the body of the spec).
+Closes the cross-mission-memory gap **within a single root
+session**: knowledge mission A discovers is visible to mission B
+without re-discovery. Strictly session-bounded; cross-conversation
+distillation belongs to phase 7.
 
-1. **Tri-state `AllowedTools` (nil≠empty)** — `nil` (absent → inherit
-   via union), non-nil empty (explicit empty), populated.
-   Unblocks community-skill onboarding AND propagates into
-   the existing `tools_catalog`'s `granted_to_session` /
-   `available_in_skills` projections — wiring the discovery
-   channel correctly.
-2. **`skill:save`** tool — structured bundle (`skill_md` +
-   `references` + `scripts` + `assets`), manifest
-   validation, rejects `autoload: true` (reserved for
-   system / admin), `overwrite: false` default with explicit
-   collision error, path-safety on relative keys. Auto-loads
-   in current session.
-3. **Skill `Advertiser`** — exports loaded skill's
-   `directory` + bundled-files listing into system prompt;
-   model invokes bundled scripts/templates via existing
-   `bash:run` / `python:run_script` with `${SKILL_DIR}/...`.
-4. **`_skill_builder` system skill** (autoload root) — two
-   protocols. **Discovery**: before composing a procedure
-   from scratch on a non-trivial request, call
-   `skill:tools_catalog(pattern=...)`, scan
-   `available_in_skills` for unloaded local skills,
-   `skill:load` if a fit. **Save**: on user-initiated save —
-   clarify, generalise, ground, mandatory post-save
-   validation loop (test with synthetic params → if fail
-   unload+fix+resave with `overwrite=true`), naming-collision
-   handling.
+~530 LOC code + content, ~1.5 weeks:
 
-**`skill:tools_catalog` is NOT new** — it already exists at
-`pkg/extension/skill/tools_catalog.go` with `granted_to_session`
-+ `available_in_skills`. Phase 4.2 only verifies tri-state
-union is correctly reflected (mainly the `available_in_skills`
-indexer needs to handle absent-allow skills per spec §3.3.2).
+1. **4 new columns on `session_notes`** (per footer §2):
+   `category` (model-supplied open tag), `author_role` (runtime,
+   from tier), `mission` (model-supplied short context phrase),
+   `embedding` (Hugr server-side via `summary:` mutation arg
+   under `@embeddings` directive). `author_skill`,
+   `mission_goal-as-snapshot`, `last_accessed_at`, `archived_at`,
+   `deleted_at` — all dropped per append-only constitution.
+2. **Climb-to-root write path** — `notepad:append` walks
+   `RootAncestor()` in the extension and stores
+   `session_id = root.id`. `session_notes_chain` recursive view
+   (`pkg/store/local/schema.tmpl.graphql:559-598`, already in
+   place) returns the union — every session in the tree sees
+   the full conversation's notepad.
+3. **Configurable read window** (`config.notepad.window`,
+   default **48h**) gates `read` / `search` / Block B snapshot
+   via `filter: { created_at: { gte: $cutoff } }`. No archival
+   sweep, no `notepad:clear` tool. Old notes physically remain
+   (append-only) but fall out of model visibility.
+4. **Pure semantic search** — `semantic: { query, limit }`
+   top-level GraphQL arg on the chain view (same pattern
+   `session_events` uses in `pkg/session/store/store.go:428-451`).
+   No Go-side hybrid re-rank; window is narrow enough that pure
+   similarity ordering suffices.
+5. **Auto-snapshot at mission spawn** — third action in
+   `applyMissionStartWrites` after plan + whiteboard renders a
+   grouped-by-tag recent-notes block into the mission's first
+   system prompt (≤2KB, ≤8 tags, ≤80 char snippets).
+6. **`sessions.mission` column** (existing at
+   `schema.tmpl.graphql:316` / `SessionRow.Mission`, currently
+   unwritten): populated at `spawn_mission` from `SpawnSpec.Task`
+   for Block B's current-mission-context header and for
+   observability via `hub.db.agent.sessions`.
 
-**Cancelled mid-discussion** (was in earlier drafts):
-`task_classify` tool, `pkg/extension/router/`, ToolFilter
-routing gate, 4-class taxonomy, `skill_builder` mega-skill
-walkthrough, strict validation hardening, brand-new
-`skill:tools_catalog` (already exists). Rationale: lean on
-what's there; routing stays as constitution-level guidance
-per skill, not a structural mechanism.
+**Surface**: `notepad:append` (canonical write, name kept from
+phase-3.5 stub) + new `notepad:read/search/show`. No `clear`.
+Breaking change vs the existing append-only stub is ok per
+pre-v1 (`feedback_pre_v1_breaking_changes` memory).
 
-After 4.2 → **4.2.2 (analyst mega-skill)**: spec at
-`design/002-runtime-canonical/phase-4.2.2-spec.md`. One
-bundled `_analyst` skill with 4 roles in `sub_agents:`,
-authored inline via 4.2's `skill:save` first (eat our own
-dogfood), then promoted to `assets/skills/_analyst/` once
-harness scenarios pass consistently across Claude / Gemini /
-Gemma. Pure content + scenario tuning; no `pkg/*` changes.
+**Closes / supersedes** in spec body: open questions #1, #2, #3
+(text-similarity API, hybrid weights, archival threshold) all
+resolved by the footer. `_distance_to_query` projection,
+oversample-and-re-rank, lifecycle timestamps — all dropped.
+
+Milestones (per footer §11):
+- α (~150 LOC) — schema + Hugr queries.
+- β (~220 LOC) — extension surface (Append / Read / Search /
+  Show; climb-to-root; window filter).
+- γ (~100 LOC + content) — auto-snapshot + skill manifest
+  `mission.on_start.notepad.tags`.
+- δ — `cross_mission_notepad` scenario passes ≥ 7/10 on Gemma
+  26B without regression on 4.2.2 scenarios.
 
 ## Project structure
 
