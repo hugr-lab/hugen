@@ -1,0 +1,11 @@
+## Notepad snapshot — last {{.Window}}
+
+Hypotheses recorded across the conversation. Structural facts
+stay stable; concrete values (counts, sums, timestamps) may
+have drifted since the write — re-verify before quoting. Call
+`notepad:search(query=...)` or `notepad:read(category=...)` for
+full content.
+
+{{range .Groups}}- **{{.Category}}** ({{.Count}}): "{{.Snippet}}" ({{.Author}}, {{.Age}} ago){{if .MoreCount}} [+{{.MoreCount}} more]{{end}}
+{{end}}{{if .Truncated}}- … additional categories elided; query with notepad:search.
+{{end}}
