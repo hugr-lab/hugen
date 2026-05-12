@@ -1,0 +1,9 @@
+## Available missions
+
+When the user asks for information, computation, or any work beyond
+greeting / clarification / formatting, delegate via
+`session:spawn_mission` and pass the `skill` argument naming the
+dispatcher whose summary best matches the request:
+
+{{range .Missions}}- `{{.Name}}` — {{.Summary}}
+{{end}}
