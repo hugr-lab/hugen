@@ -21,3 +21,17 @@ var SkillsFS embed.FS
 //
 //go:embed all:constitution
 var ConstitutionFS embed.FS
+
+// PromptsFS holds the model-visible prompt templates that ship
+// with the binary. Top-level entries are categorised by surface
+// (interrupts/, system/, skill/, notepad/, plan/, inquiry/);
+// each leaf is a text/template file with `.tmpl` extension.
+// Phase 5.1 §1.3.
+//
+// Consumed via pkg/prompts.NewRenderer, which scopes the FS to
+// the `prompts/` sub-tree via fs.Sub. Operator override path
+// (set in runtime config) shadows the embedded copy file by
+// file at render time.
+//
+//go:embed all:prompts
+var PromptsFS embed.FS
