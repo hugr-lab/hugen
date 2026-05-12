@@ -209,25 +209,17 @@ type Session struct {
 	// event append.
 	done chan struct{}
 
-	// Phase 4.2.3 ε — deterministic close turn before teardown.
-	// closeTurn != nil while the synthetic close turn runs;
-	// reset in foldAssistantAndMaybeDispatch when the turn
-	// retires. forceExit is set in the same retire path so
-	// Run's outer loop tears the session down (via the existing
-	// teardown sequence) and returns. spawnSkill / spawnRole
-	// duplicate the persisted Metadata fields so close_turn.go's
-	// resolver can pick role-specific on_close overrides without
-	// re-reading the row from the store. Set in newSession when
-	// parent != nil; empty for root sessions.
-	closeTurn   *closeTurnState
-	forceExit   atomic.Bool
-	spawnSkill  string
-	spawnRole   string
-	// mainToolCalls is the count of tool calls dispatched during
-	// the session's regular main task. Read by the close-turn
-	// SkipIfIdle check at teardown; incremented once per
-	// foldAssistantAndMaybeDispatch hand-off to the tool
-	// dispatcher.
+	// Phase 4.2.3 ε — close-turn metadata stashed for the
+	// teardown-time resolver. spawnSkill / spawnRole duplicate
+	// the persisted Metadata fields so close_turn.go's lookup
+	// can pick role-specific on_close overrides without
+	// re-reading the row from the store. mainToolCalls feeds
+	// the SkipIfIdle gate (count of tool calls during the
+	// session's regular main task). All three are set in
+	// spawn.go (parent != nil) and incremented from the regular
+	// turn machinery; empty / zero for root sessions.
+	spawnSkill    string
+	spawnRole     string
 	mainToolCalls atomic.Int64
 }
 
@@ -738,16 +730,6 @@ func (s *Session) Run(ctx context.Context) error {
 		if s.turnComplete() {
 			s.advanceOrFinish(ctx)
 		}
-		// Phase 4.2.3 ε — the close turn signals completion by
-		// setting forceExit (from foldAssistantAndMaybeDispatch's
-		// no-tool-calls branch). When set, we tear the session
-		// down with the deferred close reason and return — bypasses
-		// the inbox-driven SessionClose path that would otherwise
-		// re-enter routeInbound and try to fire another close turn.
-		if s.forceExit.Load() {
-			s.teardown(ctx)
-			return nil
-		}
 	}
 }
 
@@ -770,6 +752,25 @@ func (s *Session) Run(ctx context.Context) error {
 //     still-honest deadline reaches the store; cancellation of the
 //     writeCtx aborts the persist, which is the caller's choice.
 func (s *Session) teardown(runCtx context.Context) {
+	// 0) Phase 4.2.3 ε — deterministic close turn. Resolve the
+	// on_close config from loaded skills; if any opted in AND
+	// the close reason is not in the skip list AND the
+	// SkipIfIdle gate doesn't short-circuit, run one constrained
+	// model turn synchronously (runCloseTurnSync — no goroutines
+	// or Run-loop re-entry). Errors are logged warn-not-fatal;
+	// teardown proceeds with the existing steps regardless so
+	// the session always terminates cleanly (parent.children
+	// cleanup is driven by Run exit, not by close-turn success).
+	if s.shouldRunCloseTurn() {
+		block := s.resolveCloseTurnBlock(runCtx)
+		if !block.IsEmpty() && !(block.SkipIfIdle && s.mainToolCalls.Load() == 0) {
+			if err := s.runCloseTurnSync(runCtx, block); err != nil {
+				s.logger.Warn("close turn: aborted",
+					"session", s.id, "reason", s.closeReason, "err", err)
+			}
+		}
+	}
+
 	// 1) Stop the in-flight turn.
 	if s.turnCancel != nil {
 		s.turnCancel()
@@ -1196,28 +1197,6 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 	switch v := f.(type) {
 	case *protocol.SessionClose:
 		s.markClosing()
-		// Phase 4.2.3 ε — deterministic close turn. If at least
-		// one extension has an on_close config for this session's
-		// skill/role AND the close reason isn't in the skip list
-		// (cancel cascade / hard ceiling / restart_died / abnormal
-		// close), the runtime fires one constrained turn before
-		// teardown. closeTurnSkipReason gates the skip set;
-		// closeTurn != nil gates idempotency (a SessionClose
-		// observed while the close turn is already running falls
-		// through to the original signal path).
-		if s.closeTurn == nil && s.depth > 0 && !closeTurnSkipReason(v.Payload.Reason) {
-			block := s.resolveCloseTurnBlock(ctx)
-			if !block.IsEmpty() {
-				if block.SkipIfIdle && s.mainToolCalls.Load() == 0 {
-					return &sessionCloseSignal{reason: v.Payload.Reason}
-				}
-				s.closeTurn = buildCloseTurnState(block, v.Payload.Reason)
-				synth := protocol.NewUserMessage(s.id, s.agent.Participant(),
-					closeTurnPromptOrDefault(block))
-				s.startTurn(ctx, synth)
-				return nil
-			}
-		}
 		return &sessionCloseSignal{reason: v.Payload.Reason}
 	case *protocol.SubagentResult:
 		// Phase 4.1b-pre stage B: parent issues SessionClose back to
@@ -1408,13 +1387,6 @@ func (s *Session) gatherToolPolicy(ctx context.Context) extension.ToolIterPolicy
 // at the top of the user turn so the cap stays stable through
 // the loop even if a tool call mutates extension state mid-turn.
 func (s *Session) resolveToolIterCap(ctx context.Context) int {
-	// Phase 4.2.3 ε — during the constrained close turn, override
-	// the regular soft cap with the close-turn block's MaxTurns
-	// so a long-running main task doesn't get accidentally
-	// extended by the close turn (and vice versa).
-	if s.closeTurn != nil && s.closeTurn.MaxTurns > 0 {
-		return s.closeTurn.MaxTurns
-	}
 	if cap := s.gatherToolPolicy(ctx).SoftCap; cap > 0 {
 		return cap
 	}
@@ -1523,26 +1495,6 @@ func (s *Session) modelToolsForSession(ctx context.Context) ([]model.Tool, error
 			"depth", s.depth,
 			"count", len(snap.Tools),
 			"tools", names)
-	}
-	// Phase 4.2.3 ε — during the constrained close turn, narrow
-	// the snapshot to the AllowedTools allow-list. Empty
-	// AllowedTools (extension default) keeps the regular surface
-	// so the close turn still has the standard catalogue
-	// available; in practice the runtime default
-	// (defaultCloseTurnAllowedTools) is always set so this path
-	// only widens for manifests that explicitly opt-in.
-	if s.closeTurn != nil && len(s.closeTurn.AllowedTools) > 0 {
-		allow := make(map[string]struct{}, len(s.closeTurn.AllowedTools))
-		for _, n := range s.closeTurn.AllowedTools {
-			allow[n] = struct{}{}
-		}
-		filtered := snap.Tools[:0:0]
-		for _, t := range snap.Tools {
-			if _, ok := allow[t.Name]; ok {
-				filtered = append(filtered, t)
-			}
-		}
-		snap.Tools = filtered
 	}
 	out := make([]model.Tool, 0, len(snap.Tools))
 	for _, t := range snap.Tools {

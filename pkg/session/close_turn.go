@@ -124,6 +124,19 @@ func (s *Session) spawnSkillAndRole() (skill, role string) {
 	return s.spawnSkill, s.spawnRole
 }
 
+// shouldRunCloseTurn gates teardown's step-0 close turn. Root
+// sessions skip (no parent → no Block B context across missions
+// to consume their findings). Skip-list reasons (cancel cascade,
+// hard ceiling, restart_died, abnormal_close, empty) also skip —
+// the session is being torn down under conditions where running
+// another model call is counterproductive or unsafe.
+func (s *Session) shouldRunCloseTurn() bool {
+	if s.depth <= 0 {
+		return false
+	}
+	return !closeTurnSkipReason(s.closeReason)
+}
+
 // closeTurnSkipReason reports whether a SessionClose with the
 // given reason should bypass the close turn entirely. Skipped
 // flows: cancel cascade (parent forced termination — corrupt
