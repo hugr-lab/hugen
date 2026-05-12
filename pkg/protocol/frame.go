@@ -480,6 +480,13 @@ const (
 	SystemMessageStuckNudge  = "stuck_nudge"
 	SystemMessageWhiteboard  = "whiteboard"
 	SystemMessageSpawnedNote = "spawned_note"
+	// SystemMessageParentNote is the kind for a notify_subagent
+	// directive. Phase 5.1 § 3.4 / § 3.5: the directive rides an
+	// ordinary KindSystemMessage with FromSession == parent.id so
+	// wait_subagents can intercept it via the isParentNote predicate
+	// and the visibility filter projects "[system: parent_note] ..."
+	// into the child's history when not under wait_subagents.
+	SystemMessageParentNote = "parent_note"
 )
 
 // Phase-4 system_marker subjects (machine-readable, adapter-only).

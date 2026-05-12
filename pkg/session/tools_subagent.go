@@ -71,6 +71,13 @@ func (s *Session) initSubagent() {
 		ArgSchema:        json.RawMessage(parentContextSchema),
 		Handler:          s.callParentContext,
 	}
+	s.sessionTools["notify_subagent"] = sessionToolDescriptor{
+		Name:             "notify_subagent",
+		Description:      "Send a focused directive (KindSystemMessage with parent_note) to a direct child. Phase 5.1 § 3.5 — root / mission use this to route the relevant slice of a user follow-up to an in-flight sub-agent.",
+		PermissionObject: permObjectSubagentNotify,
+		ArgSchema:        json.RawMessage(notifySubagentSchema),
+		Handler:          s.callNotifySubagent,
+	}
 }
 
 // Permission objects per contracts/permission-objects.md §"Sub-agent
@@ -83,6 +90,7 @@ const (
 	permObjectSubagentRead          = "hugen:subagent:read"
 	permObjectSubagentCancel        = "hugen:subagent:cancel"
 	permObjectSubagentParentContext = "hugen:subagent:parent_context"
+	permObjectSubagentNotify        = "hugen:subagent:notify"
 )
 
 // describeSubagent walks every [extension.SubagentDescriber] on
