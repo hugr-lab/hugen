@@ -31,7 +31,7 @@ internals:
 - `design/002-runtime-canonical/architecture.md` — state-of-the-tree
   map; §11 is the extension recipe book.
 - `design/002-runtime-canonical/design.md` — vision + phase plan.
-- `design/002-runtime-canonical/phase-4.2.3-cross-mission-notepad.md` — active phase (with 2026-05-11 implementation-notes footer).
+- `design/002-runtime-canonical/phase-5-spec.md` — next active phase (compactor + HITL, currently in scoping).
 
 When 002 and a 001 phase doc disagree, 002 wins.
 
@@ -49,7 +49,7 @@ Phase plan:
 | 4.1c. Subagent-as-adapter: parent observes child's outbox; eliminates child→parent.Submit cross-session shortcut. Surfaced by 4.1b harness (every sub-agent hung mid-flight). | shipped (`109f6b9`) — pump + retry + per-skill intent + plan envelope migration all in same merge |
 | 4.2. Skill creation infrastructure (tri-state `AllowedTools` + `skill:save` + skill Advertiser + `_skill_builder`). | shipped (`1fc4e59`, 2026-05-10) |
 | 4.2.2. Three-tier mandatory delegation (root → mission → worker); `session:spawn_mission` singular + `session:spawn_wave` atomic; per-tier constitutions (`agent.md` + `tier-{root,mission,worker}.md`); `analyst` + `_general` mission dispatchers; Gemma 26B 20/20 acceptance gate. | shipped (`53ab909`, 2026-05-11) |
-| 4.2.3. **Session-scoped working notepad** — climb-to-root in extension; 4 new columns on `session_notes` (`category`, `author_role`, `mission`, `embedding`); `notepad:append/read/search/show` (no clear / no archive — append-only constitution); configurable read window (default 48h); semantic search via Hugr `@embeddings` + `semantic:` top-level arg + `summary:` mutation; auto-snapshot at mission spawn. Bounded to single root session — cross-conversation distillation is phase 7. | spec at `design/002-runtime-canonical/phase-4.2.3-cross-mission-notepad.md` with 2026-05-11 implementation-notes footer; ~530 LOC; depends on 4.2.2 (shipped). |
+| 4.2.3. Session-scoped working notepad — climb-to-root storage; 4 new columns on `session_notes`; `notepad:append/read/search/show` per-tier; 48h window; Block A/B prompt surfaces; sync close-turn (`pkg/session/close_turn_sync.go`) runs inline in teardown step 0; manifest declarations under `mission.on_close.notepad`. Plus `overview` analyst role for broad inventory questions, bash-mcp 120s default timeout, runtime reconcile of stale bundled skills. | shipped (`066c7b1`, 2026-05-12). Gemma 26B PASS on `cross_mission_notepad` end-to-end; backlog B1–B7 in spec footer. |
 | ~~4.3~~ | **cancelled 2026-05-08** — historical scope was Manager-as-ToolProvider generalisation; superseded by 4.1a (`SystemProvider` already dissolved) and the per-domain ToolProvider pattern that landed with it. |
 | 5. Compactor + HITL: approvals + clarifications (compactor first within the phase; replaces the phase-3 `defaultHistoryWindow=50` stop-gap) | open |
 | 6. Cron + scheduler | open |
@@ -64,76 +64,46 @@ Goal: finish design-001 cleanly, then move to **hub integration**
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
 
-## Active focus — phase 4.2.3
+## Active focus — phase 5
 
-Phases 4.2 (PR #11, `1fc4e59`, 2026-05-10) and 4.2.2 (PR #12,
-`53ab909`, 2026-05-11) shipped to `main`. Three-tier mandatory
-delegation (root → mission → worker) is live; `analyst` +
-`_general` dispatchers green on the Gemma 26B 20/20 acceptance
-gate.
+Phases 4.2 (`1fc4e59`), 4.2.2 (`53ab909`), 4.2.3 (`066c7b1`)
+all shipped to `main`. Working memory + close-turn mechanics
+green on Gemma 26B end-to-end.
 
-Next phase is **4.2.3 — session-scoped working notepad**. Spec
-at `design/002-runtime-canonical/phase-4.2.3-cross-mission-notepad.md`
-with **2026-05-11 implementation-notes footer** (read the footer
-first — it overrides several decisions in the body of the spec).
-Closes the cross-mission-memory gap **within a single root
-session**: knowledge mission A discovers is visible to mission B
-without re-discovery. Strictly session-bounded; cross-conversation
-distillation belongs to phase 7.
+Next phase is **5 — compactor + HITL**. Spec to be scoped at
+`design/002-runtime-canonical/phase-5-spec.md`. Two coupled
+pieces:
 
-~530 LOC code + content, ~1.5 weeks:
+1. **Compactor** — replaces the phase-3 stop-gap
+   `defaultHistoryWindow=50` with a content-aware history
+   summarisation pass. Runs at turn boundaries when context
+   would exceed a threshold; preserves recent turns verbatim,
+   summarises older ones into a system-prompt-rendered
+   digest. Should compose with phase 4.2.3's notepad (the
+   notepad is for **across-mission** working memory; the
+   compactor is for **within-session** history shrinkage).
+2. **HITL** — formal approval / clarification frame kinds
+   beyond the `SessionStatus.wait_approval` placeholder. New
+   protocol Frame Kinds, RouteToolFeed registration for
+   approval responses, a per-tool risk classifier, operator-
+   visible approval UI (initially via console adapter, later
+   webui).
 
-1. **4 new columns on `session_notes`** (per footer §2):
-   `category` (model-supplied open tag), `author_role` (runtime,
-   from tier), `mission` (model-supplied short context phrase),
-   `embedding` (Hugr server-side via `summary:` mutation arg
-   under `@embeddings` directive). `author_skill`,
-   `mission_goal-as-snapshot`, `last_accessed_at`, `archived_at`,
-   `deleted_at` — all dropped per append-only constitution.
-2. **Climb-to-root write path** — `notepad:append` walks
-   `RootAncestor()` in the extension and stores
-   `session_id = root.id`. `session_notes_chain` recursive view
-   (`pkg/store/local/schema.tmpl.graphql:559-598`, already in
-   place) returns the union — every session in the tree sees
-   the full conversation's notepad.
-3. **Configurable read window** (`config.notepad.window`,
-   default **48h**) gates `read` / `search` / Block B snapshot
-   via `filter: { created_at: { gte: $cutoff } }`. No archival
-   sweep, no `notepad:clear` tool. Old notes physically remain
-   (append-only) but fall out of model visibility.
-4. **Pure semantic search** — `semantic: { query, limit }`
-   top-level GraphQL arg on the chain view (same pattern
-   `session_events` uses in `pkg/session/store/store.go:428-451`).
-   No Go-side hybrid re-rank; window is narrow enough that pure
-   similarity ordering suffices.
-5. **Auto-snapshot at mission spawn** — third action in
-   `applyMissionStartWrites` after plan + whiteboard renders a
-   grouped-by-tag recent-notes block into the mission's first
-   system prompt (≤2KB, ≤8 tags, ≤80 char snippets).
-6. **`sessions.mission` column** (existing at
-   `schema.tmpl.graphql:316` / `SessionRow.Mission`, currently
-   unwritten): populated at `spawn_mission` from `SpawnSpec.Task`
-   for Block B's current-mission-context header and for
-   observability via `hub.db.agent.sessions`.
+Phase-4.2.3 backlog rides along where it naturally fits:
+- **B6** — subagent termination on non-retriable model error.
+  Phase 5's HITL frames give a natural escalation surface.
+- **B7** — scenario harness wedge detection.
+- **B3** — per-tier MaxTurns / StuckDetection migration.
 
-**Surface**: `notepad:append` (canonical write, name kept from
-phase-3.5 stub) + new `notepad:read/search/show`. No `clear`.
-Breaking change vs the existing append-only stub is ok per
-pre-v1 (`feedback_pre_v1_breaking_changes` memory).
+Phase-4.2.3 backlog NOT for phase 5 (separate fast-follow):
+- **B1** — `WorkerPromptEnricher` auto-RAG.
+- **B2** — `bash-mcp` tier narrow (waits on phase 8 artifacts).
+- **B4** — `_skill_builder` manifest cheatsheet refresh.
+- **B5** — community / inline skill sanity check.
 
-**Closes / supersedes** in spec body: open questions #1, #2, #3
-(text-similarity API, hybrid weights, archival threshold) all
-resolved by the footer. `_distance_to_query` projection,
-oversample-and-re-rank, lifecycle timestamps — all dropped.
-
-Milestones (per footer §11):
-- α (~150 LOC) — schema + Hugr queries.
-- β (~220 LOC) — extension surface (Append / Read / Search /
-  Show; climb-to-root; window filter).
-- γ (~100 LOC + content) — auto-snapshot + skill manifest
-  `mission.on_start.notepad.tags`.
-- δ — `cross_mission_notepad` scenario passes ≥ 7/10 on Gemma
-  26B without regression on 4.2.2 scenarios.
+See `design/002-runtime-canonical/phase-4.2.3-cross-mission-notepad.md`
+"Backlog — fast-follow enhancements" for full descriptions of
+each B-item.
 
 ## Project structure
 
