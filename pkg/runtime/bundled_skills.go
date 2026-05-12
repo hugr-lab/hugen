@@ -3,6 +3,7 @@ package runtime
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -27,6 +28,16 @@ const systemSkillsSubdir = "skills/system"
 // contents. Re-running the installer is a no-op when the checksum
 // matches; a mismatch (binary upgraded, payload changed) replaces
 // the existing tree.
+//
+// Reconcile: subdirectories present in the target tree but absent
+// from the current embed (typical for legacy skills retired
+// across a version bump — e.g. `_subagent` retired in 4.2.2) are
+// removed at the end of the pass. Without this the strict
+// manifest validator (phase 4.2.2 enforces `autoload_for` ⊆
+// {root, mission, worker}) rejects the entire SkillStore.List on
+// the first parse error and operators end up with empty tool
+// surfaces. Local / community skills live in sibling roots
+// (`skills/local/`, `skills/community/`) and are untouched.
 func InstallBundledSkills(stateDir string, log *slog.Logger) error {
 	if stateDir == "" {
 		return fmt.Errorf("install bundled skills: empty state dir")
@@ -39,14 +50,49 @@ func InstallBundledSkills(stateDir string, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("install bundled skills: read embed: %w", err)
 	}
+	want := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		name := e.Name()
+		want[name] = struct{}{}
 		if err := installOneSkill(name, target, log); err != nil {
 			return err
 		}
+	}
+	return reconcileStaleSkills(target, want, log)
+}
+
+// reconcileStaleSkills removes any subdirectory under target
+// whose name is not in `want` — i.e. a skill that the previous
+// binary version installed but the current one no longer ships.
+// Errors are logged warn-not-fatal: a stale directory we cannot
+// remove (filesystem permission, file open elsewhere) should not
+// block the bootstrap.
+func reconcileStaleSkills(target string, want map[string]struct{}, log *slog.Logger) error {
+	dir, err := os.ReadDir(target)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("reconcile stale skills: read dir %s: %w", target, err)
+	}
+	for _, e := range dir {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if _, keep := want[name]; keep {
+			continue
+		}
+		path := filepath.Join(target, name)
+		if err := os.RemoveAll(path); err != nil {
+			log.Warn("bundled skill: failed to remove stale dir",
+				"name", name, "path", path, "err", err)
+			continue
+		}
+		log.Info("bundled skill: removed stale dir", "name", name, "path", path)
 	}
 	return nil
 }
