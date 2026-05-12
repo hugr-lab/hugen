@@ -1,0 +1,18 @@
+[user follow-up during active work]
+
+User said: {{.UserMessage}}
+
+Active subagents:
+{{- range .Subagents}}
+  - {{.ID}} ({{.Role}}, {{.Status}}): {{.Goal}}
+{{- end}}
+
+For each piece of the follow-up, decide:
+  - relevant modification to an active subagent → notify_subagent
+  - independent new work → spawn_mission(wait="async")
+  - fundamental change invalidating active work → cancel_subagent + spawn_mission
+  - irrelevant to active work → answer directly (no tool call needed)
+
+Craft notify_subagent content as a focused directive for that
+subagent's task — do not relay raw user text. Resume wait_subagents
+after dispatching to collect outstanding results.

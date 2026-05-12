@@ -1,0 +1,8 @@
+[async mission completed]
+
+Mission {{.MissionID}} (goal: {{.Goal}}) completed.
+Status: {{.Status}}.
+{{if eq .Status "completed"}}Result summary: {{.ResultSummary}}.
+{{else}}Reason: {{.Reason}}.
+{{end}}
+Use `session:subagent_runs({{.MissionID}})` for full details.

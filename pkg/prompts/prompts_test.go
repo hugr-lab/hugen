@@ -77,6 +77,36 @@ func TestRender_AllBundled(t *testing.T) {
 		{"plan/snapshot_render", map[string]any{
 			"CurrentStep": "stage A", "Body": "1. do X\n2. do Y",
 		}},
+		{"interrupts/follow_up_with_active_subagents", map[string]any{
+			"UserMessage": "switch tack",
+			"Subagents": []map[string]any{
+				{"ID": "sub-1", "Role": "analyst", "Status": "running", "Goal": "explore catalog"},
+			},
+		}},
+		{"interrupts/parent_note_with_active_workers", map[string]any{
+			"ParentRole": "mission", "ParentID": "mis-1",
+			"Content": "narrow to last 24h only",
+			"Workers": []map[string]any{
+				{"ID": "wkr-1", "Status": "running", "Goal": "compute deltas"},
+			},
+		}},
+		{"interrupts/parent_note_buffered", map[string]any{
+			"ParentRole": "root", "ParentID": "root-1",
+			"Content": "drop the dimension column",
+		}},
+		{"interrupts/async_mission_completed", map[string]any{
+			"MissionID":     "mis-7",
+			"Goal":          "compute deltas",
+			"Status":        "completed",
+			"ResultSummary": "120 rows processed",
+		}},
+		{"inquiry/approval_request_summary", map[string]any{
+			"ToolName":    "bash.run",
+			"ArgsSummary": "{\"cmd\":\"rm -rf foo\"}",
+		}},
+		{"inquiry/timeout_notice", map[string]any{
+			"Timeout": "1h", "DefaultAction": "deny",
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
