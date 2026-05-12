@@ -240,7 +240,7 @@ query { function { module_name { my_func(arg: "val") { result } } } }
 | String | count, any, first, last, list — **NO** min/max/avg/sum |
 | DateTime, Timestamp, Date | min, max, count |
 | Boolean | bool_and, bool_or |
-| General | any, last, count, count(distinct: true) |
+| General | any, last, count |
 
 ## Quick Reference — Filters
 
