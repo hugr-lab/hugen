@@ -221,6 +221,7 @@ type Session struct {
 	// turn machinery; empty / zero for root sessions.
 	spawnSkill    string
 	spawnRole     string
+	mission       string // spawn.Task duplicated for in-memory lookup
 	mainToolCalls atomic.Int64
 }
 
@@ -1230,6 +1231,22 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 				"user_message_rejected_closing", map[string]any{"author": v.Author().ID})
 			return s.emit(ctx, marker)
 		}
+		// Phase 5.1 § 3.2: an active wait_subagents feed accepts user
+		// follow-ups so the tool can short-circuit with a reframe. The
+		// frame is dual-routed: Feed gets it so wait_subagents returns
+		// the interrupt result, AND pendingInbound gets it so the next
+		// turn boundary projects it into history via the standard
+		// visibility filter. Without the dual route the raw user text
+		// would only appear inside the rendered interrupt template and
+		// be missing from s.history for future turns.
+		if feed := s.activeToolFeed.Load(); feed != nil &&
+			feed.Consumes != nil && feed.Consumes(f) {
+			feed.Feed(f)
+			if s.turnState != nil {
+				s.pendingInbound = append(s.pendingInbound, f)
+			}
+			return nil
+		}
 		// Concurrent UserMessage during a turn is unusual (UI typically
 		// gates on AgentMessage{Final:true}). Buffer it; advanceOrFinish
 		// will fold it into history at the next turn boundary so the
@@ -1250,6 +1267,18 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 		if feed := s.activeToolFeed.Load(); feed != nil &&
 			feed.Consumes != nil && feed.Consumes(f) {
 			feed.Feed(f)
+			// Phase 5.1 § 3.4: SystemMessage that the feed consumed
+			// (e.g. parent note during wait_subagents) must also
+			// project into history at the next turn boundary so the
+			// conversation log carries the parent's directive even
+			// after the interrupt return surfaces it through the
+			// tool result. SubagentResult stays Feed-only — the
+			// terminal child signal is consumed exclusively by
+			// wait_subagents and persisted via its emit call.
+			if _, isSystem := f.(*protocol.SystemMessage); isSystem &&
+				s.turnState != nil {
+				s.pendingInbound = append(s.pendingInbound, f)
+			}
 			return nil
 		}
 		// No matching feed: fall through to RouteBuffered.

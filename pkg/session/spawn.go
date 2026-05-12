@@ -65,6 +65,7 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	// from the store.
 	child.spawnSkill = spec.Skill
 	child.spawnRole = spec.Role
+	child.mission = spec.Task
 	s.logger.Debug("session: spawn: child constructed",
 		"parent", s.id,
 		"child", child.id,

@@ -76,27 +76,40 @@ func (parent *Session) callWaitSubagents(ctx context.Context, args json.RawMessa
 	}
 
 	// Register the active tool feed so the Run loop forwards matching
-	// SubagentResult frames here. The loop reads activeToolFeed via
-	// atomic load (session.go), so the store + clear is race-safe.
-	// BlockingState declaratively flips the session into
-	// wait_subagents for the duration of the block; the release
-	// closure flips it back to active. Tool owns zero lifecycle code.
-	feedCh := make(chan *protocol.SubagentResult, len(pending))
+	// frames here. The loop reads activeToolFeed via atomic load
+	// (session.go), so the store + clear is race-safe. BlockingState
+	// declaratively flips the session into wait_subagents for the
+	// duration of the block; the release closure flips it back to
+	// active. Tool owns zero lifecycle code.
+	//
+	// Phase 5.1 § γ: the feed accepts not only SubagentResult but
+	// also UserMessage (root reframe) and parent SystemMessage
+	// (mission/worker reframe). On those interrupt frames the loop
+	// short-circuits with a rendered tool-result instead of waiting
+	// for completion; the missions in flight keep running.
+	feedCh := make(chan protocol.Frame, len(pending)+1)
 	feed := &ToolFeed{
 		Consumes: func(f protocol.Frame) bool {
-			return f.Kind() == protocol.KindSubagentResult
+			switch f.Kind() {
+			case protocol.KindSubagentResult:
+				return true
+			case protocol.KindUserMessage:
+				return true
+			case protocol.KindSystemMessage:
+				return isParentNote(f, parent)
+			}
+			return false
 		},
 		Feed: func(f protocol.Frame) {
-			sr, ok := f.(*protocol.SubagentResult)
-			if !ok {
-				return
-			}
 			select {
-			case feedCh <- sr:
+			case feedCh <- f:
 			default:
-				// Buffered channel sized to len(pending); a full chan
-				// means a duplicate result for an id we already drained
-				// — drop it (subagent_result is exactly-once per child).
+				// Buffered to len(pending)+1; a full chan means a
+				// duplicate frame for an id we already drained or
+				// an interrupt arrived while another interrupt is
+				// in flight — drop and let the next turn pick it
+				// up via pendingInbound (UserMessage/SystemMessage
+				// are dual-routed; see routeInbound).
 			}
 		},
 		BlockingState:  protocol.SessionStatusWaitSubagents,
@@ -105,33 +118,44 @@ func (parent *Session) callWaitSubagents(ctx context.Context, args json.RawMessa
 	release := parent.registerToolFeed(ctx, feed)
 	defer release()
 
-	// Block until every pending id resolves, the parent's turn ctx
-	// cancels (/cancel), or the call ctx fires.
+	// Block until every pending id resolves, an interrupt frame
+	// short-circuits, the parent's turn ctx cancels (/cancel), or
+	// the call ctx fires.
 	for len(pending) > 0 {
 		select {
-		case sr := <-feedCh:
-			id := sr.Payload.SessionID
-			if id == "" {
-				id = sr.FromSessionID()
-			}
-			if _, want := pending[id]; !want {
-				continue
-			}
-			row := waitResultRow{
-				SessionID: id,
-				Status:    statusFromReason(sr.Payload.Reason),
-				Result:    sr.Payload.Result,
-				Reason:    sr.Payload.Reason,
-				TurnsUsed: sr.Payload.TurnsUsed,
-			}
-			collected[id] = row
-			delete(pending, id)
-			// Persist the consumed subagent_result into parent's events
-			// so subsequent wait_subagents calls (or restart) see the
-			// terminal state without rerunning the child.
-			if err := parent.emit(ctx, sr); err != nil {
-				parent.logger.Warn("session: wait_subagents: persist result",
-					"parent", parent.id, "child", id, "err", err)
+		case f := <-feedCh:
+			switch v := f.(type) {
+			case *protocol.SubagentResult:
+				id := v.Payload.SessionID
+				if id == "" {
+					id = v.FromSessionID()
+				}
+				if _, want := pending[id]; !want {
+					continue
+				}
+				row := waitResultRow{
+					SessionID: id,
+					Status:    statusFromReason(v.Payload.Reason),
+					Result:    v.Payload.Result,
+					Reason:    v.Payload.Reason,
+					TurnsUsed: v.Payload.TurnsUsed,
+				}
+				collected[id] = row
+				delete(pending, id)
+				// Persist the consumed subagent_result into parent's
+				// events so subsequent wait_subagents calls (or
+				// restart) see the terminal state without rerunning
+				// the child.
+				if err := parent.emit(ctx, v); err != nil {
+					parent.logger.Warn("session: wait_subagents: persist result",
+						"parent", parent.id, "child", id, "err", err)
+				}
+			case *protocol.UserMessage:
+				return marshalInterrupt(parent, pending, in.IDs, collected,
+					"user_follow_up", v.Payload.Text, v)
+			case *protocol.SystemMessage:
+				return marshalInterrupt(parent, pending, in.IDs, collected,
+					"parent_note", v.Payload.Content, v)
 			}
 		case <-ctx.Done():
 			return toolErr("cancelled",
@@ -139,6 +163,121 @@ func (parent *Session) callWaitSubagents(ctx context.Context, args json.RawMessa
 		}
 	}
 	return marshalWaitResults(in.IDs, collected)
+}
+
+// isParentNote reports whether f is a SystemMessage authored by
+// the session's direct parent — phase 5.1 § 3.4. Root sessions
+// (parent == nil) can never receive a parent note.
+func isParentNote(f protocol.Frame, s *Session) bool {
+	if s.parent == nil {
+		return false
+	}
+	if _, ok := f.(*protocol.SystemMessage); !ok {
+		return false
+	}
+	return f.FromSessionID() == s.parent.id
+}
+
+// waitInterruptRow describes one in-flight child surfaced to the
+// model alongside an interrupt — same shape for root's "active
+// subagents" and mission's "active workers".
+type waitInterruptRow struct {
+	ID     string `json:"id"`
+	Role   string `json:"role,omitempty"`
+	Status string `json:"status"`
+	Goal   string `json:"goal,omitempty"`
+}
+
+// waitInterruptResult is the tool-result envelope wait_subagents
+// returns when an interrupt frame arrives. `instructions` carries
+// the rendered reframe template; `pending` lists the ids that are
+// still in flight; `resolved` keeps the same shape as the normal
+// return so the caller can re-invoke wait_subagents and merge.
+type waitInterruptResult struct {
+	Interrupted  bool             `json:"interrupted"`
+	Reason       string           `json:"reason"`
+	Instructions string           `json:"instructions"`
+	Pending      []waitInterruptRow `json:"pending,omitempty"`
+	Resolved     []waitResultRow  `json:"resolved,omitempty"`
+}
+
+// marshalInterrupt renders the reframe template and packages it
+// for the model. The active-child listing is built from the still-
+// pending ids by reading the in-memory parent.children map for
+// role/goal/status. Children that left the map (terminated between
+// pending registration and the interrupt) surface as "unknown" so
+// the listing length matches the pending set the model expects to
+// resume waiting on.
+func marshalInterrupt(parent *Session, pending map[string]struct{}, ids []string,
+	collected map[string]waitResultRow, reason, content string,
+	originator protocol.Frame) (json.RawMessage, error) {
+	rows := pendingChildren(parent, pending)
+	renderer := parent.deps.Prompts
+	var instructions string
+	switch reason {
+	case "user_follow_up":
+		instructions = strings.TrimRight(renderer.MustRender(
+			"interrupts/follow_up_with_active_subagents",
+			map[string]any{
+				"UserMessage": content,
+				"Subagents":   rows,
+			},
+		), "\n")
+	case "parent_note":
+		var parentRole, parentID string
+		if parent.parent != nil {
+			parentID = parent.parent.id
+			parentRole = parent.parent.spawnRole
+		}
+		instructions = strings.TrimRight(renderer.MustRender(
+			"interrupts/parent_note_with_active_workers",
+			map[string]any{
+				"ParentRole": parentRole,
+				"ParentID":   parentID,
+				"Content":    content,
+				"Workers":    rows,
+			},
+		), "\n")
+	}
+	resolved := make([]waitResultRow, 0, len(collected))
+	for _, id := range ids {
+		if row, ok := collected[id]; ok {
+			resolved = append(resolved, row)
+		}
+	}
+	return json.Marshal(waitInterruptResult{
+		Interrupted:  true,
+		Reason:       reason,
+		Instructions: instructions,
+		Pending:      rows,
+		Resolved:     resolved,
+	})
+}
+
+// pendingChildren walks parent.children for ids in pending and
+// returns one waitInterruptRow per pending id. Ids absent from the
+// map (terminated mid-flight; transient race between Feed and
+// children-map removal) surface as Status="unknown" so the model
+// still sees the id in its action surface and can decide to drop
+// it from a subsequent wait_subagents call.
+func pendingChildren(parent *Session, pending map[string]struct{}) []waitInterruptRow {
+	parent.childMu.Lock()
+	defer parent.childMu.Unlock()
+	rows := make([]waitInterruptRow, 0, len(pending))
+	for id := range pending {
+		child, ok := parent.children[id]
+		if !ok || child == nil {
+			rows = append(rows, waitInterruptRow{ID: id, Status: "unknown"})
+			continue
+		}
+		rows = append(rows, waitInterruptRow{
+			ID:     id,
+			Role:   child.spawnRole,
+			Status: child.Status(),
+			Goal:   child.mission,
+		})
+	}
+	return rows
 }
 
 func marshalWaitResults(ids []string, collected map[string]waitResultRow) (json.RawMessage, error) {

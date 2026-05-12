@@ -548,6 +548,118 @@ func TestCallWaitSubagents_Happy_LiveResult(t *testing.T) {
 	}
 }
 
+// TestIsParentNote covers the FromSession predicate the wait
+// feed uses to discriminate parent notes from unrelated system
+// messages. Root sessions (no parent) never match.
+func TestIsParentNote(t *testing.T) {
+	root := &Session{id: "root-1"}
+	child := &Session{id: "child-1", parent: root}
+	author := protocol.ParticipantInfo{ID: "test", Kind: protocol.ParticipantSystem}
+
+	parentMsg := protocol.NewSystemMessage(child.id, author, "parent_note", "do the thing")
+	parentMsg.BaseFrame.FromSession = root.id
+
+	otherMsg := protocol.NewSystemMessage(child.id, author, "stuck_nudge", "loop")
+	user := protocol.NewUserMessage(child.id, author, "hi")
+
+	if !isParentNote(parentMsg, child) {
+		t.Errorf("parent-authored SystemMessage to child should be a parent note")
+	}
+	if isParentNote(otherMsg, child) {
+		t.Errorf("SystemMessage from same session is not a parent note")
+	}
+	if isParentNote(user, child) {
+		t.Errorf("UserMessage should never be classified as a parent note")
+	}
+	if isParentNote(parentMsg, root) {
+		t.Errorf("root sessions (no parent) should never see a parent note")
+	}
+}
+
+// TestCallWaitSubagents_UserFollowUp_Interrupts verifies γ: a
+// UserMessage delivered to a root parent while wait_subagents is
+// blocked short-circuits the wait with a rendered reframe instead
+// of continuing to wait for the child. The rendered text quotes
+// the user's input and lists the still-pending subagent.
+func TestCallWaitSubagents_UserFollowUp_Interrupts(t *testing.T) {
+	parent, cleanup := newTestParent(t, withTestRunLoop())
+	defer cleanup()
+
+	// Spawn a real child so the id exists; the child won't terminate
+	// during this test — the interrupt fires from a different path.
+	out, err := parent.callSpawnSubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagents":[{"task":"explore catalog","role":"explorer"}]}`))
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	var spawned []spawnSubagentResult
+	_ = json.Unmarshal(out, &spawned)
+	childID := spawned[0].SessionID
+	drainOutboxOnce(parent.Outbox()) // subagent_started
+
+	type res struct {
+		out []byte
+		err error
+	}
+	done := make(chan res, 1)
+	args, _ := json.Marshal(waitSubagentsInput{IDs: []string{childID}})
+	go func() {
+		out, err := parent.callWaitSubagents(us1WithSession(parent), args)
+		done <- res{out: out, err: err}
+	}()
+
+	// Wait for the feed to register.
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for parent.ActiveToolFeed() == nil {
+		select {
+		case <-time.After(20 * time.Millisecond):
+		case <-deadline.C:
+			t.Fatal("activeToolFeed never registered")
+		}
+	}
+
+	// Deliver the user follow-up.
+	user := protocol.NewUserMessage(parent.ID(), parent.agent.Participant(),
+		"actually pivot to logs")
+	parent.Submit(context.Background(), user)
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("wait err: %v", r.err)
+		}
+		var result waitInterruptResult
+		if err := json.Unmarshal(r.out, &result); err != nil {
+			t.Fatalf("unmarshal interrupt: %v\nout=%s", err, r.out)
+		}
+		if !result.Interrupted {
+			t.Fatalf("expected interrupted=true; got %+v", result)
+		}
+		if result.Reason != "user_follow_up" {
+			t.Errorf("reason = %q, want user_follow_up", result.Reason)
+		}
+		if !strings.Contains(result.Instructions, "actually pivot to logs") {
+			t.Errorf("instructions missing user text: %q", result.Instructions)
+		}
+		if !strings.Contains(result.Instructions, childID) {
+			t.Errorf("instructions missing pending child id %q: %q",
+				childID, result.Instructions)
+		}
+		if len(result.Pending) != 1 || result.Pending[0].ID != childID {
+			t.Errorf("pending = %+v, want one row for %q", result.Pending, childID)
+		}
+		if result.Pending[0].Role != "explorer" {
+			t.Errorf("pending row role = %q, want explorer", result.Pending[0].Role)
+		}
+		if result.Pending[0].Goal != "explore catalog" {
+			t.Errorf("pending row goal = %q, want 'explore catalog'", result.Pending[0].Goal)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("wait_subagents did not return interrupt within 3s")
+	}
+}
+
 // TestCallWaitSubagents_CachedShortCircuit pre-seeds parent's events
 // with a SubagentResult, then calls wait_subagents — it must return
 // immediately from drainCachedSubagentResults without ever
