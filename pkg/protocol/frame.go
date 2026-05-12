@@ -415,11 +415,32 @@ type SubagentStartedPayload struct {
 // "subagent_cancel: <rationale>" | "cancel_cascade" | "restart_died" |
 // "panic: <msg>" | ...
 type SubagentResultPayload struct {
-	SessionID  string `json:"session_id"`
-	Result     string `json:"result,omitempty"`
-	Reason     string `json:"reason"`
-	TurnsUsed  int    `json:"turns_used"`
+	SessionID string `json:"session_id"`
+	Result    string `json:"result,omitempty"`
+	Reason    string `json:"reason"`
+	TurnsUsed int    `json:"turns_used"`
+	// Goal mirrors the child's original mission text (truncated by
+	// the pump). Carried alongside the result so async completion
+	// renders (Phase 5.1 § 4.3) can quote the mission goal without
+	// re-querying state.
+	Goal string `json:"goal,omitempty"`
+	// RenderMode selects the visibility-projection template for
+	// this result. Empty / "default" → "[system: subagent_result]
+	// …" (the standard wait_subagents path). "async_notify" →
+	// "interrupts/async_mission_completed.tmpl" (Phase 5.1 § 4.3).
+	// "silent" → skip history projection entirely (the event is
+	// still persisted). Set by spawn_mission's async / timeout
+	// branches at spawn time and read by the parent pump when
+	// constructing the result.
+	RenderMode string `json:"render_mode,omitempty"`
 }
+
+// Subagent render modes — see [SubagentResultPayload.RenderMode].
+const (
+	SubagentRenderDefault     = ""
+	SubagentRenderAsyncNotify = "async_notify"
+	SubagentRenderSilent      = "silent"
+)
 
 // SessionTerminatedPayload is the sole terminal write for any
 // session. Reason is free-form; phase-4 writers use:

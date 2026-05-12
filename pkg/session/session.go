@@ -223,6 +223,17 @@ type Session struct {
 	spawnRole     string
 	mission       string // spawn.Task duplicated for in-memory lookup
 	mainToolCalls atomic.Int64
+
+	// asyncSpawnMode tags this session's terminal SubagentResult
+	// with the render hint to its parent's history projection.
+	// Phase 5.1 § 4.3: spawn_mission with wait="async" (or "timeout"
+	// when the timer fires before completion) sets this to
+	// protocol.SubagentRenderAsyncNotify so the parent's next turn
+	// surfaces "interrupts/async_mission_completed.tmpl"; setting
+	// to SubagentRenderSilent suppresses the history projection
+	// entirely. Empty string falls back to the default
+	// "[system: subagent_result] …" render.
+	asyncSpawnMode string
 }
 
 // terminationCause is the cancel cause attached to a per-session ctx

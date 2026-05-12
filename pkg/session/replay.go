@@ -176,6 +176,7 @@ func projectHistory(renderer *prompts.Renderer, rows []store.EventRow, window in
 		case protocol.KindSubagentResult:
 			cid, _ := r.Metadata["session_id"].(string)
 			reason, _ := r.Metadata["reason"].(string)
+			renderMode, _ := r.Metadata["render_mode"].(string)
 			turns := 0
 			switch v := r.Metadata["turns_used"].(type) {
 			case float64:
@@ -190,6 +191,29 @@ func projectHistory(renderer *prompts.Renderer, rows []store.EventRow, window in
 				if v, ok := r.Metadata["result"].(string); ok {
 					body = v
 				}
+			}
+			// Phase 5.1 § 4.3 — async-spawned missions replay via the
+			// async template; silent mode skips history projection.
+			switch renderMode {
+			case protocol.SubagentRenderSilent:
+				continue
+			case protocol.SubagentRenderAsyncNotify:
+				goal, _ := r.Metadata["goal"].(string)
+				rendered := strings.TrimRight(renderer.MustRender(
+					"interrupts/async_mission_completed",
+					map[string]any{
+						"MissionID":     cid,
+						"Goal":          goal,
+						"Status":        statusFromReason(reason),
+						"Reason":        reason,
+						"ResultSummary": body,
+					},
+				), "\n")
+				all = append(all, model.Message{
+					Role:    model.RoleUser,
+					Content: rendered,
+				})
+				continue
 			}
 			if body == "" {
 				body = fmt.Sprintf("(no result; reason: %s)", reason)

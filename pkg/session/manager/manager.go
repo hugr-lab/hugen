@@ -61,6 +61,12 @@ type Manager struct {
 	// Phase 5.1 §α.2.
 	prompts *prompts.Renderer
 
+	// maxAsyncMissionsPerRoot caps in-flight children at the root
+	// of every spawn chain (counted at the time of an async spawn).
+	// 0 disables enforcement; runtime defaults to 5 unless
+	// WithMaxAsyncMissionsPerRoot overrides. Phase 5.1 § 4.5.
+	maxAsyncMissionsPerRoot int
+
 	// deps mirrors the per-session dependency bundle passed by
 	// reference to every Session in this Manager's tree (root +
 	// subagents). Populated by NewManager from the same arguments
@@ -86,6 +92,10 @@ type Manager struct {
 	// in-flight AppendEvent races the engine teardown.
 	wg sync.WaitGroup
 }
+
+// defaultMaxAsyncMissionsPerRoot is the phase-5.1 § 4.5 default
+// when WithMaxAsyncMissionsPerRoot is omitted by the runtime.
+const defaultMaxAsyncMissionsPerRoot = 5
 
 // ManagerOption configures a Manager at construction.
 type ManagerOption func(*Manager)
@@ -134,6 +144,16 @@ func WithPrompts(r *prompts.Renderer) ManagerOption {
 	}
 }
 
+// WithMaxAsyncMissionsPerRoot sets the per-root concurrency cap
+// for spawn_mission(wait="async"). 0 disables enforcement; the
+// manager defaults to 5 when this option is omitted. Phase 5.1
+// § 4.5.
+func WithMaxAsyncMissionsPerRoot(cap int) ManagerOption {
+	return func(m *Manager) {
+		m.maxAsyncMissionsPerRoot = cap
+	}
+}
+
 // WithTierIntents sets the per-tier model-router intent defaults
 // (root / mission / worker → intent name) the runtime applies to
 // spawned children before per-role overrides. Phase 4.2.2 §11.
@@ -173,16 +193,17 @@ func NewManager(
 	}
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	m := &Manager{
-		store:      store,
-		agent:      agent,
-		models:     models,
-		commands:   commands,
-		codec:      codec,
-		tools:      tools,
-		logger:     logger,
-		rootCtx:    rootCtx,
-		rootCancel: rootCancel,
-		live:       make(map[string]*session.Session),
+		store:                   store,
+		agent:                   agent,
+		models:                  models,
+		commands:                commands,
+		codec:                   codec,
+		tools:                   tools,
+		logger:                  logger,
+		rootCtx:                 rootCtx,
+		rootCancel:              rootCancel,
+		live:                    make(map[string]*session.Session),
+		maxAsyncMissionsPerRoot: defaultMaxAsyncMissionsPerRoot,
 	}
 	for _, o := range opts {
 		o(m)
@@ -204,9 +225,10 @@ func NewManager(
 		Opts:                m.sessionOpts,
 		RootCtx:             m.rootCtx,
 		WG:                  &m.wg,
-		MaxDepth:            session.DefaultMaxDepth,
-		DefaultMissionSkill: m.defaultMissionSkill,
-		TierIntents:         m.tierIntents,
+		MaxDepth:                session.DefaultMaxDepth,
+		DefaultMissionSkill:     m.defaultMissionSkill,
+		TierIntents:             m.tierIntents,
+		MaxAsyncMissionsPerRoot: m.maxAsyncMissionsPerRoot,
 	}
 	// Phase 4.1b-pre stage B / D6: a root session calling
 	// requestClose hands the close request to Manager via this hook.

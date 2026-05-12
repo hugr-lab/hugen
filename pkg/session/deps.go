@@ -80,6 +80,14 @@ type Deps struct {
 	// Phase 4.2.2 §6.
 	DefaultMissionSkill string
 
+	// MaxAsyncMissionsPerRoot caps the number of in-flight children
+	// counted at the root of any spawn chain. Phase 5.1 § 4.5 —
+	// spawn_mission(wait="async") walks the parent chain to root
+	// and rejects when len(root.children) ≥ this cap. 0 disables
+	// enforcement; the default at runtime construction is 5 (set by
+	// the manager).
+	MaxAsyncMissionsPerRoot int
+
 	// TierIntents maps a session tier (root/mission/worker, per
 	// skill.TierFromDepth) to the model-router intent the runtime
 	// applies as the spawned child's default. Per-role overrides

@@ -548,6 +548,108 @@ func TestCallWaitSubagents_Happy_LiveResult(t *testing.T) {
 	}
 }
 
+// TestCallSpawnMission_Async returns immediately with running
+// shape and tags the child for the async-completed render mode.
+// Verifies the cap + the legacy spawn_subagent fields still
+// surface (mission_id + session_id are aliases).
+func TestCallSpawnMission_Async(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+
+	out, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"explore","skill":"analyst","wait":"async"}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var got spawnMissionResult
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v out=%s", err, out)
+	}
+	if got.Status != "running" {
+		t.Errorf("status = %q, want running: %s", got.Status, out)
+	}
+	if got.MissionID == "" || got.SessionID == "" || got.MissionID != got.SessionID {
+		t.Errorf("mission_id / session_id wiring: %+v", got)
+	}
+	// Verify the async-notify tag landed on the child so the
+	// pump's projection produces the async template at completion.
+	parent.childMu.Lock()
+	child := parent.children[got.SessionID]
+	parent.childMu.Unlock()
+	if child == nil {
+		t.Fatalf("spawned child not in parent.children")
+	}
+	if child.asyncSpawnMode != protocol.SubagentRenderAsyncNotify {
+		t.Errorf("asyncSpawnMode = %q, want %q",
+			child.asyncSpawnMode, protocol.SubagentRenderAsyncNotify)
+	}
+}
+
+// TestCallSpawnMission_AsyncSilent suppresses the history
+// projection of the terminal subagent_result while still
+// persisting the event.
+func TestCallSpawnMission_AsyncSilent(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+
+	out, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"explore","skill":"analyst","wait":"async","on_complete":"silent"}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var got spawnMissionResult
+	_ = json.Unmarshal(out, &got)
+	parent.childMu.Lock()
+	child := parent.children[got.SessionID]
+	parent.childMu.Unlock()
+	if child == nil || child.asyncSpawnMode != protocol.SubagentRenderSilent {
+		t.Errorf("asyncSpawnMode = %q, want %q",
+			child.asyncSpawnMode, protocol.SubagentRenderSilent)
+	}
+}
+
+// TestCallSpawnMission_AsyncCap exercises the § 4.5 per-root
+// concurrency check. Sets the deps cap to a small value, fills
+// parent.children up to it, then expects the next async spawn
+// to surface "too_many_async".
+func TestCallSpawnMission_AsyncCap(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+	parent.deps.MaxAsyncMissionsPerRoot = 1
+
+	// First async spawn — fills the cap.
+	if _, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"a","skill":"analyst","wait":"async"}`)); err != nil {
+		t.Fatalf("first async: %v", err)
+	}
+	// Second async spawn — rejected.
+	out, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"b","skill":"analyst","wait":"async"}`))
+	if err != nil {
+		t.Fatalf("second async call: %v", err)
+	}
+	mgr_assertErrorCode(t, out, "too_many_async")
+}
+
+// TestCallSpawnMission_BadWait rejects an unknown wait value.
+func TestCallSpawnMission_BadWait(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+	out, _ := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"x","skill":"analyst","wait":"sometime"}`))
+	mgr_assertErrorCode(t, out, "bad_request")
+}
+
+// TestCallSpawnMission_TimeoutRequiresMs rejects wait=timeout
+// without a positive timeout_ms.
+func TestCallSpawnMission_TimeoutRequiresMs(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+	out, _ := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"x","skill":"analyst","wait":"timeout"}`))
+	mgr_assertErrorCode(t, out, "bad_request")
+}
+
 // TestCallNotifySubagent_Happy verifies the tool emits a
 // SystemMessage with FromSession=parent.id and kind=parent_note,
 // and that the frame settles into the child's inbox.

@@ -63,6 +63,24 @@ func projectFrameToHistory(r *prompts.Renderer, f protocol.Frame) (model.Message
 			protocol.SystemMessageSpawnedNote, body)
 		return model.Message{Role: model.RoleUser, Content: text}, true
 	case *protocol.SubagentResult:
+		// Phase 5.1 § 4.3: async-spawned missions render via a
+		// dedicated template; silent mode skips history.
+		switch v.Payload.RenderMode {
+		case protocol.SubagentRenderSilent:
+			return model.Message{}, false
+		case protocol.SubagentRenderAsyncNotify:
+			text := strings.TrimRight(r.MustRender(
+				"interrupts/async_mission_completed",
+				map[string]any{
+					"MissionID":     v.Payload.SessionID,
+					"Goal":          v.Payload.Goal,
+					"Status":        statusFromReason(v.Payload.Reason),
+					"Reason":        v.Payload.Reason,
+					"ResultSummary": v.Payload.Result,
+				},
+			), "\n")
+			return model.Message{Role: model.RoleUser, Content: text}, true
+		}
 		resBody := v.Payload.Result
 		if resBody == "" {
 			resBody = fmt.Sprintf("(no result; reason: %s)", v.Payload.Reason)

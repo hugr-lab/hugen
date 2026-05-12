@@ -4,6 +4,20 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
+// asyncGoalMaxLen caps SubagentResultPayload.Goal so the async-
+// notify render template (`interrupts/async_mission_completed.tmpl`)
+// has a predictable prompt budget. Goals longer than this surface
+// truncated; the model can `session:subagent_runs(...)` for full
+// context.
+const asyncGoalMaxLen = 200
+
+func truncate(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
+}
+
 // consumeChildOutbox is the parent-side adapter to a sub-agent. Spawn
 // starts one goroutine per child right after child.Start(ctx); the
 // pump reads child.Outbox(), projects cross-session-relevant frames
@@ -86,10 +100,12 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 		if !st.projected && v.Payload.Final && v.Payload.Consolidated {
 			sr := protocol.NewSubagentResult(s.id, child.id, s.agent.Participant(),
 				protocol.SubagentResultPayload{
-					SessionID: child.id,
-					Reason:    protocol.TerminationCompleted,
-					Result:    v.Payload.Text,
-					TurnsUsed: st.consolidatedSeen,
+					SessionID:  child.id,
+					Reason:     protocol.TerminationCompleted,
+					Result:     v.Payload.Text,
+					TurnsUsed:  st.consolidatedSeen,
+					Goal:       truncate(child.mission, asyncGoalMaxLen),
+					RenderMode: child.asyncSpawnMode,
 				})
 			s.projectToParent(sr)
 			st.projected = true
@@ -98,10 +114,12 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 		if !st.projected {
 			sr := protocol.NewSubagentResult(s.id, child.id, s.agent.Participant(),
 				protocol.SubagentResultPayload{
-					SessionID: child.id,
-					Reason:    "error: " + v.Payload.Code,
-					Result:    v.Payload.Message,
-					TurnsUsed: st.consolidatedSeen,
+					SessionID:  child.id,
+					Reason:     "error: " + v.Payload.Code,
+					Result:     v.Payload.Message,
+					TurnsUsed:  st.consolidatedSeen,
+					Goal:       truncate(child.mission, asyncGoalMaxLen),
+					RenderMode: child.asyncSpawnMode,
 				})
 			s.projectToParent(sr)
 			st.projected = true
@@ -114,10 +132,12 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 			}
 			sr := protocol.NewSubagentResult(s.id, child.id, s.agent.Participant(),
 				protocol.SubagentResultPayload{
-					SessionID: child.id,
-					Reason:    v.Payload.Reason,
-					Result:    v.Payload.Result,
-					TurnsUsed: turns,
+					SessionID:  child.id,
+					Reason:     v.Payload.Reason,
+					Result:     v.Payload.Result,
+					TurnsUsed:  turns,
+					Goal:       truncate(child.mission, asyncGoalMaxLen),
+					RenderMode: child.asyncSpawnMode,
 				})
 			s.projectToParent(sr)
 			st.projected = true
