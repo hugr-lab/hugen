@@ -107,6 +107,15 @@ Your job is **decomposition + synthesis**:
    not second-guess them. If something is genuinely ambiguous,
    read `parent_context` or call `session:abstain` (phase ζ)
    rather than guessing.
+
+   Before composing your first wave, scan the **notepad
+   snapshot** in your system prompt (the `## Notepad snapshot`
+   section the runtime injects). Prior missions in this same
+   conversation may have already surfaced what you need — a
+   schema-finding, a validated query-pattern, a user-preference.
+   If a snippet looks directly relevant, call `notepad:search`
+   for full content before spawning a worker to re-derive it.
+   Each saved worker is one less round of latency.
 2. Init the whiteboard so all workers share findings.
 3. For each wave:
    - Decide which workers run *in parallel*. Workers in the same

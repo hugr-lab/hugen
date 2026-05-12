@@ -68,6 +68,14 @@ into worker sessions — you load them on demand.
 
 **Mandatory boot sequence for any task that needs a domain skill:**
 
+0. **`notepad:search(query=<key concept from your task>)`** — if
+   your task references a concept the conversation has been
+   discussing (a table name, data source, user preference,
+   recurring query pattern), check the session notepad first.
+   Prior missions may have already surfaced what you need; reuse
+   beats re-deriving. Skip when the task is genuinely fresh
+   ground.
+
 1. **`skill:load("<skill-name>")`** — pulls the skill's tool surface
    into your session. Once loaded, the tools appear in your next
    turn's snapshot.
