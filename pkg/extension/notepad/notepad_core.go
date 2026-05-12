@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/skill"
 )
@@ -325,7 +326,7 @@ func ageLabel(d time.Duration) string {
 // hypotheses" reminder so weak models don't take notepad rows
 // as ground truth. Total output is clamped to ≤2KB to keep the
 // per-turn prompt budget predictable.
-func renderSnapshot(notes []Note, window time.Duration) string {
+func renderSnapshot(renderer *prompts.Renderer, notes []Note, window time.Duration) string {
 	if len(notes) == 0 {
 		return ""
 	}
@@ -360,28 +361,34 @@ func renderSnapshot(notes []Note, window time.Duration) string {
 		groups = groups[:maxTagsInBlock]
 		truncated = true
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "## Notepad snapshot — last %s\n\n", windowLabel(window))
-	b.WriteString("Hypotheses recorded across the conversation. Structural facts\n")
-	b.WriteString("stay stable; concrete values (counts, sums, timestamps) may\n")
-	b.WriteString("have drifted since the write — re-verify before quoting. Call\n")
-	b.WriteString("`notepad:search(query=...)` or `notepad:read(category=...)` for\n")
-	b.WriteString("full content.\n\n")
+	type groupItem struct {
+		Category  string
+		Count     int
+		Snippet   string
+		Author    string
+		Age       string
+		MoreCount int
+	}
+	items := make([]groupItem, 0, len(groups))
 	for _, g := range groups {
 		first := g.notes[0]
-		snippet := oneLineSnippet(first.Text, 80)
-		more := ""
-		if len(g.notes) > 1 {
-			more = fmt.Sprintf(" [+%d more]", len(g.notes)-1)
-		}
-		fmt.Fprintf(&b, "- **%s** (%d): \"%s\" (%s, %s ago)%s\n",
-			g.category, len(g.notes), snippet, first.AuthorRole,
-			ageLabel(time.Since(first.CreatedAt)), more)
+		items = append(items, groupItem{
+			Category:  g.category,
+			Count:     len(g.notes),
+			Snippet:   oneLineSnippet(first.Text, 80),
+			Author:    first.AuthorRole,
+			Age:       ageLabel(time.Since(first.CreatedAt)),
+			MoreCount: len(g.notes) - 1,
+		})
 	}
-	if truncated {
-		b.WriteString("- … additional categories elided; query with notepad:search.\n")
-	}
-	out := b.String()
+	out := renderer.MustRender(
+		"notepad/session_snapshot",
+		map[string]any{
+			"Window":    windowLabel(window),
+			"Groups":    items,
+			"Truncated": truncated,
+		},
+	)
 	if len(out) > maxBlockBytes {
 		out = out[:maxBlockBytes-3] + "..."
 	}

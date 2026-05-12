@@ -9,6 +9,7 @@ import (
 	"text/template"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -255,13 +256,14 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	if h == nil || h.manager == nil {
 		return ""
 	}
+	renderer := state.Prompts()
 	var parts []string
 	// Available missions — root-only block listing every
 	// dispatch-eligible skill (mission.enabled:true) with its
 	// Summary so the root model can pick a skill argument for
 	// session:spawn_mission. Phase 4.2.2 §6.
 	if h.tier == skillpkg.TierRoot {
-		if missions := renderAvailableMissions(ctx, h); missions != "" {
+		if missions := renderAvailableMissions(ctx, renderer, h); missions != "" {
 			parts = append(parts, missions)
 		}
 	}
@@ -271,13 +273,13 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	if b, err := h.Bindings(ctx); err == nil && b.Instructions != "" {
 		parts = append(parts, b.Instructions)
 	}
-	if cat := renderCatalogue(ctx, h); cat != "" {
+	if cat := renderCatalogue(ctx, renderer, h); cat != "" {
 		parts = append(parts, cat)
 	}
 	// Phase 4.2.3 Block A — recommended notepad tags advertised
 	// by the loaded mission dispatcher(s). Empty when no loaded
 	// skill is mission-enabled or carries a tag list.
-	if tags := renderNotepadTagAdvice(h); tags != "" {
+	if tags := renderNotepadTagAdvice(renderer, h); tags != "" {
 		parts = append(parts, tags)
 	}
 	if len(parts) == 0 {
@@ -292,41 +294,39 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 // Summary. Returns "" when no mission-enabled skills are installed
 // — root then has no dispatch options and spawn_mission surfaces
 // `no_mission_skill`. Phase 4.2.2 §6.
-func renderAvailableMissions(ctx context.Context, h *SessionSkill) string {
+func renderAvailableMissions(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill) string {
 	all, err := h.manager.List(ctx)
 	if err != nil {
 		return ""
 	}
-	var picked []skillpkg.Skill
+	type missionItem struct {
+		Name    string
+		Summary string
+	}
+	var picked []missionItem
 	for _, sk := range all {
-		if sk.Manifest.Hugen.Mission.Enabled {
-			picked = append(picked, sk)
+		if !sk.Manifest.Hugen.Mission.Enabled {
+			continue
 		}
+		summary := strings.TrimSpace(sk.Manifest.Hugen.Mission.Summary)
+		if summary == "" {
+			summary = strings.TrimSpace(sk.Manifest.Description)
+		}
+		picked = append(picked, missionItem{
+			Name:    sk.Manifest.Name,
+			Summary: summary,
+		})
 	}
 	if len(picked) == 0 {
 		return ""
 	}
 	sort.Slice(picked, func(i, j int) bool {
-		return picked[i].Manifest.Name < picked[j].Manifest.Name
+		return picked[i].Name < picked[j].Name
 	})
-	var b strings.Builder
-	b.WriteString("## Available missions\n\n")
-	b.WriteString("When the user asks for information, computation, or any work beyond\n")
-	b.WriteString("greeting / clarification / formatting, delegate via\n")
-	b.WriteString("`session:spawn_mission` and pass the `skill` argument naming the\n")
-	b.WriteString("dispatcher whose summary best matches the request:\n\n")
-	for _, sk := range picked {
-		summary := strings.TrimSpace(sk.Manifest.Hugen.Mission.Summary)
-		if summary == "" {
-			summary = strings.TrimSpace(sk.Manifest.Description)
-		}
-		b.WriteString("- `")
-		b.WriteString(sk.Manifest.Name)
-		b.WriteString("` — ")
-		b.WriteString(summary)
-		b.WriteString("\n")
-	}
-	return strings.TrimRight(b.String(), "\n")
+	return strings.TrimRight(renderer.MustRender(
+		"skill/available_missions",
+		map[string]any{"Missions": picked},
+	), "\n")
 }
 
 // renderLoadedSkillsMeta produces the per-loaded-skill metadata
@@ -349,7 +349,7 @@ func renderAvailableMissions(ctx context.Context, h *SessionSkill) string {
 // "first" is the alphabetically-first skill defining it), and
 // preserves declaration order within each contributing skill.
 // Empty when no loaded skill carries tag declarations.
-func renderNotepadTagAdvice(h *SessionSkill) string {
+func renderNotepadTagAdvice(renderer *prompts.Renderer, h *SessionSkill) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	if len(h.loaded) == 0 {
@@ -360,8 +360,12 @@ func renderNotepadTagAdvice(h *SessionSkill) string {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	seen := map[string]string{}
-	var order []string
+	type tagItem struct {
+		Name string
+		Hint string
+	}
+	seen := map[string]struct{}{}
+	var order []tagItem
 	for _, n := range names {
 		sk := h.loaded[n]
 		for _, t := range sk.Manifest.Hugen.Mission.OnStart.Notepad.Tags {
@@ -372,31 +376,20 @@ func renderNotepadTagAdvice(h *SessionSkill) string {
 			if _, present := seen[name]; present {
 				continue
 			}
-			seen[name] = strings.TrimSpace(t.Hint)
-			order = append(order, name)
+			seen[name] = struct{}{}
+			order = append(order, tagItem{
+				Name: name,
+				Hint: strings.TrimSpace(t.Hint),
+			})
 		}
 	}
 	if len(order) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	b.WriteString("## Notepad — recommended tags for this mission\n\n")
-	b.WriteString("The notepad accepts any category string; the dispatching skill\n")
-	b.WriteString("recommends these for retrieval coherence across worker waves:\n\n")
-	for _, name := range order {
-		if hint := seen[name]; hint != "" {
-			b.WriteString("- `")
-			b.WriteString(name)
-			b.WriteString("` — ")
-			b.WriteString(hint)
-			b.WriteString("\n")
-		} else {
-			b.WriteString("- `")
-			b.WriteString(name)
-			b.WriteString("`\n")
-		}
-	}
-	return b.String()
+	return renderer.MustRender(
+		"notepad/recommended_tags",
+		map[string]any{"Tags": order},
+	)
 }
 
 func renderLoadedSkillsMeta(h *SessionSkill) string {
@@ -477,7 +470,7 @@ func writeBundleCategory(b *strings.Builder, sfs fs.FS, category string) {
 // renderCatalogue produces the "## Available skills" section of
 // the system prompt: one bullet per skill in the store using the
 // manifest description. Loaded skills carry a `(loaded)` tag.
-func renderCatalogue(ctx context.Context, h *SessionSkill) string {
+func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill) string {
 	all, err := h.manager.List(ctx)
 	if err != nil || len(all) == 0 {
 		return ""
@@ -486,20 +479,24 @@ func renderCatalogue(ctx context.Context, h *SessionSkill) string {
 	for _, n := range h.LoadedNames(ctx) {
 		loadedSet[n] = struct{}{}
 	}
-	var b strings.Builder
-	b.WriteString("## Available skills\n\nLoad any of these via the `skill:load` tool when their domain becomes relevant. Already-loaded skills are tagged `(loaded)`.\n\n")
-	for _, sk := range all {
-		b.WriteString("- `")
-		b.WriteString(sk.Manifest.Name)
-		b.WriteString("`")
-		if _, on := loadedSet[sk.Manifest.Name]; on {
-			b.WriteString(" (loaded)")
-		}
-		b.WriteString(" — ")
-		b.WriteString(strings.TrimSpace(sk.Manifest.Description))
-		b.WriteString("\n")
+	type skillItem struct {
+		Name        string
+		Description string
+		Loaded      bool
 	}
-	return b.String()
+	items := make([]skillItem, 0, len(all))
+	for _, sk := range all {
+		_, on := loadedSet[sk.Manifest.Name]
+		items = append(items, skillItem{
+			Name:        sk.Manifest.Name,
+			Description: strings.TrimSpace(sk.Manifest.Description),
+			Loaded:      on,
+		})
+	}
+	return renderer.MustRender(
+		"skill/catalogue",
+		map[string]any{"Skills": items},
+	)
 }
 
 // FilterTools implements [extension.ToolFilter]. Narrows the

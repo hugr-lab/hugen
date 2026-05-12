@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -126,10 +127,10 @@ func (h *SessionPlan) Snapshot() Plan {
 // "" when no plan is active. Holding the mutex briefly ensures the
 // read sees a consistent snapshot even if a tool handler is mid-
 // Apply on another goroutine.
-func (h *SessionPlan) Render() string {
+func (h *SessionPlan) Render(renderer *prompts.Renderer) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return Render(h.plan)
+	return Render(renderer, h.plan)
 }
 
 // AdvertiseSystemPrompt implements [extension.Advertiser]. Returns
@@ -139,7 +140,7 @@ func (e *Extension) AdvertiseSystemPrompt(_ context.Context, state extension.Ses
 	if h == nil {
 		return ""
 	}
-	return h.Render()
+	return h.Render(state.Prompts())
 }
 
 // ---------- ToolProvider surface ----------

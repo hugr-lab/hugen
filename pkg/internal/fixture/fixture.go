@@ -2,17 +2,41 @@ package fixture
 
 import (
 	"context"
+	"io/fs"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/hugr-lab/hugen/assets"
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
+
+// defaultPromptsOnce caches a single bundled renderer for every
+// TestSessionState constructed via NewTestSessionState. Tests that
+// exercise prompt rendering through state.Prompts() reach the
+// production templates without per-test scaffolding; tests that
+// explicitly want a nil renderer can call SetPrompts(nil) after
+// construction.
+var (
+	defaultPromptsOnce sync.Once
+	defaultPromptsRdr  *prompts.Renderer
+)
+
+func defaultPrompts() *prompts.Renderer {
+	defaultPromptsOnce.Do(func() {
+		sub, err := fs.Sub(assets.PromptsFS, "prompts")
+		if err != nil {
+			return
+		}
+		defaultPromptsRdr = prompts.NewRenderer(sub, "", nil)
+	})
+	return defaultPromptsRdr
+}
 
 // TestSessionState is a minimal in-memory [extension.SessionState]
 // for tests that drive extensions / tool providers without a real
@@ -44,9 +68,14 @@ type TestSessionState struct {
 
 // NewTestSessionState builds a TestSessionState bound to the given
 // session id. Most tests use just this — they don't need parent
-// or tools wiring.
+// or tools wiring. The default Prompts renderer is the bundled
+// production templates (assets.PromptsFS with no override); tests
+// that need a different renderer call SetPrompts on the result.
 func NewTestSessionState(sessionID string) *TestSessionState {
-	return &TestSessionState{id: sessionID}
+	return &TestSessionState{
+		id:      sessionID,
+		prompts: defaultPrompts(),
+	}
 }
 
 // WithParent wires a parent TestSessionState so Parent() returns

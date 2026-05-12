@@ -644,7 +644,7 @@ func (s *Session) drainPendingInbound(runCtx context.Context) {
 		return
 	}
 	for _, f := range s.pendingInbound {
-		if msg, ok := projectFrameToHistory(f); ok {
+		if msg, ok := projectFrameToHistory(s.deps.Prompts, f); ok {
 			s.history = append(s.history, msg)
 		}
 		// Persist + push to outbox so the event log captures the

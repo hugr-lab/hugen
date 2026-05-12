@@ -23,7 +23,7 @@ func TestProjectHistory_Window(t *testing.T) {
 			Metadata:  map[string]any{"final": true},
 		})
 	}
-	got := projectHistory(rows, 50)
+	got := projectHistory(testPrompts(t), rows, 50)
 	if len(got) != 50 {
 		t.Errorf("len = %d, want 50", len(got))
 	}
@@ -59,7 +59,7 @@ func TestProjectHistory_IncludesSubagentFrames(t *testing.T) {
 			},
 		},
 	}
-	got := projectHistory(rows, 50)
+	got := projectHistory(testPrompts(t), rows, 50)
 	if len(got) != 2 {
 		t.Fatalf("len = %d, want 2; got=%v", len(got), got)
 	}
@@ -96,7 +96,7 @@ func TestProjectHistory_IncludesSystemMessage(t *testing.T) {
 			Metadata:  map[string]any{"final": true, "consolidated": true},
 		},
 	}
-	got := projectHistory(rows, 50)
+	got := projectHistory(testPrompts(t), rows, 50)
 	if len(got) != 3 {
 		t.Fatalf("len = %d, want 3 (user + system + agent); got=%v", len(got), got)
 	}

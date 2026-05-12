@@ -156,7 +156,10 @@ func (s *Session) evaluateRepeatedHash(runCtx context.Context) {
 		return // pattern continues; already nudged.
 	}
 	s.stuck.repeatedHashActive = true
-	s.injectStuckNudge(runCtx, fmt.Sprintf("You've called the same tool with identical arguments %d times in a row. The loop may be intentional — consider whether changing the approach or pausing to think would help. If you're confident, continue.", N))
+	s.injectStuckNudge(runCtx, s.deps.Prompts.MustRender(
+		"interrupts/stuck_repeated_tool",
+		map[string]any{"N": N},
+	))
 }
 
 // evaluateTightDensity fires once when M=stuckTightDensityCount
@@ -190,7 +193,10 @@ func (s *Session) evaluateTightDensity(runCtx context.Context) {
 		return
 	}
 	s.stuck.tightDensityActive = true
-	s.injectStuckNudge(runCtx, fmt.Sprintf("You've issued %d calls to the same tool inside %s. The loop may be productive — but pausing to think might surface a different angle.", M, stuckTightDensityWindow))
+	s.injectStuckNudge(runCtx, s.deps.Prompts.MustRender(
+		"interrupts/stuck_tight_density",
+		map[string]any{"M": M, "Window": stuckTightDensityWindow.String()},
+	))
 }
 
 // evaluateNoProgress fires (as a system_marker, not a system_message —

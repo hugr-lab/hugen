@@ -87,6 +87,7 @@ func newCeilingTestManager(t *testing.T, store session.RuntimeStore, mdl model.M
 		t.Fatalf("agent: %v", err)
 	}
 	return NewManager(store, agent, router, session.NewCommandRegistry(), protocol.NewCodec(), tm, nil,
+		WithPrompts(testPrompts(t)),
 		WithSessionOptions(
 			session.WithMaxToolIterations(softCap),
 			session.WithMaxToolIterationsHard(hardCap),

@@ -229,6 +229,7 @@ func newTestParent(t *testing.T, opts ...testParentOpt) (*Session, func()) {
 		Codec:      protocol.NewCodec(),
 		Tools:      cfg.tools,
 		Logger:     slog.Default(),
+		Prompts:    testPrompts(t),
 		Opts:       cfg.sessOpts,
 		Extensions: cfg.extensions,
 		RootCtx:    rootCtx,

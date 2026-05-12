@@ -11,15 +11,18 @@ import (
 // newStuckTestSession builds the bare minimum *Session a stuck-edge
 // unit test needs: a closed session (so emit short-circuits without
 // touching agent/store) and a discard logger (so the Warn after the
-// short-circuit doesn't panic). The detector code under test mutates
-// stuck.* fields BEFORE calling emit, so the flag transitions still
-// surface correctly even though no Frame ever lands in the store.
-func newStuckTestSession() *Session {
+// short-circuit doesn't panic). Deps carries only the Prompts
+// renderer — the detector calls MustRender to build nudge text. The
+// detector code under test mutates stuck.* fields BEFORE calling
+// emit, so the flag transitions still surface correctly even though
+// no Frame ever lands in the store.
+func newStuckTestSession(t *testing.T) *Session {
 	agent, _ := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "", nil)
 	s := &Session{
 		id:     "s1",
 		agent:  agent,
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		deps:   &Deps{Prompts: testPrompts(t)},
 	}
 	s.closed.Store(true)
 	return s
@@ -30,7 +33,7 @@ func newStuckTestSession() *Session {
 // hash clears the flag; three more identical calls fire it again
 // (phase-4-spec §13.2 #6).
 func TestStuckDetector_RepeatedHashRisingEdge(t *testing.T) {
-	s := newStuckTestSession()
+	s := newStuckTestSession(t)
 	now := time.Now()
 
 	// Two identical calls — not enough for a rising edge yet.
@@ -90,7 +93,7 @@ func TestSessionToolHash_StableAcrossCalls(t *testing.T) {
 // at max(stuckRepeatedHashWindow, stuckTightDensityCount). Without the
 // trim the window would grow unbounded across a long session.
 func TestStuckBuffer_FIFOTrim(t *testing.T) {
-	s := newStuckTestSession()
+	s := newStuckTestSession(t)
 	now := time.Now()
 	for i := 0; i < 50; i++ {
 		s.stuckObserveCall("fake:do", map[string]any{"i": i}, "", now)

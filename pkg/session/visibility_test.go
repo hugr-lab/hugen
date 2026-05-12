@@ -75,7 +75,7 @@ func TestProjectFrameToHistory_AllowList(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			msg, ok := projectFrameToHistory(tc.frame)
+			msg, ok := projectFrameToHistory(testPrompts(t), tc.frame)
 			if ok != tc.wantAllowed {
 				t.Fatalf("allowed = %v, want %v", ok, tc.wantAllowed)
 			}

@@ -11,8 +11,9 @@
 package plan
 
 import (
-	"strings"
 	"time"
+
+	"github.com/hugr-lab/hugen/pkg/prompts"
 )
 
 // Caps applied during projection. Events themselves are never
@@ -188,20 +189,17 @@ func applyComment(p Plan, ev ProjectEvent) Plan {
 //	<body>
 //
 // The "Current focus" line is omitted when CurrentStep is empty.
-func Render(p Plan) string {
+func Render(renderer *prompts.Renderer, p Plan) string {
 	if !p.Active {
 		return ""
 	}
-	var b strings.Builder
-	b.WriteString("## Active plan\n")
-	if p.CurrentStep != "" {
-		b.WriteString("Current focus: ")
-		b.WriteString(p.CurrentStep)
-		b.WriteString("\n")
-	}
-	b.WriteString("\n")
-	b.WriteString(p.Text)
-	return b.String()
+	return renderer.MustRender(
+		"plan/snapshot_render",
+		map[string]any{
+			"CurrentStep": p.CurrentStep,
+			"Body":        p.Text,
+		},
+	)
 }
 
 // capText caps a free-form string at max bytes, appending

@@ -3,9 +3,11 @@ package session
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 )
@@ -39,7 +41,7 @@ func (s *Session) materialise(ctx context.Context) error {
 			firstErr = fmt.Errorf("session %s: list events: %w", s.id, err)
 			return
 		}
-		s.history = projectHistory(rows, defaultHistoryWindow)
+		s.history = projectHistory(s.deps.Prompts, rows, defaultHistoryWindow)
 
 		// Soft-warning idempotency derives from the event log so a
 		// restart that loses in-memory state still skips re-emission.
@@ -99,7 +101,7 @@ func (s *Session) materialise(ctx context.Context) error {
 // would be invisible to the model after a process restart.
 // Reading the same shape live and after replay keeps the model's
 // mental model continuous across the cut.
-func projectHistory(rows []store.EventRow, window int) []model.Message {
+func projectHistory(renderer *prompts.Renderer, rows []store.EventRow, window int) []model.Message {
 	if window <= 0 {
 		window = defaultHistoryWindow
 	}
@@ -159,10 +161,17 @@ func projectHistory(rows []store.EventRow, window int) []model.Message {
 			case int64:
 				depthStr = fmt.Sprintf("%d", v)
 			}
+			body := strings.TrimRight(renderer.MustRender(
+				"system/spawned_note",
+				map[string]any{
+					"ChildID": cid,
+					"Role":    role,
+					"Depth":   depthStr,
+				},
+			), "\n")
 			all = append(all, model.Message{
-				Role: model.RoleUser,
-				Content: fmt.Sprintf("[system: %s] spawned %s (role: %s) at depth %s",
-					protocol.SystemMessageSpawnedNote, cid, role, depthStr),
+				Role:    model.RoleUser,
+				Content: fmt.Sprintf("[system: %s] %s", protocol.SystemMessageSpawnedNote, body),
 			})
 		case protocol.KindSubagentResult:
 			cid, _ := r.Metadata["session_id"].(string)
@@ -185,10 +194,18 @@ func projectHistory(rows []store.EventRow, window int) []model.Message {
 			if body == "" {
 				body = fmt.Sprintf("(no result; reason: %s)", reason)
 			}
+			rendered := strings.TrimRight(renderer.MustRender(
+				"system/subagent_result_render",
+				map[string]any{
+					"ChildID": cid,
+					"Reason":  reason,
+					"Turns":   turns,
+					"Body":    body,
+				},
+			), "\n")
 			all = append(all, model.Message{
-				Role: model.RoleUser,
-				Content: fmt.Sprintf("[system: subagent_result] %s reason=%s turns=%d\n%s",
-					cid, reason, turns, body),
+				Role:    model.RoleUser,
+				Content: "[system: subagent_result] " + rendered,
 			})
 		}
 	}
