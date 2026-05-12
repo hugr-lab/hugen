@@ -1,0 +1,129 @@
+# follow_up_during_mission — phase 5.1 γ acceptance.
+#
+# Two sequential user turns inside one root session. Step 1 kicks
+# off a non-trivial analyst mission asynchronously so root stays
+# alive to receive the follow-up. Step 2 sends a refining user
+# message WHILE the mission is still in flight. wait_subagents on
+# root returns an interrupt envelope; root reads the rendered
+# `interrupts/follow_up_with_active_subagents` block and routes
+# the slice via session:notify_subagent.
+#
+# By-eye assertions:
+#
+#   1. After step 1 — root issued ONE session:spawn_mission with
+#      wait="async" (catalog or scripted-via-prompt) so the mission
+#      starts but root doesn't block. Mission's events show
+#      spawn_wave running.
+#
+#   2. Step 2 ride-on — root's tool_calls after the second
+#      UserMessage include session:notify_subagent AND a fresh
+#      session:wait_subagents resume. The notify_subagent target
+#      is the active mission's id.
+#
+#   3. Mission's events show a system_message frame with
+#      kind="parent_note" + the directive root crafted (NOT raw
+#      user text — the spec requires translation).
+#
+#   4. End-to-end — root's final assistant message reflects the
+#      refined request, not the original prompt.
+#
+# Tuning notes for Gemma 26B:
+#   - Initial prompt MUST be a multi-step analyst job whose budget
+#     allows the user to interrupt before completion (e.g. "produce
+#     a 5-section report ..."). If the model answers in one turn
+#     there's no in-flight mission.
+#   - System prompt's `## Available missions` block needs the
+#     async wait hint surfaced; tier-root constitution § "When a
+#     follow-up arrives ..." covers the action shape — verify it
+#     reaches the prompt.
+name: follow_up_during_mission
+requires: [hugr]
+
+steps:
+  - say: |
+      Produce a detailed analyst report on the `northwind`
+      catalog. Cover: (1) entity inventory, (2) primary fact /
+      dimension split, (3) date-range coverage, (4) likely
+      key columns for joins, (5) suspicious nulls or
+      empty-string columns worth flagging. Run the missions in
+      the background — I may interrupt with follow-ups.
+    budget: 600s
+    wait_for_subagents: 360s
+
+    queries:
+      - name: tool_calls_root_step1
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      - name: mission_row_step1
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata mission
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+  - say: |
+      Wait — narrow the focus to ONLY the orders + order_items
+      tables. Skip everything else.
+    budget: 600s
+    wait_for_subagents: 480s
+
+    queries:
+      # Root's interrupt-response tool surface: notify_subagent
+      # + wait_subagents resume. The mission_id arg of
+      # notify_subagent must match the active mission.
+      - name: tool_calls_root_step2
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Mission events — must include a system_message with
+      # kind=parent_note + the focused directive.
+      - name: mission_system_messages
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, system_messages: (.events // []) | map({seq, tool: .tool_name, content: .content, metadata: .metadata})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "system_message"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq tool_name content metadata
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      - name: root_final_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 3
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }

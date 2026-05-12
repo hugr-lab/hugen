@@ -1,0 +1,102 @@
+# async_mission_completion — phase 5.1 § 4.3 acceptance.
+#
+# Root spawns a mission with wait="async" — the tool returns
+# immediately with status="running". Root answers the user
+# without blocking. When the mission completes, the
+# SubagentResult lands in root's pendingInbound; the next user
+# turn's prompt build surfaces the result via the
+# interrupts/async_mission_completed template.
+#
+# By-eye assertions:
+#
+#   1. Step 1 — root issues spawn_mission with wait="async" (in
+#      args). The tool returns status="running"; root's final
+#      assistant message acknowledges the mission was kicked off
+#      but does NOT include findings yet.
+#
+#   2. Mission's SubagentResult row metadata.render_mode ==
+#      "async_notify" (set by the spawn-mission async tag the
+#      pump propagates via SubagentResultPayload).
+#
+#   3. Step 2 — root's prompt for the second turn carries the
+#      rendered async_mission_completed snippet (asserted
+#      indirectly: root's reply references "Mission <id>" or the
+#      mission's result summary that flowed in via system message).
+#
+# Tuning notes:
+#   - Step-1 ask MUST be a back-grounded job. Phrase it so the
+#     model picks wait="async" over the default sync path.
+#   - Mission body should be short enough to complete inside the
+#     step-1 budget so step 2's prompt includes the completion.
+name: async_mission_completion
+requires: [hugr]
+
+steps:
+  - say: |
+      Kick off a background mission to enumerate every `northwind`
+      data source and list its tables. Do it asynchronously — I'll
+      ask you something else in the meantime; let me know when
+      it's started but don't wait.
+    budget: 480s
+    wait_for_subagents: 240s
+
+    queries:
+      - name: tool_calls_root_step1
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      - name: mission_row_step1
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status mission metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+  - say: |
+      What's the difference between a fact table and a dimension
+      table? One paragraph.
+    # Trivia answer; main signal is whether root's transcript
+    # carries the async_mission_completed system message between
+    # turns.
+    budget: 240s
+
+    queries:
+      # Root's events between step 1 final reply and the step-2
+      # turn — must include the SubagentResult row from the
+      # async mission with render_mode=async_notify.
+      - name: root_subagent_result
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "subagent_result"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq content metadata }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      - name: root_final_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 3
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }

@@ -101,3 +101,13 @@ runs:
       - skill_save_bundle
       - skill_save_overwrite_collision
       - skill_discovery_via_catalog
+      # Phase 5.1 κ — HITL gate scenarios. Initial scaffolding;
+      # harness wiring for InquiryRequest interception + multi-
+      # root fan-out arrives in a fast-follow. Expect tuning
+      # iterations against Gemma 26B before merge.
+      - follow_up_during_mission
+      - cancel_and_respawn
+      - async_mission_completion
+      - approval_gate_blocks_mutation
+      - clarification_resolves_ambiguity
+      - multi_root_independence
