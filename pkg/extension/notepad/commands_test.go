@@ -17,7 +17,7 @@ func testCommandContext() extension.CommandContext {
 }
 
 func TestExtension_Commands_Listed(t *testing.T) {
-	ext := NewExtension(fixture.NewTestStore(), "a1")
+	ext := NewExtension(fixture.NewTestStore(), "a1", Config{})
 	cmds := ext.Commands()
 	if len(cmds) != 1 {
 		t.Fatalf("len(Commands) = %d, want 1", len(cmds))
@@ -30,7 +30,7 @@ func TestExtension_Commands_Listed(t *testing.T) {
 	}
 }
 
-func TestCmdNote_Happy(t *testing.T) {
+func TestCmdNote_HappySetsUserCategory(t *testing.T) {
 	ext, state, store := newFixture(t)
 	frames, err := ext.cmdNote(context.Background(), state, testCommandContext(), []string{"hello", "world"})
 	if err != nil {
@@ -52,8 +52,15 @@ func TestCmdNote_Happy(t *testing.T) {
 	if _, ok := marker.Payload.Details["note_id"]; !ok {
 		t.Errorf("marker.Details missing note_id: %+v", marker.Payload.Details)
 	}
-	if len(store.Notes) != 1 || store.Notes[0].Content != "hello world" {
-		t.Errorf("store.Notes = %+v, want one row with %q", store.Notes, "hello world")
+	if len(store.Notes) != 1 {
+		t.Fatalf("store.Notes = %+v", store.Notes)
+	}
+	row := store.Notes[0]
+	if row.Content != "hello world" {
+		t.Errorf("content = %q, want %q", row.Content, "hello world")
+	}
+	if row.Category != userNoteCategory {
+		t.Errorf("category = %q, want %q", row.Category, userNoteCategory)
 	}
 }
 
@@ -76,8 +83,7 @@ func TestCmdNote_EmptyArgs(t *testing.T) {
 }
 
 func TestCmdNote_NoStateHandle(t *testing.T) {
-	// Bare state without InitState — FromState returns nil.
-	ext := NewExtension(fixture.NewTestStore(), "a1")
+	ext := NewExtension(fixture.NewTestStore(), "a1", Config{})
 	state := fixture.NewTestSessionState("ses-bare")
 	frames, err := ext.cmdNote(context.Background(), state, testCommandContext(), []string{"x"})
 	if err != nil {

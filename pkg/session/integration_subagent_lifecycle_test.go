@@ -10,6 +10,40 @@ import (
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 )
 
+// TestSpawn_PersistsMissionFromTask — phase 4.2.3 §6: SpawnSpec.Task
+// lands on the new sessions row's `mission` column at OpenSession
+// time. Lets observability and Block B "current mission context"
+// surface the spawn goal without scanning the event log.
+func TestSpawn_PersistsMissionFromTask(t *testing.T) {
+	store := fixture.NewTestStore()
+	root, cleanup := newTestParent(t, withTestStore(store), withTestRunLoop())
+	defer cleanup()
+	ctx := context.Background()
+
+	child, err := root.Spawn(ctx, SpawnSpec{Task: "explore northwind data source"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	drainOutboxOnce(root.Outbox())
+
+	row, ok := store.Sessions[child.ID()]
+	if !ok {
+		t.Fatalf("child row %q not persisted", child.ID())
+	}
+	if row.Mission != "explore northwind data source" {
+		t.Errorf("Mission = %q, want %q", row.Mission, "explore northwind data source")
+	}
+	// Root's own row has no Mission set (root spawns are constructed
+	// without SpawnSpec.Task in the test fixture's newTestParent).
+	rootRow, ok := store.Sessions[root.ID()]
+	if !ok {
+		t.Fatalf("root row not persisted")
+	}
+	if rootRow.Mission != "" {
+		t.Errorf("root.Mission = %q, want empty", rootRow.Mission)
+	}
+}
+
 // TestSubagent_CancelCascade_TwoDeep exercises phase-4-spec §13.2 #5: a
 // `/cancel all` on the root cascades through every descendant. Tree
 // shape: root → mid → leaf. After the cancel, both mid and leaf

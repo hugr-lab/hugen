@@ -208,6 +208,19 @@ type Session struct {
 	// finished its exit handler — including any session_terminated
 	// event append.
 	done chan struct{}
+
+	// Phase 4.2.3 ε — close-turn metadata stashed for the
+	// teardown-time resolver. spawnSkill / spawnRole duplicate
+	// the persisted Metadata fields so close_turn.go's lookup
+	// can pick role-specific on_close overrides without
+	// re-reading the row from the store. mainToolCalls feeds
+	// the SkipIfIdle gate (count of tool calls during the
+	// session's regular main task). All three are set in
+	// spawn.go (parent != nil) and incremented from the regular
+	// turn machinery; empty / zero for root sessions.
+	spawnSkill    string
+	spawnRole     string
+	mainToolCalls atomic.Int64
 }
 
 // terminationCause is the cancel cause attached to a per-session ctx
@@ -739,6 +752,25 @@ func (s *Session) Run(ctx context.Context) error {
 //     still-honest deadline reaches the store; cancellation of the
 //     writeCtx aborts the persist, which is the caller's choice.
 func (s *Session) teardown(runCtx context.Context) {
+	// 0) Phase 4.2.3 ε — deterministic close turn. Resolve the
+	// on_close config from loaded skills; if any opted in AND
+	// the close reason is not in the skip list AND the
+	// SkipIfIdle gate doesn't short-circuit, run one constrained
+	// model turn synchronously (runCloseTurnSync — no goroutines
+	// or Run-loop re-entry). Errors are logged warn-not-fatal;
+	// teardown proceeds with the existing steps regardless so
+	// the session always terminates cleanly (parent.children
+	// cleanup is driven by Run exit, not by close-turn success).
+	if s.shouldRunCloseTurn() {
+		block := s.resolveCloseTurnBlock(runCtx)
+		if !block.IsEmpty() && !(block.SkipIfIdle && s.mainToolCalls.Load() == 0) {
+			if err := s.runCloseTurnSync(runCtx, block); err != nil {
+				s.logger.Warn("close turn: aborted",
+					"session", s.id, "reason", s.closeReason, "err", err)
+			}
+		}
+	}
+
 	// 1) Stop the in-flight turn.
 	if s.turnCancel != nil {
 		s.turnCancel()

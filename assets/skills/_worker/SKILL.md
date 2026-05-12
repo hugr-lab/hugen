@@ -10,12 +10,31 @@ allowed-tools:
     tools:
       - write
       - read
+  # Phase 4.2.3 — workers read prior cross-mission findings but
+  # do not write by default. Roles that need write capability can
+  # extend allowed-tools at the role level (sub_agents block in
+  # the dispatching skill).
+  - provider: notepad
+    tools:
+      - read
+      - search
 metadata:
   hugen:
     requires_skills: []
     autoload: true
     autoload_for: [worker]
     tier_compatibility: [worker]
+    # Phase 4.2.3 ε — worker close turn. Same shape as the
+    # mission tier (default prompt + [notepad:append] surface
+    # + 2-iter cap), but the per-role on_close on the
+    # dispatching skill (analyst's schema-explorer /
+    # query-builder / data-analyst) generally provides a more
+    # specific prompt. Skip the close turn for idle workers
+    # (simple-answerer that returned text without tools).
+    mission:
+      on_close:
+        notepad:
+          skip_if_idle: true
 compatibility:
   model: any
   runtime: hugen-phase-4
@@ -48,6 +67,14 @@ and validated `inputs`. Domain skills (`hugr-data`,
 into worker sessions — you load them on demand.
 
 **Mandatory boot sequence for any task that needs a domain skill:**
+
+0. **`notepad:search(query=<key concept from your task>)`** — if
+   your task references a concept the conversation has been
+   discussing (a table name, data source, user preference,
+   recurring query pattern), check the session notepad first.
+   Prior missions may have already surfaced what you need; reuse
+   beats re-deriving. Skip when the task is genuinely fresh
+   ground.
 
 1. **`skill:load("<skill-name>")`** — pulls the skill's tool surface
    into your session. Once loaded, the tools appear in your next

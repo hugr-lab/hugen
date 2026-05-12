@@ -509,11 +509,21 @@ input session_events_chain_input {
 }
 
 # ============================================================
-# Session notes — LLM scratchpad during session
+# Session notes — per-root-session working notepad (phase 4.2.3)
 # ============================================================
+#
+# Hypotheses-not-facts scratchpad shared across all missions inside
+# one root conversation. Append-only — runtime never UPDATEs;
+# `notepad:append` writes; old notes fall out of model visibility
+# via a configurable read window (default 48h) rather than being
+# deleted. Storage location is always the root session of the
+# parent chain — the extension climbs `RootAncestor()` before
+# writing. The `session_notes_chain` view below preserves the
+# legacy parent-walk surface for observability.
 
-"""Ephemeral notes saved by LLM during a session via memory_note tool. Survive context compaction, persist across agent restarts, cleaned up when session ends."""
-type session_notes @table(name: "session_notes") @module(name: "agent") {
+"""Per-root-session working notepad — hypotheses recorded by the LLM mid-conversation. Append-only (no UPDATEs, no soft delete). Storage column session_id is always the root of the parent chain; author_session_id carries the actual writing session for audit. Eligible rows carry a semantic embedding populated server-side via Hugr's `summary:` mutation parameter."""
+type session_notes @table(name: "session_notes") @module(name: "agent")
+  {{ if .EmbeddingsEnabled }}@embeddings(model: "{{ .EmbedderModel }}", vector: "embedding", distance: Cosine){{ end }} {
   """Synthetic sortable ID: note_{agent}_{ts}_{rnd}"""
   id:          String! @pk
   """Agent that saved this note"""
@@ -525,28 +535,38 @@ type session_notes @table(name: "session_notes") @module(name: "agent") {
     references_query: "session_notes"
     references_description: "Session notes saved by this agent"
   )
-  """Session this note belongs to (where it's visible)."""
+  """Storage location — always the ROOT of the writing session's parent chain. Phase 4.2.3 extension climbs `RootAncestor()` before insert so every session in the tree sees the same notepad via `session_id == root.id`."""
   session_id:  String! @field_references(
     references_name: "sessions"
     field: "id"
     query: "session"
-    description: "Session where this note is visible"
+    description: "Root session the note is stored under"
     references_query: "notes"
-    references_description: "Notes visible in this session (own + promoted-up from children)"
+    references_description: "Notes stored at this root session"
   )
-  """Session that AUTHORED this note. Equals session_id for scope=self writes; differs when a sub-agent promotes a note via memory_note(scope:'parent'|'ancestors'). Drives author-only delete authority at the LLM tool surface."""
+  """Authoring session — may differ from session_id when a sub-agent's notepad:append climbs to root. Audit trail; never used for visibility filtering."""
   author_session_id: String @field_references(
     references_name: "sessions"
     field: "id"
     query: "author_session"
     description: "Session that wrote this note"
     references_query: "authored_notes"
-    references_description: "Notes written by this session (visible here or promoted up the chain)"
+    references_description: "Notes authored by this session (stored under its root)"
   )
-  """Note text — concise, self-contained finding"""
+  """Open-string filtering tag, model-supplied at notepad:append time. Skill's `mission.on_start.notepad.tags` may advertise recommended values; runtime accepts any string."""
+  category:    String
+  """Tier of the authoring session at write time: `agent` (root, depth 0), `coordinator` (mission, depth 1), `worker` (depth >= 2). Set by runtime from author's tier."""
+  author_role: String
+  """Model-supplied short context phrase — "what does the writing session think it is working on right now". Optional; empty acceptable. Independent of sessions.mission (which is the formal spawn goal set by runtime at spawn_mission)."""
+  mission:     String
+  """Note text — concise, self-contained hypothesis. Treat as observation under uncertainty (phase 7 distillation validates)."""
   content:     String!
   """When this note was saved"""
   created_at:  Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+  {{ if .EmbeddingsEnabled }}
+  """Semantic embedding of content. NULL for transient embedder failures. Populated atomically with insert via the `summary:` mutation parameter — the runtime passes the note content as the summary string."""
+  embedding:   Vector @dim(len: {{ .VectorSize }})
+  {{ end }}
 }
 
 # ============================================================
@@ -555,7 +575,7 @@ type session_notes @table(name: "session_notes") @module(name: "agent") {
 # notes` block; depth cap 8 mirrors session_events_chain.
 # ============================================================
 
-"""Recursive walk over parent_session_id (depth cap 8). Returns every note visible to the given session — own notes + every ancestor's notes (those addressed via memory_note(scope:'parent'|'ancestors')). Ordered by (chain_depth ASC, created_at DESC) so Snapshot renders own notes first, then by ancestry depth."""
+"""Recursive walk over parent_session_id (depth cap 8). Returns every note visible to the given session — own notes + every ancestor's notes. Phase 4.2.3 stores all notes at the root via the extension's climb-to-root, so the chain view collapses to "notes at the root" for normal sessions; the recursive form is retained for observability and to keep pre-4.2.3 rows reachable. Ordered by (chain_depth ASC, created_at DESC)."""
 type session_notes_chain @view(
   name: "session_notes_chain"
   sql: """
@@ -583,7 +603,7 @@ type session_notes_chain @view(
     references_name: "sessions"
     field: "id"
     query: "session"
-    description: "Session this note is visible in"
+    description: "Root session the note is stored under"
   )
   author_session_id: String @field_references(
     references_name: "sessions"
@@ -591,9 +611,12 @@ type session_notes_chain @view(
     query: "author_session"
     description: "Session that wrote this note"
   )
+  category:          String
+  author_role:       String
+  mission:           String
   content:           String!
   created_at:        Timestamp
-  """0 = own note, 1+ = ancestor session's note (visible because the ancestor was the addressed scope target)"""
+  """0 = own / root note, 1+ = ancestor session's note"""
   chain_depth:       Int!
 }
 

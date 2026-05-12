@@ -1,84 +1,117 @@
 // Package notepad bundles everything for the notepad session
 // extension into one place: the per-session [Notepad] type
-// (Append/List around the persistence layer), the narrow [Store]
-// interface RuntimeStore satisfies, and the [Extension] wrapper
-// that exposes "notepad:append" as a tool.ToolProvider and stashes
-// per-session [Notepad] handles in [extension.SessionState] under
-// [StateKey].
+// (Append / Read / Search / Show around the persistence layer),
+// the narrow [Store] interface RuntimeStore satisfies, and the
+// [Extension] wrapper that exposes the four tools as a
+// tool.ToolProvider and stashes per-session [Notepad] handles in
+// extension.SessionState under [StateKey].
 //
 // The extension is an agent-level singleton constructed once at
-// runtime boot with a Store + the agent's id; every session gets
-// its own *Notepad handle initialised by InitState.
+// runtime boot with a Store + the agent's id + a [Config]; every
+// session gets its own *Notepad handle initialised by InitState.
+// Phase 4.2.3 — InitState snapshots the writing session's
+// rootID via the parent-chain walk, then every Append / Read /
+// Search uses that root id as the storage key so missions
+// spawned later in the same root conversation see the same
+// notepad.
 package notepad
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
-// StateKey is the [extension.SessionState] key the extension stores
-// its per-session [Notepad] handle under. Exported so callers
-// looking up the handle from outside the extension (legacy
-// session.Notepad accessor, command env wiring) can do so without
-// magic strings.
+// StateKey is the [extension.SessionState] key the extension
+// stores its per-session [Notepad] handle under.
 const StateKey = "notepad"
 
-// PermObject is the permission object the runtime gates the
-// notepad:append tool on. Mirrored verbatim from the legacy
-// session: tool entry so existing config keeps working.
-const PermObject = "hugen:notepad:append"
+// Permission objects gated by Tier-1 operator config + Tier-2
+// Hugr role rules + Tier-3 per-user policies. Per-tier narrowing
+// is the skill manifest's job (allowed-tools); the extension
+// exposes the full surface and lets the perm stack decide.
+const (
+	PermAppend = "hugen:notepad:append"
+	PermRead   = "hugen:notepad:read"
+	PermSearch = "hugen:notepad:search"
+	PermShow   = "hugen:notepad:show"
+)
 
-// providerName is the catalogue prefix the LLM sees:
-// "notepad:<tool>". Matches tool.ToolProvider semantics.
 const providerName = "notepad"
 
+// Config carries operator-tunable knobs.
+type Config struct {
+	// Window caps how far back read/search/snapshot reach. Zero
+	// falls back to DefaultWindow (48h). The append-only
+	// constitution means notes older than the window stay in the
+	// table but fall out of model visibility.
+	Window time.Duration
+}
+
 // Extension implements [extension.Extension] +
-// [extension.StateInitializer] + [tool.ToolProvider]. The instance
-// is shared across every session under one Manager; per-session
-// state lives in [extension.SessionState] under [StateKey].
+// [extension.StateInitializer] + [tool.ToolProvider].
 type Extension struct {
 	store   Store
 	agentID string
+	cfg     Config
 }
 
-// NewExtension constructs the notepad extension. s is the
-// persistence surface (typically the agent's RuntimeStore) and
-// agentID is the owning agent's id stamped onto every NoteRow.
-func NewExtension(s Store, agentID string) *Extension {
-	return &Extension{store: s, agentID: agentID}
+// NewExtension constructs the notepad extension. cfg.Window <=0
+// resolves to DefaultWindow inside per-session Notepads.
+func NewExtension(s Store, agentID string, cfg Config) *Extension {
+	return &Extension{store: s, agentID: agentID, cfg: cfg}
 }
 
 // Compile-time interface assertions.
 var (
 	_ extension.Extension        = (*Extension)(nil)
 	_ extension.StateInitializer = (*Extension)(nil)
+	_ extension.Advertiser       = (*Extension)(nil)
 	_ tool.ToolProvider          = (*Extension)(nil)
 )
 
-// Name implements [extension.Extension] and [tool.ToolProvider].
-// Doubles as the catalogue prefix and the [StateKey].
-func (e *Extension) Name() string { return providerName }
-
-// Lifetime implements [tool.ToolProvider]. The provider is
-// stateless (per-session state lives in [extension.SessionState]) so
-// PerAgent fits — one provider instance shared across sessions.
+func (e *Extension) Name() string            { return providerName }
 func (e *Extension) Lifetime() tool.Lifetime { return tool.LifetimePerAgent }
 
-// InitState implements [extension.StateInitializer]. Allocates a
-// fresh [Notepad] for the calling session and stashes it under
-// [StateKey].
+// AdvertiseSystemPrompt implements [extension.Advertiser] —
+// Block B per phase 4.2.3 §5. Returns a compact snapshot of
+// recent notes (within the configured window), grouped by
+// category, ordered by most-recent-write. Capped to keep the
+// prompt budget tight; the model is expected to call
+// notepad:search / notepad:read for full content when relevant.
+// Empty string when the notepad is empty or the state handle is
+// missing.
+func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.SessionState) string {
+	np := FromState(state)
+	if np == nil {
+		return ""
+	}
+	notes, err := np.Read(ctx, ReadInput{Limit: maxReadLimit})
+	if err != nil || len(notes) == 0 {
+		return ""
+	}
+	return renderSnapshot(notes, np.Window())
+}
+
+// InitState allocates a fresh [Notepad] for the calling session.
+// rootID is resolved once via the parent-chain walk and the
+// per-Notepad role label is derived from depth. Both are stable
+// for the session's lifetime so caching them here is safe.
 func (e *Extension) InitState(_ context.Context, state extension.SessionState) error {
-	state.SetValue(StateKey, New(e.store, e.agentID, state.SessionID()))
+	rootID := WalkToRootID(state)
+	role := skill.TierFromDepth(state.Depth())
+	state.SetValue(StateKey, New(e.store, e.agentID, state.SessionID(), rootID, role, e.cfg.Window))
 	return nil
 }
 
 // FromState returns the *Notepad handle for state, or nil if the
-// extension has not run InitState for it (e.g. a session created
-// without the notepad extension registered).
+// extension's InitState hasn't run for it (e.g. a session
+// created without the notepad extension registered).
 func FromState(state extension.SessionState) *Notepad {
 	v, ok := state.Value(StateKey)
 	if !ok {
@@ -93,57 +126,107 @@ func FromState(state extension.SessionState) *Notepad {
 const appendSchema = `{
   "type": "object",
   "properties": {
-    "text": {"type": "string", "description": "Note body."},
-    "author_id": {"type": "string", "description": "Optional author tag; defaults to the calling identity."}
+    "content":  {"type": "string", "description": "Concise hypothesis or finding — treat as observation under uncertainty, not a validated fact. Phrase with hedging when unsure (\"appears to\", \"in the sample we checked\")."},
+    "category": {"type": "string", "description": "Open-string filtering tag (e.g. \"schema-finding\", \"user-preference\", \"deferred-question\"). Optional but recommended for retrieval."},
+    "mission":  {"type": "string", "description": "Short phrase describing what this session is working on right now. Optional — empty for ad-hoc notes."}
   },
-  "required": ["text"]
+  "required": ["content"]
+}`
+
+const readSchema = `{
+  "type": "object",
+  "properties": {
+    "category": {"type": "string", "description": "Restrict to notes carrying this category tag. Optional."},
+    "limit":    {"type": "integer", "minimum": 1, "maximum": 50, "description": "Max rows; default 20."}
+  }
+}`
+
+const searchSchema = `{
+  "type": "object",
+  "properties": {
+    "query":    {"type": "string", "description": "Natural-language semantic query. Required."},
+    "category": {"type": "string", "description": "Restrict to notes carrying this category tag. Optional."},
+    "limit":    {"type": "integer", "minimum": 1, "maximum": 20, "description": "Max rows; default 5."}
+  },
+  "required": ["query"]
+}`
+
+const showSchema = `{
+  "type": "object",
+  "properties": {
+    "category": {"type": "string", "description": "Restrict to notes carrying this category tag. Optional."},
+    "limit":    {"type": "integer", "minimum": 1, "maximum": 50, "description": "Max rows; default 20."}
+  }
 }`
 
 // List implements [tool.ToolProvider].
 func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
-	return []tool.Tool{{
-		Name:             providerName + ":append",
-		Description:      "Append a note to the caller's session notepad.",
-		Provider:         providerName,
-		PermissionObject: PermObject,
-		ArgSchema:        json.RawMessage(appendSchema),
-	}}, nil
+	return []tool.Tool{
+		{
+			Name:             providerName + ":append",
+			Description:      "Append a working note (hypothesis) to the conversation's session-scoped notepad. Visible to every mission / worker spawned in the same root session via notepad:read / notepad:search.",
+			Provider:         providerName,
+			PermissionObject: PermAppend,
+			ArgSchema:        json.RawMessage(appendSchema),
+		},
+		{
+			Name:             providerName + ":read",
+			Description:      "List recent notes from the conversation's notepad (within the configured read window). Returns hypotheses, not validated facts.",
+			Provider:         providerName,
+			PermissionObject: PermRead,
+			ArgSchema:        json.RawMessage(readSchema),
+		},
+		{
+			Name:             providerName + ":search",
+			Description:      "Semantic search over the conversation's notepad. Falls back to recency ordering when no embedder is attached.",
+			Provider:         providerName,
+			PermissionObject: PermSearch,
+			ArgSchema:        json.RawMessage(searchSchema),
+		},
+		{
+			Name:             providerName + ":show",
+			Description:      "Render the notepad as human-readable Markdown for the user (root-tier; the caller is expected to relay the result verbatim).",
+			Provider:         providerName,
+			PermissionObject: PermShow,
+			ArgSchema:        json.RawMessage(showSchema),
+		},
+	}, nil
 }
 
-// Call implements [tool.ToolProvider]. Routes by short tool name
-// after stripping the "notepad:" prefix.
+// Call implements [tool.ToolProvider].
 func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
-	short := name
-	if pfx := providerName + ":"; len(name) > len(pfx) && name[:len(pfx)] == pfx {
-		short = name[len(pfx):]
-	}
+	short := stripProviderPrefix(name)
 	switch short {
 	case "append":
 		return e.callAppend(ctx, args)
+	case "read":
+		return e.callRead(ctx, args)
+	case "search":
+		return e.callSearch(ctx, args)
+	case "show":
+		return e.callShow(ctx, args)
 	default:
 		return nil, fmt.Errorf("%w: notepad:%s", tool.ErrUnknownTool, short)
 	}
 }
 
-// Subscribe implements [tool.ToolProvider]. The catalogue is
-// static.
+// Subscribe / Close — stateless surface; nothing to advertise or
+// release at the provider level (per-session state has its own
+// lifecycle through extension.Closer if needed in the future).
 func (e *Extension) Subscribe(_ context.Context) (<-chan tool.ProviderEvent, error) {
 	return nil, nil
 }
-
-// Close implements [tool.ToolProvider]. The provider holds no
-// resources of its own — per-session state cleanup happens via
-// [extension.Closer] on the matching [extension.SessionState].
-// Notepad's state is plain memory + store-mediated rows, so no
-// Close hook is needed.
 func (e *Extension) Close() error { return nil }
 
-// ---------- handlers ----------
-
-type appendInput struct {
-	Text     string `json:"text"`
-	AuthorID string `json:"author_id,omitempty"`
+func stripProviderPrefix(name string) string {
+	pfx := providerName + ":"
+	if len(name) > len(pfx) && name[:len(pfx)] == pfx {
+		return name[len(pfx):]
+	}
+	return name
 }
+
+// ---------- tool-dispatch handlers ----------
 
 type toolError struct {
 	Code    string `json:"code"`
@@ -158,22 +241,114 @@ func toolErr(code, msg string) (json.RawMessage, error) {
 	return json.Marshal(toolErrorResponse{Error: toolError{Code: code, Message: msg}})
 }
 
-func (e *Extension) callAppend(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+// notepadFromCtx resolves the calling session's Notepad handle.
+// Centralises the SessionState + InitState check so individual
+// handlers stay small.
+func notepadFromCtx(ctx context.Context) (*Notepad, json.RawMessage, error) {
 	state, ok := extension.SessionStateFromContext(ctx)
 	if !ok {
-		return toolErr("session_gone", "no session attached to dispatch ctx")
+		out, err := toolErr("session_gone", "no session attached to dispatch ctx")
+		return nil, out, err
 	}
 	np := FromState(state)
 	if np == nil {
-		return toolErr("unavailable", "notepad extension state not initialised")
+		out, err := toolErr("unavailable", "notepad extension state not initialised")
+		return nil, out, err
 	}
-	var in appendInput
-	if err := json.Unmarshal(args, &in); err != nil {
-		return toolErr("bad_request", fmt.Sprintf("invalid notepad:append args: %v", err))
+	return np, nil, nil
+}
+
+func (e *Extension) callAppend(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	np, errOut, err := notepadFromCtx(ctx)
+	if np == nil {
+		return errOut, err
 	}
-	id, err := np.Append(ctx, in.AuthorID, in.Text)
-	if err != nil {
-		return toolErr("io", err.Error())
+	var in AppendInput
+	if uerr := json.Unmarshal(args, &in); uerr != nil {
+		return toolErr("bad_request", fmt.Sprintf("invalid notepad:append args: %v", uerr))
+	}
+	id, aerr := np.Append(ctx, in)
+	if aerr != nil {
+		return toolErr("io", aerr.Error())
 	}
 	return json.Marshal(map[string]string{"id": id})
+}
+
+func (e *Extension) callRead(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	np, errOut, err := notepadFromCtx(ctx)
+	if np == nil {
+		return errOut, err
+	}
+	var in ReadInput
+	if len(args) > 0 {
+		if uerr := json.Unmarshal(args, &in); uerr != nil {
+			return toolErr("bad_request", fmt.Sprintf("invalid notepad:read args: %v", uerr))
+		}
+	}
+	notes, rerr := np.Read(ctx, in)
+	if rerr != nil {
+		return toolErr("io", rerr.Error())
+	}
+	return json.Marshal(map[string]any{"notes": notesToWire(notes)})
+}
+
+func (e *Extension) callSearch(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	np, errOut, err := notepadFromCtx(ctx)
+	if np == nil {
+		return errOut, err
+	}
+	var in SearchInput
+	if uerr := json.Unmarshal(args, &in); uerr != nil {
+		return toolErr("bad_request", fmt.Sprintf("invalid notepad:search args: %v", uerr))
+	}
+	notes, serr := np.Search(ctx, in)
+	if serr != nil {
+		return toolErr("io", serr.Error())
+	}
+	return json.Marshal(map[string]any{"notes": notesToWire(notes)})
+}
+
+func (e *Extension) callShow(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	np, errOut, err := notepadFromCtx(ctx)
+	if np == nil {
+		return errOut, err
+	}
+	var in ShowInput
+	if len(args) > 0 {
+		if uerr := json.Unmarshal(args, &in); uerr != nil {
+			return toolErr("bad_request", fmt.Sprintf("invalid notepad:show args: %v", uerr))
+		}
+	}
+	out, serr := np.Show(ctx, in)
+	if serr != nil {
+		return toolErr("io", serr.Error())
+	}
+	return json.Marshal(map[string]string{"text": out})
+}
+
+// wireNote is the JSON shape returned to the model. Trimmed of
+// internal fields (storage SessionID is irrelevant — it's always
+// the root) to keep the tool envelope tight.
+type wireNote struct {
+	ID         string `json:"id"`
+	Category   string `json:"category,omitempty"`
+	AuthorRole string `json:"author_role,omitempty"`
+	Mission    string `json:"mission,omitempty"`
+	Text       string `json:"text"`
+	CreatedAt  string `json:"created_at"`
+}
+
+func notesToWire(notes []Note) []wireNote {
+	out := make([]wireNote, 0, len(notes))
+	for _, n := range notes {
+		out = append(out, wireNote{
+			ID:         n.ID,
+			Category:   n.Category,
+			AuthorRole: n.AuthorRole,
+			Mission:    n.Mission,
+			Text:       n.Text,
+			CreatedAt:  n.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return out
 }

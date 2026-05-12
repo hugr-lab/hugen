@@ -40,6 +40,19 @@ metadata:
           current_step: Explore
         whiteboard:
           init: true
+        # Phase 4.2.3 notepad — analyst-domain categories for
+        # working notes. Universal categories (user-preference,
+        # deferred-question) come from `_mission` skill; this
+        # block lists the data-domain ones the renderer composes
+        # alongside them via de-duplication.
+        notepad:
+          tags:
+            - name: schema-finding
+              hint: Discovered table structures, field semantics, soft-delete columns, naming conventions.
+            - name: query-pattern
+              hint: A validated SQL/GraphQL template (shape only) that produced useful results — reuse before re-deriving.
+            - name: data-quality-issue
+              hint: Anomalies, nulls, suspicious cardinalities observed during exploration.
         first_message:
           template: |
             User goal (delegated by root): {{ .UserGoal }}
@@ -49,10 +62,20 @@ metadata:
             spawn_wave. Skipping these steps is the #1 source of
             wasted latency.
 
-            ☐ A. COUNT independent angles in the user goal.
-              An "angle" = one entity / table / module / question
+            ☐ A. CLASSIFY first, then COUNT.
+              First decide the SHAPE of the user goal:
+                • Inventory ("what data is in Hugr",
+                  "what sources / modules exist") → ONE
+                  `overview` worker, single wave. Done.
+                  Do NOT spawn schema-explorer here.
+                • Single entity describe / count / query →
+                  schema-explorer → query-builder (→ data-
+                  analyst → report-builder for full analysis).
+              Then COUNT independent angles inside the goal —
+              "an angle" = one entity / table / module / question
               that can be explored without waiting on another.
               Examples:
+                "What's in Hugr"                 → overview, N = 1
                 "Describe X"                     → N = 1
                 "Describe X, Y, Z"               → N = 3
                 "What does <DS> track + main
@@ -177,6 +200,39 @@ metadata:
           - provider: whiteboard
             tools: [write, read]
 
+      - name: overview
+        description: >
+          Answers high-level "what's available" questions about the
+          Hugr platform: which data sources are registered, which
+          top-level modules exist, what each module's purpose is.
+          ONLY uses `discovery-search_data_sources` and
+          `discovery-search_modules` — never drills into table
+          schemas or runs data queries. Returns a tight catalogue
+          summary, one line per source / module. Single wave; one
+          worker. For "what data is in hugr", "what sources are
+          connected", "what modules are there" — pick THIS, not
+          schema-explorer (which is for one specific entity).
+        intent: tool_calling
+        can_spawn: false
+        tools:
+          - provider: hugr-data
+            tools: ['*']
+          - provider: whiteboard
+            tools: [write, read]
+        on_close:
+          notepad:
+            prompt: |
+              You're an overview worker wrapping up. The data-
+              source list / module list you surfaced is reusable
+              across the conversation. Call `notepad:append` once
+              with `category: "schema-finding"` and a one-line
+              `content` summarising the inventory (e.g.
+              `Hugr exposes 3 data sources: northwind,
+              adventureworks, transport — northwind module is at
+              top-level for retail data`). Skip if no real
+              inventory was surfaced. Then reply "done".
+            skip_if_idle: true
+
       - name: schema-explorer
         description: >
           Discovers Hugr schema structure for one module / entity —
@@ -185,13 +241,40 @@ metadata:
           queries. Writes a tight structured schema-map to the
           whiteboard so query-builder + data-analyst can compose
           accurate queries on top.
-        intent: cheap
+        # Phase 4.2.3 — schema-explorer needs procedural skill
+        # boot (skill:load → skill:files → skill:ref → discovery)
+        # which weak cheap-intent models (4B) routinely skip or
+        # mis-sequence. Bumped to tool_calling so it lands on the
+        # same mid-tier route as query-builder / data-analyst.
+        # Trivial Q&A still goes through simple-answerer on cheap.
+        intent: tool_calling
         can_spawn: false
         tools:
           - provider: hugr-data
             tools: ['*']
           - provider: whiteboard
             tools: [write, read]
+        # Phase 4.2.3 ε — schema-explorer's close turn records
+        # the non-obvious schema facts it surfaced. Narrow,
+        # role-specific prompt outperforms the generic
+        # _worker fallback for weak models.
+        on_close:
+          notepad:
+            prompt: |
+              You're a schema-explorer worker wrapping up. Look at the
+              schema-map you wrote to the whiteboard. For each
+              NON-OBVIOUS fact a future mission would have to
+              re-discover — soft-delete columns, status enums,
+              status enum values, FK shapes between modules, naming
+              conventions — call `notepad:append` once with
+              `category: "schema-finding"` and a one-line
+              `content` phrased as an observation (e.g.
+              `orders.deleted_at appears to mark soft-deletes`).
+              Skip obvious facts (a column being a primary key,
+              a type being String). If nothing surprising was
+              found, reply "done" without tool calls.
+            skip_if_idle: true
+            max_turns: 3
 
       - name: query-builder
         description: >
@@ -208,6 +291,20 @@ metadata:
             tools: ['*']
           - provider: whiteboard
             tools: [write, read]
+        on_close:
+          notepad:
+            prompt: |
+              You're a query-builder worker wrapping up. The query
+              you validated is on the whiteboard — its SHAPE
+              (which module, which fields, which filters) is
+              stable. Call `notepad:append` once with
+              `category: "query-pattern"` and a one-line
+              `content` describing the shape — NOT its current
+              result values. Example: `count active orders =
+              northwind.orders aggregation with filter
+              deleted_at: { is_null: true }`. Skip if the query
+              was a trivial one-off. Then reply "done".
+            skip_if_idle: true
 
       - name: data-analyst
         description: >
@@ -295,6 +392,11 @@ or violates a constraint you cannot satisfy), call
 
 - **simple-answerer** — trivial knowledge / arithmetic / formatting.
   No data tools. Single cheap turn. Returns plain text.
+- **overview** — high-level catalogue questions ("what data sources
+  are in Hugr", "what modules exist", "what's available"). Uses
+  ONLY `discovery-search_data_sources` and
+  `discovery-search_modules`; never drills into table schemas.
+  Single worker, single wave, fast.
 - **schema-explorer** — discovers Hugr schema structure for one
   module / entity. Uses ONLY `discovery-*` / `schema-*` tools;
   never runs data queries. Cheap intent. Writes a structured
@@ -318,6 +420,13 @@ or violates a constraint you cannot satisfy), call
 
 - **Trivial Q&A**: one wave, one `simple-answerer`. Return its
   result directly.
+- **Platform overview**: one wave, one `overview` worker. For
+  "what's in Hugr", "what data sources exist", "what modules
+  are available". Cheap inventory call; the result is the
+  worker's catalogue summary, return verbatim. Do NOT spawn
+  schema-explorer for these — schema-explorer reads field
+  definitions for one specific entity (deep + slow), overview
+  enumerates the top level (broad + fast).
 - **Simple schema summary**: one wave with N `schema-explorer`s
   in parallel (one per entity / angle), maybe a follow-up
   `report-builder` for prose synthesis.
@@ -339,6 +448,21 @@ and asking root for clarification.
 Your final assistant message is what root sees as the mission
 result via `wait_subagents`. Keep it tight, structured, and
 self-contained — root will quote it to the user with light
-framing. If your output has a useful `notes` section (short facts
-worth remembering across user turns), include it as a `notes:` JSON
-field in the final message so root's notepad gets seeded.
+framing.
+
+## Recording cross-mission findings
+
+Before you finalise your result, append to the session notepad
+anything the **next** mission would otherwise re-derive — schema
+shapes (`schema-finding`), validated query templates
+(`query-pattern`), data-quality flags (`data-quality-issue`),
+user preferences (`user-preference`). Phrase as observation
+("orders.deleted_at appears to mark soft-deletes"), keep it one
+line.
+
+**Do not record live values** — counts, sums, top-N, current
+timestamps. They go stale between turns; the next mission
+re-runs the query when it needs a fresh number. If you must
+reference a value, prefer "at time T we measured X" or skip the
+note entirely. See the constitution's "Working memory" section
+for the full taxonomy.

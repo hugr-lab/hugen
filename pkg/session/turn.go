@@ -550,6 +550,12 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 		}
 		return
 	}
+	// Phase 4.2.3 ε — track main-task tool-call count for the
+	// teardown-time SkipIfIdle gate (runCloseTurnSync). All
+	// dispatches in this path are main-task; the close turn
+	// runs inline in teardown and does not re-enter
+	// foldAssistantAndMaybeDispatch.
+	s.mainToolCalls.Add(int64(len(st.toolCalls)))
 
 	// Observe each dispatched call for stuck-detection BEFORE the
 	// dispatcher fires (so the trailing window's last entry exists by

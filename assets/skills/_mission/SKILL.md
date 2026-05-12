@@ -21,12 +21,46 @@ allowed-tools:
       - write
       - read
       - stop
+  # Phase 4.2.3 — missions append working hypotheses across waves
+  # and read prior session findings. `show` is root-only.
+  - provider: notepad
+    tools:
+      - append
+      - read
+      - search
 metadata:
   hugen:
     requires_skills: []
     autoload: true
     autoload_for: [mission]
     tier_compatibility: [mission]
+    # Phase 4.2.3 — universal notepad categories advertised on
+    # every mission regardless of dispatcher. Domain-specific
+    # tags (schema-finding, query-pattern, …) live on the
+    # dispatching skill (analyst, _general). Block A's renderer
+    # walks all loaded skills and de-dupes by name, so listing
+    # the conversation-level categories here keeps every mission
+    # consistent without each dispatcher repeating them.
+    mission:
+      on_start:
+        notepad:
+          tags:
+            - name: user-preference
+              hint: Stated by the user — region, currency, time zone, naming or formatting preference. Stable for the conversation.
+            - name: deferred-question
+              hint: An open question worth answering in a follow-up mission; deferred to keep the current task focused.
+      # Phase 4.2.3 ε — deterministic close turn. Every mission
+      # gets one constrained turn before SessionTerminated whose
+      # only job is to persist findings to the notepad. The empty
+      # `notepad: {}` block opts in with all runtime defaults:
+      # AllowedTools = [notepad:append], MaxTurns = 2, prompt =
+      # the runtime's built-in "review your work; record stable
+      # findings" copy. SkipIfIdle: true short-circuits when the
+      # mission emitted no tool calls (trivial paths like
+      # simple-answerer with one cheap turn).
+      on_close:
+        notepad:
+          skip_if_idle: true
 compatibility:
   model: any
   runtime: hugen-phase-4
@@ -73,6 +107,15 @@ Your job is **decomposition + synthesis**:
    not second-guess them. If something is genuinely ambiguous,
    read `parent_context` or call `session:abstain` (phase ζ)
    rather than guessing.
+
+   Before composing your first wave, scan the **notepad
+   snapshot** in your system prompt (the `## Notepad snapshot`
+   section the runtime injects). Prior missions in this same
+   conversation may have already surfaced what you need — a
+   schema-finding, a validated query-pattern, a user-preference.
+   If a snippet looks directly relevant, call `notepad:search`
+   for full content before spawning a worker to re-derive it.
+   Each saved worker is one less round of latency.
 2. Init the whiteboard so all workers share findings.
 3. For each wave:
    - Decide which workers run *in parallel*. Workers in the same

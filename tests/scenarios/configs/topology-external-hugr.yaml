@@ -16,6 +16,11 @@ tool_providers:
     lifetime: per_session
     env:
       SHARED_DIR: ${HUGEN_SHARED_ROOT}
+      # 120s default budget per bash.* call. bash-mcp's built-in
+      # fallback (30s) is too tight for the local commands the
+      # analyst's _general workers reach for. Mirrors the
+      # operator-side config.yaml convention.
+      BASH_MCP_DEFAULT_TIMEOUT_MS: "120000"
 
   - name: hugr-main
     type: mcp

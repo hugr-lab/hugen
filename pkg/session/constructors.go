@@ -39,7 +39,8 @@ var (
 )
 
 type (
-	NoteRow = store.NoteRow
+	NoteRow       = store.NoteRow
+	ListNotesOpts = store.ListNotesOpts
 )
 
 // New creates a fresh root Session. Thin public wrapper over the
@@ -124,6 +125,7 @@ func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenReques
 		SessionType:        sessionType,
 		SpawnedFromEventID: req.SpawnedFromEventID,
 		Status:             StatusActive,
+		Mission:            req.Mission,
 		Metadata:           req.Metadata,
 		CreatedAt:          now,
 		UpdatedAt:          now,

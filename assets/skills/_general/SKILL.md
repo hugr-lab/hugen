@@ -43,6 +43,13 @@ metadata:
           current_step: Explore
         whiteboard:
           init: true
+        # Phase 4.2.3 — _general advertises one extra category
+        # (tool-result) on top of the universal set carried by
+        # `_mission` (user-preference, deferred-question).
+        notepad:
+          tags:
+            - name: tool-result
+              hint: A useful tool output worth recalling rather than re-running — env values, file paths, stable identifiers. Skip outputs that change every invocation.
         first_message:
           template: |
             User goal (delegated by root): {{ .UserGoal }}

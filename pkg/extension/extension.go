@@ -299,6 +299,75 @@ type PlanSystemWriter interface {
 	SystemSet(ctx context.Context, state SessionState, text, currentStep string) error
 }
 
+// CloseTurnBlock carries the rendered on_close configuration the
+// runtime applies before tearing a session down. Phase 4.2.3 ε.
+// Returned by [CloseTurnLookup.ResolveCloseTurn] when at least
+// one loaded skill opted into a close turn for the calling
+// session's role/tier.
+//
+// The runtime uses these fields to fire one constrained model
+// turn between the session's last main-task turn and the
+// terminal SessionTerminated frame, giving weak models a narrow
+// deterministic moment to persist findings to the notepad.
+type CloseTurnBlock struct {
+	// SystemPrompt is the full close-turn system instruction.
+	// Already merged with any extension default — consumers
+	// inject it verbatim. Empty when no close turn should fire.
+	SystemPrompt string
+
+	// AllowedTools narrows the tool catalogue for the close
+	// turn to exactly these names. Empty falls back to the
+	// regular session surface (the runtime applies no extra
+	// filter). Phase 4.2.3 default for notepad close: just
+	// ["notepad:append"] to keep the model focused.
+	AllowedTools []string
+
+	// MaxTurns caps the close-turn LLM iterations independent
+	// of the session's regular max_turns budget. Zero falls
+	// back to a runtime default (2). The close-turn budget is
+	// not counted against the main task.
+	MaxTurns int
+
+	// SkipIfIdle, when true, the runtime skips the close turn
+	// entirely if the session emitted zero tool calls during
+	// its main task. Cheap-path shortcut for trivial sessions
+	// (simple-answerer, /end at root).
+	SkipIfIdle bool
+}
+
+// IsEmpty reports whether the block carries no actionable
+// configuration. The runtime treats an empty block the same as
+// "lookup returned nil" — no close turn fires.
+func (b CloseTurnBlock) IsEmpty() bool {
+	return b.SystemPrompt == "" && len(b.AllowedTools) == 0 && b.MaxTurns == 0 && !b.SkipIfIdle
+}
+
+// CloseTurnLookup extensions resolve the on_close block for a
+// session at teardown time. The runtime calls this once per
+// closing session (worker, mission, root) right after the
+// session's last main-task turn and before SessionTerminated.
+//
+// Implementations walk loaded skills and pick the most-specific
+// match in this precedence:
+//
+//  1. Sub-agent role override (the session's spawn_role matches
+//     a SubAgentRole.OnClose entry on a loaded skill).
+//  2. Mission-level OnClose on a loaded dispatching skill
+//     (e.g. analyst.mission.on_close.notepad).
+//  3. Autoloaded tier skill (_worker / _mission) generic
+//     OnClose default.
+//
+// Returns ({}, nil) when no loaded skill opts in — callers
+// gate-check via [CloseTurnBlock.IsEmpty].
+//
+// Skill ext is the canonical implementor (it owns the manifest).
+// Other extensions can opt in to contribute a built-in default
+// (typically: the notepad extension's own per-tier default
+// prompt) by composing in front of skill ext in the deps slice.
+type CloseTurnLookup interface {
+	ResolveCloseTurn(ctx context.Context, state SessionState, spawnSkill, spawnRole string) (CloseTurnBlock, error)
+}
+
 // WhiteboardSystemWriter extensions expose a direct in-process
 // whiteboard-init path bypassing the ToolManager — the runtime
 // uses it to open a mission's whiteboard from on_mission_start.

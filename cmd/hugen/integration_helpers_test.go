@@ -53,7 +53,10 @@ func (s *stubStore) NextSeq(_ context.Context, _ string) (int, error) {
 	return 1, nil
 }
 func (s *stubStore) AppendNote(_ context.Context, _ session.NoteRow) error { return nil }
-func (s *stubStore) ListNotes(_ context.Context, _ string, _ int) ([]session.NoteRow, error) {
+func (s *stubStore) ListNotes(_ context.Context, _ string, _ session.ListNotesOpts) ([]session.NoteRow, error) {
+	return nil, nil
+}
+func (s *stubStore) SearchNotes(_ context.Context, _, _ string, _ session.ListNotesOpts) ([]session.NoteRow, error) {
 	return nil, nil
 }
 func (s *stubStore) ListSessions(_ context.Context, _, _ string) ([]session.SessionRow, error) {
