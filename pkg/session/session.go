@@ -1248,7 +1248,7 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 		return nil
 	case RouteToolFeed:
 		if feed := s.activeToolFeed.Load(); feed != nil &&
-			feed.Consumes != nil && feed.Consumes(f.Kind()) {
+			feed.Consumes != nil && feed.Consumes(f) {
 			feed.Feed(f)
 			return nil
 		}

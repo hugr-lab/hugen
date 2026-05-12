@@ -83,8 +83,8 @@ func (parent *Session) callWaitSubagents(ctx context.Context, args json.RawMessa
 	// closure flips it back to active. Tool owns zero lifecycle code.
 	feedCh := make(chan *protocol.SubagentResult, len(pending))
 	feed := &ToolFeed{
-		Consumes: func(k protocol.Kind) bool {
-			return k == protocol.KindSubagentResult
+		Consumes: func(f protocol.Frame) bool {
+			return f.Kind() == protocol.KindSubagentResult
 		},
 		Feed: func(f protocol.Frame) {
 			sr, ok := f.(*protocol.SubagentResult)

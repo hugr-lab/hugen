@@ -92,10 +92,13 @@ type toolResultEvent struct {
 // [Session.registerToolFeed] for the duration of the block and
 // release it on return.
 type ToolFeed struct {
-	// Consumes returns true for Frame Kinds the active tool wants to
+	// Consumes returns true for Frames the active tool wants to
 	// receive. The Run loop checks this before falling back to
-	// pendingInbound.
-	Consumes func(protocol.Kind) bool
+	// pendingInbound. Phase-5.1 § β widens the predicate from a
+	// Kind-only check to a full-Frame inspection so callers can
+	// match on Frame metadata (FromSession for parent notes,
+	// RequestID for inquiry responses, etc.) — not just kind.
+	Consumes func(protocol.Frame) bool
 	// Feed delivers a matching Frame to the tool's blocking handler.
 	// Must be non-blocking (the loop is single-goroutine).
 	Feed func(protocol.Frame)
