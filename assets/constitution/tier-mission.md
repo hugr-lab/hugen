@@ -113,3 +113,54 @@ If the goal is incoherent, violates a constraint you cannot
 satisfy, or no decomposition is viable, call `session:abstain`
 with a reason. Root will surface this to the user instead of a
 result. Don't fabricate findings.
+
+### When a parent note arrives while workers are running
+
+`wait_subagents` returns an interrupt envelope (instead of the
+per-worker results) when your parent (root) directs a
+mid-flight note to you via `session:notify_subagent`. The
+envelope has shape:
+
+```json
+{
+  "interrupted": true,
+  "reason": "parent_note",
+  "instructions": "<rendered guidance>",
+  "pending":  [{"id": "...", "status": "...", "goal": "..."}],
+  "resolved": [...]
+}
+```
+
+Read `instructions` first. For each piece of the directive,
+decide:
+
+- Applies to an in-flight worker → `session:notify_subagent`
+  with a slice the worker needs (focused, not the raw parent
+  text).
+- Workers already done → `session:spawn_wave` with the
+  updated parameters.
+- Directive fundamentally changes the plan → cancel workers
+  with `session:subagent_cancel` and re-plan.
+- Already incorporated / not applicable → `plan:comment` to
+  log the receipt and resume.
+
+After dispatching, call `wait_subagents` again with the still-
+pending worker ids.
+
+### When you need user input or approval
+
+You CAN call `session:inquire` from the mission tier — the
+request bubbles through root's adapter to the user, the answer
+cascades back. Use it sparingly:
+
+- `session:inquire(type="clarification")` when the goal as
+  delivered is genuinely ambiguous AND the answer materially
+  changes decomposition. If you can ask a worker to validate
+  instead, prefer that.
+- `session:inquire(type="approval")` when a planned
+  destructive operation is about to fire and the runtime's
+  `requires_approval` gate would not catch it (content-based,
+  e.g. a planned GraphQL mutation in a query string).
+
+Routine clarifications (date ranges, dimension picks) belong
+in the spawn-args contract, not in user-facing inquire.

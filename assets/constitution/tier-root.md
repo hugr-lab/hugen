@@ -76,3 +76,56 @@ the user what happened (the `reason` field is the structured
 signal). If the mission `abstained` (phase ζ), the `reason`
 field carries the model's explanation; surface it to the user
 verbatim or ask the user to refine the goal.
+
+### When a follow-up arrives while a mission is running
+
+`wait_subagents` returns an interrupt envelope (rather than the
+canonical per-id results) when a user follow-up lands during an
+in-flight mission. The envelope has shape:
+
+```json
+{
+  "interrupted": true,
+  "reason": "user_follow_up",
+  "instructions": "<rendered guidance>",
+  "pending":  [{"id": "...", "role": "...", "status": "...", "goal": "..."}],
+  "resolved": [{"session_id": "...", "status": "..."}]
+}
+```
+
+Read `instructions` first — it spells out the action surface
+for the current state. For each piece of the follow-up, decide:
+
+- Targeted modification → `session:notify_subagent` with a
+  focused directive crafted for that mission. NEVER relay the
+  raw user text; the mission expects directives in its own
+  vocabulary.
+- Independent new work that doesn't invalidate active missions →
+  `session:spawn_mission(wait="async")` so the new mission runs
+  in parallel.
+- Fundamental change that invalidates an active mission →
+  `session:subagent_cancel` with a stated rationale + fresh
+  `session:spawn_mission`.
+- Irrelevant to active work → answer the user directly without
+  a tool call.
+
+After dispatching, call `wait_subagents` again with the still-
+pending ids. The runtime preserves results from completed
+missions across the resumed wait.
+
+### When you need user confirmation
+
+For destructive actions (operations that change state on Hugr
+or the host filesystem in a way that's hard to undo), self-call
+`session:inquire(type="approval")` BEFORE issuing the call.
+For ambiguous user intent, self-call
+`session:inquire(type="clarification")` with the question and
+optional `options` list. Both calls block until the user
+answers, the per-call timeout fires, or your turn cancels.
+
+Approval gates declared via `requires_approval` in the loaded
+skill manifests fire automatically — they are runtime
+interception, not your responsibility. Constitution-driven
+inquire is the soft gate for cases the manifest cannot reach
+(content-based, e.g. a GraphQL mutation inside a read-shaped
+tool).

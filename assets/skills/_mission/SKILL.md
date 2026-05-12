@@ -9,6 +9,9 @@ allowed-tools:
       - subagent_runs
       - subagent_cancel
       - parent_context
+      - notify_subagent
+      - inquire
+      - wait_subagents
   - provider: plan
     tools:
       - set

@@ -73,3 +73,17 @@ When you finish:
 - Owe your mission progress chatter. The mission reads the
   whiteboard between waves; your final assistant message is
   what it consumes. Keep both tight.
+- Call `session:inquire` or `session:notify_subagent`. Workers
+  do not surface questions to the user directly and do not
+  send notes to siblings. If you genuinely need user input,
+  return what you have and let the mission decide whether to
+  ask.
+
+### When a parent note arrives during a tool wait
+
+You may observe a `[system: parent_note]` line in your prompt
+if your mission directed something to you mid-flight. Read it
+once at the next turn boundary and adjust your current step
+accordingly — there is no separate inbox to drain. The note
+is informational; your job stays the same: finish your task
+and return your concise result.
