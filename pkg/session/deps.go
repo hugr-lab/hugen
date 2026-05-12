@@ -7,6 +7,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/tool"
@@ -50,6 +51,7 @@ type Deps struct {
 	Codec    *protocol.Codec
 	Tools    *tool.ToolManager
 	Logger   *slog.Logger
+	Prompts  *prompts.Renderer
 	Opts     []SessionOption
 
 	// Extensions is the agent-level set of registered extensions.

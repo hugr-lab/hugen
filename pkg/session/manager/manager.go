@@ -15,6 +15,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/store"
@@ -52,6 +53,13 @@ type Manager struct {
 	// Set via WithTierIntents; propagates into Deps so per-tier
 	// model routing applies at spawn time. Phase 4.2.2 §11.
 	tierIntents map[string]string
+
+	// prompts is the agent-level template renderer shared by
+	// every session in the tree. Set via WithPrompts; propagates
+	// into Deps so extension Advertisers and session-internal
+	// interrupt-text generators can render bundled templates.
+	// Phase 5.1 §α.2.
+	prompts *prompts.Renderer
 
 	// deps mirrors the per-session dependency bundle passed by
 	// reference to every Session in this Manager's tree (root +
@@ -112,6 +120,17 @@ func WithExtensions(exts ...extension.Extension) ManagerOption {
 func WithDefaultMissionSkill(name string) ManagerOption {
 	return func(m *Manager) {
 		m.defaultMissionSkill = name
+	}
+}
+
+// WithPrompts installs the agent-level template renderer. The
+// renderer is shared across every session in the tree and is
+// surfaced both as session.Deps.Prompts (used by interrupt-text
+// generators inside pkg/session) and via state.Prompts() through
+// extension.SessionState. Phase 5.1 §α.2.
+func WithPrompts(r *prompts.Renderer) ManagerOption {
+	return func(m *Manager) {
+		m.prompts = r
 	}
 }
 
@@ -180,6 +199,7 @@ func NewManager(
 		Codec:               m.codec,
 		Tools:               m.tools,
 		Logger:              m.logger,
+		Prompts:             m.prompts,
 		Extensions:          m.extensions,
 		Opts:                m.sessionOpts,
 		RootCtx:             m.rootCtx,

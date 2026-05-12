@@ -14,6 +14,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
@@ -427,6 +428,17 @@ func (s *Session) Tools() *tool.ToolManager { return s.tools }
 // duckdb-mcp, …) stay singletons; per_session providers spawn
 // once per session.
 func (s *Session) RootTools() *tool.ToolManager { return s.rootTools }
+
+// Prompts returns the agent-level template renderer shared by
+// every session in the manager tree. Nil only in test fixtures
+// that build Deps by hand without a renderer; production code
+// paths assume non-nil and call MustRender on the result.
+func (s *Session) Prompts() *prompts.Renderer {
+	if s.deps == nil {
+		return nil
+	}
+	return s.deps.Prompts
+}
 
 // OpenedAt returns the timestamp the session row was first written
 // (CreatedAt on SessionRow). Useful for callers that want to echo

@@ -3,6 +3,7 @@ package extension
 import (
 	"context"
 
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -50,6 +51,14 @@ type SessionState interface {
 	Children() []SessionState
 
 	Tools() *tool.ToolManager
+
+	// Prompts returns the agent-level template renderer shared
+	// by every session in the tree. Used by extensions whose
+	// AdvertiseSystemPrompt and similar surfaces produce
+	// model-visible prose from bundled templates under
+	// assets/prompts/. May be nil only in test fixtures that
+	// skip the renderer — production paths assume non-nil.
+	Prompts() *prompts.Renderer
 
 	// Emit persists frame on the calling session's event log and
 	// pushes it through the session's outbox for adapters.

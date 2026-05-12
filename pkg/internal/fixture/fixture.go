@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/tool"
@@ -25,6 +26,7 @@ import (
 type TestSessionState struct {
 	id        string
 	tools     *tool.ToolManager
+	prompts   *prompts.Renderer
 	parentRef *TestSessionState
 	depth     int
 	state     sync.Map
@@ -150,6 +152,15 @@ func (s *TestSessionState) Children() []extension.SessionState {
 // Tools implements [extension.SessionState]. Returns whatever was
 // installed via [TestSessionState.SetTools]; nil by default.
 func (s *TestSessionState) Tools() *tool.ToolManager { return s.tools }
+
+// SetPrompts installs a renderer that Prompts() returns. Tests
+// exercising extension-side prose rendering pass a real renderer
+// here; tests that only touch other surfaces leave it nil.
+func (s *TestSessionState) SetPrompts(r *prompts.Renderer) { s.prompts = r }
+
+// Prompts implements [extension.SessionState]. Returns whatever
+// was installed via [TestSessionState.SetPrompts]; nil by default.
+func (s *TestSessionState) Prompts() *prompts.Renderer { return s.prompts }
 
 // Emit implements [extension.SessionState]. Records the frame in
 // memory so tests can assert what an extension emitted; the
