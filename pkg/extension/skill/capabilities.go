@@ -530,9 +530,17 @@ func (e *Extension) FilterTools(ctx context.Context, state extension.SessionStat
 	}
 	out := make([]tool.Tool, 0, len(all))
 	for _, t := range all {
-		if allowed.match(t.Name) {
-			out = append(out, t)
+		if !allowed.match(t.Name) {
+			continue
 		}
+		// Phase 5.1 § η: tag the tool with the approval-gate
+		// flag the loaded skills declared. The dispatcher reads
+		// this per-session snapshot to decide whether to invoke
+		// session:inquire(type=approval) before forwarding.
+		if allowed.requiresApproval(t.Name) {
+			t.RequiresApproval = true
+		}
+		out = append(out, t)
 	}
 	return out
 }
@@ -664,6 +672,35 @@ func (e *Extension) Generation(state extension.SessionState) int64 {
 type allowedSet struct {
 	exact    map[string]bool
 	patterns []string
+	// approvalExact + approvalProviders together model the
+	// phase-5.1 § 2.6 "exact tool name OR '*' wildcard" matching
+	// rule for requires_approval. approvalExact carries fully-
+	// qualified names (provider:tool); approvalProviders names the
+	// providers whose grant carried a `requires_approval: ['*']`
+	// entry so every tool from that provider gates.
+	approvalExact     map[string]struct{}
+	approvalProviders map[string]struct{}
+}
+
+// requiresApproval reports whether the tool's fully-qualified
+// name should trigger an approval gate. Exact match wins;
+// otherwise a `*` wildcard at any of the loaded grants for the
+// tool's provider matches.
+func (a *allowedSet) requiresApproval(name string) bool {
+	if a == nil {
+		return false
+	}
+	if _, ok := a.approvalExact[name]; ok {
+		return true
+	}
+	provider := name
+	if i := strings.Index(name, ":"); i > 0 {
+		provider = name[:i]
+	}
+	if _, ok := a.approvalProviders[provider]; ok {
+		return true
+	}
+	return false
 }
 
 // match reports whether the fully-qualified tool name (e.g.
@@ -696,7 +733,11 @@ func allowedFromHandle(ctx context.Context, h *SessionSkill) *allowedSet {
 	if err != nil || len(b.AllowedTools) == 0 {
 		return &allowedSet{exact: map[string]bool{}}
 	}
-	out := &allowedSet{exact: map[string]bool{}}
+	out := &allowedSet{
+		exact:             map[string]bool{},
+		approvalExact:     map[string]struct{}{},
+		approvalProviders: map[string]struct{}{},
+	}
 	for _, g := range b.AllowedTools {
 		for _, t := range g.Tools {
 			full := g.Provider + ":" + t
@@ -705,6 +746,13 @@ func allowedFromHandle(ctx context.Context, h *SessionSkill) *allowedSet {
 				continue
 			}
 			out.exact[full] = true
+		}
+		for _, name := range g.RequiresApproval {
+			if name == "*" {
+				out.approvalProviders[g.Provider] = struct{}{}
+				continue
+			}
+			out.approvalExact[g.Provider+":"+name] = struct{}{}
 		}
 	}
 	return out

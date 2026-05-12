@@ -1698,6 +1698,29 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 		return "", true
 	}
 
+	// Phase 5.1 § η: runtime-initiated approval gate. A tool flagged
+	// RequiresApproval in the per-session snapshot runs through
+	// session:inquire(type=approval) before forwarding to the
+	// provider. The flag is set by the skill extension's ToolFilter
+	// from loaded skills' allowed-tools[].requires_approval entries.
+	if theTool.RequiresApproval {
+		approved, reason, aerr := s.requestApproval(dispatchCtx,
+			tc.Name, string(effective))
+		if aerr != nil {
+			s.emitToolError(emitCtx, tc.ID, tc.Name, "io",
+				fmt.Sprintf("approval gate: %v", aerr), "")
+			return "", true
+		}
+		if !approved {
+			if reason == "" {
+				reason = "user denied approval"
+			}
+			s.emitToolError(emitCtx, tc.ID, tc.Name, "denied_by_user",
+				reason, "")
+			return "", true
+		}
+	}
+
 	result, err := s.tools.Dispatch(dispatchCtx, theTool, effective)
 	if err != nil {
 		code := "io"

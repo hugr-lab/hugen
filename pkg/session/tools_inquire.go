@@ -237,3 +237,41 @@ func newInquiryRequestID() string {
 	_, _ = rand.Read(b[:])
 	return "inq-" + hex.EncodeToString(b[:])
 }
+
+// requestApproval is the runtime-initiated approval helper the
+// dispatcher uses for RequiresApproval-tagged tools. Phase 5.1
+// § 2.6: build an approval payload from tool name + args summary,
+// run the same internal inquire flow as the user-callable tool,
+// return (approved, reason, err). On timeout: approved=false
+// with reason carrying the timeout notice. On ctx cancel: err
+// propagates so the dispatcher surfaces an io error.
+func (s *Session) requestApproval(ctx context.Context, toolName, argsSummary string) (bool, string, error) {
+	question := ""
+	if s.deps != nil && s.deps.Prompts != nil {
+		question = strings.TrimRight(s.deps.Prompts.MustRender(
+			"inquiry/approval_request_summary",
+			map[string]any{
+				"ToolName":    toolName,
+				"ArgsSummary": argsSummary,
+			},
+		), "\n")
+	} else {
+		question = fmt.Sprintf("Run %s with args: %s ?", toolName, argsSummary)
+	}
+	args, _ := json.Marshal(inquireInput{
+		Type:     protocol.InquiryTypeApproval,
+		Question: question,
+	})
+	raw, err := s.callInquire(ctx, args)
+	if err != nil {
+		return false, "", err
+	}
+	var res approvalResult
+	if uerr := json.Unmarshal(raw, &res); uerr != nil {
+		return false, "", fmt.Errorf("approval: parse response: %w", uerr)
+	}
+	if res.Timeout {
+		return false, res.Reason, nil
+	}
+	return res.Approved, res.Reason, nil
+}

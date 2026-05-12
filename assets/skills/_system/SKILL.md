@@ -11,6 +11,10 @@ allowed-tools:
       - bash.write_file
       - bash.list_dir
       - bash.sed
+    requires_approval:
+      - bash.run
+      - bash.shell
+      - bash.write_file
   - provider: skill
     tools:
       - load
