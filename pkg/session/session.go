@@ -224,6 +224,12 @@ type Session struct {
 	mission       string // spawn.Task duplicated for in-memory lookup
 	mainToolCalls atomic.Int64
 
+	// inquiry owns the phase-5.1 HITL maps: pendingInquiry (the
+	// channel the inquire tool body blocks on) and responseRouting
+	// (the per-RequestID parent-mediated cascade-down forwarding
+	// table). Lazily initialised on first use; see inquiry.go.
+	inquiry inquiryState
+
 	// asyncSpawnMode tags this session's terminal SubagentResult
 	// with the render hint to its parent's history projection.
 	// Phase 5.1 § 4.3: spawn_mission with wait="async" (or "timeout"
@@ -1172,6 +1178,13 @@ func (s *Session) handleSubagentResult(ctx context.Context, f *protocol.Subagent
 		delete(s.children, childID)
 	}
 	s.childMu.Unlock()
+	// Phase 5.1 § 2.4: drop every inquiry-response route that
+	// pointed at this child. Without the sweep a late response
+	// arriving after the child terminated would forward to a
+	// closed inbox (best-effort drop further down) and the route
+	// would linger until session teardown — small leak per inquiry,
+	// noisy in test fixtures. Sweep is O(routes); cheap.
+	s.sweepResponseRoutesForChild(childID)
 
 	// Lifecycle: a child just deregistered. If the parent's own turn
 	// already closed and no other children remain (and no buffered

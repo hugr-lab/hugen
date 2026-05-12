@@ -88,6 +88,12 @@ type Deps struct {
 	// the manager).
 	MaxAsyncMissionsPerRoot int
 
+	// DefaultInquireTimeoutMs is the per-call deadline for
+	// session:inquire when the caller omits timeout_ms. Phase 5.1
+	// § 2.7 suggests 1 hour (3_600_000) in prod; 0 falls back to
+	// the package-level defaultInquireTimeoutMs.
+	DefaultInquireTimeoutMs int
+
 	// TierIntents maps a session tier (root/mission/worker, per
 	// skill.TierFromDepth) to the model-router intent the runtime
 	// applies as the spawned child's default. Per-role overrides

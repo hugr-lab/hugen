@@ -53,7 +53,17 @@ const (
 	// session_terminated row, optionally followed by SessionClosed for
 	// adapter back-compat. Producers: Manager.Terminate (root),
 	// parent.handleSubagentResult (subagent), parent.teardown (cascade).
-	KindSessionClose       Kind = "session_close"
+	KindSessionClose Kind = "session_close"
+
+	// Phase-5.1 HITL kinds. InquiryRequest bubbles up through the
+	// pump chain from any tier's session:inquire tool to root's
+	// adapter; InquiryResponse cascades down through ancestors
+	// back to the caller (matched by Payload.RequestID). Default-
+	// deny in the visibility filter — both kinds are routing
+	// envelopes, not model-facing prose. See § 2 of the phase
+	// spec.
+	KindInquiryRequest  Kind = "inquiry_request"
+	KindInquiryResponse Kind = "inquiry_response"
 )
 
 // ParticipantInfo identifies who emitted (or is addressed by) a Frame.
@@ -570,6 +580,64 @@ type SessionStatus struct {
 	Payload SessionStatusPayload
 }
 
+// InquiryRequestPayload is the bubble-up envelope a tier's
+// session:inquire tool emits. RequestID drives response routing
+// (cascade-down via parent-mediated responseRouting maps); the
+// caller's session id is preserved in CallerSessionID for the
+// adapter to address its eventual InquiryResponse. SessionID on
+// the embedding BaseFrame is rewritten on each hop by the pump
+// so Runtime.fanout keys correctly when the frame reaches root.
+// Phase 5.1 § 2.2.
+type InquiryRequestPayload struct {
+	RequestID       string   `json:"request_id"`
+	CallerSessionID string   `json:"caller_session_id"`
+	Type            string   `json:"type"` // approval | clarification
+	Question        string   `json:"question"`
+	Context         string   `json:"context,omitempty"`
+	Options         []string `json:"options,omitempty"`
+	TimeoutMs       int      `json:"timeout_ms,omitempty"`
+	CreatedAt       string   `json:"created_at,omitempty"`
+}
+
+// InquiryResponsePayload is the cascade-down answer. The adapter
+// addresses it to the root session id (where it received the
+// request); root's internal handler forwards it down the parent
+// chain via responseRouting until CallerSessionID == s.id at the
+// caller's hop. Approved/Reason for approval; Response/RespondedAt
+// for clarification; Timeout for runtime-synthesised expiries.
+// Phase 5.1 § 2.2.
+type InquiryResponsePayload struct {
+	RequestID       string `json:"request_id"`
+	CallerSessionID string `json:"caller_session_id"`
+	Approved        *bool  `json:"approved,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	Response        string `json:"response,omitempty"`
+	RespondedAt     string `json:"responded_at,omitempty"`
+	Timeout         bool   `json:"timeout,omitempty"`
+}
+
+// Phase-5.1 inquiry types — values for InquiryRequestPayload.Type.
+const (
+	InquiryTypeApproval      = "approval"
+	InquiryTypeClarification = "clarification"
+)
+
+// InquiryRequest is the frame that bubbles a [session:inquire]
+// call up the parent chain to root, where the adapter surfaces
+// it to the user. Phase 5.1 § 2.
+type InquiryRequest struct {
+	BaseFrame
+	Payload InquiryRequestPayload
+}
+
+// InquiryResponse is the cascade-down answer carried back to
+// the caller through responseRouting tables on each ancestor.
+// Phase 5.1 § 2.
+type InquiryResponse struct {
+	BaseFrame
+	Payload InquiryResponsePayload
+}
+
 // OpaqueFrame represents a Frame variant the codec does not know.
 // Phase 2 introduces opaque round-trip so future-phase variants
 // (sub_agent_*, approval_*, clarification_*, ...) survive an
@@ -605,6 +673,8 @@ func (f SessionTerminated) payload() any { return f.Payload }
 func (f SessionClose) payload() any      { return f.Payload }
 func (f SystemMessage) payload() any     { return f.Payload }
 func (f SessionStatus) payload() any     { return f.Payload }
+func (f InquiryRequest) payload() any    { return f.Payload }
+func (f InquiryResponse) payload() any   { return f.Payload }
 func (f OpaqueFrame) payload() any       { return f.RawPayload }
 
 // newOpaqueFrame is package-private so only the codec materialises
@@ -786,6 +856,36 @@ func NewSystemMessage(sessionID string, author ParticipantInfo, kind, content st
 	return &SystemMessage{
 		BaseFrame: newBase(sessionID, KindSystemMessage, author),
 		Payload:   SystemMessagePayload{Kind: kind, Content: content},
+	}
+}
+
+// NewInquiryRequest builds the bubble-up envelope a session's
+// inquire tool emits. sessionID is the caller's id at emit time;
+// pump rewrites SessionID on each hop while CallerSessionID
+// (preserved in the payload) carries the originator end-to-end.
+// Phase 5.1 § 2.
+func NewInquiryRequest(sessionID string, author ParticipantInfo, p InquiryRequestPayload) *InquiryRequest {
+	if p.CallerSessionID == "" {
+		p.CallerSessionID = sessionID
+	}
+	if p.CreatedAt == "" {
+		p.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	return &InquiryRequest{
+		BaseFrame: newBase(sessionID, KindInquiryRequest, author),
+		Payload:   p,
+	}
+}
+
+// NewInquiryResponse builds the cascade-down answer the adapter
+// hands to runtime.Submit. The adapter addresses it to the root
+// session id (the same id it received the request on); ancestors
+// forward it down the chain until CallerSessionID == s.id.
+// Phase 5.1 § 2.
+func NewInquiryResponse(sessionID string, author ParticipantInfo, p InquiryResponsePayload) *InquiryResponse {
+	return &InquiryResponse{
+		BaseFrame: newBase(sessionID, KindInquiryResponse, author),
+		Payload:   p,
 	}
 }
 

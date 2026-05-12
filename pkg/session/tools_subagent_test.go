@@ -738,6 +738,117 @@ func TestCallNotifySubagent_UrgentPrefix(t *testing.T) {
 	// successful delivery path.
 }
 
+// TestCallInquire_Approval_HappyPath drives the full session:
+// inquire round-trip at root: emit request, deliver response via
+// the internal dispatcher, observe the approval payload.
+func TestCallInquire_Approval_HappyPath(t *testing.T) {
+	parent, cleanup := newTestParent(t, withTestRunLoop())
+	defer cleanup()
+
+	type res struct {
+		out []byte
+		err error
+	}
+	done := make(chan res, 1)
+	args, _ := json.Marshal(inquireInput{
+		Type:      protocol.InquiryTypeApproval,
+		Question:  "Run `rm -rf /tmp/foo`?",
+		TimeoutMs: 2000,
+	})
+	go func() {
+		out, err := parent.callInquire(us1WithSession(parent), args)
+		done <- res{out: out, err: err}
+	}()
+
+	// Wait for the feed to register so we know the request was
+	// emitted and pending registered.
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for parent.ActiveToolFeed() == nil {
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-deadline.C:
+			t.Fatal("inquire activeToolFeed never registered")
+		}
+	}
+	// Extract the RequestID from the emitted request frame —
+	// drainOutbox returns the InquiryRequest the tool body
+	// pushed to outbox via emit.
+	var requestID string
+	for i := 0; i < 5 && requestID == ""; i++ {
+		select {
+		case f := <-parent.Outbox():
+			if req, ok := f.(*protocol.InquiryRequest); ok {
+				requestID = req.Payload.RequestID
+			}
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	if requestID == "" {
+		t.Fatal("InquiryRequest not observed on parent outbox")
+	}
+
+	// Synthesise the adapter's response.
+	approved := true
+	resp := protocol.NewInquiryResponse(parent.ID(), parent.agent.Participant(),
+		protocol.InquiryResponsePayload{
+			RequestID:       requestID,
+			CallerSessionID: parent.ID(),
+			Approved:        &approved,
+			Reason:          "ok",
+		})
+	parent.Submit(context.Background(), resp)
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("inquire err: %v out=%s", r.err, r.out)
+		}
+		var got approvalResult
+		if err := json.Unmarshal(r.out, &got); err != nil {
+			t.Fatalf("unmarshal: %v out=%s", err, r.out)
+		}
+		if !got.Approved || got.Reason != "ok" {
+			t.Errorf("unexpected result %+v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("inquire did not return within 3s")
+	}
+}
+
+// TestCallInquire_Timeout fires the per-call timer and surfaces
+// the default-deny envelope.
+func TestCallInquire_Timeout(t *testing.T) {
+	parent, cleanup := newTestParent(t, withTestRunLoop())
+	defer cleanup()
+
+	args, _ := json.Marshal(inquireInput{
+		Type:      protocol.InquiryTypeApproval,
+		Question:  "anything?",
+		TimeoutMs: 100,
+	})
+	out, err := parent.callInquire(us1WithSession(parent), args)
+	if err != nil {
+		t.Fatalf("inquire err: %v", err)
+	}
+	var got approvalResult
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v out=%s", err, out)
+	}
+	if !got.Timeout || got.Approved || got.DefaultAction != "deny" {
+		t.Errorf("expected timeout=true approved=false default=deny; got %+v", got)
+	}
+}
+
+// TestCallInquire_BadType rejects unknown inquiry types.
+func TestCallInquire_BadType(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+	args, _ := json.Marshal(map[string]any{"type": "weird", "question": "x"})
+	out, _ := parent.callInquire(us1WithSession(parent), args)
+	mgr_assertErrorCode(t, out, "bad_request")
+}
+
 // TestIsParentNote covers the FromSession predicate the wait
 // feed uses to discriminate parent notes from unrelated system
 // messages. Root sessions (no parent) never match.

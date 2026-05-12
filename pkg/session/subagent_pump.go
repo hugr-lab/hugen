@@ -124,6 +124,20 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 			s.projectToParent(sr)
 			st.projected = true
 		}
+	case *protocol.InquiryRequest:
+		// Phase 5.1 § 2.3: bubble up the inquiry to the ancestor
+		// chain. Record the per-RequestID route back to this child
+		// so the eventual InquiryResponse can cascade down. Rewrite
+		// SessionID to this hop (so Runtime.fanout keys it
+		// correctly when it reaches root). CallerSessionID in the
+		// payload preserves the originator end-to-end.
+		s.recordResponseRoute(v.Payload.RequestID, child.id)
+		bubbled := &protocol.InquiryRequest{
+			BaseFrame: v.BaseFrame,
+			Payload:   v.Payload,
+		}
+		bubbled.BaseFrame.Session = s.id
+		_ = s.outboxOnly(s.ctx, bubbled)
 	case *protocol.SessionTerminated:
 		if !st.projected {
 			turns := v.Payload.TurnsUsed
