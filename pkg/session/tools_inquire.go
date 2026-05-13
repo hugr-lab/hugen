@@ -21,13 +21,17 @@ import (
 const inquireSchema = `{
   "type": "object",
   "properties": {
-    "type":       {"type": "string", "enum": ["approval", "clarification"], "description": "approval: yes/no answer. clarification: free-form text."},
-    "question":   {"type": "string", "description": "Concise question shown to the user. Stand-alone — the user may not see the rest of the agent's reasoning."},
+    "type":       {"type": "string", "enum": ["approval", "clarification"], "description": "REQUIRED. Must be exactly \"approval\" (yes/no answer) or \"clarification\" (free-form text). Calls without this field are rejected."},
+    "question":   {"type": "string", "description": "REQUIRED. Concise stand-alone question shown to the user — they may not see the rest of the agent's reasoning."},
     "context":    {"type": "string", "description": "Optional extra context the user might need to answer. Keep short — long context belongs in the question."},
     "options":    {"type": "array", "items": {"type": "string"}, "description": "Optional pre-defined answers for clarification questions."},
     "timeout_ms": {"type": "integer", "minimum": 1, "description": "Per-call deadline override. Defaults to the runtime-configured global timeout."}
   },
-  "required": ["type", "question"]
+  "required": ["type", "question"],
+  "examples": [
+    {"type": "clarification", "question": "Which data source should I use?", "context": "A [fits-explicit], B [fits-possibly]", "options": ["A", "B"]},
+    {"type": "approval", "question": "Run DROP TABLE on staging.users?"}
+  ]
 }`
 
 type inquireInput struct {

@@ -16,6 +16,7 @@ import (
 	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/manager"
 	"github.com/hugr-lab/hugen/pkg/skill"
@@ -86,7 +87,7 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 
 	skillStore := skill.NewSkillStore(skill.Options{
 		SystemFS: runtime.SystemSkillsFS(),
-		HubRoot: filepath.Join(stateDir, "skills/hub"),
+		HubRoot:  filepath.Join(stateDir, "skills/hub"),
 	})
 	skills := skill.NewSkillManager(skillStore, nil)
 	view := &permsView{rules: ruleSet}

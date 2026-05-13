@@ -31,6 +31,7 @@ import (
 	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
 	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/manager"
 	"github.com/hugr-lab/hugen/pkg/skill"
@@ -211,7 +212,7 @@ func newDuckDBIntegrationCore(t *testing.T, vendorPath string) *integrationCore 
 
 	skillStore := skill.NewSkillStore(skill.Options{
 		SystemFS: runtime.SystemSkillsFS(),
-		HubRoot: filepath.Join(stateDir, "skills/hub"),
+		HubRoot:  filepath.Join(stateDir, "skills/hub"),
 	})
 	skills := skill.NewSkillManager(skillStore, nil)
 	view := &permsView{rules: nil}

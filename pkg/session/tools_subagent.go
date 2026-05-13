@@ -80,7 +80,7 @@ func (s *Session) initSubagent() {
 	}
 	s.sessionTools["inquire"] = sessionToolDescriptor{
 		Name:             "inquire",
-		Description:      "Blocking ask: type=approval surfaces a yes/no prompt; type=clarification surfaces a free-form question. Phase 5.1 § 2 — the call bubbles up the parent chain to root's adapter and blocks until the user answers, the per-call timeout fires, or ctx cancels.",
+		Description:      "Blocking ask the user. REQUIRED args: type (\"approval\" | \"clarification\") + question. Optional: context, options, timeout_ms. type=approval surfaces a yes/no prompt; type=clarification surfaces a free-form question. Phase 5.1 § 2 — the call bubbles up the parent chain to root's adapter and blocks until the user answers, the per-call timeout fires, or ctx cancels.",
 		PermissionObject: permObjectInquire,
 		ArgSchema:        json.RawMessage(inquireSchema),
 		Handler:          s.callInquire,
