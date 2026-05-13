@@ -139,20 +139,42 @@ references.
 | `hugr-query:query` | Execute a query, persist Parquet/JSON to disk, return path + preview |
 | `hugr-query:query_jq` | Execute a query + JQ transform, persist single JSON value, return path + preview |
 
-## Standard Workflow
+## Per-turn query workflow — read your tier first
 
-NEVER write a GraphQL query before running discovery first — the schema is
-filtered per-role and module names cannot be guessed.
+**Tier note** — this skill loads at two tiers with very different
+intent:
+
+- **Mission tier** — you loaded `hugr-data` for *reference
+  grounding* (`skill:files` / `skill:ref`) so your worker task
+  strings can name real modules, types, fields, and filter
+  shapes. You do **NOT** run discovery / schema / data tools
+  yourself — those belong to workers. Mission's role is to
+  decompose the user goal into focused worker tasks (per your
+  dispatching skill, e.g. `analyst`'s Stage 0 + wave
+  checklist). The workflow below describes what each WORKER
+  does inside its single focused task.
+- **Worker tier** — the steps below are yours. Run them in
+  order; the mission has already scoped the task for you.
+
+The schema is filtered per-role and module names cannot be
+guessed — NEVER write a GraphQL query before running discovery
+first.
 
 0. **Read `instructions` via `skill_ref`** the first time you touch a new
    schema in this session. The system prompt only carries the cheat-sheet
    below; query patterns, dotted-module nesting, filter rules, and edge
    cases live in the reference. **One `skill_ref` call now beats fifteen
    trial-and-error tool calls later.**
-1. **Parse user intent** — entities, metrics, filters, time ranges
+1. **Parse the task as given** — your mission already scoped it
+   (module, entity, metric, filter, time range). If anything is
+   unclear or two equally-plausible options exist, prefer
+   `session:inquire(type="clarification")` (data-level
+   ambiguity is workers' call; intent ambiguity belongs to your
+   mission — return the finding instead of guessing).
 2. **Find modules** → `hugr-main:discovery-search_modules`. Note the
    exact module names returned: dots in names are **structure**, not
-   typos (see "Critical Rules" below).
+   typos (see "Critical Rules" below). Often unnecessary at worker
+   tier because the mission named the module in your task string.
 3. **Find data objects** → `hugr-main:discovery-search_module_data_objects`
 4. **Inspect fields** → `hugr-main:schema-type_fields(type_name: "prefix_tablename")` — **MUST** call before building queries
 5. **Explore values** → `hugr-main:discovery-field_values` — understand distributions before filtering
@@ -162,7 +184,10 @@ filtered per-role and module names cannot be guessed.
    - Small inline reply? → `hugr-main:data-inline_graphql_result` (use jq to reshape; increase `max_result_size` up to 5000 if truncated)
    - Big result, file output? → `hugr-query:query` (engine response decides Parquet vs JSON per leaf)
    - JQ post-process to one JSON value? → `hugr-query:query_jq` — JQ input is the full `{data, errors}` envelope; results live under `.data.<field>`
-9. **Present** — tables, charts, dashboards, or concise text summaries
+9. **Present** — tight structured finding. Write it to the
+   whiteboard (mission reads between waves) and return your
+   final assistant message with verbatim numbers from the
+   tool output — never paraphrase, never round.
 
 ## Error Recovery — Stop, Read, Resolve
 
@@ -187,27 +212,37 @@ The same applies before the first query on a schema: if you've never
 seen `instructions` in this session and the user asks for non-trivial
 data, read it before composing a query.
 
-## Task-Specific Guidance
+## Reference catalogue
 
-Before building queries, read the appropriate reference file via `skill_ref`:
+The skill ships a small library under `references/` that the
+runtime delivers on demand via `skill:ref(skill="hugr-data",
+ref="<name>")`. The cheat-sheet below is intentionally short —
+the full grammar lives in the references. Fetch by name and
+keep the body in working context for the rest of your task.
 
-| Task | Reference | When to read |
-|------|-----------|--------------|
-| **Schema exploration & general queries** | `instructions` | Always — comprehensive reference |
-| **Data analysis** | `analyze` | Analyze, find patterns, compute stats |
-| **Dashboard creation** | `dashboard` | Visual dashboard with KPIs and charts |
-| **Query construction** | `query` | Specific GraphQL query needs construction |
-| **Aggregations** | `aggregations` | Counts, sums, averages, group-by, breakdowns |
-| **Filters** | `filter-guide` | Any non-trivial filter logic |
-| **Query patterns** | `query-patterns` | Joins, spatial, H3, functions, distinct_on |
-| **Advanced features** | `advanced-features` | Vector search, geometry, JSON struct, mutations |
-| **Queries deep dive** | `queries-deep-dive` | JQ functions, geometry/JSON filters, parameterized views |
-| **File output (big results)** | `hugr-query` | First time using `hugr-query:query` / `hugr-query:query_jq` |
+| Reference | Scope | When to read |
+|-----------|-------|--------------|
+| `instructions` | Master reference. Schema model, dotted-module nesting, query field naming, every tool's purpose, anti-patterns. | **Always at session start.** First touch of a new schema. |
+| `start`, `overview` | Quick onboarding companions to `instructions`. | Optional first read; lighter than `instructions`. |
+| `query` | GraphQL query construction — basic shape, fields, args, aliases. | Constructing a non-trivial select. |
+| `query-patterns` | Joins (`_join` cross-source), distinct_on, parameterised views, common shapes. | Combining objects across sources or modules. |
+| `aggregations` | `_aggregation` / `_bucket_aggregation`, available functions by type, group-by mechanics. | Counts / sums / averages / group-by / breakdowns. |
+| `filter-guide` | Filter operators, relation filters (`any_of`, `all_of`, `none_of`), `_and` / `_or` / `_not`. | Any non-trivial filter logic. Hugr's filter dialect is NOT standard GraphQL. |
+| `spatial-queries` | `_spatial(field, type, buffer)`: INTERSECTS / WITHIN / CONTAINS / DISJOINT / DWITHIN, inner-vs-left, spatial inside aggregation keys. | Geometry-to-geometry joins (nearest-N, containment, coverage gaps). |
+| `h3-spatial` | `h3(resolution: N)` aggregation, `inner`, `divide_values`, `distribution_by`, `distribution_by_bucket`. Cross-source via `_join` inside `data`. | Hexagonal density / geoembeddings / proportional value redistribution. |
+| `advanced-features` | Vector search, geometry transformations, JSON `struct:` extraction, cube tables, mutations, parameterised views. | Specific advanced feature called for by the task. |
+| `analyze` | Patterns for analytical workflows (distributions, anomalies, time series). | Free-form "analyse / find patterns / compute stats". |
+| `dashboard` | Multi-panel KPI / chart query shapes. | Building a visual dashboard. |
+| `queries-deep-dive` | JQ functions, geometry / JSON filter operators, parameterised view internals. | Hit a JQ / geometry / JSON / view edge case. |
+| `hugr-query` | Output-to-file mechanics: Parquet vs JSON per leaf, path layout, preview. | First time using `hugr-query:query` / `hugr-query:query_jq`. |
 
-Read `instructions` first for any task — it's the master reference. Then read the
-task-specific file. If a `data-*` or `hugr.Query` call returns an error about
-unknown fields, filter syntax, or operator names — you skipped the relevant ref.
-Load it and retry.
+Reading order on a new task:
+1. **`instructions`** if you haven't read it this session.
+2. The task-specific reference (column 2 above).
+3. If the first query errors with `Cannot query field "X"`,
+   unknown filter operator, or weird argument shape — the
+   relevant reference will explain it; load it and retry
+   instead of re-tweaking the query.
 
 ## Quick Reference — Schema Organization
 

@@ -191,85 +191,19 @@ Arguments on `_join` subfields:
 - `nested_order_by`, `nested_limit`, `nested_offset` — applied **after** the join
 - `inner: true` — use INNER JOIN instead of LEFT JOIN
 
-## Spatial Join (`_spatial`)
+## Spatial joins (`_spatial`) and H3 aggregation
 
-Join data using geometry intersection. The `_spatial` field is available on tables/views with geometry columns.
+Split out to dedicated references — both follow the same flat-
+prefixed naming rule as `_join` above (module nesting outside,
+prefixed type name inside):
 
-```graphql
-query {
-  module {
-    locations {
-      id name point
-      _spatial(field: "point", type: INTERSECTS) {
-        prefix_areas(field: "geom") { id name }
-        prefix_areas_aggregation(field: "geom") { _rows_count }
-      }
-    }
-  }
-}
-```
-
-Arguments on `_spatial`:
-- `field: String!` — source geometry field name
-- `type: GeometrySpatialQueryType!` — `INTERSECTS`, `WITHIN`, `CONTAINS`, `DISJOINT`, `DWITHIN`
-- `buffer: Int` — buffer distance in meters (required for `DWITHIN`)
-
-## H3 Spatial Aggregation
-
-Basic H3 grid:
-```graphql
-query {
-  h3(resolution: 4) {
-    cell resolution geom
-    data {
-      prefix_locations_aggregation(field: "point") { _rows_count }
-    }
-  }
-}
-```
-
-### H3 with cross-source _join and distribution_by
-
-Population estimation: distribute census data proportionally by residential building area.
-```graphql
-h3(resolution: 6) {
-  cell resolution
-  data {
-    # Admin boundaries → _join to census (cross-source)
-    lk: prefix_boundaries_aggregation(
-      field: "geom"
-      filter: { admin_level: { eq: 6 } }
-      divide_values: false    # keep original census totals
-      inner: true             # skip empty cells
-    ) {
-      pop: _join(fields: ["code"]) {
-        prefix_census(fields: ["admin_code"]) {
-          population { sum }
-        }
-      }
-    }
-    # Residential buildings as denominator
-    houses: prefix_buildings_aggregation(
-      field: "geom"
-      filter: { building_class: { eq: "residential" } }
-    ) {
-      _rows_count
-      area_sqm { sum }
-    }
-  }
-  # Distribute population by housing area
-  pop: distribution_by(
-    numerator: "data.lk.pop.prefix_census.population.sum"
-    denominator: "data.houses.area_sqm.sum"
-  ) { value ratio numerator denominator denominator_total }
-}
-```
-
-Key H3 arguments:
-- `field` — geometry field for spatial agg
-- `inner: true` — only cells with data
-- `divide_values: false` — don't split values by cell overlap (keep originals)
-- `distribution_by` paths reference the `data` structure above
+- **`_spatial`** (`INTERSECTS / WITHIN / CONTAINS / DISJOINT /
+  DWITHIN`, inner-vs-left, spatial inside aggregation keys,
+  nearest-N) — see `spatial-queries.md`.
+- **`h3(resolution:)`** with `data { ... }`, `divide_values`,
+  `inner`, `distribution_by`, `distribution_by_bucket`, and
+  cross-source patterns via `_join` inside `data` — see
+  `h3-spatial.md`.
 
 ## Cube Tables (@cube)
 
