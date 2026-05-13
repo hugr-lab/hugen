@@ -131,6 +131,16 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 		// SessionID to this hop (so Runtime.fanout keys it
 		// correctly when it reaches root). CallerSessionID in the
 		// payload preserves the originator end-to-end.
+		//
+		// Bail early if we're already closing: outboxOnly would
+		// fail anyway, and writing a route entry just leaves it for
+		// sweepResponseRoutesForChild to clean up.
+		if s.IsClosed() {
+			s.logger.Debug("session: bubble inquiry skipped — parent closing",
+				"parent", s.id, "child", child.id,
+				"request_id", v.Payload.RequestID)
+			return
+		}
 		s.recordResponseRoute(v.Payload.RequestID, child.id)
 		bubbled := &protocol.InquiryRequest{
 			BaseFrame: v.BaseFrame,

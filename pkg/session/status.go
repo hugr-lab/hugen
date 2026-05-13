@@ -94,35 +94,6 @@ func (s *Session) MarkStatus(ctx context.Context, state, reason string) {
 	s.markStatus(ctx, state, reason)
 }
 
-// markIdle / markActive / markWaitSubagents are the wired
-// transitions today. The phase-5 placeholders below are defined
-// for symmetry but never called by runtime code — HITL plumbing
-// will start invoking them when it lands.
-func (s *Session) markIdle(ctx context.Context, reason string) {
-	s.markStatus(ctx, protocol.SessionStatusIdle, reason)
-}
-
-func (s *Session) markActive(ctx context.Context, reason string) {
-	s.markStatus(ctx, protocol.SessionStatusActive, reason)
-}
-
-func (s *Session) markWaitSubagents(ctx context.Context, reason string) {
-	s.markStatus(ctx, protocol.SessionStatusWaitSubagents, reason)
-}
-
-// markWaitApproval marks the session as paused on a HITL approval
-// gate. Phase-5 placeholder — defined for the lifecycle surface
-// to be complete, never called by runtime code today.
-func (s *Session) markWaitApproval(ctx context.Context, reason string) {
-	s.markStatus(ctx, protocol.SessionStatusWaitApproval, reason)
-}
-
-// markWaitUserInput marks the session as paused on a HITL
-// clarification ask. Phase-5 placeholder — see markWaitApproval.
-func (s *Session) markWaitUserInput(ctx context.Context, reason string) {
-	s.markStatus(ctx, protocol.SessionStatusWaitUserInput, reason)
-}
-
 // LookupLatestStatusEvent walks events newest-last and returns the
 // state of the most recent [protocol.KindSessionStatus] row, or ""
 // when the log carries none. Manager.RestoreActive uses the

@@ -42,8 +42,8 @@ var constitutionTierFiles = map[string]string{
 // not tunable by operators, not materialised to disk. Binary
 // upgrades flow through automatically; there is no on-disk shadow
 // to go stale. Phase 5.1 refresh-fix 2026-05-13.
-func LoadConstitution(log *slog.Logger) (string, error) {
-	body, _, err := loadConstitutionBundle(log)
+func LoadConstitution(_ *slog.Logger) (string, error) {
+	body, _, err := loadConstitutionBundle()
 	return body, err
 }
 
@@ -52,7 +52,7 @@ func LoadConstitution(log *slog.Logger) (string, error) {
 // assets.ConstitutionFS. Missing tier manuals are tolerated
 // (skipped) so a stripped-down bundle can carry only the
 // universal preamble.
-func loadConstitutionBundle(log *slog.Logger) (string, map[string]string, error) {
+func loadConstitutionBundle() (string, map[string]string, error) {
 	universal, err := readConstitutionEmbed(constitutionDefaultFile)
 	if err != nil {
 		return "", nil, fmt.Errorf("constitution: %s: %w", constitutionDefaultFile, err)
@@ -69,7 +69,6 @@ func loadConstitutionBundle(log *slog.Logger) (string, map[string]string, error)
 		}
 		manuals[tier] = body
 	}
-	_ = log
 	return universal, manuals, nil
 }
 
@@ -85,16 +84,6 @@ func readConstitutionEmbed(name string) (string, error) {
 		return "", fmt.Errorf("read embed: %w", err)
 	}
 	return string(body), nil
-}
-
-// embedRelPath strips the `<root>/` prefix from an embed path so
-// the caller can join against the on-disk target.
-func embedRelPath(p, root string) string {
-	prefix := root + "/"
-	if len(p) > len(prefix) && p[:len(prefix)] == prefix {
-		return p[len(prefix):]
-	}
-	return p
 }
 
 // RegisterBuiltinCommands wires the session-core slash commands onto
@@ -246,7 +235,7 @@ func phaseAgent(ctx context.Context, core *Core) error {
 	if err != nil {
 		return fmt.Errorf("identity: %w", err)
 	}
-	universal, tierManuals, err := loadConstitutionBundle(core.Logger)
+	universal, tierManuals, err := loadConstitutionBundle()
 	if err != nil {
 		return fmt.Errorf("constitution: %w", err)
 	}

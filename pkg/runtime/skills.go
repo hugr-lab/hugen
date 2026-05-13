@@ -20,13 +20,17 @@ import (
 // into skill.Options.SystemFS. Useful from tests / cmd binaries
 // that build a SkillStore directly without going through
 // [BuildSkillStack].
+//
+// Panics if the embed sub-extraction fails: the embed root is a
+// compile-time constant, so a runtime failure means the binary
+// was built without the `assets/system/` tree and booting it with
+// a silent nil would leave the agent running with no `_root` /
+// `_mission` / `_worker` autoload — catastrophic and silent.
+// Fail loud at boot instead.
 func SystemSkillsFS() fs.FS {
 	sub, err := fs.Sub(assets.SystemSkillsFS, "system")
 	if err != nil {
-		// The embed root is a compile-time constant; sub-FS
-		// extraction never fails in practice. Returning nil keeps
-		// callers honest if it somehow does.
-		return nil
+		panic(fmt.Sprintf("runtime: scope assets.SystemSkillsFS: %v", err))
 	}
 	return sub
 }
@@ -47,12 +51,8 @@ func BuildSkillStack(stateDir string, log *slog.Logger) (*skill.SkillManager, sk
 	if stateDir == "" {
 		return nil, nil, fmt.Errorf("buildSkillStack: empty state dir")
 	}
-	systemFS, err := fs.Sub(assets.SystemSkillsFS, "system")
-	if err != nil {
-		return nil, nil, fmt.Errorf("buildSkillStack: scope system FS: %w", err)
-	}
 	store := skill.NewSkillStore(skill.Options{
-		SystemFS:  systemFS,
+		SystemFS:  SystemSkillsFS(),
 		HubRoot:   filepath.Join(stateDir, "skills/hub"),
 		LocalRoot: filepath.Join(stateDir, "skills/local"),
 	})

@@ -95,6 +95,78 @@ func TestInstallBundledHubSkills_EmptyStateDir(t *testing.T) {
 	}
 }
 
+// TestInstallBundledHubSkills_AddsBundleSkillOnExistingInstall
+// proves the additive path: an existing install that already has
+// one bundled skill installed gets a fresh sibling on the next
+// run. Locks the "new binary ships an extra skill" upgrade flow
+// against future regressions.
+func TestInstallBundledHubSkills_AddsBundleSkillOnExistingInstall(t *testing.T) {
+	state := t.TempDir()
+	// Seed: pretend the previous binary only shipped hubTestSkill
+	// by running a real install then deleting every other skill
+	// directory it created.
+	if err := InstallBundledHubSkills(state, discardLogger()); err != nil {
+		t.Fatalf("seed install: %v", err)
+	}
+	hubRoot := filepath.Join(state, "skills/hub")
+	entries, err := os.ReadDir(hubRoot)
+	if err != nil {
+		t.Fatalf("readdir seed: %v", err)
+	}
+	preserved := map[string]struct{}{}
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == hubTestSkill {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(hubRoot, e.Name())); err != nil {
+			t.Fatalf("trim seed: %v", err)
+		}
+	}
+	preserved[hubTestSkill] = struct{}{}
+
+	// Sanity: hubTestSkill still on disk after the trim.
+	if _, err := os.Stat(filepath.Join(hubRoot, hubTestSkill, "SKILL.md")); err != nil {
+		t.Fatalf("seed witness gone: %v", err)
+	}
+
+	// Run install again — should re-add every other bundled skill
+	// (treated as "new" by the additive path) without touching the
+	// untouched hubTestSkill checksum file.
+	checksumBefore, err := os.ReadFile(filepath.Join(hubRoot, hubTestSkill, ".hugen-checksum"))
+	if err != nil {
+		t.Fatalf("read checksum: %v", err)
+	}
+	if err := InstallBundledHubSkills(state, discardLogger()); err != nil {
+		t.Fatalf("re-install: %v", err)
+	}
+	checksumAfter, err := os.ReadFile(filepath.Join(hubRoot, hubTestSkill, ".hugen-checksum"))
+	if err != nil {
+		t.Fatalf("read checksum after: %v", err)
+	}
+	if string(checksumBefore) != string(checksumAfter) {
+		t.Errorf("hubTestSkill checksum changed unexpectedly: %q -> %q",
+			checksumBefore, checksumAfter)
+	}
+
+	// Verify at least one non-hubTestSkill bundled skill re-appeared
+	// — proves the additive path triggers for entries missing from
+	// the previous install.
+	after, err := os.ReadDir(hubRoot)
+	if err != nil {
+		t.Fatalf("readdir after: %v", err)
+	}
+	added := 0
+	for _, e := range after {
+		if !e.IsDir() || e.Name() == hubTestSkill {
+			continue
+		}
+		added++
+	}
+	if added == 0 {
+		t.Errorf("no sibling bundled skills re-added on re-install")
+	}
+}
+
 // TestInstallBundledHubSkills_LegacySystemDirRemoved verifies the
 // one-time migration sweep: a pre-split `skills/system/` directory
 // (populated by older binaries) is wiped at the next install so

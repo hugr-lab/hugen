@@ -177,6 +177,17 @@ func (a *Adapter) runInput(ctx context.Context) error {
 		var f protocol.Frame
 		if IsSlashCommand(line) {
 			pc := ParseSlashCommand(line)
+			// Inquiry-reply commands typed outside an inquiry
+			// context would otherwise fall through to the runtime
+			// as opaque SlashCommand frames the handler doesn't
+			// recognise, leaving the user with no feedback. Echo
+			// once and re-prompt instead.
+			switch pc.Name {
+			case "approve", "deny", "respond":
+				fmt.Fprintf(a.err, "no pending inquiry — /%s is only valid when prompted\n", pc.Name)
+				fmt.Fprint(a.out, "> ")
+				continue
+			}
 			f = protocol.NewSlashCommand(a.session.ID(), a.user, pc.Name, pc.Args, pc.Raw)
 		} else {
 			f = protocol.NewUserMessage(a.session.ID(), a.user, line)

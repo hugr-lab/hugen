@@ -78,9 +78,20 @@ func (s *Session) callInquire(ctx context.Context, args json.RawMessage) (json.R
 	if strings.TrimSpace(in.Question) == "" {
 		return toolErr("bad_request", "question is required")
 	}
+	defaultMs := s.resolveInquireTimeout()
 	timeoutMs := in.TimeoutMs
 	if timeoutMs <= 0 {
-		timeoutMs = s.resolveInquireTimeout()
+		timeoutMs = defaultMs
+	} else if timeoutMs > defaultMs {
+		// Upper-bound clamp: a model setting timeout_ms to a
+		// pathologically large value (gemma routinely emits 86_400_000
+		// or worse on a "give me time" prompt) would park the
+		// originator's tool feed for hours. Clamp to the
+		// operator-configured default and log; the operator's
+		// hitl.default_timeout_ms is the ceiling, not the floor.
+		s.logger.Warn("session: inquire timeout_ms clamped to default",
+			"session", s.id, "requested_ms", in.TimeoutMs, "clamped_ms", defaultMs)
+		timeoutMs = defaultMs
 	}
 	requestID := newInquiryRequestID()
 
@@ -156,8 +167,26 @@ func (s *Session) callInquire(ctx context.Context, args json.RawMessage) (json.R
 	case resp := <-respCh:
 		return marshalInquiryResponse(in.Type, resp)
 	case <-deadline.C:
+		// Race window: the deadline can fire AFTER a response has
+		// already landed in the buffered channel (cap 1). Drain
+		// non-blocking and prefer the real answer — a denied or
+		// clarified user reply should not silently become a
+		// timeout envelope.
+		select {
+		case resp := <-respCh:
+			return marshalInquiryResponse(in.Type, resp)
+		default:
+		}
 		return marshalInquiryTimeout(s, in.Type)
 	case <-ctx.Done():
+		// Same race: ctx-cancel after response landed. Prefer the
+		// real answer so a fast cascade doesn't get clipped by a
+		// concurrent session-close.
+		select {
+		case resp := <-respCh:
+			return marshalInquiryResponse(in.Type, resp)
+		default:
+		}
 		return toolErr("cancelled",
 			fmt.Sprintf("inquire aborted: %v", ctx.Err()))
 	}

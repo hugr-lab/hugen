@@ -167,9 +167,13 @@ body`)
 }
 
 func TestSkill_ThirdPartyDropIn(t *testing.T) {
+	// Third-party (admin-delivered) skills land on the hub backend;
+	// since the OriginCommunity tier was folded into OriginHub at
+	// the system/hub split, this test exercises the hub backend's
+	// "skill without metadata.hugen block" path.
 	root := t.TempDir()
-	communityRoot := filepath.Join(root, "community")
-	skillDir := filepath.Join(communityRoot, "weather")
+	hubRoot := filepath.Join(root, "hub")
+	skillDir := filepath.Join(hubRoot, "weather")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -184,10 +188,10 @@ allowed-tools: []
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	store := skill.NewSkillStore(skill.Options{HubRoot: communityRoot})
+	store := skill.NewSkillStore(skill.Options{HubRoot: hubRoot})
 	mgr := skill.NewSkillManager(store, nil)
 	if _, err := mgr.ResolveClosure(context.Background(), "weather"); err != nil {
-		t.Fatalf("ResolveClosure community skill: %v", err)
+		t.Fatalf("ResolveClosure third-party skill: %v", err)
 	}
 	got, err := store.List(context.Background())
 	if err != nil {
@@ -200,7 +204,7 @@ allowed-tools: []
 		}
 	}
 	if !found {
-		t.Errorf("community skill not surfaced by store: %+v", got)
+		t.Errorf("third-party skill not surfaced by store: %+v", got)
 	}
 }
 

@@ -465,13 +465,13 @@ type SessionTerminatedPayload struct {
 // SessionStatus state values mark the session's lifecycle stage in
 // its own events log. Idle = quiescent (turn closed, no live work).
 // Active = a turn is in progress. The wait_* values mark explicit
-// runtime pauses; phase-5 HITL plumbing will start emitting them.
+// runtime pauses — wait_subagents during spawn-wait, wait_approval
+// / wait_user_input during a session:inquire call via
+// ToolFeed.BlockingState.
 const (
 	SessionStatusIdle          = "idle"
 	SessionStatusActive        = "active"
 	SessionStatusWaitSubagents = "wait_subagents"
-	// Phase-5 HITL placeholders — declared now so the protocol surface
-	// is stable; today no runtime code emits them.
 	SessionStatusWaitApproval  = "wait_approval"
 	SessionStatusWaitUserInput = "wait_user_input"
 )

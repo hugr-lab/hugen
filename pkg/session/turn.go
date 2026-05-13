@@ -132,9 +132,9 @@ type ToolFeed struct {
 //   - The model goroutine launches; chunks fan in over s.modelChunks.
 func (s *Session) startTurn(runCtx context.Context, f *protocol.UserMessage) {
 	// Lifecycle: leaving idle for active. Emit BEFORE persisting the
-	// user message so a restart that crashes between markActive and
-	// the user_message emit still observes the session as active and
-	// classifies it eagerly.
+	// user message so a restart that crashes between the active
+	// markStatus and the user_message emit still observes the
+	// session as active and classifies it eagerly.
 	s.markStatus(runCtx, protocol.SessionStatusActive, "user_message")
 	if err := s.emit(runCtx, f); err != nil {
 		s.logger.Debug("startTurn: emit user", "session", s.id, "err", err)

@@ -41,7 +41,7 @@ func TestReadConstitutionEmbed_MissingReturnsNotExist(t *testing.T) {
 // shipped under assets/constitution/. Acts as a backstop against
 // accidental tier-file deletions in the bundle.
 func TestLoadConstitutionBundle_LoadsEveryTier(t *testing.T) {
-	universal, manuals, err := loadConstitutionBundle(nil)
+	universal, manuals, err := loadConstitutionBundle()
 	if err != nil {
 		t.Fatalf("load bundle: %v", err)
 	}
