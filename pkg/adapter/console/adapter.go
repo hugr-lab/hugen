@@ -11,6 +11,7 @@ import (
 	"os/user"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/hugr-lab/hugen/pkg/adapter"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -35,6 +36,13 @@ type Adapter struct {
 	// double-print blank lines between Reasoning and AgentMessage.
 	mu             sync.Mutex
 	currentSection string // "" | "reasoning" | "agent"
+
+	// pending holds the in-flight HITL inquiry the user is being
+	// asked to answer. Written from the render goroutine when an
+	// InquiryRequest lands; read from the input goroutine before
+	// dispatching each line. nil when no inquiry is open.
+	// Phase 5.1 § 2.
+	pending atomic.Pointer[pendingInquiry]
 
 	closed chan struct{} // closed when session_closed is observed
 }
@@ -161,6 +169,11 @@ func (a *Adapter) runInput(ctx context.Context) error {
 			fmt.Fprint(a.out, "> ")
 			continue
 		}
+		if pend := a.pending.Load(); pend != nil {
+			if a.maybeHandleInquiryReply(ctx, pend, line) {
+				continue
+			}
+		}
 		var f protocol.Frame
 		if IsSlashCommand(line) {
 			pc := ParseSlashCommand(line)
@@ -264,6 +277,11 @@ func (a *Adapter) render(f protocol.Frame) {
 		}
 		fmt.Fprintf(a.out, "system: %s\n", v.Payload.Subject)
 		fmt.Fprint(a.out, "> ")
+	case *protocol.InquiryRequest:
+		a.renderInquiryRequest(v)
+	case *protocol.InquiryResponse:
+		// Routing/echo frame — silent. The agent's resumed turn
+		// renders the model output.
 	case *protocol.SessionClosed:
 		select {
 		case <-a.closed:
