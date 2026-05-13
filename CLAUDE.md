@@ -31,7 +31,11 @@ internals:
 - `design/002-runtime-canonical/architecture.md` — state-of-the-tree
   map; §11 is the extension recipe book.
 - `design/002-runtime-canonical/design.md` — vision + phase plan.
-- `design/002-runtime-canonical/phase-5-spec.md` — next active phase (compactor + HITL, currently in scoping).
+- `design/002-runtime-canonical/backlog.md` — consolidated free
+  agenda (cross-phase items that don't yet warrant a phase).
+- Per-phase specs: `phase-4.2-*.md`, `phase-4.2.2-*.md`,
+  `phase-4.2.3-*.md`, `phase-5.1-hitl-followups-async.md`,
+  `phase-5.1b-spec.md`.
 
 When 002 and a 001 phase doc disagree, 002 wins.
 
@@ -44,66 +48,56 @@ Phase plan:
 | 3. Action layer (skills + tools + 3-tier permissions + bash/hugr-mcp) | shipped |
 | 3.5. Analyst toolkit (duckdb-mcp + python-mcp + analyst skills) | shipped |
 | 4. Sub-agents + plan + whiteboard + event-driven session loop | shipped |
-| 4.1a. Extract `pkg/runtime` + dissolve `SystemProvider` (tools onto domain `ToolProvider`s; absorbs ex-4.3) | shipped (`33a0bc3`) |
-| 4.1b. Observational scenario harness (port `../agent/tests/scenarios/` pattern; live LLM + real Hugr; ~8 scenarios v1) | shipped (`109f6b9`); 7 of 9 scenarios validated on gemini-pro + gemma4-26b, claude-sonnet canary green; `full_analyst_workflow` deferred → 4.2 |
-| 4.1c. Subagent-as-adapter: parent observes child's outbox; eliminates child→parent.Submit cross-session shortcut. Surfaced by 4.1b harness (every sub-agent hung mid-flight). | shipped (`109f6b9`) — pump + retry + per-skill intent + plan envelope migration all in same merge |
-| 4.2. Skill creation infrastructure (tri-state `AllowedTools` + `skill:save` + skill Advertiser + `_skill_builder`). | shipped (`1fc4e59`, 2026-05-10) |
-| 4.2.2. Three-tier mandatory delegation (root → mission → worker); `session:spawn_mission` singular + `session:spawn_wave` atomic; per-tier constitutions (`agent.md` + `tier-{root,mission,worker}.md`); `analyst` + `_general` mission dispatchers; Gemma 26B 20/20 acceptance gate. | shipped (`53ab909`, 2026-05-11) |
-| 4.2.3. Session-scoped working notepad — climb-to-root storage; 4 new columns on `session_notes`; `notepad:append/read/search/show` per-tier; 48h window; Block A/B prompt surfaces; sync close-turn (`pkg/session/close_turn_sync.go`) runs inline in teardown step 0; manifest declarations under `mission.on_close.notepad`. Plus `overview` analyst role for broad inventory questions, bash-mcp 120s default timeout, runtime reconcile of stale bundled skills. | shipped (`066c7b1`, 2026-05-12). Gemma 26B PASS on `cross_mission_notepad` end-to-end; backlog B1–B7 in spec footer. |
-| ~~4.3~~ | **cancelled 2026-05-08** — historical scope was Manager-as-ToolProvider generalisation; superseded by 4.1a (`SystemProvider` already dissolved) and the per-domain ToolProvider pattern that landed with it. |
-| 5. Compactor + HITL: approvals + clarifications (compactor first within the phase; replaces the phase-3 `defaultHistoryWindow=50` stop-gap) | open |
+| 4.1a. Extract `pkg/runtime` + dissolve `SystemProvider` | shipped (`33a0bc3`) |
+| 4.1b. Observational scenario harness | shipped (`109f6b9`) |
+| 4.1c. Subagent-as-adapter pump | shipped (`109f6b9`) |
+| 4.2. Skill creation infrastructure (tri-state `AllowedTools` + `skill:save` + `_skill_builder`) | shipped (`1fc4e59`, 2026-05-10) |
+| 4.2.2. Three-tier mandatory delegation (root → mission → worker) | shipped (`53ab909`, 2026-05-11) |
+| 4.2.3. Session-scoped working notepad + sync close-turn + `overview` role | shipped (`066c7b1`, 2026-05-12) |
+| ~~4.3~~ | **cancelled 2026-05-08** — superseded by 4.1a + per-domain ToolProvider pattern. |
+| 5.1. HITL primitives (`session:inquire` approval/clarification with bubble-up + cascade-down), follow-up cascade through parent chain, async `spawn_mission`, `session:notify_subagent` parent-note, `requires_approval` skill gate, system/hub skill split (`assets/system/` embed-only + `assets/skills/` hub-installed), embed-only constitution + prompts (`pkg/prompts`), 9 HITL scenarios scaffolded | shipped (`d0611e3`, 2026-05-13) — 7 of 9 validated on Gemma 4-26B; multi_root_independence + adapter-visibility deferred → 5.1b |
+| ~~5 (combined HITL + compactor)~~ | **split 2026-05-12** — HITL was production blocker; compactor independent. Became 5.1 (shipped) + 5.2 (open). |
+| 5.1b. Adapter visibility: enriched `SessionStatusPayload`, mission-progress in-tree extension, `Manager.SnapshotSession` API, multi-root harness primitive + scenario | open — spec at `phase-5.1b-spec.md` |
+| 5.2. Compactor — content-aware history summarisation; replaces phase-3 `defaultHistoryWindow=50` stop-gap; composes with 4.2.3 notepad (notepad = cross-mission, compactor = within-session) | open — not yet specced |
 | 6. Cron + scheduler | open |
-| 7. Memory pipeline + LLM Wiki — cross-conversation distilled knowledge (validated facts, advisor sub-agent). Reads phase-4.2.3 notepad as input; session-scoped working memory is owned by 4.2.3 (phase 7 does not duplicate that taxonomy). | open |
+| 7. Memory pipeline + LLM Wiki — cross-conversation distilled knowledge. Reads 4.2.3 notepad as input; session-scoped working memory is owned by 4.2.3. | open |
 | 8. Artifacts | open |
 | 9. A2A adapter | open (defer until needed) |
-| 10. Multi-party Workspaces (human + agent) | open — external interaction surface; lands after A2A so participant model is shaken out |
-| Backlog. PeerGroup mesh / pipeline | deferred — whiteboard (phase 4) covers broadcast; mesh / pipeline re-introduce when a real workload demands it |
+| 10. Multi-party Workspaces (human + agent) | open — lands after A2A |
+| Backlog | see `design/002-runtime-canonical/backlog.md` |
 
 Goal: finish design-001 cleanly, then move to **hub integration**
 (container packaging, deployment story, hub-spawned mode). Hub work is
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
 
-## Active focus — phase 5
+## Active focus — pick between 5.1b and 5.2
 
-Phases 4.2 (`1fc4e59`), 4.2.2 (`53ab909`), 4.2.3 (`066c7b1`)
-all shipped to `main`. Working memory + close-turn mechanics
-green on Gemma 26B end-to-end.
+Phase 5.1 shipped to `main` at `d0611e3` (2026-05-13). HITL
+inquire + follow-up cascade + async `spawn_mission` are live;
+the system/hub skill split + embed-only prompts/constitution
+landed in the same merge. Two roughly independent next steps,
+parallel-mergeable:
 
-Next phase is **5 — compactor + HITL**. Spec to be scoped at
-`design/002-runtime-canonical/phase-5-spec.md`. Two coupled
-pieces:
+- **5.1b** — adapter visibility surface: enriched
+  `SessionStatusPayload`, mission-progress extension,
+  `Manager.SnapshotSession`, multi-root harness primitive +
+  `multi_root_independence` scenario completion. Estimated
+  ~1080 LOC. Spec at `phase-5.1b-spec.md`.
+- **5.2** — compactor: content-aware history summarisation at
+  turn boundaries; preserves recent turns verbatim, summarises
+  older into a system-prompt digest. Composes with 4.2.3
+  notepad (cross-mission) vs compactor (within-session). Not
+  yet specced.
 
-1. **Compactor** — replaces the phase-3 stop-gap
-   `defaultHistoryWindow=50` with a content-aware history
-   summarisation pass. Runs at turn boundaries when context
-   would exceed a threshold; preserves recent turns verbatim,
-   summarises older ones into a system-prompt-rendered
-   digest. Should compose with phase 4.2.3's notepad (the
-   notepad is for **across-mission** working memory; the
-   compactor is for **within-session** history shrinkage).
-2. **HITL** — formal approval / clarification frame kinds
-   beyond the `SessionStatus.wait_approval` placeholder. New
-   protocol Frame Kinds, RouteToolFeed registration for
-   approval responses, a per-tool risk classifier, operator-
-   visible approval UI (initially via console adapter, later
-   webui).
+Pick whichever the next concrete pain point calls for. 5.1b
+unblocks rich TUI / SSE / a2a clients; 5.2 unblocks long-
+running sessions on context-window-tight models.
 
-Phase-4.2.3 backlog rides along where it naturally fits:
-- **B6** — subagent termination on non-retriable model error.
-  Phase 5's HITL frames give a natural escalation surface.
-- **B7** — scenario harness wedge detection.
-- **B3** — per-tier MaxTurns / StuckDetection migration.
-
-Phase-4.2.3 backlog NOT for phase 5 (separate fast-follow):
-- **B1** — `WorkerPromptEnricher` auto-RAG.
-- **B2** — `bash-mcp` tier narrow (waits on phase 8 artifacts).
-- **B4** — `_skill_builder` manifest cheatsheet refresh.
-- **B5** — community / inline skill sanity check.
-
-See `design/002-runtime-canonical/phase-4.2.3-cross-mission-notepad.md`
-"Backlog — fast-follow enhancements" for full descriptions of
-each B-item.
+Free-agenda items (cross-phase, no scheduled phase): live in
+`backlog.md`. Includes B1–B7 (4.2.3 fast-follows), Bubble Tea
+TUI, content-based `requires_approval`, task-complexity
+routing, PeerGroup mesh.
 
 ## Project structure
 
@@ -116,23 +110,28 @@ mcp/
 ├── hugr-query/           # in-tree Hugr GraphQL → file output (per_agent)
 └── python-mcp/           # in-tree Python execution + lazy per-session venv (per_agent)
 pkg/
-├── adapter/{console,http,webui}  # transport adapters
+├── adapter/{console,http,webui}  # transport adapters (console has inline HITL renderer)
 ├── auth/{perm,sources,template}  # 3-tier permission stack + auth.Service loopback
-├── config/                       # YAML schema + StaticService
+├── config/                       # YAML schema + StaticService views (incl. Hitl, Subagents)
+├── extension/{plan,whiteboard,notepad,skill,mcp,workspace}  # capability-bag extensions
 ├── identity/{local,hub}          # who-am-I providers
-├── model/, models/, protocol/    # LLM routing + Frame protocol
-├── session/                      # Session, Manager, Resources, Workspace, RuntimeStore
-├── skill/                        # Manifest parser + SkillManager + stores (system/local/community/inline/hub)
+├── model/, models/, protocol/    # LLM routing + Frame protocol (incl. InquiryRequest/Response)
+├── prompts/                      # embed-only template renderer (phase 5.1)
+├── session/                      # Session, Manager, inquiry routing state, turn loop
+│   └── manager/                  # multi-root supervisor + RestoreActive
+├── skill/                        # Manifest parser + SkillManager + Store (system/hub/local/inline)
 ├── store/local/                  # embedded DuckDB persistence
-└── tool/                         # ToolManager + MCPProvider + SystemProvider + Policies
+└── tool/                         # ToolManager + providers + Policies
 assets/
-├── constitution/agent.md         # universal agent constitution (rendered into prompt)
+├── constitution/                 # tier-{root,mission,worker}.md + agent.md (embed-only)
+├── prompts/                      # bundled template tree (embed-only, phase 5.1)
 ├── python/requirements.txt       # bundled analyst venv package list
-└── skills/                       # bundled skills: _system, hugr-data, duckdb-data, duckdb-docs, python-runner
+├── system/                       # agent-core skills (`_root`, `_mission`, …; embed-only)
+└── skills/                       # hub-tier bundled skills (analyst, hugr-data, duckdb-*, python-runner)
 vendor/
 └── mcp-server-motherduck/        # vendored MotherDuck DuckDB MCP (git submodule, MIT)
 design/001-agent-runtime/         # historical: per-phase specs, original design, original architecture (gitignored)
-design/002-runtime-canonical/     # canonical: design.md, architecture.md, active phase-N-spec.md (gitignored)
+design/002-runtime-canonical/     # canonical: design.md, architecture.md, backlog.md, phase-N-spec.md (gitignored)
 specs/<NNN-feature-name>/         # per-feature speckit artefacts (gitignored)
 .specify/memory/constitution.md   # Go code constitution (load-bearing rules)
 ```
