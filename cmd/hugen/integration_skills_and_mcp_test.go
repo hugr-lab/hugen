@@ -65,7 +65,7 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 	workspaceDir := filepath.Join(root, "workspace")
 	sharedDir := filepath.Join(root, "shared")
 	stateDir := filepath.Join(root, "state")
-	for _, d := range []string{workspaceDir, sharedDir, stateDir, filepath.Join(stateDir, "skills/system")} {
+	for _, d := range []string{workspaceDir, sharedDir, stateDir, filepath.Join(stateDir, "skills/hub")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -85,7 +85,8 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 	})
 
 	skillStore := skill.NewSkillStore(skill.Options{
-		SystemRoot: filepath.Join(stateDir, "skills/system"),
+		SystemFS: runtime.SystemSkillsFS(),
+		HubRoot: filepath.Join(stateDir, "skills/hub"),
 	})
 	skills := skill.NewSkillManager(skillStore, nil)
 	view := &permsView{rules: ruleSet}
@@ -182,7 +183,7 @@ allowed-tools: []
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	store := skill.NewSkillStore(skill.Options{CommunityRoot: communityRoot})
+	store := skill.NewSkillStore(skill.Options{HubRoot: communityRoot})
 	mgr := skill.NewSkillManager(store, nil)
 	if _, err := mgr.ResolveClosure(context.Background(), "weather"); err != nil {
 		t.Fatalf("ResolveClosure community skill: %v", err)
@@ -193,7 +194,7 @@ allowed-tools: []
 	}
 	found := false
 	for _, s := range got {
-		if s.Manifest.Name == "weather" && s.Origin == skill.OriginCommunity {
+		if s.Manifest.Name == "weather" && s.Origin == skill.OriginHub {
 			found = true
 		}
 	}

@@ -33,7 +33,7 @@ func defaultPrompts() *prompts.Renderer {
 		if err != nil {
 			return
 		}
-		defaultPromptsRdr = prompts.NewRenderer(sub, "", nil)
+		defaultPromptsRdr = prompts.NewRenderer(sub, nil)
 	})
 	return defaultPromptsRdr
 }

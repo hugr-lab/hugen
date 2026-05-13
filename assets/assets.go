@@ -7,8 +7,25 @@ package assets
 
 import "embed"
 
-// SkillsFS holds every directory under assets/skills/. The
-// top-level entries map one-to-one to a system-tier skill name.
+// SystemSkillsFS holds the agent-core skill set under
+// assets/system/. These skills (`_root`, `_mission`, `_worker`,
+// `_general`, `_planner`, `_skill_builder`, `_system`,
+// `_whiteboard`) are owned by the binary, embed-only, and never
+// materialised on disk. Same lifecycle as constitution and
+// prompts — core agent behaviour, not tunable by operators.
+//
+//go:embed all:system
+var SystemSkillsFS embed.FS
+
+// SkillsFS holds the hub-tier skill bundle under assets/skills/
+// (`hugr-data`, `analyst`, `duckdb-data`, `duckdb-docs`,
+// `python-runner`). These are admin-delivered extensions that
+// sit on top of the agent core. Today they are bundled with the
+// binary and materialised on disk at boot (so the SkillStore's
+// hub backend reads them like any other on-disk skill); in the
+// future, the deployment's Hub will deliver them via a remote
+// Hugr function per agent type, and the on-disk install path
+// becomes a cache for that fetch.
 //
 //go:embed all:skills
 var SkillsFS embed.FS

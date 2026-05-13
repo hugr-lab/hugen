@@ -26,7 +26,7 @@ license: MIT
 # Beta
 `)
 
-	s := NewSkillStore(Options{SystemRoot: root})
+	s := NewSkillStore(Options{HubRoot: root})
 
 	listed, err := s.List(context.Background())
 	if err != nil {
@@ -43,8 +43,8 @@ license: MIT
 	if got.Manifest.Name != "alpha" {
 		t.Errorf("Get returned %q, want alpha", got.Manifest.Name)
 	}
-	if got.Origin != OriginSystem {
-		t.Errorf("Get returned origin %v, want system", got.Origin)
+	if got.Origin != OriginHub {
+		t.Errorf("Get returned origin %v, want hub", got.Origin)
 	}
 	if got.FS == nil {
 		t.Errorf("Get returned nil FS")
@@ -52,22 +52,22 @@ license: MIT
 }
 
 func TestStore_GetUnknownSkill(t *testing.T) {
-	s := NewSkillStore(Options{SystemRoot: t.TempDir()})
+	s := NewSkillStore(Options{HubRoot: t.TempDir()})
 	_, err := s.Get(context.Background(), "missing")
 	if !errors.Is(err, ErrSkillNotFound) {
 		t.Fatalf("err = %v, want ErrSkillNotFound", err)
 	}
 }
 
-func TestStore_ShadowingOrder_SystemOverLocal(t *testing.T) {
-	systemRoot := t.TempDir()
+func TestStore_ShadowingOrder_HubOverLocal(t *testing.T) {
+	hubRoot := t.TempDir()
 	localRoot := t.TempDir()
-	mustWriteSkill(t, systemRoot, "shared", `---
+	mustWriteSkill(t, hubRoot, "shared", `---
 name: shared
-description: From system.
+description: From hub.
 license: MIT
 ---
-# system body`)
+# hub body`)
 	mustWriteSkill(t, localRoot, "shared", `---
 name: shared
 description: From local.
@@ -76,19 +76,19 @@ license: MIT
 # local body`)
 
 	s := NewSkillStore(Options{
-		SystemRoot: systemRoot,
-		LocalRoot:  localRoot,
+		HubRoot:   hubRoot,
+		LocalRoot: localRoot,
 	})
 
 	got, err := s.Get(context.Background(), "shared")
 	if err != nil {
 		t.Fatalf("Get error: %v", err)
 	}
-	if got.Origin != OriginSystem {
-		t.Errorf("Origin = %v, want system (system shadows local)", got.Origin)
+	if got.Origin != OriginHub {
+		t.Errorf("Origin = %v, want hub (hub shadows local)", got.Origin)
 	}
-	if got.Manifest.Description != "From system." {
-		t.Errorf("Description = %q, want From system.", got.Manifest.Description)
+	if got.Manifest.Description != "From hub." {
+		t.Errorf("Description = %q, want From hub.", got.Manifest.Description)
 	}
 }
 
@@ -168,7 +168,7 @@ license: MIT
 }
 
 func TestStore_PublishUnsupportedWhenNoLocalRoot(t *testing.T) {
-	s := NewSkillStore(Options{SystemRoot: t.TempDir()})
+	s := NewSkillStore(Options{HubRoot: t.TempDir()})
 	_, err := Parse([]byte(`---
 name: x
 description: y
@@ -202,7 +202,7 @@ license: MIT
 		t.Fatalf("write bad: %v", err)
 	}
 
-	s := NewSkillStore(Options{SystemRoot: root})
+	s := NewSkillStore(Options{HubRoot: root})
 	listed, err := s.List(context.Background())
 	if err == nil {
 		t.Fatal("List error = nil, want partial-failure error")

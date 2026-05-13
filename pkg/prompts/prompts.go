@@ -1,21 +1,20 @@
 // Package prompts renders model-visible prompt templates that
 // ship under assets/prompts/. Call sites pass a logical name
 // (e.g. "interrupts/stuck_repeated_tool") and a data payload;
-// the Renderer resolves the template from the operator override
-// directory if set, falling back to the embedded copy, parses
-// once, caches the parsed tree, and executes against data via
-// text/template.
+// the Renderer reads the bundled template, parses once, caches
+// the parsed tree, and executes against data via text/template.
 //
-// Phase 5.1 §α.1.
+// Templates are core agent behaviour wired into the binary —
+// not tunable by operators, not materialised to disk. Binary
+// upgrades flow through automatically.
+//
+// Phase 5.1 §α.1; embed-only after 2026-05-13 refresh-fix.
 package prompts
 
 import (
-	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"text/template"
@@ -33,37 +32,26 @@ const FileExt = ".tmpl"
 // by the runtime).
 type Renderer struct {
 	embedded fs.FS
-	override fs.FS // nil when no override dir configured
 	cache    sync.Map
 	logger   *slog.Logger
 }
 
 // NewRenderer constructs a Renderer over an embedded fs.FS root
-// (e.g. fs.Sub(assets.PromptsFS, "prompts")). If overrideDir is
-// non-empty, files under that filesystem path shadow the embedded
-// copy on a per-template basis at render time.
-//
-// Override dir files are looked up via os.DirFS; missing files
-// (ENOENT) fall through silently to the embedded copy. Any other
-// read error propagates so an operator typo doesn't go unnoticed.
+// (e.g. fs.Sub(assets.PromptsFS, "prompts")).
 //
 // Panics if embedded is nil — a Renderer with no source has no
 // purpose and a missing wiring should fail loud at boot.
-func NewRenderer(embedded fs.FS, overrideDir string, logger *slog.Logger) *Renderer {
+func NewRenderer(embedded fs.FS, logger *slog.Logger) *Renderer {
 	if embedded == nil {
 		panic("prompts: NewRenderer: embedded fs is nil")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	r := &Renderer{
+	return &Renderer{
 		embedded: embedded,
 		logger:   logger,
 	}
-	if overrideDir != "" {
-		r.override = os.DirFS(overrideDir)
-	}
-	return r
 }
 
 // Render resolves the named template, executes it against data,
@@ -116,24 +104,11 @@ func (r *Renderer) lookup(name string) (*template.Template, error) {
 	return actual.(*template.Template), nil
 }
 
-// load reads the template body from the override dir (when set)
-// and falls back to the embedded copy. Parses the body into a
-// fresh *template.Template named after the logical name.
+// load reads the template body from the embedded FS and parses
+// it into a fresh *template.Template named after the logical
+// name.
 func (r *Renderer) load(name string) (*template.Template, error) {
 	relPath := name + FileExt
-	if r.override != nil {
-		body, err := fs.ReadFile(r.override, relPath)
-		switch {
-		case err == nil:
-			r.logger.Debug("prompts: using operator override",
-				"name", name)
-			return parse(name, body)
-		case errors.Is(err, fs.ErrNotExist):
-			// fall through to embedded
-		default:
-			return nil, fmt.Errorf("prompts: read override %s: %w", relPath, err)
-		}
-	}
 	body, err := fs.ReadFile(r.embedded, relPath)
 	if err != nil {
 		return nil, fmt.Errorf("prompts: read embedded %s: %w", relPath, err)
@@ -150,20 +125,4 @@ func parse(name string, body []byte) (*template.Template, error) {
 		return nil, fmt.Errorf("prompts: parse %s: %w", name, err)
 	}
 	return t, nil
-}
-
-// OverrideDir is a small helper for runtime config plumbing: it
-// returns abs(dir) when dir is non-empty, else "". Lets callers
-// hand operator-configured relative paths (often relative to
-// the state dir) without each call site duplicating filepath
-// normalisation.
-func OverrideDir(dir string) string {
-	if dir == "" {
-		return ""
-	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return dir
-	}
-	return abs
 }

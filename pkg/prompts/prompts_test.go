@@ -2,8 +2,6 @@ package prompts_test
 
 import (
 	"io/fs"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -30,7 +28,7 @@ func promptsFS(t *testing.T) fs.FS {
 // assertions live in TestRender_GoldenSamples below for the
 // templates whose exact wording is load-bearing.
 func TestRender_AllBundled(t *testing.T) {
-	r := prompts.NewRenderer(promptsFS(t), "", nil)
+	r := prompts.NewRenderer(promptsFS(t), nil)
 	cases := []struct {
 		name string
 		data any
@@ -125,7 +123,7 @@ func TestRender_AllBundled(t *testing.T) {
 // subset of templates. Bundled prose is part of the contract;
 // silent drift breaks scenario tuning.
 func TestRender_GoldenSamples(t *testing.T) {
-	r := prompts.NewRenderer(promptsFS(t), "", nil)
+	r := prompts.NewRenderer(promptsFS(t), nil)
 
 	// stuck_repeated_tool — the simplest parameter substitution.
 	got, err := r.Render("interrupts/stuck_repeated_tool", map[string]any{"N": 5})
@@ -171,70 +169,16 @@ func TestRender_GoldenSamples(t *testing.T) {
 	}
 }
 
-// TestRender_OverrideWins verifies operator override files are
-// consulted before the embedded copy.
-func TestRender_OverrideWins(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "interrupts"), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	custom := "overridden N={{.N}}\n"
-	if err := os.WriteFile(filepath.Join(dir, "interrupts", "stuck_repeated_tool.tmpl"),
-		[]byte(custom), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	r := prompts.NewRenderer(promptsFS(t), dir, nil)
-	got, err := r.Render("interrupts/stuck_repeated_tool", map[string]any{"N": 3})
-	if err != nil {
-		t.Fatalf("Render: %v", err)
-	}
-	if got != "overridden N=3\n" {
-		t.Errorf("override not applied: %q", got)
-	}
-
-	// A template the override dir does not carry must still
-	// resolve from the embedded copy.
-	got, err = r.Render("interrupts/stuck_tight_density",
-		map[string]any{"M": 4, "Window": "10s"})
-	if err != nil {
-		t.Fatalf("Render fallback: %v", err)
-	}
-	if !strings.Contains(got, "tool inside") {
-		t.Errorf("embedded fallback did not render: %q", got)
-	}
-}
-
 // TestRender_MissingTemplate surfaces ENOENT for an unknown
 // name. Strict — the call site decides whether to degrade.
 func TestRender_MissingTemplate(t *testing.T) {
-	r := prompts.NewRenderer(promptsFS(t), "", nil)
+	r := prompts.NewRenderer(promptsFS(t), nil)
 	_, err := r.Render("does/not/exist", nil)
 	if err == nil {
 		t.Fatalf("expected error for missing template")
 	}
 	if !strings.Contains(err.Error(), "does/not/exist") {
 		t.Errorf("error does not name the missing template: %v", err)
-	}
-}
-
-// TestRender_ParseErrorPropagates ensures a malformed override
-// template surfaces as an error rather than silently falling
-// back to the embedded copy. An operator typo must not turn
-// into invisible behaviour.
-func TestRender_ParseErrorPropagates(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "interrupts"), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	bad := "{{.N\n" // missing close brace — text/template parse fails
-	if err := os.WriteFile(filepath.Join(dir, "interrupts", "stuck_repeated_tool.tmpl"),
-		[]byte(bad), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	r := prompts.NewRenderer(promptsFS(t), dir, nil)
-	_, err := r.Render("interrupts/stuck_repeated_tool", map[string]any{"N": 1})
-	if err == nil {
-		t.Fatalf("expected parse error from malformed override")
 	}
 }
 
@@ -246,7 +190,7 @@ func TestRender_CachedAfterFirstLoad(t *testing.T) {
 		"sample.tmpl": &fstest.MapFile{Data: []byte("hi {{.Name}}\n")},
 	}
 	counter := &readCounter{inner: src}
-	r := prompts.NewRenderer(counter, "", nil)
+	r := prompts.NewRenderer(counter, nil)
 
 	for i := 0; i < 5; i++ {
 		out, err := r.Render("sample", map[string]any{"Name": "world"})
@@ -266,7 +210,7 @@ func TestRender_CachedAfterFirstLoad(t *testing.T) {
 // `go test -race`. 200 goroutines, mixed templates, expecting
 // no race and no error.
 func TestRender_ConcurrentSafe(t *testing.T) {
-	r := prompts.NewRenderer(promptsFS(t), "", nil)
+	r := prompts.NewRenderer(promptsFS(t), nil)
 	names := []string{
 		"interrupts/stuck_repeated_tool",
 		"interrupts/stuck_tight_density",

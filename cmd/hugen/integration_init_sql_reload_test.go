@@ -116,7 +116,7 @@ func newDuckDBCoreWithInitSQL(t *testing.T, vendorPath, initSQL string) *integra
 	root := t.TempDir()
 	workspaceDir := filepath.Join(root, "workspace")
 	stateDir := filepath.Join(root, "state")
-	for _, d := range []string{workspaceDir, stateDir, filepath.Join(stateDir, "skills/system")} {
+	for _, d := range []string{workspaceDir, stateDir, filepath.Join(stateDir, "skills/hub")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -140,7 +140,8 @@ func newDuckDBCoreWithInitSQL(t *testing.T, vendorPath, initSQL string) *integra
 	})
 
 	skillStore := skill.NewSkillStore(skill.Options{
-		SystemRoot: filepath.Join(stateDir, "skills/system"),
+		SystemFS: runtime.SystemSkillsFS(),
+		HubRoot: filepath.Join(stateDir, "skills/hub"),
 	})
 	skills := skill.NewSkillManager(skillStore, nil)
 	view := &permsView{rules: nil}

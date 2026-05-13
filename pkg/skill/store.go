@@ -108,36 +108,45 @@ type Backend interface {
 	Publish(ctx context.Context, m Manifest, body fs.FS, opts PublishOptions) error
 }
 
-// Options groups the directory/inline configuration that
-// NewSkillStore consumes. Fields are independent — leave any
-// of them empty to skip that backend.
+// Options groups the configuration NewSkillStore consumes. Fields
+// are independent — leave any of them empty to skip that backend.
 type Options struct {
-	SystemRoot    string                // ${HUGEN_STATE}/skills/system/
-	CommunityRoot string                // deployment-pinned read-only root
-	LocalRoot     string                // ${HUGEN_STATE}/skills/local/ (writable)
-	Inline        map[string][]byte     // map[name]frontmatter+body
+	// SystemFS is the embed.FS that holds the agent-core
+	// skills (`_root`, `_mission`, …). Read-only, no on-disk
+	// presence. nil disables the system backend (tests).
+	SystemFS fs.FS
+	// HubRoot is the on-disk path where the deployment's hub
+	// skills are installed (today filled from the binary's
+	// embedded bundle; in the future, synced from a remote Hugr
+	// hub function). Read-only — operator edits are clobbered
+	// at install time. Empty disables the hub backend.
+	HubRoot string
+	// LocalRoot is `${state}/skills/local/`, writable via
+	// skill:save. Empty disables the local backend.
+	LocalRoot string
+	// Inline is the in-memory channel used by tests and the
+	// skill:save tool while a session keeps a freshly-authored
+	// skill before flushing to local.
+	Inline map[string][]byte
 }
 
 // NewSkillStore wires up backends from Options. Always returns a
-// non-nil *Store; missing roots simply contribute zero skills to
-// List/Get.
+// non-nil *Store; empty / nil fields simply contribute zero
+// skills to List / Get.
 func NewSkillStore(opts Options) *Store {
 	s := &Store{}
-	if opts.SystemRoot != "" {
-		s.backends = append(s.backends, &dirBackend{origin: OriginSystem, root: opts.SystemRoot, writable: false})
+	if opts.SystemFS != nil {
+		s.backends = append(s.backends, &embedBackend{origin: OriginSystem, fs: opts.SystemFS})
+	}
+	if opts.HubRoot != "" {
+		s.backends = append(s.backends, &dirBackend{origin: OriginHub, root: opts.HubRoot, writable: false})
 	}
 	if opts.LocalRoot != "" {
 		s.backends = append(s.backends, &dirBackend{origin: OriginLocal, root: opts.LocalRoot, writable: true})
 	}
-	if opts.CommunityRoot != "" {
-		s.backends = append(s.backends, &dirBackend{origin: OriginCommunity, root: opts.CommunityRoot, writable: false})
-	}
 	if len(opts.Inline) > 0 {
 		s.backends = append(s.backends, newInlineBackend(opts.Inline))
 	}
-	// hub:// stub — always last; always rejects List/Get/Publish
-	// with ErrUnsupportedBackend.
-	s.backends = append(s.backends, &hubBackend{})
 	return s
 }
 
@@ -196,9 +205,6 @@ func (s *Store) refreshList(ctx context.Context) ([]Skill, error) {
 	var out []Skill
 	var errs []error
 	for _, b := range s.backends {
-		if _, isHub := b.(*hubBackend); isHub {
-			continue
-		}
 		got, err := b.List(ctx)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", b.Origin(), err))
@@ -482,15 +488,86 @@ func (b *inlineBackend) Publish(ctx context.Context, m Manifest, body fs.FS, opt
 	return ErrUnsupportedBackend
 }
 
-// --- hub stub (phase 7 implements) ---
+// --- embed-backed backend (system) ---
 
-type hubBackend struct{}
-
-func (b *hubBackend) Origin() Origin                                   { return OriginHub }
-func (b *hubBackend) List(ctx context.Context) ([]Skill, error)        { return nil, ErrUnsupportedBackend }
-func (b *hubBackend) Get(ctx context.Context, name string) (Skill, error) {
-	return Skill{}, ErrSkillNotFound
+// embedBackend reads skills from an embed.FS (or any fs.FS).
+// Used by OriginSystem to serve the agent-core skill set without
+// touching disk. Mirrors dirBackend's manifest-loading logic but
+// over fs.ReadDir / fs.ReadFile instead of os.* primitives.
+type embedBackend struct {
+	origin Origin
+	fs     fs.FS
 }
-func (b *hubBackend) Publish(ctx context.Context, m Manifest, body fs.FS, opts PublishOptions) error {
+
+func (b *embedBackend) Origin() Origin { return b.origin }
+
+func (b *embedBackend) List(ctx context.Context) ([]Skill, error) {
+	if b.fs == nil {
+		return nil, nil
+	}
+	entries, err := fs.ReadDir(b.fs, ".")
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("embed: read root: %w", err)
+	}
+	var out []Skill
+	var errs []error
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		s, err := b.readSkill(e.Name())
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", e.Name(), err))
+			continue
+		}
+		out = append(out, s)
+	}
+	return out, errors.Join(errs...)
+}
+
+func (b *embedBackend) Get(ctx context.Context, name string) (Skill, error) {
+	if b.fs == nil {
+		return Skill{}, ErrSkillNotFound
+	}
+	if err := ctx.Err(); err != nil {
+		return Skill{}, err
+	}
+	if info, err := fs.Stat(b.fs, name); err != nil || !info.IsDir() {
+		return Skill{}, ErrSkillNotFound
+	}
+	return b.readSkill(name)
+}
+
+func (b *embedBackend) readSkill(name string) (Skill, error) {
+	manifestPath := name + "/SKILL.md"
+	content, err := fs.ReadFile(b.fs, manifestPath)
+	if err != nil {
+		return Skill{}, fmt.Errorf("read %s: %w", manifestPath, err)
+	}
+	m, err := Parse(content)
+	if err != nil {
+		return Skill{}, err
+	}
+	sub, err := fs.Sub(b.fs, name)
+	if err != nil {
+		return Skill{}, fmt.Errorf("sub %s: %w", name, err)
+	}
+	return Skill{
+		Manifest: m,
+		Origin:   b.origin,
+		FS:       sub,
+		// Root is the embed path; skill:files / skill:ref read
+		// through the FS handle rather than touching disk.
+		Root: "embed://" + name,
+	}, nil
+}
+
+func (b *embedBackend) Publish(_ context.Context, _ Manifest, _ fs.FS, _ PublishOptions) error {
 	return ErrUnsupportedBackend
 }

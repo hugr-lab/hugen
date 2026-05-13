@@ -16,109 +16,85 @@ import (
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 )
 
-// constitutionSubdir is the directory under StateDir where the
-// agent constitution materialises. Operators override the bundled
-// copy by editing files in this directory; if a file exists at
-// boot, it shadows the embedded one.
-const constitutionSubdir = "constitution"
-
 // constitutionDefaultFile is the universal-rules markdown — the
 // shared preamble every tier reads.
 const constitutionDefaultFile = "agent.md"
 
-// constitutionTierFiles maps each session tier to the operator-
-// editable manual the runtime concatenates with the universal
-// preamble. Each tier's manual is a self-contained operating
-// instruction set for sessions at that tier. Phase 4.2.2 §9.
+// constitutionEmbedRoot is the directory inside assets.ConstitutionFS
+// that holds the bundled files.
+const constitutionEmbedRoot = "constitution"
+
+// constitutionTierFiles maps each session tier to the manual the
+// runtime concatenates with the universal preamble. Each tier's
+// manual is a self-contained operating instruction set for sessions
+// at that tier. Phase 4.2.2 §9.
 var constitutionTierFiles = map[string]string{
 	skillpkg.TierRoot:    "tier-root.md",
 	skillpkg.TierMission: "tier-mission.md",
 	skillpkg.TierWorker:  "tier-worker.md",
 }
 
-// LoadConstitution returns the agent's constitution markdown body.
-// Search order:
-//  1. ${stateDir}/constitution/agent.md — operator override.
-//  2. assets/constitution/agent.md — bundled default.
+// LoadConstitution returns the agent's universal constitution
+// markdown body, read straight from the embedded
+// assets.ConstitutionFS.
 //
-// On first boot the bundled copy is also materialised at
-// ${stateDir}/constitution/agent.md so the operator has a starting
-// point to edit. Updating the binary refreshes the on-disk copy
-// only when the operator hasn't customised it (file matches
-// embedded byte-for-byte) — otherwise the operator's edits stay.
-func LoadConstitution(stateDir string, log *slog.Logger) (string, error) {
-	body, _, err := loadConstitutionBundle(stateDir, log)
+// Constitution is core agent behaviour wired into the binary —
+// not tunable by operators, not materialised to disk. Binary
+// upgrades flow through automatically; there is no on-disk shadow
+// to go stale. Phase 5.1 refresh-fix 2026-05-13.
+func LoadConstitution(log *slog.Logger) (string, error) {
+	body, _, err := loadConstitutionBundle(log)
 	return body, err
 }
 
 // loadConstitutionBundle returns the universal preamble + the
-// per-tier manuals map. Each filename in
-// {agent.md, tier-root.md, tier-mission.md, tier-worker.md} is
-// loaded with the same operator-override semantics: operator's
-// on-disk copy under ${stateDir}/constitution/<file> wins;
-// otherwise the embedded copy is materialised. Missing tier
-// manuals are tolerated (empty string in the map) so a hand-rolled
-// constitution that only carries agent.md still works. Phase 4.2.2
-// §9.
-func loadConstitutionBundle(stateDir string, log *slog.Logger) (string, map[string]string, error) {
-	if stateDir == "" {
-		return "", nil, errors.New("constitution: empty state dir")
-	}
-	target := filepath.Join(stateDir, constitutionSubdir)
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		return "", nil, fmt.Errorf("constitution: mkdir: %w", err)
-	}
-
-	universal, err := loadConstitutionFile(target, constitutionDefaultFile, log)
+// per-tier manuals map, all read from the embedded
+// assets.ConstitutionFS. Missing tier manuals are tolerated
+// (skipped) so a stripped-down bundle can carry only the
+// universal preamble.
+func loadConstitutionBundle(log *slog.Logger) (string, map[string]string, error) {
+	universal, err := readConstitutionEmbed(constitutionDefaultFile)
 	if err != nil {
 		return "", nil, fmt.Errorf("constitution: %s: %w", constitutionDefaultFile, err)
 	}
-
 	manuals := make(map[string]string, len(constitutionTierFiles))
 	for tier, file := range constitutionTierFiles {
-		body, err := loadConstitutionFile(target, file, log)
+		body, err := readConstitutionEmbed(file)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			// Tier file is optional — a hand-rolled constitution may
-			// carry only the universal preamble and rely on skill
-			// bodies for tier guidance. Skip silently.
+			// Tier file is optional — skip silently.
 			continue
 		case err != nil:
 			return "", nil, fmt.Errorf("constitution: %s: %w", file, err)
 		}
 		manuals[tier] = body
 	}
+	_ = log
 	return universal, manuals, nil
 }
 
-// loadConstitutionFile applies operator-override-with-embed-fallback
-// to one file under the constitution dir. Returns the chosen body
-// and an fs.ErrNotExist (unwrapped) if BOTH disk and embed lack
-// the file — that's the "tier manual is optional" signal callers
-// detect.
-func loadConstitutionFile(target, name string, log *slog.Logger) (string, error) {
-	embedded, embedErr := fs.ReadFile(assets.ConstitutionFS, filepath.Join("constitution", name))
-
-	disk := filepath.Join(target, name)
-	current, diskErr := os.ReadFile(disk)
+// readConstitutionEmbed reads one file from the embedded bundle.
+// Returns fs.ErrNotExist (unwrapped) when the name is not in the
+// bundle so callers can detect optional tier files cleanly.
+func readConstitutionEmbed(name string) (string, error) {
+	body, err := fs.ReadFile(assets.ConstitutionFS, filepath.Join(constitutionEmbedRoot, name))
 	switch {
-	case errors.Is(diskErr, fs.ErrNotExist) && errors.Is(embedErr, fs.ErrNotExist):
-		// Neither the operator nor the binary has this file.
+	case errors.Is(err, fs.ErrNotExist):
 		return "", fs.ErrNotExist
-	case errors.Is(diskErr, fs.ErrNotExist):
-		if embedErr != nil {
-			return "", fmt.Errorf("read embed: %w", embedErr)
-		}
-		if err := os.WriteFile(disk, embedded, 0o644); err != nil {
-			return "", fmt.Errorf("write default: %w", err)
-		}
-		log.Info("constitution materialised", "path", disk)
-		return string(embedded), nil
-	case diskErr != nil:
-		return "", fmt.Errorf("read disk: %w", diskErr)
+	case err != nil:
+		return "", fmt.Errorf("read embed: %w", err)
 	}
-	// Operator override takes precedence.
-	return string(current), nil
+	return string(body), nil
+}
+
+// embedRelPath strips the `<root>/` prefix from an embed path so
+// the caller can join against the on-disk target.
+func embedRelPath(p, root string) string {
+	prefix := root + "/"
+	if len(p) > len(prefix) && p[:len(prefix)] == prefix {
+		return p[len(prefix):]
+	}
+	return p
 }
 
 // RegisterBuiltinCommands wires the session-core slash commands onto
@@ -270,7 +246,7 @@ func phaseAgent(ctx context.Context, core *Core) error {
 	if err != nil {
 		return fmt.Errorf("identity: %w", err)
 	}
-	universal, tierManuals, err := loadConstitutionBundle(core.Cfg.StateDir, core.Logger)
+	universal, tierManuals, err := loadConstitutionBundle(core.Logger)
 	if err != nil {
 		return fmt.Errorf("constitution: %w", err)
 	}

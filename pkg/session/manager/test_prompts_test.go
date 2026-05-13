@@ -28,7 +28,7 @@ func testPrompts(t *testing.T) *prompts.Renderer {
 		if err != nil {
 			t.Fatalf("fs.Sub prompts: %v", err)
 		}
-		testPromptsRdr = prompts.NewRenderer(sub, "", nil)
+		testPromptsRdr = prompts.NewRenderer(sub, nil)
 	})
 	return testPromptsRdr
 }

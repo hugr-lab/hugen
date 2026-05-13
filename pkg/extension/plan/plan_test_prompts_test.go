@@ -24,7 +24,7 @@ func planTestRenderer(t *testing.T) *prompts.Renderer {
 		if err != nil {
 			t.Fatalf("fs.Sub: %v", err)
 		}
-		planPromptsRdr = prompts.NewRenderer(sub, "", nil)
+		planPromptsRdr = prompts.NewRenderer(sub, nil)
 	})
 	return planPromptsRdr
 }
