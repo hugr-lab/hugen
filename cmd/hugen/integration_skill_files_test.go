@@ -54,8 +54,8 @@ func TestSkill_FilesRoundTrip(t *testing.T) {
 	// `_system` (autoload requirement of analyst skills) and
 	// `duckdb-data`.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	if err := runtime.InstallBundledSkills(stateDir, logger); err != nil {
-		t.Fatalf("InstallBundledSkills: %v", err)
+	if err := runtime.InstallBundledHubSkills(stateDir, logger); err != nil {
+		t.Fatalf("InstallBundledHubSkills: %v", err)
 	}
 
 	cfgSvc := config.NewStaticService(config.StaticInput{
@@ -70,7 +70,8 @@ func TestSkill_FilesRoundTrip(t *testing.T) {
 	})
 
 	skillStore := skill.NewSkillStore(skill.Options{
-		SystemRoot: filepath.Join(stateDir, "skills/system"),
+		SystemFS: runtime.SystemSkillsFS(),
+		HubRoot: filepath.Join(stateDir, "skills/hub"),
 	})
 	skills := skill.NewSkillManager(skillStore, logger)
 	view := &permsView{rules: nil}
@@ -165,7 +166,7 @@ func TestSkill_FilesRoundTrip(t *testing.T) {
 	if envelope.Skill != "duckdb-data" {
 		t.Errorf("envelope.skill = %q, want duckdb-data", envelope.Skill)
 	}
-	if !strings.HasSuffix(envelope.Root, filepath.Join("skills/system", "duckdb-data")) {
+	if !strings.HasSuffix(envelope.Root, filepath.Join("skills/hub", "duckdb-data")) {
 		t.Errorf("envelope.root = %q, suspicious", envelope.Root)
 	}
 	if len(envelope.Files) < 5 {

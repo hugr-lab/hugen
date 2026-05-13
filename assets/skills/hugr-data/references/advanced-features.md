@@ -449,142 +449,17 @@ Filter in GraphQL (not JQ) for performance. Use JQ for reshaping, not filtering.
 
 ---
 
-## Spatial Queries (_spatial)
+## Spatial queries and H3 clustering
 
-### Relationship Types
-- `INTERSECTS` — geometries share any space
-- `WITHIN` — geometry completely inside reference
-- `CONTAINS` — reference completely contains target
-- `DISJOINT` — no shared space
-- `DWITHIN` — within distance (`buffer` in meters)
+Both moved to their own dedicated references — they share one
+naming rule (flat prefixed type names inside the join body) and
+deserve a focused read when the task touches geometry.
 
-```graphql
-stores {
-  id name location
-  _spatial(field: "location", type: DWITHIN, buffer: 5000) {
-    customers(field: "address_location") { id name }
-    customers_aggregation(field: "address_location") { _rows_count }
-  }
-}
-```
-
-### inner: true — INNER JOIN (exclude parents without spatial matches)
-```graphql
-_spatial(field: "location", type: DWITHIN, buffer: 5000) {
-  customers(field: "address_location", inner: true) { id }
-}
-```
-
-### _spatial in bucket aggregation keys
-Group by spatially related data:
-```graphql
-orders_bucket_aggregation {
-  key {
-    status
-    delivery_zone: _spatial(field: "delivery_location", type: WITHIN) {
-      zones(field: "boundary") { zone_id zone_name }
-    }
-  }
-  aggregations { _rows_count total { sum } }
-}
-```
-
-### Multi-level spatial queries
-Nested _spatial for hierarchical geographic analysis.
-
----
-
-## H3 Hexagonal Clustering
-
-```graphql
-query {
-  h3(resolution: 7) {
-    cell resolution
-    data {
-      buildings: buildings_aggregation(field: "location", inner: true) {
-        _rows_count
-        area { sum }
-      }
-    }
-  }
-}
-```
-
-Resolution guidelines: 5-7 (city), 8-9 (neighborhood), 10-12 (street).
-
-### Key arguments on H3 data aggregations
-- `field` (required) — geometry field for spatial aggregation
-- `inner: true` — only cells with data (skip empty hexagons)
-- `divide_values: false` — keep original values (default true distributes proportionally across cells)
-- `filter` — pre-filter data before spatial aggregation
-
-### distribution_by — distribute values proportionally across H3 cells
-Formula: `value = numerator * (denominator / denominator_total)`
-
-```graphql
-h3(resolution: 8) {
-  data { ... }
-  pop_distributed: distribution_by(
-    numerator: "data.population.population.sum"
-    denominator: "data.buildings.area.sum"
-  ) { value ratio numerator denominator denominator_total }
-}
-```
-
-### distribution_by_bucket — distribute across buckets within each cell
-
-### Complete example: Population estimation via residential buildings
-
-This pattern distributes census population across H3 cells proportionally to residential building area, using cross-source joins:
-
-```graphql
-query deOSMByH3 {
-  h3(resolution: 6) @stats {
-    cell
-    resolution
-    data {
-      # 1. Spatial aggregation: admin boundaries (Landkreise) intersecting this H3 cell
-      #    divide_values:false → keep full Landkreis population (don't split by overlap)
-      #    inner:true → skip cells with no admin boundary
-      lk: osm_bw_osm_administrative_boundaries_aggregation(
-        field: "geom"
-        filter: { admin_level: { eq: 6 } }
-        divide_values: false
-        inner: true
-      ) {
-        # 2. Cross-source _join: OSM boundaries → Zensus population by admin code
-        pop: _join(fields: ["de_code"]) {
-          zensus_population(fields: ["db_RS"]) {
-            EWZ { sum }
-          }
-        }
-      }
-
-      # 3. Spatial aggregation: residential buildings in this H3 cell
-      #    Default divide_values:true → area distributed proportionally
-      houses: osm_bw_osm_buildings_aggregation(
-        field: "geom"
-        filter: { building_class: { eq: "residential" } }
-      ) {
-        _rows_count
-        area_sqm { sum }
-      }
-    }
-
-    # 4. Distribute population by residential building area
-    #    pop = census_pop * (cell_housing_area / total_housing_area)
-    pop: distribution_by(
-      numerator: "data.lk.pop.zensus_population.EWZ.sum"
-      denominator: "data.houses.area_sqm.sum"
-    ) {
-      value             # distributed population for this cell
-      ratio             # cell's share of total housing area
-      numerator         # source census population
-      denominator       # housing area in this cell
-      denominator_total # total housing area across all cells
-    }
-  }
-}
-```
-
-Features used: H3 grid, @stats, cross-source spatial aggregation (OSM DuckDB), _join inside H3 (OSM→Zensus), divide_values control, distribution_by for proportional estimation.
+- **`_spatial`** — predicate-based geometry joins (`INTERSECTS /
+  WITHIN / CONTAINS / DISJOINT / DWITHIN`), inner-vs-left,
+  `_spatial` inside `_bucket_aggregation.key`, nearest-N
+  caveats. See `spatial-queries.md`.
+- **`h3(resolution:)`** — hexagonal grid aggregation,
+  `divide_values`, `inner`, `distribution_by`,
+  `distribution_by_bucket`, and the canonical cross-source
+  population-by-residential-area pattern. See `h3-spatial.md`.

@@ -34,7 +34,8 @@ func newTestManager(t *testing.T, store session.RuntimeStore) *Manager {
 		t.Fatalf("agent: %v", err)
 	}
 	tm := tool.NewToolManager(permsAllow{}, nil, nil)
-	return NewManager(store, agent, router, session.NewCommandRegistry(), protocol.NewCodec(), tm, nil)
+	return NewManager(store, agent, router, session.NewCommandRegistry(), protocol.NewCodec(), tm, nil,
+		WithPrompts(testPrompts(t)))
 }
 
 func TestManager_LazyMaterialisation(t *testing.T) {

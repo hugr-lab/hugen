@@ -14,7 +14,8 @@ import (
 // max-depth floor (omit fan-out, point at return / give up / change
 // tack).
 func TestSoftWarningText_RoleConditioned(t *testing.T) {
-	root := softWarningText("root", "", 7, true)
+	r := testPrompts(t)
+	root := softWarningText(r, "root", "", 7, true)
 	if !strings.Contains(root, "spawn_subagent") {
 		t.Errorf("root variant missing spawn_subagent hint: %q", root)
 	}
@@ -22,7 +23,7 @@ func TestSoftWarningText_RoleConditioned(t *testing.T) {
 		t.Errorf("root variant missing 'soft signal' phrasing: %q", root)
 	}
 
-	subDeeper := softWarningText("explorer", "list sources", 7, true)
+	subDeeper := softWarningText(r, "explorer", "list sources", 7, true)
 	if !strings.Contains(subDeeper, `"list sources"`) {
 		t.Errorf("sub-agent (depth ok) variant missing task quote: %q", subDeeper)
 	}
@@ -33,7 +34,7 @@ func TestSoftWarningText_RoleConditioned(t *testing.T) {
 		t.Errorf("sub-agent (depth ok) variant must not say sub-sub-agents are unavailable: %q", subDeeper)
 	}
 
-	subFloor := softWarningText("explorer", "list sources", 7, false)
+	subFloor := softWarningText(r, "explorer", "list sources", 7, false)
 	if !strings.Contains(subFloor, `"list sources"`) {
 		t.Errorf("sub-agent (at depth) variant missing task quote: %q", subFloor)
 	}

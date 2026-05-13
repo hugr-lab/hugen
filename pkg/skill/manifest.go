@@ -75,6 +75,19 @@ type Manifest struct {
 type ToolGrant struct {
 	Provider string   `json:"provider"`
 	Tools    []string `json:"tools"`
+	// RequiresApproval narrows the per-grant tools that the
+	// runtime should intercept with a session:inquire approval
+	// flow before forwarding the call to the provider. Phase 5.1
+	// § 2.6 ships exact-name + '*'-wildcard matching only; no
+	// glob support, no content-based gating.
+	//
+	// Names must either appear verbatim in the entry's Tools
+	// list or be the literal '*' (which expands to every tool in
+	// the same grant). Mixed lists are allowed. hugen-skill-
+	// validate enforces this at manifest authoring time;
+	// runtime ignores entries with unknown names (defence in
+	// depth).
+	RequiresApproval []string `json:"requires_approval,omitempty" yaml:"requires_approval,omitempty"`
 }
 
 // AllowedTools is the parsed allowed-tools list. Two manifest
@@ -725,6 +738,26 @@ func (m *Manifest) validate() error {
 	for i, g := range m.AllowedTools {
 		if g.Provider == "" {
 			return fmt.Errorf("allowed-tools[%d].provider is required", i)
+		}
+		// Phase 5.1 § η: requires_approval names must match the
+		// grant's Tools list verbatim or be the literal '*'.
+		// Validation prevents typos that would silently produce a
+		// no-op approval gate at runtime.
+		if len(g.RequiresApproval) == 0 {
+			continue
+		}
+		owned := map[string]struct{}{}
+		for _, t := range g.Tools {
+			owned[t] = struct{}{}
+		}
+		for j, name := range g.RequiresApproval {
+			if name == "*" {
+				continue
+			}
+			if _, ok := owned[name]; !ok {
+				return fmt.Errorf("allowed-tools[%d].requires_approval[%d] = %q: must appear in the same entry's tools list or be \"*\"",
+					i, j, name)
+			}
 		}
 	}
 	return nil

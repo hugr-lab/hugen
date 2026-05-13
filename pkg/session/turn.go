@@ -92,10 +92,13 @@ type toolResultEvent struct {
 // [Session.registerToolFeed] for the duration of the block and
 // release it on return.
 type ToolFeed struct {
-	// Consumes returns true for Frame Kinds the active tool wants to
+	// Consumes returns true for Frames the active tool wants to
 	// receive. The Run loop checks this before falling back to
-	// pendingInbound.
-	Consumes func(protocol.Kind) bool
+	// pendingInbound. Phase-5.1 § β widens the predicate from a
+	// Kind-only check to a full-Frame inspection so callers can
+	// match on Frame metadata (FromSession for parent notes,
+	// RequestID for inquiry responses, etc.) — not just kind.
+	Consumes func(protocol.Frame) bool
 	// Feed delivers a matching Frame to the tool's blocking handler.
 	// Must be non-blocking (the loop is single-goroutine).
 	Feed func(protocol.Frame)
@@ -129,9 +132,9 @@ type ToolFeed struct {
 //   - The model goroutine launches; chunks fan in over s.modelChunks.
 func (s *Session) startTurn(runCtx context.Context, f *protocol.UserMessage) {
 	// Lifecycle: leaving idle for active. Emit BEFORE persisting the
-	// user message so a restart that crashes between markActive and
-	// the user_message emit still observes the session as active and
-	// classifies it eagerly.
+	// user message so a restart that crashes between the active
+	// markStatus and the user_message emit still observes the
+	// session as active and classifies it eagerly.
 	s.markStatus(runCtx, protocol.SessionStatusActive, "user_message")
 	if err := s.emit(runCtx, f); err != nil {
 		s.logger.Debug("startTurn: emit user", "session", s.id, "err", err)
@@ -644,7 +647,7 @@ func (s *Session) drainPendingInbound(runCtx context.Context) {
 		return
 	}
 	for _, f := range s.pendingInbound {
-		if msg, ok := projectFrameToHistory(f); ok {
+		if msg, ok := projectFrameToHistory(s.deps.Prompts, f); ok {
 			s.history = append(s.history, msg)
 		}
 		// Persist + push to outbox so the event log captures the

@@ -6,6 +6,15 @@ allowed-tools:
   - provider: session
     tools:
       - parent_context
+      # Phase 5.1 follow-up — workers may inquire when the
+      # AMBIGUITY IS IN THE DATA (e.g. two equally-plausible
+      # source tables / columns for the user's request). The
+      # runtime approval gate already routes worker tool-call
+      # approvals through the same cascade; granting clarification
+      # symmetrically closes that gap. Mission still owns
+      # intent-ambiguity ("which goal did you mean") — see
+      # tier-worker.md for the rule.
+      - inquire
   - provider: whiteboard
     tools:
       - write

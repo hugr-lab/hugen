@@ -71,6 +71,20 @@ func (s *Session) initSubagent() {
 		ArgSchema:        json.RawMessage(parentContextSchema),
 		Handler:          s.callParentContext,
 	}
+	s.sessionTools["notify_subagent"] = sessionToolDescriptor{
+		Name:             "notify_subagent",
+		Description:      "Send a focused directive (KindSystemMessage with parent_note) to a direct child. Phase 5.1 § 3.5 — root / mission use this to route the relevant slice of a user follow-up to an in-flight sub-agent.",
+		PermissionObject: permObjectSubagentNotify,
+		ArgSchema:        json.RawMessage(notifySubagentSchema),
+		Handler:          s.callNotifySubagent,
+	}
+	s.sessionTools["inquire"] = sessionToolDescriptor{
+		Name:             "inquire",
+		Description:      "Blocking ask the user. REQUIRED args: type (\"approval\" | \"clarification\") + question. Optional: context, options, timeout_ms. type=approval surfaces a yes/no prompt; type=clarification surfaces a free-form question. Phase 5.1 § 2 — the call bubbles up the parent chain to root's adapter and blocks until the user answers, the per-call timeout fires, or ctx cancels.",
+		PermissionObject: permObjectInquire,
+		ArgSchema:        json.RawMessage(inquireSchema),
+		Handler:          s.callInquire,
+	}
 }
 
 // Permission objects per contracts/permission-objects.md §"Sub-agent
@@ -83,6 +97,8 @@ const (
 	permObjectSubagentRead          = "hugen:subagent:read"
 	permObjectSubagentCancel        = "hugen:subagent:cancel"
 	permObjectSubagentParentContext = "hugen:subagent:parent_context"
+	permObjectSubagentNotify        = "hugen:subagent:notify"
+	permObjectInquire               = "hugen:inquire"
 )
 
 // describeSubagent walks every [extension.SubagentDescriber] on

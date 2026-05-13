@@ -82,7 +82,7 @@ func TestRegisterToolFeed_TransitionsAndReleasesIdempotently(t *testing.T) {
 	s.markStatus(ctx, protocol.SessionStatusActive, "test_setup")
 
 	feed := &ToolFeed{
-		Consumes:       func(k protocol.Kind) bool { return false },
+		Consumes:       func(f protocol.Frame) bool { return false },
 		Feed:           func(f protocol.Frame) {},
 		BlockingState:  protocol.SessionStatusWaitSubagents,
 		BlockingReason: "test=feed",

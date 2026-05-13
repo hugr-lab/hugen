@@ -33,6 +33,14 @@ type Tool struct {
 	ArgSchema        json.RawMessage `json:"arg_schema,omitempty"`
 	Provider         string          `json:"provider"`
 	PermissionObject string          `json:"permission_object"`
+	// RequiresApproval (phase 5.1 § η): when true the dispatcher
+	// intercepts a call to this tool with a session:inquire
+	// approval flow before forwarding to the provider. The flag is
+	// set by the skill extension's ToolFilter from the loaded
+	// skills' allowed-tools[].requires_approval entries; absent
+	// in the catalogue means "no gate" — the per-session snapshot
+	// owns this metadata, not the underlying provider.
+	RequiresApproval bool `json:"requires_approval,omitempty"`
 }
 
 // Lifetime tags how a provider relates to agent/session

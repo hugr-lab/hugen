@@ -1,0 +1,160 @@
+# hitl_worker_probe — phase 5.1 κ deterministic 2-hop cascade.
+#
+# Root → _general mission → 1 generic-worker → worker calls
+# session:inquire. Tests the deepest cascade in the runtime:
+#
+#   Bubble up:
+#     1. worker emits InquiryRequest
+#     2. subagent_pump on mission bubbles it, records
+#        responseRouting[rid] = workerID on mission, rewrites
+#        SessionID → missionID
+#     3. subagent_pump on root bubbles it again, records
+#        responseRouting[rid] = missionID on root, rewrites
+#        SessionID → rootID
+#     4. frame lands in root.outbox; harness sees it
+#
+#   Cascade down (TWO routing-lookup hops, the load-bearing
+#   invariant under test):
+#     5. harness builds InquiryResponse with CallerSessionID =
+#        workerID, Manager.Deliver()s to root
+#     6. RouteInternal at root → CallerSessionID != self →
+#        lookup routing[rid] = missionID → Submit(mission, resp)
+#     7. RouteInternal at mission → CallerSessionID != self →
+#        lookup routing[rid] = workerID → Submit(worker, resp)
+#     8. RouteInternal at worker → CallerSessionID == self →
+#        deliver to pending channel → inquire tool unblocks
+#
+# By-eye assertions:
+#
+#   1. Exactly one `session_inquire` tool_call somewhere in the
+#      tree, originating from a worker session (depth >= 2,
+#      i.e. its parent's parent is the root).
+#   2. The matched tool_result carries `"response":"blue"` in
+#      content (this scenario answers `blue` to disambiguate it
+#      from hitl_minimal / hitl_mission_probe's `red`).
+#   3. Worker's final result line / mission's wave aggregation
+#      contains `worker_response=blue`.
+#   4. Root's final agent_message contains `worker_response=blue`.
+#
+# This requires the phase 5.1 follow-up grant of session:inquire
+# at worker tier (see assets/skills/_worker/SKILL.md +
+# assets/constitution/tier-worker.md "When you need user input").
+name: hitl_worker_probe
+requires: [hugr]
+
+steps:
+  - say: |
+      I am running an integration test of the WORKER-tier
+      session:inquire cascade.
+
+      Spawn ONE mission with skill "_general" and pass the
+      goal text below verbatim. Then wait_subagents on the
+      mission id. Finally reply with the single line
+      worker_response=ANSWER (no preamble, no markdown, no
+      quotes around the line) where ANSWER is whatever value
+      the mission ultimately returns after worker_response=.
+
+      Use natural prose tools call args — do not nest
+      backticks in JSON strings; the goal body is plain text.
+
+      ─── Mission goal (copy as a plain string into spawn_mission.goal) ───
+      Spawn exactly one worker via session:spawn_wave with one
+      entry, role=generic-worker. Pass this exact worker task
+      as the task field, copied verbatim:
+
+      Worker task: call session:inquire exactly once with
+      type=clarification and question=worker HITL probe should
+      I use red or blue? Do not load any skill, do not call
+      any other tool. When the inquire response comes back,
+      return the single line worker_response=ANSWER where
+      ANSWER is the response text verbatim. Then stop.
+
+      After the worker returns, your mission result is the
+      worker's worker_response=ANSWER line verbatim. Do not
+      summarise, do not add commentary.
+      ─── end mission goal ───
+    budget: 720s
+    wait_for_subagents: 600s
+
+    # The harness answers "blue" — distinct token from the other
+    # HITL probes so result attribution is unambiguous in mixed
+    # runs.
+    inquiry_responses:
+      - match:
+          type: clarification
+          question_contains: "worker HITL probe"
+        respond:
+          response: "blue"
+        delay: 100ms
+      - match:
+          type: clarification
+        respond:
+          response: "blue"
+        delay: 100ms
+
+    queries:
+      # The inquire call should be on a worker session, NOT on
+      # the mission. session_id should be a depth-2 grandchild
+      # of root (parent's parent == root).
+      - name: inquire_calls_with_depth
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map({seq, sid: .session_id, args: .tool_args})") {
+              hub { db { agent {
+                session_events(
+                  filter: {event_type: {eq: "tool_call"}, tool_name: {eq: "session_inquire"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq session_id tool_args }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Mission + worker session metadata — verifies the topology
+      # was 3-tier (root, mission, worker).
+      - name: session_tree
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({sid: .id, parent: .parent_session_id, depth, role: .metadata.spawn_role, mission: .mission})") {
+              hub { db { agent {
+                sessions(filter: {root_session_id: {eq: $sid}}) {
+                  id parent_session_id depth metadata mission
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Worker's subagent_result content — should carry
+      # `worker_response=blue`.
+      - name: worker_results
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map({seq, sid: .session_id, content})") {
+              hub { db { agent {
+                session_events(
+                  filter: {root_session_id: {eq: $sid}, event_type: {eq: "subagent_result"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq session_id content }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Root's final agent_message — must contain
+      # `worker_response=blue`.
+      - name: root_final_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 2
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }

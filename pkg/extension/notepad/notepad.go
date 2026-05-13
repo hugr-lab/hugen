@@ -95,7 +95,7 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	if err != nil || len(notes) == 0 {
 		return ""
 	}
-	return renderSnapshot(notes, np.Window())
+	return renderSnapshot(state.Prompts(), notes, np.Window())
 }
 
 // InitState allocates a fresh [Notepad] for the calling session.

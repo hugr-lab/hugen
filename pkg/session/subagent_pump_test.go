@@ -68,8 +68,8 @@ func (rc *resultCapture) len() int {
 func captureSubagentResults(parent *Session) (*resultCapture, func()) {
 	rc := &resultCapture{}
 	feed := &ToolFeed{
-		Consumes: func(k protocol.Kind) bool {
-			return k == protocol.KindSubagentResult
+		Consumes: func(f protocol.Frame) bool {
+			return f.Kind() == protocol.KindSubagentResult
 		},
 		Feed: func(f protocol.Frame) {
 			if sr, ok := f.(*protocol.SubagentResult); ok {

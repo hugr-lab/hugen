@@ -1,0 +1,6 @@
+## Available skills
+
+Load any of these via the `skill:load` tool when their domain becomes relevant. Already-loaded skills are tagged `(loaded)`.
+
+{{range .Skills}}- `{{.Name}}`{{if .Loaded}} (loaded){{end}} — {{.Description}}
+{{end}}

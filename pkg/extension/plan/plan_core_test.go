@@ -193,7 +193,7 @@ func TestRender_ActivePlan(t *testing.T) {
 		Text:        "investigate cache",
 		CurrentStep: "instrument",
 	}
-	out := Render(p)
+	out := Render(planTestRenderer(t), p)
 	if !strings.HasPrefix(out, "## Active plan\n") {
 		t.Errorf("Render = %q, expected to start with ## Active plan", out)
 	}
@@ -209,7 +209,7 @@ func TestRender_ActivePlan(t *testing.T) {
 // when no pointer is set.
 func TestRender_NoCurrentStepOmitsLine(t *testing.T) {
 	p := Plan{Active: true, Text: "body"}
-	out := Render(p)
+	out := Render(planTestRenderer(t), p)
 	if strings.Contains(out, "Current focus") {
 		t.Errorf("Render = %q, expected no current focus line", out)
 	}
@@ -218,7 +218,7 @@ func TestRender_NoCurrentStepOmitsLine(t *testing.T) {
 // TestRender_InactiveReturnsEmpty so callers can drop the block on
 // a nil-empty check.
 func TestRender_InactiveReturnsEmpty(t *testing.T) {
-	if out := Render(Plan{}); out != "" {
+	if out := Render(planTestRenderer(t), Plan{}); out != "" {
 		t.Errorf("Render(inactive) = %q, want empty", out)
 	}
 }

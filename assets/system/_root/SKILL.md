@@ -9,6 +9,8 @@ allowed-tools:
       - wait_subagents
       - subagent_runs
       - subagent_cancel
+      - notify_subagent
+      - inquire
   - provider: plan
     tools:
       - comment

@@ -1,0 +1,8 @@
+## Notepad — recommended tags for this mission
+
+The notepad accepts any category string; the dispatching skill
+recommends these for retrieval coherence across worker waves:
+
+{{range .Tags}}{{if .Hint}}- `{{.Name}}` — {{.Hint}}
+{{else}}- `{{.Name}}`
+{{end}}{{end}}

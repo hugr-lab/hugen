@@ -22,31 +22,47 @@ type Skill struct {
 }
 
 // Origin tags where a skill came from. Shadowing order at
-// SkillStore.Get: system > local > community > inline > hub.
+// SkillStore.Get: system > hub > local > inline.
+//
+// Three production sources:
+//
+//   - **system** — agent-core skills bundled in the binary
+//     (`_root`, `_mission`, `_worker`, `_general`, `_planner`,
+//     `_skill_builder`, `_system`, `_whiteboard`). Embed-only;
+//     no on-disk presence. Owned by the binary; not tunable.
+//   - **hub** — admin-delivered extensions (`hugr-data`,
+//     `analyst`, `duckdb-data`, `duckdb-docs`, `python-runner`).
+//     Today filled from the binary's embedded bundle at boot
+//     into `${state}/skills/hub/`. The future will replace that
+//     install with a remote Hugr function call against the
+//     deployment's Hub, fetching the per-agent-type bundle.
+//   - **local** — operator-authored skills under
+//     `${state}/skills/local/`, writable via skill:save.
+//
+// `inline` is the in-memory channel used by tests and the
+// skill:save tool while a session keeps a freshly-authored
+// skill before it is written to local.
 type Origin int
 
 const (
 	OriginSystem Origin = iota
-	OriginCommunity
+	OriginHub
 	OriginLocal
 	OriginInline
-	OriginHub
 )
 
 // String returns the URI-style scheme used in logs and audit
-// frames: "system://", "community://", etc.
+// frames: "system://", "hub://", etc.
 func (o Origin) String() string {
 	switch o {
 	case OriginSystem:
 		return "system"
-	case OriginCommunity:
-		return "community"
+	case OriginHub:
+		return "hub"
 	case OriginLocal:
 		return "local"
 	case OriginInline:
 		return "inline"
-	case OriginHub:
-		return "hub"
 	default:
 		return "unknown"
 	}

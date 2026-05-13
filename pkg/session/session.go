@@ -14,6 +14,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
@@ -220,7 +221,25 @@ type Session struct {
 	// turn machinery; empty / zero for root sessions.
 	spawnSkill    string
 	spawnRole     string
+	mission       string // spawn.Task duplicated for in-memory lookup
 	mainToolCalls atomic.Int64
+
+	// inquiry owns the phase-5.1 HITL maps: pendingInquiry (the
+	// channel the inquire tool body blocks on) and responseRouting
+	// (the per-RequestID parent-mediated cascade-down forwarding
+	// table). Lazily initialised on first use; see inquiry.go.
+	inquiry inquiryState
+
+	// asyncSpawnMode tags this session's terminal SubagentResult
+	// with the render hint to its parent's history projection.
+	// Phase 5.1 § 4.3: spawn_mission with wait="async" (or "timeout"
+	// when the timer fires before completion) sets this to
+	// protocol.SubagentRenderAsyncNotify so the parent's next turn
+	// surfaces "interrupts/async_mission_completed.tmpl"; setting
+	// to SubagentRenderSilent suppresses the history projection
+	// entirely. Empty string falls back to the default
+	// "[system: subagent_result] …" render.
+	asyncSpawnMode string
 }
 
 // terminationCause is the cancel cause attached to a per-session ctx
@@ -427,6 +446,17 @@ func (s *Session) Tools() *tool.ToolManager { return s.tools }
 // duckdb-mcp, …) stay singletons; per_session providers spawn
 // once per session.
 func (s *Session) RootTools() *tool.ToolManager { return s.rootTools }
+
+// Prompts returns the agent-level template renderer shared by
+// every session in the manager tree. Nil only in test fixtures
+// that build Deps by hand without a renderer; production code
+// paths assume non-nil and call MustRender on the result.
+func (s *Session) Prompts() *prompts.Renderer {
+	if s.deps == nil {
+		return nil
+	}
+	return s.deps.Prompts
+}
 
 // OpenedAt returns the timestamp the session row was first written
 // (CreatedAt on SessionRow). Useful for callers that want to echo
@@ -1148,6 +1178,13 @@ func (s *Session) handleSubagentResult(ctx context.Context, f *protocol.Subagent
 		delete(s.children, childID)
 	}
 	s.childMu.Unlock()
+	// Phase 5.1 § 2.4: drop every inquiry-response route that
+	// pointed at this child. Without the sweep a late response
+	// arriving after the child terminated would forward to a
+	// closed inbox (best-effort drop further down) and the route
+	// would linger until session teardown — small leak per inquiry,
+	// noisy in test fixtures. Sweep is O(routes); cheap.
+	s.sweepResponseRoutesForChild(childID)
 
 	// Lifecycle: a child just deregistered. If the parent's own turn
 	// already closed and no other children remain (and no buffered
@@ -1218,6 +1255,22 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 				"user_message_rejected_closing", map[string]any{"author": v.Author().ID})
 			return s.emit(ctx, marker)
 		}
+		// Phase 5.1 § 3.2: an active wait_subagents feed accepts user
+		// follow-ups so the tool can short-circuit with a reframe. The
+		// frame is dual-routed: Feed gets it so wait_subagents returns
+		// the interrupt result, AND pendingInbound gets it so the next
+		// turn boundary projects it into history via the standard
+		// visibility filter. Without the dual route the raw user text
+		// would only appear inside the rendered interrupt template and
+		// be missing from s.history for future turns.
+		if feed := s.activeToolFeed.Load(); feed != nil &&
+			feed.Consumes != nil && feed.Consumes(f) {
+			feed.Feed(f)
+			if s.turnState != nil {
+				s.pendingInbound = append(s.pendingInbound, f)
+			}
+			return nil
+		}
 		// Concurrent UserMessage during a turn is unusual (UI typically
 		// gates on AgentMessage{Final:true}). Buffer it; advanceOrFinish
 		// will fold it into history at the next turn boundary so the
@@ -1236,8 +1289,20 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 		return nil
 	case RouteToolFeed:
 		if feed := s.activeToolFeed.Load(); feed != nil &&
-			feed.Consumes != nil && feed.Consumes(f.Kind()) {
+			feed.Consumes != nil && feed.Consumes(f) {
 			feed.Feed(f)
+			// Phase 5.1 § 3.4: SystemMessage that the feed consumed
+			// (e.g. parent note during wait_subagents) must also
+			// project into history at the next turn boundary so the
+			// conversation log carries the parent's directive even
+			// after the interrupt return surfaces it through the
+			// tool result. SubagentResult stays Feed-only — the
+			// terminal child signal is consumed exclusively by
+			// wait_subagents and persisted via its emit call.
+			if _, isSystem := f.(*protocol.SystemMessage); isSystem &&
+				s.turnState != nil {
+				s.pendingInbound = append(s.pendingInbound, f)
+			}
 			return nil
 		}
 		// No matching feed: fall through to RouteBuffered.
@@ -1631,6 +1696,29 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 		}
 		s.emitToolError(emitCtx, tc.ID, tc.Name, "io", err.Error(), "")
 		return "", true
+	}
+
+	// Phase 5.1 § η: runtime-initiated approval gate. A tool flagged
+	// RequiresApproval in the per-session snapshot runs through
+	// session:inquire(type=approval) before forwarding to the
+	// provider. The flag is set by the skill extension's ToolFilter
+	// from loaded skills' allowed-tools[].requires_approval entries.
+	if theTool.RequiresApproval {
+		approved, reason, aerr := s.requestApproval(dispatchCtx,
+			tc.Name, string(effective))
+		if aerr != nil {
+			s.emitToolError(emitCtx, tc.ID, tc.Name, "io",
+				fmt.Sprintf("approval gate: %v", aerr), "")
+			return "", true
+		}
+		if !approved {
+			if reason == "" {
+				reason = "user denied approval"
+			}
+			s.emitToolError(emitCtx, tc.ID, tc.Name, "denied_by_user",
+				reason, "")
+			return "", true
+		}
 	}
 
 	result, err := s.tools.Dispatch(dispatchCtx, theTool, effective)

@@ -2,16 +2,41 @@ package fixture
 
 import (
 	"context"
+	"io/fs"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/hugr-lab/hugen/assets"
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
+
+// defaultPromptsOnce caches a single bundled renderer for every
+// TestSessionState constructed via NewTestSessionState. Tests that
+// exercise prompt rendering through state.Prompts() reach the
+// production templates without per-test scaffolding; tests that
+// explicitly want a nil renderer can call SetPrompts(nil) after
+// construction.
+var (
+	defaultPromptsOnce sync.Once
+	defaultPromptsRdr  *prompts.Renderer
+)
+
+func defaultPrompts() *prompts.Renderer {
+	defaultPromptsOnce.Do(func() {
+		sub, err := fs.Sub(assets.PromptsFS, "prompts")
+		if err != nil {
+			return
+		}
+		defaultPromptsRdr = prompts.NewRenderer(sub, nil)
+	})
+	return defaultPromptsRdr
+}
 
 // TestSessionState is a minimal in-memory [extension.SessionState]
 // for tests that drive extensions / tool providers without a real
@@ -25,6 +50,7 @@ import (
 type TestSessionState struct {
 	id        string
 	tools     *tool.ToolManager
+	prompts   *prompts.Renderer
 	parentRef *TestSessionState
 	depth     int
 	state     sync.Map
@@ -42,9 +68,14 @@ type TestSessionState struct {
 
 // NewTestSessionState builds a TestSessionState bound to the given
 // session id. Most tests use just this — they don't need parent
-// or tools wiring.
+// or tools wiring. The default Prompts renderer is the bundled
+// production templates (assets.PromptsFS with no override); tests
+// that need a different renderer call SetPrompts on the result.
 func NewTestSessionState(sessionID string) *TestSessionState {
-	return &TestSessionState{id: sessionID}
+	return &TestSessionState{
+		id:      sessionID,
+		prompts: defaultPrompts(),
+	}
 }
 
 // WithParent wires a parent TestSessionState so Parent() returns
@@ -150,6 +181,15 @@ func (s *TestSessionState) Children() []extension.SessionState {
 // Tools implements [extension.SessionState]. Returns whatever was
 // installed via [TestSessionState.SetTools]; nil by default.
 func (s *TestSessionState) Tools() *tool.ToolManager { return s.tools }
+
+// SetPrompts installs a renderer that Prompts() returns. Tests
+// exercising extension-side prose rendering pass a real renderer
+// here; tests that only touch other surfaces leave it nil.
+func (s *TestSessionState) SetPrompts(r *prompts.Renderer) { s.prompts = r }
+
+// Prompts implements [extension.SessionState]. Returns whatever
+// was installed via [TestSessionState.SetPrompts]; nil by default.
+func (s *TestSessionState) Prompts() *prompts.Renderer { return s.prompts }
 
 // Emit implements [extension.SessionState]. Records the frame in
 // memory so tests can assert what an extension emitted; the

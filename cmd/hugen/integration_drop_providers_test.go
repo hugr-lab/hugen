@@ -47,8 +47,8 @@ func TestAdmin_DropProviders(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	if err := runtime.InstallBundledSkills(stateDir, logger); err != nil {
-		t.Fatalf("InstallBundledSkills: %v", err)
+	if err := runtime.InstallBundledHubSkills(stateDir, logger); err != nil {
+		t.Fatalf("InstallBundledHubSkills: %v", err)
 	}
 
 	cfgSvc := config.NewStaticService(config.StaticInput{
@@ -63,7 +63,8 @@ func TestAdmin_DropProviders(t *testing.T) {
 	})
 
 	skillStore := skill.NewSkillStore(skill.Options{
-		SystemRoot: filepath.Join(stateDir, "skills/system"),
+		SystemFS: runtime.SystemSkillsFS(),
+		HubRoot: filepath.Join(stateDir, "skills/hub"),
 	})
 	skills := skill.NewSkillManager(skillStore, logger)
 	view := &permsView{rules: nil}

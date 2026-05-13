@@ -15,6 +15,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/store"
@@ -53,6 +54,25 @@ type Manager struct {
 	// model routing applies at spawn time. Phase 4.2.2 §11.
 	tierIntents map[string]string
 
+	// prompts is the agent-level template renderer shared by
+	// every session in the tree. Set via WithPrompts; propagates
+	// into Deps so extension Advertisers and session-internal
+	// interrupt-text generators can render bundled templates.
+	// Phase 5.1 §α.2.
+	prompts *prompts.Renderer
+
+	// maxAsyncMissionsPerRoot caps in-flight children at the root
+	// of every spawn chain (counted at the time of an async spawn).
+	// 0 disables enforcement; runtime defaults to 5 unless
+	// WithMaxAsyncMissionsPerRoot overrides. Phase 5.1 § 4.5.
+	maxAsyncMissionsPerRoot int
+
+	// defaultInquireTimeoutMs is the per-call session:inquire
+	// deadline used when the model omits timeout_ms; also the
+	// upper-bound clamp for caller-supplied timeouts. 0 leaves the
+	// pkg/session fallback (1 hour) in place. Phase 5.1 § 2.7.
+	defaultInquireTimeoutMs int
+
 	// deps mirrors the per-session dependency bundle passed by
 	// reference to every Session in this Manager's tree (root +
 	// subagents). Populated by NewManager from the same arguments
@@ -78,6 +98,10 @@ type Manager struct {
 	// in-flight AppendEvent races the engine teardown.
 	wg sync.WaitGroup
 }
+
+// defaultMaxAsyncMissionsPerRoot is the phase-5.1 § 4.5 default
+// when WithMaxAsyncMissionsPerRoot is omitted by the runtime.
+const defaultMaxAsyncMissionsPerRoot = 5
 
 // ManagerOption configures a Manager at construction.
 type ManagerOption func(*Manager)
@@ -112,6 +136,38 @@ func WithExtensions(exts ...extension.Extension) ManagerOption {
 func WithDefaultMissionSkill(name string) ManagerOption {
 	return func(m *Manager) {
 		m.defaultMissionSkill = name
+	}
+}
+
+// WithPrompts installs the agent-level template renderer. The
+// renderer is shared across every session in the tree and is
+// surfaced both as session.Deps.Prompts (used by interrupt-text
+// generators inside pkg/session) and via state.Prompts() through
+// extension.SessionState. Phase 5.1 §α.2.
+func WithPrompts(r *prompts.Renderer) ManagerOption {
+	return func(m *Manager) {
+		m.prompts = r
+	}
+}
+
+// WithMaxAsyncMissionsPerRoot sets the per-root concurrency cap
+// for spawn_mission(wait="async"). 0 disables enforcement; the
+// manager defaults to 5 when this option is omitted. Phase 5.1
+// § 4.5.
+func WithMaxAsyncMissionsPerRoot(cap int) ManagerOption {
+	return func(m *Manager) {
+		m.maxAsyncMissionsPerRoot = cap
+	}
+}
+
+// WithDefaultInquireTimeoutMs sets the per-call session:inquire
+// deadline used when the model omits timeout_ms and as the
+// upper-bound clamp for caller-supplied timeouts. 0 leaves the
+// pkg/session package-level fallback (1 hour) in place. Phase 5.1
+// § 2.7.
+func WithDefaultInquireTimeoutMs(ms int) ManagerOption {
+	return func(m *Manager) {
+		m.defaultInquireTimeoutMs = ms
 	}
 }
 
@@ -154,16 +210,17 @@ func NewManager(
 	}
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	m := &Manager{
-		store:      store,
-		agent:      agent,
-		models:     models,
-		commands:   commands,
-		codec:      codec,
-		tools:      tools,
-		logger:     logger,
-		rootCtx:    rootCtx,
-		rootCancel: rootCancel,
-		live:       make(map[string]*session.Session),
+		store:                   store,
+		agent:                   agent,
+		models:                  models,
+		commands:                commands,
+		codec:                   codec,
+		tools:                   tools,
+		logger:                  logger,
+		rootCtx:                 rootCtx,
+		rootCancel:              rootCancel,
+		live:                    make(map[string]*session.Session),
+		maxAsyncMissionsPerRoot: defaultMaxAsyncMissionsPerRoot,
 	}
 	for _, o := range opts {
 		o(m)
@@ -180,13 +237,16 @@ func NewManager(
 		Codec:               m.codec,
 		Tools:               m.tools,
 		Logger:              m.logger,
+		Prompts:             m.prompts,
 		Extensions:          m.extensions,
 		Opts:                m.sessionOpts,
 		RootCtx:             m.rootCtx,
 		WG:                  &m.wg,
-		MaxDepth:            session.DefaultMaxDepth,
-		DefaultMissionSkill: m.defaultMissionSkill,
-		TierIntents:         m.tierIntents,
+		MaxDepth:                session.DefaultMaxDepth,
+		DefaultMissionSkill:     m.defaultMissionSkill,
+		TierIntents:             m.tierIntents,
+		MaxAsyncMissionsPerRoot: m.maxAsyncMissionsPerRoot,
+		DefaultInquireTimeoutMs: m.defaultInquireTimeoutMs,
 	}
 	// Phase 4.1b-pre stage B / D6: a root session calling
 	// requestClose hands the close request to Manager via this hook.

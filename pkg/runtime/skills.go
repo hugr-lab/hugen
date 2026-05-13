@@ -3,9 +3,11 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"path/filepath"
 
+	"github.com/hugr-lab/hugen/assets"
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/skill"
@@ -13,18 +15,46 @@ import (
 	"github.com/hugr-lab/query-engine/types"
 )
 
-// BuildSkillStack constructs the SkillStore + SkillManager from the
-// installed bundled skills. system tier reads from
-// ${stateDir}/skills/system/, local from ${stateDir}/skills/local/.
-// CommunityRoot is left empty for now — operator-pinned community
-// roots are a config-time extension that lands later.
+// SystemSkillsFS returns the embed-backed fs.FS scoped to the
+// agent-core skills (`_root`, `_mission`, …). Callers wire it
+// into skill.Options.SystemFS. Useful from tests / cmd binaries
+// that build a SkillStore directly without going through
+// [BuildSkillStack].
+//
+// Panics if the embed sub-extraction fails: the embed root is a
+// compile-time constant, so a runtime failure means the binary
+// was built without the `assets/system/` tree and booting it with
+// a silent nil would leave the agent running with no `_root` /
+// `_mission` / `_worker` autoload — catastrophic and silent.
+// Fail loud at boot instead.
+func SystemSkillsFS() fs.FS {
+	sub, err := fs.Sub(assets.SystemSkillsFS, "system")
+	if err != nil {
+		panic(fmt.Sprintf("runtime: scope assets.SystemSkillsFS: %v", err))
+	}
+	return sub
+}
+
+// BuildSkillStack constructs the SkillStore + SkillManager over
+// the three-tier production layout:
+//
+//   - **system** — embed-only from assets.SystemSkillsFS. Agent
+//     core (`_root`, `_mission`, …); never on disk.
+//   - **hub**    — `${stateDir}/skills/hub/`. Admin-delivered
+//     extensions installed at boot from assets.SkillsFS (the
+//     binary-bundled defaults). The on-disk path stays the
+//     SkillStore's read window even after the future Hugr-hub
+//     sync replaces the install step.
+//   - **local**  — `${stateDir}/skills/local/`. Operator skills,
+//     writable via skill:save.
 func BuildSkillStack(stateDir string, log *slog.Logger) (*skill.SkillManager, skill.SkillStore, error) {
 	if stateDir == "" {
 		return nil, nil, fmt.Errorf("buildSkillStack: empty state dir")
 	}
 	store := skill.NewSkillStore(skill.Options{
-		SystemRoot: filepath.Join(stateDir, "skills/system"),
-		LocalRoot:  filepath.Join(stateDir, "skills/local"),
+		SystemFS:  SystemSkillsFS(),
+		HubRoot:   filepath.Join(stateDir, "skills/hub"),
+		LocalRoot: filepath.Join(stateDir, "skills/local"),
 	})
 	mgr := skill.NewSkillManager(store, log)
 	return mgr, store, nil

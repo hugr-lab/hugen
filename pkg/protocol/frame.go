@@ -53,7 +53,17 @@ const (
 	// session_terminated row, optionally followed by SessionClosed for
 	// adapter back-compat. Producers: Manager.Terminate (root),
 	// parent.handleSubagentResult (subagent), parent.teardown (cascade).
-	KindSessionClose       Kind = "session_close"
+	KindSessionClose Kind = "session_close"
+
+	// Phase-5.1 HITL kinds. InquiryRequest bubbles up through the
+	// pump chain from any tier's session:inquire tool to root's
+	// adapter; InquiryResponse cascades down through ancestors
+	// back to the caller (matched by Payload.RequestID). Default-
+	// deny in the visibility filter — both kinds are routing
+	// envelopes, not model-facing prose. See § 2 of the phase
+	// spec.
+	KindInquiryRequest  Kind = "inquiry_request"
+	KindInquiryResponse Kind = "inquiry_response"
 )
 
 // ParticipantInfo identifies who emitted (or is addressed by) a Frame.
@@ -415,11 +425,32 @@ type SubagentStartedPayload struct {
 // "subagent_cancel: <rationale>" | "cancel_cascade" | "restart_died" |
 // "panic: <msg>" | ...
 type SubagentResultPayload struct {
-	SessionID  string `json:"session_id"`
-	Result     string `json:"result,omitempty"`
-	Reason     string `json:"reason"`
-	TurnsUsed  int    `json:"turns_used"`
+	SessionID string `json:"session_id"`
+	Result    string `json:"result,omitempty"`
+	Reason    string `json:"reason"`
+	TurnsUsed int    `json:"turns_used"`
+	// Goal mirrors the child's original mission text (truncated by
+	// the pump). Carried alongside the result so async completion
+	// renders (Phase 5.1 § 4.3) can quote the mission goal without
+	// re-querying state.
+	Goal string `json:"goal,omitempty"`
+	// RenderMode selects the visibility-projection template for
+	// this result. Empty / "default" → "[system: subagent_result]
+	// …" (the standard wait_subagents path). "async_notify" →
+	// "interrupts/async_mission_completed.tmpl" (Phase 5.1 § 4.3).
+	// "silent" → skip history projection entirely (the event is
+	// still persisted). Set by spawn_mission's async / timeout
+	// branches at spawn time and read by the parent pump when
+	// constructing the result.
+	RenderMode string `json:"render_mode,omitempty"`
 }
+
+// Subagent render modes — see [SubagentResultPayload.RenderMode].
+const (
+	SubagentRenderDefault     = ""
+	SubagentRenderAsyncNotify = "async_notify"
+	SubagentRenderSilent      = "silent"
+)
 
 // SessionTerminatedPayload is the sole terminal write for any
 // session. Reason is free-form; phase-4 writers use:
@@ -434,13 +465,13 @@ type SessionTerminatedPayload struct {
 // SessionStatus state values mark the session's lifecycle stage in
 // its own events log. Idle = quiescent (turn closed, no live work).
 // Active = a turn is in progress. The wait_* values mark explicit
-// runtime pauses; phase-5 HITL plumbing will start emitting them.
+// runtime pauses — wait_subagents during spawn-wait, wait_approval
+// / wait_user_input during a session:inquire call via
+// ToolFeed.BlockingState.
 const (
 	SessionStatusIdle          = "idle"
 	SessionStatusActive        = "active"
 	SessionStatusWaitSubagents = "wait_subagents"
-	// Phase-5 HITL placeholders — declared now so the protocol surface
-	// is stable; today no runtime code emits them.
 	SessionStatusWaitApproval  = "wait_approval"
 	SessionStatusWaitUserInput = "wait_user_input"
 )
@@ -480,6 +511,13 @@ const (
 	SystemMessageStuckNudge  = "stuck_nudge"
 	SystemMessageWhiteboard  = "whiteboard"
 	SystemMessageSpawnedNote = "spawned_note"
+	// SystemMessageParentNote is the kind for a notify_subagent
+	// directive. Phase 5.1 § 3.4 / § 3.5: the directive rides an
+	// ordinary KindSystemMessage with FromSession == parent.id so
+	// wait_subagents can intercept it via the isParentNote predicate
+	// and the visibility filter projects "[system: parent_note] ..."
+	// into the child's history when not under wait_subagents.
+	SystemMessageParentNote = "parent_note"
 )
 
 // Phase-4 system_marker subjects (machine-readable, adapter-only).
@@ -542,6 +580,64 @@ type SessionStatus struct {
 	Payload SessionStatusPayload
 }
 
+// InquiryRequestPayload is the bubble-up envelope a tier's
+// session:inquire tool emits. RequestID drives response routing
+// (cascade-down via parent-mediated responseRouting maps); the
+// caller's session id is preserved in CallerSessionID for the
+// adapter to address its eventual InquiryResponse. SessionID on
+// the embedding BaseFrame is rewritten on each hop by the pump
+// so Runtime.fanout keys correctly when the frame reaches root.
+// Phase 5.1 § 2.2.
+type InquiryRequestPayload struct {
+	RequestID       string   `json:"request_id"`
+	CallerSessionID string   `json:"caller_session_id"`
+	Type            string   `json:"type"` // approval | clarification
+	Question        string   `json:"question"`
+	Context         string   `json:"context,omitempty"`
+	Options         []string `json:"options,omitempty"`
+	TimeoutMs       int      `json:"timeout_ms,omitempty"`
+	CreatedAt       string   `json:"created_at,omitempty"`
+}
+
+// InquiryResponsePayload is the cascade-down answer. The adapter
+// addresses it to the root session id (where it received the
+// request); root's internal handler forwards it down the parent
+// chain via responseRouting until CallerSessionID == s.id at the
+// caller's hop. Approved/Reason for approval; Response/RespondedAt
+// for clarification; Timeout for runtime-synthesised expiries.
+// Phase 5.1 § 2.2.
+type InquiryResponsePayload struct {
+	RequestID       string `json:"request_id"`
+	CallerSessionID string `json:"caller_session_id"`
+	Approved        *bool  `json:"approved,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	Response        string `json:"response,omitempty"`
+	RespondedAt     string `json:"responded_at,omitempty"`
+	Timeout         bool   `json:"timeout,omitempty"`
+}
+
+// Phase-5.1 inquiry types — values for InquiryRequestPayload.Type.
+const (
+	InquiryTypeApproval      = "approval"
+	InquiryTypeClarification = "clarification"
+)
+
+// InquiryRequest is the frame that bubbles a [session:inquire]
+// call up the parent chain to root, where the adapter surfaces
+// it to the user. Phase 5.1 § 2.
+type InquiryRequest struct {
+	BaseFrame
+	Payload InquiryRequestPayload
+}
+
+// InquiryResponse is the cascade-down answer carried back to
+// the caller through responseRouting tables on each ancestor.
+// Phase 5.1 § 2.
+type InquiryResponse struct {
+	BaseFrame
+	Payload InquiryResponsePayload
+}
+
 // OpaqueFrame represents a Frame variant the codec does not know.
 // Phase 2 introduces opaque round-trip so future-phase variants
 // (sub_agent_*, approval_*, clarification_*, ...) survive an
@@ -577,6 +673,8 @@ func (f SessionTerminated) payload() any { return f.Payload }
 func (f SessionClose) payload() any      { return f.Payload }
 func (f SystemMessage) payload() any     { return f.Payload }
 func (f SessionStatus) payload() any     { return f.Payload }
+func (f InquiryRequest) payload() any    { return f.Payload }
+func (f InquiryResponse) payload() any   { return f.Payload }
 func (f OpaqueFrame) payload() any       { return f.RawPayload }
 
 // newOpaqueFrame is package-private so only the codec materialises
@@ -758,6 +856,36 @@ func NewSystemMessage(sessionID string, author ParticipantInfo, kind, content st
 	return &SystemMessage{
 		BaseFrame: newBase(sessionID, KindSystemMessage, author),
 		Payload:   SystemMessagePayload{Kind: kind, Content: content},
+	}
+}
+
+// NewInquiryRequest builds the bubble-up envelope a session's
+// inquire tool emits. sessionID is the caller's id at emit time;
+// pump rewrites SessionID on each hop while CallerSessionID
+// (preserved in the payload) carries the originator end-to-end.
+// Phase 5.1 § 2.
+func NewInquiryRequest(sessionID string, author ParticipantInfo, p InquiryRequestPayload) *InquiryRequest {
+	if p.CallerSessionID == "" {
+		p.CallerSessionID = sessionID
+	}
+	if p.CreatedAt == "" {
+		p.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	return &InquiryRequest{
+		BaseFrame: newBase(sessionID, KindInquiryRequest, author),
+		Payload:   p,
+	}
+}
+
+// NewInquiryResponse builds the cascade-down answer the adapter
+// hands to runtime.Submit. The adapter addresses it to the root
+// session id (the same id it received the request on); ancestors
+// forward it down the chain until CallerSessionID == s.id.
+// Phase 5.1 § 2.
+func NewInquiryResponse(sessionID string, author ParticipantInfo, p InquiryResponsePayload) *InquiryResponse {
+	return &InquiryResponse{
+		BaseFrame: newBase(sessionID, KindInquiryResponse, author),
+		Payload:   p,
 	}
 }
 

@@ -202,6 +202,18 @@ func (c *Codec) materialise(base BaseFrame, payload []byte) (Frame, error) {
 			return nil, err
 		}
 		return &ExtensionFrame{BaseFrame: base, Payload: p}, nil
+	case KindInquiryRequest:
+		var p InquiryRequestPayload
+		if err := unmarshalPayload(payload, &p); err != nil {
+			return nil, err
+		}
+		return &InquiryRequest{BaseFrame: base, Payload: p}, nil
+	case KindInquiryResponse:
+		var p InquiryResponsePayload
+		if err := unmarshalPayload(payload, &p); err != nil {
+			return nil, err
+		}
+		return &InquiryResponse{BaseFrame: base, Payload: p}, nil
 	}
 	// Phase 2 (R-Plan-26 / FR-024): non-empty unknown kinds round-trip
 	// as *OpaqueFrame so future-phase variants survive the wire even

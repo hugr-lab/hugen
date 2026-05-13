@@ -129,7 +129,36 @@ type SubagentsView interface {
 	// is absent in YAML — see static.go.
 	DefaultStuckDetection() StuckPolicy
 
+	// MaxAsyncMissionsPerRoot caps the number of in-flight async
+	// missions (spawn_mission with wait="async") per root session.
+	// Default 5 if absent. Phase 5.1 § 4.5.
+	MaxAsyncMissionsPerRoot() int
+
 	OnUpdate(fn func()) (cancel func())
+}
+
+// HitlView is the operator-config surface for the phase-5.1 HITL
+// primitives. Today it carries one knob — the per-call deadline
+// session:inquire uses when the model omits timeout_ms. Future
+// HITL knobs (default approval action, max simultaneous inquiries
+// per session) extend this view rather than spilling into
+// SubagentsView.
+type HitlView interface {
+	// DefaultTimeoutMs is the per-call session:inquire deadline
+	// when the model omits timeout_ms. Default 1 hour if absent.
+	// Also acts as the upper-bound clamp — a model that asks for
+	// more is silently reduced and a warn is logged. Phase 5.1
+	// § 2.7.
+	DefaultTimeoutMs() int
+
+	OnUpdate(fn func()) (cancel func())
+}
+
+// HitlConfig is the data shape NewStaticService receives via
+// StaticInput.Hitl. Absent or zero fields take the runtime
+// defaults declared in static.go (DefaultTimeoutMs = 1 hour).
+type HitlConfig struct {
+	DefaultTimeoutMs int `mapstructure:"default_timeout_ms" yaml:"default_timeout_ms,omitempty"`
 }
 
 // StuckPolicy is the operator-config shape mirroring the per-skill
@@ -169,7 +198,8 @@ func (p StuckPolicy) IsEnabled() bool {
 // defaults declared in static.go (MaxDepth=5, MaxTurns=15,
 // StuckDetection runtime defaults).
 type SubagentsConfig struct {
-	MaxDepth       int         `mapstructure:"max_depth"        yaml:"max_depth,omitempty"`
-	MaxTurns       int         `mapstructure:"max_turns"        yaml:"max_turns,omitempty"`
-	StuckDetection StuckPolicy `mapstructure:"stuck_detection"  yaml:"stuck_detection,omitempty"`
+	MaxDepth                int         `mapstructure:"max_depth"                   yaml:"max_depth,omitempty"`
+	MaxTurns                int         `mapstructure:"max_turns"                   yaml:"max_turns,omitempty"`
+	StuckDetection          StuckPolicy `mapstructure:"stuck_detection"             yaml:"stuck_detection,omitempty"`
+	MaxAsyncMissionsPerRoot int         `mapstructure:"max_async_missions_per_root" yaml:"max_async_missions_per_root,omitempty"`
 }

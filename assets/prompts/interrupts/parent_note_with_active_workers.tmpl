@@ -1,0 +1,17 @@
+[parent note received during active work]
+
+{{.ParentRole}} ({{.ParentID}}) directs:
+{{.Content}}
+
+Your active workers:
+{{- range .Workers}}
+  - {{.ID}} ({{.Status}}): {{.Goal}}
+{{- end}}
+
+Decide:
+  - directive applies to in-flight workers → notify_subagent each with relevant slice
+  - workers already done → spawn_wave with updated parameters
+  - directive fundamentally changes plan → cancel workers and re-plan
+  - already incorporated / not applicable → plan:comment and resume
+
+Resume wait_subagents after dispatching.

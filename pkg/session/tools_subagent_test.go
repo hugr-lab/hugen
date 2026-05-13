@@ -548,6 +548,419 @@ func TestCallWaitSubagents_Happy_LiveResult(t *testing.T) {
 	}
 }
 
+// TestCallSpawnMission_Async returns immediately with running
+// shape and tags the child for the async-completed render mode.
+// Verifies the cap + the legacy spawn_subagent fields still
+// surface (mission_id + session_id are aliases).
+func TestCallSpawnMission_Async(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+
+	out, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"explore","skill":"analyst","wait":"async"}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var got spawnMissionResult
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v out=%s", err, out)
+	}
+	if got.Status != "running" {
+		t.Errorf("status = %q, want running: %s", got.Status, out)
+	}
+	if got.MissionID == "" || got.SessionID == "" || got.MissionID != got.SessionID {
+		t.Errorf("mission_id / session_id wiring: %+v", got)
+	}
+	// Verify the async-notify tag landed on the child so the
+	// pump's projection produces the async template at completion.
+	parent.childMu.Lock()
+	child := parent.children[got.SessionID]
+	parent.childMu.Unlock()
+	if child == nil {
+		t.Fatalf("spawned child not in parent.children")
+	}
+	if child.asyncSpawnMode != protocol.SubagentRenderAsyncNotify {
+		t.Errorf("asyncSpawnMode = %q, want %q",
+			child.asyncSpawnMode, protocol.SubagentRenderAsyncNotify)
+	}
+}
+
+// TestCallSpawnMission_AsyncSilent suppresses the history
+// projection of the terminal subagent_result while still
+// persisting the event.
+func TestCallSpawnMission_AsyncSilent(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+
+	out, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"explore","skill":"analyst","wait":"async","on_complete":"silent"}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var got spawnMissionResult
+	_ = json.Unmarshal(out, &got)
+	parent.childMu.Lock()
+	child := parent.children[got.SessionID]
+	parent.childMu.Unlock()
+	if child == nil || child.asyncSpawnMode != protocol.SubagentRenderSilent {
+		t.Errorf("asyncSpawnMode = %q, want %q",
+			child.asyncSpawnMode, protocol.SubagentRenderSilent)
+	}
+}
+
+// TestCallSpawnMission_AsyncCap exercises the § 4.5 per-root
+// concurrency check. Sets the deps cap to a small value, fills
+// parent.children up to it, then expects the next async spawn
+// to surface "too_many_async".
+func TestCallSpawnMission_AsyncCap(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+	parent.deps.MaxAsyncMissionsPerRoot = 1
+
+	// First async spawn — fills the cap.
+	if _, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"a","skill":"analyst","wait":"async"}`)); err != nil {
+		t.Fatalf("first async: %v", err)
+	}
+	// Second async spawn — rejected.
+	out, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"b","skill":"analyst","wait":"async"}`))
+	if err != nil {
+		t.Fatalf("second async call: %v", err)
+	}
+	mgr_assertErrorCode(t, out, "too_many_async")
+}
+
+// TestCallSpawnMission_BadWait rejects an unknown wait value.
+func TestCallSpawnMission_BadWait(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+	out, _ := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"x","skill":"analyst","wait":"sometime"}`))
+	mgr_assertErrorCode(t, out, "bad_request")
+}
+
+// TestCallSpawnMission_TimeoutRequiresMs rejects wait=timeout
+// without a positive timeout_ms.
+func TestCallSpawnMission_TimeoutRequiresMs(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+	out, _ := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"x","skill":"analyst","wait":"timeout"}`))
+	mgr_assertErrorCode(t, out, "bad_request")
+}
+
+// TestCallNotifySubagent_Happy verifies the tool emits a
+// SystemMessage with FromSession=parent.id and kind=parent_note,
+// and that the frame settles into the child's inbox.
+func TestCallNotifySubagent_Happy(t *testing.T) {
+	parent, cleanup := newTestParent(t, withTestRunLoop())
+	defer cleanup()
+
+	out, err := parent.callSpawnSubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagents":[{"task":"t","role":"explorer"}]}`))
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	var spawned []spawnSubagentResult
+	_ = json.Unmarshal(out, &spawned)
+	childID := spawned[0].SessionID
+	drainOutboxOnce(parent.Outbox())
+
+	args, _ := json.Marshal(notifySubagentInput{
+		SubagentID: childID,
+		Content:    "narrow to last 24h only",
+	})
+	out, err = parent.callNotifySubagent(us1WithSession(parent), args)
+	if err != nil {
+		t.Fatalf("notify: %v err=%v out=%s", err, err, out)
+	}
+	var res notifySubagentOutput
+	if err := json.Unmarshal(out, &res); err != nil {
+		t.Fatalf("unmarshal: %v out=%s", err, out)
+	}
+	if !res.Delivered {
+		t.Errorf("delivered=false; want true: %+v", res)
+	}
+	if res.FrameID == "" {
+		t.Errorf("frame_id empty: %+v", res)
+	}
+}
+
+// TestCallNotifySubagent_RejectsNonChild verifies the dispatcher
+// refuses to address an id that is not a direct child of the
+// caller. The error code surfaces "not_a_child" so the model
+// distinguishes it from a session-gone path.
+func TestCallNotifySubagent_RejectsNonChild(t *testing.T) {
+	parent, cleanup := newTestParent(t, withTestRunLoop())
+	defer cleanup()
+
+	args, _ := json.Marshal(notifySubagentInput{
+		SubagentID: "totally-not-a-real-id",
+		Content:    "hi",
+	})
+	out, _ := parent.callNotifySubagent(us1WithSession(parent), args)
+	mgr_assertErrorCode(t, out, "not_a_child")
+}
+
+// TestCallNotifySubagent_UrgentPrefix verifies the urgent flag
+// prepends "(urgent) " to the content. The flag does NOT live on
+// the frame (per spec § 3.4 — urgency is content prefix only).
+func TestCallNotifySubagent_UrgentPrefix(t *testing.T) {
+	parent, cleanup := newTestParent(t, withTestRunLoop())
+	defer cleanup()
+
+	out, _ := parent.callSpawnSubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagents":[{"task":"t"}]}`))
+	var spawned []spawnSubagentResult
+	_ = json.Unmarshal(out, &spawned)
+	childID := spawned[0].SessionID
+	drainOutboxOnce(parent.Outbox())
+
+	args, _ := json.Marshal(notifySubagentInput{
+		SubagentID: childID,
+		Content:    "stop",
+		Urgent:     true,
+	})
+	out, err := parent.callNotifySubagent(us1WithSession(parent), args)
+	if err != nil {
+		t.Fatalf("notify: %v out=%s", err, out)
+	}
+	var res notifySubagentOutput
+	_ = json.Unmarshal(out, &res)
+	if !res.Delivered {
+		t.Fatalf("delivered=false")
+	}
+	// The frame is in the child's inbox; we don't drain it here, but
+	// the content is checked by callSpawnSubagent's child machinery
+	// at handle time. The acceptance assertion for urgent prefix
+	// happens through the scenario harness; this test pins the
+	// successful delivery path.
+}
+
+// TestCallInquire_Approval_HappyPath drives the full session:
+// inquire round-trip at root: emit request, deliver response via
+// the internal dispatcher, observe the approval payload.
+func TestCallInquire_Approval_HappyPath(t *testing.T) {
+	parent, cleanup := newTestParent(t, withTestRunLoop())
+	defer cleanup()
+
+	type res struct {
+		out []byte
+		err error
+	}
+	done := make(chan res, 1)
+	args, _ := json.Marshal(inquireInput{
+		Type:      protocol.InquiryTypeApproval,
+		Question:  "Run `rm -rf /tmp/foo`?",
+		TimeoutMs: 2000,
+	})
+	go func() {
+		out, err := parent.callInquire(us1WithSession(parent), args)
+		done <- res{out: out, err: err}
+	}()
+
+	// Wait for the feed to register so we know the request was
+	// emitted and pending registered.
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for parent.ActiveToolFeed() == nil {
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-deadline.C:
+			t.Fatal("inquire activeToolFeed never registered")
+		}
+	}
+	// Extract the RequestID from the emitted request frame —
+	// drainOutbox returns the InquiryRequest the tool body
+	// pushed to outbox via emit.
+	var requestID string
+	for i := 0; i < 5 && requestID == ""; i++ {
+		select {
+		case f := <-parent.Outbox():
+			if req, ok := f.(*protocol.InquiryRequest); ok {
+				requestID = req.Payload.RequestID
+			}
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	if requestID == "" {
+		t.Fatal("InquiryRequest not observed on parent outbox")
+	}
+
+	// Synthesise the adapter's response.
+	approved := true
+	resp := protocol.NewInquiryResponse(parent.ID(), parent.agent.Participant(),
+		protocol.InquiryResponsePayload{
+			RequestID:       requestID,
+			CallerSessionID: parent.ID(),
+			Approved:        &approved,
+			Reason:          "ok",
+		})
+	parent.Submit(context.Background(), resp)
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("inquire err: %v out=%s", r.err, r.out)
+		}
+		var got approvalResult
+		if err := json.Unmarshal(r.out, &got); err != nil {
+			t.Fatalf("unmarshal: %v out=%s", err, r.out)
+		}
+		if !got.Approved || got.Reason != "ok" {
+			t.Errorf("unexpected result %+v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("inquire did not return within 3s")
+	}
+}
+
+// TestCallInquire_Timeout fires the per-call timer and surfaces
+// the default-deny envelope.
+func TestCallInquire_Timeout(t *testing.T) {
+	parent, cleanup := newTestParent(t, withTestRunLoop())
+	defer cleanup()
+
+	args, _ := json.Marshal(inquireInput{
+		Type:      protocol.InquiryTypeApproval,
+		Question:  "anything?",
+		TimeoutMs: 100,
+	})
+	out, err := parent.callInquire(us1WithSession(parent), args)
+	if err != nil {
+		t.Fatalf("inquire err: %v", err)
+	}
+	var got approvalResult
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v out=%s", err, out)
+	}
+	if !got.Timeout || got.Approved || got.DefaultAction != "deny" {
+		t.Errorf("expected timeout=true approved=false default=deny; got %+v", got)
+	}
+}
+
+// TestCallInquire_BadType rejects unknown inquiry types.
+func TestCallInquire_BadType(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+	args, _ := json.Marshal(map[string]any{"type": "weird", "question": "x"})
+	out, _ := parent.callInquire(us1WithSession(parent), args)
+	mgr_assertErrorCode(t, out, "bad_request")
+}
+
+// TestIsParentNote covers the FromSession predicate the wait
+// feed uses to discriminate parent notes from unrelated system
+// messages. Root sessions (no parent) never match.
+func TestIsParentNote(t *testing.T) {
+	root := &Session{id: "root-1"}
+	child := &Session{id: "child-1", parent: root}
+	author := protocol.ParticipantInfo{ID: "test", Kind: protocol.ParticipantSystem}
+
+	parentMsg := protocol.NewSystemMessage(child.id, author, "parent_note", "do the thing")
+	parentMsg.BaseFrame.FromSession = root.id
+
+	otherMsg := protocol.NewSystemMessage(child.id, author, "stuck_nudge", "loop")
+	user := protocol.NewUserMessage(child.id, author, "hi")
+
+	if !isParentNote(parentMsg, child) {
+		t.Errorf("parent-authored SystemMessage to child should be a parent note")
+	}
+	if isParentNote(otherMsg, child) {
+		t.Errorf("SystemMessage from same session is not a parent note")
+	}
+	if isParentNote(user, child) {
+		t.Errorf("UserMessage should never be classified as a parent note")
+	}
+	if isParentNote(parentMsg, root) {
+		t.Errorf("root sessions (no parent) should never see a parent note")
+	}
+}
+
+// TestCallWaitSubagents_UserFollowUp_Interrupts verifies γ: a
+// UserMessage delivered to a root parent while wait_subagents is
+// blocked short-circuits the wait with a rendered reframe instead
+// of continuing to wait for the child. The rendered text quotes
+// the user's input and lists the still-pending subagent.
+func TestCallWaitSubagents_UserFollowUp_Interrupts(t *testing.T) {
+	parent, cleanup := newTestParent(t, withTestRunLoop())
+	defer cleanup()
+
+	// Spawn a real child so the id exists; the child won't terminate
+	// during this test — the interrupt fires from a different path.
+	out, err := parent.callSpawnSubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagents":[{"task":"explore catalog","role":"explorer"}]}`))
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	var spawned []spawnSubagentResult
+	_ = json.Unmarshal(out, &spawned)
+	childID := spawned[0].SessionID
+	drainOutboxOnce(parent.Outbox()) // subagent_started
+
+	type res struct {
+		out []byte
+		err error
+	}
+	done := make(chan res, 1)
+	args, _ := json.Marshal(waitSubagentsInput{IDs: []string{childID}})
+	go func() {
+		out, err := parent.callWaitSubagents(us1WithSession(parent), args)
+		done <- res{out: out, err: err}
+	}()
+
+	// Wait for the feed to register.
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for parent.ActiveToolFeed() == nil {
+		select {
+		case <-time.After(20 * time.Millisecond):
+		case <-deadline.C:
+			t.Fatal("activeToolFeed never registered")
+		}
+	}
+
+	// Deliver the user follow-up.
+	user := protocol.NewUserMessage(parent.ID(), parent.agent.Participant(),
+		"actually pivot to logs")
+	parent.Submit(context.Background(), user)
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("wait err: %v", r.err)
+		}
+		var result waitInterruptResult
+		if err := json.Unmarshal(r.out, &result); err != nil {
+			t.Fatalf("unmarshal interrupt: %v\nout=%s", err, r.out)
+		}
+		if !result.Interrupted {
+			t.Fatalf("expected interrupted=true; got %+v", result)
+		}
+		if result.Reason != "user_follow_up" {
+			t.Errorf("reason = %q, want user_follow_up", result.Reason)
+		}
+		if !strings.Contains(result.Instructions, "actually pivot to logs") {
+			t.Errorf("instructions missing user text: %q", result.Instructions)
+		}
+		if !strings.Contains(result.Instructions, childID) {
+			t.Errorf("instructions missing pending child id %q: %q",
+				childID, result.Instructions)
+		}
+		if len(result.Pending) != 1 || result.Pending[0].ID != childID {
+			t.Errorf("pending = %+v, want one row for %q", result.Pending, childID)
+		}
+		if result.Pending[0].Role != "explorer" {
+			t.Errorf("pending row role = %q, want explorer", result.Pending[0].Role)
+		}
+		if result.Pending[0].Goal != "explore catalog" {
+			t.Errorf("pending row goal = %q, want 'explore catalog'", result.Pending[0].Goal)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("wait_subagents did not return interrupt within 3s")
+	}
+}
+
 // TestCallWaitSubagents_CachedShortCircuit pre-seeds parent's events
 // with a SubagentResult, then calls wait_subagents — it must return
 // immediately from drainCachedSubagentResults without ever

@@ -1,0 +1,109 @@
+# cancel_and_respawn — phase 5.1 γ + § 5.
+#
+# User interrupts an in-flight mission with a fundamentally
+# different ask. Root reads the interrupt envelope, decides the
+# active mission is invalidated, calls session:subagent_cancel
+# with a stated rationale, and spawns a fresh mission for the new
+# scope. The cancelled mission's events end with reason=
+# "subagent_cancel: <text>"; whiteboard / notepad writes made
+# before the cancel survive.
+#
+# By-eye assertions:
+#
+#   1. Step 1 — root spawned ONE analyst mission (async). Mission
+#      events show spawn_wave + at least one worker tool_call
+#      against hugr-main before the cancel arrives.
+#
+#   2. Step 2 — root's tool_calls in order: subagent_cancel
+#      (targeting the first mission's id) + spawn_mission (fresh
+#      mission for the new ask) + wait_subagents.
+#
+#   3. First mission's terminal SubagentResult / session_terminated
+#      reason starts with "subagent_cancel:" carrying root's
+#      rationale string.
+#
+#   4. Final root answer reflects the new ask only — does not
+#      mention partial work from the cancelled mission.
+#
+# Tuning notes:
+#   - Cancel rationale must be a sentence the model crafted from
+#     the user's pivot, not the literal user text.
+#   - tier-root constitution § "When a follow-up arrives ..."
+#     enumerates the cancel-and-respawn branch — verify Gemma
+#     picks it over notify_subagent for a fundamental change.
+name: cancel_and_respawn
+requires: [hugr]
+
+steps:
+  - say: |
+      Build a detailed analyst report on `northwind.orders`:
+      seasonality, basket-size trends, top customers. Take your
+      time; run in the background.
+    budget: 600s
+    wait_for_subagents: 360s
+
+    queries:
+      - name: tool_calls_root_step1
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+  - say: |
+      Stop — actually I need a completely different analysis.
+      Look at the `customers` table and tell me about the
+      geographic distribution. Forget the orders work entirely.
+    budget: 600s
+    wait_for_subagents: 480s
+
+    queries:
+      # Cancel + respawn sequence on root.
+      - name: tool_calls_root_step2
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # First mission's terminal — reason must start with
+      # "subagent_cancel:" + a model-crafted rationale.
+      - name: cancelled_mission_terminal
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, terminated: (.events // []) | map({reason: .metadata.reason})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id status
+                  events(filter: {event_type: {eq: "session_terminated"}}) {
+                    metadata
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      - name: root_final_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 3
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }

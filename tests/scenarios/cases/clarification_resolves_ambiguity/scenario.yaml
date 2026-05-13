@@ -1,0 +1,136 @@
+# clarification_resolves_ambiguity — phase 5.1 § 2 acceptance.
+#
+# User asks an ambiguous question. The mission (NOT root —
+# root delegates per ι constitution) detects the ambiguity and
+# calls session:inquire(type="clarification") with a focused
+# question and optional `options`. The request bubbles up to
+# root; the harness drives a deterministic clarification
+# response. The mission picks the disambiguated branch and
+# returns a concrete result.
+#
+# By-eye assertions:
+#
+#   1. Mission's tool_calls include session:inquire with
+#      type="clarification". The question argument quotes the
+#      specific ambiguity (e.g. "by revenue or volume?").
+#
+#   2. The subtree rooted at $sid (filter root_session_id ==
+#      $sid) carries the persisted inquiry_request frame with
+#      Payload.Type="clarification" + the same question. The
+#      bubble is routing-only (outbox); persistence happens once
+#      at the originator, so the row lives on the mission, not
+#      on root — see spec §"Inquiry routing".
+#
+#   3. Harness Submits an InquiryResponse with the chosen option.
+#      Mission's tool_result event for inquire carries the
+#      response in its content.
+#
+#   4. Mission's subsequent waves pick the branch consistent
+#      with the clarification (worker tasks include the chosen
+#      dimension).
+#
+#   5. Root's final reply quotes the clarified answer, not a
+#      hedge ("by both X and Y...").
+#
+# Tuning notes:
+#   - Mission constitution § "When you need user input or
+#     approval" — verify the model picks inquire over making
+#     an assumption for ambiguous quantitative questions.
+#   - Harness needs an InquiryRequest interceptor; reusable
+#     between this scenario and approval_gate_blocks_mutation.
+name: clarification_resolves_ambiguity
+requires: [hugr]
+
+steps:
+  - say: |
+      Tell me the top customer in `northwind`.
+    # Ambiguous: by revenue, by order count, by basket size?
+    # Mission should ask before fanning out workers.
+    budget: 420s
+    wait_for_subagents: 360s
+
+    # Phase 5.1 κ — harness intercepts the bubbled inquire and
+    # scripts the answer. First rule prefers a revenue-flavoured
+    # question (the natural ambiguity the model is expected to
+    # detect); second is a fallback for clarifications that don't
+    # contain "revenue" in the prompt. Both answer with the
+    # disambiguation "by revenue" so the mission picks the same
+    # branch end-to-end.
+    inquiry_responses:
+      - match:
+          type: clarification
+          question_contains: revenue
+        respond:
+          response: "by revenue"
+        delay: 200ms
+      - match:
+          type: clarification
+        respond:
+          response: "by revenue"
+        delay: 200ms
+
+    queries:
+      # Mission's tool sequence — expect session:inquire with
+      # type=clarification near the beginning, BEFORE any
+      # spawn_wave.
+      - name: mission_tool_calls
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, tools: (.events // []) | map({seq, tool: .tool_name, args: .tool_args})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "tool_call"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq tool_name tool_args
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Bubbled inquiry_request lives on the originator (mission),
+      # not on root — outbox-only bubble per spec §"Inquiry routing".
+      # Scan the whole subtree rooted at $sid to find it.
+      - name: inquiry_requests_in_tree
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {root_session_id: {eq: $sid}, event_type: {eq: "inquiry_request"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq session_id content metadata }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Mission's inquire tool_result envelope — must carry the
+      # adapter's response in content.
+      - name: mission_inquire_results
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map({seq, session_id, content})") {
+              hub { db { agent {
+                session_events(
+                  filter: {event_type: {eq: "tool_result"}, tool_name: {eq: "session_inquire"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq session_id content }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      - name: root_final_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 3
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }

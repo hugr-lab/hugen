@@ -50,6 +50,14 @@ const (
 var kindRoutes = map[protocol.Kind]InboundRoute{
 	protocol.KindSubagentResult: RouteToolFeed,
 	protocol.KindExtensionFrame: RouteInternal,
+	// Phase 5.1 HITL: InquiryResponse cascades down through ancestor
+	// sessions via responseRouting maps; the routing-only handler
+	// runs immediately so a mid-turn ancestor does not stall the
+	// user-visible response delivery. InquiryRequest stays in the
+	// outbox (default RouteBuffered → drain) — it is observed by
+	// the parent's pump on the cross-session path, not by inbound
+	// routing.
+	protocol.KindInquiryResponse: RouteInternal,
 }
 
 // routeFor looks up the InboundRoute for a Frame Kind. Default is

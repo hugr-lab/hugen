@@ -47,8 +47,10 @@ metadata:
         # alongside them via de-duplication.
         notepad:
           tags:
+            - name: data-source
+              hint: 'Source / module inventory facts — which Hugr module holds data for domain X, what each registered source tracks, source ↔ module map. Distinct from `schema-finding`: data-source answers "where to look", schema-finding answers "what is inside".'
             - name: schema-finding
-              hint: Discovered table structures, field semantics, soft-delete columns, naming conventions.
+              hint: Discovered table structures, field semantics, soft-delete columns, naming conventions — facts INSIDE a chosen module. Source / module identity goes to `data-source`.
             - name: query-pattern
               hint: A validated SQL/GraphQL template (shape only) that produced useful results — reuse before re-deriving.
             - name: data-quality-issue
@@ -58,9 +60,179 @@ metadata:
             User goal (delegated by root): {{ .UserGoal }}
 
             ══════════════════════════════════════════════════════
+            STAGE 0 — SOURCE PICKUP (data tasks only).
+
+            For inventory questions ("what data is in Hugr",
+            "what modules exist") or trivial Q&A — SKIP this
+            stage; the checklist below handles those shapes
+            (overview / simple-answerer).
+
+            For DATA tasks (you'll need to query a Hugr module),
+            FIRST identify exactly ONE module the goal lives in.
+            Guessing wrong wastes the whole schema → query →
+            execute pipeline. Decision tree:
+
+              1. Check the `## Notepad snapshot` block at the
+                 top of this prompt for prior `data-source`
+                 notes — that category is specifically the
+                 "which module holds data for X" answer.
+                 Optionally call
+                 `notepad:search(category="data-source",
+                 query="<user-goal keywords>")` to retrieve any
+                 longer notes truncated in the snapshot. Accept
+                 the note ONLY when it names exactly ONE module
+                 AND the user's goal maps to it unambiguously.
+                 Fuzzy match, stale note, "probably this one" —
+                 don't rely on it; continue to step 2.
+
+              2. If the notepad has no clear match, spawn ONE
+                 wave-0 `overview` worker. The task string is
+                 deliberately worded so overview does NOT pick
+                 a winner — it returns a labelled candidate
+                 list and you decide:
+                   spawn_wave(label="source-scout",
+                              subagents=[{
+                     skill: "analyst",
+                     role:  "overview",
+                     task:  "Goal: <restate the user goal>.
+                             List every Hugr data source +
+                             top-level module. For each, give
+                             a ONE-LINE confidence assessment
+                             against the goal, prefixed with
+                             EXACTLY one of these labels:
+                               [fits-explicit]   — direct
+                                 named match (the source's
+                                 scope EXPLICITLY covers the
+                                 goal's subject and region)
+                               [fits-possibly]  — could
+                                 contain it (broader scope,
+                                 region overlap, plausible
+                                 but not exact)
+                               [doesnt-fit]     — no
+                                 plausible link to the goal
+                             DO NOT crown a 'most likely' or
+                             'best' candidate. DO NOT say
+                             'I will next explore X'.
+                             Return ONLY the labelled list +
+                             a one-sentence footer summary
+                             of how many fits-* there are.
+                             Mission decides what to do with
+                             the list — the user may need to
+                             clarify which one."
+                   }])
+                 Wait for its result on the whiteboard.
+
+              3. Read overview's labelled list. The decision
+                 is now MECHANICAL — count, don't judge:
+
+                   let E = count of [fits-explicit] entries
+                   let P = count of [fits-possibly] entries
+
+                 • E == 1 AND P == 0  → use that single
+                   module, proceed to the checklist.
+                 • E + P >= 2  (ANY ambiguity — two
+                   fits-explicit, one explicit + one
+                   possibly, several fits-possibly, etc.) →
+                   you MUST call inquire. This INCLUDES the
+                   case `E == 1 AND P == 1`. The temptation
+                   to reason "fits-explicit wins over
+                   fits-possibly, take the explicit one" is
+                   EXACTLY the trap. `fits-possibly` LITERALLY
+                   means "this also fits the goal" — a
+                   competing candidate the user may prefer
+                   for reasons overview cannot see (freshness,
+                   scope, ownership, compliance, cost). Do
+                   NOT collapse "explicit + possibly" into a
+                   single pick. Call:
+                     session:inquire(
+                       type:     "clarification",  // REQUIRED
+                       question: "I need to pick the right
+                                  data source for your
+                                  request — which one should
+                                  I use?",                   // REQUIRED
+                       options:  [<every fits-* candidate>,
+                                  "none of the above /
+                                   I'll rephrase"],          // []string of labels
+                       context:  "<one line per candidate
+                                  with overview's
+                                  fits-explicit /
+                                  fits-possibly label and
+                                  the short reason>"          // free-form
+                     )
+                   After the user picks, use that module. If
+                   the user picks "none of the above" or
+                   names something different, follow their
+                   lead.
+                 • E == 0 AND P == 0  → call
+                   `session:abstain` with a reason naming
+                   the gap. Do NOT fabricate a module name.
+                 • E == 0 AND P >= 1  → also inquire (you
+                   have only weak matches; the user picks
+                   between weak fits or "rephrase").
+
+              Worked example (the names are placeholders —
+              the SHAPE is what matters, replace with whatever
+              overview actually returns):
+
+                Goal: "<X> for <Y>"
+                Overview:
+                  [fits-explicit] mod_A  — directly tracks
+                                            X for Y
+                  [fits-possibly] mod_B  — tracks X at a
+                                            broader scope
+                                            that includes Y
+                  [doesnt-fit]    mod_C, mod_D, ...
+
+                E=1, P=1 → MUST inquire. Both mod_A and
+                mod_B legitimately answer the question; they
+                may differ in scope, freshness, ownership,
+                units, or update cadence. The user picks;
+                you don't guess.
+
+              The same arithmetic applies regardless of
+              domain. Concrete shapes this pattern routinely
+              covers on a Hugr deployment:
+
+                • Geographic overlap — a regional source vs
+                  a country-wide source vs a continent-wide
+                  source, all of which technically cover the
+                  same physical place.
+                • Multi-system overlap — the "customers"
+                  table can live in CRM, ERP, billing, and
+                  marketing-events modules simultaneously,
+                  each with different completeness.
+                • Version / freshness overlap — the live
+                  operational store vs a nightly snapshot vs
+                  a curated data-warehouse layer.
+                • Topical overlap — a domain-specific module
+                  vs a universal catalogue module that
+                  re-exports the same entity.
+                • Tenant / scope overlap — a tenant-specific
+                  module vs the cross-tenant aggregate.
+
+              In every shape, multiple modules CAN serve the
+              query; the choice depends on user intent the
+              prompt doesn't surface.
+
+              Erring toward asking is the right call here. Do
+              NOT collapse "most likely" or "best candidate"
+              into a single pick — those framings are exactly
+              the shapes that need user confirmation. If
+              overview violates its contract and writes "most
+              likely" anyway, ignore that framing and apply
+              the mechanical rule above.
+
+            Every downstream worker scopes its task to the
+            chosen module explicitly: "explore <module>.orders
+            schema", "build query against <module>.customers".
+            This stops schema-explorer / query-builder from
+            wandering into adjacent modules.
+
+            ══════════════════════════════════════════════════════
             PRE-FLIGHT CHECKLIST — do this BEFORE the first
-            spawn_wave. Skipping these steps is the #1 source of
-            wasted latency.
+            spawn_wave (after Stage 0 picked the module, for
+            data tasks). Skipping these steps is the #1 source
+            of wasted latency.
 
             ☐ A. CLASSIFY first, then COUNT.
               First decide the SHAPE of the user goal:
@@ -69,8 +241,9 @@ metadata:
                   `overview` worker, single wave. Done.
                   Do NOT spawn schema-explorer here.
                 • Single entity describe / count / query →
-                  schema-explorer → query-builder (→ data-
-                  analyst → report-builder for full analysis).
+                  Stage 0 first (above), then schema-explorer →
+                  query-builder (→ data-analyst → report-
+                  builder for full analysis).
               Then COUNT independent angles inside the goal —
               "an angle" = one entity / table / module / question
               that can be explored without waiting on another.
@@ -207,11 +380,26 @@ metadata:
           top-level modules exist, what each module's purpose is.
           ONLY uses `discovery-search_data_sources` and
           `discovery-search_modules` — never drills into table
-          schemas or runs data queries. Returns a tight catalogue
-          summary, one line per source / module. Single wave; one
-          worker. For "what data is in hugr", "what sources are
-          connected", "what modules are there" — pick THIS, not
-          schema-explorer (which is for one specific entity).
+          schemas or runs data queries. Single wave; one worker.
+          Two use cases:
+          (1) Inventory questions — "what data is in hugr", "what
+          sources are connected", "what modules are there". Output:
+          a tight catalogue summary, one line per source / module.
+          (2) Source pickup before a data task — mission scopes
+          overview with a specific goal. Output contract for this
+          mode: EVERY source / module gets a one-line confidence
+          assessment prefixed with EXACTLY one of three labels —
+          `[fits-explicit]` (named match), `[fits-possibly]`
+          (broader / region overlap / plausible but not exact),
+          `[doesnt-fit]`. NEVER crown a "most likely" / "best
+          candidate" / "I will explore X next" — those framings
+          short-circuit the mission's disambiguation step and
+          send the pipeline down the wrong module. Footer is one
+          sentence: "fits-explicit=E, fits-possibly=P". Mission
+          uses E and P to decide whether to call
+          `session:inquire`. Pick overview over schema-explorer
+          (which targets one specific entity inside one already-
+          known module).
         intent: tool_calling
         can_spawn: false
         tools:
@@ -225,12 +413,15 @@ metadata:
               You're an overview worker wrapping up. The data-
               source list / module list you surfaced is reusable
               across the conversation. Call `notepad:append` once
-              with `category: "schema-finding"` and a one-line
+              with `category: "data-source"` and a one-line
               `content` summarising the inventory (e.g.
-              `Hugr exposes 3 data sources: northwind,
-              adventureworks, transport — northwind module is at
-              top-level for retail data`). Skip if no real
-              inventory was surfaced. Then reply "done".
+              `Hugr exposes 3 data sources: <src_A>, <src_B>,
+              <src_C> — <src_A>.<module_X> holds <domain_X> data;
+              <src_C>.<module_Y> holds <domain_Y>`). Map module →
+              the domain it covers, not the fields inside (those
+              go to `schema-finding` later from schema-explorer).
+              Skip if no real inventory was surfaced. Then reply
+              "done".
             skip_if_idle: true
 
       - name: schema-explorer
@@ -300,8 +491,8 @@ metadata:
               stable. Call `notepad:append` once with
               `category: "query-pattern"` and a one-line
               `content` describing the shape — NOT its current
-              result values. Example: `count active orders =
-              northwind.orders aggregation with filter
+              result values. Example: `count active <entity> =
+              <module>.<table> aggregation with filter
               deleted_at: { is_null: true }`. Skip if the query
               was a trivial one-off. Then reply "done".
             skip_if_idle: true
@@ -388,6 +579,53 @@ If a decomposition is genuinely impossible (the goal is incoherent
 or violates a constraint you cannot satisfy), call
 `session:abstain` with a reason — phase ζ. Don't make up a result.
 
+## When in doubt, ask the user
+
+Mission tier owns **intent-level ambiguity**. Two canonical
+shapes show up over and over in analyst work; in both cases the
+right move is `session:inquire(type="clarification",
+options=[...])`, NOT a "best guess":
+
+1. **Source / module pickup** — Stage 0 above; the decision
+   is MECHANICAL, not judgemental. After overview returns its
+   labelled list, compute:
+     E = number of `[fits-explicit]` entries
+     P = number of `[fits-possibly]` entries
+   - `E == 1 AND P == 0`  → use that single module.
+   - **Any other shape, including `E == 1 AND P >= 1`,
+     MUST trigger `session:inquire`.** The rationalisation
+     "fits-explicit beats fits-possibly, take explicit" is
+     EXACTLY the trap this rule exists to prevent.
+     `fits-possibly` literally means "this also fits" —
+     a competing candidate the user may prefer for reasons
+     overview cannot see (freshness, scope, ownership,
+     compliance). Picking the explicit one without asking
+     IS the "best guess" mistake.
+   - `E == 0 AND P >= 1`  → inquire (you have only weak
+     matches; user picks between weak fits or "rephrase").
+   - `E == 0 AND P == 0`  → `session:abstain`.
+
+2. **Metric / aggregation intent in wave 2** — the user says
+   "top customers", "best month", "biggest spike", "main
+   product line"; wave-1's schema-map shows multiple plausible
+   readings (revenue vs count, gross vs net, calendar vs fiscal
+   month, by region vs global). Stop before spawning
+   query-builder; call inquire with the alternatives as
+   options.
+
+A 5-second clarification beats spending the whole pipeline on
+the wrong interpretation and then redoing it. Do NOT
+pre-emptively pick the "most likely" reading just because
+guessing felt cheap — the user picks more accurately than you
+do, and they appreciate being asked once instead of seeing the
+wrong answer twice.
+
+Workers may also `inquire` for **data-level ambiguity** they
+encounter mid-task (e.g. two equally-plausible candidate
+tables for one task slice). Intent-level questions like the
+two above remain mission's call — workers escalate by
+returning their finding, not by inquiring on intent.
+
 ## Role catalogue (this skill)
 
 - **simple-answerer** — trivial knowledge / arithmetic / formatting.
@@ -427,8 +665,19 @@ or violates a constraint you cannot satisfy), call
   schema-explorer for these — schema-explorer reads field
   definitions for one specific entity (deep + slow), overview
   enumerates the top level (broad + fast).
-- **Simple schema summary**: one wave with N `schema-explorer`s
-  in parallel (one per entity / angle), maybe a follow-up
+- **Data task — source pickup first**: any "describe / count /
+  query / analyse <entity>" task starts by identifying the
+  Hugr module that contains the entity. Check the notepad
+  snapshot first; if no confident match exists, run a wave-0
+  `overview` worker scoped to "which module(s) hold data for
+  <restated goal>". On multiple equally-plausible candidates,
+  call `session:inquire(type="clarification", options=[...])`
+  and let the user pick. Only THEN spawn schema-explorer. See
+  Stage 0 in the on_mission_start prompt for the full
+  decision tree.
+- **Simple schema summary**: after Stage 0 picks the module,
+  one wave with N `schema-explorer`s in parallel (one per
+  entity / angle inside that module), maybe a follow-up
   `report-builder` for prose synthesis.
 - **Query-building task**: schema-explorer(s) → query-builder.
   Stop there if the user just wanted the validated query; the
@@ -453,12 +702,15 @@ framing.
 ## Recording cross-mission findings
 
 Before you finalise your result, append to the session notepad
-anything the **next** mission would otherwise re-derive — schema
-shapes (`schema-finding`), validated query templates
-(`query-pattern`), data-quality flags (`data-quality-issue`),
-user preferences (`user-preference`). Phrase as observation
-("orders.deleted_at appears to mark soft-deletes"), keep it one
-line.
+anything the **next** mission would otherwise re-derive —
+source / module identity (`data-source` — which module holds
+what domain), schema shapes (`schema-finding` — facts INSIDE a
+chosen module), validated query templates (`query-pattern`),
+data-quality flags (`data-quality-issue`), user preferences
+(`user-preference`). Phrase as observation
+("<table>.deleted_at appears to mark soft-deletes" for
+`schema-finding`; "<src>.<module> holds <domain> data" for
+`data-source`), keep it one line.
 
 **Do not record live values** — counts, sums, top-N, current
 timestamps. They go stale between turns; the next mission

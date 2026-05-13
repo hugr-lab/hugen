@@ -20,13 +20,20 @@ var (
 
 // Subagent runtime defaults — applied in NewStaticService when the
 // caller omits a SubagentsConfig field. Numbers anchor to phase-4-spec
-// §3 step 10.
+// §3 step 10 (and phase-5.1 § 4.5 for MaxAsyncMissionsPerRoot).
 const (
-	defaultSubagentMaxDepth                  = 5
-	defaultSubagentMaxTurns                  = 15
-	defaultStuckRepeatedHash                 = 3
-	defaultStuckTightDensityCount            = 3
-	defaultStuckTightDensityWindow           = 2 * time.Second
+	defaultSubagentMaxDepth                = 5
+	defaultSubagentMaxTurns                = 15
+	defaultStuckRepeatedHash               = 3
+	defaultStuckTightDensityCount          = 3
+	defaultStuckTightDensityWindow         = 2 * time.Second
+	defaultSubagentMaxAsyncMissionsPerRoot = 5
+)
+
+// HITL runtime defaults — applied in NewStaticService when the
+// caller omits a HitlConfig field. Phase-5.1 § 2.7.
+const (
+	defaultHitlInquireTimeoutMs = 60 * 60 * 1000 // 1 hour
 )
 
 // StaticService is the phase-3 implementation of Service. It is
@@ -46,6 +53,7 @@ type StaticService struct {
 	permSettings   PermissionSettings
 	toolProviders  []ToolProviderSpec
 	subagents      SubagentsConfig
+	hitl           HitlConfig
 }
 
 // StaticInput aggregates everything NewStaticService needs from
@@ -60,6 +68,7 @@ type StaticInput struct {
 	PermSettings   PermissionSettings
 	ToolProviders  []ToolProviderSpec
 	Subagents      SubagentsConfig
+	Hitl           HitlConfig
 }
 
 // NewStaticService captures the input snapshot. The caller still
@@ -88,6 +97,13 @@ func NewStaticService(in StaticInput) *StaticService {
 	if subagents.StuckDetection.TightDensityWindow <= 0 {
 		subagents.StuckDetection.TightDensityWindow = defaultStuckTightDensityWindow
 	}
+	if subagents.MaxAsyncMissionsPerRoot <= 0 {
+		subagents.MaxAsyncMissionsPerRoot = defaultSubagentMaxAsyncMissionsPerRoot
+	}
+	hitl := in.Hitl
+	if hitl.DefaultTimeoutMs <= 0 {
+		hitl.DefaultTimeoutMs = defaultHitlInquireTimeoutMs
+	}
 	return &StaticService{
 		localDB:        in.LocalDB,
 		localDBEnabled: in.LocalDBEnabled,
@@ -98,6 +114,7 @@ func NewStaticService(in StaticInput) *StaticService {
 		permSettings:   in.PermSettings,
 		toolProviders:  append([]ToolProviderSpec(nil), in.ToolProviders...),
 		subagents:      subagents,
+		hitl:           hitl,
 	}
 }
 
@@ -110,6 +127,7 @@ func (s *StaticService) Auth() AuthView                   { return s }
 func (s *StaticService) Permissions() PermissionsView     { return s }
 func (s *StaticService) ToolProviders() ToolProvidersView { return s }
 func (s *StaticService) Subagents() SubagentsView         { return s }
+func (s *StaticService) Hitl() HitlView                   { return s }
 
 // Subscribe returns a never-firing, never-closed channel. Phase-3
 // callers can wire it without special-casing; phase-6+ live
@@ -175,6 +193,11 @@ func (s *StaticService) DefaultMaxTurns() int           { return s.subagents.Max
 func (s *StaticService) DefaultStuckDetection() StuckPolicy {
 	return s.subagents.StuckDetection
 }
+func (s *StaticService) MaxAsyncMissionsPerRoot() int { return s.subagents.MaxAsyncMissionsPerRoot }
+
+// --- HitlView ---
+
+func (s *StaticService) DefaultTimeoutMs() int { return s.hitl.DefaultTimeoutMs }
 
 // --- OnUpdate (shared no-op) ---
 

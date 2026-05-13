@@ -1,10 +1,11 @@
-# Local Gemma4-26B via LM Studio. Requires LLM_LOCAL_URL in the
-# harness's .test.env (e.g. http://host.docker.internal:1234/v1/chat/completions).
-# This is the prod default — shape mirrors config.yaml's models.model.
-# Bumps max_tokens to 8192 on both default + cheap so the LM
-# Studio provider's thinking_budget=2048 always sits below max
-# (cheap's inherited 2048 from base.config.yaml would trip the
-# anthropic-style guard if a cloud-typed proxy ever stands in).
+# Local Gemma4-26B via LM Studio on every tier. Requires
+# LLM_LOCAL_URL in the harness's .test.env (e.g.
+# http://host.docker.internal:1234/v1/chat/completions). Same
+# `gemma4-26b` alias as configured in base config.yaml — resolves
+# to LM Studio model id `google/gemma-4-26b-a4b`. Cheap route is
+# the same model (gemma-small from earlier runs is unloaded as of
+# 2026-05-12; mounting 26B on cheap keeps the router happy without
+# falling back to an absent alias).
 models:
   mode: local
   model: gemma4-26b
@@ -12,5 +13,5 @@ models:
   routes:
     cheap:
       mode: local
-      model: gemma-small
-      max_tokens: 4096
+      model: gemma4-26b
+      max_tokens: 8192

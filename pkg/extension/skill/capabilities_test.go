@@ -78,6 +78,77 @@ func TestFilterTools_WildcardAndExact(t *testing.T) {
 	}
 }
 
+// TestFilterTools_RequiresApprovalTagging verifies the phase-5.1
+// § η flag plumbing: skill manifests carrying requires_approval
+// entries (exact + '*' wildcard) project the flag onto the
+// per-session snapshot's tool.Tool. The dispatcher reads
+// t.RequiresApproval to decide whether to interpose an inquire
+// flow before forwarding to the provider.
+func TestFilterTools_RequiresApprovalTagging(t *testing.T) {
+	const inline = `---
+name: gated
+description: minimal skill exercising requires_approval matching.
+allowed-tools:
+  - provider: bash-mcp
+    tools:
+      - bash.run
+      - bash.shell
+      - bash.read_file
+    requires_approval:
+      - bash.run
+      - bash.shell
+  - provider: hugr-main
+    tools:
+      - data-*
+    requires_approval: ['*']
+compatibility:
+  model: any
+  runtime: hugen-phase-3
+---
+body
+`
+	ctx := context.Background()
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"gated": []byte(inline)}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "agent-test")
+	state := fixture.NewTestSessionState("ses-app").WithDepth(2)
+	if err := ext.InitState(ctx, state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	if err := FromState(state).Load(ctx, "gated"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	in := []tool.Tool{
+		{Name: "bash-mcp:bash.run", Provider: "bash-mcp"},
+		{Name: "bash-mcp:bash.shell", Provider: "bash-mcp"},
+		{Name: "bash-mcp:bash.read_file", Provider: "bash-mcp"},
+		{Name: "hugr-main:data-inline_graphql_result", Provider: "hugr-main"},
+	}
+	out := ext.FilterTools(ctx, state, in)
+
+	flags := map[string]bool{}
+	for _, t := range out {
+		flags[t.Name] = t.RequiresApproval
+	}
+	want := map[string]bool{
+		"bash-mcp:bash.run":                    true,
+		"bash-mcp:bash.shell":                  true,
+		"bash-mcp:bash.read_file":              false,
+		"hugr-main:data-inline_graphql_result": true,
+	}
+	for name, want := range want {
+		got, present := flags[name]
+		if !present {
+			t.Errorf("tool %q dropped from filtered set", name)
+			continue
+		}
+		if got != want {
+			t.Errorf("tool %q RequiresApproval = %v, want %v", name, got, want)
+		}
+	}
+}
+
 // nil SkillManager → no filter (every tool surfaces).
 func TestFilterTools_NilManagerExposesEverything(t *testing.T) {
 	ext := NewExtension(nil, nil, "a1")

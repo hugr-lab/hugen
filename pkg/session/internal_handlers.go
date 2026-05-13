@@ -25,7 +25,8 @@ type internalHandler func(s *Session, ctx context.Context, f protocol.Frame)
 // the hot path doesn't need a lock: register at init time, read on
 // every routed frame.
 var internalHandlers = map[protocol.Kind]internalHandler{
-	protocol.KindExtensionFrame: dispatchExtensionFrame,
+	protocol.KindExtensionFrame:  dispatchExtensionFrame,
+	protocol.KindInquiryResponse: dispatchInquiryResponse,
 }
 
 // dispatchInternal looks up and invokes the registered handler for

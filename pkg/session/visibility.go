@@ -2,8 +2,10 @@ package session
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -41,7 +43,7 @@ import (
 // extension_frame events stay out of the parent's history
 // per §11 ("stays in the originating session's events; only
 // surfaces via subagent_runs").
-func projectFrameToHistory(f protocol.Frame) (model.Message, bool) {
+func projectFrameToHistory(r *prompts.Renderer, f protocol.Frame) (model.Message, bool) {
 	switch v := f.(type) {
 	case *protocol.UserMessage:
 		return model.Message{
@@ -49,17 +51,50 @@ func projectFrameToHistory(f protocol.Frame) (model.Message, bool) {
 			Content: v.Payload.Text,
 		}, true
 	case *protocol.SubagentStarted:
-		text := fmt.Sprintf("[system: %s] spawned %s (role: %s) at depth %d",
-			protocol.SystemMessageSpawnedNote,
-			v.Payload.ChildSessionID, v.Payload.Role, v.Payload.Depth)
+		body := strings.TrimRight(r.MustRender(
+			"system/spawned_note",
+			map[string]any{
+				"ChildID": v.Payload.ChildSessionID,
+				"Role":    v.Payload.Role,
+				"Depth":   v.Payload.Depth,
+			},
+		), "\n")
+		text := fmt.Sprintf("[system: %s] %s",
+			protocol.SystemMessageSpawnedNote, body)
 		return model.Message{Role: model.RoleUser, Content: text}, true
 	case *protocol.SubagentResult:
-		body := v.Payload.Result
-		if body == "" {
-			body = fmt.Sprintf("(no result; reason: %s)", v.Payload.Reason)
+		// Phase 5.1 § 4.3: async-spawned missions render via a
+		// dedicated template; silent mode skips history.
+		switch v.Payload.RenderMode {
+		case protocol.SubagentRenderSilent:
+			return model.Message{}, false
+		case protocol.SubagentRenderAsyncNotify:
+			text := strings.TrimRight(r.MustRender(
+				"interrupts/async_mission_completed",
+				map[string]any{
+					"MissionID":     v.Payload.SessionID,
+					"Goal":          v.Payload.Goal,
+					"Status":        statusFromReason(v.Payload.Reason),
+					"Reason":        v.Payload.Reason,
+					"ResultSummary": v.Payload.Result,
+				},
+			), "\n")
+			return model.Message{Role: model.RoleUser, Content: text}, true
 		}
-		text := fmt.Sprintf("[system: subagent_result] %s reason=%s turns=%d\n%s",
-			v.Payload.SessionID, v.Payload.Reason, v.Payload.TurnsUsed, body)
+		resBody := v.Payload.Result
+		if resBody == "" {
+			resBody = fmt.Sprintf("(no result; reason: %s)", v.Payload.Reason)
+		}
+		body := strings.TrimRight(r.MustRender(
+			"system/subagent_result_render",
+			map[string]any{
+				"ChildID": v.Payload.SessionID,
+				"Reason":  v.Payload.Reason,
+				"Turns":   v.Payload.TurnsUsed,
+				"Body":    resBody,
+			},
+		), "\n")
+		text := "[system: subagent_result] " + body
 		return model.Message{Role: model.RoleUser, Content: text}, true
 	case *protocol.SystemMessage:
 		text := fmt.Sprintf("[system: %s] %s", v.Payload.Kind, v.Payload.Content)
@@ -68,11 +103,17 @@ func projectFrameToHistory(f protocol.Frame) (model.Message, bool) {
 	return model.Message{}, false
 }
 
-// visibilityAllows is a thin predicate wrapper over projectFrameToHistory
-// for callers that only need to know whether a Frame is allow-listed
-// (e.g. tests asserting the filter contract without caring about the
-// rendered text). Equivalent to (msg, ok := project; return ok).
+// visibilityAllows is a pure-predicate version of the §11 allow-list
+// for callers (e.g. tests asserting the filter contract) that only
+// need to know whether a Frame is model-visible without rendering
+// it. Keep the cases in lockstep with projectFrameToHistory.
 func visibilityAllows(f protocol.Frame) bool {
-	_, ok := projectFrameToHistory(f)
-	return ok
+	switch f.(type) {
+	case *protocol.UserMessage,
+		*protocol.SubagentStarted,
+		*protocol.SubagentResult,
+		*protocol.SystemMessage:
+		return true
+	}
+	return false
 }

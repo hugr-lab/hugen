@@ -7,6 +7,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/tool"
@@ -50,6 +51,7 @@ type Deps struct {
 	Codec    *protocol.Codec
 	Tools    *tool.ToolManager
 	Logger   *slog.Logger
+	Prompts  *prompts.Renderer
 	Opts     []SessionOption
 
 	// Extensions is the agent-level set of registered extensions.
@@ -77,6 +79,20 @@ type Deps struct {
 	// mission dispatcher surfaces tool_error{code:"no_mission_skill"}.
 	// Phase 4.2.2 §6.
 	DefaultMissionSkill string
+
+	// MaxAsyncMissionsPerRoot caps the number of in-flight children
+	// counted at the root of any spawn chain. Phase 5.1 § 4.5 —
+	// spawn_mission(wait="async") walks the parent chain to root
+	// and rejects when len(root.children) ≥ this cap. 0 disables
+	// enforcement; the default at runtime construction is 5 (set by
+	// the manager).
+	MaxAsyncMissionsPerRoot int
+
+	// DefaultInquireTimeoutMs is the per-call deadline for
+	// session:inquire when the caller omits timeout_ms. Phase 5.1
+	// § 2.7 suggests 1 hour (3_600_000) in prod; 0 falls back to
+	// the package-level defaultInquireTimeoutMs.
+	DefaultInquireTimeoutMs int
 
 	// TierIntents maps a session tier (root/mission/worker, per
 	// skill.TierFromDepth) to the model-router intent the runtime

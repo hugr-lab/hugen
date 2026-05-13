@@ -31,6 +31,7 @@ import (
 	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
 	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/manager"
 	"github.com/hugr-lab/hugen/pkg/skill"
@@ -166,7 +167,7 @@ func newDuckDBIntegrationCore(t *testing.T, vendorPath string) *integrationCore 
 	workspaceDir := filepath.Join(root, "workspace")
 	sharedDir := filepath.Join(root, "shared")
 	stateDir := filepath.Join(root, "state")
-	for _, d := range []string{workspaceDir, sharedDir, stateDir, filepath.Join(stateDir, "skills/system")} {
+	for _, d := range []string{workspaceDir, sharedDir, stateDir, filepath.Join(stateDir, "skills/hub")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -210,7 +211,8 @@ func newDuckDBIntegrationCore(t *testing.T, vendorPath string) *integrationCore 
 	})
 
 	skillStore := skill.NewSkillStore(skill.Options{
-		SystemRoot: filepath.Join(stateDir, "skills/system"),
+		SystemFS: runtime.SystemSkillsFS(),
+		HubRoot:  filepath.Join(stateDir, "skills/hub"),
 	})
 	skills := skill.NewSkillManager(skillStore, nil)
 	view := &permsView{rules: nil}
