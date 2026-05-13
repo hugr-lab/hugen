@@ -5,14 +5,24 @@ object into H3 hexagonal cells. Use it to create density maps,
 geoembeddings, or any analysis that needs a uniform spatial grid
 across heterogeneous data sources.
 
+> **Naming inside `data { ... }`**: examples in this file use
+> short unprefixed names (`buildings_aggregation`,
+> `county_boundaries_aggregation`, …) for readability — they
+> assume a prefix-less catalog. **In a prefixed catalog, all
+> identifiers inside `_spatial(...) { ... }`, `_join(...) { ... }`,
+> and `h3(...) { data { ... } }` blocks must be flat prefixed
+> type names** (e.g. `osm_buildings_aggregation`), because those
+> blocks bypass module nesting. See `spatial-queries.md` §
+> "Critical naming rule" for the full rule and a worked example.
+
 The cell resolution (0–15) controls hexagon size:
 
 | Resolution | Approx edge | Use case |
 |------------|-------------|----------|
-| 3–4        | ~60–25 km   | Country / state overview |
-| 5–7        | ~10 km – 1 km | City-scale density |
-| 8–9        | ~500 – 200 m | Neighbourhood |
-| 10–12      | ~70 – 10 m  | Street-level |
+| 3–4        | ~25–60 km   | Country / state overview |
+| 5–7        | ~1–10 km    | City-scale density |
+| 8–9        | ~200–500 m  | Neighbourhood |
+| 10–12      | ~10–70 m    | Street-level |
 
 Lower resolution = fewer cells, faster query, coarser detail.
 Start at 5–7 for exploratory work, refine only if the question

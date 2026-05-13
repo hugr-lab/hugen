@@ -14,8 +14,12 @@
 #      type="clarification". The question argument quotes the
 #      specific ambiguity (e.g. "by revenue or volume?").
 #
-#   2. Root's events include the bubbled inquiry_request frame
-#      with Payload.Type="clarification" + the same question.
+#   2. The subtree rooted at $sid (filter root_session_id ==
+#      $sid) carries the persisted inquiry_request frame with
+#      Payload.Type="clarification" + the same question. The
+#      bubble is routing-only (outbox); persistence happens once
+#      at the originator, so the row lives on the mission, not
+#      on root — see spec §"Inquiry routing".
 #
 #   3. Harness Submits an InquiryResponse with the chosen option.
 #      Mission's tool_result event for inquire carries the
@@ -86,16 +90,17 @@ steps:
         vars: { sid: "$sid" }
         path: extensions.jq.jq
 
-      # Root's inquiry_request bubble — proves the bubble chain
-      # works end-to-end.
-      - name: inquiry_requests_on_root
+      # Bubbled inquiry_request lives on the originator (mission),
+      # not on root — outbox-only bubble per spec §"Inquiry routing".
+      # Scan the whole subtree rooted at $sid to find it.
+      - name: inquiry_requests_in_tree
         graphql: |
           query ($sid: String!) {
             hub { db { agent {
               session_events(
-                filter: {session_id: {eq: $sid}, event_type: {eq: "inquiry_request"}}
+                filter: {root_session_id: {eq: $sid}, event_type: {eq: "inquiry_request"}}
                 order_by: [{field: "seq", direction: ASC}]
-              ) { seq content metadata }
+              ) { seq session_id content metadata }
             }}}
           }
         vars: { sid: "$sid" }

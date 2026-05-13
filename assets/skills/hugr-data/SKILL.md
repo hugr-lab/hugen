@@ -228,7 +228,7 @@ keep the body in working context for the rest of your task.
 | `query-patterns` | Joins (`_join` cross-source), distinct_on, parameterised views, common shapes. | Combining objects across sources or modules. |
 | `aggregations` | `_aggregation` / `_bucket_aggregation`, available functions by type, group-by mechanics. | Counts / sums / averages / group-by / breakdowns. |
 | `filter-guide` | Filter operators, relation filters (`any_of`, `all_of`, `none_of`), `_and` / `_or` / `_not`. | Any non-trivial filter logic. Hugr's filter dialect is NOT standard GraphQL. |
-| `spatial-queries` | `_spatial(field, type, buffer)`: INTERSECTS / WITHIN / CONTAINS / DISJOINT / DWITHIN, inner-vs-left, spatial inside aggregation keys. | Geometry-to-geometry joins (nearest-N, containment, coverage gaps). |
+| `spatial-queries` | `_spatial(field, type, buffer)`: INTERSECTS / WITHIN / CONTAINS / DISJOINT / DWITHIN, inner-vs-left, spatial inside aggregation keys. | Geometry-to-geometry joins (containment, coverage gaps, approximate nearest-N via DWITHIN + client-side ranking). |
 | `h3-spatial` | `h3(resolution: N)` aggregation, `inner`, `divide_values`, `distribution_by`, `distribution_by_bucket`. Cross-source via `_join` inside `data`. | Hexagonal density / geoembeddings / proportional value redistribution. |
 | `advanced-features` | Vector search, geometry transformations, JSON `struct:` extraction, cube tables, mutations, parameterised views. | Specific advanced feature called for by the task. |
 | `analyze` | Patterns for analytical workflows (distributions, anomalies, time series). | Free-form "analyse / find patterns / compute stats". |

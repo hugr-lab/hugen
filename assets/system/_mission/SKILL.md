@@ -144,7 +144,10 @@ Your job is **decomposition + synthesis**:
 - `session:spawn_mission` — only root delegates singularly. A
   mission spawning another mission would re-create the
   decisional shape we eliminate at the topology level.
-- Raw `session:spawn_subagent` / `session:wait_subagents` — the
-  `spawn_wave` primitive subsumes both. A role with explicit
-  `can_spawn: true` and a `tools:` block granting them can opt
-  back into the raw surface for non-wave patterns.
+- Raw `session:spawn_subagent` — `spawn_wave` already wraps the
+  common atomic fan-out case. A role with explicit `can_spawn:
+  true` and a `tools:` block granting it can opt back into the
+  raw surface for non-wave patterns. `session:wait_subagents` IS
+  granted to mission (used to pick up async siblings spawned via
+  root's `spawn_mission(wait=async)`), but you rarely call it
+  directly — `spawn_wave` already returns per-worker results.

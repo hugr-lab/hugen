@@ -79,16 +79,17 @@ steps:
         vars: { sid: "$sid" }
         path: extensions.jq.jq
 
-      # Root's transcript — must include inquiry_request that
-      # bubbled up from a descendant.
-      - name: inquiry_requests_on_root
+      # Bubbled inquiry_request lives on the originating worker /
+      # mission, not on root — outbox-only bubble per spec
+      # §"Inquiry routing". Scan the subtree rooted at $sid.
+      - name: inquiry_requests_in_tree
         graphql: |
           query ($sid: String!) {
             hub { db { agent {
               session_events(
-                filter: {session_id: {eq: $sid}, event_type: {eq: "inquiry_request"}}
+                filter: {root_session_id: {eq: $sid}, event_type: {eq: "inquiry_request"}}
                 order_by: [{field: "seq", direction: ASC}]
-              ) { seq content metadata }
+              ) { seq session_id content metadata }
             }}}
           }
         vars: { sid: "$sid" }

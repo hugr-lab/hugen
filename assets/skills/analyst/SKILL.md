@@ -145,19 +145,19 @@ metadata:
                    NOT collapse "explicit + possibly" into a
                    single pick. Call:
                      session:inquire(
-                       type:     "clarification",
+                       type:     "clarification",  // REQUIRED
                        question: "I need to pick the right
                                   data source for your
                                   request — which one should
-                                  I use?",
+                                  I use?",                   // REQUIRED
                        options:  [<every fits-* candidate>,
                                   "none of the above /
-                                   I'll rephrase"],
+                                   I'll rephrase"],          // []string of labels
                        context:  "<one line per candidate
                                   with overview's
                                   fits-explicit /
                                   fits-possibly label and
-                                  the short reason>"
+                                  the short reason>"          // free-form
                      )
                    After the user picks, use that module. If
                    the user picks "none of the above" or
@@ -415,12 +415,11 @@ metadata:
               across the conversation. Call `notepad:append` once
               with `category: "data-source"` and a one-line
               `content` summarising the inventory (e.g.
-              `Hugr exposes 3 data sources: northwind,
-              adventureworks, transport — northwind.retail
-              module holds orders / customers; transport.fleet
-              module holds vehicles / trips`). Map module → the
-              domain it covers, not the fields inside (those go
-              to `schema-finding` later from schema-explorer).
+              `Hugr exposes 3 data sources: <src_A>, <src_B>,
+              <src_C> — <src_A>.<module_X> holds <domain_X> data;
+              <src_C>.<module_Y> holds <domain_Y>`). Map module →
+              the domain it covers, not the fields inside (those
+              go to `schema-finding` later from schema-explorer).
               Skip if no real inventory was surfaced. Then reply
               "done".
             skip_if_idle: true
@@ -492,8 +491,8 @@ metadata:
               stable. Call `notepad:append` once with
               `category: "query-pattern"` and a one-line
               `content` describing the shape — NOT its current
-              result values. Example: `count active orders =
-              northwind.orders aggregation with filter
+              result values. Example: `count active <entity> =
+              <module>.<table> aggregation with filter
               deleted_at: { is_null: true }`. Skip if the query
               was a trivial one-off. Then reply "done".
             skip_if_idle: true
@@ -709,9 +708,9 @@ what domain), schema shapes (`schema-finding` — facts INSIDE a
 chosen module), validated query templates (`query-pattern`),
 data-quality flags (`data-quality-issue`), user preferences
 (`user-preference`). Phrase as observation
-("orders.deleted_at appears to mark soft-deletes" for
-`schema-finding`; "northwind.retail module holds orders /
-customers data" for `data-source`), keep it one line.
+("<table>.deleted_at appears to mark soft-deletes" for
+`schema-finding`; "<src>.<module> holds <domain> data" for
+`data-source`), keep it one line.
 
 **Do not record live values** — counts, sums, top-N, current
 timestamps. They go stale between turns; the next mission

@@ -80,11 +80,12 @@ When you finish:
 
 `session:inquire(type="clarification")` is granted to you for a
 narrow case: **data-level ambiguity that you alone can see**.
-Example — your task is "find the customer table in northwind"
-and you discover two equally-plausible candidates (`nw_customers`
-and `nw_customer_archive`). The mission cannot disambiguate
-without seeing the same data, so escalating to it would just
-push the decision back. Inquire directly.
+Example — your task is "find the customer table in <module>"
+and you discover two equally-plausible candidates
+(`<prefix>_customers` and `<prefix>_customer_archive`). The
+mission cannot disambiguate without seeing the same data, so
+escalating to it would just push the decision back. Inquire
+directly.
 
 Do NOT use inquire for:
 

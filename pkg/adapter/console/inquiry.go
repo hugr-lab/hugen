@@ -157,18 +157,15 @@ func parseClarificationReply(line string) (string, error) {
 	return t, nil
 }
 
-// splitFirstToken peels off the first whitespace-delimited token
-// from s; the remainder (with leading whitespace trimmed) is
-// returned as rest. Pure helper — no quote handling.
+// splitFirstToken peels off the first space-delimited token from
+// s; the remainder (with leading whitespace trimmed) is returned
+// as rest. Pure helper — no quote handling, no tab handling
+// (CLI input is space-separated in practice).
 func splitFirstToken(s string) (head, rest string) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return "", ""
 	}
-	if idx := strings.IndexFunc(s, func(r rune) bool {
-		return r == ' ' || r == '\t'
-	}); idx >= 0 {
-		return s[:idx], strings.TrimSpace(s[idx+1:])
-	}
-	return s, ""
+	head, rest, _ = strings.Cut(s, " ")
+	return head, strings.TrimSpace(rest)
 }

@@ -158,3 +158,13 @@ Operators can refine this surface via Tier-1 (config) or Tier-2
 keeping `bash.run`. The `_system` skill itself is never unloaded.
 If a tool you expect is missing, it has been denied by policy;
 do not retry, surface the constraint to the user.
+
+## HITL approval (phase 5.1)
+
+`bash.run`, `bash.shell`, and `bash.write_file` carry
+`requires_approval: true` in the manifest. The runtime intercepts
+calls to those tools and routes them through `session:inquire`
+(type=approval); the call returns `{"error": "denied_by_user"}`
+unless the operator approves. Treat a denial as a hard stop —
+do not retry with a different argument hoping to slip past the
+gate; report the denial back to whoever spawned you.
