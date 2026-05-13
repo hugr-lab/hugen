@@ -67,6 +67,12 @@ type Manager struct {
 	// WithMaxAsyncMissionsPerRoot overrides. Phase 5.1 § 4.5.
 	maxAsyncMissionsPerRoot int
 
+	// defaultInquireTimeoutMs is the per-call session:inquire
+	// deadline used when the model omits timeout_ms; also the
+	// upper-bound clamp for caller-supplied timeouts. 0 leaves the
+	// pkg/session fallback (1 hour) in place. Phase 5.1 § 2.7.
+	defaultInquireTimeoutMs int
+
 	// deps mirrors the per-session dependency bundle passed by
 	// reference to every Session in this Manager's tree (root +
 	// subagents). Populated by NewManager from the same arguments
@@ -154,6 +160,17 @@ func WithMaxAsyncMissionsPerRoot(cap int) ManagerOption {
 	}
 }
 
+// WithDefaultInquireTimeoutMs sets the per-call session:inquire
+// deadline used when the model omits timeout_ms and as the
+// upper-bound clamp for caller-supplied timeouts. 0 leaves the
+// pkg/session package-level fallback (1 hour) in place. Phase 5.1
+// § 2.7.
+func WithDefaultInquireTimeoutMs(ms int) ManagerOption {
+	return func(m *Manager) {
+		m.defaultInquireTimeoutMs = ms
+	}
+}
+
 // WithTierIntents sets the per-tier model-router intent defaults
 // (root / mission / worker → intent name) the runtime applies to
 // spawned children before per-role overrides. Phase 4.2.2 §11.
@@ -229,6 +246,7 @@ func NewManager(
 		DefaultMissionSkill:     m.defaultMissionSkill,
 		TierIntents:             m.tierIntents,
 		MaxAsyncMissionsPerRoot: m.maxAsyncMissionsPerRoot,
+		DefaultInquireTimeoutMs: m.defaultInquireTimeoutMs,
 	}
 	// Phase 4.1b-pre stage B / D6: a root session calling
 	// requestClose hands the close request to Manager via this hook.

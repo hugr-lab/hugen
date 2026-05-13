@@ -13,6 +13,7 @@ type Service interface {
 	Permissions() PermissionsView
 	ToolProviders() ToolProvidersView
 	Subagents() SubagentsView
+	Hitl() HitlView
 
 	// Subscribe streams coarse "config changed" events for any
 	// caller that wants a single signal across all domains. Per-

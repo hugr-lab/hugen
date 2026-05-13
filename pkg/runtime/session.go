@@ -36,6 +36,18 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 			opts = append(opts, manager.WithTierIntents(mc.TierIntents))
 		}
 	}
+	// Wire phase 5.1 § 4.5 async-mission cap from
+	// config.yaml.subagents.max_async_missions_per_root. The
+	// StaticService default (5) lands here when the YAML omits
+	// the field; an explicit 0 means "unlimited".
+	if subs := core.Config.Subagents(); subs != nil {
+		opts = append(opts, manager.WithMaxAsyncMissionsPerRoot(subs.MaxAsyncMissionsPerRoot()))
+	}
+	// Wire phase 5.1 § 2.7 HITL inquire deadline from
+	// config.yaml.hitl.default_timeout_ms.
+	if hitl := core.Config.Hitl(); hitl != nil {
+		opts = append(opts, manager.WithDefaultInquireTimeoutMs(hitl.DefaultTimeoutMs()))
+	}
 	mgr := manager.NewManager(
 		core.Store, core.Agent, core.Models, core.Commands, core.Codec, core.Tools, core.Logger,
 		opts...,
