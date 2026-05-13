@@ -1,0 +1,124 @@
+# hitl_minimal — phase 5.1 κ deterministic clarification check.
+#
+# A meta-prompt that explicitly instructs root to call
+# `session:inquire(type="clarification")` once, then reply with
+# the harness response verbatim. No mission, no data lookup, no
+# delegation — the smallest possible end-to-end probe that the
+# whole inquire round-trip works:
+#
+#   1. root emits tool_call session:inquire
+#   2. inquiry_request bubbles to root.outbox (here, originator
+#      and root are the same session)
+#   3. harness pump intercepts, matches the rule, builds an
+#      inquiry_response and Manager.Deliver()s it to root
+#   4. dispatchInquiryResponse delivers to the pending channel
+#      the inquire tool body is blocked on
+#   5. inquire tool returns the response as a tool_result
+#   6. root composes its final agent_message containing the
+#      response text verbatim
+#
+# By-eye assertions:
+#
+#   1. tool_calls includes exactly one `session:inquire` with
+#      `type="clarification"`.
+#   2. tool_results for `session:inquire` carries the response
+#      text ("red") in content.
+#   3. Final agent_message contains the literal token
+#      `harness_response=red`.
+#
+# Tuning notes:
+#   - tier-root.md tells root to ASK for ambiguous user intent,
+#     and the prompt is structured as a procedural directive
+#     (not a substantive question), so the spawn_mission reflex
+#     should not fire. Gemini-pro 3.1 on root reliably follows
+#     such tool-following instructions; for weaker models the
+#     scenario may need stricter framing or a second fallback
+#     responder.
+name: hitl_minimal
+requires: [hugr]
+
+steps:
+  - say: |
+      I am running an integration test of your `session:inquire`
+      machinery. Do exactly two things, in order, and nothing
+      else. Do not spawn a mission. Do not load any skill.
+
+      Step 1 — call the tool `session:inquire` exactly once with
+      these arguments:
+        - type:     "clarification"
+        - question: "minimal HITL probe — should I use red or blue?"
+
+      Step 2 — once the tool returns a response, reply to me with
+      EXACTLY this single line (no quotes, no preamble, no markdown):
+
+        harness_response=<answer>
+
+      Substitute <answer> with the response text the tool gave
+      you in step 1, verbatim. Then stop.
+    budget: 360s
+
+    # The first rule matches the exact question text the prompt
+    # asks for; the second is a defensive fallback in case the
+    # model paraphrases or routes through mission. Both answer
+    # "red" so the assertion (harness_response=red) is stable.
+    inquiry_responses:
+      - match:
+          type: clarification
+          question_contains: "minimal HITL"
+        respond:
+          response: "red"
+        delay: 100ms
+      - match:
+          type: clarification
+        respond:
+          response: "red"
+        delay: 100ms
+
+    queries:
+      # Exactly one session:inquire call somewhere in the tree.
+      - name: inquire_calls
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map({seq, sid: .session_id, args: .tool_args})") {
+              hub { db { agent {
+                session_events(
+                  filter: {event_type: {eq: "tool_call"}, tool_name: {eq: "session_inquire"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq session_id tool_args }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Tool result envelope — content carries the harness's
+      # "red" answer.
+      - name: inquire_results
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map({seq, sid: .session_id, content})") {
+              hub { db { agent {
+                session_events(
+                  filter: {event_type: {eq: "tool_result"}, tool_name: {eq: "session_inquire"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq session_id content }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Root's final agent_message — must contain
+      # `harness_response=red`.
+      - name: root_final_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 1
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }

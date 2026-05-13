@@ -108,7 +108,7 @@ steps:
             jq(query: ".hub.db.agent.session_events | map({seq, session_id, content})") {
               hub { db { agent {
                 session_events(
-                  filter: {event_type: {eq: "tool_result"}, tool_name: {eq: "session:inquire"}}
+                  filter: {event_type: {eq: "tool_result"}, tool_name: {eq: "session_inquire"}}
                   order_by: [{field: "seq", direction: ASC}]
                 ) { seq session_id content }
               }}}

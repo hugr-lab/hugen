@@ -84,10 +84,7 @@ runs:
   - name: gemma4-26b
     llm: configs/llm-gemma4-26b.yaml
     topology: configs/topology-external-hugr.yaml
-    # Phase 5.1 κ hybrid: gemini-pro on root+mission, gemma4-26b on
-    # workers — see configs/llm-gemma4-26b.yaml header for the
-    # token-budget rationale.
-    requires: [local, hugr, gemini]
+    requires: [local, hugr]
     scenarios:
       # δ.B 3-tier core — anchor scenarios for the η Gemma gate.
       - trivial_question_via_mission
@@ -108,6 +105,7 @@ runs:
       # harness wiring for InquiryRequest interception + multi-
       # root fan-out arrives in a fast-follow. Expect tuning
       # iterations against Gemma 26B before merge.
+      - hitl_minimal
       - follow_up_during_mission
       - cancel_and_respawn
       - async_mission_completion

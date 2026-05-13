@@ -1,22 +1,17 @@
-# Hybrid: cloud Gemini-Pro 3.1 for root + mission tiers (smart
-# routing without burning premium tokens on bulk reasoning), local
-# Gemma4-26B via LM Studio for worker tier (token-heavy fanout work
-# stays free). Phase 5.1 κ tuning iteration — gemma-small is
-# unloaded from LM Studio, so cheap route can't fall back to a
-# fast local model; mounting the 26B on workers keeps the API
-# bill on a budget while root + mission get the cloud quality
-# they need to drive delegation cleanly.
-#
-# Requires GEMINI_API_KEY + LLM_LOCAL_URL in the harness's
-# .test.env.
+# Local Gemma4-26B via LM Studio on every tier. Requires
+# LLM_LOCAL_URL in the harness's .test.env (e.g.
+# http://host.docker.internal:1234/v1/chat/completions). Same
+# `gemma4-26b` alias as configured in base config.yaml — resolves
+# to LM Studio model id `google/gemma-4-26b-a4b`. Cheap route is
+# the same model (gemma-small from earlier runs is unloaded as of
+# 2026-05-12; mounting 26B on cheap keeps the router happy without
+# falling back to an absent alias).
 models:
   mode: local
-  model: gemini-pro-3-1
+  model: gemma4-26b
   max_tokens: 8192
   routes:
     cheap:
       mode: local
       model: gemma4-26b
       max_tokens: 8192
-  tier_intents:
-    worker: cheap
