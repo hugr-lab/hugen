@@ -42,7 +42,7 @@ When 002 and a 001 phase doc disagree, 002 wins.
 Phase plan:
 
 | Phase | Status |
-|-------|--------|
+| ----- | ------ |
 | 1. Native core + ModelRouter + console UI | shipped |
 | 2. HTTP/SSE + webui + ADK eviction | shipped |
 | 3. Action layer (skills + tools + 3-tier permissions + bash/hugr-mcp) | shipped |
@@ -203,8 +203,10 @@ slot is `.specify/feature.json`. Outputs are gitignored by design
 <!-- MANUAL ADDITIONS END -->
 
 ## Active Technologies
+
 - Go 1.23.x (project uses generics, `slices`, `maps`, (005-phase-4-agent-runtime)
 - DuckDB local store via `pkg/store/local`; append-only on (005-phase-4-agent-runtime)
 
 ## Recent Changes
+
 - 005-phase-4-agent-runtime: Added Go 1.23.x (project uses generics, `slices`, `maps`,
