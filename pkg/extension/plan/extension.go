@@ -133,6 +133,24 @@ func (h *SessionPlan) Render(renderer *prompts.Renderer) string {
 	return Render(renderer, h.plan)
 }
 
+// PlanSnapshot implements [extension.PlanContributor]. Returns
+// the plan body + current-step label for the SessionSnapshot.
+// Phase 5.1b §3. Empty struct when no plan is active.
+func (e *Extension) PlanSnapshot(_ context.Context, state extension.SessionState) extension.PlanSnapshotData {
+	h := FromState(state)
+	if h == nil {
+		return extension.PlanSnapshotData{}
+	}
+	p := h.Snapshot()
+	if !p.Active {
+		return extension.PlanSnapshotData{}
+	}
+	return extension.PlanSnapshotData{
+		Body:        p.Text,
+		CurrentStep: p.CurrentStep,
+	}
+}
+
 // AdvertiseSystemPrompt implements [extension.Advertiser]. Returns
 // the rendered active-plan block, or "" when the plan is inactive.
 func (e *Extension) AdvertiseSystemPrompt(_ context.Context, state extension.SessionState) string {

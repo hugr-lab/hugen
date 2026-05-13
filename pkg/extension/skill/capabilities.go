@@ -35,14 +35,28 @@ import (
 var (
 	_ extension.Advertiser          = (*Extension)(nil)
 	_ extension.ToolFilter          = (*Extension)(nil)
-	_ extension.GenerationProvider  = (*Extension)(nil)
-	_ extension.ToolPolicyAdvisor   = (*Extension)(nil)
-	_ extension.SubagentDescriber   = (*Extension)(nil)
-	_ extension.SubagentSpawnHinter = (*Extension)(nil)
-	_ extension.MissionDispatcher   = (*Extension)(nil)
-	_ extension.MissionStartLookup  = (*Extension)(nil)
-	_ extension.CloseTurnLookup     = (*Extension)(nil)
+	_ extension.GenerationProvider       = (*Extension)(nil)
+	_ extension.ToolPolicyAdvisor        = (*Extension)(nil)
+	_ extension.SubagentDescriber        = (*Extension)(nil)
+	_ extension.SubagentSpawnHinter      = (*Extension)(nil)
+	_ extension.MissionDispatcher        = (*Extension)(nil)
+	_ extension.MissionStartLookup       = (*Extension)(nil)
+	_ extension.CloseTurnLookup          = (*Extension)(nil)
+	_ extension.LoadedSkillsContributor  = (*Extension)(nil)
 )
+
+// LoadedSkillNames implements [extension.LoadedSkillsContributor].
+// Returns the names of every skill bound to the calling session,
+// sorted lexically. Used by Manager.SnapshotSession to fill the
+// SessionSnapshot.LoadedSkills field for attaching adapters.
+// Phase 5.1b §3.
+func (e *Extension) LoadedSkillNames(ctx context.Context, state extension.SessionState) []string {
+	h := FromState(state)
+	if h == nil {
+		return nil
+	}
+	return h.LoadedNames(ctx)
+}
 
 // MissionSkillExists implements [extension.MissionDispatcher].
 // Returns (true, nil) when the named skill is installed AND its

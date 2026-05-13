@@ -98,6 +98,33 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	return renderSnapshot(state.Prompts(), notes, np.Window())
 }
 
+// NotesSnapshot implements [extension.NotesContributor]. Returns
+// up to limit recent notes for the session (or 10 when limit is
+// non-positive). Backs [Manager.SnapshotSession] in phase 5.1b §3.
+func (e *Extension) NotesSnapshot(ctx context.Context, state extension.SessionState, limit int) []extension.NoteRef {
+	np := FromState(state)
+	if np == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	notes, err := np.Read(ctx, ReadInput{Limit: limit})
+	if err != nil || len(notes) == 0 {
+		return nil
+	}
+	out := make([]extension.NoteRef, 0, len(notes))
+	for _, n := range notes {
+		out = append(out, extension.NoteRef{
+			Category:  n.Category,
+			Mission:   n.Mission,
+			Content:   n.Text,
+			CreatedAt: n.CreatedAt,
+		})
+	}
+	return out
+}
+
 // InitState allocates a fresh [Notepad] for the calling session.
 // rootID is resolved once via the parent-chain walk and the
 // per-Notepad role label is derived from depth. Both are stable
