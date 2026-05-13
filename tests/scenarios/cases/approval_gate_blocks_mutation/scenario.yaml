@@ -46,6 +46,19 @@ steps:
     budget: 360s
     wait_for_subagents: 240s
 
+    # Phase 5.1 κ — every approval inquiry that bubbles to root is
+    # denied. The acceptance gate is that the caller observes a
+    # `denied_by_user` tool_error and surfaces the denial to the
+    # user instead of pretending the write happened. A small delay
+    # smooths log readability between the bubble + cascade frames.
+    inquiry_responses:
+      - match:
+          type: approval
+        respond:
+          approved: false
+          reason: "harness denied (acceptance test)"
+        delay: 200ms
+
     queries:
       # Any session in the tree issuing bash.write_file /
       # bash.run / bash.shell — locate the call site.

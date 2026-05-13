@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadRuns_HappyPath(t *testing.T) {
@@ -124,6 +125,61 @@ steps:
 	_, err := LoadScenario(path, "")
 	if err == nil || !contains(err.Error(), "must have either say:") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func TestLoadScenario_ParsesInquiryResponses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scenario.yaml")
+	body := `name: hitl
+steps:
+  - say: "go"
+    inquiry_responses:
+      - match:
+          type: clarification
+          question_contains: revenue
+        respond:
+          response: "by revenue"
+        delay: 200ms
+      - match:
+          type: approval
+        respond:
+          approved: false
+          reason: "denied by harness"
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadScenario(path, "hitl")
+	if err != nil {
+		t.Fatalf("LoadScenario: %v", err)
+	}
+	if len(s.Steps) != 1 {
+		t.Fatalf("Steps len = %d", len(s.Steps))
+	}
+	rules := s.Steps[0].InquiryResponses
+	if len(rules) != 2 {
+		t.Fatalf("InquiryResponses len = %d", len(rules))
+	}
+	if rules[0].Match.Type != "clarification" {
+		t.Errorf("rule[0] type = %q", rules[0].Match.Type)
+	}
+	if rules[0].Match.QuestionContains != "revenue" {
+		t.Errorf("rule[0] question_contains = %q", rules[0].Match.QuestionContains)
+	}
+	if rules[0].Respond.Response != "by revenue" {
+		t.Errorf("rule[0] response = %q", rules[0].Respond.Response)
+	}
+	if rules[0].Delay.Std() != 200*time.Millisecond {
+		t.Errorf("rule[0] delay = %s", rules[0].Delay)
+	}
+	if rules[1].Match.Type != "approval" {
+		t.Errorf("rule[1] type = %q", rules[1].Match.Type)
+	}
+	if rules[1].Respond.Approved == nil || *rules[1].Respond.Approved {
+		t.Errorf("rule[1] approved = %v (want pointer to false)", rules[1].Respond.Approved)
+	}
+	if rules[1].Respond.Reason != "denied by harness" {
+		t.Errorf("rule[1] reason = %q", rules[1].Respond.Reason)
 	}
 }
 

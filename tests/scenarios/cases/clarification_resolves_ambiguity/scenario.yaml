@@ -45,6 +45,26 @@ steps:
     budget: 420s
     wait_for_subagents: 360s
 
+    # Phase 5.1 κ — harness intercepts the bubbled inquire and
+    # scripts the answer. First rule prefers a revenue-flavoured
+    # question (the natural ambiguity the model is expected to
+    # detect); second is a fallback for clarifications that don't
+    # contain "revenue" in the prompt. Both answer with the
+    # disambiguation "by revenue" so the mission picks the same
+    # branch end-to-end.
+    inquiry_responses:
+      - match:
+          type: clarification
+          question_contains: revenue
+        respond:
+          response: "by revenue"
+        delay: 200ms
+      - match:
+          type: clarification
+        respond:
+          response: "by revenue"
+        delay: 200ms
+
     queries:
       # Mission's tool sequence — expect session:inquire with
       # type=clarification near the beginning, BEFORE any

@@ -5,6 +5,7 @@ package harness
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,12 +17,13 @@ import (
 // Runtime. Its ID is the GraphQL `$sid` variable scenarios use in
 // queries; OpenedAt is informational (logged into t.Log).
 type SessionHandle struct {
-	rt        *Runtime
-	t         *testing.T
-	session   *session.Session
-	id        string
-	openedAt  time.Time
-	frameLog  []protocol.Frame
+	rt         *Runtime
+	t          *testing.T
+	session    *session.Session
+	id         string
+	openedAt   time.Time
+	frameLog   []protocol.Frame
+	dispatcher atomic.Pointer[inquiryDispatcher]
 }
 
 // OpenSession creates a fresh root session and starts the outbox
@@ -75,6 +77,13 @@ func (h *SessionHandle) pump() {
 	for f := range h.session.Outbox() {
 		h.frameLog = append(h.frameLog, f)
 		logFrame(h.t, f)
+		if req, ok := f.(*protocol.InquiryRequest); ok {
+			// Spawn a delivery goroutine — Manager.Deliver blocks on
+			// the root inbox channel, and we must not stall the
+			// outbox drain. Pass by value so the goroutine owns its
+			// snapshot of the frame's payload.
+			go h.handleInquiry(*req)
+		}
 	}
 }
 
@@ -89,6 +98,15 @@ func (h *SessionHandle) Step(ctx context.Context, step Step, idx int) {
 	if budget == 0 {
 		budget = 60 * time.Second
 	}
+
+	// Swap in this step's inquiry responders before the user
+	// message is delivered so any inquire bubbled before the LLM
+	// emits its first agent_message still gets answered. Clear on
+	// return so late inquiries (e.g. from a leftover async
+	// mission) don't accidentally pick up a stale rule from the
+	// previous step.
+	h.dispatcher.Store(newInquiryDispatcher(step.InquiryResponses))
+	defer h.dispatcher.Store(nil)
 
 	switch {
 	case step.Say != "":
@@ -228,6 +246,14 @@ func logFrame(t *testing.T, f protocol.Frame) {
 	case *protocol.ExtensionFrame:
 		t.Logf("◆ %3d extension_frame ext=%s op=%s category=%s",
 			f.Seq(), v.Payload.Extension, v.Payload.Op, v.Payload.Category)
+	case *protocol.InquiryRequest:
+		t.Logf("◆ %3d inquiry_request type=%s rid=%s caller=%s q=%s",
+			f.Seq(), v.Payload.Type, v.Payload.RequestID,
+			v.Payload.CallerSessionID, singleLine(v.Payload.Question, 160))
+	case *protocol.InquiryResponse:
+		t.Logf("◆ %3d inquiry_response rid=%s caller=%s approved=%s response=%s",
+			f.Seq(), v.Payload.RequestID, v.Payload.CallerSessionID,
+			approvedLabel(v.Payload.Approved), singleLine(v.Payload.Response, 160))
 	default:
 		t.Logf("◆ %3d %s", f.Seq(), f.Kind())
 	}

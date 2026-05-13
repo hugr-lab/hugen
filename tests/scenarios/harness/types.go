@@ -98,7 +98,14 @@ type Step struct {
 	Budget           Duration  `yaml:"budget,omitempty"` // overrides default 60s
 	WaitForSubagents Duration  `yaml:"wait_for_subagents,omitempty"`
 	WaitForCondition *WaitCond `yaml:"wait_for_condition,omitempty"`
-	Queries          []Query   `yaml:"queries,omitempty"`
+	// InquiryResponses scripts answers to session:inquire calls that
+	// bubble up while this step is active. The harness pump matches
+	// each *protocol.InquiryRequest against the rules in order; the
+	// first un-consumed match is consumed and answered via the
+	// Manager.Deliver path. Unmatched requests fall through to the
+	// runtime inquire-tool timeout. Phase 5.1 § κ.
+	InquiryResponses []InquiryRule `json:"inquiry_responses,omitempty" yaml:"inquiry_responses,omitempty"` //nolint:tagliatelle
+	Queries          []Query       `yaml:"queries,omitempty"`
 }
 
 // WaitCond is a generic "poll until persisted state matches" gate.

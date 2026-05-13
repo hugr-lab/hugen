@@ -84,7 +84,10 @@ runs:
   - name: gemma4-26b
     llm: configs/llm-gemma4-26b.yaml
     topology: configs/topology-external-hugr.yaml
-    requires: [local, hugr]
+    # Phase 5.1 κ hybrid: gemini-pro on root+mission, gemma4-26b on
+    # workers — see configs/llm-gemma4-26b.yaml header for the
+    # token-budget rationale.
+    requires: [local, hugr, gemini]
     scenarios:
       # δ.B 3-tier core — anchor scenarios for the η Gemma gate.
       - trivial_question_via_mission
