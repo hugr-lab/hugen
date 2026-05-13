@@ -106,6 +106,8 @@ runs:
       # root fan-out arrives in a fast-follow. Expect tuning
       # iterations against Gemma 26B before merge.
       - hitl_minimal
+      - hitl_mission_probe
+      - hitl_worker_probe
       - follow_up_during_mission
       - cancel_and_respawn
       - async_mission_completion

@@ -73,11 +73,36 @@ When you finish:
 - Owe your mission progress chatter. The mission reads the
   whiteboard between waves; your final assistant message is
   what it consumes. Keep both tight.
-- Call `session:inquire` or `session:notify_subagent`. Workers
-  do not surface questions to the user directly and do not
-  send notes to siblings. If you genuinely need user input,
-  return what you have and let the mission decide whether to
-  ask.
+- Call `session:notify_subagent`. Workers do not send notes to
+  siblings; that is the mission's coordination channel.
+
+### When you need user input
+
+`session:inquire(type="clarification")` is granted to you for a
+narrow case: **data-level ambiguity that you alone can see**.
+Example — your task is "find the customer table in northwind"
+and you discover two equally-plausible candidates (`nw_customers`
+and `nw_customer_archive`). The mission cannot disambiguate
+without seeing the same data, so escalating to it would just
+push the decision back. Inquire directly.
+
+Do NOT use inquire for:
+
+- **Intent ambiguity** ("did you mean by revenue or by count?").
+  That belongs to the mission — return your finding and let it
+  decide whether to ask. The mission has the user's full
+  request in context; you have only your slice.
+- Routine pick-list cases that should be in the mission's
+  spawn-args contract.
+- "Just checking" before a write — `requires_approval` on the
+  tool manifest catches destructive operations automatically;
+  do not duplicate it with a soft inquire.
+
+When you inquire, your turn parks in `wait_user_input` until
+the cascade returns. Other waves in your mission keep running
+on their own turns. Keep the question tight ("source A or B?",
+options listed); add a one-sentence `context` describing what
+you found.
 
 ### When a parent note arrives during a tool wait
 

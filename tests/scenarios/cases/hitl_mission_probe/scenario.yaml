@@ -1,0 +1,122 @@
+# hitl_mission_probe — phase 5.1 κ deterministic 1-hop cascade.
+#
+# Root delegates to a `_general` mission whose entire job is to
+# call `session:inquire(type="clarification")` once and echo the
+# response. Tests the full 1-hop cascade machinery:
+#
+#   1. root issues spawn_mission(skill="_general", goal=...)
+#   2. mission calls session:inquire
+#   3. mission emits InquiryRequest → subagent_pump on root
+#      bubbles it (records responseRouting[rid] = missionID on
+#      root) and rewrites SessionID → rootID before flushing to
+#      root.outbox
+#   4. harness pump intercepts, builds InquiryResponse with
+#      CallerSessionID = missionID, Manager.Deliver()s to root
+#   5. RouteInternal at root → dispatchInquiryResponse →
+#      CallerSessionID != self → lookup routing[rid] = missionID
+#      → Submit(mission, response)
+#   6. RouteInternal at mission → dispatchInquiryResponse →
+#      CallerSessionID == self → deliver to pending channel →
+#      inquire tool unblocks → tool_result lands
+#   7. mission's next turn → final result text including
+#      `harness_response=<answer>`
+#   8. root's wait_subagents released → final agent_message
+#      includes the mission's result
+#
+# By-eye assertions:
+#
+#   1. Exactly one `session_inquire` tool_call somewhere in the
+#      tree, originating from the mission (parent_session_id ==
+#      root's sid).
+#   2. tool_result row for that call carries `"response":"red"`
+#      in content.
+#   3. Mission's final result (visible on SubagentResult or
+#      mission's last agent_message) contains the literal
+#      token `harness_response=red`.
+#   4. Root's final agent_message includes `harness_response=red`
+#      either verbatim or quoted from the mission's result.
+name: hitl_mission_probe
+requires: [hugr]
+
+steps:
+  - say: |
+      I am running an integration test of the mission-tier
+      `session:inquire` cascade. Do exactly the following.
+
+      Step 1 — call `session:spawn_mission` with:
+        - skill: "_general"
+        - goal:  "Call `session:inquire` exactly once with type=`clarification` and question=`mission HITL probe — should I use red or blue?`. Once you receive the response, return the single line `harness_response=<answer>` as your mission result, where <answer> is the response text verbatim. Do NOT spawn workers, do NOT load skills, do NOT do anything else."
+
+      Step 2 — call `session:wait_subagents` on the returned id.
+
+      Step 3 — reply to me with EXACTLY this single line (no
+      preamble, no markdown, no quotes):
+
+        harness_response=<answer>
+
+      Substituting <answer> with whatever the mission returned
+      after `harness_response=`.
+    budget: 240s
+    wait_for_subagents: 180s
+
+    # 1-hop cascade: harness answers "red" for the mission's
+    # clarification.
+    inquiry_responses:
+      - match:
+          type: clarification
+          question_contains: "mission HITL probe"
+        respond:
+          response: "red"
+        delay: 100ms
+      - match:
+          type: clarification
+        respond:
+          response: "red"
+        delay: 100ms
+
+    queries:
+      # The one inquire tool_call — should be on the mission
+      # session, not on root.
+      - name: inquire_calls
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map({seq, sid: .session_id, args: .tool_args})") {
+              hub { db { agent {
+                session_events(
+                  filter: {event_type: {eq: "tool_call"}, tool_name: {eq: "session_inquire"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq session_id tool_args }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Subagent (mission) result row — should contain
+      # `harness_response=red` in its result/content.
+      - name: mission_result
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "subagent_result"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Root's final agent_message — must contain the literal
+      # token at least once.
+      - name: root_final_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 2
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }
