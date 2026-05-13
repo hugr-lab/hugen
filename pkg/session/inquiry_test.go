@@ -15,7 +15,7 @@ func TestDispatchInquiryResponse_DeliverToOriginator(t *testing.T) {
 	defer cleanup()
 
 	const requestID = "req-deliver-1"
-	ch := parent.recordPending(requestID)
+	ch := parent.recordPending(requestID, nil)
 	defer parent.clearPending(requestID)
 
 	// Defensive route entry — dispatcher should clear it after
@@ -133,7 +133,7 @@ func TestDeliverPending_BufferedSecondDelivery(t *testing.T) {
 	defer cleanup()
 
 	const requestID = "req-dup-1"
-	ch := parent.recordPending(requestID)
+	ch := parent.recordPending(requestID, nil)
 	defer parent.clearPending(requestID)
 
 	resp := protocol.NewInquiryResponse(parent.id, protocol.ParticipantInfo{},

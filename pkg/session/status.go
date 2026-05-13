@@ -80,10 +80,60 @@ func (s *Session) markStatus(ctx context.Context, state, reason string) {
 	s.statusMu.Unlock()
 
 	frame := protocol.NewSessionStatus(s.id, s.agent.Participant(), state, reason)
+	s.populateStatusSnapshot(&frame.Payload)
 	if err := s.emit(ctx, frame); err != nil && s.logger != nil {
 		s.logger.Warn("session: emit lifecycle marker",
 			"session", s.id, "state", state, "reason", reason, "err", err)
 	}
+}
+
+// populateStatusSnapshot fills the phase-5.1b enrichment fields
+// on payload with a coherent snapshot of the session's live
+// state. Empty / nil leaves the JSON omitempty rules to keep the
+// wire format compact for idle sessions with nothing in flight.
+//
+// All three reads are best-effort, independent, and protected by
+// their own narrow mutexes (childMu, inquiry.pendingMu,
+// lastToolCall atomic). The snapshot is NOT a transaction; an
+// adapter reading two consecutive status events may observe
+// state that briefly disagrees with the live world. The
+// trade-off is intentional: locking the whole session for a
+// status emit would serialise tool dispatch and outbox writes.
+func (s *Session) populateStatusSnapshot(payload *protocol.SessionStatusPayload) {
+	if payload == nil {
+		return
+	}
+	payload.ActiveSubagents = s.snapshotActiveSubagents()
+	payload.PendingInquiry = s.snapshotPendingInquiry()
+	if last := s.lastToolCall.Load(); last != nil {
+		clone := *last
+		payload.LastToolCall = &clone
+	}
+}
+
+// snapshotActiveSubagents iterates the session's children map
+// under childMu and returns one ActiveSubagentRef per live child.
+// Returns nil (not []) when there are no children so the JSON
+// payload stays empty under omitempty.
+func (s *Session) snapshotActiveSubagents() []protocol.ActiveSubagentRef {
+	s.childMu.Lock()
+	defer s.childMu.Unlock()
+	if len(s.children) == 0 {
+		return nil
+	}
+	out := make([]protocol.ActiveSubagentRef, 0, len(s.children))
+	for _, child := range s.children {
+		if child == nil {
+			continue
+		}
+		out = append(out, protocol.ActiveSubagentRef{
+			SessionID: child.id,
+			Skill:     child.spawnSkill,
+			Role:      child.spawnRole,
+			StartedAt: child.openedAt,
+		})
+	}
+	return out
 }
 
 // MarkStatus is the cross-package entry point for the lifecycle

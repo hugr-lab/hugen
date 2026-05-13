@@ -153,6 +153,15 @@ type Session struct {
 	// adding a mutex hot-path on every inbound frame.
 	activeToolFeed atomic.Pointer[ToolFeed]
 
+	// lastToolCall snapshots the most recently dispatched tool for
+	// the enriched SessionStatusPayload adapters consume (phase
+	// 5.1b). Set in dispatchToolCall right before the actual
+	// tool.Dispatch fires; never cleared — adapters render
+	// "last tool: X" even after completion. atomic.Pointer because
+	// tool dispatch runs on its own goroutine while markStatus
+	// reads from Run / pump.
+	lastToolCall atomic.Pointer[protocol.ToolCallRef]
+
 	// Materialisation state for restart-resume (Phase 4 fills this in).
 	materialised atomic.Bool
 	matOnce      sync.Once
@@ -1633,6 +1642,13 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 	if err := s.emit(emitCtx, callFrame); err != nil {
 		s.logger.Warn("emit tool_call", "err", err)
 	}
+	// Phase 5.1b — snapshot the latest dispatched tool for the
+	// enriched SessionStatusPayload. atomic.Pointer write is
+	// race-free against the read path in buildStatusSnapshot.
+	s.lastToolCall.Store(&protocol.ToolCallRef{
+		Name:      tc.Name,
+		StartedAt: time.Now().UTC(),
+	})
 	// Log the dispatch with full args BEFORE the call so the
 	// operator can correlate any downstream slowdown / hang with
 	// the exact request. Hash is included for phase-4

@@ -124,3 +124,89 @@ func TestIsQuiescent_FreshSession(t *testing.T) {
 			s.turnState, s.activeToolFeed.Load(), len(s.pendingInbound))
 	}
 }
+
+// TestPopulateStatusSnapshot_EmptySession verifies the phase-5.1b
+// enrichment fields stay nil / empty for a fresh session with no
+// children, no inquiry, no tool dispatched. Wire format must keep
+// the omitempty contract — pre-5.1b adapters MUST see the
+// original {state, reason} shape.
+func TestPopulateStatusSnapshot_EmptySession(t *testing.T) {
+	s, cleanup := newTestParent(t)
+	defer cleanup()
+
+	var payload protocol.SessionStatusPayload
+	s.populateStatusSnapshot(&payload)
+	if payload.ActiveSubagents != nil {
+		t.Errorf("ActiveSubagents = %+v, want nil", payload.ActiveSubagents)
+	}
+	if payload.PendingInquiry != nil {
+		t.Errorf("PendingInquiry = %+v, want nil", payload.PendingInquiry)
+	}
+	if payload.LastToolCall != nil {
+		t.Errorf("LastToolCall = %+v, want nil", payload.LastToolCall)
+	}
+}
+
+// TestPopulateStatusSnapshot_WithPendingInquiry covers the inquiry
+// snapshot path: a recordPending call with a non-nil ref must
+// surface through populateStatusSnapshot as a coherent
+// PendingInquiryRef.
+func TestPopulateStatusSnapshot_WithPendingInquiry(t *testing.T) {
+	s, cleanup := newTestParent(t)
+	defer cleanup()
+
+	ref := &protocol.PendingInquiryRef{
+		RequestID: "req-snap-1",
+		Type:      protocol.InquiryTypeClarification,
+		Question:  "northwind or transport?",
+	}
+	_ = s.recordPending("req-snap-1", ref)
+	defer s.clearPending("req-snap-1")
+
+	var payload protocol.SessionStatusPayload
+	s.populateStatusSnapshot(&payload)
+	if payload.PendingInquiry == nil {
+		t.Fatal("PendingInquiry nil after recordPending")
+	}
+	if payload.PendingInquiry.RequestID != "req-snap-1" {
+		t.Errorf("RequestID = %q, want req-snap-1", payload.PendingInquiry.RequestID)
+	}
+	if payload.PendingInquiry.Question != "northwind or transport?" {
+		t.Errorf("Question = %q", payload.PendingInquiry.Question)
+	}
+	// Mutating the returned ref MUST NOT affect the live state —
+	// the helper returns a clone.
+	payload.PendingInquiry.Question = "MUTATED"
+	var second protocol.SessionStatusPayload
+	s.populateStatusSnapshot(&second)
+	if second.PendingInquiry.Question != "northwind or transport?" {
+		t.Errorf("snapshot was mutable: %q", second.PendingInquiry.Question)
+	}
+}
+
+// TestPopulateStatusSnapshot_WithLastToolCall asserts the
+// lastToolCall atomic.Pointer flows into the payload, with the
+// returned ref a copy so adapters can't mutate live state.
+func TestPopulateStatusSnapshot_WithLastToolCall(t *testing.T) {
+	s, cleanup := newTestParent(t)
+	defer cleanup()
+
+	s.lastToolCall.Store(&protocol.ToolCallRef{
+		Name: "hugr-main:discovery-search_data_sources",
+	})
+
+	var payload protocol.SessionStatusPayload
+	s.populateStatusSnapshot(&payload)
+	if payload.LastToolCall == nil {
+		t.Fatal("LastToolCall nil after Store")
+	}
+	if payload.LastToolCall.Name != "hugr-main:discovery-search_data_sources" {
+		t.Errorf("LastToolCall.Name = %q", payload.LastToolCall.Name)
+	}
+	payload.LastToolCall.Name = "MUTATED"
+	var second protocol.SessionStatusPayload
+	s.populateStatusSnapshot(&second)
+	if second.LastToolCall.Name != "hugr-main:discovery-search_data_sources" {
+		t.Errorf("snapshot was mutable: %q", second.LastToolCall.Name)
+	}
+}

@@ -10,11 +10,13 @@ import (
 // inquiryState owns the two per-session maps the phase-5.1 HITL
 // machinery needs:
 //
-//   - pending: RequestID → channel the inquire tool blocks on for
-//     this session. Populated by the inquire tool body before it
-//     emits its InquiryRequest; cleared on response delivery, tool
-//     ctx cancel, or timeout. Read from the active tool feed's
-//     Feed callback (single channel write per response).
+//   - pending: RequestID → pendingInquiryEntry. Populated by the
+//     inquire tool body before it emits its InquiryRequest;
+//     cleared on response delivery, tool ctx cancel, or timeout.
+//     Each entry carries (a) the channel the tool body blocks on
+//     and (b) a *protocol.PendingInquiryRef snapshotting the
+//     question for adapters reading the enriched
+//     SessionStatusPayload (phase 5.1b).
 //   - routing: RequestID → direct-child session id the ancestor
 //     pump bubbled this RequestID up from. Populated by the pump
 //     each time it observes a child's *InquiryRequest. Read by
@@ -29,24 +31,37 @@ import (
 // initInquiry call (lazy init guards via the mutex).
 type inquiryState struct {
 	pendingMu sync.Mutex
-	pending   map[string]chan *protocol.InquiryResponse
+	pending   map[string]*pendingInquiryEntry
 
 	routingMu sync.Mutex
 	routing   map[string]string
 }
 
+// pendingInquiryEntry is the per-RequestID slot inside
+// inquiryState.pending. The channel is the tool body's blocker;
+// the ref is the snapshot adapters render through the enriched
+// SessionStatusPayload — both live together so the status helper
+// can read a coherent view under one mutex.
+type pendingInquiryEntry struct {
+	ch  chan *protocol.InquiryResponse
+	ref *protocol.PendingInquiryRef
+}
+
 // recordPending registers the channel the inquire tool body
 // blocks on for the given RequestID. The channel is buffered to
 // 1 so the dispatcher's Feed callback never blocks; multiple
-// arrivals for the same RequestID drop after the first.
-func (s *Session) recordPending(requestID string) chan *protocol.InquiryResponse {
+// arrivals for the same RequestID drop after the first. ref
+// (optional) snapshots the question + type + start time so the
+// enriched SessionStatusPayload (phase 5.1b) can render the
+// in-flight inquiry without re-walking the event log.
+func (s *Session) recordPending(requestID string, ref *protocol.PendingInquiryRef) chan *protocol.InquiryResponse {
 	ch := make(chan *protocol.InquiryResponse, 1)
 	s.inquiry.pendingMu.Lock()
 	defer s.inquiry.pendingMu.Unlock()
 	if s.inquiry.pending == nil {
-		s.inquiry.pending = make(map[string]chan *protocol.InquiryResponse)
+		s.inquiry.pending = make(map[string]*pendingInquiryEntry)
 	}
-	s.inquiry.pending[requestID] = ch
+	s.inquiry.pending[requestID] = &pendingInquiryEntry{ch: ch, ref: ref}
 	return ch
 }
 
@@ -66,13 +81,13 @@ func (s *Session) clearPending(requestID string) {
 // true on successful delivery.
 func (s *Session) deliverPending(resp *protocol.InquiryResponse) bool {
 	s.inquiry.pendingMu.Lock()
-	ch, ok := s.inquiry.pending[resp.Payload.RequestID]
+	entry, ok := s.inquiry.pending[resp.Payload.RequestID]
 	s.inquiry.pendingMu.Unlock()
 	if !ok {
 		return false
 	}
 	select {
-	case ch <- resp:
+	case entry.ch <- resp:
 		return true
 	default:
 		// Buffered channel of 1 — already filled by an earlier
@@ -80,6 +95,32 @@ func (s *Session) deliverPending(resp *protocol.InquiryResponse) bool {
 		// success: the tool already has its answer.
 		return true
 	}
+}
+
+// snapshotPendingInquiry returns the most recently registered
+// pending inquiry's reference for the enriched
+// SessionStatusPayload, or nil when no inquire is in flight.
+// "Most recent" means the highest-StartedAt entry; the runtime
+// supports at most one in-flight per session in practice, but
+// the helper is robust to concurrent edge cases.
+func (s *Session) snapshotPendingInquiry() *protocol.PendingInquiryRef {
+	s.inquiry.pendingMu.Lock()
+	defer s.inquiry.pendingMu.Unlock()
+	var best *protocol.PendingInquiryRef
+	for _, entry := range s.inquiry.pending {
+		if entry == nil || entry.ref == nil {
+			continue
+		}
+		if best == nil || entry.ref.StartedAt.After(best.StartedAt) {
+			best = entry.ref
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	// Return a copy so callers can't mutate the live state.
+	clone := *best
+	return &clone
 }
 
 // recordResponseRoute is the pump's per-hop bookkeeping —
