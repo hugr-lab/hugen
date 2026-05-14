@@ -60,6 +60,12 @@ type model struct {
 	// the freshly minted tab. Nil in tests / when the adapter
 	// doesn't support multi-root (initial single-tab fallback).
 	openTab func() tea.Cmd
+
+	// forgetTab is the adapter-installed callback invoked when a
+	// tab is removed (operator close or session terminated). The
+	// adapter updates ~/.hugen/tui.yaml so the dead root is not
+	// re-attached on the next start. Nil in tests.
+	forgetTab func(sessionID string)
 }
 
 // newModel constructs a model with one initial tab. submit closure
@@ -233,7 +239,11 @@ func (m *model) closeTab(idx int) tea.Cmd {
 	if idx < 0 || idx >= len(m.tabs) {
 		return nil
 	}
+	closed := m.tabs[idx]
 	m.tabs = append(m.tabs[:idx], m.tabs[idx+1:]...)
+	if m.forgetTab != nil {
+		m.forgetTab(closed.sessionID)
+	}
 	if len(m.tabs) == 0 {
 		return tea.Quit
 	}

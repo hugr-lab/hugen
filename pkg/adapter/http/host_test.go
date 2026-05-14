@@ -183,6 +183,13 @@ func (f *fakeHost) ListSessions(_ context.Context, status string) ([]session.Ses
 	return out, nil
 }
 
+func (f *fakeHost) ListEvents(_ context.Context, _ string, _ session.ListEventsOpts) ([]session.EventRow, error) {
+	// HTTP adapter tests don't exercise replay; the existing
+	// fakeStore is the ReplaySource used by the reconnect path.
+	// Return empty so the AdapterHost interface is satisfied.
+	return nil, nil
+}
+
 // publish routes a frame to every subscriber of sessionID; tests use
 // it to drive the SSE writer.
 func (f *fakeHost) publish(sessionID string, frame protocol.Frame) {

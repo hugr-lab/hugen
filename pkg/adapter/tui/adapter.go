@@ -17,6 +17,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/adapter"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 // Adapter is the Bubble Tea TUI adapter. Single root in slice 1;
@@ -33,6 +34,13 @@ type Adapter struct {
 	// not race in-flight emits. Additional tabs (Ctrl+N) live only
 	// inside the model + per-tab pump.
 	initial *session.Session
+
+	// persist is the in-memory mirror of ~/.hugen/tui.yaml. Slice 5
+	// — mutated on tab open / close and re-flushed via saveSettings.
+	// Nil only if the YAML file refused to load AND HomeDir is
+	// unreachable; the absence is benign (persistence becomes a
+	// no-op).
+	persist *tuiSettings
 
 	in  io.Reader
 	out io.Writer
@@ -83,6 +91,17 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	if a.logger == nil {
 		a.logger = host.Logger()
 	}
+	// Slice 5 — load persisted state (remembered root ids, theme,
+	// …). A missing file is the first-run path; a corrupt file
+	// degrades to empty so the TUI always starts. The resulting
+	// settings struct is the source of truth for subsequent
+	// rememberRoot / forgetRoot calls.
+	if s, err := loadSettings(); err == nil {
+		a.persist = s
+	} else {
+		a.logger.Warn("tui: load settings (continuing with defaults)", "err", err)
+		a.persist = &tuiSettings{}
+	}
 
 	var sess *session.Session
 	var err error
@@ -108,6 +127,24 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	}
 
 	m := newModel(sess.ID(), a.user, a.submitFrame(ctx), a.logger)
+	// Slice 5 — on-attach replay for the initial tab. Pull the
+	// last replayLimit events from the persisted log and stitch
+	// them into the chat buffer BEFORE bubbletea starts rendering
+	// so the operator sees prior context immediately rather than
+	// a blank pane that fills in only on the next live frame.
+	// Errors degrade to "no history" — startup must not depend on
+	// an event log being readable.
+	if events, listErr := host.ListEvents(ctx, sess.ID(), store.ListEventsOpts{Limit: replayLimit}); listErr == nil {
+		replayEvents(m.tabs[0], events)
+	} else if a.logger != nil {
+		a.logger.Warn("tui: initial replay skipped", "err", listErr)
+	}
+	// Slice 5 — forget callback wired to persistence. Model invokes
+	// it whenever a tab leaves the list (operator close or
+	// SessionTerminated cascade).
+	m.forgetTab = func(id string) { a.persistRoot(id, false) }
+	// Persist the initial tab id so a future restart re-attaches.
+	a.persistRoot(sess.ID(), true)
 	// Slice 4 — model emits requestOpenTabMsg on Ctrl+N. Wire the
 	// open callback through the model so the resulting tea.Cmd
 	// runs inside bubbletea's loop with access to host + the
@@ -131,6 +168,25 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	progRef = prog
 
 	go a.pumpFrames(ctx, sub, prog)
+
+	// Slice 5 — re-attach roots remembered from the previous run.
+	// Each survivor becomes an additional tab seeded with its
+	// recent event log. Dead roots are dropped from the persisted
+	// list inside attachRememberedTabs. attachTabMsg MUST land in
+	// the model BEFORE the per-tab pump starts forwarding live
+	// frames; otherwise the first frame for the resumed session
+	// could arrive at the dispatcher with no matching tab.
+	go func() {
+		if a.persist == nil {
+			return
+		}
+		ids := append([]string(nil), a.persist.RecentRoots...)
+		extras := a.attachRememberedTabs(ctx, ids)
+		for _, e := range extras {
+			prog.Send(attachTabMsg{t: e.t})
+			go a.pumpFrames(ctx, e.sub, prog)
+		}
+	}()
 
 	// Belt-and-suspenders terminal cleanup. bubbletea's own
 	// shutdown disables mouse-tracking + exits altscreen on a clean
@@ -192,7 +248,8 @@ func (a *Adapter) submitFrame(ctx context.Context) func(protocol.Frame) error {
 // openNewTab opens a fresh root session, subscribes to its outbox,
 // spawns a pump goroutine, and returns an attachTabMsg the model
 // folds into its tab list. Errors are surfaced as openTabError so
-// the active tab can flash the failure in its banner. Slice 4.
+// the active tab can flash the failure in its banner. Slice 4 +
+// slice 5: persists the new root in ~/.hugen/tui.yaml.
 func (a *Adapter) openNewTab(ctx context.Context, prog *tea.Program) tea.Msg {
 	sess, _, err := a.host.OpenSession(ctx, adapter.OpenRequest{
 		OwnerID:      a.user.ID,
@@ -207,7 +264,82 @@ func (a *Adapter) openNewTab(ctx context.Context, prog *tea.Program) tea.Msg {
 	}
 	go a.pumpFrames(ctx, sub, prog)
 	t := newTab(sess.ID(), a.user, a.submitFrame(ctx), a.logger)
+	a.persistRoot(sess.ID(), true)
 	return attachTabMsg{t: t}
+}
+
+// rememberedAttach is one entry returned by attachRememberedTabs:
+// the freshly minted tab plus the subscription channel its pump
+// will consume from. The caller is responsible for sending the
+// attachTabMsg FIRST and starting the pump after — that ordering
+// guarantees the model has the tab in its list before any live
+// frame arrives for the session id.
+type rememberedAttach struct {
+	t   *tab
+	sub <-chan protocol.Frame
+}
+
+// attachRememberedTabs walks the persisted root id list from
+// ~/.hugen/tui.yaml and tries to ResumeSession each one. Surviving
+// roots become tabs (with their event log replayed into the chat
+// buffer); dead roots are dropped from the settings file with a
+// single info-log line so the operator sees what was forgotten.
+func (a *Adapter) attachRememberedTabs(ctx context.Context, ids []string) []rememberedAttach {
+	if len(ids) == 0 {
+		return nil
+	}
+	var attached []rememberedAttach
+	survivors := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || id == a.initial.ID() {
+			continue // skip duplicates of the initial tab
+		}
+		sess, err := a.host.ResumeSession(ctx, id)
+		if err != nil {
+			if a.logger != nil {
+				a.logger.Info("tui: remembered root not resumable; dropping", "id", id, "err", err)
+			}
+			continue
+		}
+		sub, subErr := a.host.Subscribe(ctx, sess.ID())
+		if subErr != nil {
+			if a.logger != nil {
+				a.logger.Warn("tui: subscribe failed for remembered root", "id", id, "err", subErr)
+			}
+			continue
+		}
+		t := newTab(sess.ID(), a.user, a.submitFrame(ctx), a.logger)
+		if events, listErr := a.host.ListEvents(ctx, sess.ID(), store.ListEventsOpts{Limit: replayLimit}); listErr == nil {
+			replayEvents(t, events)
+		}
+		attached = append(attached, rememberedAttach{t: t, sub: sub})
+		survivors = append(survivors, id)
+	}
+	// Rewrite the settings file so dead roots are forgotten on the
+	// next start. Best-effort.
+	if a.persist != nil {
+		a.persist.RecentRoots = append([]string{a.initial.ID()}, survivors...)
+		_ = saveSettings(a.persist)
+	}
+	return attached
+}
+
+// persistRoot upserts (add=true) or removes (add=false) a session
+// id from the persisted recent-roots list. Best-effort — errors
+// are logged-and-swallowed; persistence is a UX nicety, never a
+// correctness lever.
+func (a *Adapter) persistRoot(id string, add bool) {
+	if a.persist == nil {
+		return
+	}
+	if add {
+		a.persist.RecentRoots = rememberRoot(a.persist.RecentRoots, id)
+	} else {
+		a.persist.RecentRoots = forgetRoot(a.persist.RecentRoots, id)
+	}
+	if err := saveSettings(a.persist); err != nil && a.logger != nil {
+		a.logger.Warn("tui: save settings", "err", err)
+	}
 }
 
 func defaultUserParticipant() protocol.ParticipantInfo {

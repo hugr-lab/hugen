@@ -489,6 +489,15 @@ func (m *Manager) ListResumableRoots(ctx context.Context) ([]session.SessionSumm
 	return rowsToSummaries(plain), nil
 }
 
+// ListEvents proxies to the underlying RuntimeStore. Phase 5.1c —
+// the TUI adapter calls this on tab attach to fetch the recent
+// event log and replay it into the chat pane (on-attach rendering
+// per §9). Public so AdapterHost can expose it without leaking
+// the store interface.
+func (m *Manager) ListEvents(ctx context.Context, sessionID string, opts store.ListEventsOpts) ([]store.EventRow, error) {
+	return m.store.ListEvents(ctx, sessionID, opts)
+}
+
 func rowsToSummaries(rows []store.SessionRow) []session.SessionSummary {
 	out := make([]session.SessionSummary, 0, len(rows))
 	for _, r := range rows {
