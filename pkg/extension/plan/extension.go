@@ -133,6 +133,26 @@ func (h *SessionPlan) Render(renderer *prompts.Renderer) string {
 	return Render(renderer, h.plan)
 }
 
+// ReportStatus implements [extension.StatusReporter]. Returns
+// the full plan projection as JSON: body, current step, comments,
+// timestamps. Nil when no plan is active. Phase 5.1b — consumed
+// by liveview when it assembles its emit payload.
+func (e *Extension) ReportStatus(_ context.Context, state extension.SessionState) json.RawMessage {
+	h := FromState(state)
+	if h == nil {
+		return nil
+	}
+	p := h.Snapshot()
+	if !p.Active {
+		return nil
+	}
+	data, err := json.Marshal(p)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
 // AdvertiseSystemPrompt implements [extension.Advertiser]. Returns
 // the rendered active-plan block, or "" when the plan is inactive.
 func (e *Extension) AdvertiseSystemPrompt(_ context.Context, state extension.SessionState) string {

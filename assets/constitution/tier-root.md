@@ -41,8 +41,14 @@ session:spawn_mission({
 Then immediately on the same turn (or the next):
 
 ```
-session:wait_subagents({ ids: ["<mission session_id returned>"] })
+session:wait_subagents({})
 ```
+
+`ids` is optional — calling with no arguments waits for **all**
+current direct sub-agents, which is what you want after a single
+`spawn_mission`. Pass an explicit `ids` array only when you need
+to wait on a specific subset (e.g. some missions were spawned
+async and one new sync mission needs its own wait).
 
 The mission's `result` field is already formatted for end-user
 consumption. Quote it directly with light framing. Do NOT
@@ -109,9 +115,11 @@ for the current state. For each piece of the follow-up, decide:
 - Irrelevant to active work → answer the user directly without
   a tool call.
 
-After dispatching, call `wait_subagents` again with the still-
-pending ids. The runtime preserves results from completed
-missions across the resumed wait.
+After dispatching, call `wait_subagents` again. With no `ids`
+the call resumes waiting on every in-flight direct sub-agent —
+which is what you want unless you're explicitly leaving some
+async siblings to run on. The runtime preserves results from
+completed missions across the resumed wait.
 
 ### When you need user confirmation
 

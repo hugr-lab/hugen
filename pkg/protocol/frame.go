@@ -487,9 +487,48 @@ const (
 // free-form trigger label ("user_message", "wait_subagents tool",
 // "turn quiescent", …) used purely for diagnostics and the audit
 // log; the runtime never branches on it.
+//
+// Phase 5.1b grew the payload with three optional snapshots of
+// the session's live state at emission time, so adapters that
+// render rich status panes (TUI, future SSE / A2A) don't have to
+// walk the event log to recover them. All three fields are
+// `omitempty` — adapters that only read State / Reason continue
+// to work unchanged.
 type SessionStatusPayload struct {
-	State  string `json:"state"`
-	Reason string `json:"reason,omitempty"`
+	State           string             `json:"state"`
+	Reason          string             `json:"reason,omitempty"`
+	ActiveSubagents []ActiveSubagentRef `json:"active_subagents,omitempty"`
+	PendingInquiry  *PendingInquiryRef  `json:"pending_inquiry,omitempty"`
+	LastToolCall    *ToolCallRef        `json:"last_tool_call,omitempty"`
+}
+
+// ActiveSubagentRef is one entry in SessionStatusPayload.ActiveSubagents.
+// Populated when the emitting session has live children at the
+// time of the status transition.
+type ActiveSubagentRef struct {
+	SessionID string    `json:"session_id"`
+	Skill     string    `json:"skill,omitempty"`
+	Role      string    `json:"role,omitempty"`
+	StartedAt time.Time `json:"started_at"`
+}
+
+// PendingInquiryRef snapshots the in-flight session:inquire when
+// the session emits its KindSessionStatus(wait_approval) or
+// KindSessionStatus(wait_user_input) event. Nil when the session
+// is not blocked on an inquiry.
+type PendingInquiryRef struct {
+	RequestID string    `json:"request_id"`
+	Type      string    `json:"type"` // approval | clarification
+	Question  string    `json:"question"`
+	StartedAt time.Time `json:"started_at"`
+}
+
+// ToolCallRef snapshots the most recently dispatched tool at the
+// time of a status transition. Used by adapters to render
+// "running: hugr-main:discovery-search_data_sources" indicators.
+type ToolCallRef struct {
+	Name      string    `json:"name"`
+	StartedAt time.Time `json:"started_at"`
 }
 
 // SystemMessagePayload is a model-visible runtime injection (distinct

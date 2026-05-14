@@ -126,6 +126,40 @@ func (h *SessionWhiteboard) Snapshot() Whiteboard {
 	return out
 }
 
+// ReportStatus implements [extension.StatusReporter]. Returns
+// the full Whiteboard projection (Active, HostID, StartedAt,
+// Messages slice intact) as JSON. Falls back to the parent's
+// board when this session has no own active board — same
+// precedence as the `read` tool. Nil when no board is active
+// anywhere up the chain. Phase 5.1b — consumed by liveview when
+// it assembles its emit payload.
+func (e *Extension) ReportStatus(_ context.Context, state extension.SessionState) json.RawMessage {
+	h := FromState(state)
+	if h == nil {
+		return nil
+	}
+	source := h
+	source.mu.Lock()
+	active := source.wb.Active
+	source.mu.Unlock()
+	if !active {
+		if parentState, ok := state.Parent(); ok {
+			if parentH := FromState(parentState); parentH != nil {
+				source = parentH
+			}
+		}
+	}
+	wb := source.Snapshot()
+	if !wb.Active {
+		return nil
+	}
+	data, err := json.Marshal(wb)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
 // ---------- ToolProvider surface ----------
 
 const (

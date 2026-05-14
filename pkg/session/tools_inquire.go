@@ -27,11 +27,7 @@ const inquireSchema = `{
     "options":    {"type": "array", "items": {"type": "string"}, "description": "Optional pre-defined answers for clarification questions."},
     "timeout_ms": {"type": "integer", "minimum": 1, "description": "Per-call deadline override. Defaults to the runtime-configured global timeout."}
   },
-  "required": ["type", "question"],
-  "examples": [
-    {"type": "clarification", "question": "Which data source should I use?", "context": "A [fits-explicit], B [fits-possibly]", "options": ["A", "B"]},
-    {"type": "approval", "question": "Run DROP TABLE on staging.users?"}
-  ]
+  "required": ["type", "question"]
 }`
 
 type inquireInput struct {
@@ -97,8 +93,17 @@ func (s *Session) callInquire(ctx context.Context, args json.RawMessage) (json.R
 
 	// Register the pending channel BEFORE emitting the request so
 	// a fast cascade-down (test fixtures with synchronous adapter
-	// loops) cannot deliver before the entry exists.
-	respCh := s.recordPending(requestID)
+	// loops) cannot deliver before the entry exists. The
+	// PendingInquiryRef snapshots the question for adapters
+	// rendering the enriched SessionStatusPayload (phase 5.1b).
+	startedAt := time.Now().UTC()
+	ref := &protocol.PendingInquiryRef{
+		RequestID: requestID,
+		Type:      in.Type,
+		Question:  in.Question,
+		StartedAt: startedAt,
+	}
+	respCh := s.recordPending(requestID, ref)
 	defer s.clearPending(requestID)
 
 	// Register the active tool feed so an InquiryResponse arriving

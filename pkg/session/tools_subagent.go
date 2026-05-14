@@ -45,7 +45,7 @@ func (s *Session) initSubagent() {
 	}
 	s.sessionTools["wait_subagents"] = sessionToolDescriptor{
 		Name:             "wait_subagents",
-		Description:      "Block until each listed sub-agent produces a terminal result. Returns one row per id.",
+		Description:      "Block until each requested sub-agent produces a terminal result. `ids` is optional — omit or pass an empty array to wait for ALL current direct sub-agents (recommended for the common 'sync after a wave' pattern). Pass explicit ids only when waiting on a specific subset. Returns one row per resolved id. Unknown ids return an error listing the session's actual direct children.",
 		PermissionObject: permObjectSubagentWait,
 		ArgSchema:        json.RawMessage(waitSubagentsSchema),
 		Handler:          s.callWaitSubagents,

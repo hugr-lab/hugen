@@ -1,6 +1,7 @@
 package session
 
 import (
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -92,6 +93,29 @@ type childPumpState struct {
 // Future Phase-5 HITL kinds add one case here when those frames land
 // in pkg/protocol.
 func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childPumpState) {
+	// Phase 5.1b — notify ChildFrameObservers on every child frame
+	// before the explicit projection logic, so a parent extension
+	// (liveview) sees lifecycle-terminating frames (SessionTerminated,
+	// final AgentMessage, Error) too, not just routine tool_call /
+	// reasoning. Without this, liveview never learns that a child
+	// has terminated and the child entry leaks in the parent's
+	// projection cache. Observers are non-blocking with a recover
+	// guard, so this is safe to call unconditionally.
+	//
+	// Dual-path child cleanup convergence — by design:
+	//   1. This observer notification lets liveview's cache learn
+	//      a child died (via SessionTerminated) and drop the entry
+	//      from its projection map.
+	//   2. The explicit case below builds a SubagentResult and
+	//      submits it into parent's own inbox; routeInbound →
+	//      handleSubagentResult then issues SessionClose to the
+	//      child, waits for child.Done(), and deletes the entry
+	//      from parent.children.
+	// Both paths converge on the same end state ("child gone"); the
+	// observer-side runs first so liveview's emit-on-change reflects
+	// the topology change without waiting on the close-and-deregister
+	// round-trip.
+	s.notifyChildFrameObservers(child, f)
 	switch v := f.(type) {
 	case *protocol.AgentMessage:
 		if v.Payload.Consolidated {
@@ -170,7 +194,37 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 		// Drain. Streaming chunks (Final=false or Consolidated=false),
 		// reasoning, tool_call/result, recoverable errors, status
 		// markers, opened/closed lifecycle events, system_marker,
-		// extension_frame — all local to child's session.
+		// extension_frame — all local to child's session. The
+		// ChildFrameObserver notify-call moved to the top of this
+		// function in phase 5.1b's follow-up so the explicit cases
+		// (final AgentMessage, Error, SessionTerminated,
+		// InquiryRequest) also fan out.
+	}
+}
+
+// notifyChildFrameObservers iterates the session's deps.Extensions
+// and dispatches the child frame to every extension implementing
+// [extension.ChildFrameObserver]. Recover guard isolates extension
+// panics from the pump goroutine. Phase 5.1b.
+func (s *Session) notifyChildFrameObservers(child *Session, f protocol.Frame) {
+	if s.deps == nil {
+		return
+	}
+	for _, ext := range s.deps.Extensions {
+		obs, ok := ext.(extension.ChildFrameObserver)
+		if !ok {
+			continue
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil && s.logger != nil {
+					s.logger.Warn("session: ChildFrameObserver panic",
+						"session", s.id, "child", child.id,
+						"extension", ext.Name(), "panic", r)
+				}
+			}()
+			obs.OnChildFrame(s.ctx, s, child.id, f)
+		}()
 	}
 }
 

@@ -2,6 +2,7 @@ package skill
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"sort"
@@ -42,7 +43,25 @@ var (
 	_ extension.MissionDispatcher   = (*Extension)(nil)
 	_ extension.MissionStartLookup  = (*Extension)(nil)
 	_ extension.CloseTurnLookup     = (*Extension)(nil)
+	_ extension.StatusReporter      = (*Extension)(nil)
 )
+
+// ReportStatus implements [extension.StatusReporter]. Returns the
+// sorted list of skills currently loaded into the calling session
+// as `{"loaded": [names...]}` JSON. Phase 5.1b — consumed by
+// liveview when it assembles its emit payload.
+func (e *Extension) ReportStatus(ctx context.Context, state extension.SessionState) json.RawMessage {
+	h := FromState(state)
+	if h == nil {
+		return nil
+	}
+	names := h.LoadedNames(ctx)
+	data, err := json.Marshal(map[string]any{"loaded": names})
+	if err != nil {
+		return nil
+	}
+	return data
+}
 
 // MissionSkillExists implements [extension.MissionDispatcher].
 // Returns (true, nil) when the named skill is installed AND its

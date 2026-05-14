@@ -16,6 +16,15 @@ import (
 // the live session id. Failures are logged, not fatal — this is
 // observational.
 func (r *Runtime) RunQuery(ctx context.Context, t *testing.T, sessionID string, q Query) {
+	r.RunQueryWithSids(ctx, t, map[string]string{"sid": sessionID}, q)
+}
+
+// RunQueryWithSids is the multi-root variant of [RunQuery]. The
+// sids map carries every $sid_<name> the assertion clause may
+// reference (e.g. `{"sid_alice": "ses-...", "sid_bob": "ses-..."}`).
+// Single-root scenarios pass `{"sid": sessionID}` via the legacy
+// wrapper. Phase 5.1b δ.
+func (r *Runtime) RunQueryWithSids(ctx context.Context, t *testing.T, sids map[string]string, q Query) {
 	t.Helper()
 	if q.Name == "" {
 		q.Name = "(unnamed)"
@@ -24,11 +33,14 @@ func (r *Runtime) RunQuery(ctx context.Context, t *testing.T, sessionID string, 
 
 	vars := make(map[string]any, len(q.Vars))
 	for k, v := range q.Vars {
-		if s, ok := v.(string); ok && s == "$sid" {
-			vars[k] = sessionID
-		} else {
-			vars[k] = v
+		if s, ok := v.(string); ok && strings.HasPrefix(s, "$") {
+			key := strings.TrimPrefix(s, "$")
+			if resolved, ok := sids[key]; ok {
+				vars[k] = resolved
+				continue
+			}
 		}
+		vars[k] = v
 	}
 
 	resp, err := r.Core.LocalQuerier.Query(ctx, q.GraphQL, vars)

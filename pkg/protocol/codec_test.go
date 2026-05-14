@@ -2,7 +2,9 @@ package protocol
 
 import (
 	"errors"
+	"strings"
 	"testing"
+	"time"
 )
 
 var testAuthor = ParticipantInfo{ID: "u1", Kind: ParticipantUser, Name: "alice"}
@@ -49,10 +51,10 @@ func TestCodec_RoundTrip(t *testing.T) {
 			SessionStatusActive, "user_message")},
 		{"session_status_wait_subagents", NewSessionStatus("s1", testAgent,
 			SessionStatusWaitSubagents, "tool=wait_subagents")},
-		{"session_status_wait_approval_phase5_placeholder", NewSessionStatus("s1", testAgent,
-			SessionStatusWaitApproval, "")},
-		{"session_status_wait_user_input_phase5_placeholder", NewSessionStatus("s1", testAgent,
-			SessionStatusWaitUserInput, "")},
+		{"session_status_wait_approval", NewSessionStatus("s1", testAgent,
+			SessionStatusWaitApproval, "tool=inquire type=approval")},
+		{"session_status_wait_user_input", NewSessionStatus("s1", testAgent,
+			SessionStatusWaitUserInput, "tool=inquire type=clarification")},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -382,4 +384,117 @@ func TestEncodePayload_OmitsEnvelope(t *testing.T) {
 	if string(data) != `{"text":"hello"}` {
 		t.Fatalf("unexpected payload bytes: %s", data)
 	}
+}
+
+// TestSessionStatus_EnrichedPayloadRoundTrip covers the phase-5.1b
+// additions: ActiveSubagents, PendingInquiry, LastToolCall. The
+// codec is unchanged from 5.1 — only the payload struct grew —
+// but the wire format MUST stay backward-compatible when the new
+// fields are unset.
+func TestSessionStatus_EnrichedPayloadRoundTrip(t *testing.T) {
+	codec := NewCodec()
+	started := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
+	t.Run("with_all_fields_set", func(t *testing.T) {
+		f := NewSessionStatus("root-1", testAgent,
+			SessionStatusWaitApproval, "tool=inquire type=approval")
+		f.Payload.ActiveSubagents = []ActiveSubagentRef{
+			{SessionID: "mission-7", Skill: "analyst", Role: "", StartedAt: started},
+			{SessionID: "worker-71", Skill: "analyst", Role: "schema-explorer", StartedAt: started.Add(2 * time.Second)},
+		}
+		f.Payload.PendingInquiry = &PendingInquiryRef{
+			RequestID: "req-abc",
+			Type:      InquiryTypeApproval,
+			Question:  "Run rm -rf /tmp/cache?",
+			StartedAt: started.Add(5 * time.Second),
+		}
+		f.Payload.LastToolCall = &ToolCallRef{
+			Name:      "hugr-main:discovery-search_data_sources",
+			StartedAt: started.Add(1 * time.Second),
+		}
+		data, err := codec.EncodeFrame(f)
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		out, err := codec.DecodeFrame(data)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		got, ok := out.(*SessionStatus)
+		if !ok {
+			t.Fatalf("decoded type %T, want *SessionStatus", out)
+		}
+		if got.Payload.State != SessionStatusWaitApproval {
+			t.Errorf("State = %q, want %q", got.Payload.State, SessionStatusWaitApproval)
+		}
+		if len(got.Payload.ActiveSubagents) != 2 {
+			t.Fatalf("ActiveSubagents len = %d, want 2", len(got.Payload.ActiveSubagents))
+		}
+		if got.Payload.ActiveSubagents[1].Role != "schema-explorer" {
+			t.Errorf("ActiveSubagents[1].Role = %q, want schema-explorer",
+				got.Payload.ActiveSubagents[1].Role)
+		}
+		if got.Payload.PendingInquiry == nil {
+			t.Fatal("PendingInquiry nil after round-trip")
+		}
+		if got.Payload.PendingInquiry.RequestID != "req-abc" ||
+			got.Payload.PendingInquiry.Type != InquiryTypeApproval ||
+			got.Payload.PendingInquiry.Question != "Run rm -rf /tmp/cache?" {
+			t.Errorf("PendingInquiry drift: %+v", got.Payload.PendingInquiry)
+		}
+		if got.Payload.LastToolCall == nil {
+			t.Fatal("LastToolCall nil after round-trip")
+		}
+		if got.Payload.LastToolCall.Name != "hugr-main:discovery-search_data_sources" {
+			t.Errorf("LastToolCall.Name = %q", got.Payload.LastToolCall.Name)
+		}
+	})
+	t.Run("backward_compat_old_wire_format", func(t *testing.T) {
+		// A payload bytes-equivalent to a pre-5.1b binary's output —
+		// only state + reason — must decode cleanly with the three
+		// new fields zero/nil.
+		raw := []byte(`{
+		  "frame_id": "f1", "kind": "session_status", "session_id": "s1",
+		  "author": {"id": "a1", "kind": "agent", "name": "hugen"},
+		  "occurred_at": "2026-05-13T10:00:00Z", "seq": 1,
+		  "payload": {"state": "active", "reason": "user_message"}
+		}`)
+		out, err := codec.DecodeFrame(raw)
+		if err != nil {
+			t.Fatalf("decode legacy: %v", err)
+		}
+		got, ok := out.(*SessionStatus)
+		if !ok {
+			t.Fatalf("decoded type %T", out)
+		}
+		if got.Payload.State != SessionStatusActive {
+			t.Errorf("State = %q", got.Payload.State)
+		}
+		if got.Payload.ActiveSubagents != nil {
+			t.Errorf("ActiveSubagents should be nil for legacy payload, got %+v",
+				got.Payload.ActiveSubagents)
+		}
+		if got.Payload.PendingInquiry != nil {
+			t.Errorf("PendingInquiry should be nil, got %+v",
+				got.Payload.PendingInquiry)
+		}
+		if got.Payload.LastToolCall != nil {
+			t.Errorf("LastToolCall should be nil, got %+v", got.Payload.LastToolCall)
+		}
+	})
+	t.Run("empty_fields_omitted_on_encode", func(t *testing.T) {
+		// Round-trip a freshly-built SessionStatus with only state +
+		// reason and verify the wire bytes carry no active_subagents
+		// / pending_inquiry / last_tool_call keys at all.
+		f := NewSessionStatus("s1", testAgent, SessionStatusIdle, "newSession")
+		data, err := codec.EncodeFrame(f)
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		wire := string(data)
+		for _, k := range []string{"active_subagents", "pending_inquiry", "last_tool_call"} {
+			if strings.Contains(wire, k) {
+				t.Errorf("wire bytes carry %q for an empty payload: %s", k, wire)
+			}
+		}
+	})
 }

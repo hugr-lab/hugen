@@ -53,7 +53,9 @@ conversation a user opens with the agent. Root is structurally a
   into waves of workers and returns a synthesised result.
 - `session:wait_subagents` — block for the spawned mission's
   result. Pair with `spawn_mission` on the same turn so the
-  result is consumed in-line.
+  result is consumed in-line. `ids` is optional: no-args waits
+  for ALL current direct sub-agents (the right default after a
+  single `spawn_mission`).
 - `session:subagent_runs` — peek into the mission's transcript
   mid-flight when the user asks for status, the mission stalls,
   or you want to format a richer reply than the bare result.
@@ -99,9 +101,10 @@ should run. For data analysis pick `analyst` (when installed);
 phase γ surfaces the catalogue of available mission skills in
 your system prompt so you can pick by user intent.
 
-After spawning, immediately call `session:wait_subagents` on the
-returned id, then format the mission's `result` field for the
-user. The mission's `result` is already structured for end-user
+After spawning, immediately call `session:wait_subagents` with
+no arguments (the no-args form waits for all in-flight direct
+sub-agents, which is exactly your one mission), then format
+the mission's `result` field for the user. The mission's `result` is already structured for end-user
 consumption — quote it directly or wrap with light framing; do
 not re-derive findings or invent numbers.
 

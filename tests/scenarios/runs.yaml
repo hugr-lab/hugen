@@ -54,6 +54,13 @@ runs:
       # for non-data work; root must dispatch via `_general`, not
       # `analyst`).
       - general_shell_lookup
+      # Phase 5.1b δ — multi-root harness primitive. Two
+      # concurrent roots with trivial prompts; isolates that
+      # liveview / inquiry / async cap counters do not
+      # cross-contaminate. Gemini-pro routes root + mission via
+      # the cheap (gemma) intent — this run exercises the
+      # mixed-tier path.
+      - multi_root_independence
       # 4.2.3 δ — cross-mission notepad acceptance gate. Two
       # sequential user turns prove notes from mission A surface
       # to mission B via climb-to-root storage + the 48h window.

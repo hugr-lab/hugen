@@ -98,6 +98,26 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	return renderSnapshot(state.Prompts(), notes, np.Window())
 }
 
+// ReportStatus implements [extension.StatusReporter]. Returns up
+// to 10 most-recent notes (full Note shape) as a JSON array.
+// Nil when no notes or no notepad on this session. Phase 5.1b —
+// consumed by liveview when it assembles its emit payload.
+func (e *Extension) ReportStatus(ctx context.Context, state extension.SessionState) json.RawMessage {
+	np := FromState(state)
+	if np == nil {
+		return nil
+	}
+	notes, err := np.Read(ctx, ReadInput{Limit: 10})
+	if err != nil || len(notes) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(notes)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
 // InitState allocates a fresh [Notepad] for the calling session.
 // rootID is resolved once via the parent-chain walk and the
 // per-Notepad role label is derived from depth. Both are stable

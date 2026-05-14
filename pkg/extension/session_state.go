@@ -88,6 +88,23 @@ type SessionState interface {
 	// host→member broadcast) where blocking on a slow consumer
 	// would stall the producer's Run goroutine.
 	Submit(ctx context.Context, frame protocol.Frame) <-chan struct{}
+
+	// OutboxOnly publishes frame on the session's outbox without
+	// persisting it to session_events (no AppendEvent, no seq
+	// alloc). Used by extensions that produce transient
+	// observability frames (e.g. liveview status updates) — they
+	// flow to live adapter subscribers but don't pollute the
+	// event log. Mirrors the internal Session.outboxOnly path
+	// already used by phase-5.1 InquiryRequest bubble. Phase 5.1b.
+	OutboxOnly(ctx context.Context, frame protocol.Frame) error
+
+	// Extensions returns the agent-level slice of registered
+	// extensions in deterministic order. Used by aggregators
+	// (notably liveview) that need to iterate every sibling
+	// extension on the session and call a capability (e.g.
+	// [StatusReporter]) without hardcoding extension names.
+	// Phase 5.1b.
+	Extensions() []Extension
 }
 
 type sessionStateKey struct{}

@@ -71,3 +71,27 @@ func (s *Session) Children() []extension.SessionState {
 func (s *Session) Emit(ctx context.Context, frame protocol.Frame) error {
 	return s.emit(ctx, frame)
 }
+
+// OutboxOnly implements [extension.SessionState]. Publishes frame
+// on the session's outbox without persisting to the event log
+// (no AppendEvent, no seq allocation). Same wire shape as Emit
+// for live subscribers; absent from any post-mortem replay. Used
+// by extensions producing transient observability frames
+// (liveview status updates, future heartbeat-style traffic).
+// Phase 5.1b.
+func (s *Session) OutboxOnly(ctx context.Context, frame protocol.Frame) error {
+	return s.outboxOnly(ctx, frame)
+}
+
+// Extensions implements [extension.SessionState]. Returns the
+// agent-level extension slice in registration order. Aggregator
+// extensions (notably liveview) iterate and type-assert
+// capabilities like [extension.StatusReporter] without hardcoding
+// extension names. Returns nil when the session was constructed
+// without deps. Phase 5.1b.
+func (s *Session) Extensions() []extension.Extension {
+	if s.deps == nil {
+		return nil
+	}
+	return s.deps.Extensions
+}

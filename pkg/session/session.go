@@ -153,6 +153,15 @@ type Session struct {
 	// adding a mutex hot-path on every inbound frame.
 	activeToolFeed atomic.Pointer[ToolFeed]
 
+	// lastToolCall snapshots the most recently dispatched tool for
+	// the enriched SessionStatusPayload adapters consume (phase
+	// 5.1b). Set in dispatchToolCall right before the actual
+	// tool.Dispatch fires; never cleared — adapters render
+	// "last tool: X" even after completion. atomic.Pointer because
+	// tool dispatch runs on its own goroutine while markStatus
+	// reads from Run / pump.
+	lastToolCall atomic.Pointer[protocol.ToolCallRef]
+
 	// Materialisation state for restart-resume (Phase 4 fills this in).
 	materialised atomic.Bool
 	matOnce      sync.Once
@@ -626,6 +635,33 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 	if perr := s.store.AppendEvent(ctx, row, summary); perr != nil {
 		return fmt.Errorf("session %s: persist frame: %w", s.id, perr)
 	}
+	// Diagnostic: log live direct-child count right after every
+	// persisted emit. Helps spot drift between session.children
+	// (authoritative) and liveview's per-session projection cache
+	// — they should track together; a divergence signals a missed
+	// SessionTerminated observation or a leaked cache entry.
+	//
+	// Gated on Enabled(Debug) BEFORE the mutex so the lock cost is
+	// paid only when the operator opted into Debug-level logging.
+	// Without the gate every emit on the hot path acquires childMu.
+	if s.logger != nil && s.logger.Enabled(ctx, slog.LevelDebug) {
+		s.childMu.Lock()
+		childCount := len(s.children)
+		s.childMu.Unlock()
+		s.logger.Debug("session: emit",
+			"session", s.id,
+			"frame", string(f.Kind()),
+			"seq", nextSeq,
+			"children", childCount)
+	}
+	// Phase 5.1b — fan the persisted frame out to any
+	// FrameObserver-implementing extension on this session.
+	// Observers MUST be non-blocking (typically a non-blocking
+	// channel send to a per-extension goroutine); the recover
+	// guard catches any misbehaviour so emit's hot path stays
+	// reliable. liveview is today's only consumer; this hook is
+	// the foundation for any future observability extension.
+	s.notifyFrameObservers(ctx, f)
 	defer func() {
 		if r := recover(); r != nil {
 			// Outbox was closed concurrently; treat as a graceful
@@ -638,6 +674,32 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// notifyFrameObservers iterates the session's deps.Extensions
+// and dispatches the frame to every extension implementing
+// [extension.FrameObserver]. Recover guard isolates extension
+// panics from emit's hot path. Phase 5.1b.
+func (s *Session) notifyFrameObservers(ctx context.Context, f protocol.Frame) {
+	if s.deps == nil {
+		return
+	}
+	for _, ext := range s.deps.Extensions {
+		obs, ok := ext.(extension.FrameObserver)
+		if !ok {
+			continue
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil && s.logger != nil {
+					s.logger.Warn("session: FrameObserver panic",
+						"session", s.id, "extension", ext.Name(),
+						"panic", r)
+				}
+			}()
+			obs.OnFrameEmit(ctx, s, f)
+		}()
 	}
 }
 
@@ -1633,6 +1695,13 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 	if err := s.emit(emitCtx, callFrame); err != nil {
 		s.logger.Warn("emit tool_call", "err", err)
 	}
+	// Phase 5.1b — snapshot the latest dispatched tool for the
+	// enriched SessionStatusPayload. atomic.Pointer write is
+	// race-free against the read path in buildStatusSnapshot.
+	s.lastToolCall.Store(&protocol.ToolCallRef{
+		Name:      tc.Name,
+		StartedAt: time.Now().UTC(),
+	})
 	// Log the dispatch with full args BEFORE the call so the
 	// operator can correlate any downstream slowdown / hang with
 	// the exact request. Hash is included for phase-4
