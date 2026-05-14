@@ -245,5 +245,29 @@ func (v *sessionView) emitStatus() {
 	if err := state.OutboxOnly(context.Background(), frame); err != nil && v.logger != nil {
 		v.logger.Warn("liveview: outbox emit",
 			"session", v.sessionID, "err", err)
+		return
+	}
+	// Debug-level trace so an operator running with
+	// HUGEN_LOG_LEVEL=debug sees status frames flowing in
+	// real time. The payload is logged verbatim because it's
+	// the answer adapters see — grepping for "liveview: status"
+	// in agent.log gives the full liveview trail of a session.
+	if v.logger != nil {
+		toolName := ""
+		v.reportMu.Lock()
+		if v.lastTool != nil {
+			toolName = v.lastTool.Name
+		}
+		hasInquiry := v.pendingInquiry != nil
+		childCount := len(v.children)
+		v.reportMu.Unlock()
+		v.logger.Debug("liveview: status",
+			"session", v.sessionID,
+			"depth", v.depth,
+			"state", v.lifecycleState,
+			"last_tool", toolName,
+			"pending_inquiry", hasInquiry,
+			"children", childCount,
+			"payload", string(data))
 	}
 }
