@@ -2,6 +2,7 @@ package tui
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
@@ -66,7 +67,32 @@ type model struct {
 	// adapter updates ~/.hugen/tui.yaml so the dead root is not
 	// re-attached on the next start. Nil in tests.
 	forgetTab func(sessionID string)
+
+	// sampleStats returns a tea.Cmd that, when run, fetches the
+	// event count for the given session id and emits a
+	// statsResultMsg. Slice 6 S2. Nil in tests.
+	sampleStats func(sessionID string) tea.Cmd
 }
+
+// statsResultMsg is the async reply from a sampleStats Cmd.
+// Posted into the bubbletea loop; reducer locates the tab by
+// sessionID and updates its footer counter.
+type statsResultMsg struct {
+	sessionID string
+	events    int
+	err       error
+}
+
+// tickStatsMsg fires periodically (statsTickInterval) — on
+// receipt the model schedules a fresh SessionStats sample for
+// every open tab and re-arms the timer.
+type tickStatsMsg struct{}
+
+// statsTickInterval is the cadence at which the footer's event
+// count refreshes. 5s is the spec's recommendation — slow enough
+// that the bucket aggregation cost is amortised, fast enough that
+// the operator sees the counter move during sustained activity.
+const statsTickInterval = 5 * time.Second
 
 // newModel constructs a model with one initial tab. submit closure
 // is shared across all tabs (the runtime routes by frame.SessionID).
@@ -81,7 +107,13 @@ func newModel(sessionID string, u protocol.ParticipantInfo, submit func(protocol
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink)
+	// Slice 6 S2 — schedule the first stats sample immediately so
+	// the footer fills in within the first second of startup, and
+	// arm the periodic tick.
+	return tea.Batch(
+		textarea.Blink,
+		tea.Tick(time.Millisecond*200, func(time.Time) tea.Msg { return tickStatsMsg{} }),
+	)
 }
 
 // currentTab returns the focused tab, or nil if the list is empty.
@@ -115,6 +147,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tabs = append(m.tabs, v.t)
 		m.active = len(m.tabs) - 1
 		m.relayout()
+		// Kick off a stats sample for the new tab immediately so
+		// its footer fills before the next tick.
+		if m.sampleStats != nil {
+			return m, m.sampleStats(v.t.sessionID)
+		}
+		return m, nil
+
+	case tickStatsMsg:
+		// Fan out one sample per tab and re-arm the timer.
+		var cmds []tea.Cmd
+		if m.sampleStats != nil {
+			for _, t := range m.tabs {
+				cmds = append(cmds, m.sampleStats(t.sessionID))
+			}
+		}
+		cmds = append(cmds, tea.Tick(statsTickInterval, func(time.Time) tea.Msg { return tickStatsMsg{} }))
+		return m, tea.Batch(cmds...)
+
+	case statsResultMsg:
+		if v.err == nil {
+			if _, t := m.findTab(v.sessionID); t != nil {
+				t.eventsCount = v.events
+			}
+		}
 		return m, nil
 
 	case openTabError:

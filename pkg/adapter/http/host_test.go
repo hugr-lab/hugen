@@ -190,6 +190,8 @@ func (f *fakeHost) ListEvents(_ context.Context, _ string, _ session.ListEventsO
 	return nil, nil
 }
 
+func (f *fakeHost) SessionStats(_ context.Context, _ string) (int, error) { return 0, nil }
+
 // publish routes a frame to every subscriber of sessionID; tests use
 // it to drive the SSE writer.
 func (f *fakeHost) publish(sessionID string, frame protocol.Frame) {

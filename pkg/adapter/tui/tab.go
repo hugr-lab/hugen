@@ -61,6 +61,12 @@ type tab struct {
 	// adapter can flush the in-memory slice to disk. Nil in
 	// tests / when persistence is unavailable.
 	historySaver func(sessionID string, history []string)
+
+	// Slice 6 S2 — periodic SessionStats sample (event count).
+	// -1 = "not sampled yet"; the footer renders nothing for
+	// that case so the operator never sees a misleading "0
+	// events" before the first sample lands.
+	eventsCount int
 }
 
 // newTab builds a fresh tab bound to sessionID. The terminal
@@ -83,15 +89,16 @@ func newTab(sessionID string, u protocol.ParticipantInfo, submit func(protocol.F
 	vp.KeyMap = viewport.KeyMap{}
 
 	return &tab{
-		sessionID:  sessionID,
-		user:       u,
-		logger:     logger,
-		submit:     submit,
-		viewport:   vp,
-		textarea:   ta,
-		chat:       newChatBuffer(),
-		statusLine: "ready",
-		historyIdx: -1,
+		sessionID:   sessionID,
+		user:        u,
+		logger:      logger,
+		submit:      submit,
+		viewport:    vp,
+		textarea:    ta,
+		chat:        newChatBuffer(),
+		statusLine:  "ready",
+		historyIdx:  -1,
+		eventsCount: -1,
 	}
 }
 
@@ -120,15 +127,50 @@ func (t *tab) refreshChat() {
 
 // renderFooter is the bottom status line for this tab. Width is
 // the total horizontal budget (chat + sidebar).
+//
+// Slice 6 S2 — when eventsCount has been sampled at least once,
+// inject "· N events" before the status word so the operator
+// sees session size at a glance. -1 (pre-sample) skips the
+// segment to avoid a misleading "0 events" flash on attach.
 func (t *tab) renderFooter(width int) string {
-	left := lipgloss.NewStyle().Faint(true).Render(
-		fmt.Sprintf("session %s · %s", shortID(t.sessionID), t.statusLine))
+	prefix := fmt.Sprintf("session %s", shortID(t.sessionID))
+	if t.eventsCount >= 0 {
+		prefix += fmt.Sprintf(" · %s events", formatThousands(t.eventsCount))
+	}
+	prefix += " · " + t.statusLine
+	left := lipgloss.NewStyle().Faint(true).Render(prefix)
 	right := ""
 	if t.bannerError != "" {
-		right = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(t.bannerError)
+		right = lipgloss.NewStyle().Foreground(activeTheme.ErrorFG).Render(t.bannerError)
 	}
 	gap := strings.Repeat(" ", maxInt(1, width-lipgloss.Width(left)-lipgloss.Width(right)))
 	return left + gap + right
+}
+
+// formatThousands renders n with comma separators ("1247" →
+// "1,247"; "1247000" → "1,247,000"). Cheap; no localisation —
+// the indicator is for power-user scan, not i18n.
+func formatThousands(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	s := fmt.Sprintf("%d", n)
+	// Walk right-to-left, insert "," every 3 digits.
+	var b strings.Builder
+	rem := len(s) % 3
+	if rem > 0 {
+		b.WriteString(s[:rem])
+		if len(s) > rem {
+			b.WriteByte(',')
+		}
+	}
+	for i := rem; i < len(s); i += 3 {
+		b.WriteString(s[i : i+3])
+		if i+3 < len(s) {
+			b.WriteByte(',')
+		}
+	}
+	return b.String()
 }
 
 // appendUserBubble appends the user's outgoing message to the chat

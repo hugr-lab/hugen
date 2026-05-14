@@ -152,6 +152,16 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	// it whenever a tab leaves the list (operator close or
 	// SessionTerminated cascade).
 	m.forgetTab = func(id string) { a.persistRoot(id, false) }
+	// Slice 6 S2 — stats sampler. Returns a tea.Cmd so the call
+	// runs on bubbletea's own goroutine (the host call itself
+	// is synchronous; wrap it in a closure to avoid blocking the
+	// reducer).
+	m.sampleStats = func(id string) tea.Cmd {
+		return func() tea.Msg {
+			n, err := a.host.SessionStats(ctx, id)
+			return statsResultMsg{sessionID: id, events: n, err: err}
+		}
+	}
 	// Persist the initial tab id so a future restart re-attaches.
 	a.persistRoot(sess.ID(), true)
 	// Slice 4 — model emits requestOpenTabMsg on Ctrl+N. Wire the

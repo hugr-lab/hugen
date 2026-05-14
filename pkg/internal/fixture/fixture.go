@@ -488,6 +488,14 @@ func (s *TestStore) SearchNotes(_ context.Context, _, _ string, _ store.ListNote
 	return nil, store.ErrNoEmbedder
 }
 
+// SessionStats reports the in-memory event count for sessionID.
+// Phase 5.1c S2 — the fixture mirrors the production accessor.
+func (s *TestStore) SessionStats(_ context.Context, sessionID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.Events[sessionID]), nil
+}
+
 // CountNotesByCategory mirrors the production store: groups by
 // category, honouring opts.Window and opts.Category. opts.Limit
 // is ignored — bucket cardinality is bounded by distinct

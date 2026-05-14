@@ -222,6 +222,14 @@ type RuntimeStore interface {
 	// fall back to ListNotes. Same Window/Category/Limit semantics
 	// as ListNotes; ordering is by similarity DESC.
 	SearchNotes(ctx context.Context, sessionID, query string, opts ListNotesOpts) ([]NoteRow, error)
+	// SessionStats returns the persisted event count for sessionID.
+	// Phase 5.1c S2 — feeds the TUI footer's "N events" indicator.
+	// Uses Hugr's single-row aggregation (`session_events_aggregation`)
+	// so the query is bounded regardless of session size. A future
+	// extension may add a bytes total once the schema exposes
+	// length aggregations cheaply.
+	SessionStats(ctx context.Context, sessionID string) (events int, err error)
+
 	// CountNotesByCategory returns one row per distinct category
 	// with the total note count. opts.Window applies the same
 	// `created_at >= NOW() - Window` cutoff as ListNotes; opts.Category
@@ -684,6 +692,39 @@ func (s *RuntimeStoreLocal) SearchNotes(ctx context.Context, sessionID, query st
 		return nil, err
 	}
 	return rows, nil
+}
+
+// SessionStats reports the total persisted event count for
+// sessionID via Hugr's single-row aggregation. Bytes total is
+// intentionally absent at this layer — DuckDB's length aggregation
+// over text is non-trivial across content + tool_args + metadata
+// and the footer indicator can ship without it. Returns 0 + nil
+// on ErrNoData / ErrWrongDataPath (empty session is the normal
+// first-frame state). Phase 5.1c S2.
+func (s *RuntimeStoreLocal) SessionStats(ctx context.Context, sessionID string) (int, error) {
+	type aggResp struct {
+		RowsCount int `json:"_rows_count"`
+	}
+	res, err := queries.RunQuery[aggResp](ctx, s.querier,
+		`query ($filter: hub_db_session_events_filter) {
+			hub { db { agent {
+				session_events_aggregation(filter: $filter) {
+					_rows_count
+				}
+			}}}
+		}`,
+		map[string]any{
+			"filter": map[string]any{"session_id": map[string]any{"eq": sessionID}},
+		},
+		"hub.db.agent.session_events_aggregation",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return res.RowsCount, nil
 }
 
 // CountNotesByCategory groups notes by `category` server-side via
