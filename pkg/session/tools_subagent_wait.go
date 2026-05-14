@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"sort"
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -24,10 +25,9 @@ const waitSubagentsSchema = `{
     "ids": {
       "type": "array",
       "items": {"type": "string"},
-      "minItems": 1
+      "description": "Optional. Empty array (or absent) waits for ALL direct sub-agents of the calling session — the common 'sync after a wave' pattern. Provide explicit ids only when selectively waiting on a subset; unknown ids return an error listing the session's actual direct children."
     }
-  },
-  "required": ["ids"]
+  }
 }`
 
 type waitSubagentsInput struct {
@@ -50,8 +50,38 @@ func (parent *Session) callWaitSubagents(ctx context.Context, args json.RawMessa
 	if err := json.Unmarshal(args, &in); err != nil {
 		return toolErr("bad_request", fmt.Sprintf("invalid wait_subagents args: %v", err))
 	}
+
+	// Phase 5.1b: `ids` is optional. Empty / absent means "wait for
+	// every direct sub-agent currently in flight" — the common case
+	// after a fire-and-forget spawn cohort. Snapshot the live
+	// children once and use the set for both the implicit
+	// "wait for all" path and explicit-ids validation (the latter
+	// guards against the LLM hallucinating ids like
+	// "mission_id_from_step1" instead of substituting the real id
+	// from a prior tool result — observed on Gemma 26B).
+	parent.childMu.Lock()
+	liveChildren := make(map[string]struct{}, len(parent.children))
+	for id, c := range parent.children {
+		if c != nil {
+			liveChildren[id] = struct{}{}
+		}
+	}
+	parent.childMu.Unlock()
+
 	if len(in.IDs) == 0 {
-		return toolErr("bad_request", "ids must be a non-empty array")
+		if len(liveChildren) == 0 {
+			// Nothing to wait for — return empty results immediately
+			// rather than blocking forever. The model can re-issue
+			// after spawning if it intended a different cohort.
+			return marshalWaitResults(nil, map[string]waitResultRow{})
+		}
+		in.IDs = make([]string, 0, len(liveChildren))
+		for id := range liveChildren {
+			in.IDs = append(in.IDs, id)
+		}
+		// Stable order keeps the model's view deterministic across
+		// runs and makes test assertions predictable.
+		sort.Strings(in.IDs)
 	}
 
 	// First pass: collect any ids already terminal (cached in parent's
@@ -69,6 +99,25 @@ func (parent *Session) callWaitSubagents(ctx context.Context, args json.RawMessa
 			continue
 		}
 		pending[id] = struct{}{}
+	}
+
+	// Validate every pending id — terminated children already in
+	// `collected` get a free pass since their results exist in
+	// parent's events. Anything else MUST be a current direct
+	// child; otherwise the call would block forever waiting for a
+	// SubagentResult that will never arrive. Fast-fail with the
+	// real child list so the model can correct its argument.
+	for id := range pending {
+		if _, live := liveChildren[id]; live {
+			continue
+		}
+		realChildren := make([]string, 0, len(liveChildren))
+		for c := range liveChildren {
+			realChildren = append(realChildren, c)
+		}
+		sort.Strings(realChildren)
+		return toolErr("not_a_child",
+			fmt.Sprintf("subagent %q is not a direct child of this session; current direct children: %v", id, realChildren))
 	}
 
 	if len(pending) == 0 {

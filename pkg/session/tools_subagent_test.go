@@ -998,14 +998,50 @@ func TestCallWaitSubagents_CachedShortCircuit(t *testing.T) {
 	}
 }
 
-// TestCallWaitSubagents_BadRequest covers the empty-ids guard.
-func TestCallWaitSubagents_BadRequest(t *testing.T) {
+// TestCallWaitSubagents_EmptyIDsWithNoChildren returns an empty
+// result array immediately — phase 5.1b: ids is optional, and a
+// session with no children has nothing to wait for. Previously
+// this path returned bad_request; the new contract is "wait for
+// every direct child" semantics with the natural empty case
+// short-circuiting.
+func TestCallWaitSubagents_EmptyIDsWithNoChildren(t *testing.T) {
 	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
-	out, _ := parent.callWaitSubagents(us1WithSession(parent),
+	out, err := parent.callWaitSubagents(us1WithSession(parent),
 		json.RawMessage(`{"ids":[]}`))
-	mgr_assertErrorCode(t, out, "bad_request")
+	if err != nil {
+		t.Fatalf("callWaitSubagents: %v", err)
+	}
+	if string(out) != "[]" {
+		t.Errorf("empty ids with no children: got %s, want []", out)
+	}
+
+	// Also accept an absent ids field entirely.
+	out, err = parent.callWaitSubagents(us1WithSession(parent),
+		json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("callWaitSubagents absent ids: %v", err)
+	}
+	if string(out) != "[]" {
+		t.Errorf("absent ids with no children: got %s, want []", out)
+	}
+}
+
+// TestCallWaitSubagents_RejectsUnknownID covers the
+// hallucinated-id guard: an explicit id that isn't a current
+// direct child (and isn't cached as a terminated result) returns
+// not_a_child with the real children list. Without this, Gemma's
+// `mission_id_from_step1` placeholder would block the tool feed
+// until the step budget expires.
+func TestCallWaitSubagents_RejectsUnknownID(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+
+	// No children spawned → any id is bogus.
+	out, _ := parent.callWaitSubagents(us1WithSession(parent),
+		json.RawMessage(`{"ids":["mission_id_from_step1"]}`))
+	mgr_assertErrorCode(t, out, "not_a_child")
 }
 
 // ---------- subagent_runs ----------
