@@ -488,6 +488,36 @@ func (s *TestStore) SearchNotes(_ context.Context, _, _ string, _ store.ListNote
 	return nil, store.ErrNoEmbedder
 }
 
+// CountNotesByCategory mirrors the production store: groups by
+// category, honouring opts.Window and opts.Category. opts.Limit
+// is ignored — bucket cardinality is bounded by distinct
+// category count.
+func (s *TestStore) CountNotesByCategory(_ context.Context, sessionID string, opts store.ListNotesOpts) (map[string]int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutoff := time.Time{}
+	if opts.Window > 0 {
+		cutoff = time.Now().UTC().Add(-opts.Window)
+	}
+	out := map[string]int{}
+	for _, n := range s.Notes {
+		if sessionID != "" && n.SessionID != sessionID {
+			continue
+		}
+		if opts.Category != "" && n.Category != opts.Category {
+			continue
+		}
+		if !cutoff.IsZero() && n.CreatedAt.Before(cutoff) {
+			continue
+		}
+		out[n.Category]++
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
 func (s *TestStore) ListSessions(_ context.Context, _, _ string) ([]store.SessionRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

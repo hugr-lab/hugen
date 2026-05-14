@@ -80,6 +80,7 @@ type Store interface {
 	AppendNote(ctx context.Context, row store.NoteRow) error
 	ListNotes(ctx context.Context, sessionID string, opts store.ListNotesOpts) ([]store.NoteRow, error)
 	SearchNotes(ctx context.Context, sessionID, query string, opts store.ListNotesOpts) ([]store.NoteRow, error)
+	CountNotesByCategory(ctx context.Context, sessionID string, opts store.ListNotesOpts) (map[string]int, error)
 }
 
 // Notepad gives a Session a typed handle on its notes table. Phase
@@ -158,6 +159,15 @@ func (n *Notepad) Read(ctx context.Context, in ReadInput) ([]Note, error) {
 		return nil, err
 	}
 	return rowsToNotes(rows), nil
+}
+
+// CountsByCategory returns every category in this notepad with its
+// total note count (within the configured window). Server-side
+// aggregation — does NOT round-trip the notes themselves. Empty
+// category is keyed under the empty string; the caller decides how
+// to label it.
+func (n *Notepad) CountsByCategory(ctx context.Context) (map[string]int, error) {
+	return n.store.CountNotesByCategory(ctx, n.rootID, store.ListNotesOpts{Window: n.window})
 }
 
 // Search runs a semantic search via Hugr's `semantic:` arg. When

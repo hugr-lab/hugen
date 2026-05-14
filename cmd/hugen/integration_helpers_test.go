@@ -59,6 +59,9 @@ func (s *stubStore) ListNotes(_ context.Context, _ string, _ session.ListNotesOp
 func (s *stubStore) SearchNotes(_ context.Context, _, _ string, _ session.ListNotesOpts) ([]session.NoteRow, error) {
 	return nil, nil
 }
+func (s *stubStore) CountNotesByCategory(_ context.Context, _ string, _ session.ListNotesOpts) (map[string]int, error) {
+	return nil, nil
+}
 func (s *stubStore) ListSessions(_ context.Context, _, _ string) ([]session.SessionRow, error) {
 	return nil, nil
 }

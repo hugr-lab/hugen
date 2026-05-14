@@ -174,37 +174,40 @@ func renderPlan(p *planSnapshot, width int) string {
 	return sb.String()
 }
 
-// notepadNote is the on-the-wire shape of one Note as marshalled
-// by pkg/extension/notepad's ReportStatus — exported field names
-// only.
-type notepadNote struct {
-	ID         string `json:"ID"`
-	Category   string `json:"Category"`
-	AuthorRole string `json:"AuthorRole"`
+// notepadStatus mirrors pkg/extension/notepad's ReportStatus wire
+// shape (phase 5.1c). `counts` holds server-side bucket totals —
+// authoritative for sidebar display; `recent` is kept for a future
+// "recent notes" panel.
+type notepadStatus struct {
+	Counts map[string]int `json:"counts"`
+	Recent []struct {
+		ID       string `json:"id"`
+		Category string `json:"category,omitempty"`
+	} `json:"recent"`
 }
 
-// parseNotepadCounts groups notes by Category and returns sorted
-// (cat, count) pairs.
+// parseNotepadCounts returns sorted (category, count) pairs from
+// the liveview notepad payload. Reads `counts` directly — no
+// derivation from the truncated `recent` list.
 func parseNotepadCounts(exts map[string]json.RawMessage) []categoryCount {
 	raw, ok := exts["notepad"]
 	if !ok {
 		return nil
 	}
-	var notes []notepadNote
-	if err := json.Unmarshal(raw, &notes); err != nil {
+	var s notepadStatus
+	if err := json.Unmarshal(raw, &s); err != nil {
 		return nil
 	}
-	by := map[string]int{}
-	for _, n := range notes {
-		cat := n.Category
-		if cat == "" {
-			cat = "uncategorized"
-		}
-		by[cat]++
+	if len(s.Counts) == 0 {
+		return nil
 	}
-	out := make([]categoryCount, 0, len(by))
-	for cat, n := range by {
-		out = append(out, categoryCount{Category: cat, Count: n})
+	out := make([]categoryCount, 0, len(s.Counts))
+	for cat, n := range s.Counts {
+		label := cat
+		if label == "" {
+			label = "uncategorized"
+		}
+		out = append(out, categoryCount{Category: label, Count: n})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Count != out[j].Count {

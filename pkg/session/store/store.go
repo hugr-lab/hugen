@@ -222,6 +222,14 @@ type RuntimeStore interface {
 	// fall back to ListNotes. Same Window/Category/Limit semantics
 	// as ListNotes; ordering is by similarity DESC.
 	SearchNotes(ctx context.Context, sessionID, query string, opts ListNotesOpts) ([]NoteRow, error)
+	// CountNotesByCategory returns one row per distinct category
+	// with the total note count. opts.Window applies the same
+	// `created_at >= NOW() - Window` cutoff as ListNotes; opts.Category
+	// is honoured only as a redundant pre-filter (the result map will
+	// contain at most that one key); opts.Limit is ignored — bucket
+	// rows are bounded by distinct category count, not by note count.
+	// Notes with an empty category are bucketed under the empty key.
+	CountNotesByCategory(ctx context.Context, sessionID string, opts ListNotesOpts) (map[string]int, error)
 	ListSessions(ctx context.Context, agentID, status string) ([]SessionRow, error)
 	// ListResumableRoots returns every root session for agentID
 	// whose `status` column is Active. Each row carries its most
@@ -676,6 +684,50 @@ func (s *RuntimeStoreLocal) SearchNotes(ctx context.Context, sessionID, query st
 		return nil, err
 	}
 	return rows, nil
+}
+
+// CountNotesByCategory groups notes by `category` server-side via
+// Hugr's `session_notes_bucket_aggregation` and returns the total
+// per category. Reuses buildNotesFilter so the cutoff/category
+// semantics match ListNotes exactly. Phase 5.1c — feeds the TUI
+// liveview sidebar's total-per-tag breakdown without round-tripping
+// the full notes table over the GraphQL wire.
+func (s *RuntimeStoreLocal) CountNotesByCategory(ctx context.Context, sessionID string, opts ListNotesOpts) (map[string]int, error) {
+	filter := buildNotesFilter(sessionID, opts)
+	type bucketRow struct {
+		Key struct {
+			Category string `json:"category"`
+		} `json:"key"`
+		Aggregations struct {
+			RowsCount int `json:"_rows_count"`
+		} `json:"aggregations"`
+	}
+	rows, err := queries.RunQuery[[]bucketRow](ctx, s.querier,
+		`query ($filter: hub_db_session_notes_filter) {
+			hub { db { agent {
+				session_notes_bucket_aggregation(filter: $filter) {
+					key { category }
+					aggregations { _rows_count }
+				}
+			}}}
+		}`,
+		map[string]any{"filter": filter},
+		"hub.db.agent.session_notes_bucket_aggregation",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make(map[string]int, len(rows))
+	for _, r := range rows {
+		if r.Aggregations.RowsCount == 0 {
+			continue
+		}
+		out[r.Key.Category] = r.Aggregations.RowsCount
+	}
+	return out, nil
 }
 
 // buildNotesFilter constructs the hub_db_session_notes_filter map

@@ -19,7 +19,10 @@ func TestParseLiveviewStatus_FullPayload(t *testing.T) {
 		"extensions": map[string]any{
 			"skill":   map[string]any{"loaded": []string{"_root", "_skill_builder"}},
 			"plan":    map[string]any{"Active": true, "Text": "Investigate data sources", "CurrentStep": "Explore", "Comments": []any{1, 2}},
-			"notepad": []map[string]any{{"ID": "n1", "Category": "schema-finding"}, {"ID": "n2", "Category": "schema-finding"}, {"ID": "n3", "Category": "chat-answer"}},
+			"notepad": map[string]any{
+				"recent": []map[string]any{{"id": "n1", "category": "schema-finding"}, {"id": "n2", "category": "schema-finding"}, {"id": "n3", "category": "chat-answer"}},
+				"counts": map[string]int{"schema-finding": 2, "chat-answer": 1},
+			},
 		},
 		"children": map[string]any{
 			"ses-mission": map[string]any{
@@ -72,7 +75,7 @@ func TestRenderSidebar_HappyPathContainsExpectedSections(t *testing.T) {
 		Extensions: map[string]json.RawMessage{
 			"skill":   json.RawMessage(`{"loaded":["_root","_skill_builder"]}`),
 			"plan":    json.RawMessage(`{"Active":true,"Text":"Investigate","CurrentStep":"Explore","Comments":[{},{}]}`),
-			"notepad": json.RawMessage(`[{"Category":"schema-finding"},{"Category":"schema-finding"},{"Category":"chat-answer"}]`),
+			"notepad": json.RawMessage(`{"recent":[{"id":"n1","category":"schema-finding"}],"counts":{"schema-finding":12,"chat-answer":1}}`),
 		},
 		Children: map[string]*liveviewStatus{
 			"ses-m": {SessionID: "ses-m", Depth: 1, LifecycleState: "active", LastToolCall: &protocol.ToolCallRef{Name: "analyst.spawn"}},
@@ -125,26 +128,40 @@ func TestRenderSubagent_RecursiveDepth(t *testing.T) {
 }
 
 func TestParseNotepadCounts_GroupsAndSorts(t *testing.T) {
+	// counts is server-side aggregate — the sidebar trusts it
+	// verbatim and does NOT re-derive from `recent`.
 	exts := map[string]json.RawMessage{
-		"notepad": json.RawMessage(`[
-			{"Category":"schema-finding"},
-			{"Category":"schema-finding"},
-			{"Category":"schema-finding"},
-			{"Category":"chat-answer"},
-			{"Category":"chat-answer"},
-			{"Category":"plan-step"}
-		]`),
+		"notepad": json.RawMessage(`{
+			"recent": [{"id":"n1","category":"schema-finding"}],
+			"counts": {"schema-finding": 17, "chat-answer": 5, "plan-step": 1}
+		}`),
 	}
 	got := parseNotepadCounts(exts)
 	if len(got) != 3 {
 		t.Fatalf("buckets = %d; want 3", len(got))
 	}
-	// Sorted: most-numerous first.
-	if got[0].Category != "schema-finding" || got[0].Count != 3 {
+	if got[0].Category != "schema-finding" || got[0].Count != 17 {
 		t.Errorf("top = %+v", got[0])
 	}
-	if got[1].Category != "chat-answer" || got[1].Count != 2 {
+	if got[1].Category != "chat-answer" || got[1].Count != 5 {
 		t.Errorf("second = %+v", got[1])
+	}
+	if got[2].Category != "plan-step" || got[2].Count != 1 {
+		t.Errorf("third = %+v", got[2])
+	}
+}
+
+func TestParseNotepadCounts_EmptyCategoryLabelled(t *testing.T) {
+	exts := map[string]json.RawMessage{
+		"notepad": json.RawMessage(`{"counts":{"":4,"schema-finding":2}}`),
+	}
+	got := parseNotepadCounts(exts)
+	if len(got) != 2 {
+		t.Fatalf("buckets = %d; want 2", len(got))
+	}
+	// Most-numerous (empty key, surfaced as "uncategorized") first.
+	if got[0].Category != "uncategorized" || got[0].Count != 4 {
+		t.Errorf("top = %+v; want uncategorized=4", got[0])
 	}
 }
 

@@ -24,6 +24,9 @@ func (e errStore) ListNotes(_ context.Context, _ string, _ store.ListNotesOpts) 
 func (e errStore) SearchNotes(_ context.Context, _, _ string, _ store.ListNotesOpts) ([]store.NoteRow, error) {
 	return nil, e.err
 }
+func (e errStore) CountNotesByCategory(_ context.Context, _ string, _ store.ListNotesOpts) (map[string]int, error) {
+	return nil, e.err
+}
 
 // newNotepad builds a *Notepad bound to root sess-1 with the
 // default 48h window. Helper for the unit tests that don't need a
@@ -225,6 +228,40 @@ func TestShow_EmptyMessage(t *testing.T) {
 	}
 	if !strings.Contains(out, "empty") {
 		t.Errorf("expected empty-state message, got %q", out)
+	}
+}
+
+func TestCountsByCategory_ReturnsTrueTotals(t *testing.T) {
+	st := fixture.NewTestStore()
+	np := newNotepad(st)
+	ctx := context.Background()
+	// Two categories with different counts. CountsByCategory must
+	// return both irrespective of any read limit.
+	for i := 0; i < 7; i++ {
+		if _, err := np.Append(ctx, AppendInput{Content: "x", Category: "schema-finding"}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := np.Append(ctx, AppendInput{Content: "y", Category: "chat-answer"}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	if _, err := np.Append(ctx, AppendInput{Content: "z"}); err != nil { // empty category
+		t.Fatalf("append: %v", err)
+	}
+	got, err := np.CountsByCategory(ctx)
+	if err != nil {
+		t.Fatalf("CountsByCategory: %v", err)
+	}
+	if got["schema-finding"] != 7 {
+		t.Errorf("schema-finding = %d; want 7", got["schema-finding"])
+	}
+	if got["chat-answer"] != 3 {
+		t.Errorf("chat-answer = %d; want 3", got["chat-answer"])
+	}
+	if got[""] != 1 {
+		t.Errorf("empty-cat = %d; want 1", got[""])
 	}
 }
 
