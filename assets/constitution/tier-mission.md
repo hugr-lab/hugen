@@ -144,8 +144,10 @@ decide:
 - Already incorporated / not applicable → `plan:comment` to
   log the receipt and resume.
 
-After dispatching, call `wait_subagents` again with the still-
-pending worker ids.
+After dispatching, call `wait_subagents` again. With no `ids`
+the call snapshots and waits on every in-flight direct worker —
+the right default unless you deliberately want to leave some
+running. Pass explicit `ids` only for a specific subset.
 
 ### When you need user input or approval
 
