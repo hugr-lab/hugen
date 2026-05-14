@@ -18,6 +18,18 @@ import (
 // most prompts; Shift+Enter inserts a newline, scrolling within.
 const inputHeight = 3
 
+// sidebar geometry constants.
+//
+//   - sidebarWidth: total cells the sidebar (including its 1-cell
+//     left border) occupies when shown.
+//   - sidebarMinTerminal: below this terminal width the sidebar
+//     collapses entirely (chat-only fallback for very narrow
+//     terminals; spec open Q #6).
+const (
+	sidebarWidth      = 36
+	sidebarMinTerminal = 80
+)
+
 // model is the Bubble Tea Model for the TUI adapter. Slice 1 is
 // single-tab; multi-root tabs land in slice 4.
 type model struct {
@@ -37,6 +49,12 @@ type model struct {
 	closing     bool   // true once the user has issued /end
 	statusLine  string // one-line footer status (e.g. "thinking…")
 	bannerError string // most recent submit / runtime error
+
+	// Slice 2 — sidebar projection. Replaced wholesale on every
+	// incoming liveview/status frame; render is a pure function
+	// of the most recent value (no accumulated state).
+	sidebarStatus *liveviewStatus
+	sidebarShown  bool // false when terminal < sidebarMinTerminal
 }
 
 func newModel(sessionID string, u protocol.ParticipantInfo, submit func(protocol.Frame) error, logger *slog.Logger) model {
@@ -150,27 +168,61 @@ func (m model) View() string {
 		return "starting hugen TUI…"
 	}
 	chat := m.viewport.View()
+	top := chat
+	if m.sidebarShown {
+		// Lipgloss adds border + padding cells ON TOP of Width().
+		// Total rendered width = Width + PaddingLeft + BorderLeft.
+		// We want the rendered block to consume exactly sidebarWidth
+		// cells so the chat (width - sidebarWidth) abuts cleanly.
+		contentW := sidebarWidth - 2 // 1 cell border + 1 cell padding
+		if contentW < 1 {
+			contentW = 1
+		}
+		side := sidebarBoxStyle.
+			Width(contentW).
+			Height(m.viewport.Height).
+			Render(renderSidebar(m.sidebarStatus, contentW))
+		top = lipgloss.JoinHorizontal(lipgloss.Top, chat, side)
+	}
 	input := m.textarea.View()
 	footer := m.renderFooter()
-	return lipgloss.JoinVertical(lipgloss.Left, chat, input, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, top, input, footer)
 }
 
-// relayout adjusts viewport + textarea geometry to the current
-// terminal size. Reserved rows: 1 for footer, inputHeight for
-// textarea.
+// relayout adjusts viewport + textarea + sidebar geometry to the
+// current terminal size. Reserved rows: 1 for footer, inputHeight
+// for textarea. Sidebar shows when terminal width ≥
+// sidebarMinTerminal; below that, chat occupies the full width.
 func (m *model) relayout() {
 	reserved := inputHeight + 1
-	if m.height < reserved+4 {
-		// Terminal too small — clamp viewport height to 1; the user
-		// gets a degraded but functional layout.
-		m.viewport.Height = 1
-	} else {
-		m.viewport.Height = m.height - reserved
+	contentHeight := m.height - reserved
+	if contentHeight < 1 {
+		contentHeight = 1
 	}
-	m.viewport.Width = m.width
+
+	m.sidebarShown = m.width >= sidebarMinTerminal
+	chatWidth := m.width
+	if m.sidebarShown {
+		chatWidth = m.width - sidebarWidth
+		if chatWidth < 20 {
+			// Fall back to chat-only if the sidebar would crowd the
+			// chat below readable width.
+			m.sidebarShown = false
+			chatWidth = m.width
+		}
+	}
+
+	m.viewport.Width = chatWidth
+	m.viewport.Height = contentHeight
 	m.textarea.SetWidth(m.width)
 	m.refreshChat()
 }
+
+var sidebarBoxStyle = lipgloss.NewStyle().
+	BorderStyle(lipgloss.NormalBorder()).
+	BorderLeft(true).
+	BorderForeground(lipgloss.Color("8")).
+	PaddingLeft(1)
 
 // refreshChat re-renders the entire chat buffer into the viewport.
 // Called on layout change or after appending a new line. Auto-follow

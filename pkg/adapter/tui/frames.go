@@ -60,6 +60,17 @@ func (m *model) handleFrame(f protocol.Frame) tea.Cmd {
 	case *protocol.SystemMarker:
 		m.chat.appendSystem(v.Payload.Subject)
 		m.refreshChat()
+	case *protocol.ExtensionFrame:
+		// Slice 2 — only the liveview status frame populates the
+		// sidebar. Other extensions' frames (plan:set,
+		// whiteboard:post, …) are intentionally ignored at this
+		// layer because the liveview projection already folds them
+		// into its payload.
+		if v.Payload.Extension == "liveview" && v.Payload.Op == "status" {
+			if st, err := parseLiveviewStatus(v.Payload.Data); err == nil {
+				m.sidebarStatus = st
+			}
+		}
 	case *protocol.SessionTerminated:
 		m.chat.appendSystem(fmt.Sprintf("session terminated (%s)", v.Payload.Reason))
 		m.refreshChat()

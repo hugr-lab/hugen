@@ -1,0 +1,328 @@
+package tui
+
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/hugr-lab/hugen/pkg/protocol"
+)
+
+// liveviewStatus is the TUI's typed view of the
+// liveview/status frame's `Data`. Schema lives in
+// pkg/extension/liveview/fold.go::emitStatus (kept in sync; if
+// liveview adds a field it must stay additive — open Q #8 in the
+// phase 5.1c spec).
+type liveviewStatus struct {
+	SessionID      string                        `json:"session_id"`
+	Depth          int                           `json:"depth"`
+	LifecycleState string                        `json:"lifecycle_state,omitempty"`
+	LastToolCall   *protocol.ToolCallRef         `json:"last_tool_call,omitempty"`
+	PendingInquiry *protocol.PendingInquiryRef   `json:"pending_inquiry,omitempty"`
+	Extensions     map[string]json.RawMessage    `json:"extensions,omitempty"`
+	Children       map[string]*liveviewStatus    `json:"children,omitempty"`
+}
+
+func parseLiveviewStatus(data json.RawMessage) (*liveviewStatus, error) {
+	var s liveviewStatus
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// renderSidebar produces the right-pane sidebar string for the
+// given liveview status frame. Width caps every line; height is
+// the available vertical budget (used by lipgloss styling outside
+// this function — internal text just appends as needed).
+func renderSidebar(s *liveviewStatus, width int) string {
+	if s == nil {
+		return styleSidebarFaint.Render("waiting for liveview…")
+	}
+	if width <= 0 {
+		width = 30
+	}
+	var sb strings.Builder
+
+	// Tier header (root / mission / worker) + lifecycle pill.
+	sb.WriteString(styleSidebarHeading.Render(tierLabel(s.Depth)))
+	sb.WriteString("\n")
+	sb.WriteString(lifecyclePill(s.LifecycleState))
+	sb.WriteString("\n")
+
+	// Pending inquiry — most actionable signal; render first
+	// (after header) so the operator sees it without scrolling.
+	if s.PendingInquiry != nil {
+		sb.WriteString("\n")
+		sb.WriteString(stylePendingInquiry.Render("⚠ inquiry pending"))
+		sb.WriteString("\n")
+		sb.WriteString(styleSidebarFaint.Render(truncate(s.PendingInquiry.Question, width-1)))
+		sb.WriteString("\n")
+	}
+
+	// Active subagents — recursive subtree projection.
+	if len(s.Children) > 0 {
+		sb.WriteString("\n")
+		sb.WriteString(styleSidebarHeading.Render("Subagents"))
+		sb.WriteString("\n")
+		for _, c := range sortedChildren(s.Children) {
+			sb.WriteString(renderSubagent(c, 1, width))
+		}
+	}
+
+	// Last tool — show what's running RIGHT NOW.
+	if s.LastToolCall != nil {
+		sb.WriteString("\n")
+		sb.WriteString(styleSidebarHeading.Render("Last tool"))
+		sb.WriteString("\n")
+		sb.WriteString(truncate(s.LastToolCall.Name, width))
+		sb.WriteString("\n")
+		sb.WriteString(styleSidebarFaint.Render(ageString(s.LastToolCall.StartedAt)))
+		sb.WriteString("\n")
+	}
+
+	// Plan — current step + progress hint.
+	if plan := parsePlan(s.Extensions); plan != nil && plan.Active {
+		sb.WriteString("\n")
+		sb.WriteString(renderPlan(plan, width))
+	}
+
+	// Notepad — count + per-category breakdown.
+	if buckets := parseNotepadCounts(s.Extensions); len(buckets) > 0 {
+		sb.WriteString("\n")
+		sb.WriteString(renderNotepad(buckets, width))
+	}
+
+	// Loaded skills — terse one-liner of count, full list in
+	// expanded panel (slice 6).
+	if skills := parseSkillNames(s.Extensions); len(skills) > 0 {
+		sb.WriteString("\n")
+		sb.WriteString(styleSidebarHeading.Render("Skills"))
+		sb.WriteString("\n")
+		sb.WriteString(styleSidebarFaint.Render(fmt.Sprintf("%d loaded", len(skills))))
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+// renderSubagent prints one subagent node with `indent` levels of
+// indent. Walks Children recursively so a worker under a mission
+// under root shows up as `▸ mission` then `  ▸ worker`.
+func renderSubagent(s *liveviewStatus, indent, width int) string {
+	if s == nil {
+		return ""
+	}
+	prefix := strings.Repeat("  ", indent-1) + "▸ "
+	label := shortTierLabel(s.Depth)
+	state := s.LifecycleState
+	if state == "" {
+		state = "active"
+	}
+	line := fmt.Sprintf("%s%s · %s", prefix, label, state)
+	out := truncate(line, width) + "\n"
+	if s.LastToolCall != nil {
+		toolLine := strings.Repeat("  ", indent) + s.LastToolCall.Name
+		out += styleSidebarFaint.Render(truncate(toolLine, width)) + "\n"
+	}
+	for _, c := range sortedChildren(s.Children) {
+		out += renderSubagent(c, indent+1, width)
+	}
+	return out
+}
+
+// planSnapshot mirrors plan.Plan as marshalled (no json tags →
+// exported field names). Decoded out of
+// liveviewStatus.Extensions["plan"].
+type planSnapshot struct {
+	Active      bool      `json:"Active"`
+	Text        string    `json:"Text"`
+	CurrentStep string    `json:"CurrentStep"`
+	Comments    []any     `json:"Comments"`
+	SetAt       time.Time `json:"SetAt"`
+	UpdatedAt   time.Time `json:"UpdatedAt"`
+}
+
+func parsePlan(exts map[string]json.RawMessage) *planSnapshot {
+	raw, ok := exts["plan"]
+	if !ok {
+		return nil
+	}
+	var p planSnapshot
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil
+	}
+	return &p
+}
+
+func renderPlan(p *planSnapshot, width int) string {
+	var sb strings.Builder
+	sb.WriteString(styleSidebarHeading.Render("Plan"))
+	sb.WriteString("\n")
+	if step := strings.TrimSpace(p.CurrentStep); step != "" {
+		sb.WriteString("→ " + truncate(step, width-2))
+		sb.WriteString("\n")
+	}
+	if len(p.Comments) > 0 {
+		sb.WriteString(styleSidebarFaint.Render(fmt.Sprintf("%d comments", len(p.Comments))))
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// notepadNote is the on-the-wire shape of one Note as marshalled
+// by pkg/extension/notepad's ReportStatus — exported field names
+// only.
+type notepadNote struct {
+	ID         string `json:"ID"`
+	Category   string `json:"Category"`
+	AuthorRole string `json:"AuthorRole"`
+}
+
+// parseNotepadCounts groups notes by Category and returns sorted
+// (cat, count) pairs.
+func parseNotepadCounts(exts map[string]json.RawMessage) []categoryCount {
+	raw, ok := exts["notepad"]
+	if !ok {
+		return nil
+	}
+	var notes []notepadNote
+	if err := json.Unmarshal(raw, &notes); err != nil {
+		return nil
+	}
+	by := map[string]int{}
+	for _, n := range notes {
+		cat := n.Category
+		if cat == "" {
+			cat = "uncategorized"
+		}
+		by[cat]++
+	}
+	out := make([]categoryCount, 0, len(by))
+	for cat, n := range by {
+		out = append(out, categoryCount{Category: cat, Count: n})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Category < out[j].Category
+	})
+	return out
+}
+
+type categoryCount struct {
+	Category string
+	Count    int
+}
+
+func renderNotepad(buckets []categoryCount, width int) string {
+	var sb strings.Builder
+	total := 0
+	for _, b := range buckets {
+		total += b.Count
+	}
+	sb.WriteString(styleSidebarHeading.Render(fmt.Sprintf("Notepad · %d", total)))
+	sb.WriteString("\n")
+	for _, b := range buckets {
+		line := fmt.Sprintf("  %s (%d)", b.Category, b.Count)
+		sb.WriteString(truncate(line, width))
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+func parseSkillNames(exts map[string]json.RawMessage) []string {
+	raw, ok := exts["skill"]
+	if !ok {
+		return nil
+	}
+	var s struct {
+		Loaded []string `json:"loaded"`
+	}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil
+	}
+	return s.Loaded
+}
+
+func sortedChildren(m map[string]*liveviewStatus) []*liveviewStatus {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]*liveviewStatus, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, m[k])
+	}
+	return out
+}
+
+func tierLabel(depth int) string {
+	return "Tier: " + shortTierLabel(depth)
+}
+
+// shortTierLabel is the indent-friendly version used inside the
+// subtree stripe; the top-level sidebar header uses tierLabel for
+// the explicit "Tier: " prefix.
+func shortTierLabel(depth int) string {
+	switch depth {
+	case 0:
+		return "root"
+	case 1:
+		return "mission"
+	default:
+		return "worker"
+	}
+}
+
+func lifecyclePill(state string) string {
+	if state == "" {
+		state = "idle"
+	}
+	style := styleSidebarFaint
+	switch state {
+	case "wait_approval", "wait_user_input":
+		style = stylePendingInquiry
+	case "wait_subagents", "active":
+		style = styleSidebarActive
+	}
+	return style.Render("● " + state)
+}
+
+func ageString(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := time.Since(t).Round(time.Second)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	}
+}
+
+func truncate(s string, width int) string {
+	if width <= 0 || len(s) <= width {
+		return s
+	}
+	if width <= 1 {
+		return "…"
+	}
+	return s[:width-1] + "…"
+}
+
+var (
+	styleSidebarHeading = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	styleSidebarFaint   = lipgloss.NewStyle().Faint(true)
+	styleSidebarActive  = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	stylePendingInquiry = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("11"))
+)
