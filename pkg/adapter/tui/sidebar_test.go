@@ -127,6 +127,30 @@ func TestRenderSubagent_RecursiveDepth(t *testing.T) {
 	}
 }
 
+// TestRenderSubagent_RecentActivityPrintsHistory — phase 5.1c S1.
+// When the subagent's projection carries recent_activity, render
+// the last 2-3 tools as a stripe (most-recent first) instead of
+// the single last_tool_call.
+func TestRenderSubagent_RecentActivityPrintsHistory(t *testing.T) {
+	now := time.Now()
+	worker := &liveviewStatus{
+		SessionID:      "w",
+		Depth:          2,
+		LifecycleState: "active",
+		RecentActivity: []protocol.ToolCallRef{
+			{Name: "hugr.execute_query", StartedAt: now.Add(-2 * time.Second)},
+			{Name: "duckdb.exec_sql", StartedAt: now.Add(-10 * time.Second)},
+			{Name: "notepad.append", StartedAt: now.Add(-30 * time.Second)},
+		},
+	}
+	out := renderSubagent(worker, 1, 60)
+	for _, name := range []string{"hugr.execute_query", "duckdb.exec_sql", "notepad.append"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("missing %q in subagent activity stripe:\n%s", name, out)
+		}
+	}
+}
+
 func TestParseNotepadCounts_GroupsAndSorts(t *testing.T) {
 	// counts is server-side aggregate — the sidebar trusts it
 	// verbatim and does NOT re-derive from `recent`.

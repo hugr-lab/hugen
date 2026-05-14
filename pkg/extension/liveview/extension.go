@@ -235,6 +235,14 @@ type sessionView struct {
 	lastTool       *protocol.ToolCallRef
 	pendingInquiry *protocol.PendingInquiryRef
 	turnsUsed      int
+	// recentTools is the rolling window of the last
+	// recentToolWindow ToolCall observations on THIS session's
+	// outbox (own frames only — children publish their own
+	// recent_activity in their own liveview emit). Most-recent
+	// first; capped on insert. Phase 5.1c follow-up S1 — gives
+	// adapters enough signal to show "what is this subagent
+	// doing RIGHT NOW" without subscribing to raw child frames.
+	recentTools []protocol.ToolCallRef
 
 	// children stores the LAST KNOWN status JSON each direct
 	// child published via its own liveview status frame. Keyed
@@ -286,6 +294,12 @@ func (v *sessionView) reportActivityJSON() json.RawMessage {
 	}
 	if v.turnsUsed > 0 {
 		body["turns_used"] = v.turnsUsed
+	}
+	if len(v.recentTools) > 0 {
+		// Defensive copy — recipient may store + mutate.
+		cp := make([]protocol.ToolCallRef, len(v.recentTools))
+		copy(cp, v.recentTools)
+		body["recent_activity"] = cp
 	}
 	if len(body) == 0 {
 		return nil

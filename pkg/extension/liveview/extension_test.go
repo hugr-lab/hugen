@@ -312,6 +312,62 @@ func TestExtension_OutboxChannelOverflow(t *testing.T) {
 	}
 }
 
+// TestExtension_RecentActivity_RollingWindow — phase 5.1c S1.
+// Each *protocol.ToolCall observation prepends to a rolling
+// window capped at recentToolWindow (most-recent first); the
+// emit payload carries the window under `recent_activity`.
+func TestExtension_RecentActivity_RollingWindow(t *testing.T) {
+	ext := New(nil)
+	state := fixture.NewTestSessionState("ses-recent-1")
+	if err := ext.InitState(context.Background(), state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	defer ext.CloseSession(context.Background(), state)
+	if v := fromState(state); v != nil {
+		v.debounce = 30 * time.Millisecond
+	}
+
+	// Submit recentToolWindow+1 ToolCall frames — the oldest
+	// should drop out of the window.
+	tools := []string{"first", "second", "third", "fourth"}
+	for _, name := range tools {
+		ext.OnFrameEmit(context.Background(), state,
+			protocol.NewToolCall("ses-recent-1",
+				protocol.ParticipantInfo{ID: "a", Kind: protocol.ParticipantAgent},
+				"tc-"+name, name, nil))
+	}
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(state.Emitted()) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	frames := state.Emitted()
+	if len(frames) == 0 {
+		t.Fatalf("no emit after ToolCall frames")
+	}
+	// Use the LAST emit (debounce coalesces; force-emit per tool
+	// call fires immediately so we expect ≥ 4 emits — pick last).
+	ef := frames[len(frames)-1].(*protocol.ExtensionFrame)
+	var body map[string]any
+	if err := json.Unmarshal(ef.Payload.Data, &body); err != nil {
+		t.Fatalf("payload unmarshal: %v", err)
+	}
+	recent, ok := body["recent_activity"].([]any)
+	if !ok {
+		t.Fatalf("recent_activity missing or wrong type: %+v", body["recent_activity"])
+	}
+	if len(recent) != recentToolWindow {
+		t.Fatalf("recent_activity len = %d; want %d", len(recent), recentToolWindow)
+	}
+	// Most-recent first.
+	first := recent[0].(map[string]any)
+	if first["name"] != "fourth" {
+		t.Errorf("recent_activity[0].name = %v; want fourth", first["name"])
+	}
+}
+
 // TestExtension_NewExtensionSatisfiesContract is a compile-time-
 // style guard that *Extension implements every documented
 // capability. The actual assertion is in extension.go (interface

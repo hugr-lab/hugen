@@ -18,13 +18,14 @@ import (
 // liveview adds a field it must stay additive — open Q #8 in the
 // phase 5.1c spec).
 type liveviewStatus struct {
-	SessionID      string                        `json:"session_id"`
-	Depth          int                           `json:"depth"`
-	LifecycleState string                        `json:"lifecycle_state,omitempty"`
-	LastToolCall   *protocol.ToolCallRef         `json:"last_tool_call,omitempty"`
-	PendingInquiry *protocol.PendingInquiryRef   `json:"pending_inquiry,omitempty"`
-	Extensions     map[string]json.RawMessage    `json:"extensions,omitempty"`
-	Children       map[string]*liveviewStatus    `json:"children,omitempty"`
+	SessionID      string                      `json:"session_id"`
+	Depth          int                         `json:"depth"`
+	LifecycleState string                      `json:"lifecycle_state,omitempty"`
+	LastToolCall   *protocol.ToolCallRef       `json:"last_tool_call,omitempty"`
+	PendingInquiry *protocol.PendingInquiryRef `json:"pending_inquiry,omitempty"`
+	RecentActivity []protocol.ToolCallRef      `json:"recent_activity,omitempty"`
+	Extensions     map[string]json.RawMessage  `json:"extensions,omitempty"`
+	Children       map[string]*liveviewStatus  `json:"children,omitempty"`
 }
 
 func parseLiveviewStatus(data json.RawMessage) (*liveviewStatus, error) {
@@ -112,7 +113,11 @@ func renderSidebar(s *liveviewStatus, width int) string {
 
 // renderSubagent prints one subagent node with `indent` levels of
 // indent. Walks Children recursively so a worker under a mission
-// under root shows up as `▸ mission` then `  ▸ worker`.
+// under root shows up as `▸ mission` then `  ▸ worker`. When
+// RecentActivity is present (phase 5.1c S1) the last 2–3 tool
+// calls are rendered as a stripe under the node — gives the
+// operator a "what is this subagent doing right now" hint
+// beyond the single LastToolCall.
 func renderSubagent(s *liveviewStatus, indent, width int) string {
 	if s == nil {
 		return ""
@@ -125,8 +130,22 @@ func renderSubagent(s *liveviewStatus, indent, width int) string {
 	}
 	line := fmt.Sprintf("%s%s · %s", prefix, label, state)
 	out := truncate(line, width) + "\n"
-	if s.LastToolCall != nil {
-		toolLine := strings.Repeat("  ", indent) + s.LastToolCall.Name
+	// Prefer the rolling recent_activity window (3 tools) over
+	// the single last_tool_call when present — gives the operator
+	// recent context, not just "what's running right now".
+	indentPrefix := strings.Repeat("  ", indent)
+	if len(s.RecentActivity) > 0 {
+		for i, ref := range s.RecentActivity {
+			marker := " "
+			if i == 0 {
+				marker = "▸" // most recent gets a leader
+			}
+			toolLine := fmt.Sprintf("%s%s %s · %s",
+				indentPrefix, marker, ref.Name, ageString(ref.StartedAt))
+			out += styleSidebarFaint.Render(truncate(toolLine, width)) + "\n"
+		}
+	} else if s.LastToolCall != nil {
+		toolLine := indentPrefix + s.LastToolCall.Name
 		out += styleSidebarFaint.Render(truncate(toolLine, width)) + "\n"
 	}
 	for _, c := range sortedChildren(s.Children) {

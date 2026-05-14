@@ -19,6 +19,12 @@ import (
 // suite latency in check; future config could expose it).
 const defaultMaxStale = 3 * defaultDebounce
 
+// recentToolWindow caps the recent-activity ring on each
+// sessionView. 3 is the spec's recommended depth — enough to
+// show what a worker has been doing in the last few seconds
+// without ballooning the emit payload for long-running sessions.
+const recentToolWindow = 3
+
 // loop is the observer goroutine's main loop. Pulls frame events
 // off the channel, folds them into the session view, and decides
 // when to emit a status frame.
@@ -130,10 +136,24 @@ func (v *sessionView) foldOwnFrame(f protocol.Frame) bool {
 			v.lastTool = &cp
 		}
 	case *protocol.ToolCall:
-		v.lastTool = &protocol.ToolCallRef{
+		ref := protocol.ToolCallRef{
 			Name:      fr.Payload.Name,
 			StartedAt: time.Now().UTC(),
 		}
+		v.lastTool = &ref
+		// Phase 5.1c S1 — prepend to the rolling recent-activity
+		// window. Most-recent first; cap at recentToolWindow so
+		// the projection payload stays bounded across long
+		// sessions.
+		next := make([]protocol.ToolCallRef, 0, len(v.recentTools)+1)
+		next = append(next, ref)
+		for _, prev := range v.recentTools {
+			if len(next) >= recentToolWindow {
+				break
+			}
+			next = append(next, prev)
+		}
+		v.recentTools = next
 		// Force-emit: a new tool call is the most useful "still
 		// alive, doing X" signal for adapters. Without this every
 		// tool call only arms the debounce timer, and a session
@@ -231,6 +251,11 @@ func (v *sessionView) emitStatus() {
 	}
 	if v.pendingInquiry != nil {
 		payload["pending_inquiry"] = v.pendingInquiry
+	}
+	if len(v.recentTools) > 0 {
+		cp := make([]protocol.ToolCallRef, len(v.recentTools))
+		copy(cp, v.recentTools)
+		payload["recent_activity"] = cp
 	}
 	if len(v.children) > 0 {
 		kids := make(map[string]json.RawMessage, len(v.children))
