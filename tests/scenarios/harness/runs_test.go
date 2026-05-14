@@ -200,6 +200,91 @@ func TestLoadScenario_NameDefaultsToDirBasename(t *testing.T) {
 	}
 }
 
+// TestLoadScenario_MultiRoot covers the phase-5.1b δ shape:
+// Scenario.Roots populated, Scenario.Steps empty, Assertions
+// queries reference $sid_<name>.
+func TestLoadScenario_MultiRoot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scenario.yaml")
+	body := `name: multi_demo
+requires: [hugr]
+roots:
+  alice:
+    owner: alice
+    steps:
+      - say: "Hi"
+        budget: 60s
+  bob:
+    owner: bob
+    steps:
+      - say: "Hello"
+        budget: 60s
+assertions:
+  - name: distinct_sids
+    graphql: |
+      query ($sid_alice: String!, $sid_bob: String!) { __typename }
+    vars: { sid_alice: "$sid_alice", sid_bob: "$sid_bob" }
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadScenario(path, "fallback")
+	if err != nil {
+		t.Fatalf("LoadScenario: %v", err)
+	}
+	if len(s.Roots) != 2 {
+		t.Fatalf("Roots len = %d, want 2", len(s.Roots))
+	}
+	if s.Roots["alice"].Owner != "alice" {
+		t.Errorf("alice.owner = %q", s.Roots["alice"].Owner)
+	}
+	if len(s.Roots["alice"].Steps) != 1 || s.Roots["alice"].Steps[0].Say == "" {
+		t.Errorf("alice.steps = %+v", s.Roots["alice"].Steps)
+	}
+	if len(s.Assertions) != 1 || s.Assertions[0].Name != "distinct_sids" {
+		t.Errorf("Assertions = %+v", s.Assertions)
+	}
+}
+
+// TestLoadScenario_RejectsRootsAndStepsMutualExclusion covers the
+// validation guard: Steps and Roots are mutually exclusive.
+func TestLoadScenario_RejectsRootsAndStepsMutualExclusion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scenario.yaml")
+	body := `name: bad
+steps:
+  - say: "hi"
+roots:
+  alice:
+    steps:
+      - say: "hi alice"
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadScenario(path, "")
+	if err == nil || !contains(err.Error(), "mutually exclusive") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// TestLoadScenario_RejectsRootWithoutSteps covers the per-root
+// Steps validation.
+func TestLoadScenario_RejectsRootWithoutSteps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scenario.yaml")
+	body := `name: empty_root
+roots:
+  alice:
+    owner: alice
+    steps: []
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadScenario(path, "")
+	if err == nil || !contains(err.Error(), "empty steps") {
+		t.Errorf("err = %v", err)
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(sub) > 0 && len(s) >= len(sub) && indexOf(s, sub) >= 0
 }

@@ -81,11 +81,46 @@ type Run struct {
 // Scenario is the shape of <name>/scenario.yaml. The Name field is
 // optional; the harness defaults it to the directory basename when
 // empty.
+//
+// Single-root scenarios (`Steps` populated, `Roots` nil) follow
+// the original phase-4.1b flow: one OpenSession, sequential
+// steps, queries reference `$sid`.
+//
+// Multi-root scenarios (phase 5.1b δ — `Roots` populated, `Steps`
+// nil) open one root per `Roots` entry, run each entry's `Steps`
+// concurrently in a goroutine, then run `Assertions` queries
+// (single-shot, after all roots' work finishes). Assertion
+// queries can reference per-root ids via `$sid_<name>` template
+// variables (e.g. `$sid_alice`, `$sid_bob`).
 type Scenario struct {
 	Name      string   `yaml:"name,omitempty"`
 	Requires  []string `yaml:"requires,omitempty"`
 	SessionID string   `yaml:"session_id,omitempty"` // informational only — runtime allocates real id
-	Steps     []Step   `yaml:"steps"`
+	Steps     []Step   `yaml:"steps,omitempty"`
+
+	// Roots names a set of independent root sessions opened in
+	// parallel under a shared Manager. Phase 5.1b δ. Mutually
+	// exclusive with Steps. Map key becomes the `$sid_<key>`
+	// template variable in Assertions.
+	Roots map[string]RootSpec `yaml:"roots,omitempty"`
+
+	// Assertions are GraphQL inspection clauses run after every
+	// root's Steps finished. Used for cross-root invariants
+	// (e.g. "alice has a persisted inquiry_request that bob's
+	// session_events tail does NOT contain"). Each query may
+	// reference `$sid_<root-name>` in its Vars block — the
+	// harness resolves to that root's session id. Single-shot;
+	// no Step-level Budget / WaitFor* applies.
+	Assertions []Query `yaml:"assertions,omitempty"`
+}
+
+// RootSpec describes one root session of a multi-root scenario.
+// Owner is propagated to OpenRequest.OwnerID — useful for
+// per-root permission isolation tests; empty defaults to
+// "harness-<root-name>".
+type RootSpec struct {
+	Owner string `yaml:"owner,omitempty"`
+	Steps []Step `yaml:"steps"`
 }
 
 // Step is one user-driven beat. Either Say or Tick must be present

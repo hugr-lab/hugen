@@ -85,6 +85,10 @@ func TestScenarios(t *testing.T) {
 						t.Skipf("scenario %s skipped: %s", name, reason)
 					}
 
+					if len(sc.Roots) > 0 {
+						rt.RunMultiRoot(ctx, t, sc)
+						return
+					}
 					handle := rt.OpenSession(ctx, t)
 					for i, step := range sc.Steps {
 						handle.Step(ctx, step, i)

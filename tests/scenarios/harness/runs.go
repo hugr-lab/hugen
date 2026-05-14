@@ -54,14 +54,38 @@ func LoadScenario(scenarioPath, dirName string) (*Scenario, error) {
 	if s.Name == "" {
 		s.Name = dirName
 	}
-	if len(s.Steps) == 0 {
-		return nil, fmt.Errorf("scenario %q: steps is empty", s.Name)
-	}
-	for i, st := range s.Steps {
-		if st.Say == "" && !st.Tick {
-			return nil, fmt.Errorf("scenario %q step %d: must have either say: or tick: true",
-				s.Name, i)
+	// Two modes:
+	//   • single-root: Steps populated, Roots nil. Validate as
+	//     before.
+	//   • multi-root (phase 5.1b δ): Roots populated, Steps
+	//     empty. Validate per-root Steps.
+	switch {
+	case len(s.Roots) > 0 && len(s.Steps) > 0:
+		return nil, fmt.Errorf("scenario %q: roots: and steps: are mutually exclusive — use roots[<name>].steps[]",
+			s.Name)
+	case len(s.Roots) > 0:
+		for rootName, rs := range s.Roots {
+			if len(rs.Steps) == 0 {
+				return nil, fmt.Errorf("scenario %q: root %q has empty steps",
+					s.Name, rootName)
+			}
+			for i, st := range rs.Steps {
+				if st.Say == "" && !st.Tick {
+					return nil, fmt.Errorf("scenario %q root %q step %d: must have either say: or tick: true",
+						s.Name, rootName, i)
+				}
+			}
 		}
+	case len(s.Steps) > 0:
+		for i, st := range s.Steps {
+			if st.Say == "" && !st.Tick {
+				return nil, fmt.Errorf("scenario %q step %d: must have either say: or tick: true",
+					s.Name, i)
+			}
+		}
+	default:
+		return nil, fmt.Errorf("scenario %q: either steps: or roots: must be non-empty",
+			s.Name)
 	}
 	return &s, nil
 }

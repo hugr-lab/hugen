@@ -5,6 +5,8 @@ package harness
 import (
 	"context"
 	"fmt"
+	"sort"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,18 +32,27 @@ type SessionHandle struct {
 // pump that logs every frame to t.Log. Use this once per scenario;
 // each subsequent step on the same scenario reuses the handle.
 func (r *Runtime) OpenSession(ctx context.Context, t *testing.T) *SessionHandle {
+	return r.OpenSessionWithOwner(ctx, t, "harness")
+}
+
+// OpenSessionWithOwner is the multi-root variant: opens a fresh
+// root with an explicit OwnerID so the runtime's per-owner
+// isolation paths (permission tier-2, sessions registry) can be
+// exercised under one shared Manager. Each root gets its own
+// outbox pump goroutine. Phase 5.1b δ.
+func (r *Runtime) OpenSessionWithOwner(ctx context.Context, t *testing.T, owner string) *SessionHandle {
 	t.Helper()
 	sess, openedAt, err := r.Core.Manager.Open(ctx, session.OpenRequest{
-		OwnerID: "harness",
+		OwnerID: owner,
 		Participants: []protocol.ParticipantInfo{{
 			ID:   "harness-user",
 			Kind: protocol.ParticipantUser,
 			Name: "harness",
 		}},
 		Metadata: map[string]any{
-			"harness_run":      r.Run.Name,
-			"harness_run_dir":  r.RunDir,
-			"harness_started":  time.Now().UTC().Format(time.RFC3339),
+			"harness_run":     r.Run.Name,
+			"harness_run_dir": r.RunDir,
+			"harness_started": time.Now().UTC().Format(time.RFC3339),
 		},
 	})
 	if err != nil {
@@ -69,6 +80,83 @@ func (r *Runtime) OpenSession(ctx context.Context, t *testing.T) *SessionHandle 
 // ID returns the session id; used to fill `$sid` in scenario
 // queries.
 func (h *SessionHandle) ID() string { return h.id }
+
+// RunMultiRoot opens one root per [Scenario.Roots] entry under
+// the shared Manager, runs each root's Steps concurrently in a
+// goroutine, waits for all to finish, then executes the
+// scenario's Assertions queries. Phase 5.1b δ. Names in the
+// roots map become `$sid_<name>` template variables in
+// Assertions; e.g. roots {alice, bob} → `$sid_alice`,
+// `$sid_bob` resolve to those roots' session ids.
+func (r *Runtime) RunMultiRoot(ctx context.Context, t *testing.T, sc *Scenario) {
+	t.Helper()
+	if len(sc.Roots) == 0 {
+		t.Fatal("RunMultiRoot called on a scenario without Roots")
+	}
+
+	// Open every root before firing any step so the Manager
+	// registers them all before concurrent work starts. Each
+	// goroutine below owns its root handle exclusively.
+	handles := make(map[string]*SessionHandle, len(sc.Roots))
+	for name, spec := range sc.Roots {
+		owner := spec.Owner
+		if owner == "" {
+			owner = "harness-" + name
+		}
+		handles[name] = r.OpenSessionWithOwner(ctx, t, owner)
+		t.Logf("── multi-root: root %q opened sid=%s owner=%s",
+			name, handles[name].id, owner)
+	}
+
+	// Drive each root's Steps in its own goroutine. We don't
+	// share t between goroutines for Fatal-class operations —
+	// each Step uses Logf liberally; per-root errors surface as
+	// log lines plus a final summary t.Log.
+	var wg sync.WaitGroup
+	for name, spec := range sc.Roots {
+		wg.Add(1)
+		go func(rootName string, steps []Step) {
+			defer wg.Done()
+			h := handles[rootName]
+			for i, step := range steps {
+				h.t.Logf("── [root=%s] step %d/%d ──", rootName, i+1, len(steps))
+				h.Step(ctx, step, i)
+			}
+		}(name, spec.Steps)
+	}
+	wg.Wait()
+
+	t.Logf("── multi-root: all roots finished; running %d assertion(s)", len(sc.Assertions))
+
+	// Cross-root assertions. Each query may reference any
+	// $sid_<name> via Vars; the harness substitutes from the
+	// sids map.
+	sids := make(map[string]string, len(handles)+1)
+	for name, h := range handles {
+		sids["sid_"+name] = h.id
+	}
+	// Also expose `$sid` defaulting to the lexically-first root,
+	// purely for tooling convenience (a one-root assertion query
+	// reuses the single-root `vars: {sid: "$sid"}` shape).
+	for _, name := range sortedKeys(handles) {
+		sids["sid"] = handles[name].id
+		break
+	}
+	for _, q := range sc.Assertions {
+		r.RunQueryWithSids(ctx, t, sids, q)
+	}
+}
+
+// sortedKeys returns the map keys in lexical order. Used for
+// deterministic iteration in cross-root logging.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // pump drains the session's outbox into t.Log. Runs until the
 // session goroutine closes the outbox (which happens after

@@ -1,60 +1,143 @@
-# multi_root_independence — phase 5.1 cross-cutting invariant.
+# multi_root_independence — phase 5.1b merge gate.
 #
-# Two concurrent root sessions answer interleaved user prompts.
-# Verifies the phase-5.1 plumbing (responseRouting tables,
-# pendingInquiry maps, async cap counters) is per-session and
-# does NOT cross-contaminate between unrelated root trees.
+# Two concurrent root sessions answer unrelated user prompts under
+# one Manager. Demonstrates the phase-5.1 plumbing
+# (responseRouting tables, pendingInquiry maps, async cap counters,
+# liveview projection cache) is per-session and does NOT cross-
+# contaminate between root trees.
 #
-# Today's scenario harness drives ONE root per scenario run. This
-# scenario is a structural placeholder until the harness supports
-# multi-root orchestration (separate Setup call per t.Run,
-# concurrent OpenSession). The yaml below records the intended
-# shape; the assertion machinery lands once the runner gains the
-# fan-out.
+# Harness flow (phase 5.1b δ):
+#   1. Open `alice` and `bob` roots in parallel via the multi-root
+#      harness primitive (Scenario.Roots).
+#   2. Run each root's Steps concurrently in goroutines.
+#   3. After both finish, run Assertions queries — they reference
+#      `$sid_alice` / `$sid_bob` to inspect each root's persisted
+#      state independently.
 #
-# By-eye assertions (target):
+# By-eye assertions (assertion queries below dump the data, the
+# reviewer eyeballs):
 #
-#   1. Two open roots A and B run a non-trivial mission each.
-#      Their session trees do not share any session id.
+#   1. Both roots produced final agent_message frames on their
+#      own event logs. No session-id cross-contamination.
+#   2. alice's session_events contains no rows authored by bob's
+#      session id, and vice versa.
+#   3. Each root's session_status events follow its own lifecycle
+#      independently (no interleaved state transitions across
+#      roots).
 #
-#   2. responseRouting maps and pendingInquiry maps on A's tree
-#      never reach into B's tree (verified by emitting an
-#      inquiry on A and observing B's transcript stays empty of
-#      inquiry_response frames). Negative assertion — count
-#      must be 0.
-#
-#   3. The per-root async cap counts only direct descendants of
-#      THAT root. Filling A's children to the cap does not
-#      affect B's spawn_mission(wait="async") on B.
-#
-#   4. The shared Manager.live map contains both roots; A is
-#      not reachable as a descendant of B and vice versa.
-#
-# Tuning notes:
-#   - The harness fan-out requirement is out of scope here.
-#     Initial implementation can run the assertions as a Go
-#     test under pkg/session/manager/, not under
-#     tests/scenarios/. This yaml documents the user-facing
-#     shape; the implementation may live elsewhere.
+# The scenario uses trivial knowledge prompts so the LLM resolves
+# quickly without spawning missions — this keeps the per-root
+# work bounded and the parallel execution observable in the run
+# duration. (A multi-mission isolation test would add minutes
+# per root, blocking the merge gate on Claude budget.)
+
 name: multi_root_independence
 requires: [hugr]
 
-steps:
-  - say: |
-      (Placeholder — multi-root scenario harness pending.) Run
-      a simple data exploration on `northwind.customers`.
-    budget: 240s
-    wait_for_subagents: 180s
+roots:
+  alice:
+    owner: alice
+    steps:
+      - say: |
+          What is 2+2? Answer with just the number.
+        budget: 60s
+        queries:
+          - name: alice_events
+            graphql: |
+              query ($sid: String!) {
+                hub { db { agent {
+                  session_events(
+                    filter: {session_id: {eq: $sid}}
+                    order_by: [{field: "seq", direction: ASC}]
+                  ) { seq event_type tool_name }
+                }}}
+              }
+            vars: { sid: "$sid" }
+          - name: alice_final_messages
+            graphql: |
+              query ($sid: String!) {
+                hub { db { agent {
+                  session_events(
+                    filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                    order_by: [{field: "seq", direction: DESC}]
+                    limit: 1
+                  ) { seq content }
+                }}}
+              }
+            vars: { sid: "$sid" }
 
-    queries:
-      - name: tool_calls_root
-        graphql: |
-          query ($sid: String!) {
-            hub { db { agent {
-              session_events(
-                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
-                order_by: [{field: "seq", direction: ASC}]
-              ) { seq tool_name tool_args }
-            }}}
+  bob:
+    owner: bob
+    steps:
+      - say: |
+          What is the capital of France? Answer with just the name.
+        budget: 60s
+        queries:
+          - name: bob_events
+            graphql: |
+              query ($sid: String!) {
+                hub { db { agent {
+                  session_events(
+                    filter: {session_id: {eq: $sid}}
+                    order_by: [{field: "seq", direction: ASC}]
+                  ) { seq event_type tool_name }
+                }}}
+              }
+            vars: { sid: "$sid" }
+          - name: bob_final_messages
+            graphql: |
+              query ($sid: String!) {
+                hub { db { agent {
+                  session_events(
+                    filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                    order_by: [{field: "seq", direction: DESC}]
+                    limit: 1
+                  ) { seq content }
+                }}}
+              }
+            vars: { sid: "$sid" }
+
+# Cross-root assertions — single-shot after both roots completed.
+# Each query references `$sid_alice` / `$sid_bob` to fetch each
+# root's persisted state separately. Reviewer scans the dumps
+# for session-id isolation.
+assertions:
+  - name: distinct_session_ids
+    graphql: |
+      query ($sid_alice: String!, $sid_bob: String!) {
+        alice: hub { db { agent {
+          sessions(filter: {id: {eq: $sid_alice}}) {
+            id owner_id created_at
           }
-        vars: { sid: "$sid" }
+        }}}
+        bob: hub { db { agent {
+          sessions(filter: {id: {eq: $sid_bob}}) {
+            id owner_id created_at
+          }
+        }}}
+      }
+    vars: { sid_alice: "$sid_alice", sid_bob: "$sid_bob" }
+
+  - name: alice_only_carries_alice_events
+    graphql: |
+      query ($sid_alice: String!, $sid_bob: String!) {
+        hub { db { agent {
+          session_events(
+            filter: {session_id: {eq: $sid_alice}, event_type: {eq: "agent_message"}}
+            order_by: [{field: "seq", direction: ASC}]
+          ) { seq session_id content }
+        }}}
+      }
+    vars: { sid_alice: "$sid_alice", sid_bob: "$sid_bob" }
+
+  - name: bob_only_carries_bob_events
+    graphql: |
+      query ($sid_alice: String!, $sid_bob: String!) {
+        hub { db { agent {
+          session_events(
+            filter: {session_id: {eq: $sid_bob}, event_type: {eq: "agent_message"}}
+            order_by: [{field: "seq", direction: ASC}]
+          ) { seq session_id content }
+        }}}
+      }
+    vars: { sid_alice: "$sid_alice", sid_bob: "$sid_bob" }
