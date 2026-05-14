@@ -147,7 +147,13 @@ func SanitizeLLMSchema(raw json.RawMessage) (json.RawMessage, []string, error) {
 }
 
 func sanitizeNode(node map[string]any, path string, notes *[]string) {
-	for _, banned := range []string{"additionalProperties", "$ref", "oneOf", "anyOf", "allOf"} {
+	// "examples" landed in phase 5.1 to help weak local models
+	// (Gemma) infer the envelope shape of `session:inquire`, but
+	// Gemini's function-declaration schema parser rejects unknown
+	// fields with an INVALID_ARGUMENT. Strip it project-wide so
+	// any extension contributing a schema with examples doesn't
+	// silently break the Gemini transport.
+	for _, banned := range []string{"additionalProperties", "$ref", "oneOf", "anyOf", "allOf", "examples"} {
 		if _, exists := node[banned]; exists {
 			delete(node, banned)
 			*notes = append(*notes, fmt.Sprintf("dropped %q at %s", banned, where(path)))

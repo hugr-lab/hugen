@@ -27,11 +27,7 @@ const inquireSchema = `{
     "options":    {"type": "array", "items": {"type": "string"}, "description": "Optional pre-defined answers for clarification questions."},
     "timeout_ms": {"type": "integer", "minimum": 1, "description": "Per-call deadline override. Defaults to the runtime-configured global timeout."}
   },
-  "required": ["type", "question"],
-  "examples": [
-    {"type": "clarification", "question": "Which data source should I use?", "context": "A [fits-explicit], B [fits-possibly]", "options": ["A", "B"]},
-    {"type": "approval", "question": "Run DROP TABLE on staging.users?"}
-  ]
+  "required": ["type", "question"]
 }`
 
 type inquireInput struct {
