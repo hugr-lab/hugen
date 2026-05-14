@@ -172,6 +172,74 @@ func TestExtension_OnChildFrame_FoldsLiveviewStatusFromChild(t *testing.T) {
 	}
 }
 
+// TestExtension_OnChildFrame_SessionTerminatedDropsChildEntry
+// verifies that a child's SessionTerminated frame removes the
+// child entry from the parent's projection cache. Without this,
+// the children map kept growing across subagent lifetimes (the
+// initial 5.1b bug observed in production logs).
+func TestExtension_OnChildFrame_SessionTerminatedDropsChildEntry(t *testing.T) {
+	ext := New(nil)
+	state := fixture.NewTestSessionState("ses-parent-drop")
+	if err := ext.InitState(context.Background(), state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	defer ext.CloseSession(context.Background(), state)
+	if v := fromState(state); v != nil {
+		v.debounce = 50 * time.Millisecond
+	}
+
+	// Seed the cache with a child entry via a child status frame.
+	childData, _ := json.Marshal(map[string]any{"session_id": "ses-doomed"})
+	statusFrame := protocol.NewExtensionFrame(
+		"ses-doomed", protocol.ParticipantInfo{},
+		providerName, protocol.CategoryMarker, opStatus, childData,
+	)
+	ext.OnChildFrame(context.Background(), state, "ses-doomed", statusFrame)
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(state.Emitted()) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	priorEmits := len(state.Emitted())
+	if priorEmits == 0 {
+		t.Fatalf("no emit after seeding child entry")
+	}
+
+	// Now deliver a SessionTerminated for the same child; expect a
+	// fresh emit whose children map no longer contains the id.
+	term := protocol.NewSessionTerminated(
+		"ses-doomed", protocol.ParticipantInfo{},
+		protocol.SessionTerminatedPayload{Reason: protocol.TerminationCompleted},
+	)
+	ext.OnChildFrame(context.Background(), state, "ses-doomed", term)
+
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(state.Emitted()) > priorEmits {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	frames := state.Emitted()
+	if len(frames) <= priorEmits {
+		t.Fatalf("no fresh emit after SessionTerminated child fold (had %d, still %d)",
+			priorEmits, len(frames))
+	}
+	ef := frames[len(frames)-1].(*protocol.ExtensionFrame)
+	var body map[string]any
+	if err := json.Unmarshal(ef.Payload.Data, &body); err != nil {
+		t.Fatalf("payload unmarshal: %v", err)
+	}
+	if kids, ok := body["children"].(map[string]any); ok {
+		if _, still := kids["ses-doomed"]; still {
+			t.Errorf("ses-doomed still in children map after SessionTerminated: %+v", kids)
+		}
+	}
+}
+
 // TestExtension_ReportStatus_OwnActivity verifies the
 // StatusReporter capability: liveview exposes its own activity
 // projection as JSON (lifecycle_state, last_tool_call,

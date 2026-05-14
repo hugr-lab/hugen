@@ -9,17 +9,29 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
+// maxStale caps how long a dirty session can stay silent under
+// continuous frame traffic. The debounce timer is reset on every
+// frame, so a child emitting every 1.5 s would starve the parent's
+// 2 s debounce forever. maxStale guarantees an emit at least once
+// per window even if events keep coming. Tuned at 3× debounce so
+// bursty paths still coalesce but steady streams keep flowing.
+const maxStale = 3 * defaultDebounce
+
 // loop is the observer goroutine's main loop. Pulls frame events
 // off the channel, folds them into the session view, and decides
 // when to emit a status frame.
 //
 // Decision logic:
 //   - Force-emit (skip debounce timer) on lifecycle-changing
-//     events: SessionStatusPayload state transitions,
+//     events: SessionStatusPayload state transitions, ToolCall,
 //     InquiryRequest / InquiryResponse, SubagentStarted /
 //     SubagentResult, AgentMessage{Final&&Consolidated},
-//     SessionTerminated.
+//     SessionTerminated; child's own liveview/status frame; child
+//     SessionTerminated (drops cache entry).
 //   - Other events arm a debounce timer (defaultDebounce).
+//   - Continuous floods are bounded by maxStale: even if frames
+//     keep arriving inside the debounce window, an emit fires
+//     once now-lastEmit ≥ maxStale.
 //   - Timer fires → emit if there have been changes since the
 //     last emit. Otherwise let the session stay silent (no
 //     idle heartbeats).
@@ -30,10 +42,20 @@ import (
 // the handle.
 func (v *sessionView) loop() {
 	var (
-		dirty  bool
-		timer  *time.Timer
-		timerC <-chan time.Time
+		dirty    bool
+		timer    *time.Timer
+		timerC   <-chan time.Time
+		lastEmit = time.Now()
 	)
+	emit := func() {
+		v.emitStatus()
+		lastEmit = time.Now()
+		dirty = false
+		if timer != nil {
+			timer.Stop()
+			timerC = nil
+		}
+	}
 	for {
 		select {
 		case ev, ok := <-v.ch:
@@ -45,13 +67,8 @@ func (v *sessionView) loop() {
 			}
 			force := v.fold(ev)
 			dirty = true
-			if force {
-				v.emitStatus()
-				dirty = false
-				if timer != nil {
-					timer.Stop()
-					timerC = nil
-				}
+			if force || time.Since(lastEmit) >= maxStale {
+				emit()
 				continue
 			}
 			if timer == nil {
@@ -69,8 +86,7 @@ func (v *sessionView) loop() {
 		case <-timerC:
 			timerC = nil
 			if dirty {
-				v.emitStatus()
-				dirty = false
+				emit()
 			}
 		}
 	}
@@ -116,6 +132,12 @@ func (v *sessionView) foldOwnFrame(f protocol.Frame) bool {
 			Name:      fr.Payload.Name,
 			StartedAt: time.Now().UTC(),
 		}
+		// Force-emit: a new tool call is the most useful "still
+		// alive, doing X" signal for adapters. Without this every
+		// tool call only arms the debounce timer, and a session
+		// running back-to-back tool calls under 2 s apart would
+		// be invisible until the burst ends.
+		return true
 	case *protocol.InquiryRequest:
 		v.pendingInquiry = &protocol.PendingInquiryRef{
 			RequestID: fr.Payload.RequestID,
@@ -145,30 +167,41 @@ func (v *sessionView) foldOwnFrame(f protocol.Frame) bool {
 // liveview frame arrives. Returns true to force-emit so the
 // next layer up sees the change with minimal latency.
 func (v *sessionView) foldChildFrame(childID string, f protocol.Frame) bool {
-	ext, ok := f.(*protocol.ExtensionFrame)
-	if !ok {
-		return false
+	switch fr := f.(type) {
+	case *protocol.SessionTerminated:
+		// Child died — drop its entry from our projection so the
+		// subtree map stops carrying a stale node. Force-emit so
+		// the next layer up sees the topology change immediately.
+		v.reportMu.Lock()
+		delete(v.children, childID)
+		v.reportMu.Unlock()
+		return true
+	case *protocol.ExtensionFrame:
+		if fr.Payload.Extension != providerName || fr.Payload.Op != opStatus {
+			// Non-liveview child ExtensionFrames (plan / whiteboard /
+			// notepad / skill from the child) carry no rolled-up
+			// subtree state — the child's own liveview already
+			// summarised them. Treat as activity hint only.
+			return false
+		}
+		v.reportMu.Lock()
+		if v.children == nil {
+			v.children = map[string]json.RawMessage{}
+		}
+		// Defensive copy of the embedded Data payload — pump may
+		// reuse the frame allocation; keep our own slice.
+		data := make(json.RawMessage, len(fr.Payload.Data))
+		copy(data, fr.Payload.Data)
+		v.children[childID] = data
+		v.reportMu.Unlock()
+		return true
 	}
-	if ext.Payload.Extension != providerName || ext.Payload.Op != opStatus {
-		// Non-liveview child frames (raw tool_calls, reasoning,
-		// child's own ExtensionFrames from plan / whiteboard /
-		// notepad / skill) are interesting only as activity
-		// hints. We don't fold them into our cache — the child's
-		// own liveview already emitted its rolled-up status; we
-		// just wait for that frame.
-		return false
-	}
-	v.reportMu.Lock()
-	if v.children == nil {
-		v.children = map[string]json.RawMessage{}
-	}
-	// Defensive copy of the embedded Data payload — pump may
-	// reuse the frame allocation; keep our own slice.
-	data := make(json.RawMessage, len(ext.Payload.Data))
-	copy(data, ext.Payload.Data)
-	v.children[childID] = data
-	v.reportMu.Unlock()
-	return true
+	// Raw child frames (tool_call, reasoning, agent_message
+	// chunks, …) are useful as "child is alive, doing something"
+	// hints; they arm the debounce timer via dirty=true in loop()
+	// but never directly populate our subtree cache — the child's
+	// own liveview status frame is the authoritative summary.
+	return false
 }
 
 // emitStatus builds the SessionStatus payload and pushes it

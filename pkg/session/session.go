@@ -635,6 +635,21 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 	if perr := s.store.AppendEvent(ctx, row, summary); perr != nil {
 		return fmt.Errorf("session %s: persist frame: %w", s.id, perr)
 	}
+	// Diagnostic: log live direct-child count right after every
+	// persisted emit. Helps spot drift between session.children
+	// (authoritative) and liveview's per-session projection cache
+	// — they should track together; a divergence signals a missed
+	// SessionTerminated observation or a leaked cache entry.
+	if s.logger != nil {
+		s.childMu.Lock()
+		childCount := len(s.children)
+		s.childMu.Unlock()
+		s.logger.Debug("session: emit",
+			"session", s.id,
+			"frame", string(f.Kind()),
+			"seq", nextSeq,
+			"children", childCount)
+	}
 	// Phase 5.1b — fan the persisted frame out to any
 	// FrameObserver-implementing extension on this session.
 	// Observers MUST be non-blocking (typically a non-blocking

@@ -93,6 +93,15 @@ type childPumpState struct {
 // Future Phase-5 HITL kinds add one case here when those frames land
 // in pkg/protocol.
 func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childPumpState) {
+	// Phase 5.1b — notify ChildFrameObservers on every child frame
+	// before the explicit projection logic, so a parent extension
+	// (liveview) sees lifecycle-terminating frames (SessionTerminated,
+	// final AgentMessage, Error) too, not just routine tool_call /
+	// reasoning. Without this, liveview never learns that a child
+	// has terminated and the child entry leaks in the parent's
+	// projection cache. Observers are non-blocking with a recover
+	// guard, so this is safe to call unconditionally.
+	s.notifyChildFrameObservers(child, f)
 	switch v := f.(type) {
 	case *protocol.AgentMessage:
 		if v.Payload.Consolidated {
@@ -168,18 +177,14 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 			st.projected = true
 		}
 	default:
-		// Phase 5.1b — let parent's extensions observe the child
-		// frame before the implicit drain. The visibility filter
-		// stays default-deny, so the model on parent never sees
-		// these frames; the hook is for in-process observability
-		// only (liveview folds child activity into its tree
-		// projection). Observers MUST be non-blocking; recover
-		// guard inside isolates panics from the pump goroutine.
-		s.notifyChildFrameObservers(child, v)
 		// Drain. Streaming chunks (Final=false or Consolidated=false),
 		// reasoning, tool_call/result, recoverable errors, status
 		// markers, opened/closed lifecycle events, system_marker,
-		// extension_frame — all local to child's session.
+		// extension_frame — all local to child's session. The
+		// ChildFrameObserver notify-call moved to the top of this
+		// function in phase 5.1b's follow-up so the explicit cases
+		// (final AgentMessage, Error, SessionTerminated,
+		// InquiryRequest) also fan out.
 	}
 }
 
