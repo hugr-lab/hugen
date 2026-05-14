@@ -11,7 +11,7 @@ import (
 
 func approvalInquiry() *protocol.InquiryRequest {
 	return &protocol.InquiryRequest{
-		BaseFrame: protocol.BaseFrame{Session: "sess-root"},
+		BaseFrame: protocol.BaseFrame{Session: "sess-abc12345"},
 		Payload: protocol.InquiryRequestPayload{
 			RequestID:       "req-1",
 			CallerSessionID: "worker-71",
@@ -24,7 +24,7 @@ func approvalInquiry() *protocol.InquiryRequest {
 
 func clarificationInquiry() *protocol.InquiryRequest {
 	return &protocol.InquiryRequest{
-		BaseFrame: protocol.BaseFrame{Session: "sess-root"},
+		BaseFrame: protocol.BaseFrame{Session: "sess-abc12345"},
 		Payload: protocol.InquiryRequestPayload{
 			RequestID:       "req-2",
 			CallerSessionID: "mission-3",
@@ -73,11 +73,11 @@ func TestModel_InquiryRequest_PopulatesPendingInquiry(t *testing.T) {
 	m, _ := newTestModel(t)
 	m2, _ := m.Update(frameMsg{frame: approvalInquiry()})
 	m = m2.(model)
-	if m.pendingInquiry == nil {
+	if m.currentTab().pendingInquiry == nil {
 		t.Fatal("pendingInquiry should be set after InquiryRequest")
 	}
-	if m.pendingInquiry.req.RequestID != "req-1" {
-		t.Errorf("RequestID = %q", m.pendingInquiry.req.RequestID)
+	if m.currentTab().pendingInquiry.req.RequestID != "req-1" {
+		t.Errorf("RequestID = %q", m.currentTab().pendingInquiry.req.RequestID)
 	}
 	view := m.View()
 	if !strings.Contains(view, "Approval required") {
@@ -93,8 +93,8 @@ func TestModel_InquiryApprove_YKeySubmitsApproved(t *testing.T) {
 	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	m = m2.(model)
 
-	if m.pendingInquiry != nil {
-		t.Errorf("pendingInquiry should be cleared after y submit; got %+v", m.pendingInquiry)
+	if m.currentTab().pendingInquiry != nil {
+		t.Errorf("pendingInquiry should be cleared after y submit; got %+v", m.currentTab().pendingInquiry)
 	}
 	f := submitted.Load()
 	if f == nil {
@@ -118,7 +118,7 @@ func TestModel_InquiryDeny_NKeySubmitsDenied(t *testing.T) {
 	m = m2.(model)
 	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	m = m2.(model)
-	if m.pendingInquiry != nil {
+	if m.currentTab().pendingInquiry != nil {
 		t.Errorf("modal should be cleared after n submit")
 	}
 	f := submitted.Load()
@@ -134,11 +134,11 @@ func TestModel_InquiryReplyMode_RKeyEntersReplyMode(t *testing.T) {
 	m = m2.(model)
 	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	m = m2.(model)
-	if m.pendingInquiry == nil || !m.pendingInquiry.replyMode {
-		t.Fatalf("r should enter replyMode; got %+v", m.pendingInquiry)
+	if m.currentTab().pendingInquiry == nil || !m.currentTab().pendingInquiry.replyMode {
+		t.Fatalf("r should enter replyMode; got %+v", m.currentTab().pendingInquiry)
 	}
-	if m.pendingInquiry.replyVerb != "approve" {
-		t.Errorf("replyVerb default = %q; want approve", m.pendingInquiry.replyVerb)
+	if m.currentTab().pendingInquiry.replyVerb != "approve" {
+		t.Errorf("replyVerb default = %q; want approve", m.currentTab().pendingInquiry.replyVerb)
 	}
 	view := m.View()
 	if !strings.Contains(view, "type reason") {
@@ -157,8 +157,8 @@ func TestModel_InquiryClarification_EnterSubmitsResponse(t *testing.T) {
 	}
 	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = m2.(model)
-	if m.pendingInquiry != nil {
-		t.Errorf("modal should clear after enter; got %+v", m.pendingInquiry)
+	if m.currentTab().pendingInquiry != nil {
+		t.Errorf("modal should clear after enter; got %+v", m.currentTab().pendingInquiry)
 	}
 	f := submitted.Load()
 	if f == nil {
@@ -186,8 +186,8 @@ func TestModel_InquiryResponseEcho_ClearsPendingInquiry(t *testing.T) {
 	}
 	m2, _ = m.Update(frameMsg{frame: echo})
 	m = m2.(model)
-	if m.pendingInquiry != nil {
-		t.Errorf("echo InquiryResponse should clear modal; got %+v", m.pendingInquiry)
+	if m.currentTab().pendingInquiry != nil {
+		t.Errorf("echo InquiryResponse should clear modal; got %+v", m.currentTab().pendingInquiry)
 	}
 }
 
@@ -197,11 +197,11 @@ func TestModel_InquiryEsc_DismissesAndSurfacesBanner(t *testing.T) {
 	m = m2.(model)
 	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = m2.(model)
-	if m.pendingInquiry != nil {
-		t.Errorf("esc should dismiss modal; got %+v", m.pendingInquiry)
+	if m.currentTab().pendingInquiry != nil {
+		t.Errorf("esc should dismiss modal; got %+v", m.currentTab().pendingInquiry)
 	}
-	if !strings.Contains(m.bannerError, "still pending") {
-		t.Errorf("expected dismiss banner; got %q", m.bannerError)
+	if !strings.Contains(m.currentTab().bannerError, "still pending") {
+		t.Errorf("expected dismiss banner; got %q", m.currentTab().bannerError)
 	}
 }
 

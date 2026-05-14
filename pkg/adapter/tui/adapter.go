@@ -19,16 +19,20 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session"
 )
 
-// Adapter is the Bubble Tea TUI adapter. Single-root in slice 1;
-// multi-root tabs land in slice 4.
+// Adapter is the Bubble Tea TUI adapter. Single root in slice 1;
+// multi-root tabs added in slice 4.
 type Adapter struct {
 	resume string
 
 	logger *slog.Logger
 	user   protocol.ParticipantInfo
 
-	host    adapter.Host
-	session *session.Session
+	host adapter.Host
+	// initial holds the first root session opened by Run. Used to
+	// wait on Done() at exit so the runtime's deferred Shutdown does
+	// not race in-flight emits. Additional tabs (Ctrl+N) live only
+	// inside the model + per-tab pump.
+	initial *session.Session
 
 	in  io.Reader
 	out io.Writer
@@ -96,7 +100,7 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 			return fmt.Errorf("tui: open: %w", err)
 		}
 	}
-	a.session = sess
+	a.initial = sess
 
 	sub, err := host.Subscribe(ctx, sess.ID())
 	if err != nil {
@@ -104,6 +108,17 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	}
 
 	m := newModel(sess.ID(), a.user, a.submitFrame(ctx), a.logger)
+	// Slice 4 — model emits requestOpenTabMsg on Ctrl+N. Wire the
+	// open callback through the model so the resulting tea.Cmd
+	// runs inside bubbletea's loop with access to host + the
+	// program (for pump.Send). prog is constructed below; we close
+	// over a pointer that we fill in after construction.
+	var progRef *tea.Program
+	m.openTab = func() tea.Cmd {
+		return func() tea.Msg {
+			return a.openNewTab(ctx, progRef)
+		}
+	}
 
 	prog := tea.NewProgram(
 		m,
@@ -113,6 +128,7 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 		tea.WithInput(a.in),
 		tea.WithOutput(a.out),
 	)
+	progRef = prog
 
 	go a.pumpFrames(ctx, sub, prog)
 
@@ -142,7 +158,7 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	// deferred runtime.Shutdown does not race rootCancel against an
 	// in-flight emit. Mirrors the console adapter's EOF / /end path.
 	select {
-	case <-a.session.Done():
+	case <-a.initial.Done():
 	case <-ctx.Done():
 	}
 	return nil
@@ -171,6 +187,27 @@ func (a *Adapter) submitFrame(ctx context.Context) func(protocol.Frame) error {
 	return func(f protocol.Frame) error {
 		return a.host.Submit(ctx, f)
 	}
+}
+
+// openNewTab opens a fresh root session, subscribes to its outbox,
+// spawns a pump goroutine, and returns an attachTabMsg the model
+// folds into its tab list. Errors are surfaced as openTabError so
+// the active tab can flash the failure in its banner. Slice 4.
+func (a *Adapter) openNewTab(ctx context.Context, prog *tea.Program) tea.Msg {
+	sess, _, err := a.host.OpenSession(ctx, adapter.OpenRequest{
+		OwnerID:      a.user.ID,
+		Participants: []protocol.ParticipantInfo{a.user},
+	})
+	if err != nil {
+		return openTabError{err: fmt.Errorf("OpenSession: %w", err)}
+	}
+	sub, err := a.host.Subscribe(ctx, sess.ID())
+	if err != nil {
+		return openTabError{err: fmt.Errorf("Subscribe: %w", err)}
+	}
+	go a.pumpFrames(ctx, sub, prog)
+	t := newTab(sess.ID(), a.user, a.submitFrame(ctx), a.logger)
+	return attachTabMsg{t: t}
 }
 
 func defaultUserParticipant() protocol.ParticipantInfo {

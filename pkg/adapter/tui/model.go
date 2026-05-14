@@ -1,16 +1,12 @@
 package tui
 
 import (
-	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/hugr-lab/hugen/pkg/adapter/console"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -26,74 +22,55 @@ const inputHeight = 3
 //     collapses entirely (chat-only fallback for very narrow
 //     terminals; spec open Q #6).
 const (
-	sidebarWidth      = 36
+	sidebarWidth       = 36
 	sidebarMinTerminal = 80
 )
 
-// model is the Bubble Tea Model for the TUI adapter. Slice 1 is
-// single-tab; multi-root tabs land in slice 4.
-type model struct {
-	sessionID string
-	user      protocol.ParticipantInfo
-	logger    *slog.Logger
+// tabBarHeight reserves vertical space for the multi-root tab bar
+// (slice 4). Always rendered, even with a single tab, so layout is
+// stable across Ctrl+N / Ctrl+W.
+const tabBarHeight = 1
 
-	submit func(protocol.Frame) error // adapter-supplied submit closure
+// attachTabMsg adds a freshly opened tab to the model and switches
+// focus to it. Emitted by the adapter after Subscribe succeeds; the
+// model owns the resulting list mutation.
+type attachTabMsg struct{ t *tab }
+
+// openTabError surfaces an asynchronous OpenSession failure.
+type openTabError struct{ err error }
+
+// model is the multi-root Bubble Tea Model. Slice 4 — phase
+// 5.1c §8. Per-tab state (chat, sidebar, inquiry, …) lives on
+// [tab]; the model carries globals (terminal size, user, logger)
+// and the tab list.
+type model struct {
+	user   protocol.ParticipantInfo
+	logger *slog.Logger
 
 	width, height int
 	ready         bool
+	sidebarShown  bool // depends on terminal width — global, not per-tab
 
-	viewport viewport.Model
-	textarea textarea.Model
+	tabs   []*tab
+	active int
 
-	chat        *chatBuffer
-	closing     bool   // true once the user has issued /end
-	statusLine  string // one-line footer status (e.g. "thinking…")
-	bannerError string // most recent submit / runtime error
-
-	// Slice 2 — sidebar projection. Replaced wholesale on every
-	// incoming liveview/status frame; render is a pure function
-	// of the most recent value (no accumulated state).
-	sidebarStatus *liveviewStatus
-	sidebarShown  bool // false when terminal < sidebarMinTerminal
-
-	// Slice 3 — pending HITL inquiry. Non-nil while waiting for the
-	// operator's answer; cleared on the echoed InquiryResponse or
-	// SessionTerminated. While non-nil the Update loop intercepts
-	// keypresses and routes them to the modal instead of the chat
-	// textarea / scroll keys.
-	pendingInquiry *inquiryState
+	// openTab is the adapter-installed callback invoked on Ctrl+N.
+	// Returns a tea.Cmd that opens a new root session, subscribes
+	// to its outbox, spawns a pump, and yields an attachTabMsg with
+	// the freshly minted tab. Nil in tests / when the adapter
+	// doesn't support multi-root (initial single-tab fallback).
+	openTab func() tea.Cmd
 }
 
+// newModel constructs a model with one initial tab. submit closure
+// is shared across all tabs (the runtime routes by frame.SessionID).
 func newModel(sessionID string, u protocol.ParticipantInfo, submit func(protocol.Frame) error, logger *slog.Logger) model {
-	ta := textarea.New()
-	ta.Placeholder = "Type your message; Enter to send, Shift+Enter for newline, Ctrl+C to exit"
-	ta.ShowLineNumbers = false
-	ta.CharLimit = 0
-	ta.SetHeight(inputHeight)
-	ta.Prompt = "❯ "
-	ta.Focus()
-
-	// Disable bubbletea's default Ctrl+C/Ctrl+D — we want to intercept
-	// them and trigger /end ourselves (the runtime needs a clean close).
-	ta.KeyMap.InsertNewline.SetEnabled(true)
-
-	vp := viewport.New(80, 20) // resized on first WindowSizeMsg
-	vp.SetContent("")
-	// Clear viewport's default KeyMap so Up/Down/PgUp/etc. stop
-	// double-firing while textarea is focused. Slice 1 routes
-	// PgUp / PgDown / Home / End explicitly in Update — mouse wheel
-	// still works via tea.WithMouseCellMotion.
-	vp.KeyMap = viewport.KeyMap{}
-
+	first := newTab(sessionID, u, submit, logger)
 	return model{
-		sessionID:  sessionID,
-		user:       u,
-		logger:     logger,
-		submit:     submit,
-		viewport:   vp,
-		textarea:   ta,
-		chat:       newChatBuffer(),
-		statusLine: "ready",
+		user:   u,
+		logger: logger,
+		tabs:   []*tab{first},
+		active: 0,
 	}
 }
 
@@ -101,12 +78,26 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(textarea.Blink)
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var (
-		taCmd tea.Cmd
-		vpCmd tea.Cmd
-	)
+// currentTab returns the focused tab, or nil if the list is empty.
+func (m *model) currentTab() *tab {
+	if m.active < 0 || m.active >= len(m.tabs) {
+		return nil
+	}
+	return m.tabs[m.active]
+}
 
+// findTab locates the tab with the given session id; returns
+// (idx, *tab). idx == -1 when no match.
+func (m *model) findTab(sessionID string) (int, *tab) {
+	for i, t := range m.tabs {
+		if t.sessionID == sessionID {
+			return i, t
+		}
+	}
+	return -1, nil
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = v.Width, v.Height
@@ -114,147 +105,142 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 		return m, nil
 
+	case attachTabMsg:
+		m.tabs = append(m.tabs, v.t)
+		m.active = len(m.tabs) - 1
+		m.relayout()
+		return m, nil
+
+	case openTabError:
+		if cur := m.currentTab(); cur != nil {
+			cur.bannerError = "open tab: " + v.err.Error()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
-		// Closing state: only Ctrl+C / esc force-quit; everything else
-		// is ignored while we wait for session_terminated.
-		if m.closing {
-			switch v.String() {
-			case "ctrl+c", "esc":
-				return m, tea.Quit
-			}
-			return m, nil
-		}
-		// Slice 3 — modal inquiry intercepts keys when active.
-		// dispatchInquiryKey returns (handled, cmd, model-mutated?).
-		if m.pendingInquiry != nil {
-			handled, cmd := m.dispatchInquiryKey(v)
-			if handled {
-				return m, cmd
-			}
-			// Fall through to default textarea handling so the
-			// operator can type the reply / reason — but skip the
-			// chat-only "enter" branch below, which would try to
-			// dispatch as a user message.
-			m.textarea, taCmd = m.textarea.Update(msg)
-			return m, taCmd
-		}
-		switch v.String() {
-		case "pgup", "pgdown", "home", "end":
-			// Route scroll keys to the viewport ONLY — textarea
-			// gets cursor keys (up/down/left/right) for editing.
-			m.viewport, vpCmd = m.viewport.Update(v)
-			return m, vpCmd
-		case "ctrl+c", "ctrl+d":
-			// Submit /end, transition to closing, wait for terminator.
-			m.statusLine = "closing…"
-			m.closing = true
-			cmd := protocol.NewSlashCommand(m.sessionID, m.user, "end", nil, "/end")
-			if err := m.submit(cmd); err != nil {
-				m.bannerError = fmt.Sprintf("submit /end: %v", err)
-				return m, tea.Quit
-			}
-			return m, nil
-		case "enter":
-			// Send the current textarea value as a UserMessage (or
-			// SlashCommand if prefixed with /). Shift+Enter is handled
-			// by textarea's KeyMap.InsertNewline and never reaches
-			// here as the literal "enter" string.
-			text := strings.TrimSpace(m.textarea.Value())
-			if text == "" {
-				return m, nil
-			}
-			m.textarea.Reset()
-			m.appendUserBubble(text)
-			if err := m.dispatchUserInput(text); err != nil {
-				m.bannerError = err.Error()
-			}
-			return m, nil
-		}
+		return m.handleKey(v)
 
 	case frameMsg:
 		return m, m.handleFrame(v.frame)
 
 	case errMsg:
-		m.bannerError = v.err.Error()
+		if cur := m.currentTab(); cur != nil {
+			cur.bannerError = v.err.Error()
+		}
 		return m, nil
 	}
+	// Default: forward to active tab (so textarea / viewport tick
+	// updates keep flowing).
+	if cur := m.currentTab(); cur != nil {
+		_, cmd := cur.updateKey(tea.KeyMsg{}) // no-op route through default
+		return m, cmd
+	}
+	return m, nil
+}
 
-	m.textarea, taCmd = m.textarea.Update(msg)
-	m.viewport, vpCmd = m.viewport.Update(msg)
-	return m, tea.Batch(taCmd, vpCmd)
+// handleKey processes a keypress. Tab-switch / open / close keys are
+// handled here at the model level; everything else delegates to the
+// focused tab.
+func (m model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "ctrl+n":
+		// Adapter callback opens the new session asynchronously.
+		// The returned tea.Cmd is run by bubbletea and produces an
+		// attachTabMsg (or openTabError) which the Update reducer
+		// folds into the tab list.
+		if m.openTab != nil {
+			return m, m.openTab()
+		}
+		if cur := m.currentTab(); cur != nil {
+			cur.bannerError = "open-tab callback not installed"
+		}
+		return m, nil
+	case "ctrl+right", "ctrl+pgdown":
+		// Forward cycle. ctrl+tab is not portable across terminals
+		// (many emulators eat it); use these as the canonical bindings.
+		if len(m.tabs) > 1 {
+			m.active = (m.active + 1) % len(m.tabs)
+			if cur := m.currentTab(); cur != nil {
+				cur.dirty = false
+			}
+		}
+		return m, nil
+	case "ctrl+left", "ctrl+pgup":
+		if len(m.tabs) > 1 {
+			m.active = (m.active - 1 + len(m.tabs)) % len(m.tabs)
+			if cur := m.currentTab(); cur != nil {
+				cur.dirty = false
+			}
+		}
+		return m, nil
+	}
+	cur := m.currentTab()
+	if cur == nil {
+		if k.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	_, cmd := cur.updateKey(k)
+	return m, cmd
 }
 
 func (m model) View() string {
 	if !m.ready {
 		return "starting hugen TUI…"
 	}
-	chat := m.viewport.View()
-	top := chat
+	cur := m.currentTab()
+	if cur == nil {
+		return "no active tab"
+	}
+	chatWidth := m.width
 	if m.sidebarShown {
-		// Lipgloss adds border + padding cells ON TOP of Width().
-		// Total rendered width = Width + PaddingLeft + BorderLeft.
-		// We want the rendered block to consume exactly sidebarWidth
-		// cells so the chat (width - sidebarWidth) abuts cleanly.
-		contentW := sidebarWidth - 2 // 1 cell border + 1 cell padding
-		if contentW < 1 {
-			contentW = 1
-		}
-		side := sidebarBoxStyle.
-			Width(contentW).
-			Height(m.viewport.Height).
-			Render(renderSidebar(m.sidebarStatus, contentW))
-		top = lipgloss.JoinHorizontal(lipgloss.Top, chat, side)
+		chatWidth = m.width - sidebarWidth
 	}
-	// Slice 3 — when an inquiry is pending, render the modal in
-	// place of the textarea+footer. The chat viewport above stays
-	// scrollable so the operator can re-read the recent transcript
-	// before deciding. Reply mode (approval with /r or any
-	// clarification) keeps the textarea visible BELOW the modal so
-	// the operator can type the reason / answer.
-	if m.pendingInquiry != nil {
-		modalW := m.viewport.Width
-		if modalW < 30 {
-			modalW = 30
-		}
-		modal := renderInquiryModal(m.pendingInquiry, modalW)
-		bottom := modal
-		if m.pendingInquiry.replyMode {
-			bottom = lipgloss.JoinVertical(lipgloss.Left, modal, m.textarea.View())
-		}
-		return lipgloss.JoinVertical(lipgloss.Left, top, bottom, m.renderFooter())
-	}
-	input := m.textarea.View()
-	footer := m.renderFooter()
-	return lipgloss.JoinVertical(lipgloss.Left, top, input, footer)
+	bar := renderTabBar(m.tabs, m.active, m.width)
+	body := cur.renderBody(chatWidth, m.width, m.sidebarShown)
+	return lipgloss.JoinVertical(lipgloss.Left, bar, body)
 }
 
-// relayout adjusts viewport + textarea + sidebar geometry to the
-// current terminal size. Reserved rows: 1 for footer, inputHeight
-// for textarea. Sidebar shows when terminal width ≥
-// sidebarMinTerminal; below that, chat occupies the full width.
+// relayout recomputes geometry from the current terminal size and
+// applies it to every tab. Reserved rows: tabBarHeight (top) +
+// inputHeight + 1 footer row.
 func (m *model) relayout() {
-	reserved := inputHeight + 1
+	reserved := tabBarHeight + inputHeight + 1
 	contentHeight := m.height - reserved
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
-
 	m.sidebarShown = m.width >= sidebarMinTerminal
 	chatWidth := m.width
 	if m.sidebarShown {
 		chatWidth = m.width - sidebarWidth
 		if chatWidth < 20 {
-			// Fall back to chat-only if the sidebar would crowd the
-			// chat below readable width.
 			m.sidebarShown = false
 			chatWidth = m.width
 		}
 	}
+	for _, t := range m.tabs {
+		t.applyGeometry(chatWidth, contentHeight, m.width)
+	}
+}
 
-	m.viewport.Width = chatWidth
-	m.viewport.Height = contentHeight
-	m.textarea.SetWidth(m.width)
-	m.refreshChat()
+// closeTab removes the tab at idx from the list and adjusts the
+// active index. Used when SessionClosed arrives for a tab the
+// runtime side terminated, or when the operator's /end ack returns.
+// Returns tea.Quit when the last tab was closed.
+func (m *model) closeTab(idx int) tea.Cmd {
+	if idx < 0 || idx >= len(m.tabs) {
+		return nil
+	}
+	m.tabs = append(m.tabs[:idx], m.tabs[idx+1:]...)
+	if len(m.tabs) == 0 {
+		return tea.Quit
+	}
+	if m.active >= len(m.tabs) {
+		m.active = len(m.tabs) - 1
+	}
+	return nil
 }
 
 var sidebarBoxStyle = lipgloss.NewStyle().
@@ -262,141 +248,6 @@ var sidebarBoxStyle = lipgloss.NewStyle().
 	BorderLeft(true).
 	BorderForeground(lipgloss.Color("8")).
 	PaddingLeft(1)
-
-// refreshChat re-renders the entire chat buffer into the viewport.
-// Called on layout change or after appending a new line. Auto-follow
-// to bottom only if the user was already pinned to the bottom —
-// scrolling up to read history must NOT be undone by an incoming
-// streaming chunk.
-func (m *model) refreshChat() {
-	wasAtBottom := m.viewport.AtBottom()
-	m.viewport.SetContent(m.chat.render(m.viewport.Width))
-	if wasAtBottom {
-		m.viewport.GotoBottom()
-	}
-}
-
-// renderFooter is the single-line bottom status. Includes the
-// session id (truncated) and the current status. Errors flash in
-// red until cleared by the next frame.
-func (m *model) renderFooter() string {
-	left := lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("session %s · %s", shortID(m.sessionID), m.statusLine))
-	right := ""
-	if m.bannerError != "" {
-		right = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.bannerError)
-	}
-	gap := strings.Repeat(" ", maxInt(1, m.width-lipgloss.Width(left)-lipgloss.Width(right)))
-	return left + gap + right
-}
-
-func (m *model) appendUserBubble(text string) {
-	// Sending a new user message implicitly ends the previous turn —
-	// flush any stuck pending reasoning so the chat does not retain
-	// last turn's "thinking…" stripe between submission and the
-	// runtime's first response frame.
-	if m.chat.pendingReasoning.Len() > 0 {
-		m.chat.finalizeReasoning()
-	}
-	m.chat.appendUser(m.user.Name, text)
-	m.refreshChat()
-}
-
-// dispatchInquiryKey handles keypresses while a HITL inquiry modal
-// is open. Returns handled=true when the key produced a modal action
-// (submit / dismiss / mode change); false when the key should fall
-// through to default textarea handling. Slice 3 — phase 5.1c §7.
-func (m *model) dispatchInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
-	pend := m.pendingInquiry
-	if pend.replyMode {
-		// In reply mode the textarea is focused. Enter submits;
-		// esc cancels back to button mode (or dismisses for
-		// clarifications, which have no button mode).
-		switch k.String() {
-		case "enter":
-			text := strings.TrimSpace(m.textarea.Value())
-			if pend.req.Type == protocol.InquiryTypeClarification && text == "" {
-				return true, nil
-			}
-			if err := m.submitInquiryReply(pend, text); err != nil {
-				m.bannerError = err.Error()
-			}
-			return true, nil
-		case "esc":
-			if pend.req.Type == protocol.InquiryTypeApproval {
-				pend.replyMode = false
-				pend.replyVerb = ""
-				m.textarea.Reset()
-				return true, nil
-			}
-			// Clarification: dismiss the modal entirely. The runtime
-			// is still waiting; the model surfaces the dismissal as
-			// a banner so the operator notices. No frame is sent —
-			// the inquiry remains open server-side; another adapter
-			// (or the same one on re-prompt) can answer.
-			m.pendingInquiry = nil
-			m.textarea.Reset()
-			m.bannerError = "inquiry dismissed (still pending server-side)"
-			return true, nil
-		}
-		return false, nil
-	}
-	// Button mode (approval only): keystroke shortcuts.
-	switch k.String() {
-	case "y", "a":
-		if err := m.submitInquiryReply(pend, "/approve"); err != nil {
-			m.bannerError = err.Error()
-		}
-		return true, nil
-	case "n", "d":
-		if err := m.submitInquiryReply(pend, "/deny"); err != nil {
-			m.bannerError = err.Error()
-		}
-		return true, nil
-	case "r":
-		pend.replyMode = true
-		pend.replyVerb = "approve"
-		m.textarea.Reset()
-		m.textarea.Focus()
-		return true, nil
-	case "esc":
-		m.pendingInquiry = nil
-		m.bannerError = "inquiry dismissed (still pending server-side)"
-		return true, nil
-	}
-	return false, nil
-}
-
-// submitInquiryReply builds the InquiryResponse via the console
-// adapter's shared helpers and submits it through the host. Clears
-// the modal on success; surfaces the error in the banner on failure.
-func (m *model) submitInquiryReply(pend *inquiryState, line string) error {
-	pi := &console.PendingInquiry{
-		RequestID:       pend.req.RequestID,
-		CallerSessionID: pend.req.CallerSessionID,
-		Kind:            pend.req.Type,
-	}
-	resp, err := console.BuildInquiryReply(m.user, m.sessionID, pi, line)
-	if err != nil {
-		return err
-	}
-	if err := m.submit(resp); err != nil {
-		return err
-	}
-	m.pendingInquiry = nil
-	m.textarea.Reset()
-	return nil
-}
-
-func (m *model) dispatchUserInput(text string) error {
-	var f protocol.Frame
-	if console.IsSlashCommand(text) {
-		pc := console.ParseSlashCommand(text)
-		f = protocol.NewSlashCommand(m.sessionID, m.user, pc.Name, pc.Args, pc.Raw)
-	} else {
-		f = protocol.NewUserMessage(m.sessionID, m.user, text)
-	}
-	return m.submit(f)
-}
 
 func shortID(id string) string {
 	if len(id) <= 8 {

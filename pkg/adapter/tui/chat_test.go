@@ -66,7 +66,7 @@ func TestParseSlashFrame_DispatchPath(t *testing.T) {
 	// powers model.dispatchUserInput. Direct call ensures the
 	// import + signatures remain wired.
 	m, submitted := newTestModel(t)
-	if err := m.dispatchUserInput("/end now"); err != nil {
+	if err := m.currentTab().dispatchUserInput("/end now"); err != nil {
 		t.Fatalf("dispatchUserInput slash returned err: %v", err)
 	}
 	got := submitted.Load()

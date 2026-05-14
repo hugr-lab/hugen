@@ -39,7 +39,7 @@ func TestModel_StreamingAgentMessage_FinalizesIntoChat(t *testing.T) {
 		}})
 		m = m2.(model)
 	}
-	if got := m.chat.pendingAssistant.String(); got != "Hello, world!" {
+	if got := m.currentTab().chat.pendingAssistant.String(); got != "Hello, world!" {
 		t.Fatalf("pendingAssistant accumulator = %q; want %q", got, "Hello, world!")
 	}
 
@@ -52,17 +52,17 @@ func TestModel_StreamingAgentMessage_FinalizesIntoChat(t *testing.T) {
 		},
 	}})
 	m = m2.(model)
-	if m.chat.pendingAssistant.Len() != 0 {
+	if m.currentTab().chat.pendingAssistant.Len() != 0 {
 		t.Fatalf("pendingAssistant not reset after final-consolidated frame")
 	}
-	if len(m.chat.spans) != 1 || m.chat.spans[0].kind != spanAssistant {
-		t.Fatalf("expected one assistant span, got %d spans", len(m.chat.spans))
+	if len(m.currentTab().chat.spans) != 1 || m.currentTab().chat.spans[0].kind != spanAssistant {
+		t.Fatalf("expected one assistant span, got %d spans", len(m.currentTab().chat.spans))
 	}
-	if !strings.Contains(m.chat.spans[0].text, "Hello, world!") {
-		t.Fatalf("assistant span text = %q; missing payload", m.chat.spans[0].text)
+	if !strings.Contains(m.currentTab().chat.spans[0].text, "Hello, world!") {
+		t.Fatalf("assistant span text = %q; missing payload", m.currentTab().chat.spans[0].text)
 	}
-	if m.statusLine != "ready" {
-		t.Fatalf("statusLine = %q; want ready after final consolidated", m.statusLine)
+	if m.currentTab().statusLine != "ready" {
+		t.Fatalf("statusLine = %q; want ready after final consolidated", m.currentTab().statusLine)
 	}
 }
 
@@ -72,8 +72,8 @@ func TestModel_ErrorFrame_SetsBanner(t *testing.T) {
 		Payload: protocol.ErrorPayload{Code: "boom", Message: "something failed"},
 	}})
 	m = m2.(model)
-	if !strings.Contains(m.bannerError, "boom") || !strings.Contains(m.bannerError, "something failed") {
-		t.Fatalf("bannerError = %q; want code+message", m.bannerError)
+	if !strings.Contains(m.currentTab().bannerError, "boom") || !strings.Contains(m.currentTab().bannerError, "something failed") {
+		t.Fatalf("bannerError = %q; want code+message", m.currentTab().bannerError)
 	}
 }
 
@@ -81,7 +81,7 @@ func TestModel_CtrlC_SubmitsEndAndEntersClosing(t *testing.T) {
 	m, submitted := newTestModel(t)
 	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	m = m2.(model)
-	if !m.closing {
+	if !m.currentTab().closing {
 		t.Fatalf("Ctrl+C must transition model into closing state")
 	}
 	if cmd != nil {
@@ -128,10 +128,10 @@ func TestModel_SessionClosed_TriggersQuit_OnlyWhenClosing(t *testing.T) {
 
 func TestModel_EnterSubmitsUserMessage(t *testing.T) {
 	m, submitted := newTestModel(t)
-	m.textarea.SetValue("hello")
+	m.currentTab().textarea.SetValue("hello")
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = m2.(model)
-	if m.textarea.Value() != "" {
+	if m.currentTab().textarea.Value() != "" {
 		t.Fatalf("textarea not reset after Enter")
 	}
 	got := submitted.Load()
@@ -146,14 +146,14 @@ func TestModel_EnterSubmitsUserMessage(t *testing.T) {
 		t.Fatalf("user message text = %q; want hello", um.Payload.Text)
 	}
 	// User bubble must appear in the chat buffer immediately.
-	if len(m.chat.spans) == 0 || m.chat.spans[0].kind != spanUser {
-		t.Fatalf("expected user span echoed in chat; got %d spans", len(m.chat.spans))
+	if len(m.currentTab().chat.spans) == 0 || m.currentTab().chat.spans[0].kind != spanUser {
+		t.Fatalf("expected user span echoed in chat; got %d spans", len(m.currentTab().chat.spans))
 	}
 }
 
 func TestModel_SlashCommandRoutesToSlashFrame(t *testing.T) {
 	m, submitted := newTestModel(t)
-	m.textarea.SetValue("/end")
+	m.currentTab().textarea.SetValue("/end")
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	_ = m2
 	got := submitted.Load()
@@ -188,7 +188,7 @@ func TestModel_ReasoningAutoFlushOnNonReasoningFrame(t *testing.T) {
 		}})
 		m = m2.(model)
 	}
-	if m.chat.pendingReasoning.Len() == 0 {
+	if m.currentTab().chat.pendingReasoning.Len() == 0 {
 		t.Fatalf("expected pendingReasoning to accumulate")
 	}
 	// Any non-reasoning frame must auto-flush the accumulator into
@@ -197,10 +197,10 @@ func TestModel_ReasoningAutoFlushOnNonReasoningFrame(t *testing.T) {
 		Payload: protocol.ToolCallPayload{Name: "demo.tool"},
 	}})
 	m = m2.(model)
-	if m.chat.pendingReasoning.Len() != 0 {
+	if m.currentTab().chat.pendingReasoning.Len() != 0 {
 		t.Fatalf("pendingReasoning still set after non-reasoning frame")
 	}
-	if got := lastSpanKind(m.chat); got != spanReasoning {
+	if got := lastSpanKind(m.currentTab().chat); got != spanReasoning {
 		t.Fatalf("expected finalized reasoning span; last kind = %v", got)
 	}
 }
@@ -208,23 +208,23 @@ func TestModel_ReasoningAutoFlushOnNonReasoningFrame(t *testing.T) {
 func TestModel_UserSubmitFlushesStalePendingReasoning(t *testing.T) {
 	m, _ := newTestModel(t)
 	// Stuck reasoning from a previous turn.
-	m.chat.appendReasoningChunk("stale from prior turn")
+	m.currentTab().chat.appendReasoningChunk("stale from prior turn")
 
-	m.textarea.SetValue("next prompt")
+	m.currentTab().textarea.SetValue("next prompt")
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = m2.(model)
-	if m.chat.pendingReasoning.Len() != 0 {
+	if m.currentTab().chat.pendingReasoning.Len() != 0 {
 		t.Fatalf("user submit did not flush stale pendingReasoning")
 	}
 	// The flushed reasoning becomes a span ABOVE the new user bubble.
-	if len(m.chat.spans) < 2 {
-		t.Fatalf("expected at least 2 spans (flushed reasoning + user); got %d", len(m.chat.spans))
+	if len(m.currentTab().chat.spans) < 2 {
+		t.Fatalf("expected at least 2 spans (flushed reasoning + user); got %d", len(m.currentTab().chat.spans))
 	}
-	if m.chat.spans[0].kind != spanReasoning {
-		t.Fatalf("first span kind = %v; want spanReasoning (flushed before user echo)", m.chat.spans[0].kind)
+	if m.currentTab().chat.spans[0].kind != spanReasoning {
+		t.Fatalf("first span kind = %v; want spanReasoning (flushed before user echo)", m.currentTab().chat.spans[0].kind)
 	}
-	if m.chat.spans[1].kind != spanUser {
-		t.Fatalf("second span kind = %v; want spanUser", m.chat.spans[1].kind)
+	if m.currentTab().chat.spans[1].kind != spanUser {
+		t.Fatalf("second span kind = %v; want spanUser", m.currentTab().chat.spans[1].kind)
 	}
 }
 

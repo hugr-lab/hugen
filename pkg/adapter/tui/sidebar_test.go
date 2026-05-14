@@ -217,11 +217,11 @@ func TestModel_ExtensionFrame_LiveviewStatusPopulatesSidebar(t *testing.T) {
 	)
 	m2, _ := m.Update(frameMsg{frame: frame})
 	m = m2.(model)
-	if m.sidebarStatus == nil {
+	if m.currentTab().sidebarStatus == nil {
 		t.Fatalf("liveview/status frame did not populate sidebarStatus")
 	}
-	if m.sidebarStatus.LifecycleState != "active" {
-		t.Errorf("LifecycleState = %q", m.sidebarStatus.LifecycleState)
+	if m.currentTab().sidebarStatus.LifecycleState != "active" {
+		t.Errorf("LifecycleState = %q", m.currentTab().sidebarStatus.LifecycleState)
 	}
 }
 
@@ -233,7 +233,7 @@ func TestModel_ExtensionFrame_NonLiveviewIgnoredBySidebar(t *testing.T) {
 	)
 	m2, _ := m.Update(frameMsg{frame: frame})
 	m = m2.(model)
-	if m.sidebarStatus != nil {
+	if m.currentTab().sidebarStatus != nil {
 		t.Fatalf("non-liveview extension frame mutated sidebarStatus")
 	}
 }

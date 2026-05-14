@@ -25,118 +25,129 @@ var (
 	_ tea.Msg = errMsg{}
 )
 
-// handleFrame routes one incoming frame to the appropriate model
-// projection. Slice 1 handles the chat-relevant kinds; later slices
-// add liveview/inquiry/subagent routing. Returns a tea.Cmd when the
-// frame triggers a Bubble Tea action (e.g. SessionClosed → quit
-// during shutdown).
+// handleFrame routes one incoming frame to the matching tab by
+// session id. Frames addressed at non-active tabs flip the tab's
+// `dirty` marker for the tab-bar activity indicator. Returns a
+// tea.Cmd when the frame triggers a Bubble Tea action (e.g.
+// SessionClosed → tab removal / quit during shutdown).
 func (m *model) handleFrame(f protocol.Frame) tea.Cmd {
+	idx, t := m.findTab(f.SessionID())
+	if t == nil {
+		// Single-tab fallback: when there's exactly one tab,
+		// route the frame to it regardless of session id. Helps
+		// tests that mint frames without setting BaseFrame.Session
+		// and is a no-op in production (subscriptions always
+		// match a tab in multi-root mode).
+		if len(m.tabs) == 1 {
+			idx, t = 0, m.tabs[0]
+		} else {
+			return nil
+		}
+	}
+	cmd := t.handleFrame(f)
+	if idx != m.active {
+		t.dirty = true
+	}
+	// Tab-removal hooks fire when SessionTerminated lands.
+	if _, ok := f.(*protocol.SessionTerminated); ok {
+		// Defer removal one tick so the operator briefly sees the
+		// "session terminated (reason)" marker. For now keep it
+		// open — slice 4 minimal: only operator-initiated /end via
+		// closing flag triggers actual removal. SessionClosed below
+		// is the close ack.
+	}
+	if _, ok := f.(*protocol.SessionClosed); ok && t.closing {
+		// Operator closed this tab. Remove it; tea.Quit if it was
+		// the last.
+		if rem := m.closeTab(idx); rem != nil {
+			return rem
+		}
+	}
+	return cmd
+}
+
+// handleFrame is the per-tab projection of one incoming frame.
+// Returns tea.Quit when the tab's operator-initiated close has
+// settled (the model layer decides whether to remove the tab or
+// also exit the program).
+func (t *tab) handleFrame(f protocol.Frame) tea.Cmd {
 	// Auto-flush in-flight reasoning when a non-reasoning frame
 	// arrives. Some model adapters never emit Reasoning{Final:true}
 	// at end-of-stream; without this guard the pendingReasoning
 	// accumulator persists across turns and the chat shows last
 	// turn's "thinking…" at the bottom forever.
 	if _, isReasoning := f.(*protocol.Reasoning); !isReasoning {
-		if m.chat.pendingReasoning.Len() > 0 {
-			m.chat.finalizeReasoning()
+		if t.chat.pendingReasoning.Len() > 0 {
+			t.chat.finalizeReasoning()
 		}
 	}
 	switch v := f.(type) {
 	case *protocol.UserMessage:
-		// Already echoed via appendUserBubble on submit; the
-		// runtime's persisted copy is silent here.
+		// Already echoed via appendUserBubble on submit.
 		return nil
 	case *protocol.AgentMessage:
-		m.handleAgentMessage(v)
+		t.handleAgentMessage(v)
 	case *protocol.Reasoning:
-		m.handleReasoning(v)
+		t.handleReasoning(v)
 	case *protocol.ToolCall:
-		m.statusLine = fmt.Sprintf("tool: %s", v.Payload.Name)
+		t.statusLine = fmt.Sprintf("tool: %s", v.Payload.Name)
 	case *protocol.ToolResult:
-		m.statusLine = "thinking…"
+		t.statusLine = "thinking…"
 	case *protocol.Error:
-		m.bannerError = fmt.Sprintf("%s: %s", v.Payload.Code, v.Payload.Message)
-		m.statusLine = "ready"
+		t.bannerError = fmt.Sprintf("%s: %s", v.Payload.Code, v.Payload.Message)
+		t.statusLine = "ready"
 	case *protocol.SystemMarker:
-		m.chat.appendSystem(v.Payload.Subject)
-		m.refreshChat()
+		t.chat.appendSystem(v.Payload.Subject)
+		t.refreshChat()
 	case *protocol.ExtensionFrame:
-		// Slice 2 — only the liveview status frame populates the
-		// sidebar. Other extensions' frames (plan:set,
-		// whiteboard:post, …) are intentionally ignored at this
-		// layer because the liveview projection already folds them
-		// into its payload.
 		if v.Payload.Extension == "liveview" && v.Payload.Op == "status" {
 			if st, err := parseLiveviewStatus(v.Payload.Data); err == nil {
-				m.sidebarStatus = st
+				t.sidebarStatus = st
 			}
 		}
 	case *protocol.InquiryRequest:
-		// Slice 3 — HITL modal. Replace any prior pending inquiry
-		// (multiple bubbled inquiries are rare but supported by the
-		// runtime; only one fits the modal at a time — the latest
-		// wins. Earlier inquiry remains open server-side and will
-		// re-prompt on its own timeout).
-		m.pendingInquiry = newInquiryState(v)
-		m.statusLine = fmt.Sprintf("HITL: %s", v.Payload.Type)
-		// Focus the textarea up-front for clarifications (the only
-		// input path) and keep it ready for approvals' "reply with
-		// reason" mode.
-		m.textarea.Reset()
-		m.textarea.Focus()
+		t.pendingInquiry = newInquiryState(v)
+		t.statusLine = fmt.Sprintf("HITL: %s", v.Payload.Type)
+		t.textarea.Reset()
+		t.textarea.Focus()
 	case *protocol.InquiryResponse:
-		// Echo of the operator's own reply (or one synthesised by
-		// the runtime on timeout / another adapter). Clear the modal
-		// either way — the inquiry is no longer pending.
-		m.pendingInquiry = nil
-		m.statusLine = "ready"
+		t.pendingInquiry = nil
+		t.statusLine = "ready"
 	case *protocol.SessionTerminated:
-		m.chat.appendSystem(fmt.Sprintf("session terminated (%s)", v.Payload.Reason))
-		m.refreshChat()
-		// Clear any stale inquiry — the runtime is gone.
-		m.pendingInquiry = nil
+		t.chat.appendSystem(fmt.Sprintf("session terminated (%s)", v.Payload.Reason))
+		t.refreshChat()
+		t.pendingInquiry = nil
 	case *protocol.SessionClosed:
-		// Runtime acknowledges close. If the user initiated the
-		// shutdown (closing == true), quit the program now —
-		// adapter.Run will wait on session.Done() for clean
-		// teardown. Otherwise the close came from the runtime side
-		// (cancel cascade, etc.); leave the program up so the user
-		// can read the transcript and quit themselves.
-		m.statusLine = "closed"
-		if m.closing {
-			return tea.Quit
-		}
+		// Model-layer logic decides what to do (close the tab if
+		// the operator initiated, else leave the chat readable).
+		t.statusLine = "closed"
 	}
 	return nil
 }
 
-func (m *model) handleAgentMessage(v *protocol.AgentMessage) {
-	// Render rule mirrors console.adapter.render:
-	//   - Consolidated && Final → turn boundary; status back to ready.
-	//   - Consolidated && !Final → tool-iteration marker, silent.
-	//   - !Consolidated chunks → streaming text appended to current bubble.
+func (t *tab) handleAgentMessage(v *protocol.AgentMessage) {
 	if v.Payload.Consolidated {
 		if v.Payload.Final {
-			m.chat.finalizeAssistant()
-			m.refreshChat()
-			m.statusLine = "ready"
+			t.chat.finalizeAssistant()
+			t.refreshChat()
+			t.statusLine = "ready"
 		}
 		return
 	}
-	m.chat.appendAssistantChunk(v.Payload.Text)
-	m.statusLine = "thinking…"
-	m.refreshChat()
+	t.chat.appendAssistantChunk(v.Payload.Text)
+	t.statusLine = "thinking…"
+	t.refreshChat()
 }
 
-func (m *model) handleReasoning(v *protocol.Reasoning) {
+func (t *tab) handleReasoning(v *protocol.Reasoning) {
 	if v.Payload.Text == "" {
 		return
 	}
-	m.chat.appendReasoningChunk(v.Payload.Text)
+	t.chat.appendReasoningChunk(v.Payload.Text)
 	if v.Payload.Final {
-		m.chat.finalizeReasoning()
+		t.chat.finalizeReasoning()
 	}
-	m.refreshChat()
+	t.refreshChat()
 }
 
 // chatBuffer is the running transcript backing the viewport. Slice 1
