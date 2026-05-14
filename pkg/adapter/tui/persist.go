@@ -14,15 +14,37 @@ import (
 // operator config; absence is non-fatal.
 const settingsFileName = ".hugen/tui.yaml"
 
-// tuiSettings is the on-disk schema. Slice 5 only writes
-// RecentRoots; slice 6 will add theme / history / panel state.
+// tuiSettings is the on-disk schema.
 //
 // Backwards-compat note: unknown YAML keys are ignored on read; new
 // fields are appended on write so older binaries don't blow up on
-// fields they don't understand.
+// fields they don't understand. Existing keys never change semantics
+// — slice 5 wrote only `recent_roots`; slice 6 adds `theme` +
+// `history`, both optional.
 type tuiSettings struct {
+	// RecentRoots is the LRU list of root session IDs the TUI
+	// will try to re-attach on next start. Capped at
+	// maxRememberedRoots; mutated on tab open / close.
 	RecentRoots []string `yaml:"recent_roots,omitempty"`
+
+	// Theme is one of "", "auto", "dark", "light". Empty / "auto"
+	// triggers $COLORFGBG-based detection at startup; "dark" /
+	// "light" pin the choice. Operator config.yaml override is
+	// not yet wired (deferred).
+	Theme string `yaml:"theme,omitempty"`
+
+	// History maps root session ID → most-recent-first list of
+	// user inputs operator submitted in that tab. Capped per
+	// maxHistoryPerTab; older entries fall off. Cleared when a
+	// tab is forgotten (closeTab → forgetRoot drops the key).
+	History map[string][]string `yaml:"history,omitempty"`
 }
+
+// maxHistoryPerTab caps the per-root history ring. 200 keeps the
+// file small enough to write on every submit without measurable
+// disk churn; Up / Down navigation rarely reaches the tail at
+// that depth.
+const maxHistoryPerTab = 200
 
 // settingsPath resolves the absolute path to ~/.hugen/tui.yaml.
 // Empty + error returned when $HOME is unset (rare but possible in

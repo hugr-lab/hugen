@@ -102,6 +102,12 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 		a.logger.Warn("tui: load settings (continuing with defaults)", "err", err)
 		a.persist = &tuiSettings{}
 	}
+	// Slice 6 — resolve + install theme BEFORE the model paints
+	// its first frame. Precedence: user yaml override → COLORFGBG
+	// auto-detect → dark default.
+	resolved := resolveTheme(a.persist.Theme)
+	applyTheme(resolved)
+	a.logger.Debug("tui: theme applied", "name", resolved.Name)
 
 	var sess *session.Session
 	var err error
@@ -139,6 +145,9 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	} else if a.logger != nil {
 		a.logger.Warn("tui: initial replay skipped", "err", listErr)
 	}
+	// Slice 6 — seed input history + install the saver so every
+	// submit persists.
+	a.attachHistoryToTab(m.tabs[0])
 	// Slice 5 — forget callback wired to persistence. Model invokes
 	// it whenever a tab leaves the list (operator close or
 	// SessionTerminated cascade).
@@ -264,6 +273,7 @@ func (a *Adapter) openNewTab(ctx context.Context, prog *tea.Program) tea.Msg {
 	}
 	go a.pumpFrames(ctx, sub, prog)
 	t := newTab(sess.ID(), a.user, a.submitFrame(ctx), a.logger)
+	a.attachHistoryToTab(t)
 	a.persistRoot(sess.ID(), true)
 	return attachTabMsg{t: t}
 }
@@ -312,6 +322,7 @@ func (a *Adapter) attachRememberedTabs(ctx context.Context, ids []string) []reme
 		if events, listErr := a.host.ListEvents(ctx, sess.ID(), store.ListEventsOpts{Limit: replayLimit}); listErr == nil {
 			replayEvents(t, events)
 		}
+		a.attachHistoryToTab(t)
 		attached = append(attached, rememberedAttach{t: t, sub: sub})
 		survivors = append(survivors, id)
 	}
@@ -336,9 +347,38 @@ func (a *Adapter) persistRoot(id string, add bool) {
 		a.persist.RecentRoots = rememberRoot(a.persist.RecentRoots, id)
 	} else {
 		a.persist.RecentRoots = forgetRoot(a.persist.RecentRoots, id)
+		if a.persist.History != nil {
+			delete(a.persist.History, id)
+		}
 	}
 	if err := saveSettings(a.persist); err != nil && a.logger != nil {
 		a.logger.Warn("tui: save settings", "err", err)
+	}
+}
+
+// attachHistoryToTab loads the persisted input history for the
+// tab's session ID and installs the historySaver callback so the
+// in-memory ring flushes back to disk on every submit. Slice 6.
+func (a *Adapter) attachHistoryToTab(t *tab) {
+	if a.persist == nil || t == nil {
+		return
+	}
+	if a.persist.History != nil {
+		if h, ok := a.persist.History[t.sessionID]; ok {
+			t.history = append([]string(nil), h...)
+		}
+	}
+	t.historySaver = func(sid string, hist []string) {
+		if a.persist == nil {
+			return
+		}
+		if a.persist.History == nil {
+			a.persist.History = map[string][]string{}
+		}
+		a.persist.History[sid] = append([]string(nil), hist...)
+		if err := saveSettings(a.persist); err != nil && a.logger != nil {
+			a.logger.Warn("tui: save history", "err", err)
+		}
 	}
 }
 

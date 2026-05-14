@@ -49,6 +49,18 @@ type tab struct {
 	// while it is NOT focused. Cleared when the tab takes focus.
 	// Drives the tab-bar activity marker.
 	dirty bool
+
+	// Slice 6 — per-tab input history. Most-recent-first; capped
+	// at maxHistoryPerTab. Loaded from ~/.hugen/tui.yaml on tab
+	// attach; appended on every submit; persisted via the
+	// adapter-installed historySaver callback.
+	history    []string
+	historyIdx int // -1 = not navigating
+
+	// historySaver is invoked after history mutations so the
+	// adapter can flush the in-memory slice to disk. Nil in
+	// tests / when persistence is unavailable.
+	historySaver func(sessionID string, history []string)
 }
 
 // newTab builds a fresh tab bound to sessionID. The terminal
@@ -79,6 +91,7 @@ func newTab(sessionID string, u protocol.ParticipantInfo, submit func(protocol.F
 		textarea:   ta,
 		chat:       newChatBuffer(),
 		statusLine: "ready",
+		historyIdx: -1,
 	}
 }
 
@@ -127,6 +140,71 @@ func (t *tab) appendUserBubble(text string) {
 	}
 	t.chat.appendUser(t.user.Name, text)
 	t.refreshChat()
+}
+
+// appendHistory prepends text to the tab's history ring (most-
+// recent-first), caps at maxHistoryPerTab, and notifies the
+// historySaver so the change persists to ~/.hugen/tui.yaml.
+// De-duplicates back-to-back submissions of the same text.
+func (t *tab) appendHistory(text string) {
+	if text == "" {
+		return
+	}
+	if len(t.history) > 0 && t.history[0] == text {
+		t.historyIdx = -1
+		return
+	}
+	out := make([]string, 0, len(t.history)+1)
+	out = append(out, text)
+	for _, prev := range t.history {
+		if prev == text {
+			continue // collapse older duplicates so cycling stays useful
+		}
+		out = append(out, prev)
+		if len(out) >= maxHistoryPerTab {
+			break
+		}
+	}
+	t.history = out
+	t.historyIdx = -1
+	if t.historySaver != nil {
+		t.historySaver(t.sessionID, t.history)
+	}
+}
+
+// historyPrev loads the next-older entry into the textarea.
+// historyIdx -1 (fresh state) jumps to entry 0; otherwise advance
+// one step. No-op when already at the oldest entry.
+func (t *tab) historyPrev() bool {
+	if len(t.history) == 0 {
+		return false
+	}
+	next := t.historyIdx + 1
+	if next >= len(t.history) {
+		return false
+	}
+	t.historyIdx = next
+	t.textarea.SetValue(t.history[next])
+	t.textarea.CursorEnd()
+	return true
+}
+
+// historyNext walks back toward the present. At idx 0, one Down
+// clears the textarea and resets idx to -1 — that returns the
+// operator to "fresh input" mode.
+func (t *tab) historyNext() bool {
+	if t.historyIdx < 0 {
+		return false
+	}
+	if t.historyIdx == 0 {
+		t.historyIdx = -1
+		t.textarea.Reset()
+		return true
+	}
+	t.historyIdx--
+	t.textarea.SetValue(t.history[t.historyIdx])
+	t.textarea.CursorEnd()
+	return true
 }
 
 // dispatchUserInput parses + submits one line of operator input.
@@ -259,6 +337,24 @@ func (t *tab) updateKey(msg tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 			return true, tea.Quit
 		}
 		return true, nil
+	case "up":
+		// Slice 6 — history navigation. Route to history when the
+		// textarea is empty OR we're already in history-browsing
+		// mode (so the operator can keep walking back). Otherwise
+		// let textarea handle Up as a multi-line cursor move.
+		if t.textarea.Value() == "" || t.historyIdx >= 0 {
+			if t.historyPrev() {
+				return true, nil
+			}
+			return true, nil
+		}
+	case "down":
+		if t.historyIdx >= 0 {
+			if t.historyNext() {
+				return true, nil
+			}
+			return true, nil
+		}
 	case "enter":
 		text := strings.TrimSpace(t.textarea.Value())
 		if text == "" {
@@ -266,16 +362,37 @@ func (t *tab) updateKey(msg tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 		}
 		t.textarea.Reset()
 		t.appendUserBubble(text)
+		t.appendHistory(text)
 		if err := t.dispatchUserInput(text); err != nil {
 			t.bannerError = err.Error()
 		}
 		return true, nil
 	}
 	// Default: forward to textarea + viewport for default editing.
+	// If the operator was browsing history and now types something
+	// that likely mutates the textarea content (a rune, backspace,
+	// delete), reset historyIdx so the next Up starts from the
+	// most recent entry instead of where the cursor stopped.
+	if t.historyIdx >= 0 && isTextareaMutation(msg) {
+		t.historyIdx = -1
+	}
 	var taCmd, vpCmd tea.Cmd
 	t.textarea, taCmd = t.textarea.Update(msg)
 	t.viewport, vpCmd = t.viewport.Update(msg)
 	return true, tea.Batch(taCmd, vpCmd)
+}
+
+// isTextareaMutation reports whether a key likely mutates the
+// textarea buffer — used to evict the operator from
+// history-browse mode without false positives on cursor-only keys.
+func isTextareaMutation(k tea.KeyMsg) bool {
+	switch k.Type {
+	case tea.KeyRunes, tea.KeySpace,
+		tea.KeyBackspace, tea.KeyDelete,
+		tea.KeyTab:
+		return true
+	}
+	return false
 }
 
 // renderBody returns the tab's body: chat + optional sidebar above
