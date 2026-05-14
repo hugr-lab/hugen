@@ -9,12 +9,12 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
-// pendingInquiry is the live HITL request the console is waiting
+// PendingInquiry is the live HITL request the console is waiting
 // for the user to answer. Set when an *protocol.InquiryRequest
 // frame lands in render; consumed in runInput on the next user
 // line. Phase 5.1 § 2 — the adapter owns the user-facing leg of
 // the inquiry round trip.
-type pendingInquiry struct {
+type PendingInquiry struct {
 	RequestID       string
 	CallerSessionID string
 	Kind            string // protocol.InquiryType{Approval,Clarification}
@@ -48,7 +48,7 @@ func (a *Adapter) renderInquiryRequest(req *protocol.InquiryRequest) {
 	default:
 		fmt.Fprintln(a.out, "[reply: any text — or /respond <text>]")
 	}
-	a.pending.Store(&pendingInquiry{
+	a.pending.Store(&PendingInquiry{
 		RequestID:       p.RequestID,
 		CallerSessionID: p.CallerSessionID,
 		Kind:            p.Type,
@@ -61,7 +61,7 @@ func (a *Adapter) renderInquiryRequest(req *protocol.InquiryRequest) {
 // fully consumed (either submitted or rejected with a hint);
 // returns false when the line should fall through to normal
 // slash-command / user-message handling (e.g. /end, /help).
-func (a *Adapter) maybeHandleInquiryReply(ctx context.Context, pend *pendingInquiry, line string) bool {
+func (a *Adapter) maybeHandleInquiryReply(ctx context.Context, pend *PendingInquiry, line string) bool {
 	t := strings.TrimSpace(line)
 	if IsSlashCommand(t) {
 		pc := ParseSlashCommand(t)
@@ -72,7 +72,7 @@ func (a *Adapter) maybeHandleInquiryReply(ctx context.Context, pend *pendingInqu
 			return false
 		}
 	}
-	resp, err := buildInquiryReply(a.user, a.session.ID(), pend, t)
+	resp, err := BuildInquiryReply(a.user, a.session.ID(), pend, t)
 	if err != nil {
 		fmt.Fprintf(a.err, "inquiry reply: %v\n", err)
 		fmt.Fprint(a.out, "> ")
@@ -87,14 +87,17 @@ func (a *Adapter) maybeHandleInquiryReply(ctx context.Context, pend *pendingInqu
 	return true
 }
 
-// buildInquiryReply turns the raw input line into an
+// BuildInquiryReply turns the raw input line into an
 // InquiryResponse Frame addressed at the root session id. The
 // CallerSessionID from the original request payload is preserved
 // so dispatchInquiryResponse cascades the answer back down the
 // parent chain to whichever tier actually called session:inquire.
 // Standalone (no *Adapter receiver) so unit tests can drive it
 // without bringing the session manager up.
-func buildInquiryReply(user protocol.ParticipantInfo, rootSessionID string, pend *pendingInquiry, line string) (*protocol.InquiryResponse, error) {
+// BuildInquiryReply is exported so the TUI adapter (and any future
+// rich-client adapter) can reuse the same /approve|/deny|/respond
+// parser. Behaviour matches the console inline renderer.
+func BuildInquiryReply(user protocol.ParticipantInfo, rootSessionID string, pend *PendingInquiry, line string) (*protocol.InquiryResponse, error) {
 	payload := protocol.InquiryResponsePayload{
 		RequestID:       pend.RequestID,
 		CallerSessionID: pend.CallerSessionID,

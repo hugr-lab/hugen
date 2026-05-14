@@ -55,6 +55,13 @@ type model struct {
 	// of the most recent value (no accumulated state).
 	sidebarStatus *liveviewStatus
 	sidebarShown  bool // false when terminal < sidebarMinTerminal
+
+	// Slice 3 — pending HITL inquiry. Non-nil while waiting for the
+	// operator's answer; cleared on the echoed InquiryResponse or
+	// SessionTerminated. While non-nil the Update loop intercepts
+	// keypresses and routes them to the modal instead of the chat
+	// textarea / scroll keys.
+	pendingInquiry *inquiryState
 }
 
 func newModel(sessionID string, u protocol.ParticipantInfo, submit func(protocol.Frame) error, logger *slog.Logger) model {
@@ -116,6 +123,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 			return m, nil
+		}
+		// Slice 3 — modal inquiry intercepts keys when active.
+		// dispatchInquiryKey returns (handled, cmd, model-mutated?).
+		if m.pendingInquiry != nil {
+			handled, cmd := m.dispatchInquiryKey(v)
+			if handled {
+				return m, cmd
+			}
+			// Fall through to default textarea handling so the
+			// operator can type the reply / reason — but skip the
+			// chat-only "enter" branch below, which would try to
+			// dispatch as a user message.
+			m.textarea, taCmd = m.textarea.Update(msg)
+			return m, taCmd
 		}
 		switch v.String() {
 		case "pgup", "pgdown", "home", "end":
@@ -183,6 +204,24 @@ func (m model) View() string {
 			Height(m.viewport.Height).
 			Render(renderSidebar(m.sidebarStatus, contentW))
 		top = lipgloss.JoinHorizontal(lipgloss.Top, chat, side)
+	}
+	// Slice 3 — when an inquiry is pending, render the modal in
+	// place of the textarea+footer. The chat viewport above stays
+	// scrollable so the operator can re-read the recent transcript
+	// before deciding. Reply mode (approval with /r or any
+	// clarification) keeps the textarea visible BELOW the modal so
+	// the operator can type the reason / answer.
+	if m.pendingInquiry != nil {
+		modalW := m.viewport.Width
+		if modalW < 30 {
+			modalW = 30
+		}
+		modal := renderInquiryModal(m.pendingInquiry, modalW)
+		bottom := modal
+		if m.pendingInquiry.replyMode {
+			bottom = lipgloss.JoinVertical(lipgloss.Left, modal, m.textarea.View())
+		}
+		return lipgloss.JoinVertical(lipgloss.Left, top, bottom, m.renderFooter())
 	}
 	input := m.textarea.View()
 	footer := m.renderFooter()
@@ -260,6 +299,92 @@ func (m *model) appendUserBubble(text string) {
 	}
 	m.chat.appendUser(m.user.Name, text)
 	m.refreshChat()
+}
+
+// dispatchInquiryKey handles keypresses while a HITL inquiry modal
+// is open. Returns handled=true when the key produced a modal action
+// (submit / dismiss / mode change); false when the key should fall
+// through to default textarea handling. Slice 3 — phase 5.1c §7.
+func (m *model) dispatchInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
+	pend := m.pendingInquiry
+	if pend.replyMode {
+		// In reply mode the textarea is focused. Enter submits;
+		// esc cancels back to button mode (or dismisses for
+		// clarifications, which have no button mode).
+		switch k.String() {
+		case "enter":
+			text := strings.TrimSpace(m.textarea.Value())
+			if pend.req.Type == protocol.InquiryTypeClarification && text == "" {
+				return true, nil
+			}
+			if err := m.submitInquiryReply(pend, text); err != nil {
+				m.bannerError = err.Error()
+			}
+			return true, nil
+		case "esc":
+			if pend.req.Type == protocol.InquiryTypeApproval {
+				pend.replyMode = false
+				pend.replyVerb = ""
+				m.textarea.Reset()
+				return true, nil
+			}
+			// Clarification: dismiss the modal entirely. The runtime
+			// is still waiting; the model surfaces the dismissal as
+			// a banner so the operator notices. No frame is sent —
+			// the inquiry remains open server-side; another adapter
+			// (or the same one on re-prompt) can answer.
+			m.pendingInquiry = nil
+			m.textarea.Reset()
+			m.bannerError = "inquiry dismissed (still pending server-side)"
+			return true, nil
+		}
+		return false, nil
+	}
+	// Button mode (approval only): keystroke shortcuts.
+	switch k.String() {
+	case "y", "a":
+		if err := m.submitInquiryReply(pend, "/approve"); err != nil {
+			m.bannerError = err.Error()
+		}
+		return true, nil
+	case "n", "d":
+		if err := m.submitInquiryReply(pend, "/deny"); err != nil {
+			m.bannerError = err.Error()
+		}
+		return true, nil
+	case "r":
+		pend.replyMode = true
+		pend.replyVerb = "approve"
+		m.textarea.Reset()
+		m.textarea.Focus()
+		return true, nil
+	case "esc":
+		m.pendingInquiry = nil
+		m.bannerError = "inquiry dismissed (still pending server-side)"
+		return true, nil
+	}
+	return false, nil
+}
+
+// submitInquiryReply builds the InquiryResponse via the console
+// adapter's shared helpers and submits it through the host. Clears
+// the modal on success; surfaces the error in the banner on failure.
+func (m *model) submitInquiryReply(pend *inquiryState, line string) error {
+	pi := &console.PendingInquiry{
+		RequestID:       pend.req.RequestID,
+		CallerSessionID: pend.req.CallerSessionID,
+		Kind:            pend.req.Type,
+	}
+	resp, err := console.BuildInquiryReply(m.user, m.sessionID, pi, line)
+	if err != nil {
+		return err
+	}
+	if err := m.submit(resp); err != nil {
+		return err
+	}
+	m.pendingInquiry = nil
+	m.textarea.Reset()
+	return nil
 }
 
 func (m *model) dispatchUserInput(text string) error {

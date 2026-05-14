@@ -71,9 +71,30 @@ func (m *model) handleFrame(f protocol.Frame) tea.Cmd {
 				m.sidebarStatus = st
 			}
 		}
+	case *protocol.InquiryRequest:
+		// Slice 3 — HITL modal. Replace any prior pending inquiry
+		// (multiple bubbled inquiries are rare but supported by the
+		// runtime; only one fits the modal at a time — the latest
+		// wins. Earlier inquiry remains open server-side and will
+		// re-prompt on its own timeout).
+		m.pendingInquiry = newInquiryState(v)
+		m.statusLine = fmt.Sprintf("HITL: %s", v.Payload.Type)
+		// Focus the textarea up-front for clarifications (the only
+		// input path) and keep it ready for approvals' "reply with
+		// reason" mode.
+		m.textarea.Reset()
+		m.textarea.Focus()
+	case *protocol.InquiryResponse:
+		// Echo of the operator's own reply (or one synthesised by
+		// the runtime on timeout / another adapter). Clear the modal
+		// either way — the inquiry is no longer pending.
+		m.pendingInquiry = nil
+		m.statusLine = "ready"
 	case *protocol.SessionTerminated:
 		m.chat.appendSystem(fmt.Sprintf("session terminated (%s)", v.Payload.Reason))
 		m.refreshChat()
+		// Clear any stale inquiry — the runtime is gone.
+		m.pendingInquiry = nil
 	case *protocol.SessionClosed:
 		// Runtime acknowledges close. If the user initiated the
 		// shutdown (closing == true), quit the program now —
