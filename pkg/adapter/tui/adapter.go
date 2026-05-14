@@ -116,6 +116,24 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 
 	go a.pumpFrames(ctx, sub, prog)
 
+	// Belt-and-suspenders terminal cleanup. bubbletea's own
+	// shutdown disables mouse-tracking + exits altscreen on a clean
+	// tea.Quit path, but the context-cancellation path
+	// (tea.WithContext(ctx)) can race past that cleanup, leaving
+	// the shell stuck in SGR mouse-tracking mode — every mouse
+	// scroll after exit then types raw event bytes like
+	// `65;142;9M65;142;9M…` into the user's prompt. defer ordered
+	// LIFO so the raw CSI emit runs last — idempotent, safe to
+	// emit even after bubbletea already disabled everything.
+	defer fmt.Fprint(a.out,
+		"\x1b[?1006l"+ // disable SGR mouse mode
+			"\x1b[?1002l"+ // disable cell-motion tracking
+			"\x1b[?1003l"+ // disable any-motion tracking
+			"\x1b[?1049l"+ // exit altscreen buffer
+			"\x1b[?25h", // show cursor
+	)
+	defer func() { _ = prog.ReleaseTerminal() }()
+
 	if _, err := prog.Run(); err != nil {
 		return fmt.Errorf("tui: program: %w", err)
 	}
