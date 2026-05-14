@@ -177,3 +177,60 @@ func TestModel_View_BeforeReadyShowsBootBanner(t *testing.T) {
 		t.Fatalf("pre-ready View() = %q; want boot banner", out)
 	}
 }
+
+func TestModel_ReasoningAutoFlushOnNonReasoningFrame(t *testing.T) {
+	m, _ := newTestModel(t)
+	// Stream a few reasoning chunks WITHOUT a final flag — mimics
+	// model adapters that never close out reasoning explicitly.
+	for _, chunk := range []string{"first ", "thought ", "in progress"} {
+		m2, _ := m.Update(frameMsg{frame: &protocol.Reasoning{
+			Payload: protocol.ReasoningPayload{Text: chunk, Final: false},
+		}})
+		m = m2.(model)
+	}
+	if m.chat.pendingReasoning.Len() == 0 {
+		t.Fatalf("expected pendingReasoning to accumulate")
+	}
+	// Any non-reasoning frame must auto-flush the accumulator into
+	// a finalized span so subsequent turns do not inherit it.
+	m2, _ := m.Update(frameMsg{frame: &protocol.ToolCall{
+		Payload: protocol.ToolCallPayload{Name: "demo.tool"},
+	}})
+	m = m2.(model)
+	if m.chat.pendingReasoning.Len() != 0 {
+		t.Fatalf("pendingReasoning still set after non-reasoning frame")
+	}
+	if got := lastSpanKind(m.chat); got != spanReasoning {
+		t.Fatalf("expected finalized reasoning span; last kind = %v", got)
+	}
+}
+
+func TestModel_UserSubmitFlushesStalePendingReasoning(t *testing.T) {
+	m, _ := newTestModel(t)
+	// Stuck reasoning from a previous turn.
+	m.chat.appendReasoningChunk("stale from prior turn")
+
+	m.textarea.SetValue("next prompt")
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = m2.(model)
+	if m.chat.pendingReasoning.Len() != 0 {
+		t.Fatalf("user submit did not flush stale pendingReasoning")
+	}
+	// The flushed reasoning becomes a span ABOVE the new user bubble.
+	if len(m.chat.spans) < 2 {
+		t.Fatalf("expected at least 2 spans (flushed reasoning + user); got %d", len(m.chat.spans))
+	}
+	if m.chat.spans[0].kind != spanReasoning {
+		t.Fatalf("first span kind = %v; want spanReasoning (flushed before user echo)", m.chat.spans[0].kind)
+	}
+	if m.chat.spans[1].kind != spanUser {
+		t.Fatalf("second span kind = %v; want spanUser", m.chat.spans[1].kind)
+	}
+}
+
+func lastSpanKind(c *chatBuffer) chatSpanKind {
+	if len(c.spans) == 0 {
+		return -1
+	}
+	return c.spans[len(c.spans)-1].kind
+}

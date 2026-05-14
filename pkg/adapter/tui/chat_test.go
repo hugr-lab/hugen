@@ -18,7 +18,10 @@ func TestChatBuffer_StreamingAssistantRendersInflight(t *testing.T) {
 	b := newChatBuffer()
 	b.appendAssistantChunk("partial reply")
 	out := b.render(80)
-	if !strings.Contains(out, "partial reply") {
+	// glamour wraps each word in its own ANSI color span, so the
+	// rendered output contains "partial" and "reply" separated by
+	// escape sequences — test both tokens are present.
+	if !strings.Contains(out, "partial") || !strings.Contains(out, "reply") {
 		t.Fatalf("inflight assistant chunk missing: %q", out)
 	}
 	// Finalize → spans grow by one, pending reset.

@@ -31,6 +31,16 @@ var (
 // frame triggers a Bubble Tea action (e.g. SessionClosed → quit
 // during shutdown).
 func (m *model) handleFrame(f protocol.Frame) tea.Cmd {
+	// Auto-flush in-flight reasoning when a non-reasoning frame
+	// arrives. Some model adapters never emit Reasoning{Final:true}
+	// at end-of-stream; without this guard the pendingReasoning
+	// accumulator persists across turns and the chat shows last
+	// turn's "thinking…" at the bottom forever.
+	if _, isReasoning := f.(*protocol.Reasoning); !isReasoning {
+		if m.chat.pendingReasoning.Len() > 0 {
+			m.chat.finalizeReasoning()
+		}
+	}
 	switch v := f.(type) {
 	case *protocol.UserMessage:
 		// Already echoed via appendUserBubble on submit; the
@@ -110,7 +120,8 @@ type chatBuffer struct {
 	pendingAssistant strings.Builder
 	pendingReasoning strings.Builder
 
-	renderer *glamour.TermRenderer
+	renderer    *glamour.TermRenderer
+	renderWidth int // width the cached renderer was constructed for
 }
 
 type chatSpanKind int
@@ -129,11 +140,17 @@ type chatSpan struct {
 }
 
 func newChatBuffer() *chatBuffer {
+	// Fixed style (no auto-detect). glamour.WithAutoStyle calls
+	// termenv to query the terminal's background via OSC 11; the
+	// response races bubbletea's stdin capture and gets echoed
+	// into the textarea as garbage like `\11;rgb:1919/1a1a/1b1b\`.
+	// Theme detection lands properly in slice 6 — for now ship a
+	// dark default; light terminals stay readable but suboptimal.
 	r, _ := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamour.WithStandardStyle("dark"),
 		glamour.WithWordWrap(80),
 	)
-	return &chatBuffer{renderer: r}
+	return &chatBuffer{renderer: r, renderWidth: 80}
 }
 
 func (b *chatBuffer) appendUser(name, text string) {
@@ -177,14 +194,19 @@ func (b *chatBuffer) render(width int) string {
 	if width <= 0 {
 		width = 80
 	}
-	if b.renderer != nil {
-		// Re-create only if width changed materially; glamour does
-		// not expose a setter. For slice 1, recreating per render is
-		// fine (transcript rarely exceeds 200 spans).
+	// Recreate the renderer ONLY when the viewport width changed.
+	// glamour does not expose a setter and termenv queries the
+	// terminal on construction; recreating per render flooded the
+	// stdin with OSC 11 responses that bubbletea then echoed into
+	// the textarea. WithStandardStyle skips the termenv query
+	// entirely, so the only remaining cost is the goldmark parser
+	// init — still worth caching.
+	if b.renderer == nil || b.renderWidth != width {
 		b.renderer, _ = glamour.NewTermRenderer(
-			glamour.WithAutoStyle(),
+			glamour.WithStandardStyle("dark"),
 			glamour.WithWordWrap(width),
 		)
+		b.renderWidth = width
 	}
 
 	var sb strings.Builder

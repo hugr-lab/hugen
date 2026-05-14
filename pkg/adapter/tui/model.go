@@ -54,6 +54,11 @@ func newModel(sessionID string, u protocol.ParticipantInfo, submit func(protocol
 
 	vp := viewport.New(80, 20) // resized on first WindowSizeMsg
 	vp.SetContent("")
+	// Clear viewport's default KeyMap so Up/Down/PgUp/etc. stop
+	// double-firing while textarea is focused. Slice 1 routes
+	// PgUp / PgDown / Home / End explicitly in Update — mouse wheel
+	// still works via tea.WithMouseCellMotion.
+	vp.KeyMap = viewport.KeyMap{}
 
 	return model{
 		sessionID:  sessionID,
@@ -95,6 +100,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch v.String() {
+		case "pgup", "pgdown", "home", "end":
+			// Route scroll keys to the viewport ONLY — textarea
+			// gets cursor keys (up/down/left/right) for editing.
+			m.viewport, vpCmd = m.viewport.Update(v)
+			return m, vpCmd
 		case "ctrl+c", "ctrl+d":
 			// Submit /end, transition to closing, wait for terminator.
 			m.statusLine = "closing…"
@@ -163,11 +173,16 @@ func (m *model) relayout() {
 }
 
 // refreshChat re-renders the entire chat buffer into the viewport.
-// Called on layout change or after appending a new line. Keeps the
-// viewport pinned to the bottom (latest message).
+// Called on layout change or after appending a new line. Auto-follow
+// to bottom only if the user was already pinned to the bottom —
+// scrolling up to read history must NOT be undone by an incoming
+// streaming chunk.
 func (m *model) refreshChat() {
+	wasAtBottom := m.viewport.AtBottom()
 	m.viewport.SetContent(m.chat.render(m.viewport.Width))
-	m.viewport.GotoBottom()
+	if wasAtBottom {
+		m.viewport.GotoBottom()
+	}
 }
 
 // renderFooter is the single-line bottom status. Includes the
@@ -184,6 +199,13 @@ func (m *model) renderFooter() string {
 }
 
 func (m *model) appendUserBubble(text string) {
+	// Sending a new user message implicitly ends the previous turn —
+	// flush any stuck pending reasoning so the chat does not retain
+	// last turn's "thinking…" stripe between submission and the
+	// runtime's first response frame.
+	if m.chat.pendingReasoning.Len() > 0 {
+		m.chat.finalizeReasoning()
+	}
 	m.chat.appendUser(m.user.Name, text)
 	m.refreshChat()
 }
