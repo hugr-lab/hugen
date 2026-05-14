@@ -640,7 +640,11 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 	// (authoritative) and liveview's per-session projection cache
 	// — they should track together; a divergence signals a missed
 	// SessionTerminated observation or a leaked cache entry.
-	if s.logger != nil {
+	//
+	// Gated on Enabled(Debug) BEFORE the mutex so the lock cost is
+	// paid only when the operator opted into Debug-level logging.
+	// Without the gate every emit on the hot path acquires childMu.
+	if s.logger != nil && s.logger.Enabled(ctx, slog.LevelDebug) {
 		s.childMu.Lock()
 		childCount := len(s.children)
 		s.childMu.Unlock()

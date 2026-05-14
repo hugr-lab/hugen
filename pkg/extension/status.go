@@ -35,6 +35,15 @@ import (
 // non-blocking — typically a non-blocking channel send into a
 // goroutine the extension owns. The runtime treats `OnFrameEmit`
 // as fire-and-forget; any blocking would stall the emit hot path.
+//
+// Delivery guarantee: observers see every frame for which
+// AppendEvent succeeded, INCLUDING frames whose subsequent
+// outbox send failed (closed-channel race during teardown).
+// Persistence is the contract; subscriber delivery is separate.
+// An observer that fires a downstream emit (e.g. liveview
+// publishing a synthetic status frame) MUST handle a subsequent
+// ErrSessionClosed gracefully, since the very session that
+// triggered observation may already be in teardown.
 type FrameObserver interface {
 	OnFrameEmit(ctx context.Context, state SessionState, frame protocol.Frame)
 }

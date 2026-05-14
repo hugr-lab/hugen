@@ -101,6 +101,20 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 	// has terminated and the child entry leaks in the parent's
 	// projection cache. Observers are non-blocking with a recover
 	// guard, so this is safe to call unconditionally.
+	//
+	// Dual-path child cleanup convergence — by design:
+	//   1. This observer notification lets liveview's cache learn
+	//      a child died (via SessionTerminated) and drop the entry
+	//      from its projection map.
+	//   2. The explicit case below builds a SubagentResult and
+	//      submits it into parent's own inbox; routeInbound →
+	//      handleSubagentResult then issues SessionClose to the
+	//      child, waits for child.Done(), and deletes the entry
+	//      from parent.children.
+	// Both paths converge on the same end state ("child gone"); the
+	// observer-side runs first so liveview's emit-on-change reflects
+	// the topology change without waiting on the close-and-deregister
+	// round-trip.
 	s.notifyChildFrameObservers(child, f)
 	switch v := f.(type) {
 	case *protocol.AgentMessage:

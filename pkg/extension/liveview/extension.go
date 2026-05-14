@@ -125,6 +125,7 @@ func (e *Extension) InitState(ctx context.Context, state extension.SessionState)
 		state:     state,
 		logger:    e.logger,
 		debounce:  defaultDebounce,
+		maxStale:  defaultMaxStale,
 		ch:        make(chan frameEvent, channelBuffer),
 		children:  map[string]json.RawMessage{},
 	}
@@ -220,6 +221,7 @@ type sessionView struct {
 	state     extension.SessionState // captured at InitState
 	logger    *slog.Logger
 	debounce  time.Duration
+	maxStale  time.Duration
 
 	ch        chan frameEvent
 	closeOnce sync.Once

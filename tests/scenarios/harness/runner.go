@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
 )
@@ -138,9 +139,8 @@ func (r *Runtime) RunMultiRoot(ctx context.Context, t *testing.T, sc *Scenario) 
 	// Also expose `$sid` defaulting to the lexically-first root,
 	// purely for tooling convenience (a one-root assertion query
 	// reuses the single-root `vars: {sid: "$sid"}` shape).
-	for _, name := range sortedKeys(handles) {
-		sids["sid"] = handles[name].id
-		break
+	if names := sortedKeys(handles); len(names) > 0 {
+		sids["sid"] = handles[names[0]].id
 	}
 	for _, q := range sc.Assertions {
 		r.RunQueryWithSids(ctx, t, sids, q)
@@ -268,22 +268,64 @@ func (h *SessionHandle) lastFinalAgentMessageAfter(since time.Time) bool {
 	return false
 }
 
-// waitForSubagentsSettle polls the local store for any non-
-// terminal sub-agent rows owned by this session; returns when the
-// set is empty or the budget expires. It is a best-effort
-// "settling sentinel", not an assertion — if the budget elapses
-// the runner logs and proceeds to queries.
+// waitForSubagentsSettle polls the root session's live state
+// until the whole subtree is quiescent (root is idle AND has zero
+// live direct children), or until the budget expires. Settled
+// means: every spawned sub-agent (including async ones started
+// during the turn) has terminated and been deregistered from the
+// parent's children map. Queries fired after this return observe
+// the final persisted state.
+//
+// Two reads per tick:
+//
+//   - root.Status() == "" | "idle" — no turn in flight on root.
+//   - countLiveDescendants(root) == 0 — no descendant alive.
+//
+// Both signals together are conservative: a worker might be
+// running while root sits idle waiting in wait_subagents, and
+// vice versa. Settled = both clear.
+//
+// On budget expiry the harness logs the live subtree so a flaky
+// scenario surfaces what was still in flight instead of silently
+// proceeding to queries with stale state.
 func (h *SessionHandle) waitForSubagentsSettle(budget time.Duration) {
 	deadline := time.Now().Add(budget)
+	const tick = 100 * time.Millisecond
 	for time.Now().Before(deadline) {
-		// TODO(phase-4.1b followup): hit Core.Store.ListChildren and
-		// inspect rows. For v1 we just sleep — the runner is
-		// observational and the queries themselves dump the persisted
-		// state regardless of timing.
-		time.Sleep(500 * time.Millisecond)
-		break
+		st := h.session.Status()
+		live := countLiveDescendants(h.session)
+		if (st == "" || st == protocol.SessionStatusIdle) && live == 0 {
+			h.t.Logf("wait_for_subagents settled status=%s descendants=0 elapsed=%s",
+				st, time.Since(deadline.Add(-budget)).Round(time.Millisecond))
+			return
+		}
+		time.Sleep(tick)
 	}
-	h.t.Logf("wait_for_subagents settled (budget=%s)", budget)
+	st := h.session.Status()
+	live := countLiveDescendants(h.session)
+	h.t.Logf("wait_for_subagents BUDGET ELAPSED budget=%s root_status=%s live_descendants=%d",
+		budget, st, live)
+}
+
+// countLiveDescendants walks the subtree rooted at s and returns
+// the number of live (non-nil) session states beneath it. Uses
+// extension.SessionState.Children() so it works from a session.Session
+// or any test fixture that wires up Children correctly.
+func countLiveDescendants(s interface {
+	Children() []extension.SessionState
+}) int {
+	kids := s.Children()
+	if len(kids) == 0 {
+		return 0
+	}
+	n := len(kids)
+	for _, k := range kids {
+		if k == nil {
+			continue
+		}
+		n += countLiveDescendants(k)
+	}
+	return n
 }
 
 // waitForCondition polls a GraphQL query until its result row

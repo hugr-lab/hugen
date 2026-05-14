@@ -9,13 +9,15 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
-// maxStale caps how long a dirty session can stay silent under
-// continuous frame traffic. The debounce timer is reset on every
-// frame, so a child emitting every 1.5 s would starve the parent's
-// 2 s debounce forever. maxStale guarantees an emit at least once
-// per window even if events keep coming. Tuned at 3× debounce so
-// bursty paths still coalesce but steady streams keep flowing.
-const maxStale = 3 * defaultDebounce
+// defaultMaxStale caps how long a dirty session can stay silent
+// under continuous frame traffic. The debounce timer is reset on
+// every frame, so a child emitting every 1.5 s would starve the
+// parent's 2 s debounce forever. maxStale guarantees an emit at
+// least once per window even if events keep coming. Tuned at 3×
+// debounce so bursty paths still coalesce but steady streams keep
+// flowing. Overridable per-view (test fixtures shrink it to keep
+// suite latency in check; future config could expose it).
+const defaultMaxStale = 3 * defaultDebounce
 
 // loop is the observer goroutine's main loop. Pulls frame events
 // off the channel, folds them into the session view, and decides
@@ -67,7 +69,7 @@ func (v *sessionView) loop() {
 			}
 			force := v.fold(ev)
 			dirty = true
-			if force || time.Since(lastEmit) >= maxStale {
+			if force || time.Since(lastEmit) >= v.maxStale {
 				emit()
 				continue
 			}
