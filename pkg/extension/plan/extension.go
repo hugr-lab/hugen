@@ -133,22 +133,24 @@ func (h *SessionPlan) Render(renderer *prompts.Renderer) string {
 	return Render(renderer, h.plan)
 }
 
-// PlanSnapshot implements [extension.PlanContributor]. Returns
-// the plan body + current-step label for the SessionSnapshot.
-// Phase 5.1b §3. Empty struct when no plan is active.
-func (e *Extension) PlanSnapshot(_ context.Context, state extension.SessionState) extension.PlanSnapshotData {
+// ReportStatus implements [extension.StatusReporter]. Returns
+// the full plan projection as JSON: body, current step, comments,
+// timestamps. Nil when no plan is active. Phase 5.1b — consumed
+// by liveview when it assembles its emit payload.
+func (e *Extension) ReportStatus(_ context.Context, state extension.SessionState) json.RawMessage {
 	h := FromState(state)
 	if h == nil {
-		return extension.PlanSnapshotData{}
+		return nil
 	}
 	p := h.Snapshot()
 	if !p.Active {
-		return extension.PlanSnapshotData{}
+		return nil
 	}
-	return extension.PlanSnapshotData{
-		Body:        p.Text,
-		CurrentStep: p.CurrentStep,
+	data, err := json.Marshal(p)
+	if err != nil {
+		return nil
 	}
+	return data
 }
 
 // AdvertiseSystemPrompt implements [extension.Advertiser]. Returns

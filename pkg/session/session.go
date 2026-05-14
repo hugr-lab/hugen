@@ -635,6 +635,14 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 	if perr := s.store.AppendEvent(ctx, row, summary); perr != nil {
 		return fmt.Errorf("session %s: persist frame: %w", s.id, perr)
 	}
+	// Phase 5.1b — fan the persisted frame out to any
+	// FrameObserver-implementing extension on this session.
+	// Observers MUST be non-blocking (typically a non-blocking
+	// channel send to a per-extension goroutine); the recover
+	// guard catches any misbehaviour so emit's hot path stays
+	// reliable. liveview is today's only consumer; this hook is
+	// the foundation for any future observability extension.
+	s.notifyFrameObservers(ctx, f)
 	defer func() {
 		if r := recover(); r != nil {
 			// Outbox was closed concurrently; treat as a graceful
@@ -647,6 +655,32 @@ func (s *Session) emit(ctx context.Context, f protocol.Frame) (err error) {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// notifyFrameObservers iterates the session's deps.Extensions
+// and dispatches the frame to every extension implementing
+// [extension.FrameObserver]. Recover guard isolates extension
+// panics from emit's hot path. Phase 5.1b.
+func (s *Session) notifyFrameObservers(ctx context.Context, f protocol.Frame) {
+	if s.deps == nil {
+		return
+	}
+	for _, ext := range s.deps.Extensions {
+		obs, ok := ext.(extension.FrameObserver)
+		if !ok {
+			continue
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil && s.logger != nil {
+					s.logger.Warn("session: FrameObserver panic",
+						"session", s.id, "extension", ext.Name(),
+						"panic", r)
+				}
+			}()
+			obs.OnFrameEmit(ctx, s, f)
+		}()
 	}
 }
 

@@ -512,41 +512,6 @@ func (m *Manager) Get(id string) (*session.Session, bool) {
 	return s, ok
 }
 
-// SnapshotSession returns a point-in-time projection of the named
-// session. Walks live roots first, then descends into each root's
-// sub-agent tree until the id matches. Returns
-// [session.ErrSnapshotSessionNotFound] when no live (root or
-// descendant) session has the id. Phase 5.1b §3.
-//
-// Adapters use this on attach (TUI reconnect, SSE late-join, A2A
-// peer join) to render an existing live session without
-// replaying every event. Read-only; safe to call from any
-// goroutine.
-//
-// For already-terminated sessions, use the store's tail query
-// directly — Manager only tracks live state.
-func (m *Manager) SnapshotSession(ctx context.Context, id string, opts session.SnapshotOptions) (*session.SessionSnapshot, error) {
-	m.mu.RLock()
-	if root, ok := m.live[id]; ok {
-		m.mu.RUnlock()
-		return root.Snapshot(ctx, opts)
-	}
-	// Copy the live roots out so descendant walks happen without
-	// holding the Manager lock. Each FindDescendant takes its own
-	// per-session childMu briefly.
-	roots := make([]*session.Session, 0, len(m.live))
-	for _, root := range m.live {
-		roots = append(roots, root)
-	}
-	m.mu.RUnlock()
-	for _, root := range roots {
-		if found := root.FindDescendant(id); found != nil {
-			return found.Snapshot(ctx, opts)
-		}
-	}
-	return nil, session.ErrSnapshotSessionNotFound
-}
-
 // Start runs the Manager-side per-boot tasks. Today: RestoreActive
 // (settles dangling subagents + eagerly restores non-terminal roots).
 // Reserves the slot for future scheduler-style background work

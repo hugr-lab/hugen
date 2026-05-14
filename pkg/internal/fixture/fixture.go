@@ -64,6 +64,8 @@ type TestSessionState struct {
 	inboxMu sync.Mutex
 	inbox   []protocol.Frame
 	closed  bool
+
+	extensions []extension.Extension
 }
 
 // NewTestSessionState builds a TestSessionState bound to the given
@@ -233,6 +235,34 @@ func (s *TestSessionState) Submit(ctx context.Context, frame protocol.Frame) <-c
 	}
 	s.inbox = append(s.inbox, frame)
 	return settled
+}
+
+// OutboxOnly implements [extension.SessionState]. Records the
+// frame in the same `emitted` slice Emit uses — tests asserting
+// "did the extension produce a status frame?" treat both paths
+// uniformly. The fixture does not differentiate persisted vs
+// outbox-only since it's not wired to any real store.
+func (s *TestSessionState) OutboxOnly(_ context.Context, frame protocol.Frame) error {
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	s.emitted = append(s.emitted, frame)
+	return nil
+}
+
+// Extensions implements [extension.SessionState]. Returns the
+// extensions slice installed via [TestSessionState.SetExtensions];
+// nil by default — tests that don't exercise aggregation skip
+// the setter.
+func (s *TestSessionState) Extensions() []extension.Extension {
+	return s.extensions
+}
+
+// SetExtensions installs the slice [TestSessionState.Extensions]
+// returns. Used by aggregator tests (liveview unit tests) that
+// need to drive `state.Extensions()` for `StatusReporter`
+// discovery.
+func (s *TestSessionState) SetExtensions(exts []extension.Extension) {
+	s.extensions = exts
 }
 
 // Inbox returns a snapshot of every frame Submit accepted, in

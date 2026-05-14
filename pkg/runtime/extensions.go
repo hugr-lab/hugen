@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	liveviewext "github.com/hugr-lab/hugen/pkg/extension/liveview"
 	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
 	notepadext "github.com/hugr-lab/hugen/pkg/extension/notepad"
 	planext "github.com/hugr-lab/hugen/pkg/extension/plan"
@@ -48,6 +49,12 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		wbext.NewExtension(core.Agent.ID()),
 		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()),
 		mcpext.NewExtension(core.Config.ToolProviders(), core.Logger),
+		// liveview lands last so its FrameObserver / ChildFrameObserver
+		// see frames AFTER siblings have processed them via their own
+		// Recovery / state mutations. It contributes no tool surface;
+		// its ReportStatus iterates the slice above when assembling
+		// its emit payload. Phase 5.1b §"Wire-up".
+		liveviewext.New(core.Logger),
 	}
 
 	for _, ext := range exts {

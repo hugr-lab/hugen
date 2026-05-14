@@ -126,15 +126,17 @@ func (h *SessionWhiteboard) Snapshot() Whiteboard {
 	return out
 }
 
-// WhiteboardSnapshot implements [extension.WhiteboardContributor].
-// Returns a one-line-per-message rendering of the session's
-// whiteboard (or the parent's, when this session has no own
-// active board — same precedence as `read`). Empty string when
-// no board is active anywhere up the chain. Phase 5.1b §3.
-func (e *Extension) WhiteboardSnapshot(_ context.Context, state extension.SessionState) string {
+// ReportStatus implements [extension.StatusReporter]. Returns
+// the full Whiteboard projection (Active, HostID, StartedAt,
+// Messages slice intact) as JSON. Falls back to the parent's
+// board when this session has no own active board — same
+// precedence as the `read` tool. Nil when no board is active
+// anywhere up the chain. Phase 5.1b — consumed by liveview when
+// it assembles its emit payload.
+func (e *Extension) ReportStatus(_ context.Context, state extension.SessionState) json.RawMessage {
 	h := FromState(state)
 	if h == nil {
-		return ""
+		return nil
 	}
 	source := h
 	source.mu.Lock()
@@ -147,22 +149,15 @@ func (e *Extension) WhiteboardSnapshot(_ context.Context, state extension.Sessio
 			}
 		}
 	}
-	source.mu.Lock()
-	defer source.mu.Unlock()
-	if !source.wb.Active || len(source.wb.Messages) == 0 {
-		return ""
+	wb := source.Snapshot()
+	if !wb.Active {
+		return nil
 	}
-	var b strings.Builder
-	for i, m := range source.wb.Messages {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		if m.FromRole != "" {
-			b.WriteString("[" + m.FromRole + "] ")
-		}
-		b.WriteString(m.Text)
+	data, err := json.Marshal(wb)
+	if err != nil {
+		return nil
 	}
-	return b.String()
+	return data
 }
 
 // ---------- ToolProvider surface ----------

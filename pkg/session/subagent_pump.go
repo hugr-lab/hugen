@@ -1,6 +1,7 @@
 package session
 
 import (
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -167,10 +168,44 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 			st.projected = true
 		}
 	default:
+		// Phase 5.1b — let parent's extensions observe the child
+		// frame before the implicit drain. The visibility filter
+		// stays default-deny, so the model on parent never sees
+		// these frames; the hook is for in-process observability
+		// only (liveview folds child activity into its tree
+		// projection). Observers MUST be non-blocking; recover
+		// guard inside isolates panics from the pump goroutine.
+		s.notifyChildFrameObservers(child, v)
 		// Drain. Streaming chunks (Final=false or Consolidated=false),
 		// reasoning, tool_call/result, recoverable errors, status
 		// markers, opened/closed lifecycle events, system_marker,
 		// extension_frame — all local to child's session.
+	}
+}
+
+// notifyChildFrameObservers iterates the session's deps.Extensions
+// and dispatches the child frame to every extension implementing
+// [extension.ChildFrameObserver]. Recover guard isolates extension
+// panics from the pump goroutine. Phase 5.1b.
+func (s *Session) notifyChildFrameObservers(child *Session, f protocol.Frame) {
+	if s.deps == nil {
+		return
+	}
+	for _, ext := range s.deps.Extensions {
+		obs, ok := ext.(extension.ChildFrameObserver)
+		if !ok {
+			continue
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil && s.logger != nil {
+					s.logger.Warn("session: ChildFrameObserver panic",
+						"session", s.id, "child", child.id,
+						"extension", ext.Name(), "panic", r)
+				}
+			}()
+			obs.OnChildFrame(s.ctx, s, child.id, f)
+		}()
 	}
 }
 

@@ -98,31 +98,24 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	return renderSnapshot(state.Prompts(), notes, np.Window())
 }
 
-// NotesSnapshot implements [extension.NotesContributor]. Returns
-// up to limit recent notes for the session (or 10 when limit is
-// non-positive). Backs [Manager.SnapshotSession] in phase 5.1b §3.
-func (e *Extension) NotesSnapshot(ctx context.Context, state extension.SessionState, limit int) []extension.NoteRef {
+// ReportStatus implements [extension.StatusReporter]. Returns up
+// to 10 most-recent notes (full Note shape) as a JSON array.
+// Nil when no notes or no notepad on this session. Phase 5.1b —
+// consumed by liveview when it assembles its emit payload.
+func (e *Extension) ReportStatus(ctx context.Context, state extension.SessionState) json.RawMessage {
 	np := FromState(state)
 	if np == nil {
 		return nil
 	}
-	if limit <= 0 {
-		limit = 10
-	}
-	notes, err := np.Read(ctx, ReadInput{Limit: limit})
+	notes, err := np.Read(ctx, ReadInput{Limit: 10})
 	if err != nil || len(notes) == 0 {
 		return nil
 	}
-	out := make([]extension.NoteRef, 0, len(notes))
-	for _, n := range notes {
-		out = append(out, extension.NoteRef{
-			Category:  n.Category,
-			Mission:   n.Mission,
-			Content:   n.Text,
-			CreatedAt: n.CreatedAt,
-		})
+	data, err := json.Marshal(notes)
+	if err != nil {
+		return nil
 	}
-	return out
+	return data
 }
 
 // InitState allocates a fresh [Notepad] for the calling session.
