@@ -309,6 +309,14 @@ func (t *tab) dispatchMissionModalKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) 
 			"cancel_subagent", []string{row.SessionID, "/mission"}, text)); err != nil {
 			t.bannerError = err.Error()
 		}
+		// Phase 5.x.skill-polish-1 (R6) — modal STAYS open after
+		// single cancel so the operator can cancel multiple
+		// missions in a row without re-opening. The row flashes
+		// "⊘ cancelling…" until the liveview status frame
+		// rebuilds and drops it. Shift+C (cancel-all) closes the
+		// modal explicitly because the operator's intent is then
+		// unambiguous; staying open after cancel-all just shows
+		// an empty list.
 		return true, nil
 	case "C", "shift+c":
 		if len(state.rows) == 0 {

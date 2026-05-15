@@ -157,7 +157,14 @@ func cancelSubagentHandler() session.CommandHandler {
 			}, nil
 		}
 		childID := args[0]
-		reason := "user_request"
+		// Phase 5.x.skill-polish-1 (R7) — distinct default label
+		// from the model-callable `session:subagent_cancel` tool
+		// (which uses "user_request") so event-log forensics can
+		// tell apart "operator hit Esc" from "model decided to
+		// cancel". Operators almost always pass a real reason via
+		// the `/mission` modal; this default only fires for bare
+		// CLI typing like `/cancel_subagent ses-abc`.
+		reason := "slash_command"
 		if len(args) > 1 {
 			reason = joinArgs(args[1:])
 		}
@@ -190,7 +197,7 @@ func cancelSubagentHandler() session.CommandHandler {
 // the Esc-Esc panic-cancel gesture.
 func cancelAllSubagentsHandler() session.CommandHandler {
 	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
-		reason := "user_request"
+		reason := "slash_command_all"
 		if len(args) > 0 {
 			reason = joinArgs(args)
 		}
