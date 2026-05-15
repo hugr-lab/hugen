@@ -194,11 +194,6 @@ func (h *SessionSkill) Load(ctx context.Context, name string) error {
 	gen := h.gen
 	h.mu.Unlock()
 	for _, s := range resolved {
-		// Phase 5.2 δ (B3): surface a one-time deprecation warn for
-		// every newly-loaded skill that still carries the legacy
-		// top-level turn-loop knobs. SkillManager.WarnLegacyTurnBudget
-		// dedupes per-skill at the manager level.
-		h.manager.WarnLegacyTurnBudget(s)
 		h.manager.EmitChange(skillpkg.SkillChange{
 			Kind:       skillpkg.SkillLoaded,
 			SessionID:  h.sessionID,
@@ -265,15 +260,6 @@ func (h *SessionSkill) Bindings(_ context.Context) (skillpkg.Bindings, error) {
 		// See manifest.go::Manifest.AllowedTools.
 		out.AllowedTools = append(out.AllowedTools, s.Manifest.AllowedTools...)
 		out.SubAgentRoles = append(out.SubAgentRoles, s.Manifest.Hugen.SubAgents...)
-		if s.Manifest.Hugen.MaxTurns > out.MaxTurns {
-			out.MaxTurns = s.Manifest.Hugen.MaxTurns
-		}
-		if s.Manifest.Hugen.MaxTurnsHard > out.MaxTurnsHard {
-			out.MaxTurnsHard = s.Manifest.Hugen.MaxTurnsHard
-		}
-		if !s.Manifest.Hugen.StuckDetection.IsEnabled() {
-			out.StuckDetectionDisabled = true
-		}
 		for k, v := range s.Manifest.Hugen.Memory {
 			memCats[k] = v
 		}

@@ -165,21 +165,20 @@ func TestResolveStuckDisabled(t *testing.T) {
 	on := true
 	off := false
 	cases := []struct {
-		name          string
-		lookup        *extension.StuckDetectionPolicy
-		tier          StuckDetectionDefault
-		legacyDisable bool
-		want          bool
+		name   string
+		lookup *extension.StuckDetectionPolicy
+		tier   StuckDetectionDefault
+		want   bool
 	}{
-		{"all_abstain_default_on", nil, StuckDetectionDefault{}, false, false},
-		{"lookup_disabled", &extension.StuckDetectionPolicy{Enabled: &off}, StuckDetectionDefault{Enabled: &on}, true, true},
-		{"lookup_enabled_overrides_legacy", &extension.StuckDetectionPolicy{Enabled: &on}, StuckDetectionDefault{}, true, false},
-		{"tier_disabled_when_no_lookup", nil, StuckDetectionDefault{Enabled: &off}, false, true},
-		{"legacy_only_disabled", nil, StuckDetectionDefault{}, true, true},
+		{"all_abstain_default_on", nil, StuckDetectionDefault{}, false},
+		{"lookup_disabled_overrides_tier_on", &extension.StuckDetectionPolicy{Enabled: &off}, StuckDetectionDefault{Enabled: &on}, true},
+		{"lookup_enabled_overrides_tier_off", &extension.StuckDetectionPolicy{Enabled: &on}, StuckDetectionDefault{Enabled: &off}, false},
+		{"tier_disabled_when_no_lookup", nil, StuckDetectionDefault{Enabled: &off}, true},
+		{"tier_enabled_when_no_lookup", nil, StuckDetectionDefault{Enabled: &on}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := resolveStuckDisabled(tc.lookup, tc.tier, tc.legacyDisable); got != tc.want {
+			if got := resolveStuckDisabled(tc.lookup, tc.tier); got != tc.want {
 				t.Errorf("resolveStuckDisabled = %v; want %v", got, tc.want)
 			}
 		})

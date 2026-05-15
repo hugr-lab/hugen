@@ -310,10 +310,10 @@ func WithSessionLogger(l *slog.Logger) SessionOption {
 }
 
 // WithMaxToolIterations overrides the per-Turn cap on
-// model→tool→model loops. Precedence at runtime: per-skill
-// metadata.hugen.max_turns (max across loaded skills) > this
-// option > defaultMaxToolIterations. Useful when no skill is
-// loaded but the deployment still wants a non-default ceiling.
+// model→tool→model loops. Precedence at runtime: TurnBudgetLookup
+// (per-role / per-mission) > Deps.TierDefaults > this option >
+// defaultMaxToolIterations. Useful when no skill is loaded but
+// the deployment still wants a non-default ceiling.
 func WithMaxToolIterations(n int) SessionOption {
 	return func(s *Session) {
 		if n > 0 {
@@ -323,8 +323,8 @@ func WithMaxToolIterations(n int) SessionOption {
 }
 
 // WithMaxToolIterationsHard overrides the per-Turn HARD ceiling on
-// model→tool→model loops (phase-4-spec §8.2). Precedence: per-skill
-// metadata.hugen.max_turns_hard > this option > 2 × resolved soft cap.
+// model→tool→model loops (phase-4-spec §8.2). Same chain as
+// WithMaxToolIterations; final fallback is 2 × resolved soft cap.
 // Tests use this to drive narrow ceilings without provisioning a
 // SkillManager.
 func WithMaxToolIterationsHard(n int) SessionOption {
@@ -1560,44 +1560,13 @@ func (s *Session) handleSlashCommand(ctx context.Context, f *protocol.SlashComma
 	return nil
 }
 
-// gatherToolPolicy walks every [extension.ToolPolicyAdvisor]
-// extension once and composes their recommendations: take the
-// largest non-zero SoftCap / HardCeiling, OR over
-// DisableStuckNudges. Empty advisors yield the zero policy
-// (callers fall back to runtime defaults).
-func (s *Session) gatherToolPolicy(ctx context.Context) extension.ToolIterPolicy {
-	if s.deps == nil {
-		return extension.ToolIterPolicy{}
-	}
-	var p extension.ToolIterPolicy
-	for _, ext := range s.deps.Extensions {
-		adv, ok := ext.(extension.ToolPolicyAdvisor)
-		if !ok {
-			continue
-		}
-		got := adv.AdviseToolPolicy(ctx, s)
-		if got.SoftCap > p.SoftCap {
-			p.SoftCap = got.SoftCap
-		}
-		if got.HardCeiling > p.HardCeiling {
-			p.HardCeiling = got.HardCeiling
-		}
-		if got.DisableStuckNudges {
-			p.DisableStuckNudges = true
-		}
-	}
-	return p
-}
-
 // resolveToolIterCap picks the tool-iteration cap for one user
 // Turn. Phase 5.2 δ (B3) resolution chain: per-role / per-mission
-// via TurnBudgetLookup → Deps.TierDefaults[tier] → legacy
-// ToolPolicyAdvisor (max-across-loaded-skills of deprecated
-// SkillManifest.MaxTurns) → session-level WithMaxToolIterations
-// override → runtime default. Sampled once at the top of the
-// user turn so the cap stays stable through the loop even if a
-// tool call mutates extension state mid-turn. See
-// resolveTurnBudget for the joint resolver.
+// via TurnBudgetLookup → Deps.TierDefaults[tier] → session-level
+// WithMaxToolIterations override → runtime default. Sampled once
+// at the top of the user turn so the cap stays stable through
+// the loop even if a tool call mutates extension state mid-turn.
+// See resolveTurnBudget for the joint resolver.
 func (s *Session) resolveToolIterCap(ctx context.Context) int {
 	cap, _, _ := s.resolveTurnBudget(ctx)
 	return cap
@@ -1621,8 +1590,8 @@ func (s *Session) resolveHardCeiling(ctx context.Context, softCap int) int {
 
 // stuckDetectionEnabled reports whether the heuristic stuck-detection
 // nudges are active for this session. Phase 5.2 δ chain: explicit
-// per-role / per-mission policy wins over tier default wins over
-// legacy advisor. Default ON when every layer abstains.
+// per-role / per-mission policy wins over tier default. Default ON
+// when every layer abstains.
 func (s *Session) stuckDetectionEnabled(ctx context.Context) bool {
 	_, _, stuckDisabled := s.resolveTurnBudget(ctx)
 	return !stuckDisabled

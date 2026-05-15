@@ -86,10 +86,15 @@ metadata:
         intent: cheap
         can_spawn: false
         tools: [hugr-main:*]
-    max_turns: 8                     # per-skill loop cap
-    max_turns_hard: 16               # hard ceiling
-    stuck_detection:
-      repeated_hash: 3
+        max_tool_turns: 8            # per-role per-invocation cap (worker tier)
+        max_tool_turns_hard: 16      # per-role hard ceiling
+        stuck_detection:
+          enabled: true
+    mission:
+      enabled: true
+      summary: ...
+      max_tool_turns: 12             # per-mission cap (mission tier)
+      max_tool_turns_hard: 24        # per-mission hard ceiling
     autoload: false                  # NEVER true for skill:save manifests
     autoload_for: [root]             # ignored when autoload:false
 ```
@@ -98,9 +103,8 @@ metadata:
 |-------|---------|
 | `requires_skills` | List of skill names to auto-load alongside this one. Resolved transitively at load time. |
 | `intents` | Model router intents this skill is compatible with. Empty = any. |
-| `sub_agents` | Declared roles for `session:spawn_subagent`. |
-| `max_turns` / `max_turns_hard` | Per-skill caps on the model→tool→model loop. |
-| `stuck_detection` | Per-pattern stuck-detection thresholds. |
+| `sub_agents` | Declared roles for `session:spawn_subagent`. Per-role `max_tool_turns` / `max_tool_turns_hard` / `stuck_detection` override the worker-tier defaults. |
+| `mission.max_tool_turns` / `mission.max_tool_turns_hard` | Per-mission turn-loop caps for the mission-tier session itself. Operator-wide defaults live in `config.subagents.tier_defaults.<tier>`. |
 | `autoload` | **Forbidden in `skill:save` — set to false or omit.** Reserved for system / admin skills. |
 | `autoload_for` | Which session types autoload triggers in. Ignored when `autoload:false`. |
 
@@ -121,12 +125,14 @@ allowed-tools:
 metadata:
   hugen:
     requires_skills: []
-    max_turns: 12
 ---
 ```
 
 Note: no `autoload`, no `autoload_for`. `requires_skills: []` is
-explicit (vs absent) — both work.
+explicit (vs absent) — both work. Per-tier turn-loop budgets come
+from `config.subagents.tier_defaults`; per-role / per-mission
+overrides go on `sub_agents[*].max_tool_turns` and
+`mission.max_tool_turns`.
 
 ## Validation
 

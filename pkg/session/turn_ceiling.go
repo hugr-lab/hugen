@@ -12,11 +12,12 @@ import (
 )
 
 // turn_ceiling.go implements phase-4-spec §8.1 + §8.2: a soft-warning
-// rising-edge nudge fires once when the model crosses metadata.hugen
-// .max_turns; the hard ceiling at metadata.hugen.max_turns_hard
-// terminates the session via the explicit-cancel teardown path so the
-// parent observes a clean subagent_result{reason:"hard_ceiling"} on
-// next Turn build.
+// rising-edge nudge fires once when the model crosses the resolved
+// per-turn cap; the hard ceiling terminates the session via the
+// explicit-cancel teardown path so the parent observes a clean
+// subagent_result{reason:"hard_ceiling"} on next Turn build. Both
+// caps come from the phase-5.2 δ TurnBudget resolver
+// (resolveToolIterCap / resolveHardCeiling).
 
 // reloadSoftWarningFlag resets s.softWarningDone from the session's
 // events on materialise. The runtime treats the flag as derived state

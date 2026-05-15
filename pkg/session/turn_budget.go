@@ -51,13 +51,9 @@ func (p StuckDetectionDefault) IsEnabled() bool {
 //     per-mission knobs from the manager catalog.
 //  2. Deps.TierDefaults[tier] — operator-supplied per-tier
 //     defaults (config.subagents.tier_defaults).
-//  3. ToolPolicyAdvisor (legacy) — max-across-loaded-skills
-//     composition of the deprecated top-level SkillManifest
-//     MaxTurns / MaxTurnsHard / StuckDetection. Slated for
-//     removal in phase 5.3.
-//  4. Session-level overrides (s.maxToolIters / maxToolItersHard)
+//  3. Session-level overrides (s.maxToolIters / maxToolItersHard)
 //     set via constructor options.
-//  5. defaultMaxToolIterations / × 2 — runtime constants.
+//  4. defaultMaxToolIterations / × 2 — runtime constants.
 //
 // Phase 5.2 δ.
 func (s *Session) resolveTurnBudget(ctx context.Context) (softCap, hardCeiling int, stuckDisabled bool) {
@@ -90,9 +86,6 @@ func (s *Session) resolveTurnBudget(ctx context.Context) (softCap, hardCeiling i
 		tierVal = s.deps.TierDefaults[tier]
 	}
 
-	// Layer 3: legacy ToolPolicyAdvisor (max across advisors).
-	legacy := s.gatherToolPolicy(ctx)
-
 	// Field resolution — each independent. SoftCap always resolves
 	// to a non-zero value because the runtime constant is the final
 	// fallback. HardCeiling can return 0 when every layer abstains,
@@ -104,20 +97,18 @@ func (s *Session) resolveTurnBudget(ctx context.Context) (softCap, hardCeiling i
 	softCap = firstNonZero(
 		lookup.SoftCap,
 		tierVal.MaxToolTurns,
-		legacy.SoftCap,
 		s.maxToolIters,
 		defaultMaxToolIterations,
 	)
 	hardCeiling = firstNonZero(
 		lookup.HardCeiling,
 		tierVal.MaxToolTurnsHard,
-		legacy.HardCeiling,
 		s.maxToolItersHard,
 	)
 
 	// Stuck detection: walk the chain looking for an explicit
 	// opinion. The first layer that supplies a policy wins.
-	stuckDisabled = resolveStuckDisabled(lookup.StuckDetection, tierVal.StuckPolicy, legacy.DisableStuckNudges)
+	stuckDisabled = resolveStuckDisabled(lookup.StuckDetection, tierVal.StuckPolicy)
 	return softCap, hardCeiling, stuckDisabled
 }
 
@@ -133,16 +124,16 @@ func firstNonZero(vals ...int) int {
 	return 0
 }
 
-// resolveStuckDisabled folds the three "is stuck detection off?"
-// signals into one boolean. The lookup layer wins if it has any
-// policy (IsEnabled controls); tier default wins next; legacy
-// advisor is the final fallback. Phase 5.2 δ.
-func resolveStuckDisabled(lookup *extension.StuckDetectionPolicy, tier StuckDetectionDefault, legacyDisable bool) bool {
+// resolveStuckDisabled folds the per-layer "is stuck detection
+// off?" signals into one boolean. The lookup layer wins if it has
+// any policy (IsEnabled controls); tier default is the fallback.
+// Default ON when both layers abstain. Phase 5.2 δ.
+func resolveStuckDisabled(lookup *extension.StuckDetectionPolicy, tier StuckDetectionDefault) bool {
 	if lookup != nil {
 		return !lookup.IsEnabled()
 	}
 	if tier.Enabled != nil {
 		return !*tier.Enabled
 	}
-	return legacyDisable
+	return false
 }

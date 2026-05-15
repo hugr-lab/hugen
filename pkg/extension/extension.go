@@ -135,63 +135,12 @@ type GenerationProvider interface {
 	Generation(state SessionState) int64
 }
 
-// ToolIterPolicy is the per-turn tool-loop policy an extension
-// recommends for the calling session. The runtime composes
-// recommendations across every [ToolPolicyAdvisor] extension by
-// taking the largest non-zero SoftCap / HardCeiling and a logical
-// OR over DisableStuckNudges (the loosest setting wins by intent
-// — an explorer skill raising the budget shouldn't be undone by a
-// utility skill keeping the default).
-type ToolIterPolicy struct {
-	// SoftCap is the per-turn tool-iteration cap. Zero means "no
-	// recommendation"; the runtime falls back to its session-level
-	// override / default.
-	SoftCap int
-
-	// HardCeiling is the per-turn hard ceiling at which the runtime
-	// terminates with reason "hard_ceiling". Zero means "no
-	// recommendation"; the runtime falls back to 2 × SoftCap (or
-	// its default).
-	HardCeiling int
-
-	// DisableStuckNudges asks the runtime to silence the
-	// stuck-detection nudges for this session. Multiple extensions
-	// compose by OR — a single advisor disabling is enough.
-	DisableStuckNudges bool
-}
-
-// ToolPolicyAdvisor extensions advise the per-turn tool-loop
-// policy. Sampled once at the top of every user turn alongside
-// resolveToolIterCap; results stay stable through the loop even
-// if a tool call mutates extension state mid-turn.
-//
-// Skill ext is the canonical advisor today (loaded skills'
-// metadata.hugen.{max_turns,max_turns_hard,stuck_detection}); a
-// future plan / whiteboard ext could lift the cap for analyst
-// flows.
-//
-// Phase 5.2 δ (B3): this advisor is now the LEGACY layer of the
-// turn-loop budget resolution chain. The canonical layer is
-// [TurnBudgetLookup], which reads per-role / per-mission knobs
-// from the spawning skill's manifest. ToolPolicyAdvisor stays
-// because (a) it still returns the deprecated top-level
-// SkillManifest.MaxTurns max-across-loaded composition as a
-// fallback, and (b) future non-skill advisors (plan, whiteboard)
-// may want to lift the budget independently of any skill. The
-// runtime calls TurnBudgetLookup first; if it returns an empty
-// budget the runtime falls through to tier defaults, then to
-// the legacy ToolPolicyAdvisor, then to the runtime constant.
-type ToolPolicyAdvisor interface {
-	AdviseToolPolicy(ctx context.Context, state SessionState) ToolIterPolicy
-}
-
 // TurnBudget is the per-session turn-loop budget the runtime
 // resolves at the top of every user turn. Each field encodes "no
 // opinion from this layer" with its zero value, letting the
 // resolution chain (per-role > per-mission > tier defaults >
-// legacy ToolPolicyAdvisor > runtime constant) walk past
-// unanswered layers without overriding decisions made earlier.
-// Phase 5.2 δ.
+// runtime constant) walk past unanswered layers without
+// overriding decisions made earlier. Phase 5.2 δ.
 type TurnBudget struct {
 	// SoftCap is the per-invocation cap on the model→tool→model
 	// loop. 0 means "this layer has no opinion".

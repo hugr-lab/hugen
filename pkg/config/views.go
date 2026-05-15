@@ -118,29 +118,18 @@ type SubagentsView interface {
 	// AND no per-spawn override raised it.
 	DefaultMaxDepth() int
 
-	// DefaultMaxTurns is the per-Turn cap on the model→tool→model
-	// loop when no loaded skill specifies a higher MaxTurns.
-	// Default 15.
-	DefaultMaxTurns() int
-
-	// DefaultStuckDetection supplies the runtime's stuck-detection
-	// tunables when no loaded skill overrides them. Implementations
-	// return a value with sensible runtime defaults when the field
-	// is absent in YAML — see static.go.
-	DefaultStuckDetection() StuckPolicy
-
 	// MaxAsyncMissionsPerRoot caps the number of in-flight async
 	// missions (spawn_mission with wait="async") per root session.
 	// Default 5 if absent. Phase 5.1 § 4.5.
 	MaxAsyncMissionsPerRoot() int
 
 	// TierDefaults is the per-tier (root / mission / worker)
-	// turn-loop defaults populated by `session.tier_defaults` in
-	// config.yaml. Phase 5.2 δ (B3 migration). The map is keyed by
-	// tier label ("root"/"mission"/"worker"); a tier absent from
-	// the map signals "no operator override, use runtime defaults
-	// from static.go". Implementations always return a fresh copy
-	// — callers may mutate the result freely.
+	// turn-loop defaults populated by `subagents.tier_defaults` in
+	// config.yaml. Phase 5.2 δ (B3 migration). The map is always
+	// populated (StaticService auto-materialises the three tiers
+	// with the runtime constants on top of any operator override).
+	// Implementations always return a fresh copy — callers may
+	// mutate the result freely.
 	TierDefaults() map[string]TierTurnDefaults
 
 	OnUpdate(fn func()) (cancel func())
@@ -204,13 +193,11 @@ func (p StuckPolicy) IsEnabled() bool {
 
 // SubagentsConfig is the data shape NewStaticService receives via
 // StaticInput. Optional in YAML; absent fields take the runtime
-// defaults declared in static.go (MaxDepth=5, MaxTurns=15,
-// StuckDetection runtime defaults).
+// defaults declared in static.go (MaxDepth=5; per-tier turn-loop
+// defaults materialised under TierDefaults).
 type SubagentsConfig struct {
-	MaxDepth                int         `mapstructure:"max_depth"                   yaml:"max_depth,omitempty"`
-	MaxTurns                int         `mapstructure:"max_turns"                   yaml:"max_turns,omitempty"`
-	StuckDetection          StuckPolicy `mapstructure:"stuck_detection"             yaml:"stuck_detection,omitempty"`
-	MaxAsyncMissionsPerRoot int         `mapstructure:"max_async_missions_per_root" yaml:"max_async_missions_per_root,omitempty"`
+	MaxDepth                int `mapstructure:"max_depth"                   yaml:"max_depth,omitempty"`
+	MaxAsyncMissionsPerRoot int `mapstructure:"max_async_missions_per_root" yaml:"max_async_missions_per_root,omitempty"`
 
 	// TierDefaults is the per-tier turn-loop defaults block
 	// (config.yaml: `subagents.tier_defaults.<tier>`). Phase 5.2 δ

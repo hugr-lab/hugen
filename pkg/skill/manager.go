@@ -36,13 +36,6 @@ type SkillManager struct {
 
 	subscribersMu sync.Mutex
 	subscribers   []*subscriber
-
-	// legacyWarnedMu + legacyWarned cache the names of skills that
-	// already triggered the phase-5.2 δ legacy-turn-budget warn so
-	// the slog line fires at most once per manifest per process —
-	// every per-session Load on the same skill would otherwise spam.
-	legacyWarnedMu sync.Mutex
-	legacyWarned   map[string]struct{}
 }
 
 // SessionSink is the narrow callback surface the manager invokes
@@ -311,42 +304,6 @@ func (m *SkillManager) Subscribe(ctx context.Context) (<-chan SkillChange, error
 	return ch, nil
 }
 
-// WarnLegacyTurnBudget surfaces a one-time deprecation warning
-// when a skill manifest still carries the top-level
-// metadata.hugen.{max_turns,max_turns_hard,stuck_detection}
-// fields. Phase 5.2 δ — the canonical knobs moved to per-role /
-// per-mission overrides plus `config.subagents.tier_defaults.
-// <tier>`. Removal slated for phase 5.3 once every live user
-// skill has migrated; until then the legacy fields are still
-// honoured as a fallback layer (between tier default and runtime
-// constant).
-//
-// Per-skill once-per-process: repeated Load of the same skill
-// won't repeat the warn. Wrapping at the manager keeps the slog
-// channel quiet even when 50 sessions load `analyst` back-to-back.
-func (m *SkillManager) WarnLegacyTurnBudget(s Skill) {
-	if !s.Manifest.Hugen.HasLegacyTurnBudget() {
-		return
-	}
-	name := s.Manifest.Name
-	m.legacyWarnedMu.Lock()
-	if m.legacyWarned == nil {
-		m.legacyWarned = make(map[string]struct{})
-	}
-	if _, dup := m.legacyWarned[name]; dup {
-		m.legacyWarnedMu.Unlock()
-		return
-	}
-	m.legacyWarned[name] = struct{}{}
-	m.legacyWarnedMu.Unlock()
-	m.log.Warn("skill: metadata.hugen.{max_turns,max_turns_hard,stuck_detection} are deprecated",
-		"skill", name,
-		"migration", "move per-role overrides onto metadata.hugen.sub_agents[*].{max_tool_turns,max_tool_turns_hard,stuck_detection}; "+
-			"move per-mission overrides onto metadata.hugen.mission.{max_tool_turns,max_tool_turns_hard,stuck_detection}; "+
-			"raise tier-wide defaults via config.subagents.tier_defaults.<tier>.",
-		"phase", "5.2 δ (B3)")
-}
-
 // emit fans an event out to every active subscriber. Slow
 // subscribers drop events rather than block the producer.
 func (m *SkillManager) emit(ev SkillChange) {
@@ -373,9 +330,12 @@ type UnavailableProvider struct {
 }
 
 // Bindings is the per-Turn snapshot the skill extension hands the
-// runtime's prompt builder + ToolPolicyAdvisor. Composed on the
-// per-session [SessionSkill] handle from the manager's loaded
-// skills.
+// runtime's prompt builder. Composed on the per-session
+// [SessionSkill] handle from the manager's loaded skills. Phase
+// 5.2 δ dropped the turn-loop budget fields (MaxTurns / MaxTurnsHard
+// / StuckDetectionDisabled) — those resolve through
+// [github.com/hugr-lab/hugen/pkg/extension.TurnBudgetLookup] +
+// `config.subagents.tier_defaults.<tier>` now.
 type Bindings struct {
 	Generation       int64
 	Instructions     string                    // concatenated SKILL.md bodies
@@ -383,18 +343,6 @@ type Bindings struct {
 	Unavailable      []UnavailableProvider     // grants whose provider is not registered (US5)
 	SubAgentRoles    []SubAgentRole            // phase 4 dispatch source
 	MemoryCategories map[string]MemoryCategory // for memory dispatch
-	// MaxTurns is the largest metadata.hugen.max_turns across
-	// every loaded skill. 0 when no skill specifies one — the
-	// runtime then falls back to its default cap.
-	MaxTurns int
-
-	// MaxTurnsHard is the largest metadata.hugen.max_turns_hard
-	// across loaded skills. 0 → runtime falls back to MaxTurns*2.
-	MaxTurnsHard int
-
-	// StuckDetectionDisabled is true when at least one loaded skill
-	// explicitly sets metadata.hugen.stuck_detection.enabled=false.
-	StuckDetectionDisabled bool
 }
 
 // AnnotateUnavailable tags every allowed-tool grant in `b` whose

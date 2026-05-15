@@ -38,7 +38,6 @@ var (
 	_ extension.Advertiser          = (*Extension)(nil)
 	_ extension.ToolFilter          = (*Extension)(nil)
 	_ extension.GenerationProvider  = (*Extension)(nil)
-	_ extension.ToolPolicyAdvisor   = (*Extension)(nil)
 	_ extension.SubagentDescriber   = (*Extension)(nil)
 	_ extension.SubagentSpawnHinter = (*Extension)(nil)
 	_ extension.MissionDispatcher   = (*Extension)(nil)
@@ -607,34 +606,6 @@ func (e *Extension) FilterTools(ctx context.Context, state extension.SessionStat
 		out = append(out, t)
 	}
 	return out
-}
-
-// AdviseToolPolicy implements [extension.ToolPolicyAdvisor].
-// Reads max_turns / max_turns_hard / stuck_detection from the
-// loaded skills' bindings and reports them as a [ToolIterPolicy].
-// Empty bindings (no skill loaded, or no SkillManager wired) yield
-// the zero-valued policy, which the runtime treats as "no
-// recommendation" and falls back to its own defaults.
-//
-// Phase 5.2 δ (B3): this advisor now plays the LEGACY layer of
-// the turn-loop budget resolution chain. Bindings.MaxTurns still
-// composes from the deprecated top-level SkillManifest.MaxTurns
-// (max across loaded skills); ResolveTurnBudget below is the
-// canonical per-role / per-mission layer.
-func (e *Extension) AdviseToolPolicy(ctx context.Context, state extension.SessionState) extension.ToolIterPolicy {
-	h := FromState(state)
-	if h == nil || h.manager == nil {
-		return extension.ToolIterPolicy{}
-	}
-	b, err := h.Bindings(ctx)
-	if err != nil {
-		return extension.ToolIterPolicy{}
-	}
-	return extension.ToolIterPolicy{
-		SoftCap:            b.MaxTurns,
-		HardCeiling:        b.MaxTurnsHard,
-		DisableStuckNudges: b.StuckDetectionDisabled,
-	}
 }
 
 // ResolveTurnBudget implements [extension.TurnBudgetLookup]. Walks

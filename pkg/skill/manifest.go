@@ -191,41 +191,6 @@ type HugenMetadata struct {
 	// dispatch targets.
 	Mission MissionBlock `json:"mission,omitempty" yaml:"mission,omitempty"`
 
-	// MaxTurns / MaxTurnsHard / StuckDetection are conceptually
-	// per-session-tier, not per-skill — they tune the turn-loop and
-	// stuck-detect heuristics, which depend on the session's role
-	// (root=routing, mission=coordination, worker=execution), not on
-	// which skill is loaded. They live on the manifest today as a
-	// phase-4 artefact, when sessions had no tier.
-	//
-	// DEPRECATED phase 5.2 δ (B3): the canonical knobs are
-	// `config.session.tier_defaults.<tier>` + per-role overrides on
-	// SubAgentRole + per-mission overrides on MissionBlock. These
-	// fields are still read as a fallback BETWEEN tier default and
-	// runtime constant — a slog.Warn fires once per skill at Load
-	// time recommending migration. Bundled skill manifests are
-	// migrated in phase 5.2 η. Removal slated for phase 5.3 once
-	// every live user skill has migrated.
-
-	// MaxTurns is the per-skill cap on the model→tool→model loop
-	// inside a single user turn. 0 (absent) defers to the runtime
-	// default (defaultMaxToolIterations).
-	MaxTurns int `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
-
-	// MaxTurnsHard is the per-skill hard ceiling on the model→tool
-	// →model loop, after which the runtime calls
-	// Manager.Terminate(self, "hard_ceiling") rather than soft-
-	// nudge the model. 0 (absent) defers to defaultMaxToolIterations
-	// * 2. See phase-4-spec §8.2.
-	MaxTurnsHard int `json:"max_turns_hard,omitempty" yaml:"max_turns_hard,omitempty"`
-
-	// StuckDetection tunes the per-pattern detectors operating
-	// independently of the soft/hard caps (repeated_hash,
-	// tight_density, no_progress). All detectors default to
-	// conservative values when the field is absent. See phase-4-spec
-	// §8.3.
-	StuckDetection StuckDetectionPolicy `json:"stuck_detection,omitempty" yaml:"stuck_detection,omitempty"`
-
 	// Autoload, when true, tells the SessionManager to load this
 	// skill into every newly opened session whose tier appears in
 	// AutoloadFor. Loading is idempotent — manual /skill load of
@@ -451,8 +416,7 @@ type SubAgentRole struct {
 	//
 	// 0 (absent) falls through the resolution chain: per-role >
 	// MissionBlock.MaxToolTurns > config.session.tier_defaults.
-	// <tier>.max_tool_turns > legacy SkillManifest.MaxTurns >
-	// runtime constant. Phase 5.2 δ (B3).
+	// <tier>.max_tool_turns > runtime constant. Phase 5.2 δ (B3).
 	MaxToolTurns int `json:"max_tool_turns,omitempty" yaml:"max_tool_turns,omitempty"`
 
 	// MaxToolTurnsHard is the absolute ceiling at which the
@@ -462,12 +426,11 @@ type SubAgentRole struct {
 	MaxToolTurnsHard int `json:"max_tool_turns_hard,omitempty" yaml:"max_tool_turns_hard,omitempty"`
 
 	// StuckDetection per-role override. nil (absent) falls through
-	// the chain (MissionBlock.StuckDetection > tier default >
-	// legacy SkillManifest.StuckDetection). When set, the policy's
-	// IsEnabled() is consulted by the runtime; threshold fields
-	// (RepeatedHash / TightDensity*) are reserved for future
-	// runtime plumbing — today only the enable bit is honoured.
-	// Phase 5.2 δ.
+	// the chain (MissionBlock.StuckDetection > tier default). When
+	// set, the policy's IsEnabled() is consulted by the runtime;
+	// threshold fields (RepeatedHash / TightDensity*) are reserved
+	// for future runtime plumbing — today only the enable bit is
+	// honoured. Phase 5.2 δ.
 	StuckDetection *StuckDetectionPolicy `json:"stuck_detection,omitempty" yaml:"stuck_detection,omitempty"`
 }
 
@@ -555,47 +518,6 @@ func (h HugenMetadata) ResolveTurnBudget(roleName string) TurnBudget {
 		b.StuckDetection = h.Mission.StuckDetection
 	}
 	return b
-}
-
-// LegacyTurnBudget projects the deprecated top-level MaxTurns /
-// MaxTurnsHard / StuckDetection fields into a TurnBudget so the
-// runtime can fold them in as the final pre-runtime-fallback
-// layer. Returns an empty budget when no legacy field is set.
-// Phase 5.2 δ — the legacy fields are kept readable so unmigrated
-// user skills continue to work; the slog.Warn at Load time
-// surfaces the migration prompt.
-func (h HugenMetadata) LegacyTurnBudget() TurnBudget {
-	var b TurnBudget
-	if h.MaxTurns > 0 {
-		b.SoftCap = h.MaxTurns
-	}
-	if h.MaxTurnsHard > 0 {
-		b.HardCeiling = h.MaxTurnsHard
-	}
-	// StuckDetection on HugenMetadata is a value type today (not a
-	// pointer), so "absent" is conflated with the zero value. Treat
-	// any non-zero threshold or explicit Enabled=&false as a signal
-	// the author opted in. Pure zero ⇒ no opinion.
-	sd := h.StuckDetection
-	if sd.RepeatedHash != 0 || sd.TightDensityCount != 0 ||
-		sd.TightDensityWindow != "" || sd.Enabled != nil {
-		policy := sd
-		b.StuckDetection = &policy
-	}
-	return b
-}
-
-// HasLegacyTurnBudget reports whether the manifest carries any of
-// the deprecated top-level turn-loop knobs (MaxTurns, MaxTurnsHard,
-// StuckDetection). Phase 5.2 δ — used by the Load-time deprecation
-// warn.
-func (h HugenMetadata) HasLegacyTurnBudget() bool {
-	if h.MaxTurns > 0 || h.MaxTurnsHard > 0 {
-		return true
-	}
-	sd := h.StuckDetection
-	return sd.RepeatedHash != 0 || sd.TightDensityCount != 0 ||
-		sd.TightDensityWindow != "" || sd.Enabled != nil
 }
 
 // ResolveAutoclose walks the autoclose precedence chain for a

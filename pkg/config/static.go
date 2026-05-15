@@ -23,7 +23,6 @@ var (
 // §3 step 10 (and phase-5.1 § 4.5 for MaxAsyncMissionsPerRoot).
 const (
 	defaultSubagentMaxDepth                = 5
-	defaultSubagentMaxTurns                = 15
 	defaultStuckRepeatedHash               = 3
 	defaultStuckTightDensityCount          = 3
 	defaultStuckTightDensityWindow         = 2 * time.Second
@@ -104,18 +103,6 @@ func NewStaticService(in StaticInput) *StaticService {
 	subagents := in.Subagents
 	if subagents.MaxDepth <= 0 {
 		subagents.MaxDepth = defaultSubagentMaxDepth
-	}
-	if subagents.MaxTurns <= 0 {
-		subagents.MaxTurns = defaultSubagentMaxTurns
-	}
-	if subagents.StuckDetection.RepeatedHash <= 0 {
-		subagents.StuckDetection.RepeatedHash = defaultStuckRepeatedHash
-	}
-	if subagents.StuckDetection.TightDensityCount <= 0 {
-		subagents.StuckDetection.TightDensityCount = defaultStuckTightDensityCount
-	}
-	if subagents.StuckDetection.TightDensityWindow <= 0 {
-		subagents.StuckDetection.TightDensityWindow = defaultStuckTightDensityWindow
 	}
 	if subagents.MaxAsyncMissionsPerRoot <= 0 {
 		subagents.MaxAsyncMissionsPerRoot = defaultSubagentMaxAsyncMissionsPerRoot
@@ -209,11 +196,7 @@ func (s *StaticService) Providers() []ToolProviderSpec {
 
 // --- SubagentsView ---
 
-func (s *StaticService) DefaultMaxDepth() int           { return s.subagents.MaxDepth }
-func (s *StaticService) DefaultMaxTurns() int           { return s.subagents.MaxTurns }
-func (s *StaticService) DefaultStuckDetection() StuckPolicy {
-	return s.subagents.StuckDetection
-}
+func (s *StaticService) DefaultMaxDepth() int        { return s.subagents.MaxDepth }
 func (s *StaticService) MaxAsyncMissionsPerRoot() int { return s.subagents.MaxAsyncMissionsPerRoot }
 
 // TierDefaults returns a defensive copy of the per-tier turn-loop

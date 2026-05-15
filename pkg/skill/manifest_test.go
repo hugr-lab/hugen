@@ -296,13 +296,6 @@ description: Phase-4 fields exercised end-to-end.
 license: MIT
 metadata:
   hugen:
-    max_turns: 30
-    max_turns_hard: 60
-    stuck_detection:
-      repeated_hash: 4
-      tight_density_count: 5
-      tight_density_window: "3s"
-      enabled: false
     sub_agents:
       - name: explorer
         description: leaf
@@ -316,20 +309,17 @@ metadata:
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if m.Hugen.MaxTurnsHard != 60 {
-		t.Errorf("MaxTurnsHard = %d, want 60", m.Hugen.MaxTurnsHard)
-	}
-	if m.Hugen.StuckDetection.RepeatedHash != 4 {
-		t.Errorf("StuckDetection.RepeatedHash = %d, want 4", m.Hugen.StuckDetection.RepeatedHash)
-	}
-	if m.Hugen.StuckDetection.IsEnabled() {
-		t.Errorf("StuckDetection.IsEnabled = true, want false (explicit override)")
-	}
 	if len(m.Hugen.SubAgents) != 1 {
 		t.Fatalf("SubAgents len = %d, want 1", len(m.Hugen.SubAgents))
 	}
 	if got := m.Hugen.SubAgents[0]; got.CanSpawnEffective() {
 		t.Errorf("SubAgent.CanSpawnEffective = true, want false (explicit can_spawn: false)")
+	}
+	if !m.Hugen.Autoload {
+		t.Errorf("Autoload = false, want true")
+	}
+	if len(m.Hugen.AutoloadFor) != 2 {
+		t.Errorf("AutoloadFor = %v, want 2 entries", m.Hugen.AutoloadFor)
 	}
 }
 
@@ -995,40 +985,3 @@ metadata:
 	}
 }
 
-// TestLegacyTurnBudget_PicksUpTopLevel covers the deprecated
-// top-level MaxTurns / MaxTurnsHard / StuckDetection fallback
-// layer. Phase 5.2 δ — unmigrated user skills still produce a
-// non-empty legacy budget.
-func TestLegacyTurnBudget_PicksUpTopLevel(t *testing.T) {
-	fls := false
-	h := HugenMetadata{
-		MaxTurns:       20,
-		MaxTurnsHard:   60,
-		StuckDetection: StuckDetectionPolicy{RepeatedHash: 5, Enabled: &fls},
-	}
-	b := h.LegacyTurnBudget()
-	if b.SoftCap != 20 || b.HardCeiling != 60 {
-		t.Errorf("legacy budget caps = %+v; want soft=20 hard=60", b)
-	}
-	if b.StuckDetection == nil || b.StuckDetection.IsEnabled() {
-		t.Errorf("legacy stuck detection should reflect explicit disable; got %+v", b.StuckDetection)
-	}
-	if !h.HasLegacyTurnBudget() {
-		t.Error("HasLegacyTurnBudget = false on populated legacy fields; want true")
-	}
-}
-
-// TestLegacyTurnBudget_EmptyManifest returns the zero TurnBudget
-// when no legacy field is set, and HasLegacyTurnBudget reports
-// false. Together they let the Load warn fire only when migration
-// is actually due.
-func TestLegacyTurnBudget_EmptyManifest(t *testing.T) {
-	var h HugenMetadata
-	b := h.LegacyTurnBudget()
-	if b.SoftCap != 0 || b.HardCeiling != 0 || b.StuckDetection != nil {
-		t.Errorf("empty manifest produced non-empty legacy budget: %+v", b)
-	}
-	if h.HasLegacyTurnBudget() {
-		t.Error("HasLegacyTurnBudget = true on empty manifest")
-	}
-}
