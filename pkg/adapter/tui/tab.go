@@ -287,17 +287,26 @@ func (t *tab) dispatchUserInput(text string) error {
 // dispatchMissionModalKey routes a keypress while the `/mission`
 // modal is open. Returns handled=true when the key produced a modal
 // action; false when it should fall through to default textarea
-// handling. Phase 5.1c.cancel-ux.
+// handling. Phase 5.1c.cancel-ux + 5.2 ζ.
 func (t *tab) dispatchMissionModalKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 	state := t.pendingMissionModal
+	// Phase 5.2 ζ — follow-up text-input substate has its own
+	// dispatch table that captures every key as input rather than
+	// modal action.
+	if state.mode == missionModeFollowup {
+		return t.dispatchMissionFollowupKey(state, k)
+	}
 	switch k.String() {
 	case "j", "down":
+		state.transientHint = ""
 		state.moveSelection(1)
 		return true, nil
 	case "k", "up":
+		state.transientHint = ""
 		state.moveSelection(-1)
 		return true, nil
 	case "c", "enter":
+		state.transientHint = ""
 		row, ok := state.selectedRow()
 		if !ok {
 			// Empty list — `c` is a no-op; operator must dismiss.
@@ -318,7 +327,36 @@ func (t *tab) dispatchMissionModalKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) 
 		// unambiguous; staying open after cancel-all just shows
 		// an empty list.
 		return true, nil
+	case "d":
+		row, ok := state.selectedRow()
+		if !ok {
+			return true, nil
+		}
+		if !row.Parked {
+			state.transientHint = "only parked missions accept dismiss/follow-up"
+			return true, nil
+		}
+		state.transientHint = ""
+		state.markDismissing(state.selected)
+		text := fmt.Sprintf("/dismiss_subagent %s", row.SessionID)
+		if err := t.submit(protocol.NewSlashCommand(t.sessionID, t.user,
+			"dismiss_subagent", []string{row.SessionID}, text)); err != nil {
+			t.bannerError = err.Error()
+		}
+		return true, nil
+	case "f":
+		row, ok := state.selectedRow()
+		if !ok {
+			return true, nil
+		}
+		if !row.Parked {
+			state.transientHint = "only parked missions accept dismiss/follow-up"
+			return true, nil
+		}
+		state.enterFollowup(state.selected)
+		return true, nil
 	case "C", "shift+c":
+		state.transientHint = ""
 		if len(state.rows) == 0 {
 			return true, nil
 		}
@@ -338,6 +376,52 @@ func (t *tab) dispatchMissionModalKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) 
 		return true, nil
 	}
 	return false, nil
+}
+
+// dispatchMissionFollowupKey owns input while the modal is in the
+// follow-up substate. Enter submits a /notify_subagent slash; Esc
+// returns to the list; printable keys append to the buffer;
+// backspace / ctrl+u trim. Phase 5.2 ζ.
+func (t *tab) dispatchMissionFollowupKey(state *missionModalState, k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
+	switch k.String() {
+	case "esc":
+		state.exitFollowup()
+		return true, nil
+	case "enter":
+		buf := strings.TrimSpace(state.followupBuf)
+		if buf == "" {
+			// Silent no-op — operator pressed Enter on empty input.
+			return true, nil
+		}
+		target := state.followupTarget
+		text := fmt.Sprintf("/notify_subagent %s %s", target, buf)
+		args := []string{target, buf}
+		if err := t.submit(protocol.NewSlashCommand(t.sessionID, t.user,
+			"notify_subagent", args, text)); err != nil {
+			t.bannerError = err.Error()
+			state.exitFollowup()
+			return true, nil
+		}
+		state.exitFollowup()
+		state.transientHint = "follow-up dispatched: " + shortID(target)
+		return true, nil
+	case "ctrl+u":
+		state.followupBuf = ""
+		return true, nil
+	case "backspace":
+		if len(state.followupBuf) > 0 {
+			r := []rune(state.followupBuf)
+			state.followupBuf = string(r[:len(r)-1])
+		}
+		return true, nil
+	default:
+		// Append the typed characters. KeyMsg.Runes carries every
+		// printable rune; control combinations land empty.
+		if len(k.Runes) > 0 {
+			state.followupBuf += string(k.Runes)
+		}
+		return true, nil
+	}
 }
 
 // openMissionModal builds the modal state from the tab's current

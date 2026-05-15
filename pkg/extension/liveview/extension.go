@@ -233,6 +233,12 @@ type sessionView struct {
 	// goroutine (a sibling's liveview at emit-assembly time).
 	reportMu       sync.Mutex
 	lifecycleState string
+	// parkedAt records the local clock at the moment lifecycleState
+	// transitioned to awaiting_dismissal. Cleared on the next
+	// transition out. Surfaced in the emit payload as "parked_at"
+	// so adapters (TUI /mission modal) can render
+	// "⏸ parked Xs" without re-reading the event log. Phase 5.2 ζ.
+	parkedAt       time.Time
 	lastTool       *protocol.ToolCallRef
 	pendingInquiry *protocol.PendingInquiryRef
 	turnsUsed      int
@@ -330,6 +336,9 @@ func (v *sessionView) reportActivityJSON() json.RawMessage {
 	body := map[string]any{}
 	if v.lifecycleState != "" {
 		body["lifecycle_state"] = v.lifecycleState
+	}
+	if !v.parkedAt.IsZero() {
+		body["parked_at"] = v.parkedAt
 	}
 	if v.lastTool != nil {
 		body["last_tool_call"] = v.lastTool

@@ -471,7 +471,7 @@ func TestDoubleEsc_StaleStampClearedByModalDismiss(t *testing.T) {
 
 // keyOf is a tiny helper for table tests that need a KeyMsg from a
 // short string label. Handles letter runes ("j", "k", "c", "C") and
-// named keys ("up", "down", "esc", "enter").
+// named keys ("up", "down", "esc", "enter", "backspace").
 func keyOf(s string) tea.KeyMsg {
 	switch s {
 	case "up":
@@ -482,7 +482,279 @@ func keyOf(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyEsc}
 	case "enter":
 		return tea.KeyMsg{Type: tea.KeyEnter}
+	case "backspace":
+		return tea.KeyMsg{Type: tea.KeyBackspace}
 	}
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+}
+
+// Phase 5.2 ζ — /mission modal parked-row actions.
+
+// fakeLiveviewWithParked builds a liveview projection with two
+// children: index 0 is live (Active), index 1 is parked
+// (awaiting_dismissal) with the given parkedAt timestamp.
+func fakeLiveviewWithParked(parkedAt time.Time) *liveviewStatus {
+	s := &liveviewStatus{
+		SessionID: "root-aaaaaa01",
+		Depth:     0,
+		Children:  map[string]*liveviewStatus{},
+		ChildMeta: map[string]childMetaEntry{},
+	}
+	live := "childA00000001"
+	parked := "childB00000001"
+	s.Children[live] = &liveviewStatus{
+		SessionID:      live,
+		Depth:          1,
+		LifecycleState: protocol.SessionStatusActive,
+	}
+	s.Children[parked] = &liveviewStatus{
+		SessionID:      parked,
+		Depth:          1,
+		LifecycleState: protocol.SessionStatusAwaitingDismissal,
+		ParkedAt:       parkedAt,
+	}
+	s.ChildMeta[live] = childMetaEntry{Role: "data-analyst", Skill: "analyst", Task: "goal A",
+		StartedAt: time.Now().Add(-2 * time.Minute)}
+	s.ChildMeta[parked] = childMetaEntry{Role: "data-chatter", Skill: "data-chat", Task: "сколько платежей",
+		StartedAt: time.Now().Add(-3 * time.Minute)}
+	return s
+}
+
+// TestSnapshotMissions_ParkedBadgePropagates verifies the snapshot
+// flips Parked + ParkedAt for awaiting_dismissal children and
+// leaves live children untouched.
+func TestSnapshotMissions_ParkedBadgePropagates(t *testing.T) {
+	parkedAt := time.Now().Add(-30 * time.Second)
+	state := newMissionModalState(fakeLiveviewWithParked(parkedAt))
+	if len(state.rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(state.rows))
+	}
+	// snapshotMissions sorts by id: childA → 0 (live), childB → 1 (parked).
+	if state.rows[0].Parked {
+		t.Errorf("row 0 marked Parked; want false (live child)")
+	}
+	if !state.rows[1].Parked {
+		t.Errorf("row 1 not marked Parked; want true")
+	}
+	if !state.rows[1].ParkedAt.Equal(parkedAt) {
+		t.Errorf("row 1 ParkedAt = %v; want %v", state.rows[1].ParkedAt, parkedAt)
+	}
+}
+
+// TestRenderMissionModal_ParkedBadge verifies the rendered modal
+// surfaces the "⏸ parked …" badge for parked rows and the new key
+// hints land in the footer.
+func TestRenderMissionModal_ParkedBadge(t *testing.T) {
+	state := newMissionModalState(fakeLiveviewWithParked(time.Now().Add(-5 * time.Second)))
+	out := renderMissionModal(state, 140)
+	if !strings.Contains(out, "⏸") {
+		t.Errorf("missing parked badge glyph; got:\n%s", out)
+	}
+	if !strings.Contains(out, "parked") {
+		t.Errorf("missing 'parked' label; got:\n%s", out)
+	}
+	if !strings.Contains(out, "[d] dismiss parked") {
+		t.Errorf("missing d-key hint; got:\n%s", out)
+	}
+	if !strings.Contains(out, "[f] follow up") {
+		t.Errorf("missing f-key hint; got:\n%s", out)
+	}
+}
+
+// TestMissionModal_DismissParkedRow — `d` on a parked row submits
+// /dismiss_subagent and flips Dismissing for visual feedback.
+func TestMissionModal_DismissParkedRow(t *testing.T) {
+	m, submitted := newTestModel(t)
+	cur := m.currentTab()
+	cur.sidebarStatus = fakeLiveviewWithParked(time.Now().Add(-10 * time.Second))
+	cur.pendingMissionModal = newMissionModalState(cur.sidebarStatus)
+	cur.pendingMissionModal.selected = 1 // parked row
+	wantID := cur.pendingMissionModal.rows[1].SessionID
+
+	cur.dispatchMissionModalKey(keyOf("d"))
+
+	got := submitted.Load()
+	if got == nil {
+		t.Fatalf("nothing submitted")
+	}
+	sc, ok := (*got).(*protocol.SlashCommand)
+	if !ok {
+		t.Fatalf("submitted %T; want SlashCommand", *got)
+	}
+	if sc.Payload.Name != "dismiss_subagent" {
+		t.Errorf("slash name = %q; want dismiss_subagent", sc.Payload.Name)
+	}
+	if len(sc.Payload.Args) < 1 || sc.Payload.Args[0] != wantID {
+		t.Errorf("args = %v; want first arg = %q", sc.Payload.Args, wantID)
+	}
+	if !cur.pendingMissionModal.rows[1].Dismissing {
+		t.Errorf("parked row Dismissing flag not set after `d`")
+	}
+}
+
+// TestMissionModal_DismissLiveRowRejected — `d` on a non-parked row
+// must not dispatch and must surface a hint instead.
+func TestMissionModal_DismissLiveRowRejected(t *testing.T) {
+	m, submitted := newTestModel(t)
+	cur := m.currentTab()
+	cur.sidebarStatus = fakeLiveviewWithParked(time.Now())
+	cur.pendingMissionModal = newMissionModalState(cur.sidebarStatus)
+	cur.pendingMissionModal.selected = 0 // live row
+
+	cur.dispatchMissionModalKey(keyOf("d"))
+
+	if got := submitted.Load(); got != nil {
+		t.Errorf("submit fired on non-parked row; got %T", *got)
+	}
+	if cur.pendingMissionModal.transientHint == "" {
+		t.Errorf("transientHint not set on live-row reject")
+	}
+	if cur.pendingMissionModal.rows[0].Dismissing {
+		t.Errorf("Dismissing flag set on live row")
+	}
+}
+
+// TestMissionModal_FollowupOpensSubstate — `f` on a parked row
+// switches the modal to follow-up mode with the target captured.
+func TestMissionModal_FollowupOpensSubstate(t *testing.T) {
+	state := newMissionModalState(fakeLiveviewWithParked(time.Now()))
+	state.selected = 1
+	tab := &tab{pendingMissionModal: state}
+	tab.dispatchMissionModalKey(keyOf("f"))
+	if state.mode != missionModeFollowup {
+		t.Errorf("mode = %v; want missionModeFollowup", state.mode)
+	}
+	if state.followupTarget != state.rows[1].SessionID {
+		t.Errorf("followupTarget = %q; want %q", state.followupTarget, state.rows[1].SessionID)
+	}
+}
+
+// TestMissionModal_FollowupRejectsLiveRow — `f` on a non-parked row
+// surfaces the same hint as `d` and does not switch mode.
+func TestMissionModal_FollowupRejectsLiveRow(t *testing.T) {
+	state := newMissionModalState(fakeLiveviewWithParked(time.Now()))
+	state.selected = 0
+	tab := &tab{pendingMissionModal: state}
+	tab.dispatchMissionModalKey(keyOf("f"))
+	if state.mode == missionModeFollowup {
+		t.Errorf("mode flipped to follow-up on live row")
+	}
+	if state.transientHint == "" {
+		t.Errorf("hint not surfaced on live-row reject")
+	}
+}
+
+// TestMissionModal_FollowupEnterDispatches — typing chars + Enter
+// submits /notify_subagent with the captured target and the buffer.
+func TestMissionModal_FollowupEnterDispatches(t *testing.T) {
+	m, submitted := newTestModel(t)
+	cur := m.currentTab()
+	cur.sidebarStatus = fakeLiveviewWithParked(time.Now())
+	cur.pendingMissionModal = newMissionModalState(cur.sidebarStatus)
+	cur.pendingMissionModal.selected = 1
+	wantID := cur.pendingMissionModal.rows[1].SessionID
+
+	cur.dispatchMissionModalKey(keyOf("f"))
+	for _, r := range "hello" {
+		cur.dispatchMissionModalKey(keyOf(string(r)))
+	}
+	cur.dispatchMissionModalKey(keyOf("enter"))
+
+	got := submitted.Load()
+	if got == nil {
+		t.Fatalf("nothing submitted")
+	}
+	sc, ok := (*got).(*protocol.SlashCommand)
+	if !ok {
+		t.Fatalf("submitted %T; want SlashCommand", *got)
+	}
+	if sc.Payload.Name != "notify_subagent" {
+		t.Errorf("slash name = %q; want notify_subagent", sc.Payload.Name)
+	}
+	if len(sc.Payload.Args) < 2 || sc.Payload.Args[0] != wantID || sc.Payload.Args[1] != "hello" {
+		t.Errorf("args = %v; want [%q, \"hello\"]", sc.Payload.Args, wantID)
+	}
+	if cur.pendingMissionModal.mode != missionModeList {
+		t.Errorf("mode = %v; want list (exitFollowup after dispatch)", cur.pendingMissionModal.mode)
+	}
+}
+
+// TestMissionModal_FollowupEscReturns — esc in the follow-up
+// substate returns to the list without submitting.
+func TestMissionModal_FollowupEscReturns(t *testing.T) {
+	m, submitted := newTestModel(t)
+	cur := m.currentTab()
+	cur.sidebarStatus = fakeLiveviewWithParked(time.Now())
+	cur.pendingMissionModal = newMissionModalState(cur.sidebarStatus)
+	cur.pendingMissionModal.selected = 1
+
+	cur.dispatchMissionModalKey(keyOf("f"))
+	cur.dispatchMissionModalKey(keyOf("x"))
+	cur.dispatchMissionModalKey(keyOf("esc"))
+
+	if got := submitted.Load(); got != nil {
+		t.Errorf("submit fired on esc; got %T", *got)
+	}
+	if cur.pendingMissionModal == nil {
+		t.Fatalf("modal closed; want still open")
+	}
+	if cur.pendingMissionModal.mode != missionModeList {
+		t.Errorf("mode = %v; want list", cur.pendingMissionModal.mode)
+	}
+}
+
+// TestMissionModal_FollowupBackspaceTrims — backspace deletes one
+// rune from the buffer; ctrl+u clears it entirely.
+func TestMissionModal_FollowupBufferEdit(t *testing.T) {
+	state := newMissionModalState(fakeLiveviewWithParked(time.Now()))
+	state.selected = 1
+	tab := &tab{pendingMissionModal: state}
+	tab.dispatchMissionModalKey(keyOf("f"))
+	for _, r := range "abcde" {
+		tab.dispatchMissionModalKey(keyOf(string(r)))
+	}
+	if state.followupBuf != "abcde" {
+		t.Fatalf("buf = %q; want abcde", state.followupBuf)
+	}
+	tab.dispatchMissionModalKey(keyOf("backspace"))
+	if state.followupBuf != "abcd" {
+		t.Errorf("backspace: buf = %q; want abcd", state.followupBuf)
+	}
+	tab.dispatchMissionModalKey(tea.KeyMsg{Type: tea.KeyCtrlU})
+	if state.followupBuf != "" {
+		t.Errorf("ctrl+u: buf = %q; want empty", state.followupBuf)
+	}
+}
+
+// TestMissionModal_FollowupTargetVanishedExits — when the parked
+// child terminates while the operator is mid-typing, the rebuild
+// path drops the substate back to list with a hint.
+func TestMissionModal_FollowupTargetVanishedExits(t *testing.T) {
+	state := newMissionModalState(fakeLiveviewWithParked(time.Now()))
+	state.selected = 1
+	tab := &tab{pendingMissionModal: state}
+	tab.dispatchMissionModalKey(keyOf("f"))
+	tab.dispatchMissionModalKey(keyOf("a"))
+	if state.mode != missionModeFollowup {
+		t.Fatalf("follow-up not entered")
+	}
+	// Rebuild from a projection that drops the parked child.
+	survivors := &liveviewStatus{
+		SessionID: "root-aaaaaa01",
+		Depth:     0,
+		Children:  map[string]*liveviewStatus{},
+		ChildMeta: map[string]childMetaEntry{},
+	}
+	survivors.Children[state.rows[0].SessionID] = &liveviewStatus{
+		SessionID: state.rows[0].SessionID, Depth: 1, LifecycleState: protocol.SessionStatusActive,
+	}
+	survivors.ChildMeta[state.rows[0].SessionID] = childMetaEntry{Role: "data-analyst", Task: "goal A"}
+	state.rebuild(survivors)
+	if state.mode != missionModeList {
+		t.Errorf("mode = %v; want list after target vanished", state.mode)
+	}
+	if state.transientHint == "" {
+		t.Errorf("hint not surfaced after follow-up target vanished")
+	}
 }
 

@@ -128,6 +128,14 @@ func (v *sessionView) foldOwnFrame(f protocol.Frame) bool {
 	case *protocol.SessionStatus:
 		if v.lifecycleState != fr.Payload.State {
 			v.lifecycleState = fr.Payload.State
+			// Phase 5.2 ζ — stamp parkedAt on entry to
+			// awaiting_dismissal so the TUI modal renders an
+			// age counter; clear on any other transition.
+			if fr.Payload.State == protocol.SessionStatusAwaitingDismissal {
+				v.parkedAt = time.Now().UTC()
+			} else {
+				v.parkedAt = time.Time{}
+			}
 			return true
 		}
 		// Pending inquiry / last tool call may travel embedded
@@ -305,6 +313,9 @@ func (v *sessionView) emitStatus() {
 	}
 	if v.lifecycleState != "" {
 		payload["lifecycle_state"] = v.lifecycleState
+	}
+	if !v.parkedAt.IsZero() {
+		payload["parked_at"] = v.parkedAt
 	}
 	if v.lastTool != nil {
 		payload["last_tool_call"] = v.lastTool

@@ -21,6 +21,10 @@ type liveviewStatus struct {
 	SessionID      string                      `json:"session_id"`
 	Depth          int                         `json:"depth"`
 	LifecycleState string                      `json:"lifecycle_state,omitempty"`
+	// ParkedAt is the timestamp the session entered
+	// awaiting_dismissal. Cleared on the next lifecycle transition.
+	// Phase 5.2 ζ — drives the "⏸ parked Xs" badge in /mission.
+	ParkedAt       time.Time                   `json:"parked_at,omitempty"`
 	LastToolCall   *protocol.ToolCallRef       `json:"last_tool_call,omitempty"`
 	PendingInquiry *protocol.PendingInquiryRef `json:"pending_inquiry,omitempty"`
 	RecentActivity []protocol.ToolCallRef      `json:"recent_activity,omitempty"`

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
 // missionRow is a snapshot of one in-flight mission as displayed in
@@ -22,13 +24,45 @@ type missionRow struct {
 	// runtime's SubagentResult cascade; the row stays in the modal
 	// during that gap rendered as "⊘ cancelling…".
 	Cancelling bool
+	// Parked is true when the child sits in awaiting_dismissal.
+	// Only parked rows accept `d` (dismiss) and `f` (follow-up).
+	// Phase 5.2 ζ.
+	Parked bool
+	// ParkedAt mirrors liveviewStatus.ParkedAt so the modal can
+	// render "⏸ parked Xs". Zero when not parked.
+	ParkedAt time.Time
+	// Dismissing flips true between the operator's `d` and the
+	// runtime's teardown of a parked child — same role as
+	// Cancelling but rendered as "✓ dismissing…" so the operator
+	// can tell the two operations apart. Phase 5.2 ζ.
+	Dismissing bool
 }
+
+// missionModalMode discriminates the modal's current input layer:
+// the default "list" mode shows the rows + key hints; "followup"
+// is the text-input substate the `f` key enters on a parked row.
+// Phase 5.2 ζ.
+type missionModalMode int
+
+const (
+	missionModeList missionModalMode = iota
+	missionModeFollowup
+)
 
 // missionModalState carries everything the modal needs to render +
 // dispatch. Lives on tab; mirrors the inquiry-modal pattern.
 type missionModalState struct {
 	rows     []missionRow
 	selected int
+	// Phase 5.2 ζ — follow-up text-input substate.
+	mode           missionModalMode
+	followupTarget string // session_id captured at mode entry
+	followupRole   string // role of target — surfaced in the prompt
+	followupBuf    string // current text typed by the operator
+	// transientHint surfaces a row-level reject ("only parked
+	// missions accept dismiss/follow-up") for one render cycle.
+	// Cleared on the next valid key. Phase 5.2 ζ.
+	transientHint string
 }
 
 // snapshotMissions builds the row list from the current liveview
@@ -52,12 +86,15 @@ func snapshotMissions(s *liveviewStatus) []missionRow {
 			continue
 		}
 		meta := s.ChildMeta[id]
+		parked := c.LifecycleState == protocol.SessionStatusAwaitingDismissal
 		out = append(out, missionRow{
 			SessionID: id,
 			Tier:      shortTierLabel(c.Depth),
 			Role:      meta.Role,
 			Goal:      strings.TrimSpace(meta.Task),
 			StartedAt: meta.StartedAt,
+			Parked:    parked,
+			ParkedAt:  c.ParkedAt,
 		})
 	}
 	return out
@@ -83,8 +120,13 @@ func renderMissionModal(state *missionModalState, width int) string {
 		contentW = 20
 	}
 
+	// Phase 5.2 ζ — follow-up substate hijacks the body entirely.
+	if state.mode == missionModeFollowup {
+		return renderFollowupSubstate(state, width, contentW)
+	}
+
 	var sb strings.Builder
-	sb.WriteString(missionTitleStyle.Render("Cancel a mission"))
+	sb.WriteString(missionTitleStyle.Render("Manage missions"))
 	sb.WriteString("\n\n")
 
 	if len(state.rows) == 0 {
@@ -108,15 +150,20 @@ func renderMissionModal(state *missionModalState, width int) string {
 			goal = "(no goal recorded)"
 		}
 		age := ""
-		if !r.StartedAt.IsZero() {
+		switch {
+		case r.Parked && !r.ParkedAt.IsZero():
+			age = " · " + missionParkedStyle.Render("⏸ parked "+ageString(r.ParkedAt))
+		case r.Parked:
+			age = " · " + missionParkedStyle.Render("⏸ parked")
+		case !r.StartedAt.IsZero():
 			age = " · " + ageString(r.StartedAt)
 		}
 		body := fmt.Sprintf("%s · %q%s", label, goal, age)
-		// "⊘ cancelling…" replaces the body for rows the operator
-		// already cancelled but whose SubagentResult hasn't
-		// cascaded in yet.
-		if r.Cancelling {
+		switch {
+		case r.Cancelling:
 			body = fmt.Sprintf("%s · ⊘ cancelling…", label)
+		case r.Dismissing:
+			body = fmt.Sprintf("%s · ✓ dismissing…", label)
 		}
 		line := fmt.Sprintf("%s%s  %s", leader, shortID(r.SessionID), body)
 		style := missionRowStyle
@@ -127,9 +174,36 @@ func renderMissionModal(state *missionModalState, width int) string {
 		sb.WriteString("\n")
 	}
 	sb.WriteString("\n")
+	if state.transientHint != "" {
+		sb.WriteString(missionFaintStyle.Render(state.transientHint))
+		sb.WriteString("\n")
+	}
 	sb.WriteString(missionHintStyle.Render(
-		"[j/k] select  [c/Enter] cancel  [Shift+C] cancel all  [esc] dismiss"))
+		"[j/k] select  [c/Enter] cancel  [d] dismiss parked  [f] follow up  [Shift+C] cancel all  [esc] dismiss"))
 
+	return missionBoxStyle.Width(width - 2).Render(sb.String())
+}
+
+// renderFollowupSubstate draws the small "type the directive" panel
+// the modal switches to when `f` is pressed on a parked row. The
+// operator types text; Enter submits, Esc returns to the row list.
+// Phase 5.2 ζ.
+func renderFollowupSubstate(state *missionModalState, width, contentW int) string {
+	var sb strings.Builder
+	sb.WriteString(missionTitleStyle.Render("Follow-up directive"))
+	sb.WriteString("\n\n")
+	label := "parked mission"
+	if state.followupRole != "" {
+		label = "parked " + state.followupRole
+	}
+	header := fmt.Sprintf("%s · %s", shortID(state.followupTarget), label)
+	sb.WriteString(missionFaintStyle.Render(truncate(header, contentW)))
+	sb.WriteString("\n\n")
+	// Show the buffer with a trailing cursor block.
+	body := state.followupBuf + "▌"
+	sb.WriteString(missionFollowupInputStyle.Render(truncate(body, contentW)))
+	sb.WriteString("\n\n")
+	sb.WriteString(missionHintStyle.Render("[Enter] send  [esc] back  [ctrl+u] clear"))
 	return missionBoxStyle.Width(width - 2).Render(sb.String())
 }
 
@@ -170,6 +244,39 @@ func (s *missionModalState) markCancelling(idx int) {
 	s.rows[idx].Cancelling = true
 }
 
+// markDismissing is the dismiss counterpart of markCancelling.
+// Phase 5.2 ζ.
+func (s *missionModalState) markDismissing(idx int) {
+	if idx < 0 || idx >= len(s.rows) {
+		return
+	}
+	s.rows[idx].Dismissing = true
+}
+
+// enterFollowup transitions the modal into the follow-up text-input
+// substate, capturing the target id + role for the prompt header.
+// Phase 5.2 ζ.
+func (s *missionModalState) enterFollowup(idx int) {
+	if idx < 0 || idx >= len(s.rows) {
+		return
+	}
+	r := s.rows[idx]
+	s.mode = missionModeFollowup
+	s.followupTarget = r.SessionID
+	s.followupRole = r.Role
+	s.followupBuf = ""
+	s.transientHint = ""
+}
+
+// exitFollowup returns to the list view, discarding any typed
+// directive. Phase 5.2 ζ.
+func (s *missionModalState) exitFollowup() {
+	s.mode = missionModeList
+	s.followupTarget = ""
+	s.followupRole = ""
+	s.followupBuf = ""
+}
+
 // markAllCancelling flips Cancelling on every row — used by the
 // Shift+C action so the operator sees the modal flash through the
 // teardown collectively.
@@ -191,15 +298,22 @@ func (s *missionModalState) rebuild(live *liveviewStatus) {
 		return
 	}
 	cancelling := make(map[string]bool, len(s.rows))
+	dismissing := make(map[string]bool, len(s.rows))
 	for _, r := range s.rows {
 		if r.Cancelling {
 			cancelling[r.SessionID] = true
+		}
+		if r.Dismissing {
+			dismissing[r.SessionID] = true
 		}
 	}
 	fresh := snapshotMissions(live)
 	for i := range fresh {
 		if cancelling[fresh[i].SessionID] {
 			fresh[i].Cancelling = true
+		}
+		if dismissing[fresh[i].SessionID] {
+			fresh[i].Dismissing = true
 		}
 	}
 	s.rows = fresh
@@ -208,6 +322,23 @@ func (s *missionModalState) rebuild(live *liveviewStatus) {
 	}
 	if s.selected < 0 {
 		s.selected = 0
+	}
+	// Phase 5.2 ζ — if the follow-up target vanished from the
+	// rebuild (mission completed / dismissed in the meantime), bail
+	// out of the substate so the operator returns to the list
+	// rather than typing into a dead handle.
+	if s.mode == missionModeFollowup {
+		found := false
+		for _, r := range s.rows {
+			if r.SessionID == s.followupTarget {
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.exitFollowup()
+			s.transientHint = "follow-up target is gone — returned to list"
+		}
 	}
 }
 
@@ -230,4 +361,8 @@ var (
 	missionHintStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
 	missionRowStyle         = lipgloss.NewStyle()
 	missionRowSelectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
+	missionParkedStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
+	missionFollowupInputStyle = lipgloss.NewStyle().
+					Padding(0, 1).
+					Foreground(lipgloss.Color("15"))
 )
