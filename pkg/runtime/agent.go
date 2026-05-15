@@ -102,6 +102,8 @@ func RegisterBuiltinCommands(reg *session.CommandRegistry, logger *slog.Logger) 
 	}{
 		{"help", "list available commands", helpHandler(reg)},
 		{"cancel", "cancel the in-flight turn", cancelHandler()},
+		{"cancel_subagent", "cancel a running child mission: /cancel_subagent <session_id> [reason]", cancelSubagentHandler()},
+		{"cancel_all_subagents", "cancel every running child mission: /cancel_all_subagents [reason]", cancelAllSubagentsHandler()},
 		{"end", "close the current session", endHandler()},
 		{"model", "switch the model for this session: /model use <intent|provider/name>", modelHandler()},
 	}
@@ -140,6 +142,52 @@ func cancelHandler() session.CommandHandler {
 		c := protocol.NewCancel(env.Session.ID(), env.Author, reason)
 		c.Payload.Cascade = cascade
 		return []protocol.Frame{c}, nil
+	}
+}
+
+// cancelSubagentHandler implements `/cancel_subagent <id> [reason]`.
+// The operator-side counterpart of the model-callable
+// `session:subagent_cancel` tool. Phase 5.1c.cancel-ux.
+func cancelSubagentHandler() session.CommandHandler {
+	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
+		if len(args) < 1 {
+			return []protocol.Frame{
+				protocol.NewError(env.Session.ID(), env.AgentAuthor, "usage_error",
+					"usage: /cancel_subagent <session_id> [reason]", false),
+			}, nil
+		}
+		childID := args[0]
+		reason := "user_request"
+		if len(args) > 1 {
+			reason = joinArgs(args[1:])
+		}
+		if err := env.Session.RequestChildCancel(ctx, childID, reason); err != nil {
+			return []protocol.Frame{
+				protocol.NewError(env.Session.ID(), env.AgentAuthor, "cancel_failed", err.Error(), false),
+			}, nil
+		}
+		return []protocol.Frame{
+			protocol.NewSystemMarker(env.Session.ID(), env.AgentAuthor, "subagent_cancel_requested",
+				map[string]any{"session_id": childID, "reason": reason}),
+		}, nil
+	}
+}
+
+// cancelAllSubagentsHandler implements `/cancel_all_subagents [reason]`.
+// Fans out RequestChildCancel against every direct child. Phase
+// 5.1c.cancel-ux — used by the `/mission` modal's Shift+C action and
+// the Esc-Esc panic-cancel gesture.
+func cancelAllSubagentsHandler() session.CommandHandler {
+	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
+		reason := "user_request"
+		if len(args) > 0 {
+			reason = joinArgs(args)
+		}
+		ids := env.Session.RequestAllChildrenCancel(ctx, reason)
+		return []protocol.Frame{
+			protocol.NewSystemMarker(env.Session.ID(), env.AgentAuthor, "subagent_cancel_all_requested",
+				map[string]any{"session_ids": ids, "count": len(ids), "reason": reason}),
+		}, nil
 	}
 }
 

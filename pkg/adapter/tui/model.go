@@ -87,6 +87,18 @@ type model struct {
 	// because the tab is already in the list, the pump's first
 	// Send is guaranteed to find a matching tab. Nil in tests.
 	startPump func(sessionID string, sub <-chan protocol.Frame)
+
+	// Phase 5.1c.cancel-ux — Esc-Esc panic-cancel tracker.
+	// Stamped on every Esc keypress that did NOT dismiss a modal;
+	// reset on any non-Esc key OR on modal dismissal so the next
+	// gesture starts clean. `now` is injectable for tests via the
+	// nowFn field below.
+	lastEscAt time.Time
+
+	// nowFn returns the current wall clock; defaults to time.Now.
+	// Tests substitute a controlled clock to exercise the
+	// double-Esc window deterministically.
+	nowFn func() time.Time
 }
 
 // statsResultMsg is the async reply from a sampleStats Cmd.
@@ -109,6 +121,14 @@ type tickStatsMsg struct{}
 // the operator sees the counter move during sustained activity.
 const statsTickInterval = 5 * time.Second
 
+// escDoubleWindow is the maximum gap between two Esc presses that
+// still counts as a panic-cancel gesture. 800ms is the spec's
+// pick — tight enough that an operator dismissing a modal then
+// resuming typing does not accidentally arm, loose enough that
+// the gesture survives a half-second hesitation. Phase
+// 5.1c.cancel-ux.
+const escDoubleWindow = 800 * time.Millisecond
+
 // newModel constructs a model with one initial tab. submit closure
 // is shared across all tabs (the runtime routes by frame.SessionID).
 func newModel(sessionID string, u protocol.ParticipantInfo, submit func(protocol.Frame) error, logger *slog.Logger) model {
@@ -118,7 +138,18 @@ func newModel(sessionID string, u protocol.ParticipantInfo, submit func(protocol
 		logger: logger,
 		tabs:   []*tab{first},
 		active: 0,
+		nowFn:  time.Now,
 	}
+}
+
+// now returns the current time via nowFn (test seam) with a
+// time.Now fallback for callers that constructed the model with
+// the zero value.
+func (m *model) now() time.Time {
+	if m.nowFn == nil {
+		return time.Now()
+	}
+	return m.nowFn()
 }
 
 func (m model) Init() tea.Cmd {
@@ -303,6 +334,30 @@ func (m model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// Phase 5.1c.cancel-ux — Esc-Esc panic-cancel. Only arms when
+	// neither modal is up on the current tab (single Esc dismisses
+	// modals via the tab dispatcher). The tracker resets on any
+	// non-Esc key OR on modal-dismissing Esc so accidental sequences
+	// (Esc-dismiss, then Esc) do not fire.
+	if k.String() == "esc" {
+		if cur.pendingInquiry != nil || cur.pendingMissionModal != nil {
+			// Esc consumed by a modal dismiss — clear any prior
+			// stamp so the next Esc starts a fresh window.
+			m.lastEscAt = time.Time{}
+			_, cmd := cur.updateKey(k)
+			return m, cmd
+		}
+		now := m.now()
+		if !m.lastEscAt.IsZero() && now.Sub(m.lastEscAt) <= escDoubleWindow {
+			m.lastEscAt = time.Time{}
+			cur.firePanicCancel()
+			return m, nil
+		}
+		m.lastEscAt = now
+		_, cmd := cur.updateKey(k)
+		return m, cmd
+	}
+	m.lastEscAt = time.Time{}
 	_, cmd := cur.updateKey(k)
 	return m, cmd
 }

@@ -45,6 +45,12 @@ type tab struct {
 	// Slice 3 modal state (per-tab — only one inquiry per session).
 	pendingInquiry *inquiryState
 
+	// Phase 5.1c.cancel-ux — `/mission` modal state (per-tab; the
+	// list is rooted at this tab's root). Nil when no modal is up.
+	// Mutually exclusive with pendingInquiry — opening `/mission`
+	// while an inquiry is pending is suppressed.
+	pendingMissionModal *missionModalState
+
 	// Slice 4 — dirty flips true when a frame lands on this tab
 	// while it is NOT focused. Cleared when the tab takes focus.
 	// Drives the tab-bar activity marker.
@@ -258,6 +264,11 @@ func (t *tab) historyNext() bool {
 // — closing flips so the SessionClosed echo removes the tab; the
 // typed-command path and the keyboard shortcut converge on the
 // same close-and-quit flow.
+//
+// `/mission` is intercepted by updateKey() before reaching this
+// path; we still handle the explicit args case (`/mission foo`)
+// by passing through to the registry as a normal slash command —
+// the modal-only intent is a bare `/mission`.
 func (t *tab) dispatchUserInput(text string) error {
 	var f protocol.Frame
 	if console.IsSlashCommand(text) {
@@ -271,6 +282,83 @@ func (t *tab) dispatchUserInput(text string) error {
 		f = protocol.NewUserMessage(t.sessionID, t.user, text)
 	}
 	return t.submit(f)
+}
+
+// dispatchMissionModalKey routes a keypress while the `/mission`
+// modal is open. Returns handled=true when the key produced a modal
+// action; false when it should fall through to default textarea
+// handling. Phase 5.1c.cancel-ux.
+func (t *tab) dispatchMissionModalKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
+	state := t.pendingMissionModal
+	switch k.String() {
+	case "j", "down":
+		state.moveSelection(1)
+		return true, nil
+	case "k", "up":
+		state.moveSelection(-1)
+		return true, nil
+	case "c", "enter":
+		row, ok := state.selectedRow()
+		if !ok {
+			// Empty list — `c` is a no-op; operator must dismiss.
+			return true, nil
+		}
+		state.markCancelling(state.selected)
+		text := fmt.Sprintf("/cancel_subagent %s /mission", row.SessionID)
+		if err := t.submit(protocol.NewSlashCommand(t.sessionID, t.user,
+			"cancel_subagent", []string{row.SessionID, "/mission"}, text)); err != nil {
+			t.bannerError = err.Error()
+		}
+		return true, nil
+	case "C", "shift+c":
+		if len(state.rows) == 0 {
+			return true, nil
+		}
+		state.markAllCancelling()
+		text := "/cancel_all_subagents /mission_all"
+		if err := t.submit(protocol.NewSlashCommand(t.sessionID, t.user,
+			"cancel_all_subagents", []string{"/mission_all"}, text)); err != nil {
+			t.bannerError = err.Error()
+		}
+		// Close the modal after dispatching cancel-all — the
+		// operator's intent is unambiguous and the sidebar's
+		// recentChildren trail will show the teardown.
+		t.pendingMissionModal = nil
+		return true, nil
+	case "esc":
+		t.pendingMissionModal = nil
+		return true, nil
+	}
+	return false, nil
+}
+
+// openMissionModal builds the modal state from the tab's current
+// sidebar projection and flips it on. No-op when an inquiry modal
+// is already up — the operator must answer the inquiry first.
+func (t *tab) openMissionModal() {
+	if t.pendingInquiry != nil {
+		t.statusLine = "inquiry pending — answer first"
+		return
+	}
+	t.pendingMissionModal = newMissionModalState(t.sidebarStatus)
+}
+
+// firePanicCancel dispatches `/cancel_all_subagents panic_cancel`
+// when this tab has at least one in-flight mission. Otherwise
+// flashes a status hint so the operator does not think the
+// gesture dropped silently. Phase 5.1c.cancel-ux — Esc-Esc path.
+func (t *tab) firePanicCancel() {
+	if t.sidebarStatus == nil || len(t.sidebarStatus.Children) == 0 {
+		t.statusLine = "no missions to cancel"
+		return
+	}
+	text := "/cancel_all_subagents panic_cancel"
+	if err := t.submit(protocol.NewSlashCommand(t.sessionID, t.user,
+		"cancel_all_subagents", []string{"panic_cancel"}, text)); err != nil {
+		t.bannerError = err.Error()
+		return
+	}
+	t.statusLine = "panic_cancel dispatched"
 }
 
 // dispatchInquiryKey handles keypresses while a HITL inquiry modal
@@ -374,6 +462,16 @@ func (t *tab) updateKey(msg tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 		t.textarea, taCmd = t.textarea.Update(msg)
 		return true, taCmd
 	}
+	if t.pendingMissionModal != nil {
+		h, c := t.dispatchMissionModalKey(msg)
+		if h {
+			return true, c
+		}
+		// Default: swallow other keys while the modal is up; the
+		// operator should see static state until they pick or
+		// dismiss.
+		return true, nil
+	}
 	switch msg.String() {
 	case "pgup", "pgdown", "home", "end":
 		var vpCmd tea.Cmd
@@ -421,6 +519,17 @@ func (t *tab) updateKey(msg tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 	case "enter":
 		text := strings.TrimSpace(t.textarea.Value())
 		if text == "" {
+			return true, nil
+		}
+		// Phase 5.1c.cancel-ux — bare `/mission` opens the modal
+		// instead of submitting a SlashCommand. Explicit-arg forms
+		// (`/mission foo`) fall through to the registry path so
+		// operators can still invoke the literal command if a
+		// future build adds args to it.
+		if strings.EqualFold(text, "/mission") {
+			t.textarea.Reset()
+			t.appendHistory(text)
+			t.openMissionModal()
 			return true, nil
 		}
 		t.textarea.Reset()
@@ -487,6 +596,14 @@ func (t *tab) renderBody(chatWidth, totalWidth int, sidebarShown bool) string {
 			bottom = lipgloss.JoinVertical(lipgloss.Left, modal, t.textarea.View())
 		}
 		return lipgloss.JoinVertical(lipgloss.Left, top, bottom, t.renderFooter(totalWidth))
+	}
+	if t.pendingMissionModal != nil {
+		modalW := chatWidth
+		if modalW < 40 {
+			modalW = 40
+		}
+		modal := renderMissionModal(t.pendingMissionModal, modalW)
+		return lipgloss.JoinVertical(lipgloss.Left, top, modal, t.renderFooter(totalWidth))
 	}
 	return lipgloss.JoinVertical(lipgloss.Left,
 		top, t.textarea.View(), t.renderFooter(totalWidth))
