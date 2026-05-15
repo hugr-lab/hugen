@@ -243,13 +243,14 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 		return fmt.Errorf("tui: program: %w", err)
 	}
 
-	// Wait for the session goroutine to fully exit so the caller's
-	// deferred runtime.Shutdown does not race rootCancel against an
-	// in-flight emit. Mirrors the console adapter's EOF / /end path.
-	select {
-	case <-a.initial.Done():
-	case <-ctx.Done():
-	}
+	// Note: an earlier version waited on a.initial.Done() here to
+	// drain in-flight emits before the caller's deferred
+	// runtime.Shutdown. The teardown-race fix in `1d0e5c2`
+	// (dispatchExtensionClosers on every path + pump on
+	// childWG.Go) made that wait redundant. Critically, blocking
+	// here would also deadlock the Ctrl+C-quit flow: that path
+	// intentionally leaves the session in `active` state so the
+	// next start can resume it — Done() never fires.
 	return nil
 }
 

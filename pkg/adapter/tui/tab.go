@@ -253,10 +253,19 @@ func (t *tab) historyNext() bool {
 // Slash commands become SlashCommand frames; plain text becomes
 // UserMessage. The submit closure addresses the frame at this
 // tab's sessionID.
+//
+// `/end` is recognised as a terminate gesture identical to Ctrl+W
+// — closing flips so the SessionClosed echo removes the tab; the
+// typed-command path and the keyboard shortcut converge on the
+// same close-and-quit flow.
 func (t *tab) dispatchUserInput(text string) error {
 	var f protocol.Frame
 	if console.IsSlashCommand(text) {
 		pc := console.ParseSlashCommand(text)
+		if pc.Name == "end" {
+			t.statusLine = "closing…"
+			t.closing = true
+		}
 		f = protocol.NewSlashCommand(t.sessionID, t.user, pc.Name, pc.Args, pc.Raw)
 	} else {
 		f = protocol.NewUserMessage(t.sessionID, t.user, text)
@@ -370,7 +379,19 @@ func (t *tab) updateKey(msg tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 		var vpCmd tea.Cmd
 		t.viewport, vpCmd = t.viewport.Update(msg)
 		return true, vpCmd
-	case "ctrl+c", "ctrl+d", "ctrl+w":
+	case "ctrl+c", "ctrl+d":
+		// "Quit TUI" — does NOT terminate the session. The runtime
+		// goroutine teardown via Manager.Stop's rootCancel is a
+		// graceful path: status column stays "active", events
+		// remain queryable, and `tryFindResumableSession` will
+		// pick the session up on the next start. /end is for
+		// "I'm done with this conversation, terminate it" —
+		// reserved for Ctrl+W below and the typed `/end` command.
+		return true, tea.Quit
+	case "ctrl+w":
+		// Operator wants this tab closed AND its session
+		// terminated. Submit /end + set closing so the
+		// SessionClosed echo removes the tab (last tab → quit).
 		t.statusLine = "closing…"
 		t.closing = true
 		cmd := protocol.NewSlashCommand(t.sessionID, t.user, "end", nil, "/end")

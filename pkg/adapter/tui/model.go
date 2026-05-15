@@ -255,6 +255,23 @@ func (m model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case "alt+1", "alt+2", "alt+3", "alt+4", "alt+5",
+		"alt+6", "alt+7", "alt+8", "alt+9":
+		// Direct 1-indexed switch. Alt is chosen over Ctrl
+		// because Ctrl+N is reserved by VS Code's terminal for
+		// its own tab switching; Alt+N stays portable across
+		// Terminal.app / iTerm / Alacritty / Kitty / VS Code
+		// integrated terminal. Out-of-range targets (e.g. Alt+9
+		// with 3 tabs open) are no-ops so accidental presses
+		// don't surprise the operator.
+		idx := int(k.String()[len(k.String())-1] - '1') // '1' → 0, '9' → 8
+		if idx >= 0 && idx < len(m.tabs) {
+			m.active = idx
+			if cur := m.currentTab(); cur != nil {
+				cur.dirty = false
+			}
+		}
+		return m, nil
 	}
 	cur := m.currentTab()
 	if cur == nil {

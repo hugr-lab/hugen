@@ -48,15 +48,27 @@ var (
 
 // ReportStatus implements [extension.StatusReporter]. Returns the
 // sorted list of skills currently loaded into the calling session
-// as `{"loaded": [names...]}` JSON. Phase 5.1b — consumed by
-// liveview when it assembles its emit payload.
+// plus the count of tools visible at the moment. Wire shape:
+//
+//	{"loaded": [names...], "tools": N}
+//
+// Phase 5.1b shape (`loaded` only) is preserved for older consumers;
+// `tools` is additive and optional. The tool count is computed via
+// ToolManager.Snapshot which honours per-skill allowed-tools
+// narrowing — what the model would actually see this turn.
 func (e *Extension) ReportStatus(ctx context.Context, state extension.SessionState) json.RawMessage {
 	h := FromState(state)
 	if h == nil {
 		return nil
 	}
 	names := h.LoadedNames(ctx)
-	data, err := json.Marshal(map[string]any{"loaded": names})
+	body := map[string]any{"loaded": names}
+	if tm := state.Tools(); tm != nil {
+		if snap, err := tm.Snapshot(ctx, state.SessionID()); err == nil {
+			body["tools"] = len(snap.Tools)
+		}
+	}
+	data, err := json.Marshal(body)
 	if err != nil {
 		return nil
 	}

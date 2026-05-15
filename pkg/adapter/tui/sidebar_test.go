@@ -73,7 +73,7 @@ func TestRenderSidebar_HappyPathContainsExpectedSections(t *testing.T) {
 		LifecycleState: "wait_subagents",
 		LastToolCall:   &protocol.ToolCallRef{Name: "hugr.execute_query", StartedAt: time.Now().Add(-5 * time.Second)},
 		Extensions: map[string]json.RawMessage{
-			"skill":   json.RawMessage(`{"loaded":["_root","_skill_builder"]}`),
+			"skill":   json.RawMessage(`{"loaded":["_root","_skill_builder"],"tools":12}`),
 			"plan":    json.RawMessage(`{"Active":true,"Text":"Investigate","CurrentStep":"Explore","Comments":[{},{}]}`),
 			"notepad": json.RawMessage(`{"recent":[{"id":"n1","category":"schema-finding"}],"counts":{"schema-finding":12,"chat-answer":1}}`),
 		},
@@ -82,7 +82,12 @@ func TestRenderSidebar_HappyPathContainsExpectedSections(t *testing.T) {
 		},
 	}
 	out := renderSidebar(s, 36)
-	for _, want := range []string{"Tier: root", "wait_subagents", "Subagents", "mission", "Last tool", "hugr.execute_query", "Plan", "Explore", "Notepad", "schema-finding", "Skills"} {
+	for _, want := range []string{
+		"Tier: root", "wait_subagents", "Subagents", "mission",
+		"Last tool", "hugr.execute_query", "Plan", "Explore",
+		"Notepad", "schema-finding",
+		"Skills", "_root", "_skill_builder", "12 tools",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("sidebar missing %q in:\n%s", want, out)
 		}

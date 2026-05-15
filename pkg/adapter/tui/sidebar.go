@@ -98,14 +98,22 @@ func renderSidebar(s *liveviewStatus, width int) string {
 		sb.WriteString(renderNotepad(buckets, width))
 	}
 
-	// Loaded skills — terse one-liner of count, full list in
-	// expanded panel (slice 6).
-	if skills := parseSkillNames(s.Extensions); len(skills) > 0 {
+	// Loaded skills — list names + tool count. Names are sorted
+	// server-side by the skill extension; sidebar prints them
+	// verbatim, one per line, truncated to width. Tool count
+	// (when present in the payload) is shown next to the heading.
+	if skills, toolsCount := parseSkillStatus(s.Extensions); len(skills) > 0 {
 		sb.WriteString("\n")
-		sb.WriteString(styleSidebarHeading.Render("Skills"))
+		heading := fmt.Sprintf("Skills · %d", len(skills))
+		if toolsCount > 0 {
+			heading += fmt.Sprintf(" · %d tools", toolsCount)
+		}
+		sb.WriteString(styleSidebarHeading.Render(heading))
 		sb.WriteString("\n")
-		sb.WriteString(styleSidebarFaint.Render(fmt.Sprintf("%d loaded", len(skills))))
-		sb.WriteString("\n")
+		for _, name := range skills {
+			sb.WriteString(styleSidebarFaint.Render(truncate("  "+name, width)))
+			sb.WriteString("\n")
+		}
 	}
 
 	return sb.String()
@@ -258,18 +266,23 @@ func renderNotepad(buckets []categoryCount, width int) string {
 	return sb.String()
 }
 
-func parseSkillNames(exts map[string]json.RawMessage) []string {
+// parseSkillStatus pulls the skill extension's liveview payload
+// (loaded skill names + total tool count). Phase 5.1c followup —
+// the `tools` field is optional; consumers that only see the
+// 5.1b shape get tools=0 and render just the skill list.
+func parseSkillStatus(exts map[string]json.RawMessage) (skills []string, tools int) {
 	raw, ok := exts["skill"]
 	if !ok {
-		return nil
+		return nil, 0
 	}
 	var s struct {
 		Loaded []string `json:"loaded"`
+		Tools  int      `json:"tools"`
 	}
 	if err := json.Unmarshal(raw, &s); err != nil {
-		return nil
+		return nil, 0
 	}
-	return s.Loaded
+	return s.Loaded, s.Tools
 }
 
 func sortedChildren(m map[string]*liveviewStatus) []*liveviewStatus {

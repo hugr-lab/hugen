@@ -77,21 +77,40 @@ func TestModel_ErrorFrame_SetsBanner(t *testing.T) {
 	}
 }
 
-func TestModel_CtrlC_SubmitsEndAndEntersClosing(t *testing.T) {
+// TestModel_CtrlC_QuitsWithoutEnd is the resume-friendly behavior:
+// Ctrl+C tea.Quits immediately and does NOT submit /end. The
+// runtime keeps the session active (graceful Manager.Stop), so
+// `tryFindResumableSession` on the next start can resume it.
+func TestModel_CtrlC_QuitsWithoutEnd(t *testing.T) {
 	m, submitted := newTestModel(t)
 	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	m = m2.(model)
+	if cmd == nil {
+		t.Fatalf("Ctrl+C must return a tea.Cmd (tea.Quit); got nil")
+	}
+	if m.currentTab().closing {
+		t.Fatalf("Ctrl+C must NOT set closing — the session stays active for resume")
+	}
+	if got := submitted.Load(); got != nil {
+		t.Fatalf("Ctrl+C must NOT submit any frame; got %T", *got)
+	}
+}
+
+// TestModel_CtrlW_SubmitsEndAndEntersClosing keeps the explicit-
+// terminate path: Ctrl+W is the "close THIS conversation" gesture.
+func TestModel_CtrlW_SubmitsEndAndEntersClosing(t *testing.T) {
+	m, submitted := newTestModel(t)
+	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlW})
+	m = m2.(model)
 	if !m.currentTab().closing {
-		t.Fatalf("Ctrl+C must transition model into closing state")
+		t.Fatalf("Ctrl+W must transition the tab into closing state")
 	}
 	if cmd != nil {
-		// Ctrl+C path should return nil cmd; tea.Quit only fires on
-		// SessionClosed echo (see TestModel_SessionClosed_TriggersQuit).
-		t.Fatalf("Ctrl+C returned a tea.Cmd; expected nil — quit waits for SessionClosed")
+		t.Fatalf("Ctrl+W returned a tea.Cmd; expected nil — quit waits for SessionClosed")
 	}
 	got := submitted.Load()
 	if got == nil {
-		t.Fatalf("Ctrl+C did not submit any frame")
+		t.Fatalf("Ctrl+W did not submit any frame")
 	}
 	sc, ok := (*got).(*protocol.SlashCommand)
 	if !ok {
@@ -105,7 +124,7 @@ func TestModel_CtrlC_SubmitsEndAndEntersClosing(t *testing.T) {
 func TestModel_SessionClosed_TriggersQuit_OnlyWhenClosing(t *testing.T) {
 	m, _ := newTestModel(t)
 
-	// Unsolicited SessionClosed (no prior Ctrl+C) — must NOT quit.
+	// Unsolicited SessionClosed (no prior Ctrl+W) — must NOT quit.
 	m2, cmd := m.Update(frameMsg{frame: &protocol.SessionClosed{
 		Payload: protocol.SessionClosedPayload{Reason: "remote"},
 	}})
@@ -114,8 +133,9 @@ func TestModel_SessionClosed_TriggersQuit_OnlyWhenClosing(t *testing.T) {
 		t.Fatalf("SessionClosed without prior close-intent issued a tea.Cmd; expected nil")
 	}
 
-	// Now user initiates close — Ctrl+C — then SessionClosed quits.
-	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	// Now user initiates close via Ctrl+W (the explicit-terminate
+	// path) — then SessionClosed quits.
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlW})
 	m = m2.(model)
 	m2, cmd = m.Update(frameMsg{frame: &protocol.SessionClosed{
 		Payload: protocol.SessionClosedPayload{Reason: "user"},

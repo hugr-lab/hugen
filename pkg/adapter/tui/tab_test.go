@@ -54,6 +54,31 @@ func TestModel_AttachTab_StartsPumpWithSub(t *testing.T) {
 	}
 }
 
+// TestModel_AltNDirectSwitch covers the Alt+1..9 binding (added
+// because Ctrl+N collides with VS Code's terminal-tab switcher).
+func TestModel_AltNDirectSwitch(t *testing.T) {
+	m, _ := newTestModel(t)
+	// Add two more tabs → 3 total at indexes 0,1,2.
+	for i := 0; i < 2; i++ {
+		newT := newTab("sess-"+string(rune('A'+i)), m.user, m.tabs[0].submit, m.logger)
+		m2, _ := m.Update(attachTabMsg{t: newT})
+		m = m2.(model)
+	}
+	// Alt+2 should focus index 1 regardless of where active was.
+	m.active = 0
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}, Alt: true})
+	m = m2.(model)
+	if m.active != 1 {
+		t.Errorf("Alt+2 active = %d; want 1", m.active)
+	}
+	// Out-of-range: Alt+9 with only 3 tabs is a no-op.
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'9'}, Alt: true})
+	m = m2.(model)
+	if m.active != 1 {
+		t.Errorf("out-of-range Alt+9 must not move focus; active = %d", m.active)
+	}
+}
+
 // TestModel_AttachTab_NilSubSkipsPump confirms backward-compat
 // for tests that build attachTabMsg without a subscription
 // channel — the reducer just appends and skips startPump.
