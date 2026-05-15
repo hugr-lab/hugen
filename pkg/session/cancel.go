@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -11,6 +12,11 @@ import (
 // ErrCancelEmptyID is returned by RequestChildCancel when the caller
 // passes an empty session id.
 var ErrCancelEmptyID = errors.New("session: cancel: child id is required")
+
+// ErrChildNotParked is returned by RequestChildDismiss when the
+// target child is alive but not in awaiting_dismissal — operator
+// should use RequestChildCancel for still-running children.
+var ErrChildNotParked = errors.New("session: dismiss: child is not parked")
 
 // RequestChildCancel asks the named direct child to terminate
 // fast. Fire-and-forget — unlike the model-facing
@@ -107,4 +113,89 @@ func (s *Session) RequestAllChildrenCancel(ctx context.Context, reason string) [
 		}
 	}
 	return out
+}
+
+// RequestChildDismiss is the operator-side counterpart to the
+// model-callable `session:subagent_dismiss` tool. Tears down a
+// parked child via the standard SessionClose path with reason
+// `subagent_dismissed`. Phase 5.2 subagent-lifetime γ.
+//
+// Return values mirror RequestChildCancel:
+//   - (false, ErrCancelEmptyID) — empty childID.
+//   - (false, ErrChildNotParked) — child is alive but not in
+//     awaiting_dismissal; caller should use RequestChildCancel.
+//   - (false, nil) — id is not in the live children map (typo or
+//     already torn down). Slash handler surfaces a usage error.
+//   - (true, nil) — SessionClose dispatched; teardown observed
+//     via the standard SubagentResult projection.
+//   - (false, ctx.Err()) — caller's ctx fired mid-dispatch.
+func (s *Session) RequestChildDismiss(ctx context.Context, childID string) (bool, error) {
+	if strings.TrimSpace(childID) == "" {
+		return false, ErrCancelEmptyID
+	}
+	s.childMu.Lock()
+	child, live := s.children[childID]
+	s.childMu.Unlock()
+	if !live || child == nil || child.IsClosed() {
+		return false, nil
+	}
+	if !childIsParked(child) {
+		return false, ErrChildNotParked
+	}
+	closeFrame := protocol.NewSessionClose(child.id, s.agent.Participant(), dismissCloseReason)
+	settled := child.Submit(ctx, closeFrame)
+	select {
+	case <-settled:
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	return true, nil
+}
+
+// RequestChildNotify is the operator-side counterpart to the
+// model-callable `session:notify_subagent` tool. Delivers a
+// directive to a direct child with the same parked-vs-active
+// branching as the tool body: parked children get a synthetic
+// UserMessage (re-arm), active children get a SystemMessage
+// parent_note. Phase 5.2 subagent-lifetime γ.
+//
+// Returns (rearmed, err):
+//   - rearmed=true: child was parked, UserMessage delivered, turn
+//     loop will start on the child's next Run iteration.
+//   - rearmed=false, err=nil: child was active, parent_note
+//     delivered.
+//   - err non-nil: child not found, ctx cancelled, or empty id.
+func (s *Session) RequestChildNotify(ctx context.Context, childID, content string) (bool, error) {
+	if strings.TrimSpace(childID) == "" {
+		return false, ErrCancelEmptyID
+	}
+	if strings.TrimSpace(content) == "" {
+		return false, fmt.Errorf("session: notify: content is required")
+	}
+	s.childMu.Lock()
+	child, live := s.children[childID]
+	s.childMu.Unlock()
+	if !live || child == nil || child.IsClosed() {
+		return false, fmt.Errorf("session: notify: %w", ErrCancelEmptyID)
+	}
+	if childIsParked(child) {
+		userMsg := protocol.NewUserMessage(child.ID(), s.agent.Participant(), content)
+		settled := child.Submit(ctx, userMsg)
+		select {
+		case <-settled:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+		return true, nil
+	}
+	frame := protocol.NewSystemMessage(child.ID(), s.agent.Participant(),
+		protocol.SystemMessageParentNote, content)
+	frame.BaseFrame.FromSession = s.id
+	settled := child.Submit(ctx, frame)
+	select {
+	case <-settled:
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	return false, nil
 }

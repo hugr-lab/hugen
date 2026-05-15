@@ -9,16 +9,28 @@ import (
 )
 
 // notify_subagent — root / mission directs a focused note to a
-// direct child. The note rides KindSystemMessage with FromSession
-// == caller.id; the child's wait_subagents predicate (isParentNote)
-// or buffered drain renders it. Phase 5.1 § 3.4 / § 3.5.
+// direct child. Behaviour depends on the child's lifecycle state:
+//
+//   - Active / wait_* / idle child: the note rides KindSystemMessage
+//     with FromSession == caller.id; the child's wait_subagents
+//     predicate (isParentNote) or buffered drain renders it.
+//     Phase 5.1 § 3.4 / § 3.5.
+//   - awaiting_dismissal (parked) child: the note becomes a synthetic
+//     UserMessage authored by the parent agent. The child's Run loop
+//     reads it as the next user turn — startTurn allocates fresh
+//     turnState (budget reset) and the child re-enters its model
+//     loop. Phase 5.2 subagent-lifetime γ.
+//
+// Same tool, contract switches on state. The caller does not need
+// to know which mode applies — "deliver this directive" is the
+// instruction.
 
 const notifySubagentSchema = `{
   "type": "object",
   "properties": {
     "subagent_id": {"type": "string", "description": "Direct child session id. Must already be in the caller's children map."},
-    "content":     {"type": "string", "description": "Focused directive crafted by the caller. NOT raw user text — the caller is responsible for translating the user's intent into a child-actionable note."},
-    "urgent":      {"type": "boolean", "description": "Prepends '(urgent) ' to the content. No separate flag is carried on the frame."}
+    "content":     {"type": "string", "description": "Focused directive crafted by the caller. NOT raw user text — the caller is responsible for translating the user's intent into a child-actionable note. For parked children (awaiting_dismissal), this is delivered as a UserMessage that triggers a new turn loop."},
+    "urgent":      {"type": "boolean", "description": "Prepends '(urgent) ' to the content. No separate flag is carried on the frame. Honoured for both active and parked children."}
   },
   "required": ["subagent_id", "content"]
 }`
@@ -32,6 +44,11 @@ type notifySubagentInput struct {
 type notifySubagentOutput struct {
 	Delivered bool   `json:"delivered"`
 	FrameID   string `json:"frame_id"`
+	// Rearmed is set when the call re-armed a parked child (parked →
+	// active via synthetic UserMessage). Callers can render this as
+	// a UX hint ("mission resumed"); routing logic does not branch
+	// on it. Phase 5.2 γ.
+	Rearmed bool `json:"rearmed,omitempty"`
 }
 
 func (parent *Session) callNotifySubagent(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
@@ -70,6 +87,34 @@ func (parent *Session) callNotifySubagent(ctx context.Context, args json.RawMess
 	if in.Urgent {
 		content = "(urgent) " + content
 	}
+
+	// Phase 5.2 γ — parked-child re-arm path. UserMessage authored
+	// by the parent's agent participant. Child's routeInbound sees
+	// no active turn and calls startTurn, which allocates fresh
+	// turnState (per-invocation budget reset). The synthetic-
+	// UserMessage-as-agent pattern mirrors kickAsyncSummaryTurn
+	// from phase 5.1c.async-root; replay paths already filter
+	// these out of user-visible spans (see TUI replay.go).
+	if childIsParked(child) {
+		userMsg := protocol.NewUserMessage(child.ID(), parent.agent.Participant(), content)
+		settled := child.Submit(ctx, userMsg)
+		select {
+		case <-settled:
+		case <-ctx.Done():
+			return toolErr("cancelled",
+				fmt.Sprintf("notify_subagent aborted: %v", ctx.Err()))
+		}
+		if child.IsClosed() {
+			return toolErr("session_gone",
+				fmt.Sprintf("subagent %q terminated before the re-arm landed", in.SubagentID))
+		}
+		return json.Marshal(notifySubagentOutput{
+			Delivered: true,
+			FrameID:   userMsg.BaseFrame.ID,
+			Rearmed:   true,
+		})
+	}
+
 	frame := protocol.NewSystemMessage(child.ID(), parent.agent.Participant(),
 		protocol.SystemMessageParentNote, content)
 	// Author is parent's participant; FromSession carries parent's

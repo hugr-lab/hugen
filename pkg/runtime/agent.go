@@ -104,6 +104,8 @@ func RegisterBuiltinCommands(reg *session.CommandRegistry, logger *slog.Logger) 
 		{"cancel", "cancel the in-flight turn", cancelHandler()},
 		{"cancel_subagent", "cancel a running child mission: /cancel_subagent <session_id> [reason]", cancelSubagentHandler()},
 		{"cancel_all_subagents", "cancel every running child mission: /cancel_all_subagents [reason]", cancelAllSubagentsHandler()},
+		{"dismiss_subagent", "acknowledge a parked child and tear it down: /dismiss_subagent <session_id>", dismissSubagentHandler()},
+		{"notify_subagent", "deliver a directive to a child (re-arm if parked): /notify_subagent <session_id> <text...>", notifySubagentHandler()},
 		{"end", "close the current session", endHandler()},
 		{"model", "switch the model for this session: /model use <intent|provider/name>", modelHandler()},
 	}
@@ -187,6 +189,76 @@ func cancelSubagentHandler() session.CommandHandler {
 		return []protocol.Frame{
 			protocol.NewSystemMarker(env.Session.ID(), env.AgentAuthor, "subagent_cancel_requested",
 				map[string]any{"session_id": childID, "reason": reason}),
+		}, nil
+	}
+}
+
+// dismissSubagentHandler implements `/dismiss_subagent <id>`. The
+// operator-side counterpart of the model-callable
+// `session:subagent_dismiss` tool. Phase 5.2 subagent-lifetime γ.
+//
+// Strict on lifecycle state: a child that isn't parked returns
+// `not_parked` so the operator does not accidentally use dismiss
+// in place of cancel.
+func dismissSubagentHandler() session.CommandHandler {
+	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
+		if len(args) < 1 {
+			return []protocol.Frame{
+				protocol.NewError(env.Session.ID(), env.AgentAuthor, "usage_error",
+					"usage: /dismiss_subagent <session_id>", false),
+			}, nil
+		}
+		childID := args[0]
+		ok, err := env.Session.RequestChildDismiss(ctx, childID)
+		if err != nil {
+			code := "dismiss_failed"
+			switch {
+			case errors.Is(err, session.ErrCancelEmptyID):
+				code = "usage_error"
+			case errors.Is(err, session.ErrChildNotParked):
+				code = "not_parked"
+			}
+			return []protocol.Frame{
+				protocol.NewError(env.Session.ID(), env.AgentAuthor, code, err.Error(), false),
+			}, nil
+		}
+		if !ok {
+			return []protocol.Frame{
+				protocol.NewError(env.Session.ID(), env.AgentAuthor, "no_such_session",
+					fmt.Sprintf("no live child mission with id %q (already dismissed or typo?)", childID), false),
+			}, nil
+		}
+		return []protocol.Frame{
+			protocol.NewSystemMarker(env.Session.ID(), env.AgentAuthor, "subagent_dismiss_requested",
+				map[string]any{"session_id": childID}),
+		}, nil
+	}
+}
+
+// notifySubagentHandler implements `/notify_subagent <id> <text...>`.
+// The operator-side counterpart of the model-callable
+// `session:notify_subagent` tool. Behaviour follows the tool: parked
+// children get a re-arm UserMessage, active children get a
+// SystemMessage parent_note. Phase 5.2 subagent-lifetime γ.
+func notifySubagentHandler() session.CommandHandler {
+	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
+		if len(args) < 2 {
+			return []protocol.Frame{
+				protocol.NewError(env.Session.ID(), env.AgentAuthor, "usage_error",
+					"usage: /notify_subagent <session_id> <text...>", false),
+			}, nil
+		}
+		childID := args[0]
+		content := joinArgs(args[1:])
+		rearmed, err := env.Session.RequestChildNotify(ctx, childID, content)
+		if err != nil {
+			return []protocol.Frame{
+				protocol.NewError(env.Session.ID(), env.AgentAuthor, "notify_failed", err.Error(), false),
+			}, nil
+		}
+		return []protocol.Frame{
+			protocol.NewSystemMarker(env.Session.ID(), env.AgentAuthor, "subagent_notify_requested",
+				map[string]any{"session_id": childID, "rearmed": rearmed}),
 		}, nil
 	}
 }

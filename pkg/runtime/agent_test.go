@@ -64,7 +64,7 @@ func TestRegisterBuiltinCommands(t *testing.T) {
 	if err := RegisterBuiltinCommands(reg, nil); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	want := []string{"cancel", "cancel_all_subagents", "cancel_subagent", "end", "help", "model"}
+	want := []string{"cancel", "cancel_all_subagents", "cancel_subagent", "dismiss_subagent", "end", "help", "model", "notify_subagent"}
 	got := reg.Names()
 	if len(got) != len(want) {
 		t.Fatalf("expected %d commands, got %d (%v)", len(want), len(got), got)

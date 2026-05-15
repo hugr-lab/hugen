@@ -64,6 +64,13 @@ func (s *Session) initSubagent() {
 		ArgSchema:        json.RawMessage(subagentCancelSchema),
 		Handler:          s.callSubagentCancel,
 	}
+	s.sessionTools["subagent_dismiss"] = sessionToolDescriptor{
+		Name:             "subagent_dismiss",
+		Description:      "Acknowledge a parked sub-agent's result and tear it down. Only valid on children in awaiting_dismissal — use subagent_cancel for still-running children. Phase 5.2 subagent-lifetime.",
+		PermissionObject: permObjectSubagentDismiss,
+		ArgSchema:        json.RawMessage(subagentDismissSchema),
+		Handler:          s.callSubagentDismiss,
+	}
 	s.sessionTools["parent_context"] = sessionToolDescriptor{
 		Name:             "parent_context",
 		Description:      "Sub-agent's window into its direct parent's user-facing communication. Filtered to user/assistant messages.",
@@ -96,6 +103,7 @@ const (
 	permObjectSubagentWait          = "hugen:subagent:wait"
 	permObjectSubagentRead          = "hugen:subagent:read"
 	permObjectSubagentCancel        = "hugen:subagent:cancel"
+	permObjectSubagentDismiss       = "hugen:subagent:dismiss"
 	permObjectSubagentParentContext = "hugen:subagent:parent_context"
 	permObjectSubagentNotify        = "hugen:subagent:notify"
 	permObjectInquire               = "hugen:inquire"
