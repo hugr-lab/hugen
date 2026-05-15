@@ -54,6 +54,45 @@ func TestModel_AttachTab_StartsPumpWithSub(t *testing.T) {
 	}
 }
 
+// TestModel_TabCycle_WhenEmpty tests the macOS-friendly cycle
+// path: Tab cycles forward when the textarea is empty, leaves
+// it alone otherwise (so Tab still inserts a tab character
+// during input).
+func TestModel_TabCycle_WhenEmpty(t *testing.T) {
+	m, _ := newTestModel(t)
+	for i := 0; i < 2; i++ {
+		newT := newTab("sess-"+string(rune('A'+i)), m.user, m.tabs[0].submit, m.logger)
+		m2, _ := m.Update(attachTabMsg{t: newT})
+		m = m2.(model)
+	}
+	m.active = 0
+
+	// Empty textarea → Tab cycles forward.
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = m2.(model)
+	if m.active != 1 {
+		t.Errorf("Tab on empty textarea: active = %d; want 1", m.active)
+	}
+
+	// Shift+Tab cycles back.
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = m2.(model)
+	if m.active != 0 {
+		t.Errorf("Shift+Tab on empty: active = %d; want 0", m.active)
+	}
+
+	// Type something — Tab now should NOT cycle (falls through to
+	// textarea's tab-insert).
+	m.tabs[0].textarea.SetValue("abc")
+	priorActive := m.active
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = m2.(model)
+	if m.active != priorActive {
+		t.Errorf("Tab on non-empty textarea must not cycle; active moved %d → %d",
+			priorActive, m.active)
+	}
+}
+
 // TestModel_AltNDirectSwitch covers the Alt+1..9 binding (added
 // because Ctrl+N collides with VS Code's terminal-tab switcher).
 func TestModel_AltNDirectSwitch(t *testing.T) {

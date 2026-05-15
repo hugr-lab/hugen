@@ -255,6 +255,29 @@ func (m model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case "tab":
+		// macOS-friendly cycle. Tab only triggers when the
+		// textarea is empty so non-empty input keeps the default
+		// "insert tab character" behaviour. VS Code / Terminal.app /
+		// iTerm2 all pass Tab through to the integrated terminal
+		// without remapping; Ctrl/Alt-based bindings are flaky on
+		// macOS (Option needs Meta-as-Esc, Ctrl+N collides with
+		// VS Code, etc.).
+		if cur := m.currentTab(); cur != nil && cur.textarea.Value() == "" && len(m.tabs) > 1 {
+			m.active = (m.active + 1) % len(m.tabs)
+			if cur := m.currentTab(); cur != nil {
+				cur.dirty = false
+			}
+			return m, nil
+		}
+	case "shift+tab":
+		if cur := m.currentTab(); cur != nil && cur.textarea.Value() == "" && len(m.tabs) > 1 {
+			m.active = (m.active - 1 + len(m.tabs)) % len(m.tabs)
+			if cur := m.currentTab(); cur != nil {
+				cur.dirty = false
+			}
+			return m, nil
+		}
 	case "alt+1", "alt+2", "alt+3", "alt+4", "alt+5",
 		"alt+6", "alt+7", "alt+8", "alt+9":
 		// Direct 1-indexed switch. Alt is chosen over Ctrl
