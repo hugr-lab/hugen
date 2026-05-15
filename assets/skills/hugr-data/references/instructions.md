@@ -283,12 +283,29 @@ Auto-generated fields with arguments (hugr_type=`extra_field`, `arguments_count 
 
 Use `schema-type_fields(include_arguments: true)` to discover available arguments.
 
+### `schema-type_fields` — parameters that matter on wide tables
+
+The default response returns max **50 fields**, alphabetically ordered. Many real tables (CMS Open Payments, government datasets, FHIR projections) have 100–300 columns; the default response is a HEAD, not the full inventory. The tool has three orthogonal levers:
+
+- `relevance_query: "<NL phrase>"` — semantic ranker. The server scores fields by description + name and returns the top-N matches first. Use whenever you know the *meaning* of the field but not its name. Examples:
+  - `relevance_query: "total payment amount in dollars"` → surfaces `Total_Amount_of_Payment_USDollars` even if alphabetically it's past field #50.
+  - `relevance_query: "soft delete or tombstone column"` → surfaces `deleted_at` / `is_deleted` even when the table has 200 columns.
+- `limit: 200` + `offset: N` — pagination. Use when you want the full inventory (e.g. for a schema map). Always check `total` vs `returned` in the response — if `total > returned`, you have not seen everything.
+- `include_description: true` — adds the per-field description text. Critical when names are auto-generated (`col_123`, `Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID`); the description carries the actual semantics.
+
+**Anti-pattern**: calling `schema-type_fields(type_name: "T")` with no extra args, getting back 50 fields, and concluding "field X doesn't exist on T". The response is partial. Either re-ask with `relevance_query` for the meaning you want, or paginate to `total`.
+
+**Stop condition**: after ONE `relevance_query` (top-N matches by meaning) AND ONE full pagination to `total` (every field listed by name), if the field with that meaning is still absent, it is genuinely missing — report the absence to the caller and stop. Do NOT loop over different `relevance_query` phrasings; the ranker has already returned the closest matches by description and name.
+
 ## Workflow
 
 1. **Parse user intent** — identify entities, metrics, filters, time ranges.
 2. **Find modules**: `discovery-search_modules` — semantic search by NL query.
 3. **Find data objects**: `discovery-search_module_data_objects` — returns query field names (select, aggregation, bucket_aggregation) per table/view.
 4. **Inspect fields**: `schema-type_fields(type_name: "prefix_tablename")` — MUST call before building queries. Use the **type name** (e.g. `synthea_patients`), NOT the module name.
+   - First call: bare `type_name` for a quick head of the schema.
+   - **Looking for a specific field by meaning?** Re-call with `relevance_query: "<short NL phrase>"` + `include_description: true`. Don't conclude "missing" from the bare call.
+   - **Need the full inventory?** Bump `limit: 200`; check `total` vs `returned`; paginate via `offset` if needed.
 5. **Explore values**: `discovery-field_values` — understand data distribution, categories, statuses.
 6. **Build ONE comprehensive query** — combine objects, relations, aggregations, filters with aliases.
 7. **Validate**: `data-validate_graphql_query` — catch errors early.
@@ -301,7 +318,8 @@ Additional tools: `discovery-search_data_sources`, `discovery-search_module_func
 ## Critical Rules
 
 - ALWAYS call `schema-type_fields` before building queries — field names cannot be guessed
-- ALWAYS rely on **field descriptions** — names are often auto-generated, descriptions explain semantics
+- ALWAYS rely on **field descriptions** — names are often auto-generated, descriptions explain semantics. Pass `include_description: true` when names look opaque.
+- `schema-type_fields` default `limit` is 50 — many tables have more. **NEVER conclude "field X doesn't exist" from a bare call.** Either retry with `relevance_query: "<meaning>"` (semantic ranker) or paginate `limit/offset` until `returned == total`.
 - ALWAYS use `discovery-field_values` to understand data before building filters
 - Use **type name** (`prefix_tablename`) for introspection, **query field name** (`tablename`) for queries inside modules
 - Fields in order_by MUST be selected in the query

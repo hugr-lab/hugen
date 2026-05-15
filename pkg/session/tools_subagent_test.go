@@ -631,6 +631,58 @@ func TestCallSpawnMission_AsyncCap(t *testing.T) {
 	mgr_assertErrorCode(t, out, "too_many_async")
 }
 
+// TestCallSpawnMission_TwoAsyncInOneTurn — phase 5.1c.async-root:
+// root can spawn two independent missions back-to-back in the
+// same turn (bucket B × 2). Both children must land in
+// parent.children with the async-notify tag.
+func TestCallSpawnMission_TwoAsyncInOneTurn(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+	// Generous cap; the bucket-B duplication should fit comfortably.
+	parent.deps.MaxAsyncMissionsPerRoot = 4
+
+	out1, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"orders summary","skill":"analyst","wait":"async"}`))
+	if err != nil {
+		t.Fatalf("first async: %v", err)
+	}
+	out2, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"goal":"inventory count","skill":"analyst","wait":"async"}`))
+	if err != nil {
+		t.Fatalf("second async: %v", err)
+	}
+	var got1, got2 spawnMissionResult
+	if err := json.Unmarshal(out1, &got1); err != nil {
+		t.Fatalf("unmarshal out1: %v", err)
+	}
+	if err := json.Unmarshal(out2, &got2); err != nil {
+		t.Fatalf("unmarshal out2: %v", err)
+	}
+	if got1.Status != "running" || got2.Status != "running" {
+		t.Errorf("both statuses must be running: %q / %q", got1.Status, got2.Status)
+	}
+	if got1.SessionID == got2.SessionID || got1.SessionID == "" || got2.SessionID == "" {
+		t.Errorf("session ids must be distinct + non-empty: %q / %q",
+			got1.SessionID, got2.SessionID)
+	}
+	parent.childMu.Lock()
+	defer parent.childMu.Unlock()
+	if len(parent.children) != 2 {
+		t.Errorf("len(children) = %d, want 2", len(parent.children))
+	}
+	for _, sid := range []string{got1.SessionID, got2.SessionID} {
+		ch, ok := parent.children[sid]
+		if !ok {
+			t.Errorf("child %q missing from parent.children", sid)
+			continue
+		}
+		if ch.asyncSpawnMode != protocol.SubagentRenderAsyncNotify {
+			t.Errorf("child %q asyncSpawnMode = %q, want %q",
+				sid, ch.asyncSpawnMode, protocol.SubagentRenderAsyncNotify)
+		}
+	}
+}
+
 // TestCallSpawnMission_BadWait rejects an unknown wait value.
 func TestCallSpawnMission_BadWait(t *testing.T) {
 	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))

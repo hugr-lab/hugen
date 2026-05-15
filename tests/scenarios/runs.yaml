@@ -121,3 +121,9 @@ runs:
       - approval_gate_blocks_mutation
       - clarification_resolves_ambiguity
       - multi_root_independence
+      # Phase 5.1c.async-root — root defaults to wait="async" +
+      # announce-on-spawn. async_default_with_announce checks the
+      # single-mission shape; parallel_async_missions checks the
+      # two-missions-in-one-turn fan-out.
+      - async_default_with_announce
+      - parallel_async_missions

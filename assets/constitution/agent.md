@@ -31,9 +31,13 @@ local skill that already covers the request before composing
 a procedure from scratch — local skills do not autoload, but
 their names appear in `available_in_skills`. When the user
 explicitly asks to save current session work as a reusable
-skill, follow the `_skill_builder` protocol (clarify, generalise,
-save, validate). Never propose saving a skill yourself — that
-decision is the user's.
+skill, load `_skill_builder` first via
+`skill:load(name: "_skill_builder")` and follow its protocol
+(clarify, generalise, save, validate — full detail in the
+skill body + `skill:ref(_skill_builder, save-protocol)`).
+`_skill_builder` is NOT autoloaded — it costs context and is
+only needed on the rare save / explicit-discovery turn. Never
+propose saving a skill yourself — that decision is the user's.
 
 ## Session tier
 

@@ -1,0 +1,104 @@
+# parallel_async_missions — phase 5.1c.async-root acceptance.
+#
+# A single user turn that opens TWO unrelated tasks. Root must
+# classify each as a "new independent task" (bucket B) and emit
+# two session:spawn_mission(wait="async") calls in the same turn,
+# then a single closing acknowledgement that names both.
+#
+# By-eye assertions:
+#
+#   1. Root tool_calls contains EXACTLY two session:spawn_mission
+#      calls, both with wait="async" in tool_args. The two goals
+#      are distinct (one mentions `orders`, the other mentions
+#      `inventory`). No session:wait_subagents in root's tool_calls.
+#
+#   2. Root has exactly two child sessions, both with
+#      session_type="mission".
+#
+#   3. Each mission's terminal SubagentResult carries
+#      metadata.render_mode == "async_notify".
+#
+#   4. After the spawns, root's trailing agent_message is one
+#      announce-on-spawn line that references BOTH goals in some
+#      shape ("two missions", "обе", or two goal mentions).
+#
+# Tuning notes:
+#   - Each ask is small enough that one worker per mission suffices
+#     so the harness's wait_for_subagents window covers completion.
+#   - The phrasing "and at the same time" / "in parallel" is the
+#     strong cue for bucket B duplication.
+name: parallel_async_missions
+requires: [hugr]
+
+steps:
+  - say: |
+      Two quick parallel asks against `northwind`:
+        1. List the tables in `northwind` whose names start with
+           `orders`. One line per table, no analysis.
+        2. And at the same time — count how many tables in
+           `northwind` have a column literally named
+           `customer_id`. Just the number.
+
+      Run both in parallel. Take your time on each; I'll wait.
+    budget: 600s
+    wait_for_subagents: 480s
+
+    queries:
+      # Root's tool_calls — expect two spawn_mission(async) and
+      # NO wait_subagents.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Two children, both missions.
+      - name: mission_rows
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Per-mission SubagentResult.render_mode tag.
+      - name: subagent_results
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, results: (.events // []) | map(select(.event_type == \"subagent_result\")) | map({seq, reason: .metadata.reason, render_mode: .metadata.render_mode})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "subagent_result"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq metadata
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Root's trailing agent_message — announce-on-spawn referencing
+      # both goals.
+      - name: root_announce_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 5
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }

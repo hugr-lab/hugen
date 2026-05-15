@@ -17,7 +17,7 @@ func TestParseLiveviewStatus_FullPayload(t *testing.T) {
 		"lifecycle_state": "wait_subagents",
 		"last_tool_call":  protocol.ToolCallRef{Name: "hugr.execute_query", StartedAt: now.Add(-3 * time.Second)},
 		"extensions": map[string]any{
-			"skill":   map[string]any{"loaded": []string{"_root", "_skill_builder"}},
+			"skill":   map[string]any{"loaded": []string{"_root", "analyst"}},
 			"plan":    map[string]any{"Active": true, "Text": "Investigate data sources", "CurrentStep": "Explore", "Comments": []any{1, 2}},
 			"notepad": map[string]any{
 				"recent": []map[string]any{{"id": "n1", "category": "schema-finding"}, {"id": "n2", "category": "schema-finding"}, {"id": "n3", "category": "chat-answer"}},
@@ -73,7 +73,7 @@ func TestRenderSidebar_HappyPathContainsExpectedSections(t *testing.T) {
 		LifecycleState: "wait_subagents",
 		LastToolCall:   &protocol.ToolCallRef{Name: "hugr.execute_query", StartedAt: time.Now().Add(-5 * time.Second)},
 		Extensions: map[string]json.RawMessage{
-			"skill":   json.RawMessage(`{"loaded":["_root","_skill_builder"],"tools":12}`),
+			"skill":   json.RawMessage(`{"loaded":["_root","analyst"],"tools":12}`),
 			"plan":    json.RawMessage(`{"Active":true,"Text":"Investigate","CurrentStep":"Explore","Comments":[{},{}]}`),
 			"notepad": json.RawMessage(`{"recent":[{"id":"n1","category":"schema-finding"}],"counts":{"schema-finding":12,"chat-answer":1}}`),
 		},
@@ -86,7 +86,7 @@ func TestRenderSidebar_HappyPathContainsExpectedSections(t *testing.T) {
 		"Tier: root", "wait_subagents", "Subagents", "mission",
 		"Last tool", "hugr.execute_query", "Plan", "Explore",
 		"Notepad", "schema-finding",
-		"Skills", "_root", "_skill_builder", "12 tools",
+		"Skills", "_root", "analyst", "12 tools",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("sidebar missing %q in:\n%s", want, out)
@@ -153,6 +153,59 @@ func TestFormatSpawnMission_ShowsSkillAndGoal(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in spawn marker: %q", want, got)
 		}
+	}
+}
+
+func TestFormatAsyncMissionCompleted_HappyPath(t *testing.T) {
+	p := &protocol.SubagentResultPayload{
+		SessionID: "ses-abcdef1234",
+		Reason:    protocol.TerminationCompleted,
+		Result:    "Top providers: ACME, Globex, Initech.",
+		Goal:      "count providers",
+	}
+	got := formatAsyncMissionCompleted(p)
+	for _, want := range []string{"✓", "ses-abcd", "Top providers"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in async-completed marker: %q", want, got)
+		}
+	}
+}
+
+func TestFormatAsyncMissionCompleted_FallsBackToGoal(t *testing.T) {
+	p := &protocol.SubagentResultPayload{
+		SessionID: "ses-deadbeef",
+		Reason:    protocol.TerminationCompleted,
+		Goal:      "enumerate northwind",
+	}
+	got := formatAsyncMissionCompleted(p)
+	if !strings.Contains(got, "enumerate northwind") {
+		t.Errorf("expected goal fallback when Result empty: %q", got)
+	}
+}
+
+func TestFormatAsyncMissionCompleted_AbnormalBadges(t *testing.T) {
+	cancelled := formatAsyncMissionCompleted(&protocol.SubagentResultPayload{
+		SessionID: "ses-x",
+		Reason:    "subagent_cancel: user request",
+		Result:    "stopped",
+	})
+	if !strings.Contains(cancelled, "⊘") {
+		t.Errorf("expected ⊘ for cancel; got %q", cancelled)
+	}
+	cascade := formatAsyncMissionCompleted(&protocol.SubagentResultPayload{
+		SessionID: "ses-y",
+		Reason:    protocol.TerminationCancelCascade,
+	})
+	if !strings.Contains(cascade, "⊘") {
+		t.Errorf("expected ⊘ for cancel_cascade; got %q", cascade)
+	}
+	errored := formatAsyncMissionCompleted(&protocol.SubagentResultPayload{
+		SessionID: "ses-z",
+		Reason:    "error: io",
+		Result:    "boom",
+	})
+	if !strings.Contains(errored, "✗") {
+		t.Errorf("expected ✗ for error reason; got %q", errored)
 	}
 }
 

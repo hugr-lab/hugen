@@ -16,6 +16,14 @@
 # By-eye assertions: root narrow surface; mission picks waves
 # correctly; workers' role distribution matches the pipeline
 # stages; final answer cites actual data from the workers.
+#
+# Under phase 5.1c.async-root the user prompt is steered to
+# "block until you have the final summary" so root opts into
+# wait="sync" and the synthesised summary lands on the same
+# step. Without the steer root would acknowledge the spawn and
+# the result would arrive via [system: subagent_result] on the
+# next turn — the scenario would then need a second step to
+# observe the formatted summary.
 name: full_analyst_workflow
 requires: [hugr]
 
@@ -30,7 +38,8 @@ steps:
 
       Use the analyst pattern: plan, fan out workers across the
       stages of the pipeline, synthesise a structured 3-section
-      summary at the end.
+      summary at the end. Don't reply until you have the
+      final summary.
     # Multi-wave pipeline can take 8-12 min on gemini-pro even
     # with the cheap-route for root/mission tier_intents. Generous
     # budget; on the η Gemma run we tighten.

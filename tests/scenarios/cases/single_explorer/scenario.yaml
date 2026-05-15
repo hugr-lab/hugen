@@ -6,8 +6,11 @@
 # By-eye assertions:
 #
 # 1. Root: exactly one session:spawn_mission(skill="analyst") +
-#    one session:wait_subagents. No data tools (hugr-*, bash-*,
-#    python-*, duckdb-*).
+#    one session:wait_subagents. The prompt is steered to "block
+#    until you have the answer" so root MUST pick wait="sync";
+#    a model that picks async despite the explicit steer is a
+#    classifier regression — flag it. No data tools (hugr-*,
+#    bash-*, python-*, duckdb-*).
 #
 # 2. Mission: exactly one session:spawn_wave call, naming
 #    skill="analyst" + role="data-explorer" with one entry.
@@ -30,6 +33,7 @@ steps:
       I have a data source named "northwind". Summarise its
       schema for me in two sentences — what it tracks and what
       the main entities are. Cite actual table names you see.
+      Don't reply until you have the answer.
     # Single-worker flow: ~6-8 LLM turns. 8-min budget covers
     # gemini-pro + cheap-route latency.
     budget: 480s
