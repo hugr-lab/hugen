@@ -248,6 +248,27 @@ type sessionView struct {
 	// child published via its own liveview status frame. Keyed
 	// by child sessionID.
 	children map[string]json.RawMessage
+
+	// recentChildren is the rolling window of recently-terminated
+	// direct children. Newest-first; capped at
+	// recentChildrenWindow. Each entry carries the child's depth,
+	// last observed tool name, termination reason, and
+	// terminated-at timestamp so adapters can render a "what just
+	// finished" history without having to re-query the event log.
+	// Phase 5.1c follow-up — dogfood feedback.
+	recentChildren []recentChild
+}
+
+// recentChild is one history entry in sessionView.recentChildren.
+// Public-ish (lowercase struct, JSON-tagged fields) so the emit
+// payload carries the values directly without an intermediate
+// conversion step.
+type recentChild struct {
+	SessionID    string    `json:"session_id"`
+	Depth        int       `json:"depth,omitempty"`
+	Reason       string    `json:"reason,omitempty"`
+	LastTool     string    `json:"last_tool,omitempty"`
+	TerminatedAt time.Time `json:"terminated_at"`
 }
 
 // push is the non-blocking enqueue called from FrameObserver /

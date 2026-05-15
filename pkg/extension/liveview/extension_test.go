@@ -238,6 +238,20 @@ func TestExtension_OnChildFrame_SessionTerminatedDropsChildEntry(t *testing.T) {
 			t.Errorf("ses-doomed still in children map after SessionTerminated: %+v", kids)
 		}
 	}
+	// Dogfood follow-up: terminated child should land in
+	// recent_children with the reason carried through.
+	rc, ok := body["recent_children"].([]any)
+	if !ok || len(rc) == 0 {
+		t.Fatalf("recent_children missing or empty in payload: %+v", body["recent_children"])
+	}
+	first, _ := rc[0].(map[string]any)
+	if first["session_id"] != "ses-doomed" {
+		t.Errorf("recent_children[0].session_id = %v; want ses-doomed", first["session_id"])
+	}
+	if first["reason"] != protocol.TerminationCompleted {
+		t.Errorf("recent_children[0].reason = %v; want %q",
+			first["reason"], protocol.TerminationCompleted)
+	}
 }
 
 // TestExtension_ReportStatus_OwnActivity verifies the

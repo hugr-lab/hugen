@@ -53,11 +53,11 @@ func TestChatBuffer_SystemSpanRendered(t *testing.T) {
 	}
 }
 
-func TestCollapseLines_FlattensMultiline(t *testing.T) {
-	got := collapseLines("line one\nline two\r\nline three")
-	want := "line one · line two · line three"
+func TestPrefixMultiline_KeepsNewlinesAndIndents(t *testing.T) {
+	got := prefixMultiline("thinking: ", "line one\nline two\r\nline three")
+	want := "thinking: line one\n          line two\n          line three"
 	if got != want {
-		t.Fatalf("collapseLines = %q; want %q", got, want)
+		t.Fatalf("prefixMultiline =\n%q\nwant\n%q", got, want)
 	}
 }
 

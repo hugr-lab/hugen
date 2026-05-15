@@ -24,8 +24,20 @@ type liveviewStatus struct {
 	LastToolCall   *protocol.ToolCallRef       `json:"last_tool_call,omitempty"`
 	PendingInquiry *protocol.PendingInquiryRef `json:"pending_inquiry,omitempty"`
 	RecentActivity []protocol.ToolCallRef      `json:"recent_activity,omitempty"`
+	RecentChildren []recentChildEntry          `json:"recent_children,omitempty"`
 	Extensions     map[string]json.RawMessage  `json:"extensions,omitempty"`
 	Children       map[string]*liveviewStatus  `json:"children,omitempty"`
+}
+
+// recentChildEntry mirrors pkg/extension/liveview's recentChild
+// (same JSON shape). Carries enough info to render a "what just
+// finished" timeline entry with a reason-coloured prefix.
+type recentChildEntry struct {
+	SessionID    string    `json:"session_id"`
+	Depth        int       `json:"depth,omitempty"`
+	Reason       string    `json:"reason,omitempty"`
+	LastTool     string    `json:"last_tool,omitempty"`
+	TerminatedAt time.Time `json:"terminated_at"`
 }
 
 func parseLiveviewStatus(data json.RawMessage) (*liveviewStatus, error) {
@@ -72,6 +84,20 @@ func renderSidebar(s *liveviewStatus, width int) string {
 		sb.WriteString("\n")
 		for _, c := range sortedChildren(s.Children) {
 			sb.WriteString(renderSubagent(c, 1, width))
+		}
+	}
+
+	// Recently terminated subagents — history with reason badge.
+	// Dogfood feedback: wave-based missions complete + re-spawn
+	// constantly, which read like "the worker died" without this
+	// trail. Reason badge differentiates legitimate completion
+	// from cancellation / error.
+	if len(s.RecentChildren) > 0 {
+		sb.WriteString("\n")
+		sb.WriteString(styleSidebarHeading.Render("Recent"))
+		sb.WriteString("\n")
+		for _, rc := range s.RecentChildren {
+			sb.WriteString(renderRecentChild(rc, width))
 		}
 	}
 
@@ -283,6 +309,59 @@ func parseSkillStatus(exts map[string]json.RawMessage) (skills []string, tools i
 		return nil, 0
 	}
 	return s.Loaded, s.Tools
+}
+
+// renderRecentChild prints one history entry as a two-line block:
+//
+//	● mission · completed · 12s ago
+//	  last: hugr.execute_query
+//
+// Where the leading dot's colour encodes the reason category.
+// Phase 5.1c dogfood follow-up.
+func renderRecentChild(rc recentChildEntry, width int) string {
+	var sb strings.Builder
+	label := shortTierLabel(rc.Depth)
+	reason := rc.Reason
+	if reason == "" {
+		reason = "done"
+	}
+	style := reasonStyle(reason)
+	line := fmt.Sprintf("%s %s · %s · %s",
+		style.Render("●"), label, reasonShort(reason), ageString(rc.TerminatedAt))
+	sb.WriteString(truncate(line, width))
+	sb.WriteString("\n")
+	if rc.LastTool != "" {
+		sb.WriteString(styleSidebarFaint.Render(truncate("  last: "+rc.LastTool, width)))
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// reasonStyle picks the dot colour by reason category. Mirrors
+// the spec's success / mid / failure tiers without enumerating
+// every possible reason string.
+func reasonStyle(reason string) lipgloss.Style {
+	switch {
+	case reason == "completed":
+		return styleSidebarActive // green
+	case strings.HasPrefix(reason, "cancel"), reason == "timeout":
+		return stylePendingInquiry // amber
+	case strings.HasPrefix(reason, "error"), reason == "abnormal_close":
+		return lipgloss.NewStyle().Foreground(activeTheme.ErrorFG)
+	default:
+		return styleSidebarFaint
+	}
+}
+
+// reasonShort trims and compresses reason for the one-line slot.
+// "error: stream_error" → "stream_error"; long reasons truncate
+// inside the caller's width budget.
+func reasonShort(reason string) string {
+	const errPrefix = "error: "
+	if strings.HasPrefix(reason, errPrefix) {
+		return reason[len(errPrefix):]
+	}
+	return reason
 }
 
 func sortedChildren(m map[string]*liveviewStatus) []*liveviewStatus {

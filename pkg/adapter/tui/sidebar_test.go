@@ -136,6 +136,49 @@ func TestRenderSubagent_RecursiveDepth(t *testing.T) {
 // When the subagent's projection carries recent_activity, render
 // the last 2-3 tools as a stripe (most-recent first) instead of
 // the single last_tool_call.
+// TestRenderSidebar_RecentChildrenSection covers the dogfood
+// follow-up: when a wave rolls over, completed children appear in
+// the Recent section with reason + last_tool so the operator can
+// see "what just finished" without scrolling the event log.
+func TestRenderSidebar_RecentChildrenSection(t *testing.T) {
+	s := &liveviewStatus{
+		SessionID:      "ses-root",
+		Depth:          0,
+		LifecycleState: "active",
+		RecentChildren: []recentChildEntry{
+			{SessionID: "ses-a", Depth: 1, Reason: "completed",
+				LastTool: "hugr.execute_query", TerminatedAt: time.Now().Add(-5 * time.Second)},
+			{SessionID: "ses-b", Depth: 2, Reason: "error: stream_error",
+				LastTool: "duckdb.exec_sql", TerminatedAt: time.Now().Add(-30 * time.Second)},
+			{SessionID: "ses-c", Depth: 1, Reason: "cancel_cascade",
+				TerminatedAt: time.Now().Add(-1 * time.Minute)},
+		},
+	}
+	out := renderSidebar(s, 60)
+	for _, want := range []string{
+		"Recent",
+		"mission",       // depth=1 entries
+		"worker",        // depth=2 entries
+		"completed",
+		"stream_error",  // error reason short form
+		"cancel_cascade",
+		"hugr.execute_query",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Recent section missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestReasonShort_TrimsErrorPrefix(t *testing.T) {
+	if got := reasonShort("error: stream_error"); got != "stream_error" {
+		t.Errorf("reasonShort = %q; want stream_error", got)
+	}
+	if got := reasonShort("completed"); got != "completed" {
+		t.Errorf("reasonShort = %q; want completed", got)
+	}
+}
+
 func TestRenderSubagent_RecentActivityPrintsHistory(t *testing.T) {
 	now := time.Now()
 	worker := &liveviewStatus{

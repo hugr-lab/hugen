@@ -273,7 +273,7 @@ func (b *chatBuffer) render(width int) string {
 				sb.WriteString(s.text + "\n")
 			}
 		case spanReasoning:
-			sb.WriteString(styleReasoning.Render("thinking: " + collapseLines(s.text)))
+			sb.WriteString(styleReasoning.Render(prefixMultiline("thinking: ", s.text)))
 			sb.WriteString("\n\n")
 		case spanSystem:
 			sb.WriteString(styleSystem.Render("· " + s.text))
@@ -291,19 +291,33 @@ func (b *chatBuffer) render(width int) string {
 		}
 	}
 	if pr := b.pendingReasoning.String(); pr != "" {
-		sb.WriteString(styleReasoning.Render("thinking: " + collapseLines(pr)))
+		sb.WriteString(styleReasoning.Render(prefixMultiline("thinking: ", pr)))
 		sb.WriteString("\n")
 	}
 	return sb.String()
 }
 
-func collapseLines(s string) string {
-	// Single-line render for reasoning streams in the chat pane;
-	// keeps the transcript compact. Operators see the full
-	// multi-line in the persisted event log.
+// prefixMultiline prepends `prefix` to the first line of s, then
+// indents every subsequent line with whitespace of the same
+// visual width so the block reads as one paragraph in the chat.
+// Replaces the old collapseLines path — operators asked for the
+// multi-line thinking trail rather than a flattened "· · ·" line.
+func prefixMultiline(prefix, s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\n", " · ")
-	return strings.TrimSpace(s)
+	s = strings.TrimRight(s, "\n")
+	lines := strings.Split(s, "\n")
+	indent := strings.Repeat(" ", len(prefix))
+	var sb strings.Builder
+	for i, ln := range lines {
+		if i == 0 {
+			sb.WriteString(prefix)
+		} else {
+			sb.WriteString("\n")
+			sb.WriteString(indent)
+		}
+		sb.WriteString(ln)
+	}
+	return sb.String()
 }
 
 var (

@@ -25,6 +25,12 @@ const defaultMaxStale = 3 * defaultDebounce
 // without ballooning the emit payload for long-running sessions.
 const recentToolWindow = 3
 
+// recentChildrenWindow caps the rolling history of recently-
+// terminated direct children. 10 is the dogfood default — large
+// enough that the operator can see a few wave rollovers without
+// the emit payload growing unbounded across long missions.
+const recentChildrenWindow = 10
+
 // loop is the observer goroutine's main loop. Pulls frame events
 // off the channel, folds them into the session view, and decides
 // when to emit a status frame.
@@ -191,11 +197,44 @@ func (v *sessionView) foldOwnFrame(f protocol.Frame) bool {
 func (v *sessionView) foldChildFrame(childID string, f protocol.Frame) bool {
 	switch fr := f.(type) {
 	case *protocol.SessionTerminated:
-		// Child died — drop its entry from our projection so the
-		// subtree map stops carrying a stale node. Force-emit so
-		// the next layer up sees the topology change immediately.
+		// Child died — move it from the active children map to the
+		// recent-history ring so adapters can render a "what just
+		// finished" timeline. Force-emit so the next layer up sees
+		// the topology change immediately.
 		v.reportMu.Lock()
+		entry := recentChild{
+			SessionID:    childID,
+			Reason:       fr.Payload.Reason,
+			TerminatedAt: time.Now().UTC(),
+		}
+		// Extract depth + last tool from the child's most recent
+		// status snapshot (still in v.children at this point) so
+		// the history entry is self-contained for the TUI.
+		if last, ok := v.children[childID]; ok {
+			var summary struct {
+				Depth        int                   `json:"depth"`
+				LastToolCall *protocol.ToolCallRef `json:"last_tool_call"`
+			}
+			if json.Unmarshal(last, &summary) == nil {
+				entry.Depth = summary.Depth
+				if summary.LastToolCall != nil {
+					entry.LastTool = summary.LastToolCall.Name
+				}
+			}
+		}
 		delete(v.children, childID)
+		// Prepend newest-first; cap at recentChildrenWindow so a
+		// long mission with many wave rollovers doesn't bloat the
+		// emit payload.
+		next := make([]recentChild, 0, len(v.recentChildren)+1)
+		next = append(next, entry)
+		for _, prev := range v.recentChildren {
+			if len(next) >= recentChildrenWindow {
+				break
+			}
+			next = append(next, prev)
+		}
+		v.recentChildren = next
 		v.reportMu.Unlock()
 		return true
 	case *protocol.ExtensionFrame:
@@ -263,6 +302,12 @@ func (v *sessionView) emitStatus() {
 			kids[k] = val
 		}
 		payload["children"] = kids
+	}
+	if len(v.recentChildren) > 0 {
+		// Defensive copy — recipient may stash + mutate.
+		cp := make([]recentChild, len(v.recentChildren))
+		copy(cp, v.recentChildren)
+		payload["recent_children"] = cp
 	}
 	v.reportMu.Unlock()
 
