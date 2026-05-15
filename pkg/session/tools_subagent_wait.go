@@ -398,6 +398,8 @@ func statusFromReason(reason string) string {
 		return "restart_died"
 	case strings.HasPrefix(reason, protocol.TerminationSubagentCancelPrefix):
 		return "subagent_cancel"
+	case strings.HasPrefix(reason, protocol.TerminationUserCancelPrefix):
+		return "user_cancel"
 	case strings.HasPrefix(reason, protocol.TerminationPanicPrefix):
 		return "panic"
 	default:

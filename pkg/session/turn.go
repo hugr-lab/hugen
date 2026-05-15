@@ -131,6 +131,13 @@ type ToolFeed struct {
 //     without tearing down the session.
 //   - The model goroutine launches; chunks fan in over s.modelChunks.
 func (s *Session) startTurn(runCtx context.Context, f *protocol.UserMessage) {
+	// Phase 5.1c.cancel-ux follow-up — any starting turn supersedes
+	// a queued auto-summary kick: the new turn's history (built
+	// below via materialise + drainPendingInbound at boundaries)
+	// already carries the SubagentResult inject(s), and the model
+	// will see them naturally. Clearing here avoids a duplicate
+	// summary turn firing immediately after this one ends.
+	s.pendingAsyncSummary.Store(false)
 	// Lifecycle: leaving idle for active. Emit BEFORE persisting the
 	// user message so a restart that crashes between the active
 	// markStatus and the user_message emit still observes the
@@ -550,6 +557,15 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 		// just nilled turnState; isQuiescent checks the rest.
 		if s.isQuiescent() {
 			s.markStatus(runCtx, protocol.SessionStatusIdle, "turn_complete")
+		}
+		// Phase 5.1c.cancel-ux follow-up — if an async mission
+		// completed while this turn was in flight, drainPendingInbound
+		// above folded its [system:subagent_result] inject into
+		// s.history. Kick a fresh summary turn so the model presents
+		// the result to the user without waiting for another typed
+		// message.
+		if !s.IsClosing() && s.pendingAsyncSummary.Swap(false) {
+			s.kickAsyncSummaryTurn(runCtx)
 		}
 		return
 	}

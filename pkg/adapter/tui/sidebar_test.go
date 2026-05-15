@@ -207,6 +207,14 @@ func TestFormatAsyncMissionCompleted_AbnormalBadges(t *testing.T) {
 	if !strings.Contains(errored, "✗") {
 		t.Errorf("expected ✗ for error reason; got %q", errored)
 	}
+	userCancel := formatAsyncMissionCompleted(&protocol.SubagentResultPayload{
+		SessionID: "ses-u",
+		Reason:    protocol.TerminationUserCancelPrefix + "/mission",
+		Result:    "halted",
+	})
+	if !strings.Contains(userCancel, "⊘") {
+		t.Errorf("expected ⊘ for user_cancel; got %q", userCancel)
+	}
 }
 
 func TestRenderRecentChild_ShowsRole(t *testing.T) {

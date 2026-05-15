@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -156,6 +157,14 @@ func closeTurnSkipReason(reason string) bool {
 		"hard_ceiling",
 		"restart_died",
 		"abnormal_close":
+		return true
+	}
+	// Phase 5.1c.cancel-ux — the operator's `/mission` cancel and
+	// the Esc-Esc panic gesture stamp this prefix; running a
+	// findings-recording close turn after the operator explicitly
+	// asked to stop is counterproductive (the model would consume
+	// budget on a wrap-up summary the operator does not want).
+	if strings.HasPrefix(reason, protocol.TerminationUserCancelPrefix) {
 		return true
 	}
 	return false
