@@ -32,6 +32,87 @@ compatibility:
 body
 `
 
+// TestResolveAutoclose_LoadedSkillResolves verifies the skill
+// extension's AutocloseLookup implementation: when a skill matching
+// spawnSkill is loaded on the session, the resolver delegates to
+// HugenMetadata.ResolveAutoclose with the spawnRole. Unknown
+// spawnSkill yields found=false so the parent's resolver falls
+// through to the default-true runtime path. Phase 5.2 β.
+func TestResolveAutoclose_LoadedSkillResolves(t *testing.T) {
+	const inline = `---
+name: data-chat
+description: parking test
+metadata:
+  hugen:
+    mission:
+      enabled: true
+      summary: stub
+      autoclose: false
+    sub_agents:
+      - name: data-chatter
+        autoclose: false
+      - name: data-explorer
+---
+body
+`
+	ctx := context.Background()
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"data-chat": []byte(inline)}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "agent-test")
+	state := fixture.NewTestSessionState("ses-auto").WithDepth(2)
+	if err := ext.InitState(ctx, state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	if err := FromState(state).Load(ctx, "data-chat"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		skill     string
+		role      string
+		wantValue bool
+		wantFound bool
+	}{
+		{"empty_skill_not_found", "", "data-chatter", true, false},
+		{"unknown_skill_not_found", "ghost", "x", true, false},
+		{"role_explicit_false", "data-chat", "data-chatter", false, true},
+		{"role_falls_to_mission_false", "data-chat", "data-explorer", false, true},
+		{"unknown_role_falls_to_mission", "data-chat", "bogus", false, true},
+		{"empty_role_uses_mission", "data-chat", "", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, found := ext.ResolveAutoclose(ctx, state, tc.skill, tc.role)
+			if got != tc.wantValue || found != tc.wantFound {
+				t.Errorf("ResolveAutoclose(%q,%q) = (%v,%v); want (%v,%v)",
+					tc.skill, tc.role, got, found, tc.wantValue, tc.wantFound)
+			}
+		})
+	}
+}
+
+// TestResolveAutoclose_NoSkillStateReturnsNotFound covers the
+// session that has no skill state attached (StateInitializer not
+// run). Resolver must return found=false so the parent falls back
+// to the default-true path rather than crashing on the nil handle.
+// Phase 5.2 β.
+func TestResolveAutoclose_NoSkillStateReturnsNotFound(t *testing.T) {
+	ctx := context.Background()
+	store := skillpkg.NewSkillStore(skillpkg.Options{})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "agent-test")
+	// Note: no InitState — state has no skill handle attached.
+	state := fixture.NewTestSessionState("ses-nostate").WithDepth(2)
+	val, found := ext.ResolveAutoclose(ctx, state, "anything", "anyrole")
+	if found {
+		t.Errorf("ResolveAutoclose without state = found; want not found")
+	}
+	if !val {
+		t.Errorf("ResolveAutoclose without state val = false; want true (safe default)")
+	}
+}
+
 func TestFilterTools_WildcardAndExact(t *testing.T) {
 	ctx := context.Background()
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"dataset": []byte(inlineDatasetManifest)}})

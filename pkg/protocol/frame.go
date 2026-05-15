@@ -474,6 +474,14 @@ const (
 	SessionStatusWaitSubagents = "wait_subagents"
 	SessionStatusWaitApproval  = "wait_approval"
 	SessionStatusWaitUserInput = "wait_user_input"
+	// SessionStatusAwaitingDismissal marks a session whose terminal
+	// AgentMessage has been projected to its parent but which has
+	// not been auto-closed because its role's `autoclose` resolves
+	// to false. The session's Run loop stays alive (idle, no active
+	// turn, no pending feed) listening for either an explicit
+	// session:subagent_dismiss or a session:notify_subagent re-arm
+	// from the parent. Phase 5.2 subagent-lifetime.
+	SessionStatusAwaitingDismissal = "awaiting_dismissal"
 )
 
 // SessionStatusPayload is the lifecycle marker the Session emits at
@@ -1009,7 +1017,7 @@ func Validate(f Frame) error {
 		switch v.Payload.State {
 		case SessionStatusIdle, SessionStatusActive,
 			SessionStatusWaitSubagents, SessionStatusWaitApproval,
-			SessionStatusWaitUserInput:
+			SessionStatusWaitUserInput, SessionStatusAwaitingDismissal:
 		default:
 			return fmt.Errorf("protocol: session_status invalid state %q", v.Payload.State)
 		}

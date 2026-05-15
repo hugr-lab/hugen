@@ -1247,6 +1247,17 @@ func (s *Session) handleSubagentResult(ctx context.Context, f *protocol.Subagent
 	if !ok {
 		return
 	}
+	// Phase 5.2 subagent-lifetime β — park branch.
+	// Only normal-completion results are eligible for parking;
+	// cancel / hard_ceiling / restart_died / panic / error are
+	// always torn down. The role's autoclose resolver (skill
+	// extension, falls back to true) decides; default behaviour
+	// preserved for every skill that does not opt in.
+	if f.Payload.Reason == protocol.TerminationCompleted &&
+		!s.resolveChildAutoclose(ctx, child) {
+		s.parkChild(ctx, child)
+		return
+	}
 	closeFrame := protocol.NewSessionClose(child.id, s.agent.Participant(), "subagent_done")
 	// Fire-and-forget: if the child goroutine already exited the
 	// recover in Submit absorbs the closed-channel send and the

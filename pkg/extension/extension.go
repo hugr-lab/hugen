@@ -368,6 +368,27 @@ type CloseTurnLookup interface {
 	ResolveCloseTurn(ctx context.Context, state SessionState, spawnSkill, spawnRole string) (CloseTurnBlock, error)
 }
 
+// AutocloseLookup resolves the post-result lifecycle flag for a
+// session that produced a terminal AgentMessage. Runs on the
+// parent against the child's spawn metadata. Phase 5.2 subagent-
+// lifetime.
+//
+// Return contract:
+//
+//   - (autoclose, true)  — lookup found a manifest entry for the
+//                          (spawnSkill, spawnRole) pair and resolved
+//                          the chain (role > mission > default-true).
+//                          Caller uses this value.
+//   - (_, false)         — lookup has nothing to say; caller tries
+//                          the next extension or falls back to true.
+//
+// Skill extension is the canonical implementor. Returning autoclose
+// = false means "park the child into awaiting_dismissal"; true
+// means "current path: SessionClose + delete from parent.children".
+type AutocloseLookup interface {
+	ResolveAutoclose(ctx context.Context, state SessionState, spawnSkill, spawnRole string) (autoclose bool, found bool)
+}
+
 // WhiteboardSystemWriter extensions expose a direct in-process
 // whiteboard-init path bypassing the ToolManager — the runtime
 // uses it to open a mission's whiteboard from on_mission_start.

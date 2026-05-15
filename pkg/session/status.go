@@ -229,7 +229,18 @@ func (s *Session) isQuiescent() bool {
 		return false
 	}
 	s.childMu.Lock()
-	hasChild := len(s.children) > 0
+	hasLiveChild := false
+	for _, c := range s.children {
+		// Phase 5.2 subagent-lifetime: parked children
+		// (awaiting_dismissal) do not block parent quiescence —
+		// they're idle by design, waiting for either a dismiss
+		// or a notify_subagent re-arm.
+		if childIsParked(c) {
+			continue
+		}
+		hasLiveChild = true
+		break
+	}
 	s.childMu.Unlock()
-	return !hasChild
+	return !hasLiveChild
 }

@@ -43,8 +43,39 @@ var (
 	_ extension.MissionDispatcher   = (*Extension)(nil)
 	_ extension.MissionStartLookup  = (*Extension)(nil)
 	_ extension.CloseTurnLookup     = (*Extension)(nil)
+	_ extension.AutocloseLookup     = (*Extension)(nil)
 	_ extension.StatusReporter      = (*Extension)(nil)
 )
+
+// ResolveAutoclose implements [extension.AutocloseLookup]. Walks
+// the calling session's loaded skills and resolves the autoclose
+// flag for a child being teardown-projected on the parent.
+//
+// Precedence (first match wins via HugenMetadata.ResolveAutoclose):
+//
+//  1. spawnSkill's SubAgentRole[name=spawnRole].Autoclose if set.
+//  2. spawnSkill's MissionBlock.Autoclose if set.
+//  3. true (status quo: auto-close on terminal SubagentResult).
+//
+// Returns found=false when spawnSkill is empty or not loaded on
+// the calling session — caller falls back to the runtime default
+// (true). Phase 5.2 subagent-lifetime.
+func (e *Extension) ResolveAutoclose(_ context.Context, state extension.SessionState, spawnSkill, spawnRole string) (bool, bool) {
+	if spawnSkill == "" {
+		return true, false
+	}
+	h := FromState(state)
+	if h == nil {
+		return true, false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	sk, ok := h.loaded[spawnSkill]
+	if !ok {
+		return true, false
+	}
+	return sk.Manifest.Hugen.ResolveAutoclose(spawnRole), true
+}
 
 // ReportStatus implements [extension.StatusReporter]. Returns the
 // sorted list of skills currently loaded into the calling session
