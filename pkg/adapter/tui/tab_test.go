@@ -28,6 +28,46 @@ func TestModel_AttachTab_AddsTabAndSwitchesFocus(t *testing.T) {
 	}
 }
 
+// TestModel_AttachTab_StartsPumpWithSub is the M1 regression
+// guard: when attachTabMsg carries a non-nil subscription
+// channel, the reducer invokes startPump exactly once with the
+// new tab's session id. Combined with reading the post-update
+// model below, this proves the contract — the tab is appended
+// AND the pump is queued; the ordering (append-then-pump) is
+// enforced by the reducer's source order at model.go's
+// attachTabMsg branch.
+func TestModel_AttachTab_StartsPumpWithSub(t *testing.T) {
+	m, _ := newTestModel(t)
+	var sids []string
+	m.startPump = func(sid string, _ <-chan protocol.Frame) {
+		sids = append(sids, sid)
+	}
+	sub := make(chan protocol.Frame, 1)
+	newT := newTab("sess-pumped", m.user, m.tabs[0].submit, m.logger)
+	m2, _ := m.Update(attachTabMsg{t: newT, sub: sub})
+	m = m2.(model)
+	if len(sids) != 1 || sids[0] != "sess-pumped" {
+		t.Errorf("startPump should fire once for sess-pumped; got %v", sids)
+	}
+	if len(m.tabs) != 2 {
+		t.Errorf("attach did not append; m.tabs len = %d", len(m.tabs))
+	}
+}
+
+// TestModel_AttachTab_NilSubSkipsPump confirms backward-compat
+// for tests that build attachTabMsg without a subscription
+// channel — the reducer just appends and skips startPump.
+func TestModel_AttachTab_NilSubSkipsPump(t *testing.T) {
+	m, _ := newTestModel(t)
+	var pumpCalled bool
+	m.startPump = func(string, <-chan protocol.Frame) { pumpCalled = true }
+	newT := newTab("sess-quiet", m.user, m.tabs[0].submit, m.logger)
+	m.Update(attachTabMsg{t: newT}) // sub is nil
+	if pumpCalled {
+		t.Errorf("startPump must NOT be called when sub is nil")
+	}
+}
+
 // TestModel_CycleTabs_CtrlRightCtrlLeftWrap exercises the canonical
 // forward/back cycle bindings. ctrl+tab is not portable across
 // terminals; ctrl+right/ctrl+left + ctrl+pgdown/ctrl+pgup are used

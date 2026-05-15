@@ -88,6 +88,29 @@ func TestLoadSettings_MissingFileIsBenign(t *testing.T) {
 	}
 }
 
+func TestSaveSettings_OwnerOnlyPerms(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	if err := saveSettings(&tuiSettings{RecentRoots: []string{"ses-a"}}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	fi, err := os.Stat(filepath.Join(dir, ".hugen", "tui.yaml"))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	// File perms: only owner may read/write.
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("tui.yaml perms = %o; want 0600 (S1 — chat history must not be world-readable)", perm)
+	}
+	di, err := os.Stat(filepath.Join(dir, ".hugen"))
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if perm := di.Mode().Perm(); perm != 0o700 {
+		t.Errorf(".hugen/ perms = %o; want 0700", perm)
+	}
+}
+
 func TestLoadSettings_CorruptFileDegradesToDefaults(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)

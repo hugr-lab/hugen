@@ -33,14 +33,21 @@ var (
 func (m *model) handleFrame(f protocol.Frame) tea.Cmd {
 	idx, t := m.findTab(f.SessionID())
 	if t == nil {
-		// Single-tab fallback: when there's exactly one tab,
-		// route the frame to it regardless of session id. Helps
-		// tests that mint frames without setting BaseFrame.Session
-		// and is a no-op in production (subscriptions always
-		// match a tab in multi-root mode).
+		// Single-tab fallback for tests that mint frames without
+		// setting BaseFrame.Session. In production this branch
+		// is a no-op because (a) subscriptions emit frames with
+		// the correct session id, and (b) M1 ensures every tab
+		// is in m.tabs before its pump starts Sending. Multi-tab
+		// + unmatched id ⇒ drop+log (stale frame for a tab that
+		// was just closed; the runtime fan-out hasn't seen our
+		// unsubscribe yet).
 		if len(m.tabs) == 1 {
 			idx, t = 0, m.tabs[0]
 		} else {
+			if m.logger != nil {
+				m.logger.Debug("tui: dropped frame for unknown session",
+					"session", f.SessionID(), "kind", string(f.Kind()))
+			}
 			return nil
 		}
 	}

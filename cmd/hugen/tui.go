@@ -73,11 +73,14 @@ func tuiResumeOption(id string) tui.Option {
 // fix; better than refusing to start.
 func redirectStderrToFile(relPath string) (string, func()) {
 	noop := func() {}
-	if err := os.MkdirAll(filepath.Dir(relPath), 0o755); err != nil {
+	// Phase 5.1c S1 — owner-only access. stderr can carry logs with
+	// secrets (panic dumps, third-party tool errors mentioning
+	// tokens) so the file MUST NOT be world-readable.
+	if err := os.MkdirAll(filepath.Dir(relPath), 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "tui: cannot create log dir: %v\n", err)
 		return "", noop
 	}
-	f, err := os.OpenFile(relPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(relPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tui: cannot open log file: %v\n", err)
 		return "", noop

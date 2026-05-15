@@ -83,12 +83,18 @@ func loadSettings() (*tuiSettings, error) {
 // saveSettings rewrites ~/.hugen/tui.yaml atomically (write-to-temp
 // + rename) so a crash mid-write never leaves a half-written file.
 // Mkdir ensures parent exists on first run.
+//
+// Phase 5.1c S1 — the file holds operator input history which can
+// contain sensitive prompts (paths, error messages with tokens,
+// pasted credentials). Restrict to owner-only access: 0o700 on
+// the dir, 0o600 on the file. Rename preserves the file mode set
+// at WriteFile time.
 func saveSettings(s *tuiSettings) error {
 	path, err := settingsPath()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("tui: mkdir settings: %w", err)
 	}
 	out, err := yaml.Marshal(s)
@@ -96,7 +102,7 @@ func saveSettings(s *tuiSettings) error {
 		return fmt.Errorf("tui: marshal settings: %w", err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
 		return fmt.Errorf("tui: write settings: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {

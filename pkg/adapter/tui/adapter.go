@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/user"
+	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -40,7 +41,15 @@ type Adapter struct {
 	// Nil only if the YAML file refused to load AND HomeDir is
 	// unreachable; the absence is benign (persistence becomes a
 	// no-op).
-	persist *tuiSettings
+	//
+	// N6: every mutation goes through persistMu so the bubbletea
+	// reducer goroutine (forgetTab / historySaver / openNewTab
+	// persistRoot) cannot race with the attachRememberedTabs
+	// goroutine. saveSettings is best-effort and runs inside the
+	// critical section to keep the file's view consistent with the
+	// in-memory struct.
+	persistMu sync.Mutex
+	persist   *tuiSettings
 
 	in  io.Reader
 	out io.Writer
@@ -164,16 +173,18 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	}
 	// Persist the initial tab id so a future restart re-attaches.
 	a.persistRoot(sess.ID(), true)
-	// Slice 4 — model emits requestOpenTabMsg on Ctrl+N. Wire the
-	// open callback through the model so the resulting tea.Cmd
-	// runs inside bubbletea's loop with access to host + the
-	// program (for pump.Send). prog is constructed below; we close
-	// over a pointer that we fill in after construction.
-	var progRef *tea.Program
+	// Slice 4 / M1 — Ctrl+N callback. Returns an attachTabMsg
+	// carrying both the tab and its subscription channel; the
+	// reducer kicks off the pump AFTER appending the tab so the
+	// pump's first Send can find a matching tab.
 	m.openTab = func() tea.Cmd {
-		return func() tea.Msg {
-			return a.openNewTab(ctx, progRef)
-		}
+		return func() tea.Msg { return a.openNewTab(ctx) }
+	}
+	// startPump is installed early so it captures the program
+	// reference (filled in below after tea.NewProgram).
+	var progRef *tea.Program
+	m.startPump = func(_ string, sub <-chan protocol.Frame) {
+		go a.pumpFrames(ctx, sub, progRef)
 	}
 
 	prog := tea.NewProgram(
@@ -191,19 +202,22 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	// Slice 5 — re-attach roots remembered from the previous run.
 	// Each survivor becomes an additional tab seeded with its
 	// recent event log. Dead roots are dropped from the persisted
-	// list inside attachRememberedTabs. attachTabMsg MUST land in
-	// the model BEFORE the per-tab pump starts forwarding live
-	// frames; otherwise the first frame for the resumed session
-	// could arrive at the dispatcher with no matching tab.
+	// list inside attachRememberedTabs. M1: the attachTabMsg
+	// carries the subscription channel; the reducer kicks off the
+	// pump AFTER appending the tab, so no frame can arrive before
+	// the tab is in the list.
 	go func() {
-		if a.persist == nil {
-			return
+		// N6 — snapshot under persistMu so the goroutine's read of
+		// a.persist.RecentRoots can't race a reducer-side mutation.
+		a.persistMu.Lock()
+		var ids []string
+		if a.persist != nil {
+			ids = append([]string(nil), a.persist.RecentRoots...)
 		}
-		ids := append([]string(nil), a.persist.RecentRoots...)
+		a.persistMu.Unlock()
 		extras := a.attachRememberedTabs(ctx, ids)
 		for _, e := range extras {
-			prog.Send(attachTabMsg{t: e.t})
-			go a.pumpFrames(ctx, e.sub, prog)
+			prog.Send(attachTabMsg{t: e.t, sub: e.sub})
 		}
 	}()
 
@@ -265,11 +279,17 @@ func (a *Adapter) submitFrame(ctx context.Context) func(protocol.Frame) error {
 }
 
 // openNewTab opens a fresh root session, subscribes to its outbox,
-// spawns a pump goroutine, and returns an attachTabMsg the model
-// folds into its tab list. Errors are surfaced as openTabError so
-// the active tab can flash the failure in its banner. Slice 4 +
-// slice 5: persists the new root in ~/.hugen/tui.yaml.
-func (a *Adapter) openNewTab(ctx context.Context, prog *tea.Program) tea.Msg {
+// and returns an attachTabMsg the model folds into its tab list.
+// The pump goroutine is NOT started here — the reducer calls
+// startPump after appending the tab so the pump's first Send can
+// find a matching tab (M1).
+//
+// M2: if OpenSession succeeds but Subscribe fails, the half-opened
+// session is force-closed so the manager doesn't leak it.
+//
+// Errors are surfaced as openTabError so the active tab can flash
+// the failure in its banner.
+func (a *Adapter) openNewTab(ctx context.Context) tea.Msg {
 	sess, _, err := a.host.OpenSession(ctx, adapter.OpenRequest{
 		OwnerID:      a.user.ID,
 		Participants: []protocol.ParticipantInfo{a.user},
@@ -279,13 +299,17 @@ func (a *Adapter) openNewTab(ctx context.Context, prog *tea.Program) tea.Msg {
 	}
 	sub, err := a.host.Subscribe(ctx, sess.ID())
 	if err != nil {
+		// M2 — best-effort cleanup; do not block the Cmd on it.
+		if _, closeErr := a.host.CloseSession(ctx, sess.ID(), "tui_subscribe_failed"); closeErr != nil && a.logger != nil {
+			a.logger.Warn("tui: cleanup after Subscribe failure",
+				"session", sess.ID(), "err", closeErr)
+		}
 		return openTabError{err: fmt.Errorf("Subscribe: %w", err)}
 	}
-	go a.pumpFrames(ctx, sub, prog)
 	t := newTab(sess.ID(), a.user, a.submitFrame(ctx), a.logger)
 	a.attachHistoryToTab(t)
 	a.persistRoot(sess.ID(), true)
-	return attachTabMsg{t: t}
+	return attachTabMsg{t: t, sub: sub}
 }
 
 // rememberedAttach is one entry returned by attachRememberedTabs:
@@ -337,11 +361,14 @@ func (a *Adapter) attachRememberedTabs(ctx context.Context, ids []string) []reme
 		survivors = append(survivors, id)
 	}
 	// Rewrite the settings file so dead roots are forgotten on the
-	// next start. Best-effort.
+	// next start. Best-effort. N6 — serialise with persistMu so
+	// the reducer-side persistRoot doesn't race the rewrite.
+	a.persistMu.Lock()
 	if a.persist != nil {
 		a.persist.RecentRoots = append([]string{a.initial.ID()}, survivors...)
 		_ = saveSettings(a.persist)
 	}
+	a.persistMu.Unlock()
 	return attached
 }
 
@@ -350,6 +377,8 @@ func (a *Adapter) attachRememberedTabs(ctx context.Context, ids []string) []reme
 // are logged-and-swallowed; persistence is a UX nicety, never a
 // correctness lever.
 func (a *Adapter) persistRoot(id string, add bool) {
+	a.persistMu.Lock()
+	defer a.persistMu.Unlock()
 	if a.persist == nil {
 		return
 	}
@@ -369,16 +398,21 @@ func (a *Adapter) persistRoot(id string, add bool) {
 // attachHistoryToTab loads the persisted input history for the
 // tab's session ID and installs the historySaver callback so the
 // in-memory ring flushes back to disk on every submit. Slice 6.
+// N6: every read / write of a.persist runs under persistMu.
 func (a *Adapter) attachHistoryToTab(t *tab) {
-	if a.persist == nil || t == nil {
+	if t == nil {
 		return
 	}
-	if a.persist.History != nil {
+	a.persistMu.Lock()
+	if a.persist != nil && a.persist.History != nil {
 		if h, ok := a.persist.History[t.sessionID]; ok {
 			t.history = append([]string(nil), h...)
 		}
 	}
+	a.persistMu.Unlock()
 	t.historySaver = func(sid string, hist []string) {
+		a.persistMu.Lock()
+		defer a.persistMu.Unlock()
 		if a.persist == nil {
 			return
 		}

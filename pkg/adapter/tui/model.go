@@ -33,9 +33,17 @@ const (
 const tabBarHeight = 1
 
 // attachTabMsg adds a freshly opened tab to the model and switches
-// focus to it. Emitted by the adapter after Subscribe succeeds; the
-// model owns the resulting list mutation.
-type attachTabMsg struct{ t *tab }
+// focus to it. The pump goroutine for the new tab's subscription
+// MUST start AFTER the model has appended the tab to m.tabs —
+// otherwise the pump's first prog.Send for the new session id can
+// arrive at handleFrame with no matching tab and the frame is
+// silently dropped. To enforce this, the message carries the
+// subscription channel and the reducer hands it to the adapter-
+// installed startPump callback after the list mutation lands.
+type attachTabMsg struct {
+	t   *tab
+	sub <-chan protocol.Frame
+}
 
 // openTabError surfaces an asynchronous OpenSession failure.
 type openTabError struct{ err error }
@@ -72,6 +80,13 @@ type model struct {
 	// event count for the given session id and emits a
 	// statsResultMsg. Slice 6 S2. Nil in tests.
 	sampleStats func(sessionID string) tea.Cmd
+
+	// startPump is invoked by the attachTabMsg reducer AFTER the
+	// new tab has been appended to m.tabs. The adapter spawns a
+	// goroutine that forwards frames from sub into the program;
+	// because the tab is already in the list, the pump's first
+	// Send is guaranteed to find a matching tab. Nil in tests.
+	startPump func(sessionID string, sub <-chan protocol.Frame)
 }
 
 // statsResultMsg is the async reply from a sampleStats Cmd.
@@ -147,6 +162,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tabs = append(m.tabs, v.t)
 		m.active = len(m.tabs) - 1
 		m.relayout()
+		// Pump start MUST happen here, AFTER the append so any
+		// frame the pump fans out can findTab() the new session.
+		if m.startPump != nil && v.sub != nil {
+			m.startPump(v.t.sessionID, v.sub)
+		}
 		// Kick off a stats sample for the new tab immediately so
 		// its footer fills before the next tick.
 		if m.sampleStats != nil {
