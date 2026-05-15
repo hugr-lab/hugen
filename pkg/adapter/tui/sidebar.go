@@ -25,8 +25,20 @@ type liveviewStatus struct {
 	PendingInquiry *protocol.PendingInquiryRef `json:"pending_inquiry,omitempty"`
 	RecentActivity []protocol.ToolCallRef      `json:"recent_activity,omitempty"`
 	RecentChildren []recentChildEntry          `json:"recent_children,omitempty"`
+	ChildMeta      map[string]childMetaEntry   `json:"child_meta,omitempty"`
 	Extensions     map[string]json.RawMessage  `json:"extensions,omitempty"`
 	Children       map[string]*liveviewStatus  `json:"children,omitempty"`
+}
+
+// childMetaEntry mirrors pkg/extension/liveview's childMetaEntry —
+// spawn-time per-child metadata (role / skill) the parent
+// captured from its own SubagentStarted emit. Surfaced alongside
+// the children map so the tree can show role next to each node.
+type childMetaEntry struct {
+	Role      string    `json:"role,omitempty"`
+	Skill     string    `json:"skill,omitempty"`
+	Task      string    `json:"task,omitempty"`
+	StartedAt time.Time `json:"started_at,omitempty"`
 }
 
 // recentChildEntry mirrors pkg/extension/liveview's recentChild
@@ -35,6 +47,8 @@ type liveviewStatus struct {
 type recentChildEntry struct {
 	SessionID    string    `json:"session_id"`
 	Depth        int       `json:"depth,omitempty"`
+	Role         string    `json:"role,omitempty"`
+	Skill        string    `json:"skill,omitempty"`
 	Reason       string    `json:"reason,omitempty"`
 	LastTool     string    `json:"last_tool,omitempty"`
 	TerminatedAt time.Time `json:"terminated_at"`
@@ -83,7 +97,8 @@ func renderSidebar(s *liveviewStatus, width int) string {
 		sb.WriteString(styleSidebarHeading.Render("Subagents"))
 		sb.WriteString("\n")
 		for _, c := range sortedChildren(s.Children) {
-			sb.WriteString(renderSubagent(c, 1, width))
+			meta := s.ChildMeta[c.SessionID]
+			sb.WriteString(renderSubagent(c, meta, 1, width))
 		}
 	}
 
@@ -152,12 +167,20 @@ func renderSidebar(s *liveviewStatus, width int) string {
 // calls are rendered as a stripe under the node — gives the
 // operator a "what is this subagent doing right now" hint
 // beyond the single LastToolCall.
-func renderSubagent(s *liveviewStatus, indent, width int) string {
+//
+// `meta` carries the spawn-time role / skill captured by the
+// parent's liveview. When present, the node label includes
+// "<tier>:<role>" so the operator sees which staged role
+// (schema-explorer / query-builder / …) is currently running.
+func renderSubagent(s *liveviewStatus, meta childMetaEntry, indent, width int) string {
 	if s == nil {
 		return ""
 	}
 	prefix := strings.Repeat("  ", indent-1) + "▸ "
 	label := shortTierLabel(s.Depth)
+	if meta.Role != "" {
+		label = label + ":" + meta.Role
+	}
 	state := s.LifecycleState
 	if state == "" {
 		state = "active"
@@ -183,7 +206,9 @@ func renderSubagent(s *liveviewStatus, indent, width int) string {
 		out += styleSidebarFaint.Render(truncate(toolLine, width)) + "\n"
 	}
 	for _, c := range sortedChildren(s.Children) {
-		out += renderSubagent(c, indent+1, width)
+		// Pull role/skill from THIS node's own ChildMeta — it
+		// carries the spawn-time metadata for its direct children.
+		out += renderSubagent(c, s.ChildMeta[c.SessionID], indent+1, width)
 	}
 	return out
 }
@@ -321,6 +346,9 @@ func parseSkillStatus(exts map[string]json.RawMessage) (skills []string, tools i
 func renderRecentChild(rc recentChildEntry, width int) string {
 	var sb strings.Builder
 	label := shortTierLabel(rc.Depth)
+	if rc.Role != "" {
+		label = label + ":" + rc.Role
+	}
 	reason := rc.Reason
 	if reason == "" {
 		reason = "done"

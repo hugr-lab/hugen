@@ -53,6 +53,17 @@ func TestChatBuffer_SystemSpanRendered(t *testing.T) {
 	}
 }
 
+func TestChatBuffer_UserSpanMultilineIndents(t *testing.T) {
+	b := newChatBuffer()
+	b.appendUser("vgribanov", "first line\nsecond line")
+	out := b.render(80)
+	// "vgribanov ❯ " has visual width 12 (lipgloss.Width handles
+	// ❯ as 1 cell; raw len() over-counts UTF-8 bytes).
+	if !strings.Contains(out, "first line\n            second line") {
+		t.Fatalf("multi-line user span did not indent second line under 12-cell prefix:\n%q", out)
+	}
+}
+
 func TestPrefixMultiline_KeepsNewlinesAndIndents(t *testing.T) {
 	got := prefixMultiline("thinking: ", "line one\nline two\r\nline three")
 	want := "thinking: line one\n          line two\n          line three"

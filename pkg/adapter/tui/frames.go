@@ -263,8 +263,24 @@ func (b *chatBuffer) render(width int) string {
 	for _, s := range b.spans {
 		switch s.kind {
 		case spanUser:
-			sb.WriteString(styleUser.Render(s.label + " ❯ "))
-			sb.WriteString(s.text)
+			// Multi-line user messages (Shift+Enter newlines) used
+			// to render unindented under the styled label prefix,
+			// making the second line collide with the left margin.
+			// Render prefix styled, indent subsequent lines with
+			// whitespace matching the prefix's VISUAL width
+			// (lipgloss.Width handles wide runes like ❯ correctly;
+			// raw len(prefix) over-counts UTF-8 bytes).
+			rawPrefix := s.label + " ❯ "
+			sb.WriteString(styleUser.Render(rawPrefix))
+			lines := strings.Split(strings.ReplaceAll(s.text, "\r\n", "\n"), "\n")
+			indent := strings.Repeat(" ", lipgloss.Width(rawPrefix))
+			for i, ln := range lines {
+				if i > 0 {
+					sb.WriteString("\n")
+					sb.WriteString(indent)
+				}
+				sb.WriteString(ln)
+			}
 			sb.WriteString("\n\n")
 		case spanAssistant:
 			if md, err := b.renderer.Render(s.text); err == nil {

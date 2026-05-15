@@ -128,6 +128,7 @@ func (e *Extension) InitState(ctx context.Context, state extension.SessionState)
 		maxStale:  defaultMaxStale,
 		ch:        make(chan frameEvent, channelBuffer),
 		children:  map[string]json.RawMessage{},
+		childMeta: map[string]childMetaEntry{},
 	}
 	v.wg.Add(1)
 	go v.run()
@@ -249,6 +250,14 @@ type sessionView struct {
 	// by child sessionID.
 	children map[string]json.RawMessage
 
+	// childMeta carries per-child metadata captured at spawn time
+	// (from this session's own SubagentStarted emit): role,
+	// skill, mission task. The child itself doesn't surface these
+	// in its own liveview projection (skill/role isn't exposed
+	// via SessionState), so the parent collects them locally and
+	// emits them alongside `children` for adapter consumption.
+	childMeta map[string]childMetaEntry
+
 	// recentChildren is the rolling window of recently-terminated
 	// direct children. Newest-first; capped at
 	// recentChildrenWindow. Each entry carries the child's depth,
@@ -259,6 +268,19 @@ type sessionView struct {
 	recentChildren []recentChild
 }
 
+// childMetaEntry carries per-child metadata captured at the
+// parent's SubagentStarted emit and emitted alongside the active
+// children map so adapters can render role / skill next to each
+// subagent in the tree. Task is bounded to keep the emit payload
+// small — adapters that need the full mission read the
+// SubagentStarted event from the log.
+type childMetaEntry struct {
+	Role      string    `json:"role,omitempty"`
+	Skill     string    `json:"skill,omitempty"`
+	Task      string    `json:"task,omitempty"`
+	StartedAt time.Time `json:"started_at,omitempty"`
+}
+
 // recentChild is one history entry in sessionView.recentChildren.
 // Public-ish (lowercase struct, JSON-tagged fields) so the emit
 // payload carries the values directly without an intermediate
@@ -266,6 +288,8 @@ type sessionView struct {
 type recentChild struct {
 	SessionID    string    `json:"session_id"`
 	Depth        int       `json:"depth,omitempty"`
+	Role         string    `json:"role,omitempty"`
+	Skill        string    `json:"skill,omitempty"`
 	Reason       string    `json:"reason,omitempty"`
 	LastTool     string    `json:"last_tool,omitempty"`
 	TerminatedAt time.Time `json:"terminated_at"`

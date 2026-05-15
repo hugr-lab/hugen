@@ -180,7 +180,23 @@ func (v *sessionView) foldOwnFrame(f protocol.Frame) bool {
 	case *protocol.SubagentStarted:
 		// Lifecycle change for THIS session: it has a new child.
 		// The child's own state is delivered via its own
-		// liveview frame (caught in foldChildFrame).
+		// liveview frame (caught in foldChildFrame). Capture the
+		// spawn-time metadata (role / skill / task) here because
+		// the child's liveview projection doesn't expose those
+		// fields; the parent's record is the source of truth.
+		if v.childMeta == nil {
+			v.childMeta = map[string]childMetaEntry{}
+		}
+		task := fr.Payload.Task
+		if len(task) > 200 {
+			task = task[:200] + "…"
+		}
+		v.childMeta[fr.Payload.ChildSessionID] = childMetaEntry{
+			Role:      fr.Payload.Role,
+			Skill:     fr.Payload.Skill,
+			Task:      task,
+			StartedAt: fr.Payload.StartedAt,
+		}
 		return true
 	case *protocol.SubagentResult:
 		// One of our children terminated.
@@ -206,6 +222,11 @@ func (v *sessionView) foldChildFrame(childID string, f protocol.Frame) bool {
 			SessionID:    childID,
 			Reason:       fr.Payload.Reason,
 			TerminatedAt: time.Now().UTC(),
+		}
+		if meta, ok := v.childMeta[childID]; ok {
+			entry.Role = meta.Role
+			entry.Skill = meta.Skill
+			delete(v.childMeta, childID)
 		}
 		// Extract depth + last tool from the child's most recent
 		// status snapshot (still in v.children at this point) so
@@ -302,6 +323,13 @@ func (v *sessionView) emitStatus() {
 			kids[k] = val
 		}
 		payload["children"] = kids
+	}
+	if len(v.childMeta) > 0 {
+		meta := make(map[string]childMetaEntry, len(v.childMeta))
+		for k, val := range v.childMeta {
+			meta[k] = val
+		}
+		payload["child_meta"] = meta
 	}
 	if len(v.recentChildren) > 0 {
 		// Defensive copy — recipient may stash + mutate.

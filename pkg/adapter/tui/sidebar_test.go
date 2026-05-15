@@ -115,12 +115,38 @@ func TestRenderSidebar_PendingInquiryProminent(t *testing.T) {
 	}
 }
 
+// TestRenderSubagent_ShowsRoleFromChildMeta — dogfood feedback:
+// the operator wants to see the spawn role on each subagent node
+// (e.g. "mission:schema-explorer") rather than just the tier
+// label.
+func TestRenderSubagent_ShowsRoleFromChildMeta(t *testing.T) {
+	worker := &liveviewStatus{SessionID: "w", Depth: 2, LifecycleState: "active"}
+	out := renderSubagent(worker, childMetaEntry{Role: "schema-explorer", Skill: "analyst"}, 1, 60)
+	if !strings.Contains(out, "worker:schema-explorer") {
+		t.Errorf("missing role-augmented label: %s", out)
+	}
+}
+
+func TestRenderRecentChild_ShowsRole(t *testing.T) {
+	rc := recentChildEntry{
+		SessionID:    "ses-x",
+		Depth:        2,
+		Role:         "query-builder",
+		Reason:       "completed",
+		TerminatedAt: time.Now().Add(-5 * time.Second),
+	}
+	out := renderRecentChild(rc, 60)
+	if !strings.Contains(out, "worker:query-builder") {
+		t.Errorf("missing role on recent child: %s", out)
+	}
+}
+
 func TestRenderSubagent_RecursiveDepth(t *testing.T) {
 	worker := &liveviewStatus{SessionID: "w", Depth: 2, LifecycleState: "active",
 		LastToolCall: &protocol.ToolCallRef{Name: "hugr.execute_query"}}
 	mission := &liveviewStatus{SessionID: "m", Depth: 1, LifecycleState: "wait_subagents",
 		Children: map[string]*liveviewStatus{"w": worker}}
-	out := renderSubagent(mission, 1, 60)
+	out := renderSubagent(mission, childMetaEntry{}, 1, 60)
 	if !strings.Contains(out, "▸ mission") {
 		t.Errorf("missing mission node: %s", out)
 	}
@@ -191,7 +217,7 @@ func TestRenderSubagent_RecentActivityPrintsHistory(t *testing.T) {
 			{Name: "notepad.append", StartedAt: now.Add(-30 * time.Second)},
 		},
 	}
-	out := renderSubagent(worker, 1, 60)
+	out := renderSubagent(worker, childMetaEntry{}, 1, 60)
 	for _, name := range []string{"hugr.execute_query", "duckdb.exec_sql", "notepad.append"} {
 		if !strings.Contains(out, name) {
 			t.Errorf("missing %q in subagent activity stripe:\n%s", name, out)
