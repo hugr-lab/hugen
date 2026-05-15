@@ -577,6 +577,14 @@ const (
 	// TerminationSubagentCancelPrefix is concatenated with the
 	// caller-provided rationale: "subagent_cancel: <rationale>".
 	TerminationSubagentCancelPrefix = "subagent_cancel: "
+	// TerminationUserCancelPrefix marks a SessionClose initiated by
+	// the human operator (via /cancel_subagent, /cancel_all_subagents,
+	// or the Esc-Esc panic gesture). Recognised by
+	// closeTurnSkipReason so the dying session does NOT run a slow
+	// findings-recording close turn — the operator's intent is to
+	// stop now, not to wrap up. Concatenated with the operator's
+	// rationale: "user_cancel: <rationale>". Phase 5.1c.cancel-ux.
+	TerminationUserCancelPrefix = "user_cancel: "
 	// TerminationPanicPrefix is concatenated with the recovered
 	// panic message: "panic: <msg>".
 	TerminationPanicPrefix = "panic: "

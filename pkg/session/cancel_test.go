@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -38,7 +37,7 @@ func TestRequestChildCancel_Happy(t *testing.T) {
 	}
 
 	events, _ := testStore.ListEvents(context.Background(), child.ID(), ListEventsOpts{})
-	wanted := protocol.TerminationSubagentCancelPrefix + "/mission"
+	wanted := protocol.TerminationUserCancelPrefix + "/mission"
 	if !containsKindWithReason(events, protocol.KindSessionTerminated, wanted) {
 		t.Errorf("child terminated with wrong reason; events=%v", kindsWithReasons(events))
 	}
@@ -111,7 +110,7 @@ func TestRequestAllChildrenCancel_FansOut(t *testing.T) {
 			t.Fatalf("child %s did not exit within 3s", c.ID())
 		}
 		events, _ := testStore.ListEvents(context.Background(), c.ID(), ListEventsOpts{})
-		wanted := protocol.TerminationSubagentCancelPrefix + "panic_cancel"
+		wanted := protocol.TerminationUserCancelPrefix + "panic_cancel"
 		if !containsKindWithReason(events, protocol.KindSessionTerminated, wanted) {
 			t.Errorf("child %s wrong reason; events=%v", c.ID(), kindsWithReasons(events))
 		}
@@ -131,11 +130,74 @@ func TestRequestAllChildrenCancel_NoChildren(t *testing.T) {
 	}
 }
 
-// reasonHasCancelPrefix is a small predicate used to keep test
-// readers focused on the prefix invariant rather than the exact
-// reason suffix in case callers append metadata.
-func reasonHasCancelPrefix(reason string) bool {
-	return strings.HasPrefix(reason, protocol.TerminationSubagentCancelPrefix)
+// TestRequestChildCancel_CancelFrameEmittedBeforeTerminate — the
+// fast-cancel discipline submits Cancel{Cascade:true} BEFORE
+// SessionClose so the child's in-flight turn aborts via
+// turnCtx.Done and the cascade reaches grandchildren without
+// waiting for the mission's current turn to drain. Persisted
+// events: Cancel must land in the child's store strictly before
+// session_terminated. Phase 5.1c.cancel-ux operator-feedback fix.
+func TestRequestChildCancel_CancelEmittedBeforeTerminate(t *testing.T) {
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
+	defer cleanup()
+
+	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+
+	if err := parent.RequestChildCancel(context.Background(), child.ID(), "fast"); err != nil {
+		t.Fatalf("RequestChildCancel: %v", err)
+	}
+	select {
+	case <-child.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("child did not exit within 2s")
+	}
+
+	events, _ := testStore.ListEvents(context.Background(), child.ID(), ListEventsOpts{})
+	cancelSeq, termSeq := -1, -1
+	for i, e := range events {
+		switch e.EventType {
+		case string(protocol.KindCancel):
+			if cancelSeq < 0 {
+				cancelSeq = i
+			}
+		case string(protocol.KindSessionTerminated):
+			termSeq = i
+		}
+	}
+	if cancelSeq < 0 {
+		t.Fatalf("no cancel event persisted; events=%v", kindsWithReasons(events))
+	}
+	if termSeq < 0 {
+		t.Fatalf("no session_terminated event persisted; events=%v", kindsWithReasons(events))
+	}
+	if cancelSeq >= termSeq {
+		t.Errorf("cancel seq=%d not before terminate seq=%d", cancelSeq, termSeq)
+	}
 }
 
-var _ = reasonHasCancelPrefix // reserved for future tests
+// TestCloseTurnSkipReason_UserCancelPrefix — the new prefix is
+// recognised by the close-turn skip gate so the user-initiated
+// cancel does NOT trigger a slow findings-recording turn during
+// teardown. Phase 5.1c.cancel-ux.
+func TestCloseTurnSkipReason_UserCancelPrefix(t *testing.T) {
+	cases := []struct {
+		reason string
+		skip   bool
+	}{
+		{protocol.TerminationUserCancelPrefix + "/mission", true},
+		{protocol.TerminationUserCancelPrefix + "panic_cancel", true},
+		{protocol.TerminationUserCancelPrefix, true},
+		{protocol.TerminationSubagentCancelPrefix + "model thought best", false},
+		{protocol.TerminationCompleted, false},
+	}
+	for _, tc := range cases {
+		got := closeTurnSkipReason(tc.reason)
+		if got != tc.skip {
+			t.Errorf("closeTurnSkipReason(%q) = %v; want %v", tc.reason, got, tc.skip)
+		}
+	}
+}
