@@ -849,6 +849,34 @@ func TestCallInquire_BadType(t *testing.T) {
 	mgr_assertErrorCode(t, out, "bad_request")
 }
 
+// TestCallInquire_MissingTypeDefaultsToClarification — regression
+// for the dogfood failure where Gemma-class models omit the
+// schema-required `type` field. We default to clarification +
+// warn-log so the inquiry pipeline runs instead of returning
+// bad_request and triggering retry storms.
+func TestCallInquire_MissingTypeDefaultsToClarification(t *testing.T) {
+	parent, cleanup := newTestParent(t, withTestRunLoop())
+	defer cleanup()
+	args, _ := json.Marshal(map[string]any{
+		"question":  "Which dataset?",
+		"options":   []string{"a", "b"},
+		"timeout_ms": 100, // short so the test doesn't hang on the wait
+	})
+	out, err := parent.callInquire(us1WithSession(parent), args)
+	if err != nil {
+		t.Fatalf("callInquire returned err: %v", err)
+	}
+	// With type defaulted to clarification, the call should run
+	// to its (short) timeout — NOT return a bad_request envelope.
+	var got clarificationResult
+	if uerr := json.Unmarshal(out, &got); uerr != nil {
+		t.Fatalf("unmarshal: %v out=%s", uerr, out)
+	}
+	if !got.Timeout {
+		t.Errorf("expected timeout envelope after default-to-clarification; got %s", out)
+	}
+}
+
 // TestIsParentNote covers the FromSession predicate the wait
 // feed uses to discriminate parent notes from unrelated system
 // messages. Root sessions (no parent) never match.

@@ -65,8 +65,23 @@ func (s *Session) callInquire(ctx context.Context, args json.RawMessage) (json.R
 	if err := json.Unmarshal(args, &in); err != nil {
 		return toolErr("bad_request", fmt.Sprintf("invalid inquire args: %v", err))
 	}
+	// Schema requires `type` but Gemma / smaller models routinely
+	// omit it despite the `required: ["type", ...]` + enum on
+	// inquireSchema. Hard-rejecting then drove a real production
+	// failure (mission re-spawned workers for ~5 min while the
+	// model retried). Tolerate the omission: default to
+	// clarification and warn-log so operators can still see the
+	// model is mis-shaped. Approval needs an explicit opt-in (the
+	// UX is bimodal — defaulting to clarification just degrades
+	// to a free-form reply, which is safe; defaulting to approval
+	// would invent a yes/no decision out of nothing).
 	switch in.Type {
 	case protocol.InquiryTypeApproval, protocol.InquiryTypeClarification:
+		// explicit — no fix-up.
+	case "":
+		s.logger.Warn("session: inquire missing type — defaulting to clarification",
+			"session", s.id, "question_preview", truncate(in.Question, 80))
+		in.Type = protocol.InquiryTypeClarification
 	default:
 		return toolErr("bad_request",
 			fmt.Sprintf("type must be approval|clarification; got %q", in.Type))
