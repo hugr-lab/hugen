@@ -240,6 +240,19 @@ metadata:
                   "what sources / modules exist") → ONE
                   `overview` worker, single wave. Done.
                   Do NOT spawn schema-explorer here.
+                • CATEGORY question ("how many types of
+                  payments", "what kinds of orders exist",
+                  "list all customer-related tables") → the
+                  goal names a CATEGORY that can span MULTIPLE
+                  tables. ONE `schema-explorer` wave-1 worker
+                  scoped to "enumerate every table in
+                  <module> matching <category keyword>" via
+                  `discovery-search_module_data_objects(
+                  module_name, query)`. The catalogue IS the
+                  answer for cardinality questions; for
+                  per-table analytics, mission fans out
+                  schema-explorer (per matching table) in a
+                  later wave from that catalogue.
                 • Single entity describe / count / query →
                   Stage 0 first (above), then schema-explorer →
                   query-builder (→ data-analyst → report-
@@ -253,6 +266,11 @@ metadata:
                 "Describe X, Y, Z"               → N = 3
                 "What does <DS> track + main
                  entities + best aggregate"      → N = 3
+                "How many types of payments"     → category,
+                                                   N = 1 (enum
+                                                   wave), maybe
+                                                   N=k follow-up
+                                                   waves after.
 
             ☐ B. PUBLISH N to the plan.
               Call `plan:comment` with the literal text
@@ -440,6 +458,22 @@ metadata:
           `include_description: true` instead of concluding the
           field is missing. See `hugr-data:instructions` for the
           full lever set.
+          CATEGORY-shaped tasks ("payment types", "customer
+          tables", "patient-related entities") are different
+          from single-entity tasks. When your task names a
+          domain CATEGORY rather than ONE specific table,
+          FIRST enumerate ALL matching tables in the chosen
+          module via
+          `hugr-main:discovery-search_module_data_objects(
+          module_name: "<module>", query: "<category keyword>")`
+          and write the FULL catalogue to the whiteboard
+          ("<module>.<category> matches: tableA, tableB, tableC
+          — per-table summary: …"). Do NOT bail on the first
+          matching table; the user's "how many types" /
+          "list all" question is answered by the catalogue
+          itself, not by a deep dive into one of them. Only
+          drill into a specific table after the catalogue is
+          on the whiteboard and the mission asks for it.
         # Phase 4.2.3 — schema-explorer needs procedural skill
         # boot (skill:load → skill:files → skill:ref → discovery)
         # which weak cheap-intent models (4B) routinely skip or

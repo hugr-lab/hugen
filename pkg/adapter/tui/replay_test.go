@@ -63,6 +63,43 @@ func TestReplayEvents_ProjectsUserAndAssistantIntoChat(t *testing.T) {
 	}
 }
 
+// TestReplayEvents_SkipsAgentAuthoredUserMessages — synthetic
+// UserMessages authored by the agent participant (e.g. the
+// [system:async_summary] kick from kickAsyncSummaryTurn) must not
+// render as user bubbles during resume. Live mode hides them via
+// the UserMessage early-return in handleFrame; replay needs the
+// same discipline. Phase 5.x.skill-polish-1 dogfood fix.
+func TestReplayEvents_SkipsAgentAuthoredUserMessages(t *testing.T) {
+	user := protocol.ParticipantInfo{ID: "u", Kind: protocol.ParticipantUser, Name: "u"}
+	// Author.ID == agent_id ("agent-test" — see rowFromFrame helper)
+	// so the store's deriveAuthorKind on replay returns ParticipantAgent.
+	// Mirrors production where agent.Participant().ID == agent.ID().
+	agent := protocol.ParticipantInfo{ID: "agent-test", Kind: protocol.ParticipantAgent, Name: "hugen"}
+	tb := newTab("ses-async", user, func(protocol.Frame) error { return nil }, slog.Default())
+	tb.applyGeometry(80, 20, 100)
+
+	rows := []store.EventRow{
+		rowFromFrame(t, 1, protocol.NewUserMessage("ses-async", user, "real user msg")),
+		rowFromFrame(t, 2, protocol.NewUserMessage("ses-async", agent, "[system:async_summary] kick text")),
+		rowFromFrame(t, 3, protocol.NewAgentMessageConsolidated(
+			"ses-async", agent, "Mission completed: …", 0, true, nil, "", "")),
+	}
+	replayEvents(tb, rows)
+
+	userSpans := 0
+	for _, s := range tb.chat.spans {
+		if s.kind == spanUser {
+			userSpans++
+			if strings.Contains(s.text, "[system:async_summary]") {
+				t.Errorf("synthetic kick rendered as user span: %q", s.text)
+			}
+		}
+	}
+	if userSpans != 1 {
+		t.Errorf("user spans = %d; want 1 (real user msg only)", userSpans)
+	}
+}
+
 func TestReplayEvents_SkipsInflightAndCleanState(t *testing.T) {
 	user := protocol.ParticipantInfo{ID: "u", Kind: protocol.ParticipantUser, Name: "u"}
 	agent := protocol.ParticipantInfo{ID: "a", Kind: protocol.ParticipantAgent, Name: "hugen"}

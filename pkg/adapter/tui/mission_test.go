@@ -161,6 +161,75 @@ func TestMissionModal_CancelAll(t *testing.T) {
 	}
 }
 
+// TestMissionModal_Rebuild_DropsCompletedRows — when a liveview
+// status frame arrives mid-modal-open, rebuild() refreshes the row
+// list from the fresh projection. Rows whose children finished
+// (and thus disappeared from liveview.Children) drop out;
+// Cancelling flags for still-present rows persist so the operator
+// keeps seeing "⊘ cancelling…" feedback. Phase 5.x.skill-polish-1
+// R1/R2 fix.
+func TestMissionModal_Rebuild_DropsCompletedRows(t *testing.T) {
+	state := newMissionModalState(fakeLiveviewStatus(3))
+	state.selected = 1
+	state.markCancelling(0)
+	state.markCancelling(2)
+
+	// Live projection now shows only one of the original three
+	// children (the others terminated).
+	survivors := &liveviewStatus{
+		SessionID: "root-aaaaaa01",
+		Depth:     0,
+		Children:  map[string]*liveviewStatus{},
+		ChildMeta: map[string]childMetaEntry{},
+	}
+	keepID := state.rows[1].SessionID // childB...
+	survivors.Children[keepID] = &liveviewStatus{SessionID: keepID, Depth: 1}
+	survivors.ChildMeta[keepID] = childMetaEntry{Role: "data-analyst", Task: "goal B"}
+
+	state.rebuild(survivors)
+
+	if len(state.rows) != 1 {
+		t.Fatalf("rebuilt rows = %d; want 1", len(state.rows))
+	}
+	if state.rows[0].SessionID != keepID {
+		t.Errorf("kept row id = %q; want %q", state.rows[0].SessionID, keepID)
+	}
+	// childB wasn't in the cancelling map, so flag should be clean.
+	if state.rows[0].Cancelling {
+		t.Errorf("Cancelling flag leaked onto preserved row")
+	}
+	if state.selected != 0 {
+		t.Errorf("selected = %d; want 0 (clamped after rebuild)", state.selected)
+	}
+}
+
+// TestMissionModal_Rebuild_PreservesCancellingFlag — when a row
+// survives a rebuild and was marked Cancelling, the flag persists
+// so the "⊘ cancelling…" UI stays stable while the cancel
+// SessionClose round-trip completes.
+func TestMissionModal_Rebuild_PreservesCancellingFlag(t *testing.T) {
+	state := newMissionModalState(fakeLiveviewStatus(2))
+	state.markCancelling(0)
+	keepID := state.rows[0].SessionID
+
+	// Same children, fresh projection (mimics a liveview status
+	// frame arriving while cancel is in flight).
+	state.rebuild(fakeLiveviewStatus(2))
+
+	var found bool
+	for _, r := range state.rows {
+		if r.SessionID == keepID {
+			found = true
+			if !r.Cancelling {
+				t.Errorf("Cancelling flag lost on rebuild")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("kept id missing after rebuild")
+	}
+}
+
 // TestMissionModal_Dismiss — Esc clears the modal without submitting.
 func TestMissionModal_Dismiss(t *testing.T) {
 	m, submitted := newTestModel(t)

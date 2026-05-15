@@ -60,7 +60,8 @@ Phase plan:
 | 5.1b. Adapter visibility surface — capability-bag `liveview` extension (FrameObserver / ChildFrameObserver / StatusReporter), enriched `SessionStatusPayload`, multi-root harness primitive + `multi_root_independence` scenario, `wait_subagents` optional ids + fast-fail | shipped (`b243b77`, 2026-05-14) |
 | 5.1c. Bubble Tea TUI adapter — reference rich-client on top of 5.1b liveview surface; multi-root tabs, inquiry modal, sidebar driven by `ExtensionFrame{liveview/status}`, on-attach replay, dogfood polish | shipped (`410df3d`, 2026-05-15) |
 | 5.1c.async-root. Root defaults to `wait="async"` + three-bucket follow-up/new-mission/conversational classifier + mandatory announce-on-spawn user reply + TUI `✓ mission … completed` marker. Skill-prompt-driven; no new runtime primitives. Bundles two dogfood doc fixes (hugr-data `schema-type_fields` semantic-search params, `_skill_builder` slim + de-autoload). 5/5 PASS on Gemma 26B | shipped (`dc077ab`, 2026-05-15) |
-| 5.1c.cancel-ux. User-initiated mission cancel: `/mission` modal listing in-flight children with `j/k/c/Shift+C` keys; Esc-Esc double-press as panic-cancel-all. New SlashCommand handlers `cancel_subagent` + `cancel_all_subagents` on the session loop, `Session.RequestChildCancel` / `RequestAllChildrenCancel` helpers reusing the existing SessionClose Frame path. Spec: `design/002-runtime-canonical/phase-5.1c.cancel-ux.md` | in-progress (branch `018-mini-5.1c-cancel-ux`) |
+| 5.1c.cancel-ux. User-initiated mission cancel: `/mission` modal listing in-flight children with `j/k/c/Shift+C` keys; Esc-Esc double-press as panic-cancel-all. Fast-cancel discipline (Cancel{Cascade:true} → SessionClose with `user_cancel:` skip-close-turn prefix). Async result delivery (idle-fold + auto-summary turn on `SubagentResult{AsyncNotify}`). | shipped (`355ad48`, 2026-05-15) |
+| 5.x.skill-polish-1. `_root` Bucket D (clarify before route) + verify-mission-alive pre-check; analyst category enumeration via `discovery-search_module_data_objects` so workers don't bail on first matched table; TUI cancel-ux R-followups (modal live rebuild on liveview status, async-summary flag gated by route). | in-progress (branch `019-mini-5.x.skill-polish-1`) |
 | 5.2. Compactor — content-aware history summarisation; replaces phase-3 `defaultHistoryWindow=50` stop-gap; composes with 4.2.3 notepad (notepad = cross-mission, compactor = within-session) | open — not yet specced |
 | 6. Cron + scheduler | open |
 | 7. Memory pipeline + LLM Wiki — cross-conversation distilled knowledge. Reads 4.2.3 notepad as input; session-scoped working memory is owned by 4.2.3. | open |
@@ -74,20 +75,28 @@ Goal: finish design-001 cleanly, then move to **hub integration**
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
 
-## Active focus — 5.1c.cancel-ux in flight; 5.3.policy-ux + 5.2 queued
+## Active focus — 5.x.skill-polish-1 in flight; 5.x.subagent-lifetime + 5.3.policy-ux queued
 
-Phase 5.1c.async-root shipped to `main` at `dc077ab` (2026-05-15)
-alongside two doc fixes (hugr-data `schema-type_fields` semantic
-search params + `_skill_builder` slim + de-autoload). All 5/5
-focused scenarios PASS on Gemma 26B (gate model). Three mini-
-phases queued from the dogfood feedback log:
+Phase 5.1c.cancel-ux shipped to `main` at `355ad48` (PR #18,
+2026-05-15) — `/mission` modal + Esc-Esc panic-cancel + fast-
+cancel discipline + async-result idle-fold + auto-summary turn.
+Independent code review surfaced one race (Cancel-before-
+SessionClose ordering) and seven R-items; race fixed in-PR, 4
+of 7 R-items rolled into 5.x.skill-polish-1.
 
-- **5.1c.cancel-ux** *(in flight)* — `/mission` modal +
-  Esc-Esc panic-cancel for user-initiated mission cancel. Branch
-  `018-mini-5.1c-cancel-ux`; spec at
-  `design/002-runtime-canonical/phase-5.1c.cancel-ux.md`. Runtime
-  helpers + slash handlers + TUI modal + double-Esc tracker all
-  landed, tests green.
+- **5.x.skill-polish-1** *(in flight)* — skill prose + cancel-ux
+  R-followups. `_root` gets Bucket D (clarify before route) +
+  verify-mission-alive pre-check on Bucket A. `analyst` gets a
+  CATEGORY classifier shape that enumerates ALL matching tables
+  via `discovery-search_module_data_objects` before drilling in
+  (stops the "bail on first found table" pattern). TUI modal
+  rebuilds on each liveview status frame so cancelled rows
+  disappear naturally; async-summary flag now armed in
+  RouteBuffered (not first switch) so wait_subagents-consumed
+  AsyncNotify results don't fire redundant summary turns.
+- **5.x.subagent-lifetime** *(queued)* — don't auto-close
+  subagents on `SubagentResult`; let model dismiss or follow-up
+  the still-alive child. Phase-sized, needs deliberate design.
 - **5.3.policy-ux** *(queued)* — HITL "always allow / always
   deny" keybinds + remote admin policies.
 - **5.4.workspace-tree** *(queued, escalation only)* — if Path 1
