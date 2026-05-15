@@ -253,6 +253,167 @@ func TestPhase4Acceptance_RestartResume_TwoSiblings(t *testing.T) {
 	}
 }
 
+// TestPhase5_2eta_RestartRestoresParkedChild — phase 5.2 η.
+//
+// Spawn root + child, park the child via parent.ParkChildForTest
+// (mirrors the handleSubagentResult parking branch), graceful Stop
+// without writing termination events, fresh Manager, RestoreActive.
+// The parked child must NOT be buried as restart_died: settle's
+// η branch reattaches it as a live Session under root.children
+// with lifecycleState=awaiting_dismissal and a fresh parkedAt.
+func TestPhase5_2eta_RestartRestoresParkedChild(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+
+	mgr1 := newTestManager(t, store)
+	root, _, err := mgr1.Open(ctx, session.OpenRequest{OwnerID: "alice"})
+	if err != nil {
+		t.Fatalf("Open root: %v", err)
+	}
+	rootID := root.ID()
+	drainOutboxOnce(root.Outbox())
+
+	child, err := root.Spawn(ctx, session.SpawnSpec{
+		Skill: "data-chat", Role: "data-chatter", Task: "сколько платежей",
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	childID := child.ID()
+	drainOutboxOnce(root.Outbox())
+
+	// Pre-condition the parent's events with a subagent_result so the
+	// settle path's "no subagent_result yet" guard is bypassed (the
+	// parking branch in handleSubagentResult always projects a result
+	// before flipping the child to awaiting_dismissal). Without this
+	// the η restore branch is moot — there's nothing to skip.
+	resultFrame := protocol.NewSubagentResult(rootID, childID,
+		protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent},
+		protocol.SubagentResultPayload{
+			SessionID: childID,
+			Reason:    protocol.TerminationCompleted,
+			Result:    "answer-text",
+		})
+	rRow, rSum, perr := session.FrameToEventRow(resultFrame, "a1")
+	if perr != nil {
+		t.Fatalf("project subagent_result: %v", perr)
+	}
+	if err := store.AppendEvent(ctx, rRow, rSum); err != nil {
+		t.Fatalf("append subagent_result: %v", err)
+	}
+
+	// Park the child — the runtime parking helper emits the status
+	// marker the η restore path later keys off.
+	root.ParkChildForTest(ctx, child)
+	waitForStatus(t, child, protocol.SessionStatusAwaitingDismissal, 2*time.Second)
+
+	// Graceful shutdown — neither side writes session_terminated.
+	mgr1.Stop(ctx)
+
+	// --- Boot 2: fresh manager pointed at the same store ---
+	mgr2 := newTestManager(t, store)
+	if err := mgr2.RestoreActive(ctx); err != nil {
+		t.Fatalf("RestoreActive: %v", err)
+	}
+	defer mgr2.Stop(ctx)
+
+	// Child must NOT be buried as restart_died — η restore branch
+	// reattached it instead.
+	childEvents, _ := store.ListEvents(ctx, childID, session.ListEventsOpts{})
+	for _, ev := range childEvents {
+		if ev.EventType != string(protocol.KindSessionTerminated) {
+			continue
+		}
+		t.Fatalf("post-boot: parked child %s was terminated; reason=%v",
+			childID, ev.Metadata["reason"])
+	}
+
+	// Root is alive again and the child is back in root.children.
+	restoredRoot, ok := mgr2.Get(rootID)
+	if !ok {
+		t.Fatalf("post-boot: root %s not registered live", rootID)
+	}
+	restoredChild, ok := restoredRoot.FindDescendant(childID)
+	if !ok {
+		t.Fatalf("post-boot: parked child %s not attached under root.children",
+			childID)
+	}
+	if got := restoredChild.Status(); got != protocol.SessionStatusAwaitingDismissal {
+		t.Errorf("restored child status = %q; want %q",
+			got, protocol.SessionStatusAwaitingDismissal)
+	}
+}
+
+// TestPhase5_2eta_RestartTerminatedChildStillBuried verifies the η
+// restore branch's terminal-event short-circuit: a child that had
+// session_terminated written before the crash still goes through
+// the legacy settle flow (no resurrection).
+func TestPhase5_2eta_RestartTerminatedChildStillBuried(t *testing.T) {
+	store := fixture.NewTestStore()
+	ctx := context.Background()
+
+	mgr1 := newTestManager(t, store)
+	root, _, err := mgr1.Open(ctx, session.OpenRequest{OwnerID: "alice"})
+	if err != nil {
+		t.Fatalf("Open root: %v", err)
+	}
+	rootID := root.ID()
+	drainOutboxOnce(root.Outbox())
+
+	child, err := root.Spawn(ctx, session.SpawnSpec{Task: "scout"})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	childID := child.ID()
+	drainOutboxOnce(root.Outbox())
+
+	// Park the child + then write a terminal event directly to its
+	// log (simulates a crash that landed the parking marker AND a
+	// SessionClose-driven teardown before Stop).
+	root.ParkChildForTest(ctx, child)
+	waitForStatus(t, child, protocol.SessionStatusAwaitingDismissal, 2*time.Second)
+	terminal := protocol.NewSessionTerminated(childID,
+		protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent},
+		protocol.SessionTerminatedPayload{Reason: protocol.TerminationCompleted})
+	tRow, tSum, perr := session.FrameToEventRow(terminal, "a1")
+	if perr != nil {
+		t.Fatalf("project terminal: %v", perr)
+	}
+	if err := store.AppendEvent(ctx, tRow, tSum); err != nil {
+		t.Fatalf("append terminal: %v", err)
+	}
+	mgr1.Stop(ctx)
+
+	mgr2 := newTestManager(t, store)
+	if err := mgr2.RestoreActive(ctx); err != nil {
+		t.Fatalf("RestoreActive: %v", err)
+	}
+	defer mgr2.Stop(ctx)
+
+	restoredRoot, ok := mgr2.Get(rootID)
+	if !ok {
+		t.Fatalf("root not registered live post-boot")
+	}
+	if _, ok := restoredRoot.FindDescendant(childID); ok {
+		t.Errorf("terminated child resurrected; want bury")
+	}
+}
+
+// waitForStatus polls the in-memory Status() field for the given
+// state. Used by η tests where markStatus emits asynchronously and
+// the parking marker may land a few ticks after parkChild returns.
+func waitForStatus(t *testing.T, s *session.Session, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if s.Status() == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("status %q not reached within %v; got %q", want, timeout, s.Status())
+}
+
 // eventKinds is a local shortcut for diagnostics in this file. The
 // global `kinds` helper used to live in recover_test.go but is
 // unused in the settle-only suite — reintroducing a private helper

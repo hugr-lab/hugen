@@ -208,17 +208,6 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *De
 		return nil, ErrSessionClosed
 	}
 
-	// Settle any dangling sub-agents BEFORE bringing up the goroutine
-	// so a) the synthetic subagent_result rows are persisted regardless
-	// of whether lifecycle.Acquire / start succeed, and b) materialise
-	// (called lazily on first inbound) sees a coherent parent.events.
-	// Idempotent — second call (e.g. RestoreActive then Resume on the
-	// same root) finds the rows already there and writes nothing.
-	if _, err := settleDanglingSubagents(ctx, deps, id); err != nil {
-		deps.Logger.Warn("session: restore settle dangling",
-			"session", id, "err", err)
-	}
-
 	depth := depthFromRow(row)
 	var parentCtx context.Context
 	if parent != nil {
@@ -234,6 +223,20 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *De
 	s := buildSessionShell(id, depth, parent, deps, sessCtx, cancel)
 	s.openedAt = row.CreatedAt
 	s.ownerID = row.OwnerID
+
+	// Settle any dangling sub-agents BEFORE bringing up the goroutine
+	// so a) the synthetic subagent_result rows are persisted regardless
+	// of whether lifecycle.Acquire / start succeed, and b) materialise
+	// (called lazily on first inbound) sees a coherent parent.events.
+	// Phase 5.2 η: pass the just-built shell as `parent` so settle's
+	// restore-parked branch can reattach awaiting_dismissal children
+	// under s.children.
+	// Idempotent — second call (e.g. RestoreActive then Resume on the
+	// same root) finds the rows already there and writes nothing.
+	if _, err := settleDanglingSubagents(ctx, deps, s, id); err != nil {
+		deps.Logger.Warn("session: restore settle dangling",
+			"session", id, "err", err)
+	}
 
 	// Extension InitState — every extension allocates a fresh
 	// per-session handle. For resumed sessions Recovery (lazy on the

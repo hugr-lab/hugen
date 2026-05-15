@@ -86,6 +86,46 @@ func childIsParked(c *Session) bool {
 	return c.Status() == protocol.SessionStatusAwaitingDismissal
 }
 
+// ParkChildForTest is a test-only wrapper around parkChild. The
+// runtime path runs from handleSubagentResult; tests that exercise
+// parking-adjacent behaviour (restore, dismiss, ε ceiling)
+// shortcut the result projection and drive parkChild directly.
+func (s *Session) ParkChildForTest(ctx context.Context, child *Session) {
+	s.parkChild(ctx, child)
+}
+
+// FindDescendant walks this session's subtree breadth-first and
+// returns the first descendant whose ID matches. Used by tests
+// (and future cross-tree lookups in the manager / TUI) to reach a
+// specific child without the caller iterating Children()
+// recursively. Returns (nil, false) when no match is found.
+func (s *Session) FindDescendant(id string) (*Session, bool) {
+	if s == nil || id == "" {
+		return nil, false
+	}
+	queue := []*Session{s}
+	for len(queue) > 0 {
+		head := queue[0]
+		queue = queue[1:]
+		head.childMu.Lock()
+		kids := make([]*Session, 0, len(head.children))
+		for _, c := range head.children {
+			if c == nil {
+				continue
+			}
+			kids = append(kids, c)
+		}
+		head.childMu.Unlock()
+		for _, c := range kids {
+			if c.id == id {
+				return c, true
+			}
+			queue = append(queue, c)
+		}
+	}
+	return nil, false
+}
+
 // armParkIdleTimer schedules the per-child idle-timeout that auto-
 // dismisses a parked child after Deps.ParkedIdleTimeout. Replaces
 // any timer left over from a prior parking (idempotent re-park
