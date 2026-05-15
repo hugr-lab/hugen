@@ -1,0 +1,102 @@
+# parked_dismiss_after_summary — phase 5.2 ι.
+#
+# Step 1 spawns a chat-shape mission that completes and parks (the
+# dispatching skill has `mission.autoclose: false`). Step 2 brings
+# an UNRELATED follow-up that does not belong to the parked
+# mission's thread. The model must:
+#
+#   (a) Recognise the new ask is independent of the parked mission
+#       (different domain / scope).
+#   (b) Call `session:subagent_dismiss(<parked-id>)` to free the
+#       slot before spawning fresh work.
+#   (c) Issue a fresh `session:spawn_mission` for the new request.
+#
+# By-eye assertions:
+#
+#   1. After step 1 the mission row's latest session_status is
+#      "awaiting_dismissal" — same precondition as
+#      parked_followup_chat.
+#
+#   2. Step 2's root tool_calls contain — in order — exactly one
+#      `session:subagent_dismiss` with the step-1 mission id AND
+#      one `session:spawn_mission` whose goal references the new
+#      ask. The two distinct missions surface as separate child
+#      session rows.
+#
+#   3. The dismissed mission's events log carries
+#      session_terminated{reason="subagent_dismissed"}; the new
+#      mission's row exists with its own session id ≠ the
+#      dismissed one.
+#
+#   4. Root's final agent_message to the user on step 2 quotes the
+#      NEW mission's result, not the dismissed one's stale answer.
+#
+# Tuning notes:
+#   - Step-2 goal is intentionally orthogonal to step 1
+#     (different module / different question shape) so the model
+#     can recognise it as a fresh thread.
+name: parked_dismiss_after_summary
+requires: [hugr]
+
+steps:
+  - say: |
+      Pull the top-3 employees by orders processed in `northwind`
+      Q4 1997 — names + counts only.
+    budget: 360s
+    wait_for_subagents: 240s
+
+    queries:
+      - name: mission_lifecycle
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}, session_type: {eq: "mission"}}) {
+                id status session_type
+                events(
+                  filter: {event_type: {eq: "session_status"}}
+                  order_by: [{field: "seq", direction: DESC}]
+                  limit: 1
+                ) { seq metadata }
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+  - say: |
+      Different question — does the northwind catalog have an
+      inventory_movements table? Just yes/no plus the column list
+      if it exists.
+    budget: 360s
+    wait_for_subagents: 240s
+
+    queries:
+      # Root tool_calls on step 2 — expect dismiss + spawn_mission.
+      - name: tool_calls_root_step2
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Child session rows — expect two missions, the older one
+      # terminated by dismiss.
+      - name: mission_rows
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata created_at
+                events(
+                  filter: {event_type: {eq: "session_terminated"}}
+                  order_by: [{field: "seq", direction: DESC}]
+                  limit: 1
+                ) { metadata }
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }

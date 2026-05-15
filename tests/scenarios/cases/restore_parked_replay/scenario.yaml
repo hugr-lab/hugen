@@ -1,0 +1,108 @@
+# restore_parked_replay — phase 5.2 ι.
+#
+# Bounces the runtime mid-conversation to verify the η restore path
+# reattaches a parked child as a live Session under the restored
+# root. Step 1 spawns a chat-shape mission that completes and
+# parks; the harness then performs a controlled restart (graceful
+# Stop + fresh Manager pointed at the same store), and step 2 fires
+# a follow-up the model should route via notify_subagent to the
+# SAME — now restored — mission id.
+#
+# By-eye assertions (post-restart):
+#
+#   1. The mission's events log shows NO session_terminated row
+#      between step 1 and step 2 — restore reattached the parked
+#      session rather than burying it as restart_died.
+#
+#   2. The mission's latest session_status remains
+#      "awaiting_dismissal" through the restart.
+#
+#   3. Root's tool_calls on step 2 contain notify_subagent with
+#      the step-1 mission id. The mission's event log gains a
+#      synthetic user_message authored by root's agent participant
+#      followed by a fresh agent_message turn.
+#
+#   4. The mission's session row appears in
+#      Manager.Get(rootID).FindDescendant(missionID) on the post-
+#      restart Manager (harness probe).
+#
+# Tuning notes:
+#   - Harness restart support is the new piece this scenario
+#     exercises. The runner must call mgr1.Stop(ctx) → fresh
+#     mgr2 → mgr2.RestoreActive(ctx) → mgr2.Resume(rootID)
+#     between steps. Until that hook lands, this scenario is
+#     scaffolded but skipped at run time.
+#   - Long idle timeout to ensure the restored session doesn't
+#     auto-dismiss during the restart window. Restart resets the
+#     idle clock per phase-5.2 resolved decision 7.
+name: restore_parked_replay
+requires: [hugr, restart-capable]
+overrides:
+  subagents:
+    parking:
+      parked_idle_timeout: 30m
+
+steps:
+  - say: |
+      Pull the row count of `customers` in northwind. Single
+      number please.
+    budget: 240s
+    wait_for_subagents: 180s
+
+    queries:
+      - name: mission_parked
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}, session_type: {eq: "mission"}}) {
+                id status session_type
+                events(
+                  filter: {event_type: {eq: "session_status"}}
+                  order_by: [{field: "seq", direction: DESC}]
+                  limit: 1
+                ) { metadata }
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+  # restart_runtime: the harness instruction goes here once
+  # restart-capable runs are wired. Concretely the runner observes
+  # this marker between steps, gracefully stops the current core,
+  # builds a fresh one against the same store, and re-attaches the
+  # root via Resume. Until then the scenario `requires:
+  # restart-capable` keeps it out of CI.
+  - restart_runtime: true
+
+  - say: |
+      And the same number for `chinook.customers` please.
+    budget: 240s
+    wait_for_subagents: 180s
+
+    queries:
+      - name: mission_no_termination
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}, session_type: {eq: "mission"}}) {
+                id
+                events(
+                  filter: {event_type: {eq: "session_terminated"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { metadata }
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      - name: tool_calls_root_step2
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }

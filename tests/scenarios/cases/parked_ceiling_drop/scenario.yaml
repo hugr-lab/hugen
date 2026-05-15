@@ -1,0 +1,106 @@
+# parked_ceiling_drop — phase 5.2 ι.
+#
+# Verifies the Deps.MaxParkedChildrenPerRoot eviction: four
+# sequential chat-shape missions, each of which parks after its
+# result. The cap is set to 3 via topology override
+# (`subagents.parking.max_parked_children_per_root: 3`). On the
+# 4th park, the runtime auto-dismisses the OLDEST parked mission
+# (smallest parkedAt) with reason="ceiling_drop" before parking
+# the new one.
+#
+# By-eye assertions:
+#
+#   1. Four session rows under root with session_type="mission".
+#      Their `created_at` timestamps are strictly increasing in
+#      spawn order.
+#
+#   2. Exactly ONE of the four missions has
+#      session_terminated{reason="ceiling_drop"} — and it is the
+#      mission with the smallest created_at among the four.
+#
+#   3. The other three missions remain in awaiting_dismissal
+#      (their latest session_status events).
+#
+#   4. NO `session:subagent_dismiss` tool_call appears on root —
+#      the eviction is runtime-driven.
+#
+# Tuning notes:
+#   - Four sequential user turns; each asks a small distinct
+#     question (table count in different modules). The chat-shape
+#     skill keeps each mission parked.
+#   - Cap 3 + 4 missions = exactly one eviction, which keeps the
+#     assertions deterministic.
+name: parked_ceiling_drop
+requires: [hugr]
+overrides:
+  subagents:
+    parking:
+      max_parked_children_per_root: 3
+      # Long enough so the idle timer never fires during the test;
+      # ceiling enforcement must be the sole eviction reason.
+      parked_idle_timeout: 30m
+
+steps:
+  - say: How many tables are in module `northwind`? Number only.
+    budget: 180s
+    wait_for_subagents: 120s
+  - say: How many in module `chinook`? Number only.
+    budget: 180s
+    wait_for_subagents: 120s
+  - say: How many in module `dvdrental`? Number only.
+    budget: 180s
+    wait_for_subagents: 120s
+  - say: |
+      And in module `pagila` — how many tables? Number only.
+    budget: 180s
+    wait_for_subagents: 120s
+
+    queries:
+      - name: mission_rows
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(
+                filter: {parent_session_id: {eq: $sid}, session_type: {eq: "mission"}}
+                order_by: [{field: "created_at", direction: ASC}]
+              ) {
+                id status session_type created_at
+                events(
+                  filter: {event_type: {in: ["session_status", "session_terminated"]}}
+                  order_by: [{field: "seq", direction: DESC}]
+                  limit: 1
+                ) { event_type metadata }
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Aggregate: count of session_terminated{ceiling_drop} rows
+      # across the root's mission subtree. Must equal 1.
+      - name: ceiling_drop_count
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map(.events // []) | flatten | map(select(.event_type == \"session_terminated\" and .metadata.reason == \"ceiling_drop\")) | length") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}, session_type: {eq: "mission"}}) {
+                  events(filter: {event_type: {eq: "session_terminated"}}) {
+                    event_type metadata
+                  }
+                }
+              }}}
+            }
+          }
+        path: extensions.jq.jq
+
+      # Root tool_calls — must NOT contain subagent_dismiss.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name }
+            }}}
+          }
+        vars: { sid: "$sid" }

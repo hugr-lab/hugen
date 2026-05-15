@@ -1,0 +1,93 @@
+# b3_per_role_budget_isolation — phase 5.2 ι.
+#
+# Covers phase-5.2 δ (B3 migration): two SubAgentRole entries in
+# the SAME mission's dispatching skill declare DIFFERENT
+# `max_tool_turns` overrides. The mission spawns one worker per
+# role in a single wave; each worker's turn-loop budget MUST
+# resolve to its own per-role override, not to a max across the
+# pair, not to the tier default.
+#
+# Concrete setup (test fixture, not a bundled skill):
+#
+#   sub_agents:
+#     - name: tight-worker        # max_tool_turns: 4
+#       max_tool_turns: 4
+#       max_tool_turns_hard: 8
+#     - name: loose-worker        # max_tool_turns: 20
+#       max_tool_turns: 20
+#       max_tool_turns_hard: 40
+#
+# The mission task instructs both workers to perform a small
+# scripted loop of tool calls that, with naive routing, would
+# exceed a 4-iteration soft cap on the tight side while staying
+# safely under 20 for the loose one. The scenario's by-eye
+# assertions inspect the count of tool_call rows per worker.
+#
+# By-eye assertions:
+#
+#   1. Both workers' session_event logs contain tool_call rows.
+#      The tight-worker's tool_call count is ≤ 4 (its soft cap);
+#      the loose-worker's tool_call count is > 4 and ≤ 20 (it
+#      uses its own per-role budget, not the tight one's).
+#
+#   2. Neither worker emits a soft_warning system_message marker
+#      (tight stays within 4; loose stays within 20 — both well
+#      below their own caps for a small task).
+#
+#   3. NO worker hits session_terminated{reason="hard_ceiling"};
+#      the hard caps are not exercised by this scenario.
+#
+# Tuning notes:
+#   - This scenario depends on a test-fixture skill manifest with
+#     the two roles above. The phase-5.2 ι work scaffolds the
+#     YAML; the skill fixture lands as part of the analyst skill
+#     migration or a future test-only SKILL.md.
+#   - A naive resolution chain that takes the max across loaded
+#     skills would clamp the tight worker to 20, breaking
+#     assertion #1. The δ chain (per-role > per-mission > tier
+#     default) keeps each role's number isolated.
+name: b3_per_role_budget_isolation
+requires: [hugr, b3-fixture-skill]
+
+steps:
+  - say: |
+      Run one tight-worker and one loose-worker in parallel
+      against northwind. Each worker should chain its allotted
+      tool calls then return a one-line summary. Use the
+      `b3-fixture` skill.
+    budget: 480s
+    wait_for_subagents: 360s
+
+    queries:
+      # Per-worker tool_call counts. The harness reviewer compares
+      # tight vs loose: tight ≤ 4, loose > 4.
+      - name: worker_tool_calls
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\")) | map({worker_id: .id, role: .metadata.spawn_role, tool_calls: ((.events // []) | map(select(.event_type == \"tool_call\")) | length)})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}, session_type: {eq: "subagent"}}) {
+                  id metadata
+                  events(filter: {event_type: {eq: "tool_call"}}) { event_type }
+                }
+              }}}
+            }
+          }
+        path: extensions.jq.jq
+
+      # Soft-warning / hard-ceiling probes — must be empty.
+      - name: worker_warnings
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map(select(.session_type == \"subagent\")) | map({worker_id: .id, soft_warnings: ((.events // []) | map(select(.event_type == \"system_message\" and .metadata.kind == \"soft_warning\")) | length), terminated_reason: ((.events // []) | map(select(.event_type == \"session_terminated\")) | (.[0].metadata.reason // null))})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}, session_type: {eq: "subagent"}}) {
+                  id
+                  events(filter: {event_type: {in: ["system_message", "session_terminated"]}}) {
+                    event_type metadata
+                  }
+                }
+              }}}
+            }
+          }
+        path: extensions.jq.jq

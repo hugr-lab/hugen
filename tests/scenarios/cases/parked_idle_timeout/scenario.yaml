@@ -1,0 +1,82 @@
+# parked_idle_timeout — phase 5.2 ι.
+#
+# Deterministic runtime-behaviour scenario. A chat-shape mission
+# parks after its result; the runtime's idle-timeout timer fires
+# after the configured deadline and auto-dismisses the child with
+# reason="idle_timeout". The harness uses a short override
+# (`subagents.parking.parked_idle_timeout: 2s`) via a topology
+# overlay so the scenario completes in seconds rather than the
+# 10-minute production default.
+#
+# By-eye assertions:
+#
+#   1. After step-1 spawn_mission the mission row's latest
+#      session_status is "awaiting_dismissal" (immediately after
+#      result delivery).
+#
+#   2. After the harness sleeps past the timeout, the mission's
+#      events log carries session_terminated{reason="idle_timeout"}.
+#
+#   3. NO `session:subagent_dismiss` tool_call appears on root —
+#      the dismissal was runtime-driven, not model-driven.
+#
+#   4. The parent's children-map cleanup ran: a probe of the
+#      manager's `Get(rootID).FindDescendant(missionID)` returns
+#      false post-timeout. (Harness can assert this via the
+#      sessions table — child's status column flips to terminated.)
+#
+# Tuning notes:
+#   - The 2s override is set at the topology overlay level. Test
+#     runs against the real Hugr backend; the configured timeout
+#     flows through SubagentsView.ParkedIdleTimeout() into the
+#     Manager.
+#   - Harness must extend its post-step probe window past the
+#     timeout (`post_settle: 8s` or similar) so the timer fires
+#     and the synthesised SessionClose lands before the assertion
+#     phase.
+name: parked_idle_timeout
+requires: [hugr]
+overrides:
+  subagents:
+    parking:
+      parked_idle_timeout: 2s
+
+steps:
+  - say: |
+      Quick lookup against northwind — what's the total number
+      of orders in 1997? Single number, no commentary.
+    budget: 360s
+    wait_for_subagents: 240s
+    post_settle: 8s
+
+    queries:
+      # Mission timeline — expect awaiting_dismissal status
+      # followed (after the harness's post_settle wait) by a
+      # session_terminated{idle_timeout} row.
+      - name: mission_terminal
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}, session_type: {eq: "mission"}}) {
+                id status session_type
+                events(
+                  filter: {event_type: {in: ["session_status", "session_terminated"]}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq event_type metadata }
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Root tool_calls — must NOT contain subagent_dismiss.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name }
+            }}}
+          }
+        vars: { sid: "$sid" }

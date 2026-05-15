@@ -1,0 +1,118 @@
+# parked_followup_chat — phase 5.2 ι.
+#
+# A two-step conversational thread that exercises the autoclose:false
+# parking path end-to-end. The mission's dispatching skill (data-chat
+# or any future chat-shape mission) declares `mission.autoclose: false`
+# so the mission stays parked in awaiting_dismissal after delivering
+# its result. Root sees the parked mission via liveview / sidebar and,
+# on a related follow-up turn, MUST issue `session:notify_subagent`
+# on the SAME parked session id rather than spawning a fresh mission.
+#
+# By-eye assertions:
+#
+#   1. After step 1 the mission session row has status="active" and
+#      the latest session_status event on that mission carries
+#      state="awaiting_dismissal". No session_terminated event yet.
+#
+#   2. Step 1's root agent_message quotes the mission's `result`
+#      verbatim (light framing only — no fabrication).
+#
+#   3. After step 2 root's tool_calls contain a session:notify_subagent
+#      call whose first argument is the EXACT session id of the
+#      mission from step 1. There is NO additional session:spawn_mission
+#      on step 2.
+#
+#   4. The mission's events log gains a second user_message (the
+#      synthetic UserMessage authored by root's agent participant
+#      carrying the directive) followed by a new agent_message turn.
+#
+# Tuning notes:
+#   - Picking the right action is the model's choice — the chat-shape
+#     skill's constitution + the parked-subagent section in
+#     tier-root.md teach the model to prefer `notify_subagent` for
+#     continuous threads.
+#   - This scenario requires a skill that declares
+#     `mission.autoclose: false`. Until the data-chat skill (phase
+#     5.2 data-chat) lands, run this scenario against a hand-edited
+#     analyst SKILL.md fixture or against the future chat skill.
+name: parked_followup_chat
+requires: [hugr]
+
+steps:
+  - say: |
+      What were the top-3 customers by total order value in
+      northwind last quarter? Just the names + numbers, no
+      analysis.
+    budget: 360s
+    wait_for_subagents: 240s
+
+    queries:
+      # Mission session row + the latest session_status marker —
+      # expects state=awaiting_dismissal after the mission's result
+      # lands.
+      - name: mission_lifecycle
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}, session_type: {eq: "mission"}}) {
+                id status session_type
+                events(
+                  filter: {event_type: {eq: "session_status"}}
+                  order_by: [{field: "seq", direction: DESC}]
+                  limit: 1
+                ) { seq metadata }
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Root's tool_calls — expect exactly one spawn_mission.
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+  - say: |
+      And the same view but for two quarters ago, please. Same
+      shape — top 3, names + numbers only.
+    budget: 360s
+    wait_for_subagents: 240s
+
+    queries:
+      # Root's tool_calls on step 2 — expect notify_subagent against
+      # the step-1 mission id. NO new spawn_mission.
+      - name: tool_calls_root_step2
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args metadata }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Mission's full event timeline — expect a SECOND user_message
+      # (the synthetic UserMessage from notify_subagent's re-arm)
+      # and a second agent_message turn after it.
+      - name: mission_timeline
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}, session_type: {eq: "mission"}}) {
+                id
+                events(order_by: [{field: "seq", direction: ASC}]) {
+                  seq event_type metadata
+                }
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
