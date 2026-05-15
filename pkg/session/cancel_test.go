@@ -179,6 +179,27 @@ func TestRequestChildCancel_CancelEmittedBeforeTerminate(t *testing.T) {
 	}
 }
 
+// TestStatusFromReason_UserCancelPrefix — the new prefix is mapped
+// to its own LLM-visible status enum so the model reading the async
+// mission injection sees "user_cancel" instead of falling through to
+// "completed". Phase 5.1c.cancel-ux.
+func TestStatusFromReason_UserCancelPrefix(t *testing.T) {
+	cases := []struct {
+		reason string
+		want   string
+	}{
+		{protocol.TerminationUserCancelPrefix + "/mission", "user_cancel"},
+		{protocol.TerminationUserCancelPrefix + "panic_cancel", "user_cancel"},
+		{protocol.TerminationSubagentCancelPrefix + "x", "subagent_cancel"},
+		{protocol.TerminationCompleted, "completed"},
+	}
+	for _, tc := range cases {
+		if got := statusFromReason(tc.reason); got != tc.want {
+			t.Errorf("statusFromReason(%q) = %q; want %q", tc.reason, got, tc.want)
+		}
+	}
+}
+
 // TestCloseTurnSkipReason_UserCancelPrefix — the new prefix is
 // recognised by the close-turn skip gate so the user-initiated
 // cancel does NOT trigger a slow findings-recording turn during

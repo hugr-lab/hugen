@@ -375,6 +375,7 @@ func formatAsyncMissionCompleted(p *protocol.SubagentResultPayload) string {
 	case p.Reason == "" || p.Reason == protocol.TerminationCompleted:
 		badge = "✓"
 	case strings.HasPrefix(p.Reason, "subagent_cancel"),
+		strings.HasPrefix(p.Reason, "user_cancel"),
 		p.Reason == protocol.TerminationCancelCascade:
 		badge = "⊘"
 	default:
