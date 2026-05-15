@@ -125,6 +125,15 @@ func (t *tab) handleFrame(f protocol.Frame) tea.Cmd {
 		if v.Payload.Extension == "liveview" && v.Payload.Op == "status" {
 			if st, err := parseLiveviewStatus(v.Payload.Data); err == nil {
 				t.sidebarStatus = st
+				// Phase 5.x.skill-polish-1 — keep the `/mission`
+				// modal in sync with the live child list. Without
+				// this rebuild the modal would target a snapshot
+				// from open-time; a child that completed
+				// underneath stays visible (and selectable) until
+				// the operator dismisses with Esc.
+				if t.pendingMissionModal != nil {
+					t.pendingMissionModal.rebuild(t.sidebarStatus)
+				}
 			}
 		}
 	case *protocol.InquiryRequest:

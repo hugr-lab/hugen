@@ -179,6 +179,45 @@ func (s *missionModalState) markAllCancelling() {
 	}
 }
 
+// rebuild refreshes the row list from a fresh liveview projection
+// while preserving the Cancelling flag for any rows still present
+// (mid-cancel feedback shouldn't blink off just because the
+// liveview status frame raced the SubagentResult). Rows that
+// vanish from the live projection (children that finished
+// terminating) drop out; the selection clamps to the new bounds.
+// Phase 5.x.skill-polish-1 — R1/R2 fix from cancel-ux review.
+func (s *missionModalState) rebuild(live *liveviewStatus) {
+	if s == nil {
+		return
+	}
+	cancelling := make(map[string]bool, len(s.rows))
+	for _, r := range s.rows {
+		if r.Cancelling {
+			cancelling[r.SessionID] = true
+		}
+	}
+	fresh := snapshotMissions(live)
+	for i := range fresh {
+		if cancelling[fresh[i].SessionID] {
+			fresh[i].Cancelling = true
+		}
+	}
+	s.rows = fresh
+	if s.selected >= len(s.rows) {
+		s.selected = max(0, len(s.rows)-1)
+	}
+	if s.selected < 0 {
+		s.selected = 0
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 var (
 	missionBoxStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).

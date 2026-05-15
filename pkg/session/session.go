@@ -1329,13 +1329,12 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 		// normal RouteToolFeed / RouteBuffered path so wait_subagents
 		// (or the next turn's drainPendingInbound) sees it.
 		s.handleSubagentResult(ctx, v)
-		// Phase 5.1c.cancel-ux follow-up — arm the auto-summary
-		// trigger so root proactively surfaces the result to the
-		// user. Cleared by the next user-driven startTurn, or
-		// swapped on the idle-fold path / end-of-turn boundary.
-		if v.Payload.RenderMode == protocol.SubagentRenderAsyncNotify {
-			s.pendingAsyncSummary.Store(true)
-		}
+		// Arming of pendingAsyncSummary moved into the RouteBuffered
+		// case below (phase 5.x.skill-polish-1) so we don't arm
+		// redundantly when an active wait_subagents feed consumes
+		// the frame — the feed surfaces the result to the model
+		// directly as a tool return and there is no inject in
+		// history to kick a summary turn from.
 	case *protocol.Cancel:
 		return s.handleCancel(ctx, v)
 	case *protocol.SlashCommand:
@@ -1402,17 +1401,30 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 		// No matching feed: fall through to RouteBuffered.
 		fallthrough
 	case RouteBuffered:
+		// Phase 5.x.skill-polish-1 (R4): arm pendingAsyncSummary
+		// here, in the RouteBuffered branch, NOT in the first
+		// switch. By moving the check below the feed-consumption
+		// check above, an AsyncNotify SubagentResult that
+		// wait_subagents already consumed does not falsely arm a
+		// summary turn that would have no inject to summarise.
+		if sr, ok := f.(*protocol.SubagentResult); ok && sr.Payload.RenderMode == protocol.SubagentRenderAsyncNotify {
+			s.pendingAsyncSummary.Store(true)
+		}
 		if s.turnState == nil {
 			// Phase 5.1c.cancel-ux follow-up — fold inter-turn
 			// frames that arrive while the session is idle into
 			// s.history the same way drainPendingInbound does at
-			// turn boundaries. Without this an async mission's
-			// SubagentResult is persisted + visible in the TUI but
-			// the next prompt build (buildMessages → s.history) is
-			// missing the [system:subagent_result] inject, so the
-			// model has to fish for the result via notify_subagent
-			// — which fails with `not_a_child` because
-			// handleSubagentResult already deregistered the child.
+			// turn boundaries. Symmetric scope: any frame the
+			// visibility filter accepts (SubagentResult,
+			// SystemMessage, SubagentStarted, …) — NOT a
+			// SubagentResult-specific path. Without this an async
+			// mission's SubagentResult is persisted + visible in
+			// the TUI but the next prompt build (buildMessages →
+			// s.history) is missing the [system:subagent_result]
+			// inject, so the model has to fish for the result via
+			// notify_subagent — which fails with `not_a_child`
+			// because handleSubagentResult already deregistered
+			// the child.
 			if s.deps != nil {
 				if msg, ok := projectFrameToHistory(s.deps.Prompts, f); ok {
 					s.history = append(s.history, msg)
@@ -1421,13 +1433,12 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 			if err := s.emit(ctx, f); err != nil {
 				return err
 			}
-			// Phase 5.1c.cancel-ux follow-up — auto-summary trigger.
-			// Async-mission completion arrived while root was idle;
-			// kick a system-initiated turn so the model surfaces the
-			// result to the user without waiting for the next typed
-			// message. Cleared/swapped here so a re-entrant arrival
-			// during the upcoming turn re-arms via pendingInbound +
-			// end-of-turn check.
+			// Auto-summary trigger. Async-mission completion arrived
+			// while root was idle; kick a system-initiated turn so
+			// the model surfaces the result to the user without
+			// waiting for the next typed message. Cleared/swapped
+			// here so a re-entrant arrival during the upcoming turn
+			// re-arms via pendingInbound + end-of-turn check.
 			if !s.IsClosing() && s.pendingAsyncSummary.Swap(false) {
 				s.kickAsyncSummaryTurn(ctx)
 			}
