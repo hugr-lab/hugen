@@ -7,9 +7,13 @@
 # By-eye assertions (queries below):
 #
 # 1. Root's tool_calls contains exactly one `session:spawn_mission`
-#    and one `session:wait_subagents`. Specifically NOT
-#    `session:spawn_subagent` (narrowed at β) and NOT any data tool
-#    (hugr-*, python-*, duckdb-*, bash-*).
+#    (NOT `session:spawn_subagent`, narrowed at β) and NO data tool
+#    (hugr-*, python-*, duckdb-*, bash-*). Under phase 5.1c.async-root
+#    the prompt is steered to "block until you have the answer", so
+#    root SHOULD pick wait="sync" and pair the spawn with one
+#    session:wait_subagents call. If a model picks async despite the
+#    steer, the pair is replaced by spawn_mission(async) + an
+#    announce-on-spawn assistant_message; both shapes are acceptable.
 #
 # 2. Root has exactly one child session with metadata.spawn_skill
 #    set to "analyst". That child is the mission.
@@ -36,7 +40,7 @@ requires: []
 steps:
   - say: |
       What is 2 + 2? Give the number plus a one-sentence
-      explanation of why.
+      explanation of why. Don't reply until you have the answer.
     # gemini-pro takes 40-50s per LLM turn; a trivial Q&A through
     # root → mission → worker → mission → root needs 5-7 turns.
     # 8-minute budget gives comfortable margin until tier_intents

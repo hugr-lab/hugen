@@ -431,7 +431,15 @@ metadata:
           discovery-* / schema-* tools; never executes data
           queries. Writes a tight structured schema-map to the
           whiteboard so query-builder + data-analyst can compose
-          accurate queries on top.
+          accurate queries on top. On wide tables (100+ columns —
+          CMS / FHIR / government datasets), the default
+          `schema-type_fields` call returns only the first 50
+          fields alphabetically. When you're looking for a field
+          by *meaning* (e.g. "the total payment amount"), retry
+          with `relevance_query: "<NL phrase>"` and
+          `include_description: true` instead of concluding the
+          field is missing. See `hugr-data:instructions` for the
+          full lever set.
         # Phase 4.2.3 — schema-explorer needs procedural skill
         # boot (skill:load → skill:files → skill:ref → discovery)
         # which weak cheap-intent models (4B) routinely skip or

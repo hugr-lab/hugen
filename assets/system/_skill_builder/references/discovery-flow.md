@@ -76,8 +76,8 @@ Your flow:
 
 | Mechanism | Where used | Triggered |
 |-----------|-----------|-----------|
-| **Autoload** | System skills (`_root`, `_planner`, `_skill_builder`, `_whiteboard`) | Every root session at boot |
-| **Discovery + skill:load** | Local user skills (created via `skill:save`) and on-demand community skills | Model decides per turn |
+| **Autoload** | A tight set of tier-base skills (`_root`, `_mission`, `_worker`, `_planner`, `_whiteboard`) — kept minimal so steady-state context cost stays low | Every session at boot, per tier |
+| **Discovery + skill:load** | Local user skills (created via `skill:save`), on-demand community skills, AND `_skill_builder` itself (load it when the save / explicit-discovery trigger fires — full protocol in its body + `references/save-protocol.md`) | Model decides per turn |
 
 There is no per-session "autoload my local skills" knob — by
 design. Local stores grow over sessions and an autoload-everything

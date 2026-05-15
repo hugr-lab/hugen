@@ -131,7 +131,7 @@ references.
 | `hugr-main:discovery-search_module_data_objects` | Find tables/views in a module — returns query field names AND type names |
 | `hugr-main:discovery-search_module_functions` | Find custom functions in a module (NOT aggregations) |
 | `hugr-main:discovery-field_values` | Get distinct values and stats for a field |
-| `hugr-main:schema-type_fields` | Get fields of a type (use type name like `prefix_tablename`) |
+| `hugr-main:schema-type_fields` | Get fields of a type (use type name like `prefix_tablename`). **Default limit is 50**; pass `limit: 200` for wide tables, `relevance_query: "<NL>"` to semantic-rank for a specific concept, `offset` to paginate, `include_description: true` when names are auto-generated. |
 | `hugr-main:schema-type_info` | Get metadata for a type |
 | `hugr-main:schema-enum_values` | Get enum values |
 | `hugr-main:data-validate_graphql_query` | Validate a query before executing |
@@ -176,7 +176,11 @@ first.
    typos (see "Critical Rules" below). Often unnecessary at worker
    tier because the mission named the module in your task string.
 3. **Find data objects** → `hugr-main:discovery-search_module_data_objects`
-4. **Inspect fields** → `hugr-main:schema-type_fields(type_name: "prefix_tablename")` — **MUST** call before building queries
+4. **Inspect fields** → `hugr-main:schema-type_fields(type_name: "prefix_tablename")` — **MUST** call before building queries.
+   - Default `limit: 50` — many real tables have 100+ columns. **If you expect a field to exist and it's not in the response, the response is paginated, not authoritative.** Two complementary tools:
+     - **You know the meaning, not the name** (e.g. "the total payment amount", "the soft-delete column") → pass `relevance_query: "<short NL phrase>"`. The server semantically ranks fields by description + name; the top-N comes back first regardless of alphabetical order. This is the right move for wide CMS-style tables (Open Payments, government datasets, FHIR projections, ...). Combine with `include_description: true` to read what each field actually carries.
+     - **You want everything** → bump `limit: 200`, then check `total` vs `returned` in the response. If `total > returned`, paginate via `offset` until you've seen every field. Do NOT conclude "field X doesn't exist" from a partial response.
+   - Pass `include_arguments: true` when you need to know what filter / order_by / args a field supports (e.g. inspecting a relation's `select` args).
 5. **Explore values** → `hugr-main:discovery-field_values` — understand distributions before filtering
 6. **Build ONE query** — combine aggregations, relations, filters with aliases
 7. **Validate** → `hugr-main:data-validate_graphql_query`
@@ -201,7 +205,14 @@ shape. Read the error, then escalate to the right tool:
   next query. Do **not** keep guessing underscored or prefixed forms.
 - **`Cannot query field "Y" on type "Z"`** — `Y` does not exist on `Z`.
   Run `hugr-main:schema-type_fields(type_name: "Z")` and pick a real
-  field. Never guess.
+  field. Never guess. **If `Y` is the *meaning* you want but you can't
+  find a column with that exact name**, re-call
+  `schema-type_fields(type_name: "Z", relevance_query: "<what Y means>",
+  include_description: true)` — wide tables (100+ columns) only return
+  the first 50 alphabetically by default, and field names are often
+  auto-generated boilerplate while descriptions explain semantics.
+  "Field doesn't exist" is the wrong conclusion before you've checked
+  with a relevance query OR paginated to `total`.
 - **Unknown filter operator / argument shape** — read the
   `filter-guide` reference via `skill_ref`. The filter language is
   not standard GraphQL.
@@ -309,6 +320,7 @@ filter: { _not: { status: { in: ["cancelled", "expired"] } } }
   → `transport { public { routes(...) { ... } } }`. The dot count in the
   module name equals the nesting depth before the data-object field.
 - **ALWAYS** call `schema-type_fields` before building queries — field names cannot be guessed
+- **`schema-type_fields` returns max 50 fields by default.** For wide tables (CMS / government / FHIR / 100+ columns), the default response is partial. When a field you expect by *meaning* is not in the response, retry with `relevance_query: "<NL phrase>"` (semantic ranker) before concluding it doesn't exist. Bump `limit: 200` + `offset` to paginate. Check `total` vs `returned` to know how many fields actually exist.
 - Use **type name** (`prefix_tablename`) for introspection, **query field name** (`tablename`) inside modules
 - Fields in `order_by` **MUST** be selected in the query
 - **NEVER** use `distinct_on` with `_bucket_aggregation` — grouping is defined by `key { ... }`

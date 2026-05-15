@@ -1,11 +1,16 @@
 # skill_save_bundle — user does a small task, then asks the agent to
 # save it as a reusable skill. Exercises the full save protocol from
-# `_skill_builder`: clarify → compose bundle → save → auto-load →
-# mandatory validation → report ready.
+# `_skill_builder`: load _skill_builder (no longer autoloaded — phase
+# 5.1c.async-root context-tax fix) → clarify → compose bundle → save →
+# auto-load → mandatory validation → report ready.
 #
 # By-eye / queries verify:
+#   - `skill:load(_skill_builder)` is called BEFORE `skill:save` on
+#     step 2 — the model picks it up from the constitution prose
+#     pointer ("load `_skill_builder` first via skill:load").
 #   - skill:save was called once with a non-empty `scripts` map.
-#   - skill:load was called immediately after (auto-load from save).
+#   - skill:load was called again immediately after skill:save
+#     (auto-load of the freshly saved skill).
 #   - At least one bash:run / python:run_script invocation followed
 #     skill:save — that's the validation step running the bundled
 #     script with synthetic params.

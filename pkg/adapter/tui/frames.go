@@ -135,6 +135,15 @@ func (t *tab) handleFrame(f protocol.Frame) tea.Cmd {
 	case *protocol.InquiryResponse:
 		t.pendingInquiry = nil
 		t.statusLine = "ready"
+	case *protocol.SubagentResult:
+		// Phase 5.1c.async-root § TUI: announce when an async-spawned
+		// mission lands on root's outbox. Sync results arrive via the
+		// model's reply and need no transient marker; silent mode by
+		// definition does not surface.
+		if v.Payload.RenderMode == protocol.SubagentRenderAsyncNotify {
+			t.chat.appendSystem(formatAsyncMissionCompleted(&v.Payload))
+			t.refreshChat()
+		}
 	case *protocol.SessionTerminated:
 		t.chat.appendSystem(fmt.Sprintf("session terminated (%s)", v.Payload.Reason))
 		t.refreshChat()
@@ -348,6 +357,42 @@ func formatNotifySubagent(args any) string {
 		return "📨 follow-up forwarded to " + target
 	}
 	return fmt.Sprintf("📨 follow-up → %s: %s", target, preview)
+}
+
+// formatAsyncMissionCompleted summarises a SubagentResult frame the
+// runtime delivered through the async path (RenderMode ==
+// "async_notify"). Phase 5.1c.async-root: the operator otherwise
+// sees only the model's next reply referencing the mission's
+// result; a transient marker makes the turnaround visible.
+//
+// Status badge picks ✓ / ✗ / ⊘ from the reason — completed runs
+// land on ✓, anything else (cancelled, hard ceiling, error) on a
+// muted glyph. Preview prefers Result; falls back to Goal so an
+// empty-result completion still names what finished.
+func formatAsyncMissionCompleted(p *protocol.SubagentResultPayload) string {
+	badge := "✓"
+	switch {
+	case p.Reason == "" || p.Reason == protocol.TerminationCompleted:
+		badge = "✓"
+	case strings.HasPrefix(p.Reason, "subagent_cancel"),
+		p.Reason == protocol.TerminationCancelCascade:
+		badge = "⊘"
+	default:
+		badge = "✗"
+	}
+	preview := strings.TrimSpace(p.Result)
+	if preview == "" {
+		preview = strings.TrimSpace(p.Goal)
+	}
+	preview = strings.ReplaceAll(preview, "\n", " ")
+	if len(preview) > 120 {
+		preview = preview[:120] + "…"
+	}
+	tag := fmt.Sprintf("%s mission %s completed", badge, shortID(p.SessionID))
+	if preview == "" {
+		return tag
+	}
+	return tag + ": " + preview
 }
 
 // formatSpawnMission summarises a session_spawn_mission tool call

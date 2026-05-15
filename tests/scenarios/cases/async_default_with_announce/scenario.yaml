@@ -1,0 +1,92 @@
+# async_default_with_announce — phase 5.1c.async-root acceptance.
+#
+# A substantive analyst ask phrased WITHOUT "block / wait" steering.
+# Under the new _root skill, root should default to wait="async" and
+# emit a short user-visible assistant message acknowledging the
+# kickoff (the announce-on-spawn line). The mission then runs in
+# the background; its result lands as a [system: subagent_result]
+# injection on root's next turn.
+#
+# By-eye assertions:
+#
+#   1. Root tool_calls contains exactly one session:spawn_mission
+#      and the tool_args carry wait="async". There is NO
+#      session:wait_subagents in root's tool_calls.
+#
+#   2. After the spawn_mission tool_call, root emits exactly one
+#      assistant final agent_message — the announce-on-spawn line.
+#      The body should mention the mission goal in human shape
+#      ("Запустил миссию ..." / "Started ... mission" / similar).
+#
+#   3. The async mission's terminal SubagentResult row carries
+#      metadata.render_mode == "async_notify".
+#
+# Tuning notes:
+#   - Step-1 ask is a moderate-size analyst job (the model needs to
+#     judge "this could take a while; better not block").
+#   - No "block on the answer" wording — that would push the model
+#     toward sync.
+name: async_default_with_announce
+requires: [hugr]
+
+steps:
+  - say: |
+      Build me a short report on the `northwind` data source:
+      what it tracks, the main fact and dimension tables, and
+      one observation about the date-range coverage. Take your
+      time — I'm not in a hurry, I'll ask you something else
+      in the meantime.
+    budget: 480s
+    wait_for_subagents: 360s
+
+    queries:
+      # Root's tool_calls — must include spawn_mission with
+      # wait="async" in tool_args, and must NOT include
+      # wait_subagents (async-first reflex).
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Root's final agent_message after the spawn — the
+      # announce-on-spawn acknowledgement. By-eye reviewer checks
+      # the body names the mission goal in some shape.
+      - name: root_announce_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 3
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # The async mission's render_mode tag — must be
+      # "async_notify" so the completion projects through
+      # interrupts/async_mission_completed.tmpl.
+      - name: mission_subagent_result
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, results: (.events // []) | map(select(.event_type == \"subagent_result\")) | map({seq, reason: .metadata.reason, render_mode: .metadata.render_mode})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "subagent_result"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq metadata
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
