@@ -51,6 +51,13 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 		if td := subs.TierDefaults(); len(td) > 0 {
 			opts = append(opts, manager.WithTierDefaults(projectTierDefaults(td)))
 		}
+		// Phase 5.2 ε: parking ceiling + idle timeout from
+		// config.yaml.subagents.parking. StaticService materialises
+		// the defaults (3 / 10m) when the YAML block is omitted.
+		opts = append(opts,
+			manager.WithMaxParkedChildrenPerRoot(subs.MaxParkedChildrenPerRoot()),
+			manager.WithParkedIdleTimeout(subs.ParkedIdleTimeout()),
+		)
 	}
 	// Wire phase 5.1 § 2.7 HITL inquire deadline from
 	// config.yaml.hitl.default_timeout_ms.

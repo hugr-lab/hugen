@@ -76,6 +76,9 @@ func (parent *Session) callSubagentDismiss(ctx context.Context, args json.RawMes
 				in.SessionID, child.Status()))
 	}
 
+	// Phase 5.2 ε: cancel the ε idle-timer BEFORE Submit so a stale
+	// fire can't race with our own dismiss.
+	cancelParkIdleTimer(child)
 	closeFrame := protocol.NewSessionClose(child.id, parent.agent.Participant(), dismissCloseReason)
 	child.Submit(ctx, closeFrame)
 	select {
@@ -83,8 +86,13 @@ func (parent *Session) callSubagentDismiss(ctx context.Context, args json.RawMes
 	case <-ctx.Done():
 		return toolErr("cancelled", ctx.Err().Error())
 	}
-	// handleSubagentResult does the children map cleanup when the
-	// projected SubagentResult lands on parent's inbox. Same
-	// invariant as subagent_cancel.
+	// Phase 5.2 ε: the pump's st.projected gate suppresses a second
+	// SubagentResult after the child's initial completion (the one
+	// that triggered parking). handleSubagentResult will therefore
+	// not fire here, and the parent.children entry would leak
+	// without an explicit deregister. The helper is also used by the
+	// auto-dismiss paths (idle timeout, ceiling drop); same
+	// invariant.
+	parent.deregisterDismissedChild(child.id, child)
 	return json.Marshal(subagentDismissOutput{OK: true})
 }

@@ -239,6 +239,33 @@ type Session struct {
 	// table). Lazily initialised on first use; see inquiry.go.
 	inquiry inquiryState
 
+	// lifetimeToolTurns counts model→tool→model iterations across
+	// every invocation of this session — survives a parked-then-
+	// re-armed round-trip via notify_subagent. The phase-5.2 ε hard
+	// ceiling (resolveHardCeiling) is checked against this counter,
+	// not turnState.iter (which resets per invocation, so the soft
+	// cap stays per-turn). atomic.Int64 because retireTurn / startTurn
+	// run on the Run goroutine but tests inspect from the outside.
+	// Restart resets the count — phase-5.2 spec resolution 7 keeps
+	// idle timers and lifetime counters in-memory only.
+	lifetimeToolTurns atomic.Int64
+
+	// parkedAt captures when the session entered awaiting_dismissal.
+	// Set by parkChild, cleared on dismiss or re-arm. The phase-5.2
+	// ε ceiling enforcement picks the oldest parked child (smallest
+	// parkedAt) for forced eviction. atomic.Int64 stores UnixNano so
+	// the read path inside enforceParkingCeiling needs no lock.
+	parkedAt atomic.Int64
+
+	// parkTimer is the AfterFunc handle scheduled at park time;
+	// fired by the runtime when the idle timeout expires. Cleared
+	// on re-arm (notify_subagent) and on explicit dismiss
+	// (subagent_dismiss tool). Phase 5.2 ε. parkTimerMu guards
+	// concurrent stop/reset from the Run goroutine and the timer's
+	// own goroutine.
+	parkTimerMu sync.Mutex
+	parkTimer   *time.Timer
+
 	// asyncSpawnMode tags this session's terminal SubagentResult
 	// with the render hint to its parent's history projection.
 	// Phase 5.1 § 4.3: spawn_mission with wait="async" (or "timeout"

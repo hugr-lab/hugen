@@ -95,7 +95,13 @@ func (parent *Session) callNotifySubagent(ctx context.Context, args json.RawMess
 	// UserMessage-as-agent pattern mirrors kickAsyncSummaryTurn
 	// from phase 5.1c.async-root; replay paths already filter
 	// these out of user-visible spans (see TUI replay.go).
+	//
+	// Phase 5.2 ε: clear the idle-timeout timer before Submit so a
+	// stale fire can't auto-dismiss the child mid-re-arm. The hard
+	// ceiling (lifetimeToolTurns vs st.capHard) stays armed — only
+	// the soft cap resets per invocation.
 	if childIsParked(child) {
+		cancelParkIdleTimer(child)
 		userMsg := protocol.NewUserMessage(child.ID(), parent.agent.Participant(), content)
 		settled := child.Submit(ctx, userMsg)
 		select {

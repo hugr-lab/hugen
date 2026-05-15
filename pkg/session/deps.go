@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
@@ -108,10 +109,26 @@ type Deps struct {
 	// boot. Phase 5.2 δ (B3 migration). The resolution chain at
 	// resolveTurnBudget consults the skill extension's per-role /
 	// per-mission lookup first, then falls back to this map, then
-	// to the legacy ToolPolicyAdvisor, then to the runtime
-	// constant. A tier absent from the map signals "no operator
-	// override at this tier — use the runtime constant directly".
+	// to the session-level option, then to the runtime constant.
+	// A tier absent from the map signals "no operator override at
+	// this tier — use the runtime constant directly".
 	TierDefaults map[string]TierTurnDefaults
+
+	// MaxParkedChildrenPerRoot is the cap on simultaneously-parked
+	// children across a root's subtree (phase 5.2 ε). When
+	// parkChild would push the count over the cap, the runtime
+	// auto-dismisses the oldest parked child first. 0 disables
+	// enforcement; the manager defaults to 3 unless
+	// WithMaxParkedChildrenPerRoot overrides.
+	MaxParkedChildrenPerRoot int
+
+	// ParkedIdleTimeout is the per-child idle deadline applied on
+	// entering awaiting_dismissal. On expiry the runtime auto-
+	// dismisses with reason="idle_timeout"; a notify_subagent
+	// re-arm clears the timer. 0 disables the timer; the manager
+	// defaults to 10 minutes unless WithParkedIdleTimeout overrides.
+	// Phase 5.2 ε.
+	ParkedIdleTimeout time.Duration
 
 	// OnCloseRequest is the optional outbound hook a root session
 	// fires from requestClose (phase-4.1b-pre stage B / D6). The hook

@@ -20,13 +20,16 @@ var (
 
 // Subagent runtime defaults — applied in NewStaticService when the
 // caller omits a SubagentsConfig field. Numbers anchor to phase-4-spec
-// §3 step 10 (and phase-5.1 § 4.5 for MaxAsyncMissionsPerRoot).
+// §3 step 10 (and phase-5.1 § 4.5 for MaxAsyncMissionsPerRoot;
+// phase-5.2 ε for the Parking block).
 const (
 	defaultSubagentMaxDepth                = 5
 	defaultStuckRepeatedHash               = 3
 	defaultStuckTightDensityCount          = 3
 	defaultStuckTightDensityWindow         = 2 * time.Second
 	defaultSubagentMaxAsyncMissionsPerRoot = 5
+	defaultMaxParkedChildrenPerRoot        = 3
+	defaultParkedIdleTimeout               = 10 * time.Minute
 )
 
 // Per-tier turn-loop defaults — applied in NewStaticService when
@@ -108,6 +111,12 @@ func NewStaticService(in StaticInput) *StaticService {
 		subagents.MaxAsyncMissionsPerRoot = defaultSubagentMaxAsyncMissionsPerRoot
 	}
 	subagents.TierDefaults = mergeTierDefaults(subagents.TierDefaults)
+	if subagents.Parking.MaxParkedChildrenPerRoot <= 0 {
+		subagents.Parking.MaxParkedChildrenPerRoot = defaultMaxParkedChildrenPerRoot
+	}
+	if subagents.Parking.ParkedIdleTimeout <= 0 {
+		subagents.Parking.ParkedIdleTimeout = defaultParkedIdleTimeout
+	}
 	hitl := in.Hitl
 	if hitl.DefaultTimeoutMs <= 0 {
 		hitl.DefaultTimeoutMs = defaultHitlInquireTimeoutMs
@@ -196,8 +205,16 @@ func (s *StaticService) Providers() []ToolProviderSpec {
 
 // --- SubagentsView ---
 
-func (s *StaticService) DefaultMaxDepth() int        { return s.subagents.MaxDepth }
+func (s *StaticService) DefaultMaxDepth() int         { return s.subagents.MaxDepth }
 func (s *StaticService) MaxAsyncMissionsPerRoot() int { return s.subagents.MaxAsyncMissionsPerRoot }
+
+func (s *StaticService) MaxParkedChildrenPerRoot() int {
+	return s.subagents.Parking.MaxParkedChildrenPerRoot
+}
+
+func (s *StaticService) ParkedIdleTimeout() time.Duration {
+	return s.subagents.Parking.ParkedIdleTimeout
+}
 
 // TierDefaults returns a defensive copy of the per-tier turn-loop
 // defaults map so callers may not mutate the static snapshot.

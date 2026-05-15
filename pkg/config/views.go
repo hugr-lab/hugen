@@ -132,6 +132,16 @@ type SubagentsView interface {
 	// mutate the result freely.
 	TierDefaults() map[string]TierTurnDefaults
 
+	// MaxParkedChildrenPerRoot caps the number of simultaneously-
+	// parked children across a root's subtree. When a new park
+	// attempt would exceed the cap, the runtime auto-dismisses the
+	// oldest parked child first. Default 3 if absent. Phase 5.2 ε.
+	MaxParkedChildrenPerRoot() int
+
+	// ParkedIdleTimeout is the per-parked-child idle deadline.
+	// Default 10m if absent. Phase 5.2 ε.
+	ParkedIdleTimeout() time.Duration
+
 	OnUpdate(fn func()) (cancel func())
 }
 
@@ -207,6 +217,28 @@ type SubagentsConfig struct {
 	// (root 12/24, mission 16/32, worker 40/80) on top of operator
 	// values so a partially-specified block still works.
 	TierDefaults map[string]TierTurnDefaults `mapstructure:"tier_defaults" yaml:"tier_defaults,omitempty"`
+
+	// Parking governs the parked-subagent lifetime knobs (phase 5.2
+	// ε). NewStaticService materialises both fields with runtime
+	// defaults when omitted.
+	Parking ParkingConfig `mapstructure:"parking" yaml:"parking,omitempty"`
+}
+
+// ParkingConfig collects the runtime hygiene caps that bound
+// parked-subagent occupancy. Phase 5.2 ε.
+//
+//   - MaxParkedChildrenPerRoot caps simultaneously-parked children
+//     across a root's subtree. When a new park attempt would push
+//     the count over the cap, the runtime auto-dismisses the
+//     oldest parked child (by ParkedAt) with reason="ceiling_drop"
+//     before parking the new one.
+//   - ParkedIdleTimeout is the per-child idle clock that starts on
+//     entering awaiting_dismissal; on expiry the runtime auto-
+//     dismisses with reason="idle_timeout". notify_subagent re-arm
+//     clears the timer; the next park starts a fresh clock.
+type ParkingConfig struct {
+	MaxParkedChildrenPerRoot int           `mapstructure:"max_parked_children_per_root" yaml:"max_parked_children_per_root,omitempty"`
+	ParkedIdleTimeout        time.Duration `mapstructure:"parked_idle_timeout"          yaml:"parked_idle_timeout,omitempty"`
 }
 
 // TierTurnDefaults is one tier's turn-loop budget. Each field is

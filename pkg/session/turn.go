@@ -472,11 +472,20 @@ func (s *Session) advanceOrFinish(runCtx context.Context) {
 	// already trimmed pendingToolCalls and appended each tool message
 	// to s.history. Advance to the next iteration (or hit the ceiling).
 	st.iter++
+	lifetime := s.lifetimeToolTurns.Add(1)
 
-	// Hard ceiling (phase-4-spec §8.2): terminate the session via the
-	// explicit-cancel teardown path. The deferred handleExit writes
-	// session_terminated{reason:"hard_ceiling"} and (for sub-agents)
-	// surfaces a clean subagent_result to the parent.
+	// Hard ceiling (phase-4-spec §8.2 + phase-5.2 ε): terminate the
+	// session via the explicit-cancel teardown path. The deferred
+	// handleExit writes session_terminated{reason:"hard_ceiling"}
+	// and (for sub-agents) surfaces a clean subagent_result to the
+	// parent.
+	//
+	// Phase 5.2 ε: the soft cap (st.cap) stays per-invocation —
+	// notify_subagent re-arm allocates a fresh turnState so st.iter
+	// restarts at 0 — but the hard ceiling is checked against the
+	// session's lifetime counter, which survives parking. A parked
+	// child re-armed N times accumulates iterations; the runaway
+	// wall remains.
 	//
 	// No lifecycle marker is emitted on this path: the session is
 	// terminating, not idling. The session_terminated event is the
@@ -485,9 +494,10 @@ func (s *Session) advanceOrFinish(runCtx context.Context) {
 	// session_terminated|session_status pair) and skips the
 	// session, so the persisted "active" marker that immediately
 	// precedes session_terminated never reaches the classifier.
-	if st.capHard > 0 && st.iter >= st.capHard {
+	if st.capHard > 0 && lifetime >= int64(st.capHard) {
 		s.logger.Warn("session: tool re-call hard ceiling hit",
-			"session", s.id, "max_hard", st.capHard, "iter", st.iter)
+			"session", s.id, "max_hard", st.capHard,
+			"iter", st.iter, "lifetime", lifetime)
 		s.triggerHardCeiling(runCtx)
 		s.retireTurn()
 		return

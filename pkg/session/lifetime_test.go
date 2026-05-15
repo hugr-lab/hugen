@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -213,4 +214,113 @@ func TestSessionStatus_AwaitingDismissalValidates(t *testing.T) {
 	if err := protocol.Validate(frame); err != nil {
 		t.Errorf("validate session_status(awaiting_dismissal) = %v; want nil", err)
 	}
+}
+
+// Phase 5.2 ε — pure-helper coverage for the parking-ceiling /
+// idle-timer plumbing. These tests avoid the full Session machinery
+// (no store / no Run goroutine) and only exercise the in-memory
+// state walks + timer slot. End-to-end behaviour ships in the ι
+// scenario harness.
+
+// TestCollectParkedSubtree_GathersAllParkedDescendants pins the
+// DFS walk: parked grandchildren and parked direct children both
+// surface; non-parked ones are skipped; the newcomer (skip) is
+// excluded.
+func TestCollectParkedSubtree_GathersAllParkedDescendants(t *testing.T) {
+	parked := func(id string) *Session {
+		s := &Session{id: id, lifecycleState: protocol.SessionStatusAwaitingDismissal}
+		return s
+	}
+	live := func(id string) *Session {
+		return &Session{id: id, lifecycleState: protocol.SessionStatusActive}
+	}
+
+	g1 := parked("g1")
+	g2 := live("g2")
+	g3 := parked("g3")
+	c1 := parked("c1")
+	c1.children = map[string]*Session{"g1": g1, "g2": g2}
+	c2 := live("c2")
+	c2.children = map[string]*Session{"g3": g3}
+	skip := parked("skip")
+	root := &Session{id: "root", children: map[string]*Session{
+		"c1": c1, "c2": c2, "skip": skip,
+	}}
+
+	got := collectParkedSubtree(root, skip)
+	want := map[string]bool{"c1": true, "g1": true, "g3": true}
+	if len(got) != len(want) {
+		t.Fatalf("len(got) = %d (%v), want %d (%v)", len(got), idsOf(got), len(want), want)
+	}
+	for _, c := range got {
+		if !want[c.id] {
+			t.Errorf("unexpected parked id %q in result", c.id)
+		}
+	}
+}
+
+// TestOldestParked_PicksSmallestParkedAt verifies the selector
+// returns the session with the earliest parkedAt timestamp.
+func TestOldestParked_PicksSmallestParkedAt(t *testing.T) {
+	a := &Session{id: "a"}
+	a.parkedAt.Store(300)
+	b := &Session{id: "b"}
+	b.parkedAt.Store(100)
+	c := &Session{id: "c"}
+	c.parkedAt.Store(200)
+	got := oldestParked([]*Session{a, b, c})
+	if got == nil || got.id != "b" {
+		t.Fatalf("oldestParked = %v; want b", got)
+	}
+}
+
+// TestOldestParked_EmptyReturnsNil pins the empty-input contract.
+func TestOldestParked_EmptyReturnsNil(t *testing.T) {
+	if got := oldestParked(nil); got != nil {
+		t.Errorf("oldestParked(nil) = %v; want nil", got)
+	}
+	if got := oldestParked([]*Session{}); got != nil {
+		t.Errorf("oldestParked([]) = %v; want nil", got)
+	}
+}
+
+// TestCancelParkIdleTimer_StopsAndClearsSlot ensures the timer is
+// stopped (does not fire) and the slot is cleared after cancel.
+func TestCancelParkIdleTimer_StopsAndClearsSlot(t *testing.T) {
+	fired := make(chan struct{}, 1)
+	child := &Session{id: "c"}
+	child.parkTimer = time.AfterFunc(50*time.Millisecond, func() {
+		fired <- struct{}{}
+	})
+
+	cancelParkIdleTimer(child)
+
+	child.parkTimerMu.Lock()
+	if child.parkTimer != nil {
+		t.Error("parkTimer slot not cleared after cancel")
+	}
+	child.parkTimerMu.Unlock()
+
+	select {
+	case <-fired:
+		t.Error("timer fired after cancel")
+	case <-time.After(120 * time.Millisecond):
+		// expected — no fire
+	}
+}
+
+// TestCancelParkIdleTimer_NoTimerIsNoop guards the no-armed-timer
+// path — cancelling on a child that never parked must not panic.
+func TestCancelParkIdleTimer_NoTimerIsNoop(t *testing.T) {
+	cancelParkIdleTimer(nil) // explicit nil receiver tolerated
+	child := &Session{id: "c"}
+	cancelParkIdleTimer(child)
+}
+
+func idsOf(ss []*Session) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = s.id
+	}
+	return out
 }

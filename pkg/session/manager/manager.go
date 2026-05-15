@@ -79,6 +79,14 @@ type Manager struct {
 	// (defaultMaxToolIterations / × 2) in place at every tier.
 	tierDefaults map[string]session.TierTurnDefaults
 
+	// maxParkedChildrenPerRoot caps simultaneously-parked children
+	// across a root's subtree. 0 disables enforcement. Phase 5.2 ε.
+	maxParkedChildrenPerRoot int
+
+	// parkedIdleTimeout is the per-parked-child idle deadline.
+	// 0 disables the timer. Phase 5.2 ε.
+	parkedIdleTimeout time.Duration
+
 	// deps mirrors the per-session dependency bundle passed by
 	// reference to every Session in this Manager's tree (root +
 	// subagents). Populated by NewManager from the same arguments
@@ -108,6 +116,15 @@ type Manager struct {
 // defaultMaxAsyncMissionsPerRoot is the phase-5.1 § 4.5 default
 // when WithMaxAsyncMissionsPerRoot is omitted by the runtime.
 const defaultMaxAsyncMissionsPerRoot = 5
+
+// Phase 5.2 ε defaults — applied when the runtime omits the
+// corresponding option. Matches pkg/config StaticService numbers
+// so a manager built without an operator config (tests, no-skill
+// deployments) still gets the runtime-hygiene behaviour.
+const (
+	defaultMaxParkedChildrenPerRoot = 3
+	defaultParkedIdleTimeout        = 10 * time.Minute
+)
 
 // ManagerOption configures a Manager at construction.
 type ManagerOption func(*Manager)
@@ -212,6 +229,24 @@ func WithTierDefaults(defaults map[string]session.TierTurnDefaults) ManagerOptio
 	}
 }
 
+// WithMaxParkedChildrenPerRoot caps the simultaneously-parked
+// children across a root's subtree. 0 disables enforcement; the
+// manager defaults to 3 when this option is omitted. Phase 5.2 ε.
+func WithMaxParkedChildrenPerRoot(cap int) ManagerOption {
+	return func(m *Manager) {
+		m.maxParkedChildrenPerRoot = cap
+	}
+}
+
+// WithParkedIdleTimeout sets the per-child idle deadline applied
+// on park. 0 disables the timer; the manager defaults to 10
+// minutes when this option is omitted. Phase 5.2 ε.
+func WithParkedIdleTimeout(d time.Duration) ManagerOption {
+	return func(m *Manager) {
+		m.parkedIdleTimeout = d
+	}
+}
+
 // NewManager constructs the manager. All required deps are
 // passed in (constitution principle II). The manager owns a root
 // context (separate from any adapter's errgroup context) that scopes
@@ -234,17 +269,19 @@ func NewManager(
 	}
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	m := &Manager{
-		store:                   store,
-		agent:                   agent,
-		models:                  models,
-		commands:                commands,
-		codec:                   codec,
-		tools:                   tools,
-		logger:                  logger,
-		rootCtx:                 rootCtx,
-		rootCancel:              rootCancel,
-		live:                    make(map[string]*session.Session),
-		maxAsyncMissionsPerRoot: defaultMaxAsyncMissionsPerRoot,
+		store:                    store,
+		agent:                    agent,
+		models:                   models,
+		commands:                 commands,
+		codec:                    codec,
+		tools:                    tools,
+		logger:                   logger,
+		rootCtx:                  rootCtx,
+		rootCancel:               rootCancel,
+		live:                     make(map[string]*session.Session),
+		maxAsyncMissionsPerRoot:  defaultMaxAsyncMissionsPerRoot,
+		maxParkedChildrenPerRoot: defaultMaxParkedChildrenPerRoot,
+		parkedIdleTimeout:        defaultParkedIdleTimeout,
 	}
 	for _, o := range opts {
 		o(m)
@@ -266,12 +303,14 @@ func NewManager(
 		Opts:                m.sessionOpts,
 		RootCtx:             m.rootCtx,
 		WG:                  &m.wg,
-		MaxDepth:                session.DefaultMaxDepth,
-		DefaultMissionSkill:     m.defaultMissionSkill,
-		TierIntents:             m.tierIntents,
-		TierDefaults:            m.tierDefaults,
-		MaxAsyncMissionsPerRoot: m.maxAsyncMissionsPerRoot,
-		DefaultInquireTimeoutMs: m.defaultInquireTimeoutMs,
+		MaxDepth:                 session.DefaultMaxDepth,
+		DefaultMissionSkill:      m.defaultMissionSkill,
+		TierIntents:              m.tierIntents,
+		TierDefaults:             m.tierDefaults,
+		MaxAsyncMissionsPerRoot:  m.maxAsyncMissionsPerRoot,
+		MaxParkedChildrenPerRoot: m.maxParkedChildrenPerRoot,
+		ParkedIdleTimeout:        m.parkedIdleTimeout,
+		DefaultInquireTimeoutMs:  m.defaultInquireTimeoutMs,
 	}
 	// Phase 4.1b-pre stage B / D6: a root session calling
 	// requestClose hands the close request to Manager via this hook.

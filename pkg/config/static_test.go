@@ -246,3 +246,36 @@ func TestStaticService_TierDefaults_Copy(t *testing.T) {
 			td2["worker"].MaxToolTurns, defaultTierWorkerMaxTurns)
 	}
 }
+
+// TestStaticService_Parking_Defaults verifies ε defaults
+// materialise when the operator omits the parking block.
+func TestStaticService_Parking_Defaults(t *testing.T) {
+	s := NewStaticService(StaticInput{})
+	v := s.Subagents()
+	if got := v.MaxParkedChildrenPerRoot(); got != 3 {
+		t.Errorf("MaxParkedChildrenPerRoot = %d, want 3", got)
+	}
+	if got := v.ParkedIdleTimeout(); got != 10*time.Minute {
+		t.Errorf("ParkedIdleTimeout = %v, want 10m", got)
+	}
+}
+
+// TestStaticService_Parking_Override verifies operator values flow
+// through unmodified.
+func TestStaticService_Parking_Override(t *testing.T) {
+	s := NewStaticService(StaticInput{
+		Subagents: SubagentsConfig{
+			Parking: ParkingConfig{
+				MaxParkedChildrenPerRoot: 7,
+				ParkedIdleTimeout:        90 * time.Second,
+			},
+		},
+	})
+	v := s.Subagents()
+	if got := v.MaxParkedChildrenPerRoot(); got != 7 {
+		t.Errorf("MaxParkedChildrenPerRoot = %d, want 7", got)
+	}
+	if got := v.ParkedIdleTimeout(); got != 90*time.Second {
+		t.Errorf("ParkedIdleTimeout = %v, want 90s", got)
+	}
+}
