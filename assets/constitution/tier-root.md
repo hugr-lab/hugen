@@ -121,6 +121,40 @@ which is what you want unless you're explicitly leaving some
 async siblings to run on. The runtime preserves results from
 completed missions across the resumed wait.
 
+### When a mission stays parked after its result
+
+Some mission skills do not auto-close their workers on completion.
+You receive the mission's `result` field as usual, but the
+mission's child remains alive in `awaiting_dismissal` state —
+ready for a follow-up directive without re-spawning. The
+in-flight projection (sidebar / `/mission` modal) renders these
+with a ⏸ "parked" badge.
+
+Three things you can do with a parked mission:
+
+- **Dismiss it** via `session:subagent_dismiss(session_id)` once
+  you are satisfied with the result. The runtime tears it down
+  cleanly. Dismiss when the work is final or the user's next
+  request is unrelated.
+- **Follow up** via `session:notify_subagent(session_id,
+  content="<directive>")`. The directive becomes the parked
+  mission's next user message; its loop re-arms with a fresh
+  per-invocation budget (the lifetime hard ceiling still
+  applies). Use this when the user's follow-up is continuous
+  (chat-shape: "and what about June?", "drill into channel X")
+  and the parked mission's context is still relevant.
+- **Leave it alone.** Parked missions expire after a runtime-
+  configured idle timeout (default 10 minutes); the runtime
+  also evicts the oldest parked mission when a small cap is
+  exceeded. Leaving a mission parked occupies a slot — be
+  intentional about it.
+
+Picking the right action follows the same routing logic as
+fresh requests: an unrelated new question goes through a fresh
+`spawn_mission`, even if a related mission is parked.
+Re-purposing a parked mission for unrelated work wastes its
+context and confuses the result.
+
 ### When you need user confirmation
 
 For destructive actions (operations that change state on Hugr

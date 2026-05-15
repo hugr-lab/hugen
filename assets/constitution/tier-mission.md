@@ -149,6 +149,41 @@ the call snapshots and waits on every in-flight direct worker —
 the right default unless you deliberately want to leave some
 running. Pass explicit `ids` only for a specific subset.
 
+### When a worker stays parked after its result
+
+Some worker roles do not auto-close on completion — their
+`SubAgentRole` declares `autoclose: false` because the work is
+naturally a multi-turn thread (chat-shape worker, iterative
+refinement). The worker delivers its result through the normal
+`wait_subagents` path; afterwards it remains alive in
+`awaiting_dismissal` state, ready for a follow-up directive
+without re-spawning.
+
+Three things you can do with a parked worker:
+
+- **Dismiss it** via `session:subagent_dismiss(session_id)` once
+  the work is done. The runtime tears it down cleanly. Dismiss
+  when the result is final or your next wave addresses a
+  different angle.
+- **Follow up** via `session:notify_subagent(session_id,
+  content="<directive>")`. The directive becomes the parked
+  worker's next user message; its loop re-arms with a fresh
+  per-invocation budget (the lifetime hard ceiling still
+  applies). Prefer this when refinement / continuation is
+  cheaper than fresh decomposition.
+- **Leave it alone.** Parked workers expire after a runtime-
+  configured idle timeout; the runtime also evicts the oldest
+  parked worker when a small subtree cap is exceeded. Leaving a
+  worker parked occupies a slot — be intentional about it.
+
+Pick `notify_subagent` when the parked worker's context still
+serves the next step (you'd be paying the same context cost to
+re-spawn it). Pick `subagent_dismiss` when the result is final
+or the next angle is unrelated. The standard wave loop —
+`spawn_wave` for new decomposition — remains the answer when
+the next step requires fresh decomposition rather than a
+continuation.
+
 ### When you need user input or approval
 
 You CAN call `session:inquire` from the mission tier — the

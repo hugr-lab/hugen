@@ -73,8 +73,11 @@ When you finish:
 - Owe your mission progress chatter. The mission reads the
   whiteboard between waves; your final assistant message is
   what it consumes. Keep both tight.
-- Call `session:notify_subagent`. Workers do not send notes to
-  siblings; that is the mission's coordination channel.
+- Call `session:notify_subagent` or `session:subagent_dismiss`.
+  Both are mission-tier tools that coordinate parked siblings;
+  workers operate one-shot — finish, return, exit. If you see
+  one of those names elsewhere in this prompt, it belongs to a
+  different tier's manual.
 
 ### When you need user input
 
