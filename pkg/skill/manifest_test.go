@@ -343,6 +343,124 @@ func TestCanSpawn_DefaultsTrue(t *testing.T) {
 	}
 }
 
+// TestAutoclose_RoleEffective covers the SubAgentRole.AutocloseEffective
+// reading of role-local Autoclose without mission-block fallback.
+// Phase 5.2 α.
+func TestAutoclose_RoleEffective(t *testing.T) {
+	t.Run("nil_defaults_true", func(t *testing.T) {
+		r := SubAgentRole{Name: "data-chatter"}
+		if !r.AutocloseEffective() {
+			t.Error("AutocloseEffective = false on nil; want true")
+		}
+	})
+	t.Run("explicit_false", func(t *testing.T) {
+		f := false
+		r := SubAgentRole{Name: "data-chatter", Autoclose: &f}
+		if r.AutocloseEffective() {
+			t.Error("AutocloseEffective = true on &false; want false")
+		}
+	})
+	t.Run("explicit_true", func(t *testing.T) {
+		tr := true
+		r := SubAgentRole{Name: "explorer", Autoclose: &tr}
+		if !r.AutocloseEffective() {
+			t.Error("AutocloseEffective = false on &true; want true")
+		}
+	})
+}
+
+// TestAutoclose_MissionEffective covers the MissionBlock.AutocloseEffective
+// reading independent of any role. Phase 5.2 α.
+func TestAutoclose_MissionEffective(t *testing.T) {
+	t.Run("nil_defaults_true", func(t *testing.T) {
+		var m MissionBlock
+		if !m.AutocloseEffective() {
+			t.Error("AutocloseEffective = false on nil; want true")
+		}
+	})
+	t.Run("explicit_false", func(t *testing.T) {
+		f := false
+		m := MissionBlock{Autoclose: &f}
+		if m.AutocloseEffective() {
+			t.Error("AutocloseEffective = true on &false; want false")
+		}
+	})
+}
+
+// TestAutoclose_ResolveAutocloseChain exercises the full role >
+// mission > default-true precedence at the HugenMetadata level.
+// Phase 5.2 α — runtime parking branch reads through this resolver.
+func TestAutoclose_ResolveAutocloseChain(t *testing.T) {
+	tru, fls := true, false
+	cases := []struct {
+		name    string
+		role    *bool
+		mission *bool
+		roleSel string
+		want    bool
+	}{
+		{"all_nil_defaults_true", nil, nil, "r", true},
+		{"role_false_wins", &fls, &tru, "r", false},
+		{"role_true_wins_over_mission_false", &tru, &fls, "r", true},
+		{"mission_false_no_role", nil, &fls, "r", false},
+		{"unknown_role_falls_to_mission", &fls, &tru, "bogus", true},
+		{"empty_role_uses_mission", &fls, &tru, "", true},
+		{"empty_role_no_mission_default_true", &fls, nil, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := HugenMetadata{
+				SubAgents: []SubAgentRole{{Name: "r", Autoclose: tc.role}},
+				Mission:   MissionBlock{Autoclose: tc.mission},
+			}
+			if got := h.ResolveAutoclose(tc.roleSel); got != tc.want {
+				t.Errorf("ResolveAutoclose(%q) = %v; want %v", tc.roleSel, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAutoclose_ParsesFromYAML verifies the manifest parser
+// captures explicit `autoclose: false` on both SubAgentRole and
+// MissionBlock, and surfaces AckInquiry. Phase 5.2 α.
+func TestAutoclose_ParsesFromYAML(t *testing.T) {
+	src := `---
+name: data-chat
+description: conversational data access
+metadata:
+  hugen:
+    mission:
+      enabled: true
+      summary: stub
+      autoclose: false
+      ack_inquiry: true
+    sub_agents:
+      - name: data-chatter
+        autoclose: false
+      - name: data-explorer
+---
+`
+	m, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if m.Hugen.Mission.Autoclose == nil || *m.Hugen.Mission.Autoclose {
+		t.Errorf("Mission.Autoclose = %v; want &false", m.Hugen.Mission.Autoclose)
+	}
+	if !m.Hugen.Mission.AckInquiry {
+		t.Error("Mission.AckInquiry = false; want true")
+	}
+	if got := m.Hugen.ResolveAutoclose("data-chatter"); got {
+		t.Error("data-chatter resolves autoclose=true; want false (role override)")
+	}
+	if got := m.Hugen.ResolveAutoclose("data-explorer"); got {
+		t.Error("data-explorer resolves autoclose=true; want false (mission fallback)")
+	}
+	if got := m.Hugen.ResolveAutoclose("bogus"); got {
+		t.Error("bogus role falls to mission autoclose=false; got true")
+	}
+}
+
 // TestStuckDetection_DefaultEnabled verifies IsEnabled returns true
 // when Enabled is unset, mirroring the conservative-default stance
 // from §8.3.

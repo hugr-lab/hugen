@@ -422,6 +422,24 @@ type SubAgentRole struct {
 	// to the dispatching skill's mission-level on_close, then to
 	// the autoloaded `_worker` base. Per-role override wins.
 	OnClose MissionOnClose `json:"on_close,omitempty" yaml:"on_close,omitempty"`
+
+	// Autoclose controls the post-result lifecycle for sessions
+	// spawned in this role. Phase 5.2 subagent-lifetime.
+	//
+	//   - nil (absent)  — fall through to MissionBlock.Autoclose,
+	//                     then to true (status quo: auto-close on
+	//                     terminal SubagentResult).
+	//   - &true         — explicitly request auto-close.
+	//   - &false        — park into awaiting_dismissal after the
+	//                     terminal AgentMessage; let the model
+	//                     decide via session:subagent_dismiss or
+	//                     session:notify_subagent.
+	//
+	// Abstain (session:abstain) ignores this flag and always tears
+	// the child down — abstain is a routing signal, not a result.
+	// Pointer so the default-true semantic survives a missing key
+	// (HugenMetadata.ResolveAutoclose handles the chain).
+	Autoclose *bool `json:"autoclose,omitempty" yaml:"autoclose,omitempty"`
 }
 
 // CanSpawnEffective resolves SubAgentRole.CanSpawn to the boolean
@@ -433,6 +451,52 @@ func (r SubAgentRole) CanSpawnEffective() bool {
 		return true
 	}
 	return *r.CanSpawn
+}
+
+// AutocloseEffective resolves SubAgentRole.Autoclose to a plain
+// boolean, ignoring the mission-block fallback. Returns true when
+// unset. Callers that need the full chain (role → mission → true)
+// should use HugenMetadata.ResolveAutoclose. Phase 5.2.
+func (r SubAgentRole) AutocloseEffective() bool {
+	if r.Autoclose == nil {
+		return true
+	}
+	return *r.Autoclose
+}
+
+// AutocloseEffective resolves MissionBlock.Autoclose, ignoring the
+// per-role override. Returns true when unset. Phase 5.2.
+func (m MissionBlock) AutocloseEffective() bool {
+	if m.Autoclose == nil {
+		return true
+	}
+	return *m.Autoclose
+}
+
+// ResolveAutoclose walks the autoclose precedence chain for a
+// named role under this manifest: SubAgentRole.Autoclose (if set)
+// > MissionBlock.Autoclose (if set) > true. Phase 5.2.
+//
+// roleName is matched against HugenMetadata.SubAgents[*].Name; the
+// empty string or an unknown name falls straight through to the
+// mission-block / default-true chain (the mission-tier session
+// itself has no role and uses the mission-block knob).
+func (h HugenMetadata) ResolveAutoclose(roleName string) bool {
+	if roleName != "" {
+		for i := range h.SubAgents {
+			if h.SubAgents[i].Name != roleName {
+				continue
+			}
+			if h.SubAgents[i].Autoclose != nil {
+				return *h.SubAgents[i].Autoclose
+			}
+			break
+		}
+	}
+	if h.Mission.Autoclose != nil {
+		return *h.Mission.Autoclose
+	}
+	return true
 }
 
 // MemoryCategory ports the legacy memory.yaml shape.
@@ -466,6 +530,21 @@ type MissionBlock struct {
 	// mission-tier session itself (and as fallback for workers
 	// whose role doesn't override).
 	OnClose MissionOnClose `json:"on_close,omitempty" yaml:"on_close,omitempty"`
+
+	// Autoclose is the mission-block default for the parked-child
+	// lifecycle of every worker spawned under this mission.
+	// SubAgentRole.Autoclose overrides per-role; nil here means
+	// "no mission-level opinion, fall through to true". Phase 5.2
+	// subagent-lifetime. See SubAgentRole.Autoclose for semantics.
+	Autoclose *bool `json:"autoclose,omitempty" yaml:"autoclose,omitempty"`
+
+	// AckInquiry, when true, asks the runtime to surface a HITL
+	// inquiry on root tier when a child rooted at root parks
+	// (awaiting_dismissal). Opt-in even when Autoclose is false —
+	// chat-shape skills typically leave it off because the
+	// operator's next typed line carries intent. Phase 5.2
+	// subagent-lifetime §4.
+	AckInquiry bool `json:"ack_inquiry,omitempty" yaml:"ack_inquiry,omitempty"`
 }
 
 // MissionOnStart describes the per-skill boot sequence the runtime
