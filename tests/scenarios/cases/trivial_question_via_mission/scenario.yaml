@@ -10,10 +10,9 @@
 #    (NOT `session:spawn_subagent`, narrowed at β) and NO data tool
 #    (hugr-*, python-*, duckdb-*, bash-*). Under phase 5.1c.async-root
 #    the prompt is steered to "block until you have the answer", so
-#    root SHOULD pick wait="sync" and pair the spawn with one
-#    session:wait_subagents call. If a model picks async despite the
-#    steer, the pair is replaced by spawn_mission(async) + an
-#    announce-on-spawn assistant_message; both shapes are acceptable.
+#    root MUST pick wait="sync" and pair the spawn with one
+#    session:wait_subagents call. A model that picks async despite
+#    the explicit steer is a classifier regression — flag it.
 #
 # 2. Root has exactly one child session with metadata.spawn_skill
 #    set to "analyst". That child is the mission.

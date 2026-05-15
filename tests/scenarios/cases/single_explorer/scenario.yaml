@@ -6,12 +6,11 @@
 # By-eye assertions:
 #
 # 1. Root: exactly one session:spawn_mission(skill="analyst") +
-#    one session:wait_subagents (the prompt is steered to "block
-#    until you have the answer" so root picks wait="sync"). No
-#    data tools (hugr-*, bash-*, python-*, duckdb-*). If the
-#    model picks async despite the steer, accept
-#    spawn_mission(async) + an announce-on-spawn assistant_message
-#    instead — phase 5.1c.async-root.
+#    one session:wait_subagents. The prompt is steered to "block
+#    until you have the answer" so root MUST pick wait="sync";
+#    a model that picks async despite the explicit steer is a
+#    classifier regression — flag it. No data tools (hugr-*,
+#    bash-*, python-*, duckdb-*).
 #
 # 2. Mission: exactly one session:spawn_wave call, naming
 #    skill="analyst" + role="data-explorer" with one entry.

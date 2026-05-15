@@ -295,6 +295,8 @@ The default response returns max **50 fields**, alphabetically ordered. Many rea
 
 **Anti-pattern**: calling `schema-type_fields(type_name: "T")` with no extra args, getting back 50 fields, and concluding "field X doesn't exist on T". The response is partial. Either re-ask with `relevance_query` for the meaning you want, or paginate to `total`.
 
+**Stop condition**: after ONE `relevance_query` (top-N matches by meaning) AND ONE full pagination to `total` (every field listed by name), if the field with that meaning is still absent, it is genuinely missing — report the absence to the caller and stop. Do NOT loop over different `relevance_query` phrasings; the ranker has already returned the closest matches by description and name.
+
 ## Workflow
 
 1. **Parse user intent** — identify entities, metrics, filters, time ranges.
