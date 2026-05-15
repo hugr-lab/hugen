@@ -30,6 +30,26 @@ const (
 	defaultSubagentMaxAsyncMissionsPerRoot = 5
 )
 
+// Per-tier turn-loop defaults — applied in NewStaticService when
+// the operator does not supply a `subagents.tier_defaults.<tier>`
+// block. Phase 5.2 δ (B3 migration). Worker tier matches today's
+// runtime constants (defaultMaxToolIterations=40, hard=80) so
+// post-migration behaviour is byte-identical for worker sessions
+// that don't carry per-role overrides. Root / mission shrink —
+// they coordinate, not execute, and benefit from a tighter loop
+// so a wedged routing turn surfaces faster.
+const (
+	defaultTierRootMaxTurns         = 12
+	defaultTierRootMaxTurnsHard     = 24
+	defaultTierMissionMaxTurns      = 16
+	defaultTierMissionMaxTurnsHard  = 32
+	defaultTierWorkerMaxTurns       = 40
+	defaultTierWorkerMaxTurnsHard   = 80
+	tierLabelRoot                   = "root"
+	tierLabelMission                = "mission"
+	tierLabelWorker                 = "worker"
+)
+
 // HITL runtime defaults — applied in NewStaticService when the
 // caller omits a HitlConfig field. Phase-5.1 § 2.7.
 const (
@@ -100,6 +120,7 @@ func NewStaticService(in StaticInput) *StaticService {
 	if subagents.MaxAsyncMissionsPerRoot <= 0 {
 		subagents.MaxAsyncMissionsPerRoot = defaultSubagentMaxAsyncMissionsPerRoot
 	}
+	subagents.TierDefaults = mergeTierDefaults(subagents.TierDefaults)
 	hitl := in.Hitl
 	if hitl.DefaultTimeoutMs <= 0 {
 		hitl.DefaultTimeoutMs = defaultHitlInquireTimeoutMs
@@ -194,6 +215,72 @@ func (s *StaticService) DefaultStuckDetection() StuckPolicy {
 	return s.subagents.StuckDetection
 }
 func (s *StaticService) MaxAsyncMissionsPerRoot() int { return s.subagents.MaxAsyncMissionsPerRoot }
+
+// TierDefaults returns a defensive copy of the per-tier turn-loop
+// defaults map so callers may not mutate the static snapshot.
+// Phase 5.2 δ.
+func (s *StaticService) TierDefaults() map[string]TierTurnDefaults {
+	if len(s.subagents.TierDefaults) == 0 {
+		return nil
+	}
+	out := make(map[string]TierTurnDefaults, len(s.subagents.TierDefaults))
+	for k, v := range s.subagents.TierDefaults {
+		out[k] = v
+	}
+	return out
+}
+
+// mergeTierDefaults applies the runtime per-tier defaults on top
+// of the operator-supplied values: any zero field on a tier entry
+// falls back to the constant; tiers absent from the input map are
+// materialised with the full runtime default. Phase 5.2 δ. Stuck-
+// detection thresholds inherit defaults from the existing
+// subagents-level constants so the same number lands on every
+// tier (the runtime today reads these from constants — δ only
+// plumbs the enable bit through; threshold plumbing is future
+// work).
+func mergeTierDefaults(in map[string]TierTurnDefaults) map[string]TierTurnDefaults {
+	out := make(map[string]TierTurnDefaults, 3)
+	for _, tier := range []struct {
+		label    string
+		soft     int
+		hard     int
+	}{
+		{tierLabelRoot, defaultTierRootMaxTurns, defaultTierRootMaxTurnsHard},
+		{tierLabelMission, defaultTierMissionMaxTurns, defaultTierMissionMaxTurnsHard},
+		{tierLabelWorker, defaultTierWorkerMaxTurns, defaultTierWorkerMaxTurnsHard},
+	} {
+		v := in[tier.label]
+		if v.MaxToolTurns <= 0 {
+			v.MaxToolTurns = tier.soft
+		}
+		if v.MaxToolTurnsHard <= 0 {
+			v.MaxToolTurnsHard = tier.hard
+		}
+		if v.StuckDetection.RepeatedHash <= 0 {
+			v.StuckDetection.RepeatedHash = defaultStuckRepeatedHash
+		}
+		if v.StuckDetection.TightDensityCount <= 0 {
+			v.StuckDetection.TightDensityCount = defaultStuckTightDensityCount
+		}
+		if v.StuckDetection.TightDensityWindow <= 0 {
+			v.StuckDetection.TightDensityWindow = defaultStuckTightDensityWindow
+		}
+		out[tier.label] = v
+	}
+	// Pass through any operator-supplied tier labels outside the
+	// canonical set unchanged. Today the parser only accepts
+	// root/mission/worker — but a typo (e.g. "missions") would
+	// otherwise be silently dropped; preserve it so the runtime
+	// caller can warn.
+	for k, v := range in {
+		if _, ok := out[k]; ok {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
 
 // --- HitlView ---
 

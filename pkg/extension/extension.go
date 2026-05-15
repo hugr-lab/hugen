@@ -19,6 +19,7 @@ package extension
 
 import (
 	"context"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
@@ -168,8 +169,87 @@ type ToolIterPolicy struct {
 // metadata.hugen.{max_turns,max_turns_hard,stuck_detection}); a
 // future plan / whiteboard ext could lift the cap for analyst
 // flows.
+//
+// Phase 5.2 δ (B3): this advisor is now the LEGACY layer of the
+// turn-loop budget resolution chain. The canonical layer is
+// [TurnBudgetLookup], which reads per-role / per-mission knobs
+// from the spawning skill's manifest. ToolPolicyAdvisor stays
+// because (a) it still returns the deprecated top-level
+// SkillManifest.MaxTurns max-across-loaded composition as a
+// fallback, and (b) future non-skill advisors (plan, whiteboard)
+// may want to lift the budget independently of any skill. The
+// runtime calls TurnBudgetLookup first; if it returns an empty
+// budget the runtime falls through to tier defaults, then to
+// the legacy ToolPolicyAdvisor, then to the runtime constant.
 type ToolPolicyAdvisor interface {
 	AdviseToolPolicy(ctx context.Context, state SessionState) ToolIterPolicy
+}
+
+// TurnBudget is the per-session turn-loop budget the runtime
+// resolves at the top of every user turn. Each field encodes "no
+// opinion from this layer" with its zero value, letting the
+// resolution chain (per-role > per-mission > tier defaults >
+// legacy ToolPolicyAdvisor > runtime constant) walk past
+// unanswered layers without overriding decisions made earlier.
+// Phase 5.2 δ.
+type TurnBudget struct {
+	// SoftCap is the per-invocation cap on the model→tool→model
+	// loop. 0 means "this layer has no opinion".
+	SoftCap int
+
+	// HardCeiling is the lifetime hard ceiling at which the
+	// runtime terminates the session with reason "hard_ceiling".
+	// 0 means "this layer has no opinion".
+	HardCeiling int
+
+	// StuckDetection is a pointer so absence (nil) is distinct
+	// from an explicit zero policy. Today only IsEnabled() is
+	// consumed by the runtime; threshold fields are reserved for
+	// future plumbing.
+	StuckDetection *StuckDetectionPolicy
+}
+
+// StuckDetectionPolicy is the extension-layer view of the stuck-
+// detection knobs. Mirrors skill.StuckDetectionPolicy and
+// config.StuckPolicy field-for-field so the resolver chain stays
+// type-stable across pkg/skill, pkg/config, and pkg/extension —
+// none of which import each other directly. Phase 5.2 δ.
+type StuckDetectionPolicy struct {
+	RepeatedHash       int
+	TightDensityCount  int
+	TightDensityWindow time.Duration
+	Enabled            *bool
+}
+
+// IsEnabled mirrors skill.StuckDetectionPolicy.IsEnabled — default
+// true when Enabled is nil; only an explicit &false disables.
+func (p StuckDetectionPolicy) IsEnabled() bool {
+	if p.Enabled == nil {
+		return true
+	}
+	return *p.Enabled
+}
+
+// TurnBudgetLookup is the canonical per-role / per-mission
+// resolver for the phase-5.2 δ turn-loop budget chain. Implemented
+// by the skill extension: given the spawnSkill + spawnRole of the
+// calling session, walks the manifest's per-role override then
+// per-mission fallback and returns whichever fields are set.
+//
+// Contract:
+//   - spawnSkill == "" (root sessions never carry a spawn skill)
+//     → return zero-valued TurnBudget. Runtime falls through to
+//     tier defaults.
+//   - spawnSkill set but not present in the catalog → return zero;
+//     runtime falls through. Implementations MUST NOT error out
+//     of band — the lookup is best-effort.
+//   - Per-field zero values mean "this layer made no decision";
+//     the runtime preserves them for the next layer.
+//
+// Sampled once at the top of every user turn, before the legacy
+// ToolPolicyAdvisor path. Phase 5.2 δ.
+type TurnBudgetLookup interface {
+	ResolveTurnBudget(ctx context.Context, state SessionState, spawnSkill, spawnRole string) TurnBudget
 }
 
 // SubagentValidation is the outcome a [SubagentDescriber]

@@ -1590,31 +1590,28 @@ func (s *Session) gatherToolPolicy(ctx context.Context) extension.ToolIterPolicy
 }
 
 // resolveToolIterCap picks the tool-iteration cap for one user
-// Turn. Precedence: ToolPolicyAdvisor recommendation (skills'
-// max(metadata.hugen.max_turns) today) → session-level
-// WithMaxToolIterations override → runtime default. Sampled once
-// at the top of the user turn so the cap stays stable through
-// the loop even if a tool call mutates extension state mid-turn.
+// Turn. Phase 5.2 δ (B3) resolution chain: per-role / per-mission
+// via TurnBudgetLookup → Deps.TierDefaults[tier] → legacy
+// ToolPolicyAdvisor (max-across-loaded-skills of deprecated
+// SkillManifest.MaxTurns) → session-level WithMaxToolIterations
+// override → runtime default. Sampled once at the top of the
+// user turn so the cap stays stable through the loop even if a
+// tool call mutates extension state mid-turn. See
+// resolveTurnBudget for the joint resolver.
 func (s *Session) resolveToolIterCap(ctx context.Context) int {
-	if cap := s.gatherToolPolicy(ctx).SoftCap; cap > 0 {
-		return cap
-	}
-	if s.maxToolIters > 0 {
-		return s.maxToolIters
-	}
-	return defaultMaxToolIterations
+	cap, _, _ := s.resolveTurnBudget(ctx)
+	return cap
 }
 
 // resolveHardCeiling picks the per-Turn hard ceiling at which the
 // session terminates with reason "hard_ceiling" (phase-4-spec §8.2).
-// Precedence: ToolPolicyAdvisor HardCeiling → session override →
-// 2 × resolved soft cap.
+// Same chain as resolveToolIterCap; the softCap argument is kept
+// for the legacy fallback (2 × softCap) when no layer supplies
+// HardCeiling explicitly.
 func (s *Session) resolveHardCeiling(ctx context.Context, softCap int) int {
-	if hard := s.gatherToolPolicy(ctx).HardCeiling; hard > 0 {
+	_, hard, _ := s.resolveTurnBudget(ctx)
+	if hard > 0 {
 		return hard
-	}
-	if s.maxToolItersHard > 0 {
-		return s.maxToolItersHard
 	}
 	if softCap > 0 {
 		return softCap * 2
@@ -1623,10 +1620,12 @@ func (s *Session) resolveHardCeiling(ctx context.Context, softCap int) int {
 }
 
 // stuckDetectionEnabled reports whether the heuristic stuck-detection
-// nudges are active for this session. Disabled when any
-// ToolPolicyAdvisor sets DisableStuckNudges. Default ON.
+// nudges are active for this session. Phase 5.2 δ chain: explicit
+// per-role / per-mission policy wins over tier default wins over
+// legacy advisor. Default ON when every layer abstains.
 func (s *Session) stuckDetectionEnabled(ctx context.Context) bool {
-	return !s.gatherToolPolicy(ctx).DisableStuckNudges
+	_, _, stuckDisabled := s.resolveTurnBudget(ctx)
+	return !stuckDisabled
 }
 
 // buildMessages prepends the per-Turn system message (agent

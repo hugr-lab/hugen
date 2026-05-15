@@ -201,3 +201,76 @@ func TestStaticService_SubagentsView_Override(t *testing.T) {
 		t.Error("IsEnabled() = true with explicit Enabled=&false; want false")
 	}
 }
+
+// TestStaticService_TierDefaults_Materialised verifies the
+// per-tier turn-loop defaults block is auto-populated with the
+// runtime constants even when the operator supplies no
+// `tier_defaults` block. Phase 5.2 δ.
+func TestStaticService_TierDefaults_Materialised(t *testing.T) {
+	s := NewStaticService(StaticInput{})
+	td := s.Subagents().TierDefaults()
+	for _, tier := range []string{"root", "mission", "worker"} {
+		v, ok := td[tier]
+		if !ok {
+			t.Fatalf("tier %q missing from defaults map", tier)
+		}
+		if v.MaxToolTurns <= 0 || v.MaxToolTurnsHard <= 0 {
+			t.Errorf("tier %q caps = %+v; want non-zero defaults", tier, v)
+		}
+		if v.StuckDetection.RepeatedHash <= 0 {
+			t.Errorf("tier %q stuck-detection RepeatedHash = %d; want default >0",
+				tier, v.StuckDetection.RepeatedHash)
+		}
+	}
+	if td["root"].MaxToolTurns >= td["worker"].MaxToolTurns {
+		t.Errorf("root soft cap %d should be smaller than worker %d",
+			td["root"].MaxToolTurns, td["worker"].MaxToolTurns)
+	}
+}
+
+// TestStaticService_TierDefaults_Override merges an explicit
+// operator block with the runtime defaults: supplied fields win
+// per-tier, absent fields inherit. Phase 5.2 δ.
+func TestStaticService_TierDefaults_Override(t *testing.T) {
+	off := false
+	s := NewStaticService(StaticInput{
+		Subagents: SubagentsConfig{
+			TierDefaults: map[string]TierTurnDefaults{
+				"worker": {
+					MaxToolTurns:   80,
+					StuckDetection: StuckPolicy{Enabled: &off},
+				},
+			},
+		},
+	})
+	td := s.Subagents().TierDefaults()
+	worker := td["worker"]
+	if worker.MaxToolTurns != 80 {
+		t.Errorf("worker.MaxToolTurns = %d; want 80 (override)", worker.MaxToolTurns)
+	}
+	if worker.MaxToolTurnsHard <= 0 {
+		t.Errorf("worker.MaxToolTurnsHard = %d; want runtime default", worker.MaxToolTurnsHard)
+	}
+	if worker.StuckDetection.IsEnabled() {
+		t.Error("worker stuck detection should be disabled by explicit override")
+	}
+	// Untouched tiers keep the runtime defaults.
+	root := td["root"]
+	if root.MaxToolTurns <= 0 || root.MaxToolTurnsHard <= 0 {
+		t.Errorf("root defaults missing: %+v", root)
+	}
+}
+
+// TestStaticService_TierDefaults_Copy ensures the accessor returns
+// a defensive copy — mutating it must not bleed into subsequent
+// calls.
+func TestStaticService_TierDefaults_Copy(t *testing.T) {
+	s := NewStaticService(StaticInput{})
+	td := s.Subagents().TierDefaults()
+	td["worker"] = TierTurnDefaults{MaxToolTurns: 1}
+	td2 := s.Subagents().TierDefaults()
+	if td2["worker"].MaxToolTurns != defaultTierWorkerMaxTurns {
+		t.Errorf("worker leaked mutation; got %d, want %d",
+			td2["worker"].MaxToolTurns, defaultTierWorkerMaxTurns)
+	}
+}

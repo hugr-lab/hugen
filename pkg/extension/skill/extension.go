@@ -194,6 +194,11 @@ func (h *SessionSkill) Load(ctx context.Context, name string) error {
 	gen := h.gen
 	h.mu.Unlock()
 	for _, s := range resolved {
+		// Phase 5.2 δ (B3): surface a one-time deprecation warn for
+		// every newly-loaded skill that still carries the legacy
+		// top-level turn-loop knobs. SkillManager.WarnLegacyTurnBudget
+		// dedupes per-skill at the manager level.
+		h.manager.WarnLegacyTurnBudget(s)
 		h.manager.EmitChange(skillpkg.SkillChange{
 			Kind:       skillpkg.SkillLoaded,
 			SessionID:  h.sessionID,

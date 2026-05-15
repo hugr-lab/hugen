@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/assets"
+	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/manager"
@@ -42,6 +43,14 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 	// the field; an explicit 0 means "unlimited".
 	if subs := core.Config.Subagents(); subs != nil {
 		opts = append(opts, manager.WithMaxAsyncMissionsPerRoot(subs.MaxAsyncMissionsPerRoot()))
+		// Phase 5.2 δ (B3): per-tier turn-loop defaults flow from
+		// config.yaml.subagents.tier_defaults through SubagentsView.
+		// StaticService materialises root / mission / worker with
+		// the runtime constants when the YAML block is omitted, so
+		// this always installs a populated map.
+		if td := subs.TierDefaults(); len(td) > 0 {
+			opts = append(opts, manager.WithTierDefaults(projectTierDefaults(td)))
+		}
 	}
 	// Wire phase 5.1 § 2.7 HITL inquire deadline from
 	// config.yaml.hitl.default_timeout_ms.
@@ -60,6 +69,27 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 		mgr.Stop(shutdownCtx)
 	})
 	return nil
+}
+
+// projectTierDefaults converts the config-layer view of the
+// per-tier turn-loop defaults into the session-layer mirror type.
+// Keeps the dependency arrow config → session (pkg/session never
+// imports pkg/config). Phase 5.2 δ.
+func projectTierDefaults(in map[string]config.TierTurnDefaults) map[string]session.TierTurnDefaults {
+	out := make(map[string]session.TierTurnDefaults, len(in))
+	for tier, v := range in {
+		out[tier] = session.TierTurnDefaults{
+			MaxToolTurns:     v.MaxToolTurns,
+			MaxToolTurnsHard: v.MaxToolTurnsHard,
+			StuckPolicy: session.StuckDetectionDefault{
+				RepeatedHash:       v.StuckDetection.RepeatedHash,
+				TightDensityCount:  v.StuckDetection.TightDensityCount,
+				TightDensityWindow: v.StuckDetection.TightDensityWindow,
+				Enabled:            v.StuckDetection.Enabled,
+			},
+		}
+	}
+	return out
 }
 
 // buildPromptRenderer constructs the agent-level prompts.Renderer

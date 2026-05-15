@@ -73,6 +73,12 @@ type Manager struct {
 	// pkg/session fallback (1 hour) in place. Phase 5.1 § 2.7.
 	defaultInquireTimeoutMs int
 
+	// tierDefaults is the per-tier turn-loop budget defaults map
+	// threaded into Deps for the phase-5.2 δ resolution chain. Set
+	// via WithTierDefaults. nil leaves the runtime constants
+	// (defaultMaxToolIterations / × 2) in place at every tier.
+	tierDefaults map[string]session.TierTurnDefaults
+
 	// deps mirrors the per-session dependency bundle passed by
 	// reference to every Session in this Manager's tree (root +
 	// subagents). Populated by NewManager from the same arguments
@@ -188,6 +194,24 @@ func WithTierIntents(intents map[string]string) ManagerOption {
 	}
 }
 
+// WithTierDefaults threads the per-tier turn-loop budget defaults
+// (root / mission / worker) into the Deps bundle every Session in
+// the tree sees. Phase 5.2 δ (B3 migration). Defensively copied
+// so the caller may not mutate the active map.
+func WithTierDefaults(defaults map[string]session.TierTurnDefaults) ManagerOption {
+	return func(m *Manager) {
+		if len(defaults) == 0 {
+			return
+		}
+		if m.tierDefaults == nil {
+			m.tierDefaults = make(map[string]session.TierTurnDefaults, len(defaults))
+		}
+		for k, v := range defaults {
+			m.tierDefaults[k] = v
+		}
+	}
+}
+
 // NewManager constructs the manager. All required deps are
 // passed in (constitution principle II). The manager owns a root
 // context (separate from any adapter's errgroup context) that scopes
@@ -245,6 +269,7 @@ func NewManager(
 		MaxDepth:                session.DefaultMaxDepth,
 		DefaultMissionSkill:     m.defaultMissionSkill,
 		TierIntents:             m.tierIntents,
+		TierDefaults:            m.tierDefaults,
 		MaxAsyncMissionsPerRoot: m.maxAsyncMissionsPerRoot,
 		DefaultInquireTimeoutMs: m.defaultInquireTimeoutMs,
 	}

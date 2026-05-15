@@ -103,6 +103,16 @@ type Deps struct {
 	// 4.2.2 §11.
 	TierIntents map[string]string
 
+	// TierDefaults is the per-tier turn-loop default budget,
+	// populated from config.subagents.tier_defaults at runtime
+	// boot. Phase 5.2 δ (B3 migration). The resolution chain at
+	// resolveTurnBudget consults the skill extension's per-role /
+	// per-mission lookup first, then falls back to this map, then
+	// to the legacy ToolPolicyAdvisor, then to the runtime
+	// constant. A tier absent from the map signals "no operator
+	// override at this tier — use the runtime constant directly".
+	TierDefaults map[string]TierTurnDefaults
+
 	// OnCloseRequest is the optional outbound hook a root session
 	// fires from requestClose (phase-4.1b-pre stage B / D6). The hook
 	// hands the close request to whoever owns the session's

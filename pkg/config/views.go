@@ -134,6 +134,15 @@ type SubagentsView interface {
 	// Default 5 if absent. Phase 5.1 § 4.5.
 	MaxAsyncMissionsPerRoot() int
 
+	// TierDefaults is the per-tier (root / mission / worker)
+	// turn-loop defaults populated by `session.tier_defaults` in
+	// config.yaml. Phase 5.2 δ (B3 migration). The map is keyed by
+	// tier label ("root"/"mission"/"worker"); a tier absent from
+	// the map signals "no operator override, use runtime defaults
+	// from static.go". Implementations always return a fresh copy
+	// — callers may mutate the result freely.
+	TierDefaults() map[string]TierTurnDefaults
+
 	OnUpdate(fn func()) (cancel func())
 }
 
@@ -202,4 +211,31 @@ type SubagentsConfig struct {
 	MaxTurns                int         `mapstructure:"max_turns"                   yaml:"max_turns,omitempty"`
 	StuckDetection          StuckPolicy `mapstructure:"stuck_detection"             yaml:"stuck_detection,omitempty"`
 	MaxAsyncMissionsPerRoot int         `mapstructure:"max_async_missions_per_root" yaml:"max_async_missions_per_root,omitempty"`
+
+	// TierDefaults is the per-tier turn-loop defaults block
+	// (config.yaml: `subagents.tier_defaults.<tier>`). Phase 5.2 δ
+	// (B3 migration): canonical replacement for the deprecated
+	// SkillManifest.MaxTurns / MaxTurnsHard / StuckDetection
+	// composition. NewStaticService merges the runtime defaults
+	// (root 12/24, mission 16/32, worker 40/80) on top of operator
+	// values so a partially-specified block still works.
+	TierDefaults map[string]TierTurnDefaults `mapstructure:"tier_defaults" yaml:"tier_defaults,omitempty"`
+}
+
+// TierTurnDefaults is one tier's turn-loop budget. Each field is
+// optional; missing values inherit the runtime defaults declared
+// in static.go (per-tier). Phase 5.2 δ.
+type TierTurnDefaults struct {
+	// MaxToolTurns is the per-invocation cap on the
+	// model→tool→model loop for sessions at this tier. 0 (absent)
+	// falls back to the runtime default for this tier.
+	MaxToolTurns int `mapstructure:"max_tool_turns" yaml:"max_tool_turns,omitempty"`
+
+	// MaxToolTurnsHard is the lifetime hard ceiling. 0 falls back
+	// to the runtime default for this tier.
+	MaxToolTurnsHard int `mapstructure:"max_tool_turns_hard" yaml:"max_tool_turns_hard,omitempty"`
+
+	// StuckDetection mirrors the per-skill StuckPolicy shape.
+	// Field-level zero values inherit the runtime defaults.
+	StuckDetection StuckPolicy `mapstructure:"stuck_detection" yaml:"stuck_detection,omitempty"`
 }

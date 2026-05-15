@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/prompts"
@@ -45,6 +46,7 @@ var (
 	_ extension.CloseTurnLookup     = (*Extension)(nil)
 	_ extension.AutocloseLookup     = (*Extension)(nil)
 	_ extension.StatusReporter      = (*Extension)(nil)
+	_ extension.TurnBudgetLookup    = (*Extension)(nil)
 )
 
 // ResolveAutoclose implements [extension.AutocloseLookup]. Walks
@@ -613,6 +615,12 @@ func (e *Extension) FilterTools(ctx context.Context, state extension.SessionStat
 // Empty bindings (no skill loaded, or no SkillManager wired) yield
 // the zero-valued policy, which the runtime treats as "no
 // recommendation" and falls back to its own defaults.
+//
+// Phase 5.2 δ (B3): this advisor now plays the LEGACY layer of
+// the turn-loop budget resolution chain. Bindings.MaxTurns still
+// composes from the deprecated top-level SkillManifest.MaxTurns
+// (max across loaded skills); ResolveTurnBudget below is the
+// canonical per-role / per-mission layer.
 func (e *Extension) AdviseToolPolicy(ctx context.Context, state extension.SessionState) extension.ToolIterPolicy {
 	h := FromState(state)
 	if h == nil || h.manager == nil {
@@ -627,6 +635,74 @@ func (e *Extension) AdviseToolPolicy(ctx context.Context, state extension.Sessio
 		HardCeiling:        b.MaxTurnsHard,
 		DisableStuckNudges: b.StuckDetectionDisabled,
 	}
+}
+
+// ResolveTurnBudget implements [extension.TurnBudgetLookup]. Walks
+// the spawning skill's manifest from the agent-level catalog (NOT
+// the calling session's loaded skills — workers do not always
+// load the dispatching mission skill) and returns the per-role >
+// per-mission resolved budget. Phase 5.2 δ (B3 migration).
+//
+// Returns a zero-valued TurnBudget (no opinion) when:
+//   - spawnSkill is empty (root sessions never carry a spawn skill).
+//   - SkillManager is unwired on the calling state.
+//   - spawnSkill is not present in the catalog (e.g. uninstalled
+//     between spawn and the budget resolution).
+//
+// Catalog lookup failures are swallowed deliberately: the runtime
+// falls through to tier defaults and legacy advisor layers when
+// this resolver has no opinion. Logging the miss here would spam
+// every turn for sessions spawned from since-unloaded skills.
+func (e *Extension) ResolveTurnBudget(ctx context.Context, state extension.SessionState, spawnSkill, spawnRole string) extension.TurnBudget {
+	if spawnSkill == "" {
+		return extension.TurnBudget{}
+	}
+	h := FromState(state)
+	if h == nil || h.manager == nil {
+		return extension.TurnBudget{}
+	}
+	sk, err := h.manager.Get(ctx, spawnSkill)
+	if err != nil {
+		return extension.TurnBudget{}
+	}
+	b := sk.Manifest.Hugen.ResolveTurnBudget(spawnRole)
+	return extension.TurnBudget{
+		SoftCap:        b.SoftCap,
+		HardCeiling:    b.HardCeiling,
+		StuckDetection: projectStuckPolicy(b.StuckDetection),
+	}
+}
+
+// projectStuckPolicy converts a pointer-shaped pkg/skill stuck
+// policy into the extension-package mirror type. Returns nil when
+// the input is nil — the runtime treats nil as "no opinion".
+func projectStuckPolicy(in *skillpkg.StuckDetectionPolicy) *extension.StuckDetectionPolicy {
+	if in == nil {
+		return nil
+	}
+	window, _ := parseStuckWindow(in.TightDensityWindow)
+	out := extension.StuckDetectionPolicy{
+		RepeatedHash:       in.RepeatedHash,
+		TightDensityCount:  in.TightDensityCount,
+		TightDensityWindow: window,
+		Enabled:            in.Enabled,
+	}
+	return &out
+}
+
+// parseStuckWindow turns the manifest's string-formatted duration
+// into a time.Duration. Empty / unparseable values return zero —
+// the runtime treats zero as "no opinion" and inherits its
+// constant. Phase 5.2 δ.
+func parseStuckWindow(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, err
+	}
+	return d, nil
 }
 
 // DescribeSubagent implements [extension.SubagentDescriber]. Walks

@@ -847,3 +847,188 @@ metadata:
 		t.Errorf("TierCompatibility = %v, want 3 entries", m.Hugen.TierCompatibility)
 	}
 }
+
+// TestResolveTurnBudget_RoleOverride covers the per-role layer
+// of the resolution chain: explicit values on
+// SubAgentRole.MaxToolTurns / MaxToolTurnsHard / StuckDetection
+// land on the returned TurnBudget regardless of mission defaults.
+// Phase 5.2 δ (B3).
+func TestResolveTurnBudget_RoleOverride(t *testing.T) {
+	fls := false
+	h := HugenMetadata{
+		SubAgents: []SubAgentRole{{
+			Name:             "fast",
+			MaxToolTurns:     5,
+			MaxToolTurnsHard: 10,
+			StuckDetection:   &StuckDetectionPolicy{Enabled: &fls},
+		}},
+		Mission: MissionBlock{
+			MaxToolTurns:     50,
+			MaxToolTurnsHard: 100,
+		},
+	}
+	b := h.ResolveTurnBudget("fast")
+	if b.SoftCap != 5 {
+		t.Errorf("SoftCap = %d; want 5 (role override)", b.SoftCap)
+	}
+	if b.HardCeiling != 10 {
+		t.Errorf("HardCeiling = %d; want 10 (role override)", b.HardCeiling)
+	}
+	if b.StuckDetection == nil || b.StuckDetection.IsEnabled() {
+		t.Errorf("StuckDetection role override missed; got %+v", b.StuckDetection)
+	}
+}
+
+// TestResolveTurnBudget_MissionFallback fills only the
+// MissionBlock layer; the role entry exists with zero values, so
+// the resolver must fall through to the mission knobs. Phase 5.2 δ.
+func TestResolveTurnBudget_MissionFallback(t *testing.T) {
+	tru := true
+	h := HugenMetadata{
+		SubAgents: []SubAgentRole{{Name: "r"}},
+		Mission: MissionBlock{
+			MaxToolTurns:     16,
+			MaxToolTurnsHard: 32,
+			StuckDetection:   &StuckDetectionPolicy{Enabled: &tru},
+		},
+	}
+	b := h.ResolveTurnBudget("r")
+	if b.SoftCap != 16 {
+		t.Errorf("SoftCap = %d; want 16 (mission)", b.SoftCap)
+	}
+	if b.HardCeiling != 32 {
+		t.Errorf("HardCeiling = %d; want 32 (mission)", b.HardCeiling)
+	}
+	if b.StuckDetection == nil || !b.StuckDetection.IsEnabled() {
+		t.Errorf("StuckDetection mission fallback missed; got %+v", b.StuckDetection)
+	}
+}
+
+// TestResolveTurnBudget_FieldIndependence covers the
+// "each field independently resolved" semantic: a role may set
+// only one knob, leaving the rest to mission. Phase 5.2 δ.
+func TestResolveTurnBudget_FieldIndependence(t *testing.T) {
+	fls := false
+	h := HugenMetadata{
+		SubAgents: []SubAgentRole{{
+			Name:         "r",
+			MaxToolTurns: 8, // role overrides only soft cap
+		}},
+		Mission: MissionBlock{
+			MaxToolTurnsHard: 80, // mission supplies hard ceiling
+			StuckDetection:   &StuckDetectionPolicy{Enabled: &fls},
+		},
+	}
+	b := h.ResolveTurnBudget("r")
+	if b.SoftCap != 8 {
+		t.Errorf("SoftCap = %d; want 8 (role)", b.SoftCap)
+	}
+	if b.HardCeiling != 80 {
+		t.Errorf("HardCeiling = %d; want 80 (mission)", b.HardCeiling)
+	}
+	if b.StuckDetection == nil || b.StuckDetection.IsEnabled() {
+		t.Errorf("StuckDetection should fall to mission policy; got %+v", b.StuckDetection)
+	}
+}
+
+// TestResolveTurnBudget_NoRole_UsesMission mirrors the mission-
+// tier session shape: ResolveTurnBudget called with an empty role
+// skips SubAgents entirely and returns mission knobs only.
+func TestResolveTurnBudget_NoRole_UsesMission(t *testing.T) {
+	h := HugenMetadata{
+		SubAgents: []SubAgentRole{{Name: "r", MaxToolTurns: 999}},
+		Mission:   MissionBlock{MaxToolTurns: 16},
+	}
+	b := h.ResolveTurnBudget("")
+	if b.SoftCap != 16 {
+		t.Errorf("SoftCap = %d; want 16 (mission only)", b.SoftCap)
+	}
+}
+
+// TestResolveTurnBudget_NoOverride_Empty asserts the zero-value
+// path: no role, no mission knobs ⇒ empty TurnBudget so the
+// runtime falls through to its tier/legacy/constant layers.
+func TestResolveTurnBudget_NoOverride_Empty(t *testing.T) {
+	h := HugenMetadata{SubAgents: []SubAgentRole{{Name: "r"}}}
+	b := h.ResolveTurnBudget("r")
+	if b.SoftCap != 0 || b.HardCeiling != 0 || b.StuckDetection != nil {
+		t.Errorf("expected empty TurnBudget; got %+v", b)
+	}
+}
+
+// TestResolveTurnBudget_ParsesFromYAML verifies the YAML parser
+// captures the new SubAgentRole + MissionBlock turn-loop knobs.
+func TestResolveTurnBudget_ParsesFromYAML(t *testing.T) {
+	src := `---
+name: data-chat
+description: per-role budget plumbing
+metadata:
+  hugen:
+    mission:
+      enabled: true
+      summary: stub
+      max_tool_turns: 16
+      max_tool_turns_hard: 32
+    sub_agents:
+      - name: fast
+        max_tool_turns: 5
+        max_tool_turns_hard: 10
+        stuck_detection:
+          enabled: false
+      - name: thorough
+---
+`
+	m, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	fast := m.Hugen.ResolveTurnBudget("fast")
+	if fast.SoftCap != 5 || fast.HardCeiling != 10 {
+		t.Errorf("fast budget = %+v; want soft=5 hard=10", fast)
+	}
+	if fast.StuckDetection == nil || fast.StuckDetection.IsEnabled() {
+		t.Errorf("fast stuck detection should be disabled; got %+v", fast.StuckDetection)
+	}
+	thorough := m.Hugen.ResolveTurnBudget("thorough")
+	if thorough.SoftCap != 16 || thorough.HardCeiling != 32 {
+		t.Errorf("thorough budget = %+v; want soft=16 hard=32 (mission)", thorough)
+	}
+}
+
+// TestLegacyTurnBudget_PicksUpTopLevel covers the deprecated
+// top-level MaxTurns / MaxTurnsHard / StuckDetection fallback
+// layer. Phase 5.2 δ — unmigrated user skills still produce a
+// non-empty legacy budget.
+func TestLegacyTurnBudget_PicksUpTopLevel(t *testing.T) {
+	fls := false
+	h := HugenMetadata{
+		MaxTurns:       20,
+		MaxTurnsHard:   60,
+		StuckDetection: StuckDetectionPolicy{RepeatedHash: 5, Enabled: &fls},
+	}
+	b := h.LegacyTurnBudget()
+	if b.SoftCap != 20 || b.HardCeiling != 60 {
+		t.Errorf("legacy budget caps = %+v; want soft=20 hard=60", b)
+	}
+	if b.StuckDetection == nil || b.StuckDetection.IsEnabled() {
+		t.Errorf("legacy stuck detection should reflect explicit disable; got %+v", b.StuckDetection)
+	}
+	if !h.HasLegacyTurnBudget() {
+		t.Error("HasLegacyTurnBudget = false on populated legacy fields; want true")
+	}
+}
+
+// TestLegacyTurnBudget_EmptyManifest returns the zero TurnBudget
+// when no legacy field is set, and HasLegacyTurnBudget reports
+// false. Together they let the Load warn fire only when migration
+// is actually due.
+func TestLegacyTurnBudget_EmptyManifest(t *testing.T) {
+	var h HugenMetadata
+	b := h.LegacyTurnBudget()
+	if b.SoftCap != 0 || b.HardCeiling != 0 || b.StuckDetection != nil {
+		t.Errorf("empty manifest produced non-empty legacy budget: %+v", b)
+	}
+	if h.HasLegacyTurnBudget() {
+		t.Error("HasLegacyTurnBudget = true on empty manifest")
+	}
+}

@@ -198,12 +198,14 @@ type HugenMetadata struct {
 	// which skill is loaded. They live on the manifest today as a
 	// phase-4 artefact, when sessions had no tier.
 	//
-	// DEFERRED to phase 5: migrate to per-tier defaults in
-	// config.yaml.session.tier_defaults + per-role overrides on
-	// SubAgentRole. Until then the runtime keeps the current
-	// "max across loaded skills" composition with bumped defaults
-	// (defaultMaxToolIterations = 40, hard = 80) sized for the
-	// 3-tier topology landed in phase 4.2.2.
+	// DEPRECATED phase 5.2 δ (B3): the canonical knobs are
+	// `config.session.tier_defaults.<tier>` + per-role overrides on
+	// SubAgentRole + per-mission overrides on MissionBlock. These
+	// fields are still read as a fallback BETWEEN tier default and
+	// runtime constant — a slog.Warn fires once per skill at Load
+	// time recommending migration. Bundled skill manifests are
+	// migrated in phase 5.2 η. Removal slated for phase 5.3 once
+	// every live user skill has migrated.
 
 	// MaxTurns is the per-skill cap on the model→tool→model loop
 	// inside a single user turn. 0 (absent) defers to the runtime
@@ -440,6 +442,33 @@ type SubAgentRole struct {
 	// Pointer so the default-true semantic survives a missing key
 	// (HugenMetadata.ResolveAutoclose handles the chain).
 	Autoclose *bool `json:"autoclose,omitempty" yaml:"autoclose,omitempty"`
+
+	// MaxToolTurns is the per-invocation cap on the worker's
+	// model→tool→model loop for sessions spawned under this role.
+	// For parked roles (Autoclose:false) the counter resets on each
+	// notify_subagent re-arm (phase 5.2 ε). For auto-close roles the
+	// counter is session-lifetime as today.
+	//
+	// 0 (absent) falls through the resolution chain: per-role >
+	// MissionBlock.MaxToolTurns > config.session.tier_defaults.
+	// <tier>.max_tool_turns > legacy SkillManifest.MaxTurns >
+	// runtime constant. Phase 5.2 δ (B3).
+	MaxToolTurns int `json:"max_tool_turns,omitempty" yaml:"max_tool_turns,omitempty"`
+
+	// MaxToolTurnsHard is the absolute ceiling at which the
+	// session terminates with reason "hard_ceiling". Lifetime-
+	// scoped even for parked roles. 0 (absent) falls through the
+	// same resolution chain as MaxToolTurns. Phase 5.2 δ.
+	MaxToolTurnsHard int `json:"max_tool_turns_hard,omitempty" yaml:"max_tool_turns_hard,omitempty"`
+
+	// StuckDetection per-role override. nil (absent) falls through
+	// the chain (MissionBlock.StuckDetection > tier default >
+	// legacy SkillManifest.StuckDetection). When set, the policy's
+	// IsEnabled() is consulted by the runtime; threshold fields
+	// (RepeatedHash / TightDensity*) are reserved for future
+	// runtime plumbing — today only the enable bit is honoured.
+	// Phase 5.2 δ.
+	StuckDetection *StuckDetectionPolicy `json:"stuck_detection,omitempty" yaml:"stuck_detection,omitempty"`
 }
 
 // CanSpawnEffective resolves SubAgentRole.CanSpawn to the boolean
@@ -471,6 +500,102 @@ func (m MissionBlock) AutocloseEffective() bool {
 		return true
 	}
 	return *m.Autoclose
+}
+
+// TurnBudget aggregates the three knobs the turn loop reads:
+// SoftCap (per-invocation cap), HardCeiling (lifetime ceiling),
+// and StuckDetection (per-pattern detector policy). Zero / nil
+// fields mean "no opinion from this layer" — callers walk the
+// resolution chain until a non-zero / non-nil value is found.
+// Phase 5.2 δ (B3 migration).
+type TurnBudget struct {
+	SoftCap        int
+	HardCeiling    int
+	StuckDetection *StuckDetectionPolicy
+}
+
+// ResolveTurnBudget walks the per-role > per-mission precedence
+// for a named role under this manifest. Returns the first
+// non-zero / non-nil value found at each field independently;
+// fields that miss both layers stay zero / nil so the runtime can
+// fall through to its tier defaults / legacy / constant. Phase
+// 5.2 δ.
+//
+// roleName is matched against HugenMetadata.SubAgents[*].Name;
+// the empty string or an unknown name skips the role layer
+// (mission-tier sessions have no role and resolve via the
+// mission-block knobs only).
+func (h HugenMetadata) ResolveTurnBudget(roleName string) TurnBudget {
+	var b TurnBudget
+	if roleName != "" {
+		for i := range h.SubAgents {
+			if h.SubAgents[i].Name != roleName {
+				continue
+			}
+			r := &h.SubAgents[i]
+			if r.MaxToolTurns > 0 {
+				b.SoftCap = r.MaxToolTurns
+			}
+			if r.MaxToolTurnsHard > 0 {
+				b.HardCeiling = r.MaxToolTurnsHard
+			}
+			if r.StuckDetection != nil {
+				b.StuckDetection = r.StuckDetection
+			}
+			break
+		}
+	}
+	if b.SoftCap == 0 && h.Mission.MaxToolTurns > 0 {
+		b.SoftCap = h.Mission.MaxToolTurns
+	}
+	if b.HardCeiling == 0 && h.Mission.MaxToolTurnsHard > 0 {
+		b.HardCeiling = h.Mission.MaxToolTurnsHard
+	}
+	if b.StuckDetection == nil && h.Mission.StuckDetection != nil {
+		b.StuckDetection = h.Mission.StuckDetection
+	}
+	return b
+}
+
+// LegacyTurnBudget projects the deprecated top-level MaxTurns /
+// MaxTurnsHard / StuckDetection fields into a TurnBudget so the
+// runtime can fold them in as the final pre-runtime-fallback
+// layer. Returns an empty budget when no legacy field is set.
+// Phase 5.2 δ — the legacy fields are kept readable so unmigrated
+// user skills continue to work; the slog.Warn at Load time
+// surfaces the migration prompt.
+func (h HugenMetadata) LegacyTurnBudget() TurnBudget {
+	var b TurnBudget
+	if h.MaxTurns > 0 {
+		b.SoftCap = h.MaxTurns
+	}
+	if h.MaxTurnsHard > 0 {
+		b.HardCeiling = h.MaxTurnsHard
+	}
+	// StuckDetection on HugenMetadata is a value type today (not a
+	// pointer), so "absent" is conflated with the zero value. Treat
+	// any non-zero threshold or explicit Enabled=&false as a signal
+	// the author opted in. Pure zero ⇒ no opinion.
+	sd := h.StuckDetection
+	if sd.RepeatedHash != 0 || sd.TightDensityCount != 0 ||
+		sd.TightDensityWindow != "" || sd.Enabled != nil {
+		policy := sd
+		b.StuckDetection = &policy
+	}
+	return b
+}
+
+// HasLegacyTurnBudget reports whether the manifest carries any of
+// the deprecated top-level turn-loop knobs (MaxTurns, MaxTurnsHard,
+// StuckDetection). Phase 5.2 δ — used by the Load-time deprecation
+// warn.
+func (h HugenMetadata) HasLegacyTurnBudget() bool {
+	if h.MaxTurns > 0 || h.MaxTurnsHard > 0 {
+		return true
+	}
+	sd := h.StuckDetection
+	return sd.RepeatedHash != 0 || sd.TightDensityCount != 0 ||
+		sd.TightDensityWindow != "" || sd.Enabled != nil
 }
 
 // ResolveAutoclose walks the autoclose precedence chain for a
@@ -545,6 +670,17 @@ type MissionBlock struct {
 	// operator's next typed line carries intent. Phase 5.2
 	// subagent-lifetime §4.
 	AckInquiry bool `json:"ack_inquiry,omitempty" yaml:"ack_inquiry,omitempty"`
+
+	// MaxToolTurns / MaxToolTurnsHard / StuckDetection are the
+	// mission-tier overrides consulted when a mission session's
+	// effective budget is resolved. Per-role values on
+	// HugenMetadata.SubAgents[*] still win at the worker tier.
+	// 0 / nil falls through the resolution chain (tier default >
+	// legacy SkillManifest.MaxTurns > runtime constant). Phase 5.2
+	// δ (B3).
+	MaxToolTurns     int                   `json:"max_tool_turns,omitempty" yaml:"max_tool_turns,omitempty"`
+	MaxToolTurnsHard int                   `json:"max_tool_turns_hard,omitempty" yaml:"max_tool_turns_hard,omitempty"`
+	StuckDetection   *StuckDetectionPolicy `json:"stuck_detection,omitempty" yaml:"stuck_detection,omitempty"`
 }
 
 // MissionOnStart describes the per-skill boot sequence the runtime
