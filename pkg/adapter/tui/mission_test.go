@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -418,6 +417,3 @@ func keyOf(s string) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 }
 
-// keep encoding/json referenced in case future tests need the
-// payload introspection helpers.
-var _ = json.Marshal

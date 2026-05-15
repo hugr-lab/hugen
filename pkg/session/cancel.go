@@ -37,29 +37,53 @@ var ErrCancelEmptyID = errors.New("session: cancel: child id is required")
 // Idempotent: a child that is already closed (or not in the live
 // children map) returns nil. Returns ErrCancelEmptyID when
 // childID is empty.
-func (s *Session) RequestChildCancel(ctx context.Context, childID, reason string) error {
+// Return values:
+//   - (false, ErrCancelEmptyID) — empty childID.
+//   - (false, nil) — id is not in the live children map (typo OR
+//     already-terminated child that was already swept). The slash
+//     handler surfaces this as a usage_error so an operator typo
+//     does not get silently confirmed.
+//   - (true, nil) — Cancel + SessionClose were dispatched; the
+//     async teardown is observed via the standard SubagentResult
+//     projection.
+//   - (false, ctx.Err()) — caller's ctx fired while awaiting the
+//     Cancel Frame settle on the child's inbound channel.
+func (s *Session) RequestChildCancel(ctx context.Context, childID, reason string) (bool, error) {
 	if strings.TrimSpace(childID) == "" {
-		return ErrCancelEmptyID
+		return false, ErrCancelEmptyID
 	}
 	s.childMu.Lock()
 	child, live := s.children[childID]
 	s.childMu.Unlock()
 	if !live || child.IsClosed() {
-		return nil
+		return false, nil
 	}
-	r := strings.TrimSpace(reason)
-	full := protocol.TerminationUserCancelPrefix + r
+	full := protocol.TerminationUserCancelPrefix + strings.TrimSpace(reason)
 	// Step 1: Cancel with cascade — aborts the child's in-flight
-	// turn and cascade-closes its workers.
+	// turn and cascade-closes its workers. Submit is async (spawns a
+	// goroutine racing on s.in); we MUST await its `settled` channel
+	// before submitting the SessionClose so the Run loop reads
+	// Cancel first. Without the wait, the two goroutines race and
+	// SessionClose can land in s.in ahead of Cancel — routeInbound's
+	// SessionClose case returns sessionCloseSignal and the Cancel is
+	// dropped silently when s.in closes during teardown. Reproduced
+	// deterministically in PR-review test loops.
 	cancelFrame := protocol.NewCancel(child.id, s.agent.Participant(), full)
 	cancelFrame.Payload.Cascade = true
-	child.Submit(ctx, cancelFrame)
+	cancelSettled := child.Submit(ctx, cancelFrame)
+	select {
+	case <-cancelSettled:
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 	// Step 2: SessionClose — terminates the child itself with a
 	// skip-close-turn reason so teardown does not block on a
-	// findings model turn the operator did not ask for.
+	// findings model turn the operator did not ask for. Fire-and-
+	// forget; ordering vs Cancel is now guaranteed by the await
+	// above.
 	closeFrame := protocol.NewSessionClose(child.id, s.agent.Participant(), full)
 	child.Submit(ctx, closeFrame)
-	return nil
+	return true, nil
 }
 
 // RequestAllChildrenCancel snapshots the live children map and
@@ -78,7 +102,7 @@ func (s *Session) RequestAllChildrenCancel(ctx context.Context, reason string) [
 	s.childMu.Unlock()
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if err := s.RequestChildCancel(ctx, id, reason); err == nil {
+		if ok, _ := s.RequestChildCancel(ctx, id, reason); ok {
 			out = append(out, id)
 		}
 	}

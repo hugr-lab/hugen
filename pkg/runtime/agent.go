@@ -161,9 +161,20 @@ func cancelSubagentHandler() session.CommandHandler {
 		if len(args) > 1 {
 			reason = joinArgs(args[1:])
 		}
-		if err := env.Session.RequestChildCancel(ctx, childID, reason); err != nil {
+		cancelled, err := env.Session.RequestChildCancel(ctx, childID, reason)
+		if err != nil {
 			return []protocol.Frame{
 				protocol.NewError(env.Session.ID(), env.AgentAuthor, "cancel_failed", err.Error(), false),
+			}, nil
+		}
+		// Phase 5.1c.cancel-ux follow-up — fail loudly on an
+		// operator typo. RequestChildCancel returns cancelled=false
+		// when the id is not in the live children map; without
+		// this branch a typo gets silently confirmed.
+		if !cancelled {
+			return []protocol.Frame{
+				protocol.NewError(env.Session.ID(), env.AgentAuthor, "no_such_session",
+					fmt.Sprintf("no live child mission with id %q (already completed or typo?)", childID), false),
 			}, nil
 		}
 		return []protocol.Frame{

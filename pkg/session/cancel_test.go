@@ -26,8 +26,8 @@ func TestRequestChildCancel_Happy(t *testing.T) {
 	}
 	drainOutboxOnce(parent.Outbox()) // subagent_started
 
-	if err := parent.RequestChildCancel(context.Background(), child.ID(), "/mission"); err != nil {
-		t.Fatalf("RequestChildCancel: %v", err)
+	if ok, err := parent.RequestChildCancel(context.Background(), child.ID(), "/mission"); err != nil || !ok {
+		t.Fatalf("RequestChildCancel: ok=%v err=%v", ok, err)
 	}
 
 	select {
@@ -51,9 +51,30 @@ func TestRequestChildCancel_EmptyID(t *testing.T) {
 	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
-	err := parent.RequestChildCancel(context.Background(), "  ", "x")
+	ok, err := parent.RequestChildCancel(context.Background(), "  ", "x")
 	if !errors.Is(err, ErrCancelEmptyID) {
 		t.Errorf("got %v, want ErrCancelEmptyID", err)
+	}
+	if ok {
+		t.Errorf("ok=true on empty id; want false")
+	}
+}
+
+// TestRequestChildCancel_UnknownIDReportsNotCancelled — operator
+// typo case: an id that is not in parent.children returns
+// (false, nil) so the slash handler can surface a usage error
+// rather than confirming a phantom cancel. Phase 5.1c.cancel-ux
+// review fix.
+func TestRequestChildCancel_UnknownIDReportsNotCancelled(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+
+	ok, err := parent.RequestChildCancel(context.Background(), "ses-typo123", "x")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if ok {
+		t.Errorf("ok=true for unknown id; want false")
 	}
 }
 
@@ -69,12 +90,16 @@ func TestRequestChildCancel_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	if err := parent.RequestChildCancel(context.Background(), child.ID(), "first"); err != nil {
-		t.Fatalf("first: %v", err)
+	if ok, err := parent.RequestChildCancel(context.Background(), child.ID(), "first"); err != nil || !ok {
+		t.Fatalf("first: ok=%v err=%v", ok, err)
 	}
 	<-child.Done()
-	if err := parent.RequestChildCancel(context.Background(), child.ID(), "second"); err != nil {
+	ok, err := parent.RequestChildCancel(context.Background(), child.ID(), "second")
+	if err != nil {
 		t.Errorf("second cancel returned err: %v", err)
+	}
+	if ok {
+		t.Errorf("second cancel ok=true; want false (child already gone)")
 	}
 }
 
@@ -147,8 +172,8 @@ func TestRequestChildCancel_CancelEmittedBeforeTerminate(t *testing.T) {
 		t.Fatalf("spawn: %v", err)
 	}
 
-	if err := parent.RequestChildCancel(context.Background(), child.ID(), "fast"); err != nil {
-		t.Fatalf("RequestChildCancel: %v", err)
+	if ok, err := parent.RequestChildCancel(context.Background(), child.ID(), "fast"); err != nil || !ok {
+		t.Fatalf("RequestChildCancel: ok=%v err=%v", ok, err)
 	}
 	select {
 	case <-child.Done():
