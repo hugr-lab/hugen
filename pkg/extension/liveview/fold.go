@@ -19,6 +19,18 @@ import (
 // suite latency in check; future config could expose it).
 const defaultMaxStale = 3 * defaultDebounce
 
+// recentToolWindow caps the recent-activity ring on each
+// sessionView. 3 is the spec's recommended depth — enough to
+// show what a worker has been doing in the last few seconds
+// without ballooning the emit payload for long-running sessions.
+const recentToolWindow = 3
+
+// recentChildrenWindow caps the rolling history of recently-
+// terminated direct children. 10 is the dogfood default — large
+// enough that the operator can see a few wave rollovers without
+// the emit payload growing unbounded across long missions.
+const recentChildrenWindow = 10
+
 // loop is the observer goroutine's main loop. Pulls frame events
 // off the channel, folds them into the session view, and decides
 // when to emit a status frame.
@@ -130,10 +142,24 @@ func (v *sessionView) foldOwnFrame(f protocol.Frame) bool {
 			v.lastTool = &cp
 		}
 	case *protocol.ToolCall:
-		v.lastTool = &protocol.ToolCallRef{
+		ref := protocol.ToolCallRef{
 			Name:      fr.Payload.Name,
 			StartedAt: time.Now().UTC(),
 		}
+		v.lastTool = &ref
+		// Phase 5.1c S1 — prepend to the rolling recent-activity
+		// window. Most-recent first; cap at recentToolWindow so
+		// the projection payload stays bounded across long
+		// sessions.
+		next := make([]protocol.ToolCallRef, 0, len(v.recentTools)+1)
+		next = append(next, ref)
+		for _, prev := range v.recentTools {
+			if len(next) >= recentToolWindow {
+				break
+			}
+			next = append(next, prev)
+		}
+		v.recentTools = next
 		// Force-emit: a new tool call is the most useful "still
 		// alive, doing X" signal for adapters. Without this every
 		// tool call only arms the debounce timer, and a session
@@ -154,7 +180,23 @@ func (v *sessionView) foldOwnFrame(f protocol.Frame) bool {
 	case *protocol.SubagentStarted:
 		// Lifecycle change for THIS session: it has a new child.
 		// The child's own state is delivered via its own
-		// liveview frame (caught in foldChildFrame).
+		// liveview frame (caught in foldChildFrame). Capture the
+		// spawn-time metadata (role / skill / task) here because
+		// the child's liveview projection doesn't expose those
+		// fields; the parent's record is the source of truth.
+		if v.childMeta == nil {
+			v.childMeta = map[string]childMetaEntry{}
+		}
+		task := fr.Payload.Task
+		if len(task) > 200 {
+			task = task[:200] + "…"
+		}
+		v.childMeta[fr.Payload.ChildSessionID] = childMetaEntry{
+			Role:      fr.Payload.Role,
+			Skill:     fr.Payload.Skill,
+			Task:      task,
+			StartedAt: fr.Payload.StartedAt,
+		}
 		return true
 	case *protocol.SubagentResult:
 		// One of our children terminated.
@@ -171,11 +213,49 @@ func (v *sessionView) foldOwnFrame(f protocol.Frame) bool {
 func (v *sessionView) foldChildFrame(childID string, f protocol.Frame) bool {
 	switch fr := f.(type) {
 	case *protocol.SessionTerminated:
-		// Child died — drop its entry from our projection so the
-		// subtree map stops carrying a stale node. Force-emit so
-		// the next layer up sees the topology change immediately.
+		// Child died — move it from the active children map to the
+		// recent-history ring so adapters can render a "what just
+		// finished" timeline. Force-emit so the next layer up sees
+		// the topology change immediately.
 		v.reportMu.Lock()
+		entry := recentChild{
+			SessionID:    childID,
+			Reason:       fr.Payload.Reason,
+			TerminatedAt: time.Now().UTC(),
+		}
+		if meta, ok := v.childMeta[childID]; ok {
+			entry.Role = meta.Role
+			entry.Skill = meta.Skill
+			delete(v.childMeta, childID)
+		}
+		// Extract depth + last tool from the child's most recent
+		// status snapshot (still in v.children at this point) so
+		// the history entry is self-contained for the TUI.
+		if last, ok := v.children[childID]; ok {
+			var summary struct {
+				Depth        int                   `json:"depth"`
+				LastToolCall *protocol.ToolCallRef `json:"last_tool_call"`
+			}
+			if json.Unmarshal(last, &summary) == nil {
+				entry.Depth = summary.Depth
+				if summary.LastToolCall != nil {
+					entry.LastTool = summary.LastToolCall.Name
+				}
+			}
+		}
 		delete(v.children, childID)
+		// Prepend newest-first; cap at recentChildrenWindow so a
+		// long mission with many wave rollovers doesn't bloat the
+		// emit payload.
+		next := make([]recentChild, 0, len(v.recentChildren)+1)
+		next = append(next, entry)
+		for _, prev := range v.recentChildren {
+			if len(next) >= recentChildrenWindow {
+				break
+			}
+			next = append(next, prev)
+		}
+		v.recentChildren = next
 		v.reportMu.Unlock()
 		return true
 	case *protocol.ExtensionFrame:
@@ -232,12 +312,30 @@ func (v *sessionView) emitStatus() {
 	if v.pendingInquiry != nil {
 		payload["pending_inquiry"] = v.pendingInquiry
 	}
+	if len(v.recentTools) > 0 {
+		cp := make([]protocol.ToolCallRef, len(v.recentTools))
+		copy(cp, v.recentTools)
+		payload["recent_activity"] = cp
+	}
 	if len(v.children) > 0 {
 		kids := make(map[string]json.RawMessage, len(v.children))
 		for k, val := range v.children {
 			kids[k] = val
 		}
 		payload["children"] = kids
+	}
+	if len(v.childMeta) > 0 {
+		meta := make(map[string]childMetaEntry, len(v.childMeta))
+		for k, val := range v.childMeta {
+			meta[k] = val
+		}
+		payload["child_meta"] = meta
+	}
+	if len(v.recentChildren) > 0 {
+		// Defensive copy — recipient may stash + mutate.
+		cp := make([]recentChild, len(v.recentChildren))
+		copy(cp, v.recentChildren)
+		payload["recent_children"] = cp
 	}
 	v.reportMu.Unlock()
 

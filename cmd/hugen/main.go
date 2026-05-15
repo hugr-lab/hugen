@@ -61,12 +61,13 @@ func run(args []string, errOut io.Writer) int {
 	case "a2a":
 		fmt.Fprintln(errOut, "the a2a mode is not yet available in this build; planned for phase 10")
 		return exitUsage
-	case "", "console", "webui":
+	case "", "console", "webui", "tui":
 		// OK — fall through to bootstrap.
 	default:
 		fmt.Fprintf(errOut, "unknown subcommand %q\n\n", sub)
-		fmt.Fprintln(errOut, "usage: hugen [console|webui]")
-		fmt.Fprintln(errOut, "  console  start the console adapter")
+		fmt.Fprintln(errOut, "usage: hugen [console|tui|webui]")
+		fmt.Fprintln(errOut, "  console  start the inline-renderer console adapter (default)")
+		fmt.Fprintln(errOut, "  tui      start the Bubble Tea TUI adapter")
 		fmt.Fprintln(errOut, "  webui    start the HTTP API + loopback web UI")
 		return exitUsage
 	}
@@ -85,6 +86,8 @@ func run(args []string, errOut io.Writer) int {
 	switch sub {
 	case "webui":
 		return runWebUI(ctx, core, boot)
+	case "tui":
+		return runTUI(ctx, core)
 	default:
 		return runConsole(ctx, core)
 	}

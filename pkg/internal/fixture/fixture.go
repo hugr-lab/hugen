@@ -488,6 +488,44 @@ func (s *TestStore) SearchNotes(_ context.Context, _, _ string, _ store.ListNote
 	return nil, store.ErrNoEmbedder
 }
 
+// SessionStats reports the in-memory event count for sessionID.
+// Phase 5.1c S2 — the fixture mirrors the production accessor.
+func (s *TestStore) SessionStats(_ context.Context, sessionID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.Events[sessionID]), nil
+}
+
+// CountNotesByCategory mirrors the production store: groups by
+// category, honouring opts.Window and opts.Category. opts.Limit
+// is ignored — bucket cardinality is bounded by distinct
+// category count.
+func (s *TestStore) CountNotesByCategory(_ context.Context, sessionID string, opts store.ListNotesOpts) (map[string]int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutoff := time.Time{}
+	if opts.Window > 0 {
+		cutoff = time.Now().UTC().Add(-opts.Window)
+	}
+	out := map[string]int{}
+	for _, n := range s.Notes {
+		if sessionID != "" && n.SessionID != sessionID {
+			continue
+		}
+		if opts.Category != "" && n.Category != opts.Category {
+			continue
+		}
+		if !cutoff.IsZero() && n.CreatedAt.Before(cutoff) {
+			continue
+		}
+		out[n.Category]++
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
 func (s *TestStore) ListSessions(_ context.Context, _, _ string) ([]store.SessionRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -93,9 +93,15 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	// rest. Without this, child's outbox back-fills its 32-buffer on
 	// streaming chunks and emit blocks indefinitely. See
 	// pkg/session/subagent_pump.go for the kind-level dispatch and
-	// abnormal-close finalizer. Fire-and-forget — the range loop
-	// exits naturally when child closes its outbox in Run's defer.
-	go s.consumeChildOutbox(child)
+	// abnormal-close finalizer.
+	//
+	// Phase 5.1c — track the pump goroutine on parent.childWG so
+	// parent.drainOnTeardown waits for it before dispatchExtensionClosers
+	// closes per-session state (e.g. liveview's channel that pump
+	// pokes via ChildFrameObserver). Without this the pump can still
+	// be draining buffered child frames into parent's liveview after
+	// teardown closed liveview's channel — race + dropped frame.
+	s.childWG.Go(func() { s.consumeChildOutbox(child) })
 
 	started := protocol.NewSubagentStarted(s.id, s.deps.Agent.Participant(), protocol.SubagentStartedPayload{
 		ChildSessionID: child.ID(),

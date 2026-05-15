@@ -222,6 +222,22 @@ type RuntimeStore interface {
 	// fall back to ListNotes. Same Window/Category/Limit semantics
 	// as ListNotes; ordering is by similarity DESC.
 	SearchNotes(ctx context.Context, sessionID, query string, opts ListNotesOpts) ([]NoteRow, error)
+	// SessionStats returns the persisted event count for sessionID.
+	// Phase 5.1c S2 — feeds the TUI footer's "N events" indicator.
+	// Uses Hugr's single-row aggregation (`session_events_aggregation`)
+	// so the query is bounded regardless of session size. A future
+	// extension may add a bytes total once the schema exposes
+	// length aggregations cheaply.
+	SessionStats(ctx context.Context, sessionID string) (events int, err error)
+
+	// CountNotesByCategory returns one row per distinct category
+	// with the total note count. opts.Window applies the same
+	// `created_at >= NOW() - Window` cutoff as ListNotes; opts.Category
+	// is honoured only as a redundant pre-filter (the result map will
+	// contain at most that one key); opts.Limit is ignored — bucket
+	// rows are bounded by distinct category count, not by note count.
+	// Notes with an empty category are bucketed under the empty key.
+	CountNotesByCategory(ctx context.Context, sessionID string, opts ListNotesOpts) (map[string]int, error)
 	ListSessions(ctx context.Context, agentID, status string) ([]SessionRow, error)
 	// ListResumableRoots returns every root session for agentID
 	// whose `status` column is Active. Each row carries its most
@@ -676,6 +692,83 @@ func (s *RuntimeStoreLocal) SearchNotes(ctx context.Context, sessionID, query st
 		return nil, err
 	}
 	return rows, nil
+}
+
+// SessionStats reports the total persisted event count for
+// sessionID via Hugr's single-row aggregation. Bytes total is
+// intentionally absent at this layer — DuckDB's length aggregation
+// over text is non-trivial across content + tool_args + metadata
+// and the footer indicator can ship without it. Returns 0 + nil
+// on ErrNoData / ErrWrongDataPath (empty session is the normal
+// first-frame state). Phase 5.1c S2.
+func (s *RuntimeStoreLocal) SessionStats(ctx context.Context, sessionID string) (int, error) {
+	type aggResp struct {
+		RowsCount int `json:"_rows_count"`
+	}
+	res, err := queries.RunQuery[aggResp](ctx, s.querier,
+		`query ($filter: hub_db_session_events_filter) {
+			hub { db { agent {
+				session_events_aggregation(filter: $filter) {
+					_rows_count
+				}
+			}}}
+		}`,
+		map[string]any{
+			"filter": map[string]any{"session_id": map[string]any{"eq": sessionID}},
+		},
+		"hub.db.agent.session_events_aggregation",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return res.RowsCount, nil
+}
+
+// CountNotesByCategory groups notes by `category` server-side via
+// Hugr's `session_notes_bucket_aggregation` and returns the total
+// per category. Reuses buildNotesFilter so the cutoff/category
+// semantics match ListNotes exactly. Phase 5.1c — feeds the TUI
+// liveview sidebar's total-per-tag breakdown without round-tripping
+// the full notes table over the GraphQL wire.
+func (s *RuntimeStoreLocal) CountNotesByCategory(ctx context.Context, sessionID string, opts ListNotesOpts) (map[string]int, error) {
+	filter := buildNotesFilter(sessionID, opts)
+	type bucketRow struct {
+		Key struct {
+			Category string `json:"category"`
+		} `json:"key"`
+		Aggregations struct {
+			RowsCount int `json:"_rows_count"`
+		} `json:"aggregations"`
+	}
+	rows, err := queries.RunQuery[[]bucketRow](ctx, s.querier,
+		`query ($filter: hub_db_session_notes_filter) {
+			hub { db { agent {
+				session_notes_bucket_aggregation(filter: $filter) {
+					key { category }
+					aggregations { _rows_count }
+				}
+			}}}
+		}`,
+		map[string]any{"filter": filter},
+		"hub.db.agent.session_notes_bucket_aggregation",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make(map[string]int, len(rows))
+	for _, r := range rows {
+		if r.Aggregations.RowsCount == 0 {
+			continue
+		}
+		out[r.Key.Category] = r.Aggregations.RowsCount
+	}
+	return out, nil
 }
 
 // buildNotesFilter constructs the hub_db_session_notes_filter map

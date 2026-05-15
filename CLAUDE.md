@@ -57,7 +57,8 @@ Phase plan:
 | ~~4.3~~ | **cancelled 2026-05-08** — superseded by 4.1a + per-domain ToolProvider pattern. |
 | 5.1. HITL primitives (`session:inquire` approval/clarification with bubble-up + cascade-down), follow-up cascade through parent chain, async `spawn_mission`, `session:notify_subagent` parent-note, `requires_approval` skill gate, system/hub skill split (`assets/system/` embed-only + `assets/skills/` hub-installed), embed-only constitution + prompts (`pkg/prompts`), 9 HITL scenarios scaffolded | shipped (`d0611e3`, 2026-05-13) — 7 of 9 validated on Gemma 4-26B; multi_root_independence + adapter-visibility deferred → 5.1b |
 | ~~5 (combined HITL + compactor)~~ | **split 2026-05-12** — HITL was production blocker; compactor independent. Became 5.1 (shipped) + 5.2 (open). |
-| 5.1b. Adapter visibility: enriched `SessionStatusPayload`, mission-progress in-tree extension, `Manager.SnapshotSession` API, multi-root harness primitive + scenario | open — spec at `phase-5.1b-spec.md` |
+| 5.1b. Adapter visibility surface — capability-bag `liveview` extension (FrameObserver / ChildFrameObserver / StatusReporter), enriched `SessionStatusPayload`, multi-root harness primitive + `multi_root_independence` scenario, `wait_subagents` optional ids + fast-fail | shipped (`b243b77`, 2026-05-14) |
+| 5.1c. Bubble Tea TUI adapter — reference rich-client on top of 5.1b liveview surface; multi-root tabs, inquiry modal, sidebar driven by `ExtensionFrame{liveview/status}`, on-attach replay via `store.ListEvents` | open (trigger-gated) — spec at `phase-5.1c-tui-bubbletea.md`; ships when console UX pain / external integrator / surface-validation need fires |
 | 5.2. Compactor — content-aware history summarisation; replaces phase-3 `defaultHistoryWindow=50` stop-gap; composes with 4.2.3 notepad (notepad = cross-mission, compactor = within-session) | open — not yet specced |
 | 6. Cron + scheduler | open |
 | 7. Memory pipeline + LLM Wiki — cross-conversation distilled knowledge. Reads 4.2.3 notepad as input; session-scoped working memory is owned by 4.2.3. | open |
@@ -71,33 +72,36 @@ Goal: finish design-001 cleanly, then move to **hub integration**
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
 
-## Active focus — pick between 5.1b and 5.2
+## Active focus — pick between 5.1c and 5.2
 
-Phase 5.1 shipped to `main` at `d0611e3` (2026-05-13). HITL
-inquire + follow-up cascade + async `spawn_mission` are live;
-the system/hub skill split + embed-only prompts/constitution
-landed in the same merge. Two roughly independent next steps,
-parallel-mergeable:
+Phase 5.1b shipped to `main` at `b243b77` (2026-05-14): the
+capability-bag liveview foundation, enriched `SessionStatusPayload`,
+multi-root harness, and `wait_subagents` optional-ids fast-fail
+are live. Two roughly independent next steps, parallel-mergeable:
 
-- **5.1b** — adapter visibility surface: enriched
-  `SessionStatusPayload`, mission-progress extension,
-  `Manager.SnapshotSession`, multi-root harness primitive +
-  `multi_root_independence` scenario completion. Estimated
-  ~1080 LOC. Spec at `phase-5.1b-spec.md`.
+- **5.1c** — Bubble Tea TUI adapter: reference rich-client on
+  top of 5.1b's `ExtensionFrame{liveview/status}` surface.
+  Multi-root tabs, inquiry modal, sidebar projection driven by
+  the latest liveview frame, on-attach replay via
+  `store.ListEvents`. Estimated ~2440 LOC. Spec at
+  `phase-5.1c-tui-bubbletea.md`. **Trigger-gated** — only
+  starts when console UX pain / external integrator / 5.1b
+  surface-validation pressure fires.
 - **5.2** — compactor: content-aware history summarisation at
   turn boundaries; preserves recent turns verbatim, summarises
   older into a system-prompt digest. Composes with 4.2.3
   notepad (cross-mission) vs compactor (within-session). Not
   yet specced.
 
-Pick whichever the next concrete pain point calls for. 5.1b
-unblocks rich TUI / SSE / a2a clients; 5.2 unblocks long-
-running sessions on context-window-tight models.
+Pick whichever the next concrete pain point calls for. 5.1c
+unblocks rich daily-use TUI / external adapter integrators;
+5.2 unblocks long-running sessions on context-window-tight
+models.
 
 Free-agenda items (cross-phase, no scheduled phase): live in
-`backlog.md`. Includes B1–B7 (4.2.3 fast-follows), Bubble Tea
-TUI, content-based `requires_approval`, task-complexity
-routing, PeerGroup mesh.
+`backlog.md`. Includes B1–B7 (4.2.3 fast-follows), content-
+based `requires_approval`, task-complexity routing, PeerGroup
+mesh.
 
 ## Project structure
 

@@ -42,7 +42,7 @@ type Adapter struct {
 	// InquiryRequest lands; read from the input goroutine before
 	// dispatching each line. nil when no inquiry is open.
 	// Phase 5.1 § 2.
-	pending atomic.Pointer[pendingInquiry]
+	pending atomic.Pointer[PendingInquiry]
 
 	closed chan struct{} // closed when session_closed is observed
 }

@@ -128,6 +128,7 @@ func (e *Extension) InitState(ctx context.Context, state extension.SessionState)
 		maxStale:  defaultMaxStale,
 		ch:        make(chan frameEvent, channelBuffer),
 		children:  map[string]json.RawMessage{},
+		childMeta: map[string]childMetaEntry{},
 	}
 	v.wg.Add(1)
 	go v.run()
@@ -235,11 +236,63 @@ type sessionView struct {
 	lastTool       *protocol.ToolCallRef
 	pendingInquiry *protocol.PendingInquiryRef
 	turnsUsed      int
+	// recentTools is the rolling window of the last
+	// recentToolWindow ToolCall observations on THIS session's
+	// outbox (own frames only — children publish their own
+	// recent_activity in their own liveview emit). Most-recent
+	// first; capped on insert. Phase 5.1c follow-up S1 — gives
+	// adapters enough signal to show "what is this subagent
+	// doing RIGHT NOW" without subscribing to raw child frames.
+	recentTools []protocol.ToolCallRef
 
 	// children stores the LAST KNOWN status JSON each direct
 	// child published via its own liveview status frame. Keyed
 	// by child sessionID.
 	children map[string]json.RawMessage
+
+	// childMeta carries per-child metadata captured at spawn time
+	// (from this session's own SubagentStarted emit): role,
+	// skill, mission task. The child itself doesn't surface these
+	// in its own liveview projection (skill/role isn't exposed
+	// via SessionState), so the parent collects them locally and
+	// emits them alongside `children` for adapter consumption.
+	childMeta map[string]childMetaEntry
+
+	// recentChildren is the rolling window of recently-terminated
+	// direct children. Newest-first; capped at
+	// recentChildrenWindow. Each entry carries the child's depth,
+	// last observed tool name, termination reason, and
+	// terminated-at timestamp so adapters can render a "what just
+	// finished" history without having to re-query the event log.
+	// Phase 5.1c follow-up — dogfood feedback.
+	recentChildren []recentChild
+}
+
+// childMetaEntry carries per-child metadata captured at the
+// parent's SubagentStarted emit and emitted alongside the active
+// children map so adapters can render role / skill next to each
+// subagent in the tree. Task is bounded to keep the emit payload
+// small — adapters that need the full mission read the
+// SubagentStarted event from the log.
+type childMetaEntry struct {
+	Role      string    `json:"role,omitempty"`
+	Skill     string    `json:"skill,omitempty"`
+	Task      string    `json:"task,omitempty"`
+	StartedAt time.Time `json:"started_at,omitempty"`
+}
+
+// recentChild is one history entry in sessionView.recentChildren.
+// Public-ish (lowercase struct, JSON-tagged fields) so the emit
+// payload carries the values directly without an intermediate
+// conversion step.
+type recentChild struct {
+	SessionID    string    `json:"session_id"`
+	Depth        int       `json:"depth,omitempty"`
+	Role         string    `json:"role,omitempty"`
+	Skill        string    `json:"skill,omitempty"`
+	Reason       string    `json:"reason,omitempty"`
+	LastTool     string    `json:"last_tool,omitempty"`
+	TerminatedAt time.Time `json:"terminated_at"`
 }
 
 // push is the non-blocking enqueue called from FrameObserver /
@@ -286,6 +339,12 @@ func (v *sessionView) reportActivityJSON() json.RawMessage {
 	}
 	if v.turnsUsed > 0 {
 		body["turns_used"] = v.turnsUsed
+	}
+	if len(v.recentTools) > 0 {
+		// Defensive copy — recipient may store + mutate.
+		cp := make([]protocol.ToolCallRef, len(v.recentTools))
+		copy(cp, v.recentTools)
+		body["recent_activity"] = cp
 	}
 	if len(body) == 0 {
 		return nil

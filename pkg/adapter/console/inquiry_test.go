@@ -91,14 +91,14 @@ func TestParseClarificationReply(t *testing.T) {
 // cascade-down dispatcher matches on.
 func TestBuildInquiryReply_Approval(t *testing.T) {
 	user := protocol.ParticipantInfo{ID: "op", Kind: protocol.ParticipantUser, Name: "op"}
-	pend := &pendingInquiry{
+	pend := &PendingInquiry{
 		RequestID:       "inq-abc",
 		CallerSessionID: "worker-42",
 		Kind:            protocol.InquiryTypeApproval,
 	}
-	resp, err := buildInquiryReply(user, "root-1", pend, "/approve looks ok")
+	resp, err := BuildInquiryReply(user, "root-1", pend, "/approve looks ok")
 	if err != nil {
-		t.Fatalf("buildInquiryReply: %v", err)
+		t.Fatalf("BuildInquiryReply: %v", err)
 	}
 	if resp.Payload.RequestID != "inq-abc" {
 		t.Errorf("RequestID: got %q, want inq-abc", resp.Payload.RequestID)
@@ -119,14 +119,14 @@ func TestBuildInquiryReply_Approval(t *testing.T) {
 
 func TestBuildInquiryReply_Clarification(t *testing.T) {
 	user := protocol.ParticipantInfo{ID: "op", Kind: protocol.ParticipantUser, Name: "op"}
-	pend := &pendingInquiry{
+	pend := &PendingInquiry{
 		RequestID:       "inq-xyz",
 		CallerSessionID: "mission-7",
 		Kind:            protocol.InquiryTypeClarification,
 	}
-	resp, err := buildInquiryReply(user, "root-1", pend, "by revenue")
+	resp, err := BuildInquiryReply(user, "root-1", pend, "by revenue")
 	if err != nil {
-		t.Fatalf("buildInquiryReply: %v", err)
+		t.Fatalf("BuildInquiryReply: %v", err)
 	}
 	if resp.Payload.Response != "by revenue" {
 		t.Errorf("Response: got %q, want %q", resp.Payload.Response, "by revenue")

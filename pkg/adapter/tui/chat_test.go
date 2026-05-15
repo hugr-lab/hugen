@@ -1,0 +1,108 @@
+package tui
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestChatBuffer_AppendUserAndRender(t *testing.T) {
+	b := newChatBuffer()
+	b.appendUser("alice", "hi there")
+	out := b.render(80)
+	if !strings.Contains(out, "alice") || !strings.Contains(out, "hi there") {
+		t.Fatalf("render missing user content: %q", out)
+	}
+}
+
+func TestChatBuffer_StreamingAssistantRendersInflight(t *testing.T) {
+	b := newChatBuffer()
+	b.appendAssistantChunk("partial reply")
+	out := b.render(80)
+	// glamour wraps each word in its own ANSI color span, so the
+	// rendered output contains "partial" and "reply" separated by
+	// escape sequences — test both tokens are present.
+	if !strings.Contains(out, "partial") || !strings.Contains(out, "reply") {
+		t.Fatalf("inflight assistant chunk missing: %q", out)
+	}
+	// Finalize → spans grow by one, pending reset.
+	b.finalizeAssistant()
+	if b.pendingAssistant.Len() != 0 {
+		t.Fatalf("pendingAssistant should be empty after finalize")
+	}
+	if len(b.spans) != 1 || b.spans[0].kind != spanAssistant {
+		t.Fatalf("finalize did not produce assistant span; spans=%d", len(b.spans))
+	}
+}
+
+func TestChatBuffer_FinalizeEmpty_NoSpan(t *testing.T) {
+	b := newChatBuffer()
+	// Finalize with no pending content must not append a blank span.
+	b.finalizeAssistant()
+	b.finalizeReasoning()
+	if len(b.spans) != 0 {
+		t.Fatalf("empty finalize created spans: %d", len(b.spans))
+	}
+}
+
+func TestChatBuffer_SystemSpanRendered(t *testing.T) {
+	b := newChatBuffer()
+	b.appendSystem("session terminated (user)")
+	out := b.render(80)
+	if !strings.Contains(out, "session terminated") {
+		t.Fatalf("system span missing: %q", out)
+	}
+}
+
+// TestChatBuffer_UserSpanWordWraps — dogfood feedback: long
+// single-line user input used to overflow the viewport
+// horizontally. Now reflow.wordwrap breaks long lines at word
+// boundaries; each wrapped line is indented under the prefix.
+func TestChatBuffer_UserSpanWordWraps(t *testing.T) {
+	b := newChatBuffer()
+	long := "abc def ghi jkl mno pqr stu vwx yz1 234 567"
+	b.appendUser("user", long)
+	out := b.render(30) // narrow viewport forces wrap
+	// Output must contain at least one mid-text newline (wrap
+	// happened) AND every word from the source.
+	if !strings.Contains(out, "\n") {
+		t.Fatalf("no newline in wrapped output:\n%q", out)
+	}
+	for _, w := range strings.Fields(long) {
+		if !strings.Contains(out, w) {
+			t.Fatalf("missing word %q after wrap:\n%q", w, out)
+		}
+	}
+}
+
+func TestChatBuffer_UserSpanMultilineIndents(t *testing.T) {
+	b := newChatBuffer()
+	b.appendUser("vgribanov", "first line\nsecond line")
+	out := b.render(80)
+	// "vgribanov ❯ " has visual width 12 (lipgloss.Width handles
+	// ❯ as 1 cell; raw len() over-counts UTF-8 bytes).
+	if !strings.Contains(out, "first line\n            second line") {
+		t.Fatalf("multi-line user span did not indent second line under 12-cell prefix:\n%q", out)
+	}
+}
+
+func TestPrefixMultiline_KeepsNewlinesAndIndents(t *testing.T) {
+	got := prefixMultiline("thinking: ", "line one\nline two\r\nline three")
+	want := "thinking: line one\n          line two\n          line three"
+	if got != want {
+		t.Fatalf("prefixMultiline =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestParseSlashFrame_DispatchPath(t *testing.T) {
+	// Sanity: console.IsSlashCommand + ParseSlashCommand contract
+	// powers model.dispatchUserInput. Direct call ensures the
+	// import + signatures remain wired.
+	m, submitted := newTestModel(t)
+	if err := m.currentTab().dispatchUserInput("/end now"); err != nil {
+		t.Fatalf("dispatchUserInput slash returned err: %v", err)
+	}
+	got := submitted.Load()
+	if got == nil {
+		t.Fatalf("nothing submitted")
+	}
+}

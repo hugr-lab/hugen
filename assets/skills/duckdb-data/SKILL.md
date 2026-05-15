@@ -69,6 +69,11 @@ SQL diverges from Postgres in places (FILTER clause, QUALIFY, list / struct
    `ATTACH` is needed for one-off reads.
 3. **Write outputs via COPY** — `COPY (SELECT ...) TO 'data/out.parquet'`.
    Surface relative paths back to the user.
+4. **`${SESSION_DIR}` is ephemeral** — wiped when the worker session
+   closes. Files emitted by COPY survive only for the duration of the
+   current task. If the user expects to keep / re-open a result later,
+   say so in your final answer so root can capture it; a dedicated
+   artifact-storage path is on the roadmap.
 
 ## Critical rules
 

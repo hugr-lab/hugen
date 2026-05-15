@@ -18,6 +18,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 // Adapter is the surface the runtime exposes to inbound channels
@@ -37,6 +38,14 @@ type AdapterHost interface {
 	Subscribe(ctx context.Context, sessionID string) (<-chan protocol.Frame, error)
 	CloseSession(ctx context.Context, id, reason string) (time.Time, error)
 	ListSessions(ctx context.Context, status string) ([]session.SessionSummary, error)
+	// SessionStats returns the persisted event count for sessionID.
+	// Phase 5.1c S2 — TUI footer indicator.
+	SessionStats(ctx context.Context, sessionID string) (int, error)
+	// ListEvents returns events from the session's persisted log.
+	// Phase 5.1c — feeds the TUI adapter's on-attach replay
+	// (last 100 events stitched into the chat viewport before the
+	// next live frame arrives).
+	ListEvents(ctx context.Context, sessionID string, opts store.ListEventsOpts) ([]store.EventRow, error)
 	Logger() *slog.Logger
 }
 
@@ -228,6 +237,14 @@ func (h *adapterHost) CloseSession(ctx context.Context, id, reason string) (time
 
 func (h *adapterHost) ListSessions(ctx context.Context, status string) ([]session.SessionSummary, error) {
 	return h.rt.manager.ListSessions(ctx, status)
+}
+
+func (h *adapterHost) ListEvents(ctx context.Context, sessionID string, opts store.ListEventsOpts) ([]store.EventRow, error) {
+	return h.rt.manager.ListEvents(ctx, sessionID, opts)
+}
+
+func (h *adapterHost) SessionStats(ctx context.Context, sessionID string) (int, error) {
+	return h.rt.manager.SessionStats(ctx, sessionID)
 }
 
 func (h *adapterHost) Logger() *slog.Logger { return h.rt.logger }

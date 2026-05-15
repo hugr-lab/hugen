@@ -899,13 +899,32 @@ func (s *Session) teardown(runCtx context.Context) {
 	// of blocking forever on a full buffer.
 	s.drainOnTeardown()
 
+	// 3) Extension Closer dispatch in REVERSE registration order so
+	// later extensions whose state depends on earlier ones release
+	// first (mcp closes its providers before workspace removes the
+	// session dir; skill drops its sink before tool catalog goes
+	// away). Errors are logged warn-not-fatal — a misbehaving
+	// extension must not block teardown / terminal write.
+	//
+	// Runs on BOTH graceful and explicit-close paths because
+	// extensions with persistent goroutines (e.g. liveview's
+	// per-session observer) MUST be joined before defer close(s.out)
+	// fires — otherwise their in-flight emitStatus → s.out send
+	// races with the channel close. Closers receive a possibly-done
+	// ctx on graceful shutdown; existing impls ignore the ctx param.
+	closeCtx := runCtx
+	if tc != nil {
+		closeCtx = tc.writeCtx
+	}
+	s.dispatchExtensionClosers(closeCtx)
+
 	if tc == nil {
 		// Graceful: nothing else to do. handleExit early-returns on a
 		// nil cause; replicate that here without the store writes.
 		return
 	}
 
-	// 3) Persist anything we caught in the drain. emit() short-circuits
+	// 4) Persist anything we caught in the drain. emit() short-circuits
 	// once s.closed is set, but here closed is still false — we use
 	// persistOnly to skip the outbox push (it's about to close anyway).
 	for _, f := range s.pendingInbound {
@@ -915,14 +934,6 @@ func (s *Session) teardown(runCtx context.Context) {
 		}
 	}
 	s.pendingInbound = nil
-
-	// 4) Extension Closer dispatch in REVERSE registration order so
-	// later extensions whose state depends on earlier ones release
-	// first (mcp closes its providers before workspace removes the
-	// session dir; skill drops its sink before tool catalog goes
-	// away). Errors are logged warn-not-fatal — a misbehaving
-	// extension must not block teardown / terminal write.
-	s.dispatchExtensionClosers(tc.writeCtx)
 
 	// 4.5) Close the per-session ToolManager child after extensions
 	// dropped their references; agent-level providers stay live on

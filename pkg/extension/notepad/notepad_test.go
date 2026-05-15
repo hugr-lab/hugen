@@ -298,3 +298,59 @@ func TestCall_UnknownOp(t *testing.T) {
 		t.Fatal("expected error for unknown op")
 	}
 }
+
+// TestReportStatus_ShapeAndTotals — phase 5.1c. ReportStatus must
+// return TRUE per-category totals (server-side aggregate, not
+// derived from the truncated recent list). 11 schema-finding notes
+// + 1 chat-answer note → counts.schema-finding == 11 even though
+// recent caps at 10.
+func TestReportStatus_ShapeAndTotals(t *testing.T) {
+	ext, state, _ := newFixture(t)
+	ctx := extension.WithSessionState(context.Background(), state)
+	// Seed 12 notes across two categories. AppendNote → ListNotes
+	// recent will project at most 10; counts must show the true total.
+	for i := 0; i < 11; i++ {
+		args, _ := json.Marshal(AppendInput{Content: "finding", Category: "schema-finding"})
+		if _, err := ext.Call(ctx, "notepad:append", args); err != nil {
+			t.Fatalf("seed append: %v", err)
+		}
+	}
+	args, _ := json.Marshal(AppendInput{Content: "answer", Category: "chat-answer"})
+	if _, err := ext.Call(ctx, "notepad:append", args); err != nil {
+		t.Fatalf("seed append: %v", err)
+	}
+
+	raw := ext.ReportStatus(ctx, state)
+	if len(raw) == 0 {
+		t.Fatalf("ReportStatus returned empty payload")
+	}
+	var got struct {
+		Recent []map[string]any `json:"recent"`
+		Counts map[string]int   `json:"counts"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, string(raw))
+	}
+	if got.Counts["schema-finding"] != 11 {
+		t.Errorf("counts.schema-finding = %d; want 11 (full bucket, not truncated by recent)", got.Counts["schema-finding"])
+	}
+	if got.Counts["chat-answer"] != 1 {
+		t.Errorf("counts.chat-answer = %d; want 1", got.Counts["chat-answer"])
+	}
+	if len(got.Recent) > 10 {
+		t.Errorf("recent = %d; want <= 10", len(got.Recent))
+	}
+	if len(got.Recent) == 0 {
+		t.Errorf("recent is empty; want at most-recent notes")
+	}
+}
+
+// TestReportStatus_EmptyNotepad — no notes ⇒ nil payload (so the
+// liveview emit skips the extension key entirely).
+func TestReportStatus_EmptyNotepad(t *testing.T) {
+	ext, state, _ := newFixture(t)
+	ctx := extension.WithSessionState(context.Background(), state)
+	if raw := ext.ReportStatus(ctx, state); raw != nil {
+		t.Errorf("empty notepad ReportStatus = %s; want nil", string(raw))
+	}
+}

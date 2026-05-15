@@ -98,20 +98,40 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	return renderSnapshot(state.Prompts(), notes, np.Window())
 }
 
-// ReportStatus implements [extension.StatusReporter]. Returns up
-// to 10 most-recent notes (full Note shape) as a JSON array.
-// Nil when no notes or no notepad on this session. Phase 5.1b —
-// consumed by liveview when it assembles its emit payload.
+// ReportStatus implements [extension.StatusReporter]. Returns a
+// compact projection: the 10 most-recent notes plus the TRUE
+// per-category totals (server-side bucket aggregation, not derived
+// from the truncated recent list). Phase 5.1c — the TUI sidebar
+// renders the totals; recent list is kept for future "recent notes"
+// expansion panels. Nil when no notes or no notepad on this session.
+//
+// Wire shape:
+//
+//	{"recent": [{"id":..., "category":..., ...}, ...], "counts": {"cat": N, ...}}
 func (e *Extension) ReportStatus(ctx context.Context, state extension.SessionState) json.RawMessage {
 	np := FromState(state)
 	if np == nil {
 		return nil
 	}
-	notes, err := np.Read(ctx, ReadInput{Limit: 10})
-	if err != nil || len(notes) == 0 {
+	counts, err := np.CountsByCategory(ctx)
+	if err != nil {
 		return nil
 	}
-	data, err := json.Marshal(notes)
+	notes, err := np.Read(ctx, ReadInput{Limit: 10})
+	if err != nil {
+		return nil
+	}
+	if len(notes) == 0 && len(counts) == 0 {
+		return nil
+	}
+	payload := struct {
+		Recent []wireNote     `json:"recent"`
+		Counts map[string]int `json:"counts"`
+	}{
+		Recent: notesToWire(notes),
+		Counts: counts,
+	}
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil
 	}
