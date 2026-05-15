@@ -84,6 +84,14 @@ patterns below cover the majority of tasks and prevent the typical
    Conventional subdirs: `data/`, `reports/`, `figures/`.
 4. **Surface relative paths** to the user — they read files via the workspace
    root the host exposes.
+5. **`${SESSION_DIR}` is ephemeral.** It is wiped when this worker session
+   closes (typically at the end of the current task / wave). Anything inside
+   does NOT survive into the next user follow-up. If the user explicitly asked
+   for a file to keep / refine later, **either** include its contents in your
+   final `result` text (so root captures it and can hand it back), **or**
+   tell the user the absolute path you'd write to and let them confirm. A
+   dedicated artifact-storage surface is on the roadmap; until it lands,
+   treat SESSION_DIR as scratch.
 
 ## Task-Specific Guidance
 
