@@ -44,6 +44,18 @@ func replayEvents(t *tab, rows []store.EventRow) {
 		// their normal branches.
 		switch v := f.(type) {
 		case *protocol.UserMessage:
+			// Phase 5.x.skill-polish-1 — skip synthetic
+			// agent-authored UserMessage kicks (e.g. the
+			// `[system:async_summary]` prompt emitted by
+			// kickAsyncSummaryTurn). They are runtime triggers,
+			// not chat content; the operator never saw them in
+			// the live session because the live handler returns
+			// nil for inbound UserMessage. Reproducing them as
+			// user bubbles on resume violates the live↔replay
+			// equivalence.
+			if v.Author().Kind != protocol.ParticipantUser {
+				continue
+			}
 			label := v.Author().Name
 			if label == "" {
 				label = v.Author().ID
