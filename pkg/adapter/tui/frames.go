@@ -99,6 +99,20 @@ func (t *tab) handleFrame(f protocol.Frame) tea.Cmd {
 		t.handleReasoning(v)
 	case *protocol.ToolCall:
 		t.statusLine = fmt.Sprintf("tool: %s", v.Payload.Name)
+		// Surface a few coordination tools as system markers so
+		// the operator sees follow-up cascades / spawn lifecycles
+		// in the chat transcript instead of just the sidebar.
+		// Dogfood feedback: a typed follow-up triggers
+		// session_notify_subagent silently — the operator has no
+		// chat-visible confirmation that the cascade happened.
+		switch v.Payload.Name {
+		case "session_notify_subagent", "session:notify_subagent":
+			t.chat.appendSystem(formatNotifySubagent(v.Payload.Args))
+			t.refreshChat()
+		case "session_spawn_mission", "session:spawn_mission":
+			t.chat.appendSystem(formatSpawnMission(v.Payload.Args))
+			t.refreshChat()
+		}
 	case *protocol.ToolResult:
 		t.statusLine = "thinking…"
 	case *protocol.Error:
@@ -310,6 +324,58 @@ func (b *chatBuffer) render(width int) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// formatNotifySubagent makes a one-line summary for the chat
+// system-marker when root forwards a follow-up to a running
+// subagent. `args` is the tool's ToolCall Args (any-typed; the
+// known shape is `{subagent_id, content}`). Quotes the content
+// preview when present, falls back to a generic message.
+func formatNotifySubagent(args any) string {
+	m, _ := args.(map[string]any)
+	target := "subagent"
+	if id, ok := m["subagent_id"].(string); ok && id != "" {
+		target = shortID(id)
+	}
+	preview := ""
+	if c, ok := m["content"].(string); ok && c != "" {
+		preview = c
+		if len(preview) > 120 {
+			preview = preview[:120] + "…"
+		}
+	}
+	if preview == "" {
+		return "📨 follow-up forwarded to " + target
+	}
+	return fmt.Sprintf("📨 follow-up → %s: %s", target, preview)
+}
+
+// formatSpawnMission summarises a session_spawn_mission tool call
+// for the chat transcript. Shows the skill + goal preview so the
+// operator sees what the agent is delegating without scrolling
+// the sidebar.
+func formatSpawnMission(args any) string {
+	m, _ := args.(map[string]any)
+	skill := "mission"
+	if s, ok := m["skill"].(string); ok && s != "" {
+		skill = s
+	}
+	wait, _ := m["wait"].(string)
+	preview := ""
+	if g, ok := m["goal"].(string); ok && g != "" {
+		preview = g
+		if len(preview) > 120 {
+			preview = preview[:120] + "…"
+		}
+	}
+	tag := "🚀 spawning " + skill
+	if wait != "" && wait != "sync" {
+		tag += " (" + wait + ")"
+	}
+	if preview == "" {
+		return tag
+	}
+	return tag + ": " + preview
 }
 
 // indentBlock indents each line of s by `pad` spaces. When

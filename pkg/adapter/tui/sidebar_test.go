@@ -127,6 +127,35 @@ func TestRenderSubagent_ShowsRoleFromChildMeta(t *testing.T) {
 	}
 }
 
+func TestFormatNotifySubagent_FollowUpMarker(t *testing.T) {
+	got := formatNotifySubagent(map[string]any{
+		"subagent_id": "ses-abcdef1234",
+		"content":     "also add a per-company table",
+	})
+	if !strings.Contains(got, "📨") {
+		t.Errorf("missing icon: %q", got)
+	}
+	if !strings.Contains(got, "ses-abcd") { // shortID truncation
+		t.Errorf("missing target: %q", got)
+	}
+	if !strings.Contains(got, "also add a per-company table") {
+		t.Errorf("missing content preview: %q", got)
+	}
+}
+
+func TestFormatSpawnMission_ShowsSkillAndGoal(t *testing.T) {
+	got := formatSpawnMission(map[string]any{
+		"skill": "analyst",
+		"goal":  "count providers in op2023",
+		"wait":  "async",
+	})
+	for _, want := range []string{"🚀", "analyst", "async", "count providers"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in spawn marker: %q", want, got)
+		}
+	}
+}
+
 func TestRenderRecentChild_ShowsRole(t *testing.T) {
 	rc := recentChildEntry{
 		SessionID:    "ses-x",
