@@ -59,7 +59,8 @@ Phase plan:
 | ~~5 (combined HITL + compactor)~~ | **split 2026-05-12** — HITL was production blocker; compactor independent. Became 5.1 (shipped) + 5.2 (open). |
 | 5.1b. Adapter visibility surface — capability-bag `liveview` extension (FrameObserver / ChildFrameObserver / StatusReporter), enriched `SessionStatusPayload`, multi-root harness primitive + `multi_root_independence` scenario, `wait_subagents` optional ids + fast-fail | shipped (`b243b77`, 2026-05-14) |
 | 5.1c. Bubble Tea TUI adapter — reference rich-client on top of 5.1b liveview surface; multi-root tabs, inquiry modal, sidebar driven by `ExtensionFrame{liveview/status}`, on-attach replay, dogfood polish | shipped (`410df3d`, 2026-05-15) |
-| 5.1c.async-root. Root defaults to `wait="async"` + three-bucket follow-up/new-mission/conversational classifier + mandatory announce-on-spawn user reply + TUI `✓ mission … completed` marker. Skill-prompt-driven; no new runtime primitives | open (branch `017-mini-5.1c-async-root`, 2026-05-15) |
+| 5.1c.async-root. Root defaults to `wait="async"` + three-bucket follow-up/new-mission/conversational classifier + mandatory announce-on-spawn user reply + TUI `✓ mission … completed` marker. Skill-prompt-driven; no new runtime primitives. Bundles two dogfood doc fixes (hugr-data `schema-type_fields` semantic-search params, `_skill_builder` slim + de-autoload). 5/5 PASS on Gemma 26B | shipped (`dc077ab`, 2026-05-15) |
+| 5.1c.cancel-ux. User-initiated mission cancel: `/mission` modal listing in-flight children with `j/k/c/Shift+C` keys; Esc-Esc double-press as panic-cancel-all. New SlashCommand handlers `cancel_subagent` + `cancel_all_subagents` on the session loop. Spec: `design/002-runtime-canonical/backlog.md` §"User-initiated mission cancel" | open (queued — next focal item) |
 | 5.2. Compactor — content-aware history summarisation; replaces phase-3 `defaultHistoryWindow=50` stop-gap; composes with 4.2.3 notepad (notepad = cross-mission, compactor = within-session) | open — not yet specced |
 | 6. Cron + scheduler | open |
 | 7. Memory pipeline + LLM Wiki — cross-conversation distilled knowledge. Reads 4.2.3 notepad as input; session-scoped working memory is owned by 4.2.3. | open |
@@ -73,21 +74,23 @@ Goal: finish design-001 cleanly, then move to **hub integration**
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
 
-## Active focus — 5.1c.async-root in flight, 5.2 + 5.3.policy-ux queued
+## Active focus — 5.1c.cancel-ux next; 5.3.policy-ux + 5.2 queued
 
-Phase 5.1c shipped to `main` at `410df3d` (2026-05-15): Bubble
-Tea TUI adapter + dogfood polish. Three mini-phases queued from
-the dogfood feedback log:
+Phase 5.1c.async-root shipped to `main` at `dc077ab` (2026-05-15)
+alongside two doc fixes (hugr-data `schema-type_fields` semantic
+search params + `_skill_builder` slim + de-autoload). All 5/5
+focused scenarios PASS on Gemma 26B (gate model). Three mini-
+phases queued from the dogfood feedback log:
 
-- **5.1c.async-root** *(in flight, branch `017-mini-5.1c-async-root`)* —
-  flips root's reflex to async-first via a `_root` SKILL.md
-  rewrite. Three-bucket classifier (follow-up / new mission /
-  conversational), mandatory announce-on-spawn assistant reply,
-  TUI `✓ mission … completed` marker. Two new scenarios + three
-  updated. Spec: `phase-5.1c.async-root.md`.
+- **5.1c.cancel-ux** *(next focal item)* — `/mission` modal +
+  Esc-Esc panic-cancel for user-initiated mission cancel. Today
+  `session:subagent_cancel` is model-only; users have no way to
+  stop runaway / unwanted async missions short of `/end`-ing the
+  whole root. Spec lives at
+  `design/002-runtime-canonical/backlog.md` §"User-initiated
+  mission cancel".
 - **5.3.policy-ux** *(queued)* — HITL "always allow / always
-  deny" keybinds + remote admin policies. Trigger after async-
-  root settles so the policy modal lands on a stable foundation.
+  deny" keybinds + remote admin policies.
 - **5.4.workspace-tree** *(queued, escalation only)* — if Path 1
   (SESSION_DIR ephemeral manifest warning, shipped 2026-05-15)
   doesn't hold, restructure to root-rooted workspace tree with
