@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
@@ -263,24 +264,18 @@ func (b *chatBuffer) render(width int) string {
 	for _, s := range b.spans {
 		switch s.kind {
 		case spanUser:
-			// Multi-line user messages (Shift+Enter newlines) used
-			// to render unindented under the styled label prefix,
-			// making the second line collide with the left margin.
-			// Render prefix styled, indent subsequent lines with
-			// whitespace matching the prefix's VISUAL width
-			// (lipgloss.Width handles wide runes like ❯ correctly;
-			// raw len(prefix) over-counts UTF-8 bytes).
+			// Multi-line user messages (Shift+Enter newlines) +
+			// long single lines used to overflow the viewport
+			// horizontally. Wrap each line to (width-prefixWidth)
+			// via reflow.wordwrap, then indent continuation lines
+			// under the styled prefix using lipgloss.Width (raw
+			// len() over-counts UTF-8 bytes for ❯).
 			rawPrefix := s.label + " ❯ "
+			prefixWidth := lipgloss.Width(rawPrefix)
 			sb.WriteString(styleUser.Render(rawPrefix))
-			lines := strings.Split(strings.ReplaceAll(s.text, "\r\n", "\n"), "\n")
-			indent := strings.Repeat(" ", lipgloss.Width(rawPrefix))
-			for i, ln := range lines {
-				if i > 0 {
-					sb.WriteString("\n")
-					sb.WriteString(indent)
-				}
-				sb.WriteString(ln)
-			}
+			sb.WriteString(indentBlock(
+				wordwrap.String(s.text, maxInt(10, width-prefixWidth)),
+				prefixWidth, false))
 			sb.WriteString("\n\n")
 		case spanAssistant:
 			if md, err := b.renderer.Render(s.text); err == nil {
@@ -289,7 +284,9 @@ func (b *chatBuffer) render(width int) string {
 				sb.WriteString(s.text + "\n")
 			}
 		case spanReasoning:
-			sb.WriteString(styleReasoning.Render(prefixMultiline("thinking: ", s.text)))
+			const reasoningPrefix = "thinking: "
+			wrapped := wordwrap.String(s.text, maxInt(10, width-len(reasoningPrefix)))
+			sb.WriteString(styleReasoning.Render(prefixMultiline(reasoningPrefix, wrapped)))
 			sb.WriteString("\n\n")
 		case spanSystem:
 			sb.WriteString(styleSystem.Render("· " + s.text))
@@ -307,8 +304,33 @@ func (b *chatBuffer) render(width int) string {
 		}
 	}
 	if pr := b.pendingReasoning.String(); pr != "" {
-		sb.WriteString(styleReasoning.Render(prefixMultiline("thinking: ", pr)))
+		const reasoningPrefix = "thinking: "
+		wrapped := wordwrap.String(pr, maxInt(10, width-len(reasoningPrefix)))
+		sb.WriteString(styleReasoning.Render(prefixMultiline(reasoningPrefix, wrapped)))
 		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// indentBlock indents each line of s by `pad` spaces. When
+// includeFirst is true the first line is also indented; otherwise
+// only continuation lines (used when the caller already wrote a
+// styled prefix on the same line as the first content line).
+func indentBlock(s string, pad int, includeFirst bool) string {
+	if pad <= 0 || s == "" {
+		return s
+	}
+	indent := strings.Repeat(" ", pad)
+	lines := strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n")
+	var sb strings.Builder
+	for i, ln := range lines {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		if i > 0 || includeFirst {
+			sb.WriteString(indent)
+		}
+		sb.WriteString(ln)
 	}
 	return sb.String()
 }

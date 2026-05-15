@@ -53,6 +53,27 @@ func TestChatBuffer_SystemSpanRendered(t *testing.T) {
 	}
 }
 
+// TestChatBuffer_UserSpanWordWraps — dogfood feedback: long
+// single-line user input used to overflow the viewport
+// horizontally. Now reflow.wordwrap breaks long lines at word
+// boundaries; each wrapped line is indented under the prefix.
+func TestChatBuffer_UserSpanWordWraps(t *testing.T) {
+	b := newChatBuffer()
+	long := "abc def ghi jkl mno pqr stu vwx yz1 234 567"
+	b.appendUser("user", long)
+	out := b.render(30) // narrow viewport forces wrap
+	// Output must contain at least one mid-text newline (wrap
+	// happened) AND every word from the source.
+	if !strings.Contains(out, "\n") {
+		t.Fatalf("no newline in wrapped output:\n%q", out)
+	}
+	for _, w := range strings.Fields(long) {
+		if !strings.Contains(out, w) {
+			t.Fatalf("missing word %q after wrap:\n%q", w, out)
+		}
+	}
+}
+
 func TestChatBuffer_UserSpanMultilineIndents(t *testing.T) {
 	b := newChatBuffer()
 	b.appendUser("vgribanov", "first line\nsecond line")
