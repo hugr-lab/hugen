@@ -98,6 +98,18 @@ type Scenario struct {
 	SessionID string   `yaml:"session_id,omitempty"` // informational only — runtime allocates real id
 	Steps     []Step   `yaml:"steps,omitempty"`
 
+	// Fixtures names test-only skill bundles the harness installs
+	// into the run's local skill backend before Core boot. Each
+	// entry resolves to `tests/scenarios/fixtures/<name>/` and is
+	// copied to `${stateDir}/skills/local/<name>/`. Phase 5.2 ι.
+	Fixtures []string `yaml:"fixtures,omitempty"`
+
+	// Overrides is a free-form config patch deep-merged on top of
+	// the run's agent-config.yaml before Core boot. Used by ε
+	// scenarios that need short timeouts / smaller caps than the
+	// production defaults. Phase 5.2 ι.
+	Overrides map[string]any `yaml:"overrides,omitempty"`
+
 	// Roots names a set of independent root sessions opened in
 	// parallel under a shared Manager. Phase 5.1b δ. Mutually
 	// exclusive with Steps. Map key becomes the `$sid_<key>`
@@ -141,6 +153,23 @@ type Step struct {
 	// runtime inquire-tool timeout. Phase 5.1 § κ.
 	InquiryResponses []InquiryRule `json:"inquiry_responses,omitempty" yaml:"inquiry_responses,omitempty"` //nolint:tagliatelle
 	Queries          []Query       `yaml:"queries,omitempty"`
+
+	// PostSettle is an extra sleep BEFORE running Queries — gives
+	// runtime-driven asynchronous events (idle-timer fires, ceiling
+	// drops, parking idle expirations) time to land in the event
+	// log. Use sparingly; prefer WaitForCondition for assertions
+	// that can be expressed as a SQL/GraphQL predicate. Phase 5.2 ι.
+	PostSettle Duration `yaml:"post_settle,omitempty"`
+
+	// RestartRuntime, when true, signals the runner to gracefully
+	// stop the current Core after this step's queries land and
+	// build a fresh Core against the same StateDir before the next
+	// step runs. The fresh Core's Manager.RestoreActive reattaches
+	// the scenario's root via the persisted session_events;
+	// scenario step indexing continues against the restored root
+	// id. Either Say + RestartRuntime can coexist (run the step,
+	// then bounce). Phase 5.2 ι (restore_parked_replay).
+	RestartRuntime bool `yaml:"restart_runtime,omitempty"`
 }
 
 // WaitCond is a generic "poll until persisted state matches" gate.

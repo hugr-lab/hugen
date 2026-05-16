@@ -82,6 +82,32 @@ func (r *Runtime) OpenSessionWithOwner(ctx context.Context, t *testing.T, owner 
 // queries.
 func (h *SessionHandle) ID() string { return h.id }
 
+// ReattachAfterRestart refreshes the SessionHandle's session
+// pointer + restarts the outbox pump against the post-restart
+// Manager. Caller must have just run rt.Restart(ctx, t) so the
+// fresh Manager's RestoreActive has reattached the root. Failure
+// to find the root after the restart is fatal — restore_parked_replay
+// counts on the root reattaching cleanly. Phase 5.2 ι.
+func (h *SessionHandle) ReattachAfterRestart(ctx context.Context, t *testing.T) {
+	t.Helper()
+	sess, ok := h.rt.Core.Manager.Get(h.id)
+	if !ok {
+		// Try Resume — lazy-restored idle roots don't appear in
+		// Manager.live until Resume runs.
+		s, err := h.rt.Core.Manager.Resume(ctx, h.id)
+		if err != nil {
+			t.Fatalf("ReattachAfterRestart: resume %s: %v", h.id, err)
+		}
+		sess = s
+	}
+	h.session = sess
+	// Fresh pump for the fresh outbox. The previous pump goroutine
+	// exited when the old Core's session goroutine drained at
+	// Shutdown.
+	go h.pump()
+	t.Logf("── session reattached after restart ── id=%s", h.id)
+}
+
 // RunMultiRoot opens one root per [Scenario.Roots] entry under
 // the shared Manager, runs each root's Steps concurrently in a
 // goroutine, waits for all to finish, then executes the
@@ -176,8 +202,9 @@ func (h *SessionHandle) pump() {
 }
 
 // Step runs one scenario step against this session. Order:
-// primary action (say or tick) → wait_for_subagents → queries.
-// Each query result is dumped via RunQuery — no asserts.
+// primary action (say / tick / restart_runtime) → wait_for_subagents →
+// post_settle → queries. Each query result is dumped via RunQuery —
+// no asserts.
 func (h *SessionHandle) Step(ctx context.Context, step Step, idx int) {
 	h.t.Helper()
 	h.t.Logf("── step %d ──", idx+1)
@@ -201,8 +228,15 @@ func (h *SessionHandle) Step(ctx context.Context, step Step, idx int) {
 		h.deliverUserMessage(ctx, step.Say, budget)
 	case step.Tick:
 		h.t.Logf("tick")
+	case step.RestartRuntime:
+		// Restart-only step: no user message, just bounce the Core
+		// and reattach. queries run against the reattached session
+		// so a post-restart assertion can inspect the event log.
+		h.t.Logf("restart_runtime: shutting down + rebuilding Core")
+		h.rt.Restart(ctx, h.t)
+		h.ReattachAfterRestart(ctx, h.t)
 	default:
-		h.t.Fatalf("step %d: must have say or tick", idx+1)
+		h.t.Fatalf("step %d: must have say, tick, or restart_runtime", idx+1)
 	}
 
 	if step.WaitForSubagents > 0 {
@@ -210,6 +244,16 @@ func (h *SessionHandle) Step(ctx context.Context, step Step, idx int) {
 	}
 	if step.WaitForCondition != nil {
 		h.waitForCondition(ctx, step.WaitForCondition)
+	}
+	if step.PostSettle > 0 {
+		// Sleep so runtime-asynchronous events (idle timer fires,
+		// ceiling drops) land in the event log before Queries
+		// snapshot it. The wait is deliberately a flat sleep
+		// because there's no single store-side predicate that
+		// captures "idle timer has fired" — the assertion lives
+		// in the query body itself.
+		h.t.Logf("post_settle: sleeping %v before queries", step.PostSettle.Std())
+		time.Sleep(step.PostSettle.Std())
 	}
 
 	for _, q := range step.Queries {

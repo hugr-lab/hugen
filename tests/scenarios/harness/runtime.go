@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,13 @@ type Runtime struct {
 	Env       map[string]string
 	RunDir    string
 	AgentCfg  string
+	// runsRoot is tests/scenarios/, used by InstallFixtures to
+	// resolve fixture paths.
+	runsRoot string
+	// buildCfg captures the parameters used to construct Core, so
+	// Restart() can rebuild a fresh Core against the same StateDir
+	// after a graceful Shutdown. Phase 5.2 ι (restore_parked_replay).
+	buildCfg  runtime.Config
 	logger    *slog.Logger
 }
 
@@ -167,24 +175,146 @@ func Setup(ctx context.Context, t *testing.T, opts SetupOpts) *Runtime {
 	if err != nil {
 		t.Fatalf("harness.Setup: runtime.Build: %v", err)
 	}
+
+	rt := &Runtime{
+		Core:     core,
+		Run:      opts.Run,
+		Env:      env,
+		RunDir:   runDir,
+		AgentCfg: agentCfgPath,
+		runsRoot: opts.RunsRoot,
+		buildCfg: cfg,
+		logger:   logger,
+	}
+	// Shutdown is wired on the live Core pointer rather than the
+	// captured closure variable so a Runtime.Restart that swaps
+	// rt.Core mid-test still cleans up whichever Core is alive at
+	// teardown time.
 	t.Cleanup(func() {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		core.Shutdown(shutCtx)
+		if rt.Core != nil {
+			rt.Core.Shutdown(shutCtx)
+		}
 	})
 
 	logger.Info("harness setup complete",
 		"run", opts.Run.Name, "run_dir", runDir,
 		"agent_config", agentCfgPath, "http_port", port)
 
-	return &Runtime{
-		Core:     core,
-		Run:      opts.Run,
-		Env:      env,
-		RunDir:   runDir,
-		AgentCfg: agentCfgPath,
-		logger:   logger,
+	return rt
+}
+
+// InstallFixtures copies test-only skill bundles from
+// `tests/scenarios/fixtures/<name>/` into the run's local skill
+// backend, then refreshes the SkillStore's List cache so the new
+// entries surface on the next skill discovery call. Called by the
+// runner before scenarios that declare `fixtures:` in their YAML.
+// Phase 5.2 ι.
+//
+// Idempotent: a fixture already present on disk is overwritten;
+// the SkillStore refresh is best-effort. Failures fatal — the
+// scenario depends on the fixture being there.
+func (r *Runtime) InstallFixtures(t *testing.T, names []string) {
+	t.Helper()
+	if len(names) == 0 {
+		return
 	}
+	localRoot := filepath.Join(r.buildCfg.StateDir, "skills", "local")
+	if err := os.MkdirAll(localRoot, 0o755); err != nil {
+		t.Fatalf("InstallFixtures: mkdir local: %v", err)
+	}
+	for _, name := range names {
+		src := filepath.Join(r.runsRoot, "fixtures", name)
+		dst := filepath.Join(localRoot, name)
+		if err := copyTree(src, dst); err != nil {
+			t.Fatalf("InstallFixtures: copy %s → %s: %v", src, dst, err)
+		}
+	}
+	if r.Core != nil && r.Core.SkillStore != nil {
+		// The concrete *skill.Store implements Refresh; the
+		// SkillStore interface deliberately omits it (operators
+		// don't refresh). Type-assert and skip cleanly if some
+		// future test wires a different backend.
+		if refresher, ok := r.Core.SkillStore.(interface{ Refresh() }); ok {
+			refresher.Refresh()
+		}
+	}
+}
+
+// Restart gracefully stops the current Core, rebuilds a fresh
+// Core against the same StateDir, and runs Manager.RestoreActive
+// so non-terminal roots reattach. After Restart returns, callers
+// holding a SessionHandle from before must reattach via
+// SessionHandle.ReattachAfterRestart to refresh the session
+// pointer. Phase 5.2 ι (restore_parked_replay).
+func (r *Runtime) Restart(ctx context.Context, t *testing.T) {
+	t.Helper()
+	if r.Core == nil {
+		t.Fatalf("Restart: Core is nil")
+	}
+	prev := r.Core
+	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	prev.Shutdown(shutCtx)
+	cancel()
+
+	core, err := runtime.Build(ctx, r.buildCfg)
+	if err != nil {
+		t.Fatalf("Restart: runtime.Build: %v", err)
+	}
+	if err := core.Manager.RestoreActive(ctx); err != nil {
+		t.Fatalf("Restart: RestoreActive: %v", err)
+	}
+	r.Core = core
+	r.logger.Info("harness restart complete",
+		"run", r.Run.Name, "run_dir", r.RunDir)
+}
+
+// copyTree mirrors src directory into dst, creating dst when
+// absent. Files are copied byte-for-byte with the source's mode.
+// Skips dotfiles and symlinks to keep the contract simple — the
+// fixture set is small and curated.
+func copyTree(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("stat src: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("fixture %s is not a directory", src)
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("mkdir dst: %w", err)
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return fmt.Errorf("readdir: %w", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		sp := filepath.Join(src, name)
+		dp := filepath.Join(dst, name)
+		if e.IsDir() {
+			if err := copyTree(sp, dp); err != nil {
+				return err
+			}
+			continue
+		}
+		data, err := os.ReadFile(sp)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", sp, err)
+		}
+		einfo, err := e.Info()
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", sp, err)
+		}
+		if err := os.WriteFile(dp, data, einfo.Mode().Perm()); err != nil {
+			return fmt.Errorf("write %s: %w", dp, err)
+		}
+	}
+	return nil
 }
 
 // SetupOpts bundles Setup's required + optional inputs.
