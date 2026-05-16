@@ -410,13 +410,17 @@ type SystemMarker struct {
 // child sub-agent session is spawned. Inputs is arbitrary JSON the
 // parent passes to the child via spawn_subagent.
 type SubagentStartedPayload struct {
-	ChildSessionID string    `json:"child_session_id"`
-	Skill          string    `json:"skill,omitempty"`
-	Role           string    `json:"role,omitempty"`
-	Task           string    `json:"task"`
-	Depth          int       `json:"depth"`
-	StartedAt      time.Time `json:"started_at"`
-	Inputs         any       `json:"inputs,omitempty"`
+	ChildSessionID string `json:"child_session_id"`
+	// Name is the sanitised short identifier the model uses to
+	// address this child. Unique among the spawning parent's live
+	// children. Phase 5.2 α (subagent naming).
+	Name      string    `json:"name,omitempty"`
+	Skill     string    `json:"skill,omitempty"`
+	Role      string    `json:"role,omitempty"`
+	Task      string    `json:"task"`
+	Depth     int       `json:"depth"`
+	StartedAt time.Time `json:"started_at"`
+	Inputs    any       `json:"inputs,omitempty"`
 }
 
 // SubagentResultPayload is delivered to the parent's inbox as a Frame
@@ -426,6 +430,10 @@ type SubagentStartedPayload struct {
 // "panic: <msg>" | ...
 type SubagentResultPayload struct {
 	SessionID string `json:"session_id"`
+	// Name mirrors SubagentStartedPayload.Name — the sanitised
+	// short identifier the parent used to address this child.
+	// Phase 5.2 α (subagent naming).
+	Name      string `json:"name,omitempty"`
 	Result    string `json:"result,omitempty"`
 	Reason    string `json:"reason"`
 	TurnsUsed int    `json:"turns_used"`

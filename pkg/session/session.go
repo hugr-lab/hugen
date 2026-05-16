@@ -35,6 +35,7 @@ import (
 // in one go.
 type Session struct {
 	id               string
+	name             string // sanitised kebab-case; "" for roots. REQUIRED at spawn; addressing identifier exposed to the model.
 	ownerID          string // owner from SessionRow.OwnerID; inherited by subagents
 	depth            int    // 0 for root; parent.depth+1 for subagent
 	deps             *Deps  // shared bundle; nil only in legacy NewSession callers
@@ -74,6 +75,10 @@ type Session struct {
 	parent   *Session
 	childMu  sync.Mutex
 	children map[string]*Session
+	// pendingNames reserves subagent names mid-spawn so two concurrent
+	// Spawn calls from the same parent cannot pick the same sanitised
+	// name. Guarded by childMu. Phase 5.2 α (subagent naming).
+	pendingNames map[string]struct{}
 
 	// Per-session ctx + cancel. Set by newSession / newSessionRestore
 	// before the goroutine launches; nil only for legacy NewSession
@@ -409,6 +414,11 @@ func NewSession(
 
 // ID returns the session identifier.
 func (s *Session) ID() string { return s.id }
+
+// SubagentName returns the sanitised short name this session was
+// spawned with — the addressing identifier used by tools like
+// notify_subagent and acceptance gates. Empty for root sessions.
+func (s *Session) SubagentName() string { return s.name }
 
 // Inbox is the channel callers push frames onto.
 func (s *Session) Inbox() chan<- protocol.Frame { return s.in }

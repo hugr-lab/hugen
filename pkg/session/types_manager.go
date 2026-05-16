@@ -51,12 +51,24 @@ type OpenRequest struct {
 	// mission context" header can see the mission's purpose
 	// without scanning the event log. Empty for root sessions.
 	Mission string
+	// Name is the sanitised subagent name. Empty for root sessions;
+	// non-empty + unique among the parent's live children for
+	// sub-agents. Set by Session.Spawn after sanitisation +
+	// collision-suffix resolution. Persisted into row.Metadata so
+	// restore can rebuild s.name. Phase 5.2 α (subagent naming).
+	Name string
 }
 
 // SpawnSpec is the input to Session.Spawn. Carries the model-supplied
 // fields from session:spawn_subagent (skill, role, task, inputs) plus
 // the parent's spawn-event id used for diagnostics.
 type SpawnSpec struct {
+	// Name is the model-supplied short identifier for the child.
+	// Spawn sanitises it via SanitizeName + collision-suffixes
+	// against the parent's live children before persistence.
+	// REQUIRED — Spawn rejects empty Name. Phase 5.2 α
+	// (subagent naming).
+	Name    string
 	Skill   string
 	Role    string
 	Task    string

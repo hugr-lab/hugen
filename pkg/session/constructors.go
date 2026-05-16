@@ -113,10 +113,21 @@ func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenReques
 	// 1. Build the *Session shell (no IO yet — easier to roll back on
 	// downstream errors below).
 	s := buildSessionShell(id, depth, parent, deps, sessCtx, cancel)
+	s.name = req.Name
 
 	// 2. Persist the initial row (the only sessions-row WRITE on the
 	// open path; future writes touch session_events instead).
 	now := time.Now().UTC()
+	meta := req.Metadata
+	if req.Name != "" {
+		if meta == nil {
+			meta = make(map[string]any, 1)
+		}
+		// Phase 5.2 α: stash subagent name in row.Metadata so
+		// restore can rebuild s.name. First-class column promotion
+		// can come later when there's a query reason.
+		meta["name"] = req.Name
+	}
 	row := store.SessionRow{
 		ID:                 id,
 		AgentID:            deps.Agent.ID(),
@@ -126,7 +137,7 @@ func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenReques
 		SpawnedFromEventID: req.SpawnedFromEventID,
 		Status:             StatusActive,
 		Mission:            req.Mission,
-		Metadata:           req.Metadata,
+		Metadata:           meta,
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
@@ -234,6 +245,11 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *De
 	s := buildSessionShell(id, depth, parent, deps, sessCtx, cancel)
 	s.openedAt = row.CreatedAt
 	s.ownerID = row.OwnerID
+	if row.Metadata != nil {
+		if n, ok := row.Metadata["name"].(string); ok {
+			s.name = n
+		}
+	}
 
 	// Extension InitState — every extension allocates a fresh
 	// per-session handle. For resumed sessions Recovery (lazy on the
@@ -272,6 +288,7 @@ func buildSessionShell(id string, depth int, parent *Session, deps *Deps, sessCt
 	s.deps = deps
 	s.parent = parent
 	s.children = make(map[string]*Session)
+	s.pendingNames = make(map[string]struct{})
 	s.ctx = sessCtx
 	s.cancel = cancel
 	return s

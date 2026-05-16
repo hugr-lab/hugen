@@ -125,6 +125,7 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 			sr := protocol.NewSubagentResult(s.id, child.id, s.agent.Participant(),
 				protocol.SubagentResultPayload{
 					SessionID:  child.id,
+					Name:       child.name,
 					Reason:     protocol.TerminationCompleted,
 					Result:     v.Payload.Text,
 					TurnsUsed:  st.consolidatedSeen,
@@ -139,6 +140,7 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 			sr := protocol.NewSubagentResult(s.id, child.id, s.agent.Participant(),
 				protocol.SubagentResultPayload{
 					SessionID:  child.id,
+					Name:       child.name,
 					Reason:     "error: " + v.Payload.Code,
 					Result:     v.Payload.Message,
 					TurnsUsed:  st.consolidatedSeen,
@@ -181,6 +183,7 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 			sr := protocol.NewSubagentResult(s.id, child.id, s.agent.Participant(),
 				protocol.SubagentResultPayload{
 					SessionID:  child.id,
+					Name:       child.name,
 					Reason:     v.Payload.Reason,
 					Result:     v.Payload.Result,
 					TurnsUsed:  turns,
@@ -242,6 +245,7 @@ func (s *Session) projectAbnormalClose(child *Session, consolidatedSeen int) {
 	sr := protocol.NewSubagentResult(s.id, child.id, s.agent.Participant(),
 		protocol.SubagentResultPayload{
 			SessionID: child.id,
+			Name:      child.name,
 			Reason:    "abnormal_close",
 			TurnsUsed: consolidatedSeen,
 		})

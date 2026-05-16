@@ -29,12 +29,13 @@ const spawnWaveSchema = `{
       "items": {
         "type": "object",
         "properties": {
+          "name":   {"type": "string", "description": "Short human-readable identifier for the worker (kebab-case, [a-z0-9-]{2,32}). Used in subsequent calls like notify_subagent / subagent_cancel. Runtime sanitises and auto-suffixes on collision. REQUIRED."},
           "skill":  {"type": "string", "description": "Skill name providing the role."},
           "role":   {"type": "string", "description": "Role within the skill."},
           "task":   {"type": "string", "description": "Free-form prompt the worker sees as its first user message."},
           "inputs": {"description": "Optional JSON the mission passes to the worker."}
         },
-        "required": ["task"]
+        "required": ["name", "task"]
       }
     },
     "wait_timeout_ms": {"type": "integer", "minimum": 0, "description": "Per-call deadline on the wait phase. 0 (default) uses the surrounding context's deadline."}

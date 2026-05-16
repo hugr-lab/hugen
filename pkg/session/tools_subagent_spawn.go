@@ -24,12 +24,13 @@ const spawnSubagentSchema = `{
       "items": {
         "type": "object",
         "properties": {
+          "name":   {"type": "string", "description": "Short human-readable identifier for the worker (kebab-case, [a-z0-9-]{2,32}). Used in subsequent calls like notify_subagent / subagent_cancel. Runtime sanitises the value and auto-suffixes on collision with a live sibling. REQUIRED."},
           "skill":  {"type": "string", "description": "Skill name providing the role."},
           "role":   {"type": "string", "description": "Role within the skill."},
           "task":   {"type": "string", "description": "Free-form prompt the child sees as its first user message."},
           "inputs": {"description": "Optional JSON the parent passes to the child."}
         },
-        "required": ["task"]
+        "required": ["name", "task"]
       }
     }
   },
@@ -41,6 +42,7 @@ type spawnSubagentInput struct {
 }
 
 type spawnEntry struct {
+	Name   string `json:"name"`
 	Skill  string `json:"skill,omitempty"`
 	Role   string `json:"role,omitempty"`
 	Task   string `json:"task"`
@@ -48,6 +50,7 @@ type spawnEntry struct {
 }
 
 type spawnSubagentResult struct {
+	Name      string `json:"name"`
 	SessionID string `json:"session_id"`
 	Depth     int    `json:"depth"`
 }
@@ -72,6 +75,10 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 		maxDepth = parent.deps.MaxDepth
 	}
 	for i, e := range in.Subagents {
+		if strings.TrimSpace(e.Name) == "" {
+			return toolErr("bad_request",
+				fmt.Sprintf("subagents[%d].name is required", i))
+		}
 		if strings.TrimSpace(e.Task) == "" {
 			return toolErr("bad_request",
 				fmt.Sprintf("subagents[%d].task is required", i))
@@ -111,6 +118,7 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 	out := make([]spawnSubagentResult, 0, len(in.Subagents))
 	for i, e := range in.Subagents {
 		spec := SpawnSpec{
+			Name:   e.Name,
 			Skill:  e.Skill,
 			Role:   e.Role,
 			Task:   e.Task,
@@ -128,6 +136,7 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 		// freshly-spawned child. Phase 4.2.2 §11.
 		parent.applyChildIntent(ctx, child, e.Skill, e.Role)
 		out = append(out, spawnSubagentResult{
+			Name:      child.name,
 			SessionID: child.ID(),
 			Depth:     child.depth,
 		})
