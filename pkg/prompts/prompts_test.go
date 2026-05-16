@@ -98,6 +98,20 @@ func TestRender_AllBundled(t *testing.T) {
 			"Status":        "completed",
 			"ResultSummary": "120 rows processed",
 		}},
+		{"interrupts/async_mission_completed", map[string]any{
+			"MissionID":     "mis-8",
+			"Goal":          "list orders",
+			"Status":        "completed",
+			"ResultSummary": "3 rows",
+			// Phase 5.2 τ — parked branch.
+			"Parked": true,
+		}},
+		{"system/subagent_result_parked", map[string]any{
+			"ChildID": "ses-parked-1",
+			"Reason":  "completed",
+			"Turns":   2,
+			"Body":    "answer text",
+		}},
 		{"inquiry/approval_request_summary", map[string]any{
 			"ToolName":    "bash.run",
 			"ArgsSummary": "{\"cmd\":\"rm -rf foo\"}",

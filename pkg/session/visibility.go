@@ -77,6 +77,7 @@ func projectFrameToHistory(r *prompts.Renderer, f protocol.Frame) (model.Message
 					"Status":        statusFromReason(v.Payload.Reason),
 					"Reason":        v.Payload.Reason,
 					"ResultSummary": v.Payload.Result,
+					"Parked":        v.Payload.Parked && v.Payload.Reason == protocol.TerminationCompleted,
 				},
 			), "\n")
 			return model.Message{Role: model.RoleUser, Content: text}, true

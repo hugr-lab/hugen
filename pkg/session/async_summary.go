@@ -16,11 +16,11 @@ import (
 //
 // Wording kept terse — the inject already carries the mission goal +
 // rendered result via `interrupts/async_mission_completed.tmpl`.
-const asyncSummaryPrompt = "[system:async_summary] One or more async missions completed since the previous user message. " +
-	"The [system:async_mission_completed] inject(s) above carry their results. " +
-	"Write the user-facing reply now — summarise what was found and what to do next. " +
-	"Do NOT re-spawn the same mission. " +
-	"Do NOT call session:notify_subagent for a completed mission — it has already terminated; the result is in the inject above. " +
+const asyncSummaryPrompt = "[system:async_summary] One or more async missions delivered a result since the previous user message. " +
+	"The [system:async_mission_completed] inject(s) above carry the results — quote them into the user-facing reply now. " +
+	"Each inject names the mission's lifecycle status: " +
+	"a TERMINATED mission is gone (do NOT re-spawn the same one and do NOT call session:notify_subagent for it — there is no live session to notify); " +
+	"a PARKED mission is still alive in awaiting_dismissal (the inject explicitly says so) — you may session:notify_subagent it for a continuation OR session:subagent_dismiss it when the work is final, but do NOT re-spawn a fresh duplicate of it. " +
 	"If the result is incomplete or ambiguous, ask the user a clarifying question instead of looping on tool calls."
 
 // kickAsyncSummaryTurn starts a system-initiated turn driven by a

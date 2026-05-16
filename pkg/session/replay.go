@@ -199,6 +199,7 @@ func projectHistory(renderer *prompts.Renderer, rows []store.EventRow, window in
 				continue
 			case protocol.SubagentRenderAsyncNotify:
 				goal, _ := r.Metadata["goal"].(string)
+				parked, _ := r.Metadata["parked"].(bool)
 				rendered := strings.TrimRight(renderer.MustRender(
 					"interrupts/async_mission_completed",
 					map[string]any{
@@ -207,6 +208,7 @@ func projectHistory(renderer *prompts.Renderer, rows []store.EventRow, window in
 						"Status":        statusFromReason(reason),
 						"Reason":        reason,
 						"ResultSummary": body,
+						"Parked":        parked && reason == protocol.TerminationCompleted,
 					},
 				), "\n")
 				all = append(all, model.Message{
