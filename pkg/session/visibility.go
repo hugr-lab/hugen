@@ -85,8 +85,16 @@ func projectFrameToHistory(r *prompts.Renderer, f protocol.Frame) (model.Message
 		if resBody == "" {
 			resBody = fmt.Sprintf("(no result; reason: %s)", v.Payload.Reason)
 		}
+		// Phase 5.2 τ — parked rows pick the "still alive, awaiting
+		// directive" template so the live-projection path matches
+		// the replay-projection path (replay.go's KindSubagentResult
+		// case applies the same gate).
+		tmpl := "system/subagent_result_render"
+		if v.Payload.Parked && v.Payload.Reason == protocol.TerminationCompleted {
+			tmpl = "system/subagent_result_parked"
+		}
 		body := strings.TrimRight(r.MustRender(
-			"system/subagent_result_render",
+			tmpl,
 			map[string]any{
 				"ChildID": v.Payload.SessionID,
 				"Reason":  v.Payload.Reason,

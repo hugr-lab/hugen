@@ -443,6 +443,18 @@ type SubagentResultPayload struct {
 	// branches at spawn time and read by the parent pump when
 	// constructing the result.
 	RenderMode string `json:"render_mode,omitempty"`
+
+	// Parked, when true, signals that the child is NOT terminated
+	// by this result — it has delivered its first answer and
+	// transitioned to awaiting_dismissal so the parent can
+	// `session:notify_subagent` for a continuation or
+	// `session:subagent_dismiss` to tear it down. The history
+	// projection renders parked rows with explicit "still alive,
+	// awaiting your next directive" framing so the model doesn't
+	// read them as terminal. Set by the pump when it resolves
+	// autoclose=false for the spawning role at projection time.
+	// Phase 5.2 τ.
+	Parked bool `json:"parked,omitempty"`
 }
 
 // Subagent render modes — see [SubagentResultPayload.RenderMode].

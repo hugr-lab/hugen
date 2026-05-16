@@ -1,0 +1,12 @@
+{{.ChildID}} reason={{.Reason}} turns={{.Turns}} state=parked
+{{.Body}}
+
+(The sub-agent above is NOT terminated — it delivered this
+result and is now parked in `awaiting_dismissal`, awaiting your
+next directive. Its working context (notepad cache, prior
+introspection) is still alive. To continue the same thread call
+`session:notify_subagent({subagent_id: "{{.ChildID}}", content:
+"<your directive>"})`. To tear it down — when the work is final
+or your next request is unrelated — call
+`session:subagent_dismiss({session_id: "{{.ChildID}}"})`. Leaving
+it parked occupies a slot on the per-root cap; be intentional.)

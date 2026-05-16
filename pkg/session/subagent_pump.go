@@ -122,6 +122,13 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 			st.consolidatedSeen++
 		}
 		if !st.projected && v.Payload.Final && v.Payload.Consolidated {
+			// Phase 5.2 τ — resolve autoclose ahead of projection so
+			// the parent's history (and adapters scraping the
+			// projected row) reads "still alive, awaiting directive"
+			// instead of "terminated" for parked roles. Mirrors the
+			// later decision in handleSubagentResult; we cannot read
+			// `child.Status()` here yet because parkChild has not run.
+			parked := !s.resolveChildAutoclose(s.ctx, child)
 			sr := protocol.NewSubagentResult(s.id, child.id, s.agent.Participant(),
 				protocol.SubagentResultPayload{
 					SessionID:  child.id,
@@ -130,6 +137,7 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 					TurnsUsed:  st.consolidatedSeen,
 					Goal:       truncate(child.mission, asyncGoalMaxLen),
 					RenderMode: child.asyncSpawnMode,
+					Parked:     parked,
 				})
 			s.projectToParent(sr)
 			st.projected = true

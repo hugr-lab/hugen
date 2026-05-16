@@ -46,6 +46,18 @@ func TestProjectFrameToHistory_AllowList(t *testing.T) {
 			wantPrefix:  "[system: subagent_result]",
 		},
 		{
+			// Phase 5.2 τ — Parked=true renders with the explicit
+			// "still alive, awaiting directive" framing so the
+			// model doesn't read the row as terminal.
+			name: "subagent_result with Parked=true renders parked template",
+			frame: protocol.NewSubagentResult("s1", "child-1", author, protocol.SubagentResultPayload{
+				SessionID: "child-1", Result: "found foo",
+				Reason: protocol.TerminationCompleted, TurnsUsed: 4, Parked: true,
+			}),
+			wantAllowed: true,
+			wantPrefix:  "state=parked",
+		},
+		{
 			name: "subagent_result without body falls back to reason",
 			frame: protocol.NewSubagentResult("s1", "child-1", author, protocol.SubagentResultPayload{
 				SessionID: "child-1", Reason: protocol.TerminationHardCeiling, TurnsUsed: 60,

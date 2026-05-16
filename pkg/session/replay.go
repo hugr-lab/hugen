@@ -218,8 +218,22 @@ func projectHistory(renderer *prompts.Renderer, rows []store.EventRow, window in
 			if body == "" {
 				body = fmt.Sprintf("(no result; reason: %s)", reason)
 			}
+			// Phase 5.2 τ — parked rows render with the explicit
+			// "still alive, awaiting directive" template so the
+			// model doesn't read them as terminal. The pump sets
+			// payload.Parked=true when it resolves
+			// autoclose=false for the spawning role at projection
+			// time; later subagent_dismiss / idle_timeout /
+			// ceiling_drop rows for the same child override this
+			// with their own reason, so the LAST row in the events
+			// log is the canonical state.
+			parked, _ := r.Metadata["parked"].(bool)
+			tmpl := "system/subagent_result_render"
+			if parked && reason == protocol.TerminationCompleted {
+				tmpl = "system/subagent_result_parked"
+			}
 			rendered := strings.TrimRight(renderer.MustRender(
-				"system/subagent_result_render",
+				tmpl,
 				map[string]any{
 					"ChildID": cid,
 					"Reason":  reason,
