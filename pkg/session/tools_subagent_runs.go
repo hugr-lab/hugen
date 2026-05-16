@@ -17,7 +17,7 @@ import (
 const subagentRunsSchema = `{
   "type": "object",
   "properties": {
-    "session_id": {"type": "string"},
+    "session_id": {"type": "string", "description": "Target identifier — either the subagent's short Name (returned by spawn) or its session_id. Must resolve to a direct child of the caller."},
     "since_seq":  {"type": "integer", "minimum": 0},
     "limit":      {"type": "integer", "minimum": 1, "maximum": 500}
   },
@@ -59,7 +59,16 @@ func (parent *Session) callSubagentRuns(ctx context.Context, args json.RawMessag
 		return toolErr("bad_request", "session_id is required")
 	}
 
-	if errFrame := parent.assertChildOf(ctx, in.SessionID); errFrame != nil {
+	// Phase 5.2 α.1b: input may be a Name or a session_id. Live
+	// children get rewritten to the canonical session_id; closed
+	// children fall through to the store-level assertion using the
+	// input as a session_id.
+	resolvedID := in.SessionID
+	if id, _, ok := parent.resolveChildTarget(in.SessionID); ok {
+		resolvedID = id
+	}
+
+	if errFrame := parent.assertChildOf(ctx, resolvedID); errFrame != nil {
 		return errFrame, nil
 	}
 
@@ -71,7 +80,7 @@ func (parent *Session) callSubagentRuns(ctx context.Context, args json.RawMessag
 		limit = subagentRunsHardCap
 	}
 
-	rows, err := parent.store.ListEvents(ctx, in.SessionID, store.ListEventsOpts{
+	rows, err := parent.store.ListEvents(ctx, resolvedID, store.ListEventsOpts{
 		MinSeq: in.SinceSeq,
 		Limit:  limit,
 	})

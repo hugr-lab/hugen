@@ -154,3 +154,34 @@ func (s *Session) childByName(name string) (*Session, bool) {
 	}
 	return nil, false
 }
+
+// resolveChildTarget converts a model-supplied identifier (either a
+// session_id or a Name) into a session_id + the live child Session
+// pointer. The lookup precedence is:
+//
+//  1. Direct session_id hit in `parent.children`. The model
+//     typically passes session_ids around, so this is the fast path.
+//  2. Name lookup over live children. The model may pass the short
+//     name it gave at spawn time (or that the runtime returned in
+//     the spawn response after sanitisation).
+//
+// Returns ("", nil, false) when neither lookup hits. Acquires
+// s.childMu. Callers that need to operate on closed children fall
+// through to whatever store-level check they already had
+// (`assertChildOf`) using the input as a session_id.
+func (s *Session) resolveChildTarget(input string) (sessionID string, child *Session, ok bool) {
+	if input == "" {
+		return "", nil, false
+	}
+	s.childMu.Lock()
+	defer s.childMu.Unlock()
+	if c, ok := s.children[input]; ok && c != nil {
+		return input, c, true
+	}
+	for id, c := range s.children {
+		if c != nil && c.name == input {
+			return id, c, true
+		}
+	}
+	return "", nil, false
+}

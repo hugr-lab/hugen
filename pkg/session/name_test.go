@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestSanitizeName covers the model-facing edge cases: empty, all-
@@ -236,6 +237,106 @@ func TestSpawn_PropagatesNameToStartedFrame(t *testing.T) {
 	}
 	if got := child.SubagentName(); got != "explore-orders" {
 		t.Errorf("child.SubagentName() = %q, want %q", got, "explore-orders")
+	}
+}
+
+// TestNotify_AddressByName verifies notify_subagent accepts the
+// child's Name as the target identifier (in addition to the legacy
+// session_id form). Phase 5.2 α.1b.
+func TestNotify_AddressByName(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+
+	out, err := parent.callSpawnSubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagents":[{"name":"fetch","task":"go"}]}`))
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	var rows []spawnSubagentResult
+	if err := json.Unmarshal(out, &rows); err != nil || len(rows) != 1 {
+		t.Fatalf("spawn unmarshal: %v (output=%s)", err, out)
+	}
+
+	// Address by Name.
+	out, err = parent.callNotifySubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagent_id":"fetch","content":"check rows"}`))
+	if err != nil {
+		t.Fatalf("notify by name: %v", err)
+	}
+	var nout notifySubagentOutput
+	if err := json.Unmarshal(out, &nout); err != nil {
+		t.Fatalf("notify unmarshal: %v (output=%s)", err, out)
+	}
+	if !nout.Delivered {
+		t.Errorf("notify by name not delivered (output=%s)", out)
+	}
+
+	// Address by session_id (legacy path) still works.
+	idJSON, _ := json.Marshal(map[string]string{
+		"subagent_id": rows[0].SessionID,
+		"content":     "ping",
+	})
+	out, err = parent.callNotifySubagent(us1WithSession(parent), idJSON)
+	if err != nil {
+		t.Fatalf("notify by session_id: %v", err)
+	}
+	if err := json.Unmarshal(out, &nout); err != nil {
+		t.Fatalf("notify (by id) unmarshal: %v (output=%s)", err, out)
+	}
+	if !nout.Delivered {
+		t.Errorf("notify by session_id not delivered (output=%s)", out)
+	}
+
+	// Unknown identifier surfaces not_a_child.
+	out, _ = parent.callNotifySubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagent_id":"nonexistent","content":"x"}`))
+	mgr_assertErrorCode(t, out, "not_a_child")
+}
+
+// TestWaitSubagents_AddressByName verifies wait_subagents accepts a
+// mix of names and session_ids in the `ids` array and that the
+// returned rows use the canonical session_id keying. Phase 5.2
+// α.1b.
+func TestWaitSubagents_AddressByName(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+
+	// Spawn two children with explicit names.
+	_, err := parent.callSpawnSubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagents":[{"name":"alpha","task":"go"},{"name":"beta","task":"go"}]}`))
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+
+	// Build the wait args using one name + one session_id (mixed).
+	parent.childMu.Lock()
+	var alphaID, betaID string
+	for id, c := range parent.children {
+		switch c.name {
+		case "alpha":
+			alphaID = id
+		case "beta":
+			betaID = id
+		}
+	}
+	parent.childMu.Unlock()
+	if alphaID == "" || betaID == "" {
+		t.Fatalf("children name index missing: alpha=%q beta=%q", alphaID, betaID)
+	}
+
+	// Run wait with `["alpha", "<beta-session-id>"]` — both should
+	// resolve, neither should trip the not_a_child fast-fail.
+	args, _ := json.Marshal(waitSubagentsInput{IDs: []string{"alpha", betaID}})
+	ctx, cancelCtx := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancelCtx()
+	out, _ := parent.callWaitSubagents(ctx, args)
+
+	// The wait will deadline (children don't auto-complete in this
+	// fixture), but the not_a_child fast-fail must NOT have fired.
+	// Surface the actual code so failures are clear; "cancelled"
+	// or empty results both indicate the resolver succeeded.
+	if strings.Contains(string(out), `"not_a_child"`) {
+		t.Errorf("wait_subagents with name input fast-failed not_a_child: %s", out)
 	}
 }
 

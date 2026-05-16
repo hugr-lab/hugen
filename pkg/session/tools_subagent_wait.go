@@ -25,7 +25,7 @@ const waitSubagentsSchema = `{
     "ids": {
       "type": "array",
       "items": {"type": "string"},
-      "description": "Optional. Empty array (or absent) waits for ALL direct sub-agents of the calling session — the common 'sync after a wave' pattern. Provide explicit ids only when selectively waiting on a subset; unknown ids return an error listing the session's actual direct children."
+      "description": "Optional. Each entry is either a subagent's short Name (returned by spawn) or its session_id. Empty array (or absent) waits for ALL direct sub-agents of the calling session — the common 'sync after a wave' pattern. Provide explicit identifiers only when selectively waiting on a subset; unknown identifiers return an error listing the session's actual direct children."
     }
   }
 }`
@@ -59,11 +59,19 @@ func (parent *Session) callWaitSubagents(ctx context.Context, args json.RawMessa
 	// guards against the LLM hallucinating ids like
 	// "mission_id_from_step1" instead of substituting the real id
 	// from a prior tool result — observed on Gemma 26B).
+	//
+	// Phase 5.2 α.1b: snapshot also builds a name→session_id index
+	// so explicit ids that are names get rewritten to session_ids
+	// before the wait loop registers their results.
 	parent.childMu.Lock()
 	liveChildren := make(map[string]struct{}, len(parent.children))
+	nameIndex := make(map[string]string, len(parent.children))
 	for id, c := range parent.children {
 		if c != nil {
 			liveChildren[id] = struct{}{}
+			if c.name != "" {
+				nameIndex[c.name] = id
+			}
 		}
 	}
 	parent.childMu.Unlock()
@@ -82,6 +90,20 @@ func (parent *Session) callWaitSubagents(ctx context.Context, args json.RawMessa
 		// Stable order keeps the model's view deterministic across
 		// runs and makes test assertions predictable.
 		sort.Strings(in.IDs)
+	} else {
+		// Rewrite name entries to session_ids in-place. The order
+		// the model passed is preserved, but each entry becomes
+		// canonical. Unknown entries fall through to the
+		// not_a_child validation below, which returns the real
+		// child set for the model to correct from.
+		for i, raw := range in.IDs {
+			if _, hit := liveChildren[raw]; hit {
+				continue
+			}
+			if id, ok := nameIndex[raw]; ok {
+				in.IDs[i] = id
+			}
+		}
 	}
 
 	// First pass: collect any ids already terminal (cached in parent's
