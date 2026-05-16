@@ -70,10 +70,21 @@ type Run struct {
 	// Topology is the path to a config that selects tool_providers
 	// (embedded vs external-hugr).
 	Topology string `yaml:"topology"`
+	// Overlays is a list of additional config files merged on top
+	// of base ← LLM ← Topology, in order. Used for small focused
+	// patches (e.g. `subagents.parking.parked_idle_timeout: 5s`)
+	// that don't justify a full topology fork. Each path resolves
+	// relative to runs.yaml's directory, same convention as LLM
+	// and Topology. Phase 5.2 ι.
+	Overlays []string `yaml:"overlays,omitempty"`
 	// Requires gates the whole run on environment availability.
 	// Known keys: "hugr" (HUGR_URL + HUGR_ACCESS_TOKEN), "anthropic"
 	// (ANTHROPIC_API_KEY), "gemini" (GEMINI_API_KEY), "openai"
-	// (OPENAI_API_KEY), "local" (LLM_LOCAL_URL).
+	// (OPENAI_API_KEY), "local" (LLM_LOCAL_URL),
+	// "park-fast-overlay" / "park-cap-overlay" (signals that a
+	// scenario depends on a focused parking-config overlay; the
+	// gate string isn't an env-var check but a scenario-side
+	// marker used to gate the corresponding ι yamls).
 	Requires  []string `yaml:"requires"`
 	Scenarios []string `yaml:"scenarios"`
 }

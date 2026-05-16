@@ -147,3 +147,25 @@ runs:
       - parked_dismiss_after_summary
       - restore_parked_replay
       - b3_per_role_budget_isolation
+
+  # Phase 5.2 ι — dedicated runs for the two parking scenarios
+  # whose assertions depend on a non-default parking-config. The
+  # claude-sonnet topology stays the source for tool_providers;
+  # `overlays:` layers a tiny patch on top with the short
+  # timeout / small cap. Mostly informational on weak models —
+  # the deterministic ε path is covered by Go integration tests.
+  - name: claude-sonnet-park-fast
+    llm: configs/llm-claude-sonnet.yaml
+    topology: configs/topology-external-hugr.yaml
+    overlays: [configs/overlay-park-fast.yaml]
+    requires: [anthropic, hugr]
+    scenarios:
+      - parked_idle_timeout
+
+  - name: claude-sonnet-park-cap
+    llm: configs/llm-claude-sonnet.yaml
+    topology: configs/topology-external-hugr.yaml
+    overlays: [configs/overlay-park-cap.yaml]
+    requires: [anthropic, hugr]
+    scenarios:
+      - parked_ceiling_drop

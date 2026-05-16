@@ -1,0 +1,12 @@
+# Phase 5.2 ι — focused parking overlay for the parked_ceiling_drop
+# scenario. Caps the simultaneously-parked children at 3 (matches
+# the spec's "fourth parks evicts the first" shape) and stretches
+# the idle timeout to 30 minutes so the timer cannot interfere with
+# the ceiling-eviction assertion during the scenario's run window.
+#
+# Applied on top of base config + LLM + topology-external-hugr so
+# tool_providers are inherited unchanged.
+subagents:
+  parking:
+    max_parked_children_per_root: 3
+    parked_idle_timeout: 30m

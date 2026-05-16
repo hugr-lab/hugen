@@ -31,10 +31,10 @@
 #   - Cap 3 + 4 missions = exactly one eviction, which keeps the
 #     assertions deterministic.
 name: parked_ceiling_drop
-# Same overlay gate as parked_idle_timeout: a dedicated run with
-# max_parked_children_per_root=3 (and long parked_idle_timeout)
-# is required for deterministic eviction. Phase 5.2 ι.
-requires: [hugr, park-cap-overlay]
+# Overlay `configs/overlay-park-cap.yaml` caps parked children at
+# 3 and stretches the idle timeout to 30m so the timer can't
+# masquerade as a ceiling eviction during the run.
+requires: [hugr]
 
 steps:
   - say: How many tables are in module `northwind`? Number only.

@@ -1,0 +1,15 @@
+# Phase 5.2 ι — focused parking overlay for the parked_idle_timeout
+# scenario. Shrinks the idle-timeout deadline so the runtime's
+# AfterFunc fires inside a reasonable scenario budget (~10s instead
+# of the 10-minute production default). Ceiling stays well above
+# the scenario's single parked child so eviction can't masquerade
+# as idle timeout.
+#
+# Applied on top of base config + LLM + topology-external-hugr so
+# tool_providers are inherited unchanged. Use this overlay only
+# for scenarios whose assertion shape depends on the timer firing
+# during the test window.
+subagents:
+  parking:
+    parked_idle_timeout: 5s
+    max_parked_children_per_root: 16

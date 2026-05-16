@@ -117,14 +117,19 @@ func Setup(ctx context.Context, t *testing.T, opts SetupOpts) *Runtime {
 		}
 	}
 
-	// Merge: prod config.yaml ← LLM overlay ← topology overlay.
-	// Output written into runDir so the run's exact agent-config is
-	// preserved on disk for human review.
+	// Merge: prod config.yaml ← LLM overlay ← topology overlay ←
+	// run.Overlays (in order). Output written into runDir so the
+	// run's exact agent-config is preserved on disk for human
+	// review.
 	agentCfgPath := filepath.Join(runDir, "agent-config.yaml")
-	if err := mergeConfigs(opts.BaseConfigPath,
+	overlays := []string{
 		ResolveRunPath(opts.RunsPath, opts.Run.LLM),
 		ResolveRunPath(opts.RunsPath, opts.Run.Topology),
-		agentCfgPath); err != nil {
+	}
+	for _, ov := range opts.Run.Overlays {
+		overlays = append(overlays, ResolveRunPath(opts.RunsPath, ov))
+	}
+	if err := mergeConfigs(opts.BaseConfigPath, overlays, agentCfgPath); err != nil {
 		t.Fatalf("harness.Setup: merge configs: %v", err)
 	}
 
@@ -372,15 +377,17 @@ func makeTokenInjectionHook(env map[string]string, logger *slog.Logger) func(con
 	}
 }
 
-// mergeConfigs deep-merges base ← llmOverlay ← topologyOverlay
-// into out. Maps merge recursively; lists are replaced (overlay
-// wins). Scalars are replaced (overlay wins).
-func mergeConfigs(base, llmOverlay, topologyOverlay, out string) error {
+// mergeConfigs deep-merges base ← each overlay in order into out.
+// Maps merge recursively; lists are replaced (overlay wins);
+// scalars are replaced (overlay wins). Empty overlay paths are
+// skipped cleanly so callers can pass nil-ish entries without a
+// branch.
+func mergeConfigs(base string, overlays []string, out string) error {
 	merged, err := readYAMLAsMap(base)
 	if err != nil {
 		return fmt.Errorf("read base %s: %w", base, err)
 	}
-	for _, overlay := range []string{llmOverlay, topologyOverlay} {
+	for _, overlay := range overlays {
 		if overlay == "" {
 			continue
 		}

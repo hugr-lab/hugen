@@ -26,23 +26,14 @@
 #      sessions table — child's status column flips to terminated.)
 #
 # Tuning notes:
-#   - The 2s override is set at the topology overlay level. Test
-#     runs against the real Hugr backend; the configured timeout
-#     flows through SubagentsView.ParkedIdleTimeout() into the
-#     Manager.
-#   - Harness must extend its post-step probe window past the
-#     timeout (`post_settle: 8s` or similar) so the timer fires
-#     and the synthesised SessionClose lands before the assertion
-#     phase.
+#   - The 5s override comes from `configs/overlay-park-fast.yaml`,
+#     applied via the Run.Overlays mechanism so tool_providers
+#     stay inherited from topology-external-hugr.yaml.
+#   - post_settle: 12s covers the 5s timer + a small budget for
+#     the runtime-driven SessionClose cascade to land in the
+#     event log before the assertion queries snapshot it.
 name: parked_idle_timeout
-# requires: park-fast-overlay marks the scenario skipped until a
-# topology overlay setting subagents.parking.parked_idle_timeout
-# to a short window is wired into a dedicated run in runs.yaml.
-# The deterministic ε path is already covered by Go unit tests
-# (pkg/session/lifetime_test.go) and integration_restart_test.go;
-# this YAML pins the model-facing acceptance shape for the day
-# the overlay lands.
-requires: [hugr, park-fast-overlay]
+requires: [hugr]
 
 steps:
   - say: |
@@ -50,7 +41,7 @@ steps:
       of orders in 1997? Single number, no commentary.
     budget: 360s
     wait_for_subagents: 240s
-    post_settle: 8s
+    post_settle: 12s
 
     queries:
       # Mission timeline — expect awaiting_dismissal status
