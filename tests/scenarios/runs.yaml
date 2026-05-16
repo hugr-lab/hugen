@@ -169,6 +169,22 @@ runs:
     scenarios:
       - parked_idle_timeout
 
+  # Phase 5.2 ι routing-validation runs. Strip the cheap-route
+  # tier_intents so root + mission run on the LLM overlay's
+  # default model itself, not the gemma cheap route. Lets us
+  # measure how the strong model handles parked-subagent
+  # routing without delegating the decision to gemma.
+  - name: gemini-pro-routing
+    llm: configs/llm-gemini-pro.yaml
+    topology: configs/topology-external-hugr.yaml
+    overlays: [configs/overlay-tier-intents-default.yaml]
+    requires: [gemini, hugr]
+    scenarios:
+      - parked_followup_chat
+      - parked_dismiss_after_summary
+      - restore_parked_replay
+      - b3_per_role_budget_isolation
+
   - name: claude-sonnet-park-cap
     llm: configs/llm-claude-sonnet.yaml
     topology: configs/topology-external-hugr.yaml

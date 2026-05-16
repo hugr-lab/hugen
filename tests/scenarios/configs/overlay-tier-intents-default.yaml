@@ -1,0 +1,14 @@
+# Phase 5.2 ι routing-validation overlay. Strips the cheap-route
+# tier_intents so root + mission inherit the LLM overlay's default
+# model (gemini-pro-3-1 in llm-gemini-pro.yaml; claude-sonnet in
+# llm-claude-sonnet.yaml). Lets us measure how the strong model
+# itself handles parked-subagent routing (dismiss-vs-notify-vs-
+# spawn discipline) without delegating that decision to the cheap
+# (gemma) route the production tier_intents block configures.
+#
+# Apply via Run.Overlays AFTER the LLM overlay so the
+# tier_intents key on the LLM yaml is overwritten cleanly.
+models:
+  tier_intents:
+    root: default
+    mission: default
