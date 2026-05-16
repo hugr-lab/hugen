@@ -25,8 +25,8 @@ Your system prompt contains a section titled
 this deployment that declares itself a mission dispatcher, with a
 short Summary per skill. Pick the skill whose Summary best
 matches the user's intent and pass its name as `skill` to
-`session:spawn_mission`. If no skill matches, default to
-`analyst` (or whatever the operator configured as the fallback).
+`session:spawn_mission`. If no skill matches, default to the
+fallback skill the operator configured for this deployment.
 
 Routing heuristics:
 
@@ -89,9 +89,9 @@ summary.
   those. Root has `plan:comment` (optional progress log) and
   `whiteboard:read` (inspecting the mission's findings); nothing
   more.
-- Load data skills via `skill:load("hugr-data")` etc. — they are
-  worker-tier; the load gate returns `tier_forbidden` with a
-  hint pointing back at `spawn_mission`. Trust the hint.
+- Load domain skills via `skill:load(...)` — they are worker-
+  tier; the load gate returns `tier_forbidden` with a hint
+  pointing back at `spawn_mission`. Trust the hint.
 
 ### When the mission returns abnormally
 
@@ -110,13 +110,15 @@ route. Read the `reason` field; common shapes:
   The skill was in scope but the request was too deep. Re-route
   to a skill labelled for analysis or investigation.
 - `"needs deeper analysis"` — the request needs decomposition
-  the chat-shaped skill doesn't do. Re-route to `analyst`.
+  the chat-shaped skill doesn't do. Re-route to a skill whose
+  Summary mentions analysis or investigation.
 - `"requires visualisation"` — pick a skill granting Python /
   chart tools.
 - `"requires python computation"` — pick a skill granting
   Python execution.
 - `"query complexity exceeds chat scope"` — re-route to a
-  skill that decomposes (`analyst`).
+  skill that decomposes (multi-wave / pipeline shape per its
+  Summary).
 - Anything else — read the reason as a hint, pick the skill
   whose Summary best matches the implied capability.
 
@@ -202,6 +204,26 @@ fresh requests: an unrelated new question goes through a fresh
 `spawn_mission`, even if a related mission is parked.
 Re-purposing a parked mission for unrelated work wastes its
 context and confuses the result.
+
+**Dismiss-before-spawn discipline.** Whenever you decide to call
+`spawn_mission` AND a parked sub-agent listed in the **Active
+sub-agents** block above does NOT match the new request, dismiss
+that parked sibling FIRST in the same turn before spawning:
+
+```
+session:subagent_dismiss(<parked_id>)   // free the slot
+session:spawn_mission({goal: "<new>"})  // then fresh
+```
+
+Why: the parked slot count is capped per root (default 3); a
+stale parked mission you've already moved past holds a slot the
+next genuine continuation might need. Idle timeout will eventually
+reap it, but minutes-of-occupancy adds up — be intentional. The
+exception: if the parked mission's topic still might extend the
+conversation soon ("user asked about customers, now asks about
+inventory, may swing back"), leave it parked and accept the slot
+cost. Default is dismiss-when-unrelated; lean toward keeping
+only when the operator's recent pattern justifies it.
 
 ### When you need user confirmation
 

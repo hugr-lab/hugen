@@ -80,6 +80,13 @@ runs:
       - skill_save_bundle
       - skill_save_overwrite_collision
       - skill_discovery_via_catalog
+      # Phase 5.2 ι — parked-subagent acceptance scenarios on
+      # Gemini Pro. parked_idle_timeout / parked_ceiling_drop need
+      # the park-fast / park-cap overlays (separate runs below).
+      - parked_followup_chat
+      - parked_dismiss_after_summary
+      - restore_parked_replay
+      - b3_per_role_budget_isolation
       # Retired in δ.B (legacy 2-tier patterns):
       # - three_parallel             — superseded by whiteboard_fanout3
       # - plan_root_solo             — root no longer owns plan:set/clear

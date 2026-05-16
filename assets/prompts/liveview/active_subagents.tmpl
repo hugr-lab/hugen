@@ -9,4 +9,4 @@ General guidance:
 
 - A **parked** sub-agent kept its full working context (notepad cache, prior introspection). `session:notify_subagent(id, content="<directive>")` re-arms it for a continuation — cheaper than re-spawning when the next user message extends the same thread. `session:subagent_dismiss(id)` tears it down when the work is final or the next request is unrelated.
 - An **active / wait_** sub-agent is still running. Leave it alone unless you have a directed update via `session:notify_subagent`.
-- If none of these match the user's request, spawn a fresh mission — but make that choice deliberately, not by ignoring the list above.
+- **Before `spawn_mission`:** if a parked row above does NOT match the new request, call `subagent_dismiss(<id>)` for it in the SAME turn before spawning fresh. The parked-children slot count is capped per root; a stale row you've moved past costs a slot the next genuine continuation might need.
