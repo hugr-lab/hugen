@@ -36,6 +36,17 @@ runs:
       - skill_save_bundle
       - skill_save_overwrite_collision
       - skill_discovery_via_catalog
+      # Phase 5.2 ι — parked-subagent acceptance scenarios.
+      # Rely on the new bundled data-chat skill
+      # (mission.autoclose:false). parked_idle_timeout +
+      # parked_ceiling_drop require a topology overlay setting
+      # short parking caps — wired in a fast-follow run.
+      - parked_followup_chat
+      - parked_dismiss_after_summary
+      - restore_parked_replay
+      # b3_per_role_budget_isolation installs the test-only
+      # b3-fixture skill (tests/scenarios/fixtures/b3-fixture/).
+      - b3_per_role_budget_isolation
 
   - name: gemini-pro
     llm: configs/llm-gemini-pro.yaml
@@ -127,3 +138,12 @@ runs:
       # two-missions-in-one-turn fan-out.
       - async_default_with_announce
       - parallel_async_missions
+      # Phase 5.2 ι — parked-subagent acceptance scenarios on
+      # Gemma. parked_idle_timeout / parked_ceiling_drop need a
+      # short-timeout topology overlay; restore_parked_replay
+      # exercises the η restore branch directly (deterministic
+      # runtime path — model performance informational).
+      - parked_followup_chat
+      - parked_dismiss_after_summary
+      - restore_parked_replay
+      - b3_per_role_budget_isolation

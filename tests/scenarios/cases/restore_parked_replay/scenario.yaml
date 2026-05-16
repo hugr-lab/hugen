@@ -36,11 +36,7 @@
 #     auto-dismiss during the restart window. Restart resets the
 #     idle clock per phase-5.2 resolved decision 7.
 name: restore_parked_replay
-requires: [hugr, restart-capable]
-overrides:
-  subagents:
-    parking:
-      parked_idle_timeout: 30m
+requires: [hugr]
 
 steps:
   - say: |
@@ -66,12 +62,10 @@ steps:
           }
         vars: { sid: "$sid" }
 
-  # restart_runtime: the harness instruction goes here once
-  # restart-capable runs are wired. Concretely the runner observes
-  # this marker between steps, gracefully stops the current core,
-  # builds a fresh one against the same store, and re-attaches the
-  # root via Resume. Until then the scenario `requires:
-  # restart-capable` keeps it out of CI.
+  # Phase 5.2 ι — harness restart hook. Gracefully Stops the
+  # current Core and builds a fresh one against the same
+  # state-dir; Manager.RestoreActive reattaches this scenario's
+  # root + its parked child via the η restore branch.
   - restart_runtime: true
 
   - say: |

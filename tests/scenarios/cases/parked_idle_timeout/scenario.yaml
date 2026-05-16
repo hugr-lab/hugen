@@ -35,11 +35,14 @@
 #     and the synthesised SessionClose lands before the assertion
 #     phase.
 name: parked_idle_timeout
-requires: [hugr]
-overrides:
-  subagents:
-    parking:
-      parked_idle_timeout: 2s
+# requires: park-fast-overlay marks the scenario skipped until a
+# topology overlay setting subagents.parking.parked_idle_timeout
+# to a short window is wired into a dedicated run in runs.yaml.
+# The deterministic ε path is already covered by Go unit tests
+# (pkg/session/lifetime_test.go) and integration_restart_test.go;
+# this YAML pins the model-facing acceptance shape for the day
+# the overlay lands.
+requires: [hugr, park-fast-overlay]
 
 steps:
   - say: |

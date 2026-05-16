@@ -47,7 +47,8 @@
 #     assertion #1. The δ chain (per-role > per-mission > tier
 #     default) keeps each role's number isolated.
 name: b3_per_role_budget_isolation
-requires: [hugr, b3-fixture-skill]
+requires: [hugr]
+fixtures: [b3-fixture]
 
 steps:
   - say: |

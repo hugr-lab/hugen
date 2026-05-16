@@ -85,6 +85,12 @@ func TestScenarios(t *testing.T) {
 						t.Skipf("scenario %s skipped: %s", name, reason)
 					}
 
+					// Phase 5.2 ι — install any test-only skill
+					// fixtures the scenario depends on before
+					// opening the session so the SkillStore picks
+					// them up via the local backend's first scan.
+					rt.InstallFixtures(t, sc.Fixtures)
+
 					if len(sc.Roots) > 0 {
 						rt.RunMultiRoot(ctx, t, sc)
 						return
