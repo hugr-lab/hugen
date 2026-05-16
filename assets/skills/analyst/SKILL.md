@@ -15,20 +15,40 @@ metadata:
     mission:
       enabled: true
       summary: >
-        Data analysis, GraphQL queries against Hugr, dashboards, and
-        reports. Use for any request involving exploring, aggregating,
-        or visualising data — also for trivial knowledge / arithmetic
-        questions (those still go through a single cheap worker).
+        Multi-step data investigation: analysis, reports,
+        dashboards, visualisations, anomaly detection, "why"
+        questions, and anything needing Python-side computation
+        or charts. Decomposes into waves of specialised workers
+        (explorer → analyst → builder). **Slower than
+        chat-shaped skills** — pick this only when the user
+        explicitly wants analysis or when the question's depth
+        warrants pipeline decomposition. For short data lookups,
+        counts, top-N lists, or conversation-thread follow-ups,
+        prefer a chat-shaped skill (e.g. `data-chat`).
       keywords:
-        - data
-        - query
         - analyse
-        - dashboard
+        - analyze
+        - проанализируй
         - report
+        - отчёт
+        - dashboard
+        - дашборд
         - chart
-        - aggregate
-        - schema
-        - hugr
+        - plot
+        - graph
+        - visualise
+        - нарисуй
+        - визуализация
+        - explain why
+        - почему
+        - причина
+        - объясни
+        - find anomalies
+        - найди аномалии
+        - outliers
+        - export
+        - investigate
+        - расследовать
 
       on_start:
         plan:

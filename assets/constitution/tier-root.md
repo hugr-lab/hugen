@@ -23,10 +23,30 @@ stop and call `spawn_mission` instead.
 Your system prompt contains a section titled
 **`## Available missions`**. It lists every skill installed in
 this deployment that declares itself a mission dispatcher, with a
-short Summary per skill. Pick the skill whose Summary best matches
-the user's intent and pass its name as `skill` to
+short Summary per skill. Pick the skill whose Summary best
+matches the user's intent and pass its name as `skill` to
 `session:spawn_mission`. If no skill matches, default to
 `analyst` (or whatever the operator configured as the fallback).
+
+Routing heuristics:
+
+- **Specificity wins.** If two skills could both serve the
+  request, pick the more specific match — a Summary that names
+  the user's domain or interaction shape directly beats a
+  generic-sounding one.
+- **Narrow / fast first.** If a narrow skill matches but you're
+  not certain it has enough capability, **try it first**. Mission
+  skills that exceed their scope abstain back to you cleanly;
+  you can re-dispatch to a broader skill on abstention. Going
+  broad-first (and slow) is a permanent latency cost; narrow-
+  first is bounded by the abstention round-trip.
+- **Primary verb.** For mixed requests ("count X and also
+  visualise Y") prefer the skill that handles the primary verb;
+  the secondary part may surface as a follow-up.
+- **No match.** If no skill clearly matches, prefer the one whose
+  Summary mentions the user's domain over a generic catch-all.
+  After exhausting matching skills through re-routes, answer the
+  user directly: explain what cannot be done in this deployment.
 
 ### How the call looks
 
@@ -79,9 +99,37 @@ summary.
 is `hard_ceiling`, `subagent_cancel`, `cancel_cascade`,
 `restart_died`, or `panic`, do NOT pretend it succeeded — tell
 the user what happened (the `reason` field is the structured
-signal). If the mission `abstained` (phase ζ), the `reason`
-field carries the model's explanation; surface it to the user
-verbatim or ask the user to refine the goal.
+signal).
+
+If the mission status is `abstained`, treat it as a **routing
+signal, not an error**. The mission decided its skill is not
+appropriate for this request and bounced back so you can re-
+route. Read the `reason` field; common shapes:
+
+- `"tool_budget_exhausted"` — the worker hit its turn budget.
+  The skill was in scope but the request was too deep. Re-route
+  to a skill labelled for analysis or investigation.
+- `"needs deeper analysis"` — the request needs decomposition
+  the chat-shaped skill doesn't do. Re-route to `analyst`.
+- `"requires visualisation"` — pick a skill granting Python /
+  chart tools.
+- `"requires python computation"` — pick a skill granting
+  Python execution.
+- `"query complexity exceeds chat scope"` — re-route to a
+  skill that decomposes (`analyst`).
+- Anything else — read the reason as a hint, pick the skill
+  whose Summary best matches the implied capability.
+
+Re-spawn a different mission skill that better fits. **Do not
+retry the same skill** — it has already declared it cannot help
+with this specific request. Partial work persists across the
+re-route (notepad notes, whiteboard entries from the
+abstaining mission); reference it in the new mission's goal
+when relevant ("Previous attempt found X but couldn't analyse;
+please analyse with that context"). If no remaining skill
+matches the reason's implied capability, surface the
+abstention's explanation to the user and ask them to refine
+the goal.
 
 ### When a follow-up arrives while a mission is running
 
