@@ -101,15 +101,58 @@ type Closer interface {
 	CloseSession(ctx context.Context, state SessionState) error
 }
 
-// Advertiser extensions contribute a section to the system prompt
-// the runtime feeds into the model on each turn. The returned
-// string is concatenated into the prompt verbatim (with newline
-// separation). An empty string skips the section. Sections are
-// emitted in extension-registration order; v1 does not provide
+// Advertiser extensions contribute a section to the **static**
+// system-prompt prefix the runtime feeds into the model. The
+// returned string is concatenated into the prompt verbatim (with
+// newline separation). An empty string skips the section. Sections
+// are emitted in extension-registration order; v1 does not provide
 // ordering primitives — order this matters to is documented at the
 // registration site.
+//
+// Static = the content is expected to remain identical across
+// consecutive turns of the same session as long as the registering
+// extension's underlying state doesn't change (e.g. skill bindings,
+// constitution body, mission summary catalogue). Identical content
+// turn-to-turn keeps provider-side prompt caches (Anthropic prompt
+// cache, Gemini context cache) warm — the cache hits the long
+// shared prefix and only the variable tail re-bills.
+//
+// Dynamic per-turn state (notepad snapshot, live sub-agent roster,
+// plan progress) belongs on [Instructor.PerTurnPrompt] instead so
+// it lands as a separate system-role message at the very end of
+// the chat history, where it can vary every turn without breaking
+// the cached prefix.
 type Advertiser interface {
 	AdvertiseSystemPrompt(ctx context.Context, state SessionState) string
+}
+
+// Instructor extensions contribute a per-turn dynamic block the
+// runtime inserts as a separate system-role message immediately
+// BEFORE the latest user message in the chat history (so it sits
+// at the very end of the prompt, where attention is highest, and
+// outside the static system-prompt prefix the provider caches).
+// The block is rebuilt every Turn from live state — call sites
+// MUST be cheap; the assembly happens on the hot path before the
+// model goroutine fires.
+//
+// Empty return skips the section. Multiple Instructor blocks
+// concatenate in registration order, separated by a blank line.
+// The composed message is NEVER persisted as an event — it is an
+// ephemeral runtime artefact, regenerated on the next prompt
+// build from the most-recent live state.
+//
+// Use Instructor for content that changes turn-to-turn:
+//   - notepad rolling snapshot (new notes land between turns)
+//   - active sub-agent roster (parking, completion, spawn)
+//   - plan current_step + recent comments
+//
+// Use [Advertiser] for content stable within a session lifetime
+// (constitution prose, loaded skill bodies, available-missions
+// catalogue, immutable templates).
+//
+// Phase 5.2 π.
+type Instructor interface {
+	PerTurnPrompt(ctx context.Context, state SessionState) string
 }
 
 // ToolFilter extensions narrow the per-session tool catalogue.

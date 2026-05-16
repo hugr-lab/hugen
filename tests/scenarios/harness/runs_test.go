@@ -123,8 +123,30 @@ steps:
 		t.Fatal(err)
 	}
 	_, err := LoadScenario(path, "")
-	if err == nil || !contains(err.Error(), "must have either say:") {
+	if err == nil || !contains(err.Error(), "must have say, tick: true, or restart_runtime: true") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// TestLoadScenario_AcceptsRestartRuntimeStep pins phase 5.2 ι:
+// restart_runtime: true is a valid no-Say/Tick step.
+func TestLoadScenario_AcceptsRestartRuntimeStep(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scenario.yaml")
+	body := `name: restart
+steps:
+  - say: "go"
+  - restart_runtime: true
+  - say: "again"
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sc, err := LoadScenario(path, "")
+	if err != nil {
+		t.Fatalf("LoadScenario: %v", err)
+	}
+	if len(sc.Steps) != 3 || !sc.Steps[1].RestartRuntime {
+		t.Errorf("steps[1].RestartRuntime = false; want true (%+v)", sc.Steps)
 	}
 }
 

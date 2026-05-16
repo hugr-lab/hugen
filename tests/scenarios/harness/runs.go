@@ -70,16 +70,16 @@ func LoadScenario(scenarioPath, dirName string) (*Scenario, error) {
 					s.Name, rootName)
 			}
 			for i, st := range rs.Steps {
-				if st.Say == "" && !st.Tick {
-					return nil, fmt.Errorf("scenario %q root %q step %d: must have either say: or tick: true",
+				if st.Say == "" && !st.Tick && !st.RestartRuntime {
+					return nil, fmt.Errorf("scenario %q root %q step %d: must have say, tick: true, or restart_runtime: true",
 						s.Name, rootName, i)
 				}
 			}
 		}
 	case len(s.Steps) > 0:
 		for i, st := range s.Steps {
-			if st.Say == "" && !st.Tick {
-				return nil, fmt.Errorf("scenario %q step %d: must have either say: or tick: true",
+			if st.Say == "" && !st.Tick && !st.RestartRuntime {
+				return nil, fmt.Errorf("scenario %q step %d: must have say, tick: true, or restart_runtime: true",
 					s.Name, i)
 			}
 		}

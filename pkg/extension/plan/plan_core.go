@@ -3,7 +3,7 @@
 // [SessionPlan] handle that wraps the projection + a mutex behind
 // Set / Comment / Show / Clear, and the [Extension] wrapper
 // exposing the four plan tools and the [extension.StateInitializer]
-// / [extension.Recovery] / [extension.Advertiser] hooks the runtime
+// / [extension.Recovery] / [extension.Instructor] hooks the runtime
 // dispatches against.
 //
 // Phase-4 spec §6 + contracts/tools-plan.md + data-model.md §3.1

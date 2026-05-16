@@ -52,7 +52,7 @@ func NewExtension(agentID string) *Extension {
 var (
 	_ extension.Extension        = (*Extension)(nil)
 	_ extension.StateInitializer = (*Extension)(nil)
-	_ extension.Advertiser       = (*Extension)(nil)
+	_ extension.Instructor       = (*Extension)(nil) // phase 5.2 π — was Advertiser
 	_ extension.Recovery         = (*Extension)(nil)
 	_ extension.PlanSystemWriter = (*Extension)(nil)
 	_ tool.ToolProvider          = (*Extension)(nil)
@@ -153,9 +153,13 @@ func (e *Extension) ReportStatus(_ context.Context, state extension.SessionState
 	return data
 }
 
-// AdvertiseSystemPrompt implements [extension.Advertiser]. Returns
-// the rendered active-plan block, or "" when the plan is inactive.
-func (e *Extension) AdvertiseSystemPrompt(_ context.Context, state extension.SessionState) string {
+// PerTurnPrompt implements [extension.Instructor]. Returns the
+// rendered active-plan block, or "" when the plan is inactive.
+// Phase 5.2 π — migrated from Advertiser. Plan body / current_step
+// / comments mutate within a session lifetime (every plan:set,
+// plan:comment, plan:advance); the block belongs in the per-turn
+// dynamic inject rather than the cached static prefix.
+func (e *Extension) PerTurnPrompt(_ context.Context, state extension.SessionState) string {
 	h := FromState(state)
 	if h == nil {
 		return ""

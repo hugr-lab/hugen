@@ -1,0 +1,12 @@
+## Active sub-agents
+
+You have {{.Count}} direct sub-agent{{if ne .Count 1}}s{{end}} from earlier in this conversation. **Before spawning a new mission, decide whether one of these can serve the user's request.**
+
+{{range .Rows}}- `{{.ShortID}}` · {{.Label}} · state=`{{.State}}`{{if .ParkedAge}} (parked {{.ParkedAge}}){{end}} · "{{.Task}}"
+  → {{.Hint}}
+{{end}}
+General guidance:
+
+- A **parked** sub-agent kept its full working context (notepad cache, prior introspection). `session:notify_subagent(id, content="<directive>")` re-arms it for a continuation — cheaper than re-spawning when the next user message extends the same thread. `session:subagent_dismiss(id)` tears it down when the work is final or the next request is unrelated.
+- An **active / wait_** sub-agent is still running. Leave it alone unless you have a directed update via `session:notify_subagent`.
+- If none of these match the user's request, spawn a fresh mission — but make that choice deliberately, not by ignoring the list above.

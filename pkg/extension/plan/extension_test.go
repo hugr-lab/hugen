@@ -265,12 +265,12 @@ func TestCallClear(t *testing.T) {
 
 // ---------- Advertiser ----------
 
-func TestAdvertiseSystemPrompt_Active(t *testing.T) {
+func TestPerTurnPrompt_Active(t *testing.T) {
 	ext, state := newReadyExt(t)
 	_, _ = ext.Call(callCtx(state), "plan:set",
 		mustMarshal(t, setInput{Text: "investigate latency", CurrentStep: "instrument"}))
 
-	prompt := ext.AdvertiseSystemPrompt(context.Background(), state)
+	prompt := ext.PerTurnPrompt(context.Background(), state)
 	if !strings.Contains(prompt, "## Active plan") {
 		t.Errorf("missing plan block: %q", prompt)
 	}
@@ -282,9 +282,9 @@ func TestAdvertiseSystemPrompt_Active(t *testing.T) {
 	}
 }
 
-func TestAdvertiseSystemPrompt_Inactive(t *testing.T) {
+func TestPerTurnPrompt_Inactive(t *testing.T) {
 	ext, state := newReadyExt(t)
-	if got := ext.AdvertiseSystemPrompt(context.Background(), state); got != "" {
+	if got := ext.PerTurnPrompt(context.Background(), state); got != "" {
 		t.Errorf("inactive prompt = %q, want empty", got)
 	}
 }
@@ -353,7 +353,7 @@ func TestRecover_RebuildsProjection(t *testing.T) {
 	}
 
 	// Advertiser surface still renders the rebuilt block.
-	prompt := ext.AdvertiseSystemPrompt(context.Background(), state)
+	prompt := ext.PerTurnPrompt(context.Background(), state)
 	if !strings.Contains(prompt, "investigate latency") {
 		t.Errorf("prompt missing rebuilt body: %q", prompt)
 	}

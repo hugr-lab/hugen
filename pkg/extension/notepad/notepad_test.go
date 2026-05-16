@@ -257,7 +257,7 @@ func TestAdvertise_RendersSnapshot(t *testing.T) {
 		}
 	}
 
-	out := ext.AdvertiseSystemPrompt(context.Background(), state)
+	out := ext.PerTurnPrompt(context.Background(), state)
 	if out == "" {
 		t.Fatal("expected non-empty Advertise output")
 	}
@@ -276,7 +276,7 @@ func TestAdvertise_RendersSnapshot(t *testing.T) {
 
 func TestAdvertise_EmptyWhenNoNotes(t *testing.T) {
 	ext, state, _ := newFixture(t)
-	if out := ext.AdvertiseSystemPrompt(context.Background(), state); out != "" {
+	if out := ext.PerTurnPrompt(context.Background(), state); out != "" {
 		t.Errorf("expected empty Advertise, got %q", out)
 	}
 }
@@ -285,7 +285,7 @@ func TestAdvertise_NilStateHandle(t *testing.T) {
 	// Bare state without InitState — FromState returns nil.
 	ext := NewExtension(fixture.NewTestStore(), "a1", Config{})
 	state := fixture.NewTestSessionState("ses-bare")
-	if out := ext.AdvertiseSystemPrompt(context.Background(), state); out != "" {
+	if out := ext.PerTurnPrompt(context.Background(), state); out != "" {
 		t.Errorf("expected empty Advertise for missing state, got %q", out)
 	}
 }

@@ -99,6 +99,7 @@ var (
 	_ extension.FrameObserver      = (*Extension)(nil)
 	_ extension.ChildFrameObserver = (*Extension)(nil)
 	_ extension.StatusReporter     = (*Extension)(nil)
+	_ extension.Instructor         = (*Extension)(nil) // phase 5.2 π
 	_ extension.Closer             = (*Extension)(nil)
 )
 

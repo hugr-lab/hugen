@@ -1624,32 +1624,104 @@ func (s *Session) stuckDetectionEnabled(ctx context.Context) bool {
 	return !stuckDisabled
 }
 
-// buildMessages prepends the per-Turn system message (agent
-// constitution + concatenated skill instructions) to the chat
-// history. Rebuilt every Turn because skill bindings can change
-// between Turns (skill_load / skill_unload during a session). The
-// returned slice is a fresh copy — callers can mutate it freely
+// buildMessages composes the model-facing chat slice for the next
+// Generate call. Order:
+//
+//  1. **Static system prefix** — agent constitution + extension
+//     Advertiser sections. Rebuilt every Turn (skill bindings can
+//     mutate via skill_load / skill_unload) but the content is
+//     EXPECTED to be stable across consecutive turns of the same
+//     session so provider-side prompt caches (Anthropic prompt
+//     cache, Gemini context cache) hit the long shared prefix.
+//
+//  2. **Persisted history** — s.history projected from events.
+//     This bloc grows by one (user) and one (assistant) message per
+//     turn; both are part of the cached prefix once written.
+//
+//  3. **Per-turn Instructor inject** — phase 5.2 π. A second
+//     system-role message inserted IMMEDIATELY BEFORE the last
+//     user message in the composed slice so the live state
+//     (notepad snapshot, active sub-agent roster, plan progress)
+//     sits at the very end of the prompt where attention is
+//     highest, and outside the cached prefix where it can vary
+//     turn-to-turn without poisoning the cache. The block is
+//     ephemeral — never persisted, regenerated on every prompt
+//     build from current extension state.
+//
+// The returned slice is a fresh copy — callers can mutate it freely
 // without touching s.history.
 func (s *Session) buildMessages(ctx context.Context) []model.Message {
-	out := make([]model.Message, 0, len(s.history)+1)
+	out := make([]model.Message, 0, len(s.history)+2)
 	if sys := s.systemPrompt(ctx); sys != "" {
 		out = append(out, model.Message{Role: model.RoleSystem, Content: sys})
 	}
 	out = append(out, s.history...)
-	return out
+
+	inject := s.perTurnInstructorBlock(ctx)
+	if inject == "" {
+		return out
+	}
+	// Insert the inject right BEFORE the last user message — that
+	// keeps the variable block at the end of the prompt
+	// (attention-priority) without splitting a tool_call /
+	// tool_result pair that providers expect adjacent. If the
+	// trailing slice doesn't end with a user message (e.g. the
+	// turn ended with an assistant message and the loop is now
+	// building a follow-up cycle), append at the very end.
+	injectMsg := model.Message{Role: model.RoleSystem, Content: inject}
+	last := len(out) - 1
+	if last >= 0 && out[last].Role == model.RoleUser {
+		out = append(out, model.Message{})
+		copy(out[last+1:], out[last:])
+		out[last] = injectMsg
+		return out
+	}
+	return append(out, injectMsg)
 }
 
-// systemPrompt assembles the system-prompt body for the next
-// model.Generate call. Order:
+// perTurnInstructorBlock concatenates every Instructor-implementing
+// extension's PerTurnPrompt output. Empty extensions are skipped.
+// Sections are joined by a blank line. The composed result is the
+// content of the per-turn system inject described in
+// buildMessages. Phase 5.2 π.
+func (s *Session) perTurnInstructorBlock(ctx context.Context) string {
+	if s.deps == nil {
+		return ""
+	}
+	var parts []string
+	for _, ext := range s.deps.Extensions {
+		inst, ok := ext.(extension.Instructor)
+		if !ok {
+			continue
+		}
+		section := inst.PerTurnPrompt(ctx, s)
+		if section == "" {
+			continue
+		}
+		parts = append(parts, section)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// systemPrompt assembles the **static** system-prompt prefix the
+// runtime feeds into the next model.Generate call. Order:
 //  1. Session tier header — "Session tier: <tier>" line that
 //     anchors the constitution's Session-tier section to the
 //     concrete tier of this session (phase 4.2.2 §9).
 //  2. Agent constitution (universal rules + Session tier section).
-//  3. Extension Advertiser sections — registration order. Plan ext
-//     advertises the active-plan block (registered before skill so
-//     it lands ahead of skill instructions / catalogue); skill ext
-//     contributes (a) the body of every loaded skill and (b) the
-//     catalogue of every skill the agent can reach.
+//  3. Extension Advertiser sections — registration order. Skill
+//     ext contributes (a) the body of every loaded skill and (b)
+//     the catalogue of every skill the agent can reach.
+//
+// Phase 5.2 π — content expected to be stable across consecutive
+// turns of the same session so provider-side prompt caches stay
+// warm. Dynamic per-turn content (notepad snapshot, active
+// sub-agent roster, plan progress) lives on
+// [extension.Instructor] and lands as a separate system-role
+// message at the end of buildMessages's output.
 func (s *Session) systemPrompt(ctx context.Context) string {
 	var parts []string
 	tier := skillpkg.TierFromDepth(s.depth)

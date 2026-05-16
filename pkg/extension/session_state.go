@@ -54,7 +54,7 @@ type SessionState interface {
 
 	// Prompts returns the agent-level template renderer shared
 	// by every session in the tree. Used by extensions whose
-	// AdvertiseSystemPrompt and similar surfaces produce
+	// AdvertiseSystemPrompt / PerTurnPrompt surfaces produce
 	// model-visible prose from bundled templates under
 	// assets/prompts/. May be nil only in test fixtures that
 	// skip the renderer — production paths assume non-nil.
