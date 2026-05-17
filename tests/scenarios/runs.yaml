@@ -146,3 +146,23 @@ runs:
       - chat_quick_question
       - chat_followup_continuity
       - chat_spawns_mission_for_report
+
+  # Phase 5.2 η — root-as-chat mixed model gate. Root + mission
+  # on Gemini Pro 3.1; workers on local gemma4-26b. Same
+  # scenario subset as the gemma-only η bucket so results can
+  # be diffed side-by-side.
+  - name: gemini-root-gemma-worker
+    llm: configs/llm-gemini-root-gemma-worker.yaml
+    topology: configs/topology-external-hugr.yaml
+    requires: [gemini, local, hugr]
+    scenarios:
+      # Bucket 1 — chat with repeated messages + dynamic skill
+      # load (hugr-data lazy-loaded by root).
+      - chat_quick_question
+      - chat_followup_continuity
+      # Bucket 2 — one / several async missions.
+      - chat_spawns_mission_for_report
+      - parallel_async_missions
+      # Bucket 3 — HITL bubble-up + follow-up from a mission.
+      - hitl_mission_probe
+      - follow_up_during_mission
