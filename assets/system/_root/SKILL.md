@@ -140,6 +140,7 @@ Call shape:
 
 ```
 session:spawn_mission({
+  name:   "<short-kebab-case-id>",    // REQUIRED — addressable handle
   skill:  "<dispatcher skill>",       // see ## Available missions
   goal:   "<the user's ask, restated as the mission's job>",
   inputs: { /* optional structured context */ },
@@ -147,8 +148,16 @@ session:spawn_mission({
 })
 ```
 
-The runtime returns `{ session_id, mission_id, status: "running",
-depth }`.
+`name` is a short kebab-case identifier (`[a-z0-9-]{2,32}`) you
+pick from the user's ask (2-4 words). The runtime sanitises and
+auto-suffixes on collision with a live sibling; the resolved name
+comes back in the response. Use it in subsequent
+addressing calls (`notify_subagent`, `subagent_cancel`,
+`subagent_runs`) where it reads more naturally than the
+session_id.
+
+The runtime returns `{ session_id, name, mission_id,
+status: "running", depth }`.
 
 ### Announce-on-spawn (mandatory after async spawn)
 
@@ -189,10 +198,14 @@ through `session:notify_subagent`:
 
 ```
 session:notify_subagent({
-  subagent_id: "<id of the in-flight mission>",
+  subagent_id: "<name OR session_id of the in-flight mission>",
   content:     "<translated directive>"
 })
 ```
+
+`subagent_id` accepts either the name you chose at spawn or the
+session_id returned by `spawn_mission`. Names read more
+naturally across turns.
 
 **Translate, don't quote.** The mission was started with its own
 goal; the user's follow-up needs to be reshaped as an instruction

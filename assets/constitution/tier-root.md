@@ -45,12 +45,22 @@ sub-tasks — call:
 
 ```
 session:spawn_mission({
+  name:  "<short-kebab-case-id>",     // REQUIRED — addressable handle
   skill: "<dispatcher skill>",        // from ## Available missions
   goal:  "<the user's ask, restated as the mission's job>",
   inputs: { /* optional structured context */ },
   wait:   "async"
 })
 ```
+
+`name` is a short kebab-case identifier (`[a-z0-9-]{2,32}`) you
+choose so you and the user can refer to this mission later —
+derive it from the user's ask (2-4 words, no quoting). The runtime
+sanitises and auto-suffixes on collision with a live sibling, so
+pick something memorable; the resolved name comes back in the
+spawn response. Use that name in subsequent
+`notify_subagent` / `subagent_cancel` / `subagent_runs` calls in
+place of the session_id when it reads more naturally.
 
 Pick the dispatcher skill whose Summary in `## Available missions`
 best matches the user's intent. Missions run **async** by default.
@@ -72,10 +82,14 @@ task. Route those follow-ups through:
 
 ```
 session:notify_subagent({
-  subagent_id: "<id of the in-flight mission>",
+  subagent_id: "<name OR session_id of the in-flight mission>",
   content:     "<translated directive>"
 })
 ```
+
+`subagent_id` accepts either the name you chose at spawn or the
+runtime-assigned session_id. The name reads more naturally when
+addressing across multiple turns.
 
 **Translate, don't quote.** The mission was started with its own
 goal; the user's follow-up must be reshaped into an instruction
