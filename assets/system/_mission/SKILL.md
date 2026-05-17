@@ -39,11 +39,10 @@ metadata:
     tier_compatibility: [mission]
     # Phase 4.2.3 — universal notepad categories advertised on
     # every mission regardless of dispatcher. Domain-specific
-    # tags (schema-finding, query-pattern, …) live on the
-    # dispatching skill (analyst, _general). Block A's renderer
-    # walks all loaded skills and de-dupes by name, so listing
-    # the conversation-level categories here keeps every mission
-    # consistent without each dispatcher repeating them.
+    # tags live on the dispatching skill itself. Block A's
+    # renderer walks all loaded skills and de-dupes by name, so
+    # listing the conversation-level categories here keeps every
+    # mission consistent without each dispatcher repeating them.
     mission:
       on_start:
         notepad:
@@ -115,10 +114,10 @@ Your job is **decomposition + synthesis**:
    snapshot** in your system prompt (the `## Notepad snapshot`
    section the runtime injects). Prior missions in this same
    conversation may have already surfaced what you need — a
-   schema-finding, a validated query-pattern, a user-preference.
-   If a snippet looks directly relevant, call `notepad:search`
-   for full content before spawning a worker to re-derive it.
-   Each saved worker is one less round of latency.
+   prior finding, a validated pattern, a user-preference. If a
+   snippet looks directly relevant, call `notepad:search` for
+   full content before spawning a worker to re-derive it. Each
+   saved worker is one less round of latency.
 2. Init the whiteboard so all workers share findings.
 3. For each wave:
    - Decide which workers run *in parallel*. Workers in the same
@@ -136,11 +135,11 @@ Your job is **decomposition + synthesis**:
 
 ## What this skill does NOT grant
 
-- Domain data tools (hugr-*, python-*, duckdb-*, bash-*) — not
+- Domain tools (any provider granted by a hub-tier skill) — not
   loadable at mission tier (`tier_forbidden`). Mission
-  coordinates; workers do data work. If you find yourself
-  wanting to query a database directly, spawn a worker with a
-  data-skill role instead.
+  coordinates; workers execute. If you find yourself wanting to
+  query a data source or run a shell command directly, spawn a
+  worker with the relevant role instead.
 - `session:spawn_mission` — only root delegates singularly. A
   mission spawning another mission would re-create the
   decisional shape we eliminate at the topology level.

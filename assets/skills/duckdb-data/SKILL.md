@@ -23,7 +23,7 @@ metadata:
     requires: [_system]
     autoload: false
     autoload_for: []
-    tier_compatibility: [mission, worker]
+    tier_compatibility: [root, mission, worker]
     sub_agents: []
     intents: [data_query, file_analysis, spatial_analysis]
 compatibility:
@@ -38,6 +38,17 @@ operator's `--init-sql`. The connection is born when the session opens and
 dies on close — no on-disk database file, no cross-session leakage. Spill
 files and secrets live under `${SESSION_DIR}/.duckdb/` and are reaped with
 the rest of the workspace.
+
+**Tier note** — loadable on three tiers:
+
+- **Root tier (chat)** — quick SQL on a workspace file you can answer in
+  one or two `execute_query` calls. Reply to the user with the result.
+  If the question expands into joins across several files or multi-step
+  reshaping, recognise it as batch and `session:spawn_mission(...)`.
+- **Worker tier** — run the standard workflow below inside your scoped
+  task; return a structured finding for your mission to read.
+- **Mission tier** — load for reference grounding (`skill:ref`); workers
+  execute the queries.
 
 > Adapted from upstream [`duckdb/duckdb-skills`](https://github.com/duckdb/duckdb-skills)
 > (MIT). Control flow rewritten from `Bash + duckdb` CLI to

@@ -25,14 +25,12 @@ metadata:
     requires: []
     autoload: false
     autoload_for: []
-    # Mission may load this skill for read-only reference grounding
-    # (skill:files / skill:ref) before fan-out; workers load it to
-    # execute real queries. Root has no path to load it — the
-    # tier_forbidden envelope on skill:load steers root back to
-    # session:spawn_mission. Phase 4.2.2 §3 narrow. Stays [mission,
-    # worker] (not pure [worker]) until mission no longer needs to
-    # ground worker tasks in schema docs — η or later.
-    tier_compatibility: [mission, worker]
+    # Root loads this skill when the user asks a data question that
+    # is short enough to answer in chat (a count, a single value, a
+    # quick listing). Mission loads it for read-only reference
+    # grounding (skill:files / skill:ref) before fan-out; workers
+    # load it to execute real queries inside a mission.
+    tier_compatibility: [root, mission, worker]
     sub_agents: []
     memory:
       categories:
@@ -141,9 +139,20 @@ references.
 
 ## Per-turn query workflow — read your tier first
 
-**Tier note** — this skill loads at two tiers with very different
+**Tier note** — this skill loads at three tiers with very different
 intent:
 
+- **Root tier (chat)** — you loaded `hugr-data` to answer a
+  short data question directly in chat (a count, a single value,
+  a quick listing, a schema lookup). Run discovery / schema /
+  data tools yourself and reply to the user. Keep the sequence
+  tight: ~3 tool calls is the target for one quick question
+  (search_modules → search_module_data_objects → small data call,
+  or schema lookup → inline result). If the answer needs heavy
+  exploration, multi-step aggregation, or a structured artifact,
+  recognise it as batch-shaped and call
+  `session:spawn_mission(skill: <analyst-like dispatcher>, ...)`
+  instead.
 - **Mission tier** — you loaded `hugr-data` for *reference
   grounding* (`skill:files` / `skill:ref`) so your worker task
   strings can name real modules, types, fields, and filter

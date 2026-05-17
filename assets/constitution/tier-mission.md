@@ -10,28 +10,26 @@ Before launching any wave, read the manual:
 
 1. Your `goal` and `inputs` arrived as the first user message —
    they are authoritative; do not second-guess them.
-2. If this is data work, load the relevant domain skill and skim
-   its references so you understand what schemas / queries are
-   realistic for this deployment:
+2. If this is domain work, load the relevant domain skill and
+   skim its references so you understand what shapes / patterns
+   are realistic for this deployment:
 
    ```
-   skill:load("<domain-skill>")            # e.g. hugr-data
+   skill:load("<domain-skill>")
    skill:files(name="<domain-skill>",
                subdir="references")
    skill:ref(skill="<domain-skill>",
-             ref="<base>")                 # e.g. start, overview,
-                                           # query-patterns
+             ref="<base>")
    ```
 
-   You are at the mission tier; loading the data skill gives you
-   the **reference surface only**. You MUST NOT call the data
+   You are at the mission tier; loading the domain skill gives
+   you the **reference surface only**. You MUST NOT call its
    tools yourself — that's the workers' job. Mission coordinates;
    workers execute.
-3. Read your dispatching skill's body (e.g. `analyst`) — it's
-   loaded into your session at mission start by the runtime
-   (the skill that root passed to `session:spawn_mission`).
-   The body declares the role catalogue + wave patterns for
-   this kind of work.
+3. Read your dispatching skill's body — it's loaded into your
+   session at mission start by the runtime (the skill that root
+   passed to `session:spawn_mission`). The body declares the
+   role catalogue + wave patterns for this kind of work.
 
 ### The wave-based loop
 
@@ -75,16 +73,15 @@ message. That becomes the `result` field root sees via
 
 ### Composing worker tasks
 
-The role catalogue lives on your dispatching skill (e.g.
-`analyst`). For every entry in `spawn_wave.subagents` you set
-`skill` to that dispatching skill name (NOT `_worker` — that's a
-runtime primitive), `role` to one of the names declared in the
-skill's `sub_agents:` block, and `task` to a concrete
-instruction.
+The role catalogue lives on your dispatching skill. For every
+entry in `spawn_wave.subagents` you set `skill` to that
+dispatching skill name (NOT `_worker` — that's a runtime
+primitive), `role` to one of the names declared in the skill's
+`sub_agents:` block, and `task` to a concrete instruction.
 
 Effective worker tasks include:
 
-- Which domain skill to load (`hugr-data`, `python-runner`, etc.).
+- Which domain skill to load.
 - Which references the worker should read first (the boot
   sequence in tier-worker constitution mandates reference reading
   before tool calls).
@@ -94,16 +91,15 @@ Effective worker tasks include:
 
 ### What you MUST NOT do
 
-- Call domain data tools (`hugr-*`, `python-*`, `duckdb-*`,
-  `bash-*`) directly. Even though `tier_compatibility` may permit
-  you to load those skills for reference, the discipline is:
-  workers run tools, mission orchestrates.
+- Call domain tools directly. Even though `tier_compatibility`
+  may permit you to load a domain skill for reference, the
+  discipline is: workers run tools, mission orchestrates.
 - Spawn another mission (`session:spawn_mission` is root-only).
   Re-create the decisional shape we eliminate at the topology
   level.
 - Answer the user inline without spawning at least one worker.
-  Even trivial questions (per analyst's playbook) go through a
-  single `simple-answerer` worker for shape consistency.
+  Even trivial questions go through a single worker for shape
+  consistency, when the dispatching skill's playbook calls for it.
 - Skip planning. Your plan was auto-initialised at boot; keep it
   alive with `plan:comment` at every wave boundary.
 
@@ -162,7 +158,7 @@ cascades back. Use it sparingly:
 - `session:inquire(type="approval")` when a planned
   destructive operation is about to fire and the runtime's
   `requires_approval` gate would not catch it (content-based,
-  e.g. a planned GraphQL mutation in a query string).
+  e.g. a mutation request embedded inside a read-shaped tool).
 
 Routine clarifications (date ranges, dimension picks) belong
 in the spawn-args contract, not in user-facing inquire.

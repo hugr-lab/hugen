@@ -107,10 +107,9 @@ shell tools and file tools see exactly the same paths.
 - `skill:ref` — read a reference document that ships with a
   loaded skill (`references/<name>.md`).
 - `skill:files` — list the on-disk files of a loaded skill with
-  relative + absolute paths so other tools (`bash.read_file`,
-  `python-mcp:run_script`, `duckdb-mcp:execute_query`) can address
-  them directly. Optional `subdir` / `glob` filters narrow the
-  listing.
+  relative + absolute paths so other tools (file-readers, script
+  runners, query engines) can address them directly. Optional
+  `subdir` / `glob` filters narrow the listing.
 - `policy:save` / `policy:revoke` — persist or remove a personal
   Tier-3 tool policy ("always allow" / "always deny") for the
   caller. Args: `tool_name` (`<provider>:<field>`, glob `*`

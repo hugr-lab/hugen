@@ -36,10 +36,9 @@ metadata:
     # Phase 4.2.3 ε — worker close turn. Same shape as the
     # mission tier (default prompt + [notepad:append] surface
     # + 2-iter cap), but the per-role on_close on the
-    # dispatching skill (analyst's schema-explorer /
-    # query-builder / data-analyst) generally provides a more
-    # specific prompt. Skip the close turn for idle workers
-    # (simple-answerer that returned text without tools).
+    # dispatching skill generally provides a more specific
+    # prompt. Skip the close turn for idle workers that
+    # returned text without tools.
     mission:
       on_close:
         notepad:
@@ -71,9 +70,8 @@ The autoloaded surface is minimal:
 ## Doing your task — read the manual first
 
 Your mission passed you a `task` (the user message you boot with)
-and validated `inputs`. Domain skills (`hugr-data`,
-`python-runner`, `duckdb-data`, `duckdb-docs`) are NOT autoloaded
-into worker sessions — you load them on demand.
+and validated `inputs`. Domain skills are NOT autoloaded into
+worker sessions — you load them on demand from the catalogue.
 
 **Mandatory boot sequence for any task that needs a domain skill:**
 
@@ -95,15 +93,13 @@ into worker sessions — you load them on demand.
    syntax cheatsheets, gotchas) curated by humans for the model.
 
 3. **`skill:ref(skill="<skill-name>", ref="<base-name>")`** — read
-   the reference relevant to your task BEFORE any data tool call.
-   For example, for `hugr-data` work, the typical first reads are
-   `start`, `overview`, and `query-patterns` (or
-   `queries-deep-dive` for complex GraphQL). Do NOT compose
-   queries from memory — the runtime's GraphQL flavour has
-   skill-specific syntax the reference covers.
+   the reference relevant to your task BEFORE any domain tool
+   call. Each skill ships its own reference catalogue; what to
+   read first is covered in the skill's body. Do NOT compose
+   calls from memory — domain-specific syntax and gotchas live
+   in the references.
 
-4. Now make your domain calls (`hugr-main:*`, `python-mcp:*`,
-   `duckdb-mcp:*`). Use what the reference taught you.
+4. Now make your domain calls. Use what the reference taught you.
 
 Skipping the reference-read step is the single biggest cause of
 malformed queries on weak models. Read the manual first, then act.

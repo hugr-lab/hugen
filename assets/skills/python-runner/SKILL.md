@@ -23,7 +23,7 @@ metadata:
     requires: []
     autoload: false
     autoload_for: []
-    tier_compatibility: [mission, worker]
+    tier_compatibility: [root, mission, worker]
     sub_agents: []
 compatibility:
   model: any
@@ -36,6 +36,17 @@ Per-session Python virtualenv with the data-stack pre-installed. The venv
 materialises lazily from an operator-built template at first call — no
 per-session network, no per-call install. Each session has its own copy and
 its own working directory under `${SESSION_DIR}` that bash-mcp shares.
+
+**Tier note** — loadable on three tiers:
+
+- **Root tier (chat)** — a one-off transform, a small chart, a short
+  numeric computation the user asked for inline. Run the snippet and
+  reply to the user with the path / summary. For multi-stage pipelines,
+  full HTML / PDF reports, or anything that decomposes into several
+  worker tasks, `session:spawn_mission(...)` instead.
+- **Worker tier** — standard usage. Read the relevant reference, compose
+  the script, run it, return a structured finding to your mission.
+- **Mission tier** — load for reference grounding only; workers execute.
 
 ## Two tools
 
