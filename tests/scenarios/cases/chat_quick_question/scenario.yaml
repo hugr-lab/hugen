@@ -1,0 +1,107 @@
+# chat_quick_question — phase 5.2 root-as-chat acceptance.
+#
+# Single-step quick data question. Under the rewritten _root
+# constitution root IS the chat agent: it loads the relevant
+# data skill on demand and answers the user directly without
+# spawning a mission. The user-visible payoff is "one count in
+# ~3 LLM turns end-to-end" — the load-bearing pre-5.2 pain.
+#
+# By-eye assertions:
+#
+#   1. Root's tool_calls contains skill:load("hugr-data") and
+#      at least one data-tool call (hugr-main:* / hugr-query:* /
+#      similar) that produced an answer for the user. Root does
+#      NOT call session:spawn_mission — this is the chat path,
+#      not the batch path.
+#
+#   2. No mission session exists — sessions.parent_session_id =
+#      root has zero rows.
+#
+#   3. Root's last agent_message is the final answer and
+#      contains a number (the count). Body shape is
+#      conversational, not a report-style multi-section dump.
+#
+#   4. Total LLM turn count for root ≤ 4 (the η pass criterion
+#      from the phase-5.2-root-as-chat spec). Counted via
+#      session_events of event_type = "model_turn" /
+#      "agent_message" depending on what the runtime records;
+#      the by-eye reviewer can tally agent_message rows as a
+#      lower bound.
+#
+# requires: [hugr] — needs a live data source the model can
+# count rows in.
+name: chat_quick_question
+requires: [hugr]
+
+steps:
+  - say: |
+      How many rows are in the `orders` table of the
+      `northwind` data source? Just the number is fine.
+    # Chat-path target is ~3 turns end-to-end. Budget covers
+    # weak-model latency (gemma 26B ~50s/turn × 4-5 turns) with
+    # margin for an exploratory skill:load + one query iteration.
+    budget: 300s
+    wait_for_subagents: 60s
+
+    queries:
+      # Root's tool sequence. Expect:
+      #  - exactly zero session:spawn_mission rows
+      #  - one or more skill:load rows (loading hugr-data)
+      #  - one or more hugr-main / hugr-query data tool rows
+      #  - no bash-mcp:* (chat questions are model-direct, not
+      #    shell scripted)
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Mission rows under root — must be zero (chat path, no
+      # delegation). A non-empty result here is the primary
+      # regression signal: root fell back to batch dispatch on
+      # a question it should have answered directly.
+      - name: missions_under_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Root's final agent_message — the user-visible answer.
+      # By-eye check: contains a number, ≤ ~3 short paragraphs.
+      - name: root_final_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 3
+              ) { seq content created_at }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Turn count on root. Reviewer tallies agent_message rows
+      # as a lower bound for "LLM turns". Pass criterion: ≤ 4.
+      - name: root_turn_count
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq created_at }
+            }}}
+          }
+        vars: { sid: "$sid" }

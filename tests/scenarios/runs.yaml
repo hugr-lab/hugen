@@ -36,6 +36,12 @@ runs:
       - skill_save_bundle
       - skill_save_overwrite_collision
       - skill_discovery_via_catalog
+      # Phase 5.2 ζ — root-as-chat. Quick data Q&A via root
+      # directly (no mission); anaphoric follow-up; batch ask
+      # spawns analyst with required `name` arg.
+      - chat_quick_question
+      - chat_followup_continuity
+      - chat_spawns_mission_for_report
 
   - name: gemini-pro
     llm: configs/llm-gemini-pro.yaml
@@ -69,6 +75,12 @@ runs:
       - skill_save_bundle
       - skill_save_overwrite_collision
       - skill_discovery_via_catalog
+      # Phase 5.2 ζ — root-as-chat. Quick data Q&A via root
+      # directly (no mission); anaphoric follow-up; batch ask
+      # spawns analyst with required `name` arg.
+      - chat_quick_question
+      - chat_followup_continuity
+      - chat_spawns_mission_for_report
       # Retired in δ.B (legacy 2-tier patterns):
       # - three_parallel             — superseded by whiteboard_fanout3
       # - plan_root_solo             — root no longer owns plan:set/clear
@@ -127,3 +139,10 @@ runs:
       # two-missions-in-one-turn fan-out.
       - async_default_with_announce
       - parallel_async_missions
+      # Phase 5.2 ζ — root-as-chat. Quick data Q&A via root
+      # directly (no mission); anaphoric follow-up; batch ask
+      # spawns analyst with required `name` arg. Primary η
+      # validation gate on the weak-model run.
+      - chat_quick_question
+      - chat_followup_continuity
+      - chat_spawns_mission_for_report

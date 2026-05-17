@@ -1,0 +1,161 @@
+# chat_followup_continuity — phase 5.2 root-as-chat acceptance.
+#
+# Two sequential conversational turns inside one root session.
+# Step 1 asks for a schema lookup; root answers directly via
+# hugr-data. Step 2 is an anaphoric follow-up ("now count the
+# rows in it") that depends on what was just discussed; root
+# answers directly again, reusing the discovery from step 1
+# WITHOUT re-running schema introspection.
+#
+# By-eye assertions:
+#
+#   1. Step 1 — root's tool_calls includes skill:load("hugr-data")
+#      and ≥1 hugr-data tool call (hugr-main:* / hugr-query:* /
+#      discovery-* / similar). Zero session:spawn_mission rows.
+#
+#   2. Step 2 — root's tool_calls in the step-2 window contains:
+#       - zero session:spawn_mission rows (still chat path), and
+#       - either NO additional skill:load("hugr-data") (already
+#         loaded for the root session) OR exactly one
+#         redundant-but-cheap re-load that doesn't fan out into
+#         a second discovery walk.
+#      The key negative assertion: step 2 does NOT re-run the
+#      schema-discovery tools that already ran in step 1.
+#
+#   3. No mission sessions exist under root at any point —
+#      both turns are pure chat-path.
+#
+#   4. Root's final agent_message after step 2 contains a number
+#      (the count) AND references the entity discovered in step
+#      1 — proving the conversational context carried over
+#      between turns (in-session history + optional notepad).
+#
+# requires: [hugr] — uses live northwind for both steps.
+name: chat_followup_continuity
+requires: [hugr]
+
+steps:
+  # ─────────────────── Step 1 — schema discovery via chat ───────────────────
+  - say: |
+      What tables are in the `northwind` data source? Give me
+      a short list — names only, no descriptions.
+    # Root → skill:load(hugr-data) → discovery-* → final answer.
+    # ~3-5 turns × 30-50s on weak models.
+    budget: 360s
+    wait_for_subagents: 60s
+
+    queries:
+      # Root tool_calls for step 1. Expect skill:load("hugr-data")
+      # plus at least one discovery / data tool. Zero
+      # session:spawn_mission rows.
+      - name: tool_calls_root_step1
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Mission rows must stay empty after step 1.
+      - name: missions_under_root_step1
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Root agent_message after step 1 — names some tables. The
+      # step-2 anaphoric "it" depends on this answer existing.
+      - name: root_message_step1
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 3
+              ) { seq content created_at }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+  # ────────────────── Step 2 — anaphoric follow-up via chat ─────────────────
+  - say: |
+      Pick the one that sounds most like a transactional fact
+      table and give me its row count. Don't re-explore the
+      schema — use what you already have.
+    # Root reads its own history for the table name; one
+    # hugr-data query for the count; one final agent_message.
+    # ~3 turns × 30-50s.
+    budget: 300s
+    wait_for_subagents: 60s
+
+    queries:
+      # Root tool_calls — the cumulative list across both steps.
+      # By-eye reviewer compares against the step-1 snapshot to
+      # see which tools were added in step 2; the assertion is
+      # "no new spawn_mission, no second wave of discovery".
+      - name: tool_calls_root_step2
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Still zero mission rows after step 2.
+      - name: missions_under_root_step2
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Root's final answer — contains a number AND references
+      # the table named in step 1.
+      - name: root_final_message_step2
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 3
+              ) { seq content created_at }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Optional cross-check: any notepad writes the runtime
+      # produced (root has notepad:append per the rewritten
+      # tool surface). Empty is fine — the in-session history
+      # already covers anaphora — but a populated row is also
+      # a valid continuity mechanism. Reviewer reads either as
+      # pass.
+      - name: notes_under_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_notes(
+                filter: {session_id: {eq: $sid}}
+                order_by: [{field: "created_at", direction: ASC}]
+              ) { id author_session_id author_role category content created_at }
+            }}}
+          }
+        vars: { sid: "$sid" }
