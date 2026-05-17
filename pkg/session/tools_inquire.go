@@ -119,7 +119,6 @@ func (s *Session) callInquire(ctx context.Context, args json.RawMessage) (json.R
 		StartedAt: startedAt,
 	}
 	respCh := s.recordPending(requestID, ref)
-	defer s.clearPending(requestID)
 
 	// Register the active tool feed so an InquiryResponse arriving
 	// at the caller's hop matches by RequestID and delivers to
@@ -159,7 +158,18 @@ func (s *Session) callInquire(ctx context.Context, args json.RawMessage) (json.R
 		BlockingReason: "tool=inquire type=" + in.Type,
 	}
 	release := s.registerToolFeed(ctx, feed)
-	defer release()
+	// clearPending MUST run before release(): release() invokes
+	// markStatus(active) which emits a SessionStatus carrying
+	// populateStatusSnapshot's view of s.inquiry.pending. If the
+	// pending map still has our entry at that moment, the status
+	// frame ships with PendingInquiry=<ref>, and downstream
+	// observers (liveview) keep the stale ref forever — there is
+	// no later emit that would carry PendingInquiry=nil. Order
+	// matters: clear first, then release.
+	defer func() {
+		s.clearPending(requestID)
+		release()
+	}()
 
 	// Emit the InquiryRequest on the caller's outbox. emit
 	// persists in session_events AND fans out to subscribers of

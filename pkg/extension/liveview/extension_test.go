@@ -90,6 +90,88 @@ func TestExtension_OnFrameEmit_ForceEmitOnInquiry(t *testing.T) {
 	}
 }
 
+// TestExtension_OnFrameEmit_SessionStatusClearsPendingInquiry guards
+// the regression observed on 022-root-as-chat: when the inquire
+// resolution path runs (root self-inquire OR a child's bubbled
+// inquiry cascading back down), the session emits a SessionStatus
+// frame with PendingInquiry=nil to mark the wait_* → active
+// transition. The fold path MUST clear v.pendingInquiry on that
+// frame; pre-fix it left the ref dangling forever and the sidebar
+// badge stayed lit even after the model resumed and the turn ended.
+func TestExtension_OnFrameEmit_SessionStatusClearsPendingInquiry(t *testing.T) {
+	ext := New(nil)
+	state := fixture.NewTestSessionState("ses-clear-pending")
+	if err := ext.InitState(context.Background(), state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	defer ext.CloseSession(context.Background(), state)
+
+	if v := fromState(state); v != nil {
+		v.debounce = 50 * time.Millisecond
+	}
+
+	// Seed v.pendingInquiry via the eager InquiryRequest path
+	// (mirrors what root sees when it emits its own inquire request,
+	// or when the pump bubbles a child's request up to its outbox).
+	req := protocol.NewInquiryRequest("ses-clear-pending", protocol.ParticipantInfo{},
+		protocol.InquiryRequestPayload{
+			RequestID: "req-clear",
+			Type:      protocol.InquiryTypeApproval,
+			Question:  "Run?",
+		})
+	ext.OnFrameEmit(context.Background(), state, req)
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(state.Emitted()) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	first := state.Emitted()
+	if len(first) == 0 {
+		t.Fatal("no liveview frame after InquiryRequest")
+	}
+	var body1 map[string]any
+	_ = json.Unmarshal(first[len(first)-1].(*protocol.ExtensionFrame).Payload.Data, &body1)
+	if body1["pending_inquiry"] == nil {
+		t.Fatal("pending_inquiry missing after InquiryRequest emit")
+	}
+
+	// Drive the wait_approval → active transition. This is the
+	// frame the session emits via markStatus(active) inside the
+	// inquire tool's defer-release. With the tools_inquire defer
+	// reorder, populateStatusSnapshot now sees an empty pending
+	// map and ships PendingInquiry=nil here.
+	statusFrame := protocol.NewSessionStatus("ses-clear-pending", protocol.ParticipantInfo{},
+		protocol.SessionStatusActive, "tool=inquire released")
+	ext.OnFrameEmit(context.Background(), state, statusFrame)
+
+	// Lifecycle change (wait_approval implicit → active) plus
+	// pendingInquiry reconcile both force-emit; poll until we see
+	// the post-status frame land.
+	prevLen := len(first)
+	deadline = time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(state.Emitted()) > prevLen {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	after := state.Emitted()
+	if len(after) <= prevLen {
+		t.Fatal("no liveview frame after SessionStatus(active)")
+	}
+	last := after[len(after)-1].(*protocol.ExtensionFrame)
+	var body2 map[string]any
+	if err := json.Unmarshal(last.Payload.Data, &body2); err != nil {
+		t.Fatalf("payload unmarshal: %v", err)
+	}
+	if got, present := body2["pending_inquiry"]; present && got != nil {
+		t.Errorf("pending_inquiry should be cleared after SessionStatus(active), got %v", got)
+	}
+}
+
 // TestExtension_OnFrameEmit_NoEmitOnTrivialFrame verifies a
 // non-lifecycle frame (e.g. a SystemMarker) does NOT trigger an
 // immediate emit. With the debounce window still open, the test
