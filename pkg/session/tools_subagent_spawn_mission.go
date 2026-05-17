@@ -188,6 +188,12 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 
 	// Tier-default + per-role intent override on the spawned mission.
 	parent.applyChildIntent(ctx, child, skillName, in.Role)
+	// Per-role spawn appliers (autoload_skills, …) on the new
+	// session BEFORE the task UserMessage. Missions usually
+	// don't declare autoload (the dispatching skill is itself
+	// the mission's surface), but the hook is symmetric so a
+	// mission role CAN opt in if needed.
+	parent.applyChildSpawnAppliers(ctx, child, skillName, in.Role)
 
 	// Tag the child's terminal SubagentResult with the projection
 	// hint the parent's pump will copy into the payload. Async +

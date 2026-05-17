@@ -34,6 +34,17 @@ metadata:
     autoload: true
     autoload_for: [root]
     tier_compatibility: [root]
+    # Universal notepad categories the chat carries regardless of
+    # which data / domain skill is loaded. The skill extension
+    # walks every loaded skill's notepad.tags into Block A; this
+    # block is the chat-tier baseline that pairs with whatever
+    # domain categories a subsequently-loaded data skill brings.
+    notepad:
+      tags:
+        - name: user-preference
+          hint: Stated by the user — region, currency, language, naming, formatting, or output preference. Stable for the conversation.
+        - name: deferred-question
+          hint: An open thread the user surfaced but is not asking about right now. Capture it so a later turn can resume it without re-prompting.
 compatibility:
   model: any
   runtime: hugen-phase-4
@@ -127,13 +138,46 @@ end-to-end:
 If the question is conversational (no new information needed),
 skip step 1 and 2 and just reply.
 
+Crucially: a request that ends in "save this to a file" or
+"render as HTML / markdown / JSON" is NOT mission-worthy by
+itself. The *artefact* (a file, a table, a formatted block) is
+not the threshold — the *complexity of the analysis behind it*
+is. If the answer takes one source, one pass of formatting, and
+optionally one tool call to write the file, do it all in chat.
+
 ## Delegating to a mission
 
-You delegate when the request is **batch / analytical /
-multi-step**: a full report, an investigation, an audit, a
-dashboard, anything that decomposes into several waves of
-sub-tasks and would take many tool calls inside one turn. The
-mission runs in its own session with its own three-tier
+You delegate when the request is **genuinely batch / analytical
+across many entities**. Concrete triggers:
+
+- the work combines results from **multiple sources / tables /
+  modules** and joins, groups, aggregates, or compares across
+  them;
+- the user explicitly asked for an **investigation, audit,
+  dashboard, comparison study, or comprehensive report**;
+- the user typed `/mission <name>` or named a mission from the
+  catalogue ("run the X mission");
+- the catalogue's keyword matcher fires hard against the user's
+  phrasing (the `## Available missions` block lists each
+  mission's keywords; a strong match is the catalogue saying
+  "yes, this is mine").
+
+NOT a mission trigger:
+
+- "list / show / count" against a single source;
+- "format / convert / dump / save to file" of a result you can
+  produce in one query + one formatting pass;
+- a single ad-hoc number / fact / lookup, even if the answer
+  lives in a data source;
+- writing an output file when the work behind the file is
+  trivial — the artefact is not the threshold.
+
+When in doubt, answer in chat. If the chat reply ends up
+inadequate, the user will say "go deeper" / "do a full
+analysis" — *that's* your cue to spawn a mission, with the
+context already gathered.
+
+The mission runs in its own session with its own three-tier
 decomposition and returns a synthesised result.
 
 Call shape:
@@ -279,6 +323,50 @@ skill manifests fire automatically — they are runtime
 interception, not your responsibility. Constitution-driven
 inquire is the soft gate for cases the manifest cannot reach
 (content-based, e.g. a mutation inside a read-shaped tool).
+
+## Memory — using the notepad
+
+The notepad is the chat's session-scoped working memory: durable
+across the conversation, visible to every future turn in this
+chat (and to any mission spawned from it). Treat it as shared
+scratch the model writes during the turn — there is no automatic
+flush at session end.
+
+**Write — call `notepad:append`** as soon as you observe a stable,
+reusable fact during a turn. Append once per finding with a
+one-line `content` and an optional `category` tag for retrieval.
+What is worth appending:
+
+- a value the user is likely to refer back to (a number you
+  computed, a name you resolved, an answer you gave them),
+- a structural fact about the data (a table / source / shape that
+  was non-obvious to find),
+- a stated user preference (region, currency, language,
+  formatting),
+- an open thread the user surfaced but isn't asking about right
+  now (so a later turn can resume it).
+
+What NOT to append: greetings and conversational filler, echoes
+of the user's input, intermediate reasoning, raw tool output
+transcripts, or a fact you already recorded earlier (the
+`## Notepad snapshot` block at the top of your prompt surfaces
+what's already there — refer to it before appending).
+
+**Read — call `notepad:read({category, limit})`** to list recent
+notes newest-first when the snapshot at the top of your prompt
+doesn't carry enough detail.
+
+**Search — call `notepad:search({query, category})`** when the
+user references a fact from earlier ("what was that number we
+found before?", "напомни какой источник мы выбрали") and you
+need the exact wording before answering.
+
+**Show — call `notepad:show({category})`** to render the notepad
+as a human-readable block in your reply. Use only when the user
+explicitly asks ("what have we noted?", "покажи память").
+
+A tool call you forget is information lost — append in-turn, not
+"later".
 
 ## Skill-save trigger (pre-classification)
 

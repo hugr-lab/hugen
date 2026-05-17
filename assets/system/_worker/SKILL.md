@@ -70,10 +70,16 @@ The autoloaded surface is minimal:
 ## Doing your task — read the manual first
 
 Your mission passed you a `task` (the user message you boot with)
-and validated `inputs`. Domain skills are NOT autoloaded into
-worker sessions — you load them on demand from the catalogue.
+and validated `inputs`.
 
-**Mandatory boot sequence for any task that needs a domain skill:**
+Your role may declare `autoload_skills` in its manifest entry. If
+so, those skills are already loaded by the runtime BEFORE your
+first turn — you'll see them in the `## Loaded skills` block of
+your system prompt. In that case, skip step 1 below; the surface
+is ready. Skills not in that block must still be loaded on
+demand.
+
+**Boot sequence for any task that needs a domain skill:**
 
 0. **`notepad:search(query=<key concept from your task>)`** — if
    your task references a concept the conversation has been
@@ -84,8 +90,10 @@ worker sessions — you load them on demand from the catalogue.
    ground.
 
 1. **`skill:load("<skill-name>")`** — pulls the skill's tool surface
-   into your session. Once loaded, the tools appear in your next
-   turn's snapshot.
+   into your session. SKIP this step for any skill already listed
+   in `## Loaded skills` (your role pre-declared it via
+   `autoload_skills`); calling load on an already-loaded skill is
+   a wasted turn.
 
 2. **`skill:files(name="<skill-name>", subdir="references")`** —
    list the reference documents the skill ships. Each domain skill

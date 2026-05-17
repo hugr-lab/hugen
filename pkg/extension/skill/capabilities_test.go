@@ -293,34 +293,32 @@ body
 	}
 }
 
-// TestAdvertiseSystemPrompt_NotepadTagsBlockA verifies the phase
-// 4.2.3 Block A section ("## Notepad — recommended tags") appears
-// when a mission-enabled skill with on_start.notepad.tags is
-// loaded into the session.
+// TestAdvertiseSystemPrompt_NotepadTagsBlockA verifies the Block
+// A section ("## Notepad — recommended tags") appears when a
+// loaded skill declares top-level metadata.hugen.notepad.tags.
 func TestAdvertiseSystemPrompt_NotepadTagsBlockA(t *testing.T) {
 	ctx := context.Background()
-	missionWithTags := `---
+	skillWithTags := `---
 name: analyst
 description: data analysis skill.
 metadata:
   hugen:
     tier_compatibility: [mission]
+    notepad:
+      tags:
+        - name: schema-finding
+          hint: Discovered table structures or field semantics.
+        - name: data-quality-issue
+          hint: Anomalies, nulls, suspicious cardinalities.
+        - name: deferred-question
     mission:
       enabled: true
       summary: Data analysis, queries, reports.
-      on_start:
-        notepad:
-          tags:
-            - name: schema-finding
-              hint: Discovered table structures or field semantics.
-            - name: data-quality-issue
-              hint: Anomalies, nulls, suspicious cardinalities.
-            - name: deferred-question
 ---
 body
 `
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
-		"analyst": []byte(missionWithTags),
+		"analyst": []byte(skillWithTags),
 	}})
 	mgr := skillpkg.NewSkillManager(store, nil)
 	ext := NewExtension(mgr, nil, "a1")
@@ -335,7 +333,7 @@ body
 
 	out := ext.AdvertiseSystemPrompt(ctx, missState)
 	for _, want := range []string{
-		"## Notepad — recommended tags for this mission",
+		"## Notepad — recommended tags",
 		"`schema-finding`",
 		"Discovered table structures",
 		"`data-quality-issue`",
@@ -772,6 +770,109 @@ func writeBundledSkill(t *testing.T, name, manifest string, files map[string][]b
 	root := t.TempDir()
 	writeBundledSkillInto(t, root, name, manifest, files)
 	return root
+}
+
+// TestApplyOnSubagentSpawn_AutoloadSkills covers the role-declared
+// autoload path: when a worker is spawned with role R declaring
+// `autoload_skills: [target]`, the SubagentSpawnApplier loads
+// `target` on the child's SessionSkill BEFORE the worker's first
+// turn — no in-band `skill:load(...)` ritual needed.
+func TestApplyOnSubagentSpawn_AutoloadSkills(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+
+	// Dispatching skill with one role that pre-declares autoload.
+	writeBundledSkillInto(t, root, "host", `---
+name: host
+description: dispatching skill with one autoloading role.
+license: MIT
+metadata:
+  hugen:
+    tier_compatibility: [mission]
+    sub_agents:
+      - name: worker-a
+        description: worker that needs target pre-loaded.
+        autoload_skills: [target]
+---
+`, nil)
+
+	// The autoload target — worker-loadable.
+	writeBundledSkillInto(t, root, "target", `---
+name: target
+description: provider the autoloading role needs.
+license: MIT
+metadata:
+  hugen:
+    tier_compatibility: [worker]
+---
+`, nil)
+
+	store := skillpkg.NewSkillStore(skillpkg.Options{LocalRoot: root})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "agent-autoload")
+
+	// Child session as the worker. Depth 2 → worker tier.
+	child := fixture.NewTestSessionState("ses-child").WithDepth(2)
+	if err := ext.InitState(ctx, child); err != nil {
+		t.Fatalf("InitState child: %v", err)
+	}
+
+	// Sanity: target is NOT loaded yet (tier autoload only pulls
+	// skills opting into `autoload_for`).
+	if names := FromState(child).LoadedNames(ctx); contains(names, "target") {
+		t.Fatalf("precondition: target should not be loaded yet, got %v", names)
+	}
+
+	// Invoke the applier as the runtime would post-Spawn.
+	if err := ext.ApplyOnSubagentSpawn(ctx, child, "host", "worker-a"); err != nil {
+		t.Fatalf("ApplyOnSubagentSpawn: %v", err)
+	}
+
+	// target should now be in the child's loaded set.
+	if names := FromState(child).LoadedNames(ctx); !contains(names, "target") {
+		t.Errorf("ApplyOnSubagentSpawn did not load 'target'; loaded=%v", names)
+	}
+}
+
+// TestApplyOnSubagentSpawn_NoOpWhenRoleEmpty — empty role / skill /
+// missing autoload list short-circuits without touching the child.
+func TestApplyOnSubagentSpawn_NoOpWhenRoleEmpty(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeBundledSkillInto(t, root, "host", `---
+name: host
+description: dispatching skill, role declares no autoload.
+license: MIT
+metadata:
+  hugen:
+    tier_compatibility: [mission]
+    sub_agents:
+      - name: worker-a
+        description: vanilla worker.
+---
+`, nil)
+	store := skillpkg.NewSkillStore(skillpkg.Options{LocalRoot: root})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "agent-noop")
+	child := fixture.NewTestSessionState("ses-noop").WithDepth(2)
+	if err := ext.InitState(ctx, child); err != nil {
+		t.Fatalf("InitState child: %v", err)
+	}
+	loadedBefore := append([]string(nil), FromState(child).LoadedNames(ctx)...)
+	if err := ext.ApplyOnSubagentSpawn(ctx, child, "host", "worker-a"); err != nil {
+		t.Errorf("unexpected error on no-op applier: %v", err)
+	}
+	loadedAfter := FromState(child).LoadedNames(ctx)
+	if len(loadedAfter) != len(loadedBefore) {
+		t.Errorf("loaded set mutated by no-op applier: before=%v after=%v", loadedBefore, loadedAfter)
+	}
+	// Unknown role / skill must also be silent no-ops.
+	if err := ext.ApplyOnSubagentSpawn(ctx, child, "host", "missing-role"); err != nil {
+		t.Errorf("unknown role should no-op, got: %v", err)
+	}
+	if err := ext.ApplyOnSubagentSpawn(ctx, child, "missing-skill", "worker-a"); err != nil {
+		t.Errorf("unknown skill should no-op, got: %v", err)
+	}
 }
 
 // writeBundledSkillInto writes a skill named `name` under root with

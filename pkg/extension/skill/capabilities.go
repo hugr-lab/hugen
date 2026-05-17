@@ -40,6 +40,7 @@ var (
 	_ extension.ToolPolicyAdvisor   = (*Extension)(nil)
 	_ extension.SubagentDescriber   = (*Extension)(nil)
 	_ extension.SubagentSpawnHinter = (*Extension)(nil)
+	_ extension.SubagentSpawnApplier = (*Extension)(nil)
 	_ extension.MissionDispatcher   = (*Extension)(nil)
 	_ extension.MissionStartLookup  = (*Extension)(nil)
 	_ extension.CloseTurnLookup     = (*Extension)(nil)
@@ -370,16 +371,19 @@ func renderAvailableMissions(ctx context.Context, renderer *prompts.Renderer, h 
 // header — there are no bundled files to list.
 // renderNotepadTagAdvice produces Block A — a "## Notepad —
 // recommended tags" prompt section listing the notepad categories
-// that any loaded skill advertises via
-// metadata.hugen.mission.on_start.notepad.tags. Phase 4.2.3 §5.
+// any loaded skill advertises via metadata.hugen.notepad.tags.
 //
-// Walks every loaded skill (no mission.enabled filter — universal
-// tags live on the autoloaded tier skill `_mission`, domain tags
-// live on the dispatcher like `analyst` / `_general`). De-dupes
-// tag names (first hint wins, sort order is name-stable so the
-// "first" is the alphabetically-first skill defining it), and
-// preserves declaration order within each contributing skill.
-// Empty when no loaded skill carries tag declarations.
+// Walks every loaded skill — categories vary with which skills
+// are currently loaded; each skill teaches the model what shape
+// of fact belongs in the notepad for that domain. Universal
+// chat / mission tags come from autoloaded system skills
+// (`_root`, `_mission`); domain tags come from extensions (e.g.
+// a data skill declaring `schema-finding`, `query-pattern`).
+// De-dupes tag names — first hint wins, sort order is name-
+// stable so the "first" is the alphabetically-first skill
+// defining it; declaration order within each contributing skill
+// is preserved. Empty when no loaded skill carries tag
+// declarations.
 func renderNotepadTagAdvice(renderer *prompts.Renderer, h *SessionSkill) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -399,7 +403,7 @@ func renderNotepadTagAdvice(renderer *prompts.Renderer, h *SessionSkill) string 
 	var order []tagItem
 	for _, n := range names {
 		sk := h.loaded[n]
-		for _, t := range sk.Manifest.Hugen.Mission.OnStart.Notepad.Tags {
+		for _, t := range sk.Manifest.Hugen.Notepad.Tags {
 			name := strings.TrimSpace(t.Name)
 			if name == "" {
 				continue
@@ -634,6 +638,54 @@ func (e *Extension) SubagentSpawnHint(ctx context.Context, state extension.Sessi
 		return extension.SubagentSpawnHint{}, err
 	}
 	return extension.SubagentSpawnHint{Intent: role.Intent}, nil
+}
+
+// ApplyOnSubagentSpawn implements [extension.SubagentSpawnApplier].
+// Reads `sub_agents[*].autoload_skills` from the dispatching
+// skill's manifest (via the SkillManager — the skill does NOT need
+// to be loaded on the child) and Load()s each on the child's
+// per-session SessionSkill. Per-skill failures are wrapped and
+// returned; the runtime logs and continues, since a failed
+// autoload should not block the spawn (the worker can still
+// skill:load(...) at runtime).
+//
+// Tier compatibility is enforced by SessionSkill.Load itself —
+// each target's tier_compatibility must include the child's tier
+// or Load returns ErrTierForbidden, which surfaces here as the
+// wrapped error.
+func (e *Extension) ApplyOnSubagentSpawn(ctx context.Context, child extension.SessionState, skillName, roleName string) error {
+	if skillName == "" || roleName == "" || e.manager == nil {
+		return nil
+	}
+	sk, err := e.manager.Get(ctx, skillName)
+	if err != nil {
+		// Unknown dispatching skill — silently no-op. Spawn-time
+		// validation against the catalogue runs elsewhere; an
+		// unrecognised skill here is not this applier's failure
+		// to surface.
+		return nil
+	}
+	var role *skillpkg.SubAgentRole
+	roles := sk.Manifest.Hugen.SubAgents
+	for i := range roles {
+		if roles[i].Name == roleName {
+			role = &roles[i]
+			break
+		}
+	}
+	if role == nil || len(role.AutoloadSkills) == 0 {
+		return nil
+	}
+	h := FromState(child)
+	if h == nil {
+		return nil
+	}
+	for _, name := range role.AutoloadSkills {
+		if err := h.Load(ctx, name); err != nil {
+			return fmt.Errorf("autoload %q for role %s/%s: %w", name, skillName, roleName, err)
+		}
+	}
+	return nil
 }
 
 // lookupSkillRole walks the loaded skill catalog once to locate a

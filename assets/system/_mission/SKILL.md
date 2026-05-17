@@ -37,20 +37,20 @@ metadata:
     autoload: true
     autoload_for: [mission]
     tier_compatibility: [mission]
-    # Phase 4.2.3 — universal notepad categories advertised on
-    # every mission regardless of dispatcher. Domain-specific
-    # tags live on the dispatching skill itself. Block A's
-    # renderer walks all loaded skills and de-dupes by name, so
-    # listing the conversation-level categories here keeps every
-    # mission consistent without each dispatcher repeating them.
+    # Universal notepad categories advertised on every mission
+    # regardless of dispatcher. Domain-specific tags live on the
+    # dispatching skill itself (e.g. analyst, hugr-data). The
+    # skill extension walks every loaded skill's notepad.tags and
+    # de-dupes by name, so listing conversation-level categories
+    # here keeps every mission consistent without each dispatcher
+    # repeating them.
+    notepad:
+      tags:
+        - name: user-preference
+          hint: Stated by the user — region, currency, time zone, naming or formatting preference. Stable for the conversation.
+        - name: deferred-question
+          hint: An open question worth answering in a follow-up mission; deferred to keep the current task focused.
     mission:
-      on_start:
-        notepad:
-          tags:
-            - name: user-preference
-              hint: Stated by the user — region, currency, time zone, naming or formatting preference. Stable for the conversation.
-            - name: deferred-question
-              hint: An open question worth answering in a follow-up mission; deferred to keep the current task focused.
       # Phase 4.2.3 ε — deterministic close turn. Every mission
       # gets one constrained turn before SessionTerminated whose
       # only job is to persist findings to the notepad. The empty

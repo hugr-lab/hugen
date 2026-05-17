@@ -135,6 +135,10 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 		// Apply tier-default + per-role intent override on the
 		// freshly-spawned child. Phase 4.2.2 §11.
 		parent.applyChildIntent(ctx, child, e.Skill, e.Role)
+		// Apply per-role spawn appliers (skill autoload, ...) BEFORE
+		// the task UserMessage so the worker's first turn sees the
+		// surface ready.
+		parent.applyChildSpawnAppliers(ctx, child, e.Skill, e.Role)
 		out = append(out, spawnSubagentResult{
 			Name:      child.name,
 			SessionID: child.ID(),

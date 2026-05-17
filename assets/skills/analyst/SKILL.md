@@ -12,23 +12,41 @@ metadata:
     autoload: false
     tier_compatibility: [mission]
 
+    # Analyst-domain notepad categories. Universal chat / mission
+    # categories (user-preference, deferred-question) come from the
+    # autoloaded system skills; the skill extension de-dupes by
+    # name across every loaded skill.
+    notepad:
+      tags:
+        - name: data-source
+          hint: 'Source / module inventory facts — which Hugr module holds data for domain X, what each registered source tracks, source ↔ module map. Distinct from `schema-finding`: data-source answers "where to look", schema-finding answers "what is inside".'
+        - name: schema-finding
+          hint: Discovered table structures, field semantics, soft-delete columns, naming conventions — facts INSIDE a chosen module. Source / module identity goes to `data-source`.
+        - name: query-pattern
+          hint: A validated SQL/GraphQL template (shape only) that produced useful results — reuse before re-deriving.
+        - name: data-quality-issue
+          hint: Anomalies, nulls, suspicious cardinalities observed during exploration.
     mission:
       enabled: true
       summary: >
-        Data analysis, GraphQL queries against Hugr, dashboards, and
-        reports. Use for any request involving exploring, aggregating,
-        or visualising data — also for trivial knowledge / arithmetic
-        questions (those still go through a single cheap worker).
+        Cross-table data analysis: joins, group-by, aggregations,
+        comparisons across modules, dashboards, comprehensive reports.
+        Use only when the request needs combining or summarising data
+        from many entities. Single-source lists, counts, lookups, or
+        "save this result as a file" requests should stay in chat;
+        chat can load this skill's worker-tier tools directly without
+        spawning a mission.
       keywords:
-        - data
-        - query
         - analyse
         - dashboard
         - report
         - chart
         - aggregate
-        - schema
-        - hugr
+        - group
+        - join
+        - compare
+        - audit
+        - investigate
 
       on_start:
         plan:
@@ -40,356 +58,245 @@ metadata:
           current_step: Explore
         whiteboard:
           init: true
-        # Phase 4.2.3 notepad — analyst-domain categories for
-        # working notes. Universal categories (user-preference,
-        # deferred-question) come from `_mission` skill; this
-        # block lists the data-domain ones the renderer composes
-        # alongside them via de-duplication.
-        notepad:
-          tags:
-            - name: data-source
-              hint: 'Source / module inventory facts — which Hugr module holds data for domain X, what each registered source tracks, source ↔ module map. Distinct from `schema-finding`: data-source answers "where to look", schema-finding answers "what is inside".'
-            - name: schema-finding
-              hint: Discovered table structures, field semantics, soft-delete columns, naming conventions — facts INSIDE a chosen module. Source / module identity goes to `data-source`.
-            - name: query-pattern
-              hint: A validated SQL/GraphQL template (shape only) that produced useful results — reuse before re-deriving.
-            - name: data-quality-issue
-              hint: Anomalies, nulls, suspicious cardinalities observed during exploration.
         first_message:
           template: |
             User goal (delegated by root): {{ .UserGoal }}
+            {{ if and .Inputs (index .Inputs "skip_planning") }}
+            ══════════════════════════════════════════════════════
+            Pre-built plan supplied — SKIP STAGES A and B
+
+            The caller passed `skip_planning: true` and a pre-built
+            plan under `inputs.plan`. Jump directly to STAGE C and
+            execute the steps verbatim.
+
+            Inputs (read `plan` here):
+
+              {{ printf "%v" .Inputs }}
+
+            If `inputs.plan` is missing or unparseable, fall back to
+            the standard flow (STAGE A onward).
+            ══════════════════════════════════════════════════════
+            {{ end }}
+            You are the analyst mission coordinator. Three stages:
+            A) get a plan from a wave-0 planner worker, B) confirm
+            the plan with the user via session:inquire, C) execute
+            the approved steps in order.
 
             ══════════════════════════════════════════════════════
-            STAGE 0 — SOURCE PICKUP (data tasks only).
+            STAGE A — Plan
 
-            For inventory questions ("what data is in Hugr",
-            "what modules exist") or trivial Q&A — SKIP this
-            stage; the checklist below handles those shapes
-            (overview / simple-answerer).
+            Spawn ONE wave-0 worker:
 
-            For DATA tasks (you'll need to query a Hugr module),
-            FIRST identify exactly ONE module the goal lives in.
-            Guessing wrong wastes the whole schema → query →
-            execute pipeline. Decision tree:
+              session:spawn_wave({
+                wave_label: "planning",
+                subagents:  [{
+                  skill: "analyst",
+                  role:  "planner",
+                  task:  "User goal: {{ .UserGoal }}\n\nProduce a wave plan as a ```yaml fenced block. Do all source / module / table resolution up front — downstream workers must not need to re-discover what you have already verified.\n\nBoot: your `hugr-data` discovery/schema tools are auto-loaded — confirm via ## Loaded skills, then start probing. Do NOT call skill:load(\"hugr-data\") (already loaded) and NEVER skill:load(\"analyst\") (mission-tier, will fail tier_forbidden). If the user goal is genuinely ambiguous, call session:inquire(type=\"clarification\") BEFORE planning rather than guessing.\n\nAvailable analyst roles:\n  • overview       — \"what's available\" inventory; discovery-* read-only.\n  • schema-explorer — discovers ONE entity / module schema; discovery-* + schema-* read-only.\n  • query-builder  — composes + validates ONE GraphQL query (count-only / LIMIT 1).\n  • data-analyst   — executes validated queries, runs python / duckdb post-processing, file output.\n  • report-builder — synthesises final answer; may emit HTML/JS with interactivity, markdown, or python-rendered output. No data tools.\n\nPlan shape (BOTH fields are mandatory):\n  ```yaml\n  plan:                                    # technical — consumed by mission\n    - role: <one of the roles above>\n      task: \"<self-contained worker brief. Embed every resolved fact you already probed: source/module/table names, function names, expected columns, query draft, file path, output format. The worker must be able to execute WITHOUT re-running discovery-* / schema-* probes you already ran.>\"\n      inputs:                              # optional structured context, passed through to spawn_wave inputs\n        data_source: \"<resolved name>\"\n        module: \"<resolved name>\"\n        tables: [\"<t1>\"]\n        query_draft: \"<optional GraphQL draft>\"\n        output_format: \"html|markdown|json|csv\"\n        file_path: \"<resolved path if applicable>\"\n      skip_if: \"<optional precondition the mission verifies via notepad:search>\"\n  user_summary: |                          # human-facing — 2-4 sentences, no jargon\n    <plain-language plan: what we'll do and why, no role names, no tool names>\n  rationale: \"<one paragraph internal — what you decided and why>\"\n  ```"
+                }]
+              })
 
-              1. Check the `## Notepad snapshot` block at the
-                 top of this prompt for prior `data-source`
-                 notes — that category is specifically the
-                 "which module holds data for X" answer.
-                 Optionally call
-                 `notepad:search(category="data-source",
-                 query="<user-goal keywords>")` to retrieve any
-                 longer notes truncated in the snapshot. Accept
-                 the note ONLY when it names exactly ONE module
-                 AND the user's goal maps to it unambiguously.
-                 Fuzzy match, stale note, "probably this one" —
-                 don't rely on it; continue to step 2.
+            Wait sync. The planner's final assistant message
+            contains a ```yaml block with shape:
 
-              2. If the notepad has no clear match, spawn ONE
-                 wave-0 `overview` worker. The task string is
-                 deliberately worded so overview does NOT pick
-                 a winner — it returns a labelled candidate
-                 list and you decide:
-                   spawn_wave(label="source-scout",
-                              subagents=[{
-                     skill: "analyst",
-                     role:  "overview",
-                     task:  "Goal: <restate the user goal>.
-                             List every Hugr data source +
-                             top-level module. For each, give
-                             a ONE-LINE confidence assessment
-                             against the goal, prefixed with
-                             EXACTLY one of these labels:
-                               [fits-explicit]   — direct
-                                 named match (the source's
-                                 scope EXPLICITLY covers the
-                                 goal's subject and region)
-                               [fits-possibly]  — could
-                                 contain it (broader scope,
-                                 region overlap, plausible
-                                 but not exact)
-                               [doesnt-fit]     — no
-                                 plausible link to the goal
-                             DO NOT crown a 'most likely' or
-                             'best' candidate. DO NOT say
-                             'I will next explore X'.
-                             Return ONLY the labelled list +
-                             a one-sentence footer summary
-                             of how many fits-* there are.
-                             Mission decides what to do with
-                             the list — the user may need to
-                             clarify which one."
-                   }])
-                 Wait for its result on the whiteboard.
+              plan:
+                - role: <analyst sub_agent role name>
+                  task: "<self-contained, embeds resolved sources/tables>"
+                  inputs:
+                    data_source: "<name>"
+                    tables: ["<t>"]
+                    ...
+                  skip_if: "<optional precondition>"
+                - role: ...
+              user_summary: "<plain-language for the user>"
+              rationale: "<internal one paragraph>"
 
-              3. Read overview's labelled list. The decision
-                 is now MECHANICAL — count, don't judge:
-
-                   let E = count of [fits-explicit] entries
-                   let P = count of [fits-possibly] entries
-
-                 • E == 1 AND P == 0  → use that single
-                   module, proceed to the checklist.
-                 • E + P >= 2  (ANY ambiguity — two
-                   fits-explicit, one explicit + one
-                   possibly, several fits-possibly, etc.) →
-                   you MUST call inquire. This INCLUDES the
-                   case `E == 1 AND P == 1`. The temptation
-                   to reason "fits-explicit wins over
-                   fits-possibly, take the explicit one" is
-                   EXACTLY the trap. `fits-possibly` LITERALLY
-                   means "this also fits the goal" — a
-                   competing candidate the user may prefer
-                   for reasons overview cannot see (freshness,
-                   scope, ownership, compliance, cost). Do
-                   NOT collapse "explicit + possibly" into a
-                   single pick. Call:
-                     session:inquire(
-                       type:     "clarification",  // REQUIRED
-                       question: "I need to pick the right
-                                  data source for your
-                                  request — which one should
-                                  I use?",                   // REQUIRED
-                       options:  [<every fits-* candidate>,
-                                  "none of the above /
-                                   I'll rephrase"],          // []string of labels
-                       context:  "<one line per candidate
-                                  with overview's
-                                  fits-explicit /
-                                  fits-possibly label and
-                                  the short reason>"          // free-form
-                     )
-                   After the user picks, use that module. If
-                   the user picks "none of the above" or
-                   names something different, follow their
-                   lead.
-                 • E == 0 AND P == 0  → call
-                   `session:abstain` with a reason naming
-                   the gap. Do NOT fabricate a module name.
-                 • E == 0 AND P >= 1  → also inquire (you
-                   have only weak matches; the user picks
-                   between weak fits or "rephrase").
-
-              Worked example (the names are placeholders —
-              the SHAPE is what matters, replace with whatever
-              overview actually returns):
-
-                Goal: "<X> for <Y>"
-                Overview:
-                  [fits-explicit] mod_A  — directly tracks
-                                            X for Y
-                  [fits-possibly] mod_B  — tracks X at a
-                                            broader scope
-                                            that includes Y
-                  [doesnt-fit]    mod_C, mod_D, ...
-
-                E=1, P=1 → MUST inquire. Both mod_A and
-                mod_B legitimately answer the question; they
-                may differ in scope, freshness, ownership,
-                units, or update cadence. The user picks;
-                you don't guess.
-
-              The same arithmetic applies regardless of
-              domain. Concrete shapes this pattern routinely
-              covers on a Hugr deployment:
-
-                • Geographic overlap — a regional source vs
-                  a country-wide source vs a continent-wide
-                  source, all of which technically cover the
-                  same physical place.
-                • Multi-system overlap — the "customers"
-                  table can live in CRM, ERP, billing, and
-                  marketing-events modules simultaneously,
-                  each with different completeness.
-                • Version / freshness overlap — the live
-                  operational store vs a nightly snapshot vs
-                  a curated data-warehouse layer.
-                • Topical overlap — a domain-specific module
-                  vs a universal catalogue module that
-                  re-exports the same entity.
-                • Tenant / scope overlap — a tenant-specific
-                  module vs the cross-tenant aggregate.
-
-              In every shape, multiple modules CAN serve the
-              query; the choice depends on user intent the
-              prompt doesn't surface.
-
-              Erring toward asking is the right call here. Do
-              NOT collapse "most likely" or "best candidate"
-              into a single pick — those framings are exactly
-              the shapes that need user confirmation. If
-              overview violates its contract and writes "most
-              likely" anyway, ignore that framing and apply
-              the mechanical rule above.
-
-            Every downstream worker scopes its task to the
-            chosen module explicitly: "explore <module>.orders
-            schema", "build query against <module>.customers".
-            This stops schema-explorer / query-builder from
-            wandering into adjacent modules.
+            Parse both `plan` (technical, used in STAGE C) and
+            `user_summary` (shown to the user in STAGE B). If the
+            YAML block is missing or unparseable, spawn one more
+            planner with the parse error in the task. At most two
+            parse-retry attempts.
 
             ══════════════════════════════════════════════════════
-            PRE-FLIGHT CHECKLIST — do this BEFORE the first
-            spawn_wave (after Stage 0 picked the module, for
-            data tasks). Skipping these steps is the #1 source
-            of wasted latency.
+            STAGE B — Confirm with user
 
-            ☐ A. CLASSIFY first, then COUNT.
-              First decide the SHAPE of the user goal:
-                • Inventory ("what data is in Hugr",
-                  "what sources / modules exist") → ONE
-                  `overview` worker, single wave. Done.
-                  Do NOT spawn schema-explorer here.
-                • CATEGORY question ("how many types of
-                  payments", "what kinds of orders exist",
-                  "list all customer-related tables") → the
-                  goal names a CATEGORY that can span MULTIPLE
-                  tables. ONE `schema-explorer` wave-1 worker
-                  scoped to "enumerate every table in
-                  <module> matching <category keyword>" via
-                  `discovery-search_module_data_objects(
-                  module_name, query)`. The catalogue IS the
-                  answer for cardinality questions; for
-                  per-table analytics, mission fans out
-                  schema-explorer (per matching table) in a
-                  later wave from that catalogue.
-                • Single entity describe / count / query →
-                  Stage 0 first (above), then schema-explorer →
-                  query-builder (→ data-analyst → report-
-                  builder for full analysis).
-              Then COUNT independent angles inside the goal —
-              "an angle" = one entity / table / module / question
-              that can be explored without waiting on another.
-              Examples:
-                "What's in Hugr"                 → overview, N = 1
-                "Describe X"                     → N = 1
-                "Describe X, Y, Z"               → N = 3
-                "What does <DS> track + main
-                 entities + best aggregate"      → N = 3
-                "How many types of payments"     → category,
-                                                   N = 1 (enum
-                                                   wave), maybe
-                                                   N=k follow-up
-                                                   waves after.
+            Render `user_summary` for the user and call
+            `session:inquire` — show the HUMAN summary, NOT the
+            technical YAML:
 
-            ☐ B. PUBLISH N to the plan.
-              Call `plan:comment` with the literal text
-              "Wave 1 decomposition: N=<number>, angles=[<list>]"
-              BEFORE the first spawn_wave. This makes the count
-              auditable.
+              session:inquire({
+                type:     "clarification",
+                question: "Plan for: <one-line restate goal>.\n\n<plan.user_summary verbatim>\n\nProceed?",
+                options:  ["approve", "refine", "abort"]
+              })
 
-            ☐ C. WAVE 1 = ONE spawn_wave call with N entries.
-              Multiple entries in a single call run IN PARALLEL.
-              YOU CANNOT fake parallelism with N sequential
-              spawn_wave calls — the second call only starts
-              after the first returns, costing N× the latency
-              for zero benefit.
+            On user reply:
 
-              ✘ ANTI-PATTERN (do NOT do this):
-                  spawn_wave({subagents: [{task: "explore X"}]})
-                  spawn_wave({subagents: [{task: "explore Y"}]})
-                  spawn_wave({subagents: [{task: "explore Z"}]})
+              • approve  → STAGE C with the current technical plan.
+              • refine   → spawn another wave-0 planner. Pass the
+                           user's refinement note in the task
+                           ("Previous plan: <yaml>; user feedback:
+                           <text>. Revise."). Repeat STAGE B.
+                           Hard cap: 3 refine cycles, then
+                           `session:abstain(reason: "refine_loop_exhausted")`.
+              • abort    → `session:abstain(reason: "user_aborted_plan")`.
 
-              ✔ CORRECT (single call, 3 entries):
-                  spawn_wave({subagents: [
-                    {task: "explore X"},
-                    {task: "explore Y"},
-                    {task: "explore Z"}
-                  ]})
-
-            ☐ D. Sequential waves are ONLY for true dependencies:
-                schema → query (query needs schema)
-                query → execute (execute needs query)
-                execute → report (report needs results)
-              Within a wave, parallelise everything independent.
             ══════════════════════════════════════════════════════
+            STAGE C — Execute
 
-            Two more structural rules:
+            For each technical `plan` step IN ORDER:
 
-            1. Role catalogue lives on `analyst`. Every
-               `session:spawn_wave` entry sets `skill: "analyst"`
-               and picks one of {simple-answerer, schema-explorer,
-               query-builder, data-analyst, report-builder}. Do
-               NOT pass `skill: "_worker"` — that's a runtime
-               primitive.
+              1. If `skip_if` is present, evaluate it now —
+                 typically via `notepad:search` for a matching
+                 note. If satisfied, skip and continue.
 
-            2. For DATA tasks, read the manual before deciding
-               waves. Load + skim the relevant domain skill so
-               you understand what schemas exist and what
-               queries are realistic:
+              2. Otherwise spawn ONE wave with this role + task,
+                 passing the step's `inputs` block through:
 
-                 skill:load("hugr-data")
-                 skill:files(name="hugr-data", subdir="references")
-                 skill:ref(skill="hugr-data", ref="start")
-                 skill:ref(skill="hugr-data", ref="overview")
-                 # then per task: query-patterns / aggregations /
-                 # filter-guide / queries-deep-dive as appropriate
+                   session:spawn_wave({
+                     wave_label: "<step #N: role>",
+                     subagents:  [{
+                       skill:  "analyst",
+                       role:   "<plan.step.role>",
+                       task:   "<plan.step.task>",
+                       inputs: <plan.step.inputs>     // forward as-is
+                     }]
+                   })
 
-               Loading hugr-data at mission tier gives you the
-               documentation surface; DO NOT call hugr-main:* /
-               hugr-query:* tools yourself — workers do that.
-               Mission coordinates; workers execute.
+                 The step's `task` already embeds resolved
+                 sources / tables / queries — workers should NOT
+                 re-run discovery. If a worker still needs
+                 something unstated, it can self-call
+                 `session:inquire(type="clarification")` and the
+                 bubble path will reach the user.
 
-            Run the analyst playbook (always one or more workers,
-            never answer inline — even for trivial questions):
+              3. After it returns: `whiteboard:read` to fold
+                 findings, `plan:comment` with a one-line
+                 progress note ("Step N done: <summary>"). Then
+                 continue to the next step.
 
-              Trivial Q&A (e.g. "what is 2+2"):
-                ONE wave. Spawn ONE `simple-answerer`. Return its
-                result directly.
+            When every step is processed, produce a final
+            assistant message — that's the `result` root sees in
+            its `wait_subagents` call.
 
-              Data work — staged pipeline (Hugr default):
+            ══════════════════════════════════════════════════════
+            Structural rules:
 
-                Wave 1 — SCHEMA DISCOVERY (parallel × N angles)
-                  ONE spawn_wave call with N `schema-explorer`
-                  entries, N = the count published in checklist B.
-                  Each entry's `task` scopes to one angle. They
-                  run `discovery-*` / `schema-*` tools ONLY and
-                  each writes a structured schema-map to the
-                  whiteboard. Cheap intent.
-
-                Wave 2 — QUERY COMPOSITION + VALIDATION (parallel)
-                  ONE spawn_wave with M `query-builder` entries
-                  (often M=1; use M>1 when the goal needs M
-                  distinct query shapes). Each reads its scope's
-                  schema-map from wave-1's whiteboard, composes
-                  one GraphQL query, validates with a small test
-                  call (count-only or LIMIT 1), and writes the
-                  validated query + sample row back.
-
-                Wave 3 — EXECUTION (parallel, optional)
-                  Only if more rows / aggregates / post-processing
-                  than the validation pass returned are needed.
-                  ONE spawn_wave with K `data-analyst` entries
-                  running the validated queries from wave-2.
-
-                Wave 4 — SYNTHESIS (sequential by nature)
-                  ONE `report-builder` worker. Reads the whiteboard
-                  ONLY (no data tools) and composes the final
-                  answer for root. SKIP wave 4 entirely when the
-                  user explicitly says "no long report" or the
-                  deliverable is already complete on the
-                  whiteboard (e.g. "give me the validated query
-                  + a sample row" — query-builder's whiteboard
-                  output IS the deliverable).
-
-            After each wave: `whiteboard:read` to gather findings,
-            `plan:comment` to log progress, and DECIDE whether to
-            launch another wave or finalize. Re-plan freely — if
-            wave-1 surprises you, drop the original wave-2 idea
-            and spawn something better suited.
+            • Mission COORDINATES; it does not call domain tools
+              itself. Workers execute.
+            • `skill: "analyst"` on every `spawn_wave` entry.
+              Workers pick the right `_worker`-tier primitives
+              themselves.
+            • The planner OWNS scope decisions — what roles, in
+              what order, with what parallelism. Mission does
+              NOT second-guess the plan beyond `skip_if` checks
+              and parse retries.
+            • For parallel work within one step, the planner
+              encodes it as a single plan entry whose `task`
+              names multiple angles — the spawned worker then
+              decides; OR the planner produces a multi-entry
+              wave inline (one plan step with a list of
+              sub-tasks). Keep the prototype simple: one role +
+              one task per plan step, sequential.
+            • The original (pre-5.x) staged-pipeline playbook is
+              superseded — the planner now picks the shape per
+              task.
 
     sub_agents:
-      - name: simple-answerer
+      - name: planner
         description: >
-          Answers a trivial knowledge / arithmetic / formatting
-          question from the LLM's own knowledge in one turn. No
-          data tools needed. Cheapest path for "what is 2+2",
-          "summarise this paragraph", etc.
-        intent: cheap
+          Wave-0 mission planner. Two phases:
+
+          PHASE 1 — Resolve the data surface. BEFORE deciding
+          roles, use discovery-* / schema-* tools to pin down
+          which sources, modules, tables, columns, and functions
+          are actually involved. Every downstream worker depends
+          on YOU having done this — if you skip it, query-builder
+          and data-analyst will each re-run discovery,
+          multiplying latency wave by wave.
+
+          PHASE 2 — Decompose into roles. With the data surface
+          resolved, choose the shortest ordered list of analyst
+          sub_agent roles that answers the goal. Each plan step
+          must carry the resolved facts (source name, module,
+          table list, column hints, query draft, output format,
+          file path) so the worker can execute without
+          re-probing.
+
+          The mission session reads your plan, confirms its
+          `user_summary` with the user via `session:inquire`,
+          then executes the steps. You OWN scope decisions —
+          which roles to run, in what order, what to skip.
+
+          Clarify before guessing. If the user goal is genuinely
+          ambiguous (unclear module, unclear output format,
+          unclear scope, conflicting candidates), call
+          `session:inquire(type="clarification", options=[...])`
+          BEFORE producing the plan rather than baking a guess
+          into the technical steps. Downstream workers can also
+          inquire, but planner-time clarification is cheaper —
+          the user answers once, not per wave.
+
+          Boot protocol (FIRST tool calls):
+
+            1. notepad:search(query=<key concepts from goal>) —
+               check prior findings; reusing a known data-source
+               or query-pattern note skips entire waves later.
+
+            2. Your discovery / schema tools are already loaded
+               (the role declares `autoload_skills: [hugr-data]`,
+               so the runtime loaded it before your first turn).
+               Confirm via the `## Loaded skills` block in your
+               system prompt — you should see `hugr-data`. Skip
+               any `skill:load("hugr-data")` call; loading an
+               already-loaded skill wastes a turn.
+
+            3. DO NOT skill:load("analyst") — workers cannot
+               load mission-tier skills; the role catalog is in
+               your task. Trying it fails with tier_forbidden
+               and wastes a turn.
+
+          Hard rules:
+            - NO data execution. discovery-* and schema-* only.
+              `data-inline_graphql_result`, `python-runner`,
+              `bash` are NOT in your surface — propose them for
+              downstream workers in the plan, do not run them
+              yourself.
+            - Resolve sources / tables FIRST. A plan that names
+              roles before naming the data surface is incomplete
+              — workers will fill the gap by re-running the same
+              discovery you skipped.
+            - Embed every resolved fact in the step's `task` +
+              `inputs`. The worker reads its task literally;
+              "find the right table" is a planning failure, not
+              a worker instruction.
+            - Prefer the shortest plan that answers the goal.
+              For "list / count / show X" where notepad or one
+              cheap query covers it, two steps (or one) is
+              enough. Reserve 4+ step plans for genuine
+              analytical / reporting work.
+            - Always emit the plan as a fenced ```yaml block in
+              your final assistant message. The mission reads
+              only that block, parsing both `plan` (technical)
+              and `user_summary` (human-facing).
+        intent: tool_calling
         can_spawn: false
+        autoload_skills: [hugr-data]
         tools:
+          - provider: hugr-data
+            tools:
+              - discovery-search_data_sources
+              - discovery-search_modules
+              - discovery-search_module_data_objects
+              - discovery-search_module_functions
+              - discovery-field_values
+              - schema-type_info
+              - schema-type_fields
+              - schema-enum_values
           - provider: whiteboard
             tools: [write, read]
+          - provider: notepad
+            tools: [read, search]
 
       - name: overview
         description: >
@@ -420,6 +327,7 @@ metadata:
           known module).
         intent: tool_calling
         can_spawn: false
+        autoload_skills: [hugr-data]
         tools:
           - provider: hugr-data
             tools: ['*']
@@ -479,9 +387,9 @@ metadata:
         # which weak cheap-intent models (4B) routinely skip or
         # mis-sequence. Bumped to tool_calling so it lands on the
         # same mid-tier route as query-builder / data-analyst.
-        # Trivial Q&A still goes through simple-answerer on cheap.
         intent: tool_calling
         can_spawn: false
+        autoload_skills: [hugr-data]
         tools:
           - provider: hugr-data
             tools: ['*']
@@ -519,6 +427,7 @@ metadata:
           data-analyst to expand.
         intent: tool_calling
         can_spawn: false
+        autoload_skills: [hugr-data]
         tools:
           - provider: hugr-data
             tools: ['*']
@@ -551,6 +460,7 @@ metadata:
           DuckDB for local files, Python for shaping / plotting.
         intent: tool_calling
         can_spawn: false
+        autoload_skills: [hugr-data, duckdb-data, python-runner]
         tools:
           - provider: hugr-data
             tools: ['*']
@@ -571,6 +481,7 @@ metadata:
           whiteboard and post-shapes.
         intent: default
         can_spawn: false
+        autoload_skills: [python-runner]
         tools:
           - provider: python-runner
             tools: ['*']
@@ -611,11 +522,14 @@ Your `_mission` skill gives you the wave-based fan-out primitive:
 
 ## The minimum invariant
 
-ALWAYS spawn at least one worker. Even for trivial questions —
-arithmetic, definitions, formatting — delegate to a single
-`simple-answerer` worker on cheap intent. That keeps the topology
-shape deterministic; root sees a uniform result envelope every
-time.
+ALWAYS spawn at least one worker — the mission is a coordinator,
+not an executor. Trivial questions (arithmetic, definitions,
+plain-language formatting) should not reach you in the first
+place; root answers those directly in chat per its mission
+threshold. If one slipped through anyway (explicit `/mission`
+override or a misclassified delegation), `session:abstain` with
+a reason rather than guessing — the user can rephrase or take
+the answer in chat.
 
 If a decomposition is genuinely impossible (the goal is incoherent
 or violates a constraint you cannot satisfy), call
@@ -670,8 +584,6 @@ returning their finding, not by inquiring on intent.
 
 ## Role catalogue (this skill)
 
-- **simple-answerer** — trivial knowledge / arithmetic / formatting.
-  No data tools. Single cheap turn. Returns plain text.
 - **overview** — high-level catalogue questions ("what data sources
   are in Hugr", "what modules exist", "what's available"). Uses
   ONLY `discovery-search_data_sources` and
@@ -698,8 +610,6 @@ returning their finding, not by inquiring on intent.
 
 ## Wave patterns
 
-- **Trivial Q&A**: one wave, one `simple-answerer`. Return its
-  result directly.
 - **Platform overview**: one wave, one `overview` worker. For
   "what's in Hugr", "what data sources exist", "what modules
   are available". Cheap inventory call; the result is the
