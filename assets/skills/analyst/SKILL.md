@@ -189,6 +189,91 @@ metadata:
                  one-line progress note ("wave <wave_label>
                  done: <summary>"). Continue.
 
+              4. THREAD the wave's outputs into the NEXT
+                 wave's worker `inputs`. This is the single
+                 most load-bearing step in the mission loop —
+                 without it, the next wave's worker has only
+                 the [Whiteboard] block to parse and that's
+                 where prose-vs-structured drift creeps in.
+                 `spawn_wave` returns a JSON array of
+                 `{session_id, status, result, reason,
+                 turns_used}` — one entry per subagent.
+                 `result` is the worker's closing assistant
+                 message verbatim. Combine that with the
+                 `whiteboard:read` from step 3 (full
+                 broadcasts incl. `path:` / `shape:` /
+                 `columns:` / `values:`) and lift every
+                 file artefact + key value into the next
+                 wave's `inputs` BEFORE calling `spawn_wave`.
+
+                 What MUST land in next-wave inputs:
+                   - `artefacts`: array of file references the
+                     consumer will read. Each entry mirrors
+                     the broadcast: `{path, shape, columns,
+                     headline}`. Workers read these from
+                     `inputs.artefacts` directly — no need to
+                     parse [Whiteboard] prose.
+                   - `known_facts`: structured copy of any
+                     `values:` broadcasts (scalar totals,
+                     picked rows, counts). Use the same keys
+                     the broadcast did so the consumer doesn't
+                     have to translate.
+                   - `file_path`: when the user goal specified
+                     a destination (e.g. `~/Downloads/x.html`),
+                     forward it verbatim. This is the FINAL
+                     output target — the last worker writes
+                     there literally.
+                   - Any plan-level resolved facts
+                     (data_source, module, tables) the planner
+                     already verified.
+
+                 Why copy when the runtime auto-prepends
+                 `[Whiteboard]`? The whiteboard is human-
+                 readable prose; `inputs` is structured JSON.
+                 Weak models trust the latter more reliably
+                 and don't drop numbers in transcription.
+                 Treat the board as cross-cutting context and
+                 `inputs` as the contract for THIS worker.
+
+                 Concrete shape — say wave-1 produced two
+                 broadcasts:
+                   #1 (from `metrics-collector`):
+                     path: data/aggregates/payments.json
+                     shape: 89 bytes
+                     headline: total_payments=$1.93B over 628012 rows
+                     values: {rows: 628012,
+                              total_payments_sum: 1925088669.43,
+                              total_payments_avg: 3065.37}
+                   #2 (from `top-providers-fetcher`):
+                     path: data/top/op2023_providers.parquet
+                     shape: 50 x 6
+                     columns: [first_name:str, last_name:str,
+                               npi:int64, total_payments_amount:
+                               float64, total_research_amount:
+                               float64, total_ownership_count:
+                               float64]
+                     headline: top 50 providers by payment
+                 The next wave's report-builder spawn:
+                   inputs: {
+                     file_path: "~/Downloads/op2023_overview.html",
+                     artefacts: [
+                       {path: "data/aggregates/payments.json",
+                        shape: "89B", headline: "..."},
+                       {path: "data/top/op2023_providers.parquet",
+                        shape: "50x6",
+                        columns: [...],
+                        headline: "..."}
+                     ],
+                     known_facts: {
+                       rows: 628012,
+                       total_payments_sum: 1925088669.43,
+                       total_payments_avg: 3065.37
+                     }
+                   }
+                 With this, report-builder writes the report
+                 without re-querying, re-discovering, or
+                 introspecting the parquet — pure compose.
+
             When every wave is processed, produce a final
             assistant message — that's the `result` root sees in
             its `wait_subagents` call.
@@ -542,27 +627,65 @@ metadata:
           proved out; focuses on results, not schema. The right
           tool depends on the task — Hugr for federated data,
           DuckDB for local files, Python for shaping / plotting.
-          Before returning, call `whiteboard:write` ONCE.
-          REQUIRED in the broadcast when you produce a file
-          artefact (parquet / JSON / CSV / html):
+
+          **Tool choice for the actual fetch — always
+          persist.** Every fetched dataset (tabular OR scalar)
+          MUST land on disk as a file artefact. Use
+          `hugr-query:query` with a `path:` argument so the
+          result lands as parquet (tabular) or JSON (scalar /
+          aggregation) under SESSION_DIR. Downstream waves
+          read via `pd.read_parquet(path)` / `json.load(open(
+          path))` — no re-fetch, no re-discovery.
+
+          `hugr-main:data-inline_graphql_result` is reserved
+          for in-session probing the model uses to confirm
+          syntax or peek a couple of rows BEFORE committing
+          to the final `hugr-query:query` — never as the
+          terminal fetch handed off to the next wave. If you
+          catch yourself about to return inline data as the
+          final result, switch to `hugr-query:query` with the
+          same GraphQL and a `path:` argument; persist the
+          artefact, then broadcast its path.
+
+          Why so strict: the mission's next wave (typically
+          report-builder) cannot see your tool response — only
+          the whiteboard and its own `inputs`. An inline-only
+          return strands the data in your context, which dies
+          when your session terminates. The cost is invariant:
+          one extra `path:` argument vs five re-discovery
+          rounds on the next worker.
+
+          **whiteboard:write — ALWAYS, exactly once before
+          returning.** No exceptions. The board is the
+          cross-wave bus; missing it strands the next worker.
+          Required keys for every broadcast (since every
+          fetch produces a file artefact):
+
             - path: <relative path under SESSION_DIR>
-            - shape: <rows> x <cols> (or `<bytes>` for JSON)
+            - shape: <rows> x <cols> for tabular, or
+              `<bytes>` for scalar/aggregation JSON
             - columns: [<col1>:<dtype>, <col2>:<dtype>, ...] —
               for any non-scalar column, drill in: e.g.
               `key: {Manufacturer_Name: str}`,
               `aggregations: {Total_Amount: {sum: float}}`.
-              Empty list ONLY when the artefact is a 1-row
-              scalar summary.
+              Empty list ONLY for 1-row scalar summaries.
             - headline: <one line worth quoting verbatim — top
-              value, total, count — whatever the next wave will
-              cite>.
-          Why this exact shape: report-builder and downstream
-          analysts compose against these broadcasts without
-          re-opening the file. Missing `columns:` forces them
-          to introspect via `df.head()` / `df.columns`, which
-          is the single biggest waste in a multi-wave mission.
-          You already know the schema — you queried it. Spend
-          one line; save the next worker five rounds.
+              value, total, count — whatever the next wave
+              will cite>.
+            - values: <OPTIONAL compact JSON> — for scalar /
+              ≤ 10-row results where downstream will quote
+              the numbers literally (overall sums, counts,
+              picked single rows). Skip for big tabular
+              artefacts; the next worker reads them from
+              `path:`.
+            - query: <the GraphQL/SQL that produced the file>
+              — one line, so a follow-up worker can re-run /
+              extend if needed.
+
+          The whole broadcast is ≤ 4 KB. Schema info you
+          already have from the query response goes here
+          verbatim — never paraphrase ("payments are large"
+          → bad; `total_payments_sum: 1925088669.43` → good).
         intent: tool_calling
         can_spawn: false
         autoload_skills: [hugr-data, duckdb-data, python-runner]
@@ -608,6 +731,50 @@ metadata:
           you need row-level detail) — and in that case prefer
           ONE `python-mcp:run_code` inline probe to multiple
           `bash:write_file` + `run_script` rounds.
+
+          **`inputs.artefacts` + `inputs.known_facts` are
+          first-class — read them BEFORE the whiteboard.** The
+          mission threads prior-wave file paths and quoted
+          values into your `inputs` JSON deliberately
+          (mission STAGE B step 4). For every entry of
+          `inputs.artefacts` — `{path, shape, columns,
+          headline}` — read the file with `pd.read_parquet(
+          inputs['artefacts'][i]['path'])` /
+          `json.load(open(inputs['artefacts'][i]['path']))`;
+          you don't need to call `whiteboard:read` to find
+          paths the mission has already lifted into your
+          brief. For `inputs.known_facts` — quote those
+          numbers verbatim in the report (totals, counts,
+          picked entities). Do NOT re-fetch the same totals
+          with `hugr-query:query` "to be sure" — they came
+          from a sibling worker who already paid the round-
+          trip cost. The board is fallback context when
+          something is genuinely missing from `inputs`.
+
+          **`inputs.file_path` is the LITERAL destination.**
+          When the mission passes `file_path: <abs path>` in
+          inputs, that string IS your final output target.
+          Two ways to honour it:
+            a. Write directly to the expanded absolute path
+               from python (`open(os.path.expanduser(
+               inputs['file_path']), 'w')`). Preferred when
+               nothing else under SESSION_DIR needs the same
+               artefact.
+            b. Write to a SESSION_DIR-relative path (e.g.
+               `reports/<filename>`) for composition, THEN
+               at the end call `bash:bash.shell cp <session
+               path> <expanded file_path>` to land the final
+               copy at the exact target. Required when the
+               same artefact is consumed within the workspace
+               first and then exported.
+          Do NOT silently substitute your own path
+          (`reports/<x>.html`) and then claim in the final
+          assistant message that the file was written to
+          `~/Downloads/...`. Either honour the literal path
+          from inputs or call out the discrepancy explicitly
+          ("wrote to <actual path>; could not reach
+          <requested path> because <reason>"). The user reads
+          your final message and trusts the path you cite.
           Number formatting in any user-facing output (HTML, tables,
           chart labels, summary text): humanise large magnitudes to
           short suffix form — `3.32B`, `1.5M`, `127K`, `4.6K`. NEVER
