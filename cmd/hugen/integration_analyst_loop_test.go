@@ -249,7 +249,7 @@ func newAnalystIntegrationCore(t *testing.T, pyBin, tmpl, vendor string) *integr
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
 		manager.WithExtensions(
-			wsext.NewExtension(workspaceDir, true),
+			wsext.NewExtension(workspaceDir, logger),
 			mcpext.NewExtension(cfgSvc.ToolProviders(), logger),
 		),
 	)

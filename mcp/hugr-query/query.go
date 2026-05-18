@@ -19,11 +19,12 @@ import (
 
 // queryDeps groups the values every tool handler needs. The
 // runtime constructs one of these at boot and the handlers close
-// over it.
+// over it. Workspace paths are NOT cached on deps — the per-call
+// session_dir from MCP `_meta` is the single source of truth
+// (see resolveOutDir in paths.go).
 type queryDeps struct {
-	client    *client.Client
-	timeouts  timeoutConfig
-	workspace string // WORKSPACES_ROOT (parent of per-session scratch dirs)
+	client   *client.Client
+	timeouts timeoutConfig
 }
 
 // queryArgs is the LLM-supplied input for hugr.Query. There is no
@@ -99,7 +100,7 @@ const jsonPreviewCap = 1024
 // the top-level data map, writes one file per top-level field
 // (Parquet for ArrowTable, JSON otherwise), and returns a
 // queryResult with a short preview.
-func (d *queryDeps) runQuery(ctx context.Context, sessionID string, in queryArgs) (queryResult, error) {
+func (d *queryDeps) runQuery(ctx context.Context, sessionDir string, in queryArgs) (queryResult, error) {
 	if strings.TrimSpace(in.GraphQL) == "" {
 		return queryResult{}, fmt.Errorf("graphql: empty")
 	}
@@ -119,7 +120,7 @@ func (d *queryDeps) runQuery(ctx context.Context, sessionID string, in queryArgs
 	}
 
 	queryID := newShortID()
-	written, err := d.writeResponse(sessionID, in.Path, queryID, resp)
+	written, err := d.writeResponse(sessionDir, in.Path, queryID, resp)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -148,7 +149,7 @@ func assembleResult(queryID string, elapsed time.Duration, written []partEntry) 
 // runQueryJQ is the hugr.QueryJQ handler. It runs the GraphQL via
 // QueryJSON (which applies the JQ post-processor server-side) and
 // writes the resulting JsonValue to a single .json file.
-func (d *queryDeps) runQueryJQ(ctx context.Context, sessionID string, in queryJQArgs) (queryResult, error) {
+func (d *queryDeps) runQueryJQ(ctx context.Context, sessionDir string, in queryJQArgs) (queryResult, error) {
 	if strings.TrimSpace(in.GraphQL) == "" {
 		return queryResult{}, fmt.Errorf("graphql: empty")
 	}
@@ -172,7 +173,7 @@ func (d *queryDeps) runQueryJQ(ctx context.Context, sessionID string, in queryJQ
 		return queryResult{}, mapJQError(cctx, err, elapsed)
 	}
 	queryID := newShortID()
-	dir, err := d.resolveOutDir(sessionID, in.Path, queryID)
+	dir, err := resolveOutDir(sessionDir, in.Path, queryID)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -207,7 +208,7 @@ func (d *queryDeps) runQueryJQ(ctx context.Context, sessionID string, in queryJQ
 // session workspace); the runtime adds `<dir>/<sanitized_field>.<ext>`
 // for each part. An empty `requestedDir` defaults to
 // `data/<query_id>/`.
-func (d *queryDeps) writeResponse(sessionID, requestedDir, queryID string, resp *types.Response) ([]partEntry, error) {
+func (d *queryDeps) writeResponse(sessionDir, requestedDir, queryID string, resp *types.Response) ([]partEntry, error) {
 	if resp == nil || resp.Data == nil {
 		return nil, nil
 	}
@@ -223,7 +224,7 @@ func (d *queryDeps) writeResponse(sessionID, requestedDir, queryID string, resp 
 		return nil, nil
 	}
 
-	dir, err := d.resolveOutDir(sessionID, requestedDir, queryID)
+	dir, err := resolveOutDir(sessionDir, requestedDir, queryID)
 	if err != nil {
 		return nil, err
 	}

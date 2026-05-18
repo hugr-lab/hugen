@@ -33,10 +33,12 @@ type Config struct {
 	AfterAuthHook func(ctx context.Context, svc *auth.Service) error
 }
 
-// WorkspaceConfig — per-session scratch root.
+// WorkspaceConfig — per-session scratch root. Phase 5.4: dirs are
+// never deleted on session close. Mission subdirs are reclaimed by
+// the orphan sweeper (TTL-based); root dirs are reclaimed by
+// phase-6 cron.
 type WorkspaceConfig struct {
-	Dir            string
-	CleanupOnClose bool
+	Dir string
 }
 
 // HTTPConfig — listener for /api/v1/* and the auth endpoints.

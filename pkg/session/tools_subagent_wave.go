@@ -49,16 +49,49 @@ type spawnWaveInput struct {
 	WaitTimeoutMS int          `json:"wait_timeout_ms,omitempty"`
 }
 
+// spawnWaveExpectedShape is the self-correction template returned
+// alongside a bad_request envelope. Weak models that emitted
+// spawn_wave({}) see this verbatim in their next turn's
+// tool_result.error.expected_shape and can copy-paste it as the
+// next call's args. Placeholders inside string fields are
+// intentional — the model fills them with mission-specific
+// content; the field names + structure are what it needed.
+var spawnWaveExpectedShape = map[string]any{
+	"subagents": []any{
+		map[string]any{
+			"name":     "<short kebab-case id, e.g. planner-wave0>",
+			"task":     "<self-contained worker brief; describes the user goal and what the worker must produce>",
+			"role":     "<optional role inside the skill>",
+			"skill":    "<optional skill name, defaults to the parent's>",
+			"inputs":   map[string]any{"_comment": "optional JSON the worker sees alongside task"},
+		},
+	},
+	"wave_label":      "<optional short label for logging>",
+	"wait_timeout_ms": 0,
+}
+
 func (parent *Session) callSpawnWave(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	if parent.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}
 	var in spawnWaveInput
 	if err := json.Unmarshal(args, &in); err != nil {
-		return toolErr("bad_request", fmt.Sprintf("invalid spawn_wave args: %v", err))
+		// args is unparseable; embed it as a literal string so the
+		// envelope itself remains valid JSON. Weak models that drift
+		// into malformed args benefit most from seeing the expected
+		// shape next to their bad input.
+		return toolErrShape("bad_request",
+			fmt.Sprintf("invalid spawn_wave args: %v", err),
+			string(args), spawnWaveExpectedShape)
 	}
 	if len(in.Subagents) == 0 {
-		return toolErr("bad_request", "subagents must be a non-empty array")
+		// Self-correction hint: weak models that emit spawn_wave({})
+		// drift into multi-minute loops because the previous tool_result
+		// only said "subagents must be a non-empty array" — no example.
+		// Embed the expected shape directly so the next turn can fix it.
+		return toolErrShape("bad_request",
+			"subagents must be a non-empty array",
+			json.RawMessage(args), spawnWaveExpectedShape)
 	}
 
 	// Spawn phase — delegate to the batch helper. On a validation

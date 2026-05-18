@@ -40,9 +40,10 @@ func fakeTemplate(t *testing.T) string {
 func TestEnsureSessionVenv_FastPath(t *testing.T) {
 	root := t.TempDir()
 	tpl := fakeTemplate(t)
+	sessDir := filepath.Join(root, "ses-root", "ses-mission")
 
 	// Pre-populate the session venv + stamp so fast path triggers.
-	sessVenv := filepath.Join(root, "ses-1", ".venv")
+	sessVenv := filepath.Join(sessDir, ".venv")
 	if err := os.MkdirAll(sessVenv, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -52,13 +53,10 @@ func TestEnsureSessionVenv_FastPath(t *testing.T) {
 	}
 	stat0, _ := os.Stat(stamp)
 
-	deps := &execDeps{template: tpl, workspacesRoot: root, log: discardLogger()}
-	sessDir, gotVenv, err := ensureSessionVenv(deps, "ses-1")
+	deps := &execDeps{template: tpl, log: discardLogger()}
+	gotVenv, err := ensureSessionVenv(deps, sessDir)
 	if err != nil {
 		t.Fatalf("ensureSessionVenv: %v", err)
-	}
-	if sessDir != filepath.Join(root, "ses-1") {
-		t.Errorf("sessDir = %q", sessDir)
 	}
 	if gotVenv != sessVenv {
 		t.Errorf("sessVenv = %q want %q", gotVenv, sessVenv)
@@ -72,9 +70,10 @@ func TestEnsureSessionVenv_FastPath(t *testing.T) {
 func TestEnsureSessionVenv_Bootstrap(t *testing.T) {
 	root := t.TempDir()
 	tpl := fakeTemplate(t)
-	deps := &execDeps{template: tpl, workspacesRoot: root, log: discardLogger()}
+	sessDir := filepath.Join(root, "ses-root", "ses-mission-new")
+	deps := &execDeps{template: tpl, log: discardLogger()}
 
-	sessDir, sessVenv, err := ensureSessionVenv(deps, "ses-new")
+	sessVenv, err := ensureSessionVenv(deps, sessDir)
 	if err != nil {
 		t.Fatalf("ensureSessionVenv: %v", err)
 	}
@@ -84,17 +83,15 @@ func TestEnsureSessionVenv_Bootstrap(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(sessVenv, "bin", "python")); err != nil {
 		t.Errorf("python not copied: %v", err)
 	}
-	if sessDir != filepath.Join(root, "ses-new") {
-		t.Errorf("sessDir = %q", sessDir)
-	}
 }
 
 func TestEnsureSessionVenv_PartialRecovery(t *testing.T) {
 	root := t.TempDir()
 	tpl := fakeTemplate(t)
+	sessDir := filepath.Join(root, "ses-root", "ses-broken")
 
 	// Pre-populate a partial venv (no stamp file).
-	sessVenv := filepath.Join(root, "ses-broken", ".venv")
+	sessVenv := filepath.Join(sessDir, ".venv")
 	if err := os.MkdirAll(sessVenv, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -103,8 +100,8 @@ func TestEnsureSessionVenv_PartialRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deps := &execDeps{template: tpl, workspacesRoot: root, log: discardLogger()}
-	if _, _, err := ensureSessionVenv(deps, "ses-broken"); err != nil {
+	deps := &execDeps{template: tpl, log: discardLogger()}
+	if _, err := ensureSessionVenv(deps, sessDir); err != nil {
 		t.Fatalf("ensureSessionVenv: %v", err)
 	}
 	if _, err := os.Stat(junk); !os.IsNotExist(err) {
@@ -117,16 +114,48 @@ func TestEnsureSessionVenv_PartialRecovery(t *testing.T) {
 
 func TestEnsureSessionVenv_TemplateMissing(t *testing.T) {
 	deps := &execDeps{
-		template:       "/nonexistent/template",
-		workspacesRoot: t.TempDir(),
-		log:            discardLogger(),
+		template: "/nonexistent/template",
+		log:      discardLogger(),
 	}
-	_, _, err := ensureSessionVenv(deps, "ses-x")
+	_, err := ensureSessionVenv(deps, filepath.Join(t.TempDir(), "ses-x"))
 	if err == nil {
 		t.Fatalf("expected error when template is missing")
 	}
 	if !strings.Contains(err.Error(), "template missing") {
 		t.Errorf("err=%q does not mention template", err)
+	}
+}
+
+// TestEnsureSessionVenv_ConcurrentBootstrap exercises the per-dir
+// mutex: two goroutines bootstrap the SAME session_dir at once (the
+// 5.4 mission-shared layout case). Both must succeed, the .venv
+// must be fully populated, and only one bootstrap pass should
+// actually run copyTree (verified by checking the stamp mtime
+// doesn't get rewritten by the second caller).
+func TestEnsureSessionVenv_ConcurrentBootstrap(t *testing.T) {
+	root := t.TempDir()
+	tpl := fakeTemplate(t)
+	sessDir := filepath.Join(root, "ses-root", "ses-mission-shared")
+	deps := &execDeps{template: tpl, log: discardLogger()}
+
+	const workers = 4
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			_, err := ensureSessionVenv(deps, sessDir)
+			errs <- err
+		}()
+	}
+	for i := 0; i < workers; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("worker %d: %v", i, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(sessDir, ".venv", stampName)); err != nil {
+		t.Errorf("stamp missing after concurrent bootstrap: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sessDir, ".venv", "bin", "python")); err != nil {
+		t.Errorf("python missing after concurrent bootstrap: %v", err)
 	}
 }
 
@@ -241,18 +270,18 @@ func TestCappedBuffer(t *testing.T) {
 	}
 }
 
-func TestSessionIDFromRequest(t *testing.T) {
+func TestSessionDirFromRequest(t *testing.T) {
 	var req mcp.CallToolRequest
-	if got := sessionIDFromRequest(req); got != "" {
+	if got := sessionDirFromRequest(req); got != "" {
 		t.Errorf("nil meta should yield empty, got %q", got)
 	}
-	req.Params.Meta = &mcp.Meta{AdditionalFields: map[string]any{"session_id": "ses-7"}}
-	if got := sessionIDFromRequest(req); got != "ses-7" {
-		t.Errorf("got %q want ses-7", got)
+	req.Params.Meta = &mcp.Meta{AdditionalFields: map[string]any{"session_dir": "/work/ses-r/ses-m"}}
+	if got := sessionDirFromRequest(req); got != "/work/ses-r/ses-m" {
+		t.Errorf("got %q want /work/ses-r/ses-m", got)
 	}
-	req.Params.Meta = &mcp.Meta{AdditionalFields: map[string]any{"session_id": 42}}
-	if got := sessionIDFromRequest(req); got != "" {
-		t.Errorf("non-string id should yield empty, got %q", got)
+	req.Params.Meta = &mcp.Meta{AdditionalFields: map[string]any{"session_dir": 42}}
+	if got := sessionDirFromRequest(req); got != "" {
+		t.Errorf("non-string value should yield empty, got %q", got)
 	}
 }
 

@@ -11,25 +11,28 @@ import (
 )
 
 // resolveOutDir validates the LLM-supplied output directory and
-// returns its absolute path under the session workspace, mkdir'd
-// and ready to receive part files.
+// returns its absolute path under the calling session's workspace
+// directory, mkdir'd and ready to receive part files.
+//
+// `sessionDir` is the absolute path the runtime provides via MCP
+// `_meta.session_dir` (resolved by the workspace extension — under
+// the 5.4 layout this is the mission's shared dir for worker
+// sessions, so output written by one worker is readable by its
+// siblings in the same mission).
 //
 // Contract:
 //
-//   - empty `requested`   → default to `<workspace>/<sid>/data/<queryID>/`.
-//   - relative path       → joined under `<workspace>/<sid>/`.
+//   - empty `requested`   → default to `<sessionDir>/data/<queryID>/`.
+//   - relative path       → joined under `<sessionDir>/`.
 //   - absolute path       → rejected (arg_validation).
 //   - `..`-escape         → rejected (arg_validation).
-func (d *queryDeps) resolveOutDir(sessionID, requested, queryID string) (string, error) {
-	if d.workspace == "" {
-		return "", errors.New("WORKSPACES_ROOT not set")
-	}
-	if sessionID == "" {
-		return "", errors.New("session_id missing in tool call metadata")
+func resolveOutDir(sessionDir, requested, queryID string) (string, error) {
+	if sessionDir == "" {
+		return "", errors.New("session_dir missing in tool call metadata")
 	}
 	var dir string
 	if requested == "" {
-		dir = filepath.Join(d.workspace, sessionID, "data", queryID)
+		dir = filepath.Join(sessionDir, "data", queryID)
 	} else {
 		if filepath.IsAbs(requested) {
 			return "", &toolError{Code: "arg_validation", Msg: "path must be relative to the session workspace"}
@@ -40,7 +43,7 @@ func (d *queryDeps) resolveOutDir(sessionID, requested, queryID string) (string,
 		if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 			return "", &toolError{Code: "arg_validation", Msg: "path escapes session workspace"}
 		}
-		dir = filepath.Join(d.workspace, sessionID, cleaned)
+		dir = filepath.Join(sessionDir, cleaned)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
@@ -59,4 +62,3 @@ func newShortID() string {
 	}
 	return hex.EncodeToString(b[:])
 }
-

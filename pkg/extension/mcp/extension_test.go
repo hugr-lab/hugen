@@ -17,7 +17,7 @@ import (
 // state. Avoids reaching for private SessionWorkspace fields.
 func wireWorkspace(t *testing.T, state *fixture.TestSessionState, root string) {
 	t.Helper()
-	ext := wsext.NewExtension(root, false)
+	ext := wsext.NewExtension(root, nil)
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("workspace InitState: %v", err)
 	}

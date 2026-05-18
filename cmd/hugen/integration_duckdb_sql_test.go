@@ -140,20 +140,16 @@ func TestAnalyst_DuckDBSQL(t *testing.T) {
 		t.Errorf("spatial query did not return a distance: %s", spatial)
 	}
 
-	// Criterion 4 cleanup — closing the session removes <sid>/ entirely
-	// (workspace.Release with cleanup=true), including .duckdb/.
+	// Criterion 4 close — phase 5.4 contract: CloseSession is
+	// forget-only at every tier. The session dir (and any DuckDB
+	// scratch underneath it) must persist past Terminate;
+	// reclamation is the orphan sweeper's / phase-6 cron's job.
 	sessDir := filepath.Join(core.workspaceDir, sess.ID())
-	duckScratch := filepath.Join(sessDir, ".duckdb")
-	// .duckdb may or may not exist (DuckDB creates tmp/secrets lazily);
-	// existence isn't required, only "gone after close".
 	if err := core.manager.Terminate(ctx, sess.ID(), "user:/end"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if _, err := os.Stat(sessDir); !os.IsNotExist(err) {
-		t.Errorf("session dir %s not cleaned", sessDir)
-	}
-	if _, err := os.Stat(duckScratch); !os.IsNotExist(err) {
-		t.Errorf("duckdb scratch %s not cleaned", duckScratch)
+	if _, err := os.Stat(sessDir); err != nil {
+		t.Errorf("session dir %s removed by close (5.4 expects persistence): %v", sessDir, err)
 	}
 }
 
@@ -227,7 +223,7 @@ func newDuckDBIntegrationCore(t *testing.T, vendorPath string) *integrationCore 
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
 		manager.WithExtensions(
-			wsext.NewExtension(workspaceDir, true),
+			wsext.NewExtension(workspaceDir, logger),
 			mcpext.NewExtension(cfgSvc.ToolProviders(), logger),
 		),
 	)

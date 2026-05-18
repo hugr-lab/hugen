@@ -69,8 +69,76 @@ The autoloaded surface is minimal:
 
 ## Doing your task — read the manual first
 
-Your mission passed you a `task` (the user message you boot with)
-and validated `inputs`.
+Your mission passed you a `task` (the user message you boot with).
+When the mission and prior waves have already done work, three
+labelled blocks land on top of your first message — read them
+top-down before doing anything else:
+
+```
+[Whiteboard]
+(N messages on board, active since HH:MM)
+
+#1 @HH:MM from <role>:
+  <broadcast text>
+#2 @HH:MM from <role> (<name>):
+  ...
+
+[Inputs from parent]
+{
+  "module": "<resolved>",
+  "tables": ["<resolved>"],
+  "query_draft": "<validated draft>",
+  "file_path": "<resolved>",
+  ...
+}
+
+[Task]
+<task prose>
+```
+
+The optional `(<name>)` after `<role>` is the sibling's spawn
+name. When the planner spawns two `data-analyst` workers in one
+wave, names disambiguate whose finding is whose — e.g. `from
+data-analyst (top-providers)` vs `from data-analyst
+(payment-distribution)`. Missing parens means the author had no
+explicit name (root sessions, single-of-role workers, legacy
+events).
+
+- **`[Whiteboard]`** — shared accumulated findings from siblings
+  in earlier waves of this mission. Trust the broadcasts: validated
+  queries, resolved schema facts, file paths to output someone
+  else already produced. **DO NOT re-run discovery / schema /
+  validation for facts already on the board.** If a relevant
+  broadcast is older than the bound (`Showing last N. Call
+  whiteboard:read for the full history.`), call `whiteboard:read`
+  once to load the full set into your context before composing.
+- **`[Inputs from parent]`** — mission-supplied facts for THIS
+  step specifically (module, tables, query_draft, file_path, …).
+  Different from the whiteboard: inputs are this-worker-only
+  briefing, whiteboard is cross-wave context.
+- **`[Task]`** — the actual instruction. Read it last, with
+  whiteboard + inputs already in mind.
+
+**Trust order: Whiteboard → Inputs → Manual.**
+
+- Whiteboard broadcasts are siblings' validated work — quote
+  query strings, file paths, schema facts verbatim instead of
+  recomputing them. The board is the source of truth between
+  waves.
+- Inputs are mission's specific brief: `module` / `tables` →
+  skip `discovery-search_*`; `query_draft` → execute as-is,
+  skip a from-scratch `schema-type_fields` + validate cycle;
+  `file_path` → write to that path, do not invent a new one.
+  Discover ONLY for keys missing from BOTH whiteboard and
+  inputs.
+- References (`skill:ref`) carry **syntax + conventions** the
+  facts above don't (how to address fields, special operators,
+  quoting rules, gotchas). When you're composing a new query
+  (no usable draft in inputs / whiteboard), read the relevant
+  reference FIRST. A validated `query_draft` from the inputs /
+  whiteboard can usually run as-is and lets you skip references
+  for that one query — but the moment you alter / compose
+  something new, references come back into the picture.
 
 Your role may declare `autoload_skills` in its manifest entry. If
 so, those skills are already loaded by the runtime BEFORE your

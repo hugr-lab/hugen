@@ -94,7 +94,7 @@ metadata:
                 subagents:  [{
                   skill: "analyst",
                   role:  "planner",
-                  task:  "User goal: {{ .UserGoal }}\n\nProduce a wave plan as a ```yaml fenced block, then secure user approval via session:inquire BEFORE returning. Do all source / module / table resolution up front — downstream workers must not need to re-discover what you have already verified.\n\nBoot: your `hugr-data` discovery/schema tools are auto-loaded — confirm via ## Loaded skills, then start probing. Do NOT call skill:load(\"hugr-data\") (already loaded) and NEVER skill:load(\"analyst\") (mission-tier, will fail tier_forbidden). If the user goal is genuinely ambiguous, call session:inquire(type=\"clarification\") BEFORE planning rather than guessing.\n\nAvailable analyst roles:\n  • overview       — \"what's available\" inventory; discovery-* read-only.\n  • schema-explorer — discovers ONE entity / module schema; discovery-* + schema-* read-only.\n  • query-builder  — composes + validates ONE GraphQL query (count-only / LIMIT 1).\n  • data-analyst   — executes validated queries, runs python / duckdb post-processing, file output.\n  • report-builder — synthesises final answer; may emit HTML/JS with interactivity, markdown, or python-rendered output. No data tools.\n\nPlan shape (all three fields are mandatory):\n  ```yaml\n  plan:                                    # technical — consumed by mission\n    - role: <one of the roles above>\n      task: \"<self-contained worker brief. Embed every resolved fact you already probed: source/module/table names, function names, expected columns, query draft, file path, output format. The worker must be able to execute WITHOUT re-running discovery-* / schema-* probes you already ran.>\"\n      inputs:                              # optional structured context, passed through to spawn_wave inputs\n        data_source: \"<resolved name>\"\n        module: \"<resolved name>\"\n        tables: [\"<t1>\"]\n        query_draft: \"<optional GraphQL draft>\"\n        output_format: \"html|markdown|json|csv\"\n        file_path: \"<resolved path if applicable>\"\n      skip_if: \"<optional precondition the mission verifies via notepad:search>\"\n  user_summary: |                          # human-facing — 2-4 sentences, no jargon\n    <plain-language plan: what we'll do and why, no role names, no tool names>\n  rationale: \"<one paragraph internal — what you decided and why>\"\n  ```\n\nConfirm-and-refine loop (planner runs this BEFORE returning):\n  After drafting the YAML, call session:inquire({type:\"clarification\", question: \"Plan for: <one-line restate goal>.\\n\\n<user_summary verbatim>\\n\\nProceed?\", options:[\"approve\",\"refine\",\"abort\"]}). The inquire bubbles up through the mission to root chat — the user reply bubbles back to you. On `approve` (or any response starting with \"approve\"): return the final YAML and end the turn. On `refine <text>`: revise the plan in this same session (no respawn — you keep your probed data surface), update user_summary, and inquire again. Hard cap 3 refine cycles, then return YAML containing only `abstain: \"refine_loop_exhausted\"`. On `abort`: return YAML containing only `abstain: \"user_aborted_plan\"`."
+                  task:  "User goal: {{ .UserGoal }}\n\nProduce a wave plan as a ```yaml fenced block, then secure user approval via session:inquire BEFORE returning. Do all source / module / table resolution up front — downstream workers must not need to re-discover what you have already verified.\n\nBoot: your `hugr-data` discovery/schema tools are auto-loaded — confirm via ## Loaded skills, then start probing. Do NOT call skill:load(\"hugr-data\") (already loaded) and NEVER skill:load(\"analyst\") (mission-tier, will fail tier_forbidden). If the user goal is genuinely ambiguous, call session:inquire(type=\"clarification\") BEFORE planning rather than guessing.\n\nAvailable analyst roles:\n  • overview       — \"what's available\" inventory; discovery-* read-only.\n  • schema-explorer — discovers ONE entity / module schema; discovery-* + schema-* read-only.\n  • query-builder  — composes + validates ONE GraphQL query (count-only / LIMIT 1).\n  • data-analyst   — executes validated queries, runs python / duckdb post-processing, file output.\n  • report-builder — synthesises final answer; may emit HTML/JS with interactivity, markdown, or python-rendered output. No data tools.\n\nPlan shape (waves, REQUIRED fields marked):\n  ```yaml\n  plan:                                    # ORDERED array of waves; each wave is one spawn_wave call by mission\n    - wave_label: \"<short tag for logging, e.g. 'discover' / 'execute'>\"   # REQUIRED\n      subagents:                                                           # REQUIRED; every entry in this array runs IN PARALLEL\n        - name: \"<short kebab-case id, REQUIRED; semantic — e.g. 'top-providers' not 'data-analyst-0'>\"\n          role: \"<one of the roles above; REQUIRED>\"\n          task: \"<self-contained brief; embed resolved facts; do NOT restate planning>\"\n          inputs:                          # structured context — runtime surfaces this as an [Inputs from parent] JSON block above the worker's task; cross-wave findings come via the [Whiteboard] block automatically, no need to copy\n            data_source: \"<resolved name>\"\n            module: \"<resolved name>\"\n            tables: [\"<t1>\"]\n            query_draft: \"<optional validated GraphQL>\"\n            output_format: \"html|markdown|json|csv\"\n            file_path: \"<resolved path if applicable>\"\n          skip_if: \"<optional precondition the mission verifies via notepad:search>\"\n        - name: \"<another subagent in the SAME wave — runs in parallel with the one above>\"\n          ...\n    - wave_label: \"<next wave; runs only after the previous wave's subagents all complete>\"\n      subagents: [ ... ]\n  user_summary: |                          # human-facing — 2-4 sentences, no jargon\n    <plain-language plan: what we'll do and why, no role names, no tool names>\n  rationale: \"<one paragraph internal — what you decided and why>\"\n  ```\n\nWave parallelism rules:\n  - Subagents in the SAME wave run in parallel — only group them when they have no dependency on each other's whiteboard output.\n  - Each subsequent wave sees the prior waves' whiteboard broadcasts in its `[Whiteboard]` block; deps flow through the board.\n  - Example: schema-explorer + overview can run together (independent reads); two data-analyst's executing different queries can run together; a report-builder MUST wait for the data-analyst's that produced its inputs.\n  - Sequential when in doubt — wrong parallelism (worker waits for a board fact that hasn't arrived yet) is worse than slow.\n\nConfirm-and-refine loop (planner runs this BEFORE returning):\n  After drafting the YAML, call session:inquire({type:\"clarification\", question: \"Plan for: <one-line restate goal>.\\n\\n<user_summary verbatim>\\n\\nProceed?\", options:[\"approve\",\"refine\",\"abort\"]}). The inquire bubbles up through the mission to root chat — the user reply bubbles back to you. On `approve` (or any response starting with \"approve\"): return the final YAML and end the turn. On `refine <text>`: revise the plan in this same session (no respawn — you keep your probed data surface), update user_summary, and inquire again. Hard cap 3 refine cycles, then return YAML containing only `abstain: \"refine_loop_exhausted\"`. On `abort`: return YAML containing only `abstain: \"user_aborted_plan\"`."
                 }]
               })
 
@@ -102,14 +102,17 @@ metadata:
             contains a ```yaml block with shape:
 
               plan:
-                - role: <analyst sub_agent role name>
-                  task: "<self-contained, embeds resolved sources/tables>"
-                  inputs:
-                    data_source: "<name>"
-                    tables: ["<t>"]
-                    ...
-                  skip_if: "<optional precondition>"
-                - role: ...
+                - wave_label: "<short tag>"
+                  subagents:
+                    - name: "<kebab-case id, semantic>"
+                      role: "<analyst sub_agent role name>"
+                      task: "<self-contained brief>"
+                      inputs: { data_source, module, tables, query_draft?, file_path?, output_format? }
+                      skip_if: "<optional precondition>"
+                    - name: "<another subagent — runs parallel with the one above>"
+                      ...
+                - wave_label: "<next sequential wave>"
+                  subagents: [ ... ]
               user_summary: "<plain-language for the user>"
               rationale: "<internal one paragraph>"
 
@@ -142,40 +145,59 @@ metadata:
             ══════════════════════════════════════════════════════
             STAGE B — Execute
 
-            For each technical `plan` step IN ORDER:
+            The planner's `plan` is an ORDERED array of WAVES
+            (not a flat list of steps). Each wave declares one
+            or more `subagents` that run IN PARALLEL within that
+            wave; waves themselves run sequentially.
 
-              1. If `skip_if` is present, evaluate it now —
-                 typically via `notepad:search` for a matching
-                 note. If satisfied, skip and continue.
+            For each wave in `plan` IN ORDER:
 
-              2. Otherwise spawn ONE wave with this role + task,
-                 passing the step's `inputs` block through:
+              1. Resolve `skip_if`. Walk the wave's subagents and
+                 evaluate any `skip_if` predicate (typically
+                 `notepad:search` for a known note). Drop the
+                 satisfied entries from this wave's batch. If the
+                 wave empties out, log a `plan:comment` and move
+                 on to the next wave.
+
+              2. Spawn the wave in ONE call — the runtime fans
+                 out goroutines so each subagent runs in
+                 parallel; `spawn_wave` returns after all
+                 finish:
 
                    session:spawn_wave({
-                     wave_label: "<step #N: role>",
-                     subagents:  [{
-                       skill:  "analyst",
-                       role:   "<plan.step.role>",
-                       task:   "<plan.step.task>",
-                       inputs: <plan.step.inputs>     // forward as-is
-                     }]
+                     wave_label: "<plan.wave.wave_label>",
+                     subagents: [
+                       {
+                         name:   "<plan.wave.subagents[i].name>",
+                         skill:  "analyst",
+                         role:   "<plan.wave.subagents[i].role>",
+                         task:   "<plan.wave.subagents[i].task>",
+                         inputs: <plan.wave.subagents[i].inputs>
+                       },
+                       ... (one entry per subagent in this wave)
+                     ]
                    })
 
-                 The step's `task` already embeds resolved
-                 sources / tables / queries — workers should NOT
-                 re-run discovery. If a worker still needs
-                 something unstated, it can self-call
-                 `session:inquire(type="clarification")` and the
-                 bubble path will reach the user.
+                 The runtime auto-prepends `[Whiteboard]` (prior
+                 waves' broadcasts) + `[Inputs from parent]` to
+                 each worker's first message — workers see what
+                 siblings produced + their own brief without
+                 mission having to copy facts manually.
 
-              3. After it returns: `whiteboard:read` to fold
-                 findings, `plan:comment` with a one-line
-                 progress note ("Step N done: <summary>"). Then
-                 continue to the next step.
+              3. After spawn_wave returns: `whiteboard:read` to
+                 see what the wave added, `plan:comment` with a
+                 one-line progress note ("wave <wave_label>
+                 done: <summary>"). Continue.
 
-            When every step is processed, produce a final
+            When every wave is processed, produce a final
             assistant message — that's the `result` root sees in
             its `wait_subagents` call.
+
+            Backward compat — if `plan` is a flat array (no
+            `wave_label` / `subagents` wrapping, just `{role,
+            task, inputs, ...}` entries), treat each entry as a
+            single-subagent wave and spawn them one at a time.
+            New plans should use the wave shape.
 
             ══════════════════════════════════════════════════════
             Structural rules:
@@ -185,20 +207,12 @@ metadata:
             • `skill: "analyst"` on every `spawn_wave` entry.
               Workers pick the right `_worker`-tier primitives
               themselves.
-            • The planner OWNS scope decisions — what roles, in
-              what order, with what parallelism. Mission does
-              NOT second-guess the plan beyond `skip_if` checks
-              and parse retries.
-            • For parallel work within one step, the planner
-              encodes it as a single plan entry whose `task`
-              names multiple angles — the spawned worker then
-              decides; OR the planner produces a multi-entry
-              wave inline (one plan step with a list of
-              sub-tasks). Keep the prototype simple: one role +
-              one task per plan step, sequential.
-            • The original (pre-5.x) staged-pipeline playbook is
-              superseded — the planner now picks the shape per
-              task.
+            • The planner OWNS scope decisions — which subagents,
+              in which wave, in what order. Mission does NOT
+              second-guess the plan beyond `skip_if` checks and
+              parse retries.
+            • Pre-5.x staged-pipeline playbook is superseded —
+              the planner now picks the wave shape per task.
 
     sub_agents:
       - name: planner
@@ -251,6 +265,14 @@ metadata:
           order, what to skip. The mission does not re-inquire
           the user; what you return is final.
 
+          On `approve`, BEFORE returning the YAML, call
+          `whiteboard:write` ONCE with a tight summary of the
+          resolved data surface (data source, module, tables,
+          relevant column hints, any function names you found).
+          Downstream workers see this as their `[Whiteboard]`
+          block so they don't redo your discovery. One write per
+          plan, ≤ 4 KB — not a transcript, a digest.
+
           Clarify before planning, too. If the user goal is
           genuinely ambiguous BEFORE you can draft a plan
           (unclear module, unclear output format, unclear scope,
@@ -290,10 +312,38 @@ metadata:
               roles before naming the data surface is incomplete
               — workers will fill the gap by re-running the same
               discovery you skipped.
-            - Embed every resolved fact in the step's `task` +
-              `inputs`. The worker reads its task literally;
-              "find the right table" is a planning failure, not
-              a worker instruction.
+            - Embed every resolved fact in the subagent's
+              `inputs`. The runtime prepends `inputs` as an
+              `[Inputs from parent]` JSON block above the
+              worker's task, so any key you fill is read verbatim
+              and skipped from the worker's own discovery. The
+              runtime ALSO prepends a `[Whiteboard]` block with
+              prior waves' broadcasts — cross-wave handoffs flow
+              through the board automatically; no need to
+              re-encode upstream waves' output in downstream
+              `inputs`. Baseline keys:
+                • Any role touching a specific table MUST carry
+                  `module` + `tables`.
+                • Subagents writing output MUST carry
+                  `file_path` + `output_format`.
+                • `query_draft` is appropriate when you've
+                  already validated a single query the next
+                  subagent will run as-is. Skip for multi-query
+                  work — route through a query-builder step
+                  instead.
+            - Name every subagent. `name` is REQUIRED on each
+              entry — pick a semantic kebab-case id (e.g.
+              `top-providers`, `payment-distribution`,
+              `op2023-overview`) rather than `data-analyst-1`.
+              Used for whiteboard provenance + addressing
+              (notify_subagent, subagent_cancel).
+            - Group independent subagents into ONE wave. If two
+              data-analyst's run queries that don't depend on
+              each other's whiteboard output, put them in the
+              same wave — they run in parallel. Sequential when
+              you're unsure — wrong parallelism (a worker reads
+              the board for a fact that hasn't arrived yet) is
+              worse than slow.
             - Prefer the shortest plan that answers the goal.
               For "list / count / show X" where notepad or one
               cheap query covers it, two steps (or one) is
@@ -353,6 +403,12 @@ metadata:
           `session:inquire`. Pick overview over schema-explorer
           (which targets one specific entity inside one already-
           known module).
+          Before returning, call `whiteboard:write` ONCE with the
+          structured inventory you produced (sources / modules /
+          confidence labels for source-pickup mode, or the
+          catalogue summary for inventory mode). Downstream waves
+          pick this up from their `[Whiteboard]` block instead of
+          re-running discovery.
         intent: tool_calling
         can_spawn: false
         autoload_skills: [hugr-data]
@@ -486,6 +542,27 @@ metadata:
           proved out; focuses on results, not schema. The right
           tool depends on the task — Hugr for federated data,
           DuckDB for local files, Python for shaping / plotting.
+          Before returning, call `whiteboard:write` ONCE.
+          REQUIRED in the broadcast when you produce a file
+          artefact (parquet / JSON / CSV / html):
+            - path: <relative path under SESSION_DIR>
+            - shape: <rows> x <cols> (or `<bytes>` for JSON)
+            - columns: [<col1>:<dtype>, <col2>:<dtype>, ...] —
+              for any non-scalar column, drill in: e.g.
+              `key: {Manufacturer_Name: str}`,
+              `aggregations: {Total_Amount: {sum: float}}`.
+              Empty list ONLY when the artefact is a 1-row
+              scalar summary.
+            - headline: <one line worth quoting verbatim — top
+              value, total, count — whatever the next wave will
+              cite>.
+          Why this exact shape: report-builder and downstream
+          analysts compose against these broadcasts without
+          re-opening the file. Missing `columns:` forces them
+          to introspect via `df.head()` / `df.columns`, which
+          is the single biggest waste in a multi-wave mission.
+          You already know the schema — you queried it. Spend
+          one line; save the next worker five rounds.
         intent: tool_calling
         can_spawn: false
         autoload_skills: [hugr-data, duckdb-data, python-runner]
@@ -507,6 +584,42 @@ metadata:
           charts / tables / formatted output when the goal calls
           for visualisation. Does NOT run new data queries; reads
           whiteboard and post-shapes.
+          **Whiteboard is your input**: the prior schema-explorer /
+          query-builder / data-analyst waves wrote validated queries,
+          schema facts, and result file paths there. You see them at
+          the top of your first message in the `[Whiteboard]` block
+          (and can re-read in full via `whiteboard:read`). DO NOT
+          re-run `hugr-main:discovery-*` / `hugr-main:schema-*` —
+          you have no data tools and that work is already done.
+          Pull whatever you need from the board, then format. If a
+          fact you need is genuinely missing, return a short
+          "missing: <what>" finding to mission instead of
+          improvising; mission will spawn the right worker.
+          **Trust whiteboard `columns:` lines verbatim.** When a
+          data-analyst broadcast lists `path:`, `shape:`,
+          `columns:` (nested dtypes included), go STRAIGHT to
+          the compose step — do NOT `df.head()`, `df.columns`,
+          `cat <json>`, or write check_data.py-style probe
+          scripts. The schema is the broadcast. The ONLY time
+          you may introspect an artefact is when the broadcast
+          is missing `columns:` entirely or the columns shape
+          doesn't match what your compose step actually needs
+          (e.g. headline broadcast was a scalar summary, but
+          you need row-level detail) — and in that case prefer
+          ONE `python-mcp:run_code` inline probe to multiple
+          `bash:write_file` + `run_script` rounds.
+          Number formatting in any user-facing output (HTML, tables,
+          chart labels, summary text): humanise large magnitudes to
+          short suffix form — `3.32B`, `1.5M`, `127K`, `4.6K`. NEVER
+          surface scientific notation (`3.32e+9`, `1.5e+6`) — the
+          mantissa is unreadable for non-technical readers. Floats
+          for money / counts get rounded to 2 decimal places before
+          the suffix (`3.32B`, not `3.31940057881B`). Inside the
+          generated HTML / markdown that means a one-line helper
+          (e.g. pandas `apply` with a small `format_short(n)`
+          function) — not a runtime arg. Quote ABSOLUTE numbers
+          when they fit in 4 digits (`628012` rows → "628,012
+          rows"), suffix-shorten the rest (`3,319,400,578` → `3.32B`).
         intent: default
         can_spawn: false
         autoload_skills: [python-runner]

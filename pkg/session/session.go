@@ -13,6 +13,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/extension"
+	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -415,10 +416,19 @@ func NewSession(
 // ID returns the session identifier.
 func (s *Session) ID() string { return s.id }
 
-// SubagentName returns the sanitised short name this session was
-// spawned with — the addressing identifier used by tools like
-// notify_subagent and acceptance gates. Empty for root sessions.
+// SubagentName implements [extension.SessionState]. Returns the
+// sanitised short name this session was spawned with — the
+// addressing identifier used by tools like notify_subagent and
+// acceptance gates, and (phase 5.4.c stage 3) the disambiguator
+// for same-role siblings on the whiteboard digest. Empty for root
+// sessions.
 func (s *Session) SubagentName() string { return s.name }
+
+// Role implements [extension.SessionState]. Returns spawnRole — the
+// per-skill role key from the dispatching skill's sub_agents block
+// — so extensions can attribute author provenance on cross-session
+// frames without touching [*Session] internals. Empty for roots.
+func (s *Session) Role() string { return s.spawnRole }
 
 // Inbox is the channel callers push frames onto.
 func (s *Session) Inbox() chan<- protocol.Frame { return s.in }
@@ -1763,7 +1773,17 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 			"tool dispatch not configured for this session", "")
 		return "", true
 	}
-	dispatchCtx := perm.WithSession(turnCtx, perm.SessionContext{SessionID: s.id})
+	sc := perm.SessionContext{SessionID: s.id}
+	// 5.4 — surface the resolved workspace dir to dispatched tool
+	// providers. Per_agent MCPs (hugr-query, python-mcp) use this
+	// (via MCP `_meta.session_dir`) instead of joining the legacy
+	// flat `<workspace_root>/<session_id>/` path so workers in the
+	// same mission share one folder. Empty when the workspace
+	// extension is not wired (test fixtures).
+	if ws := wsext.FromState(s); ws != nil {
+		sc.WorkspaceDir = ws.Dir()
+	}
+	dispatchCtx := perm.WithSession(turnCtx, sc)
 	// Extension ToolProviders (notepad, plan, whiteboard, skill, …)
 	// recover the calling SessionState via
 	// extension.SessionStateFromContext. *Session satisfies

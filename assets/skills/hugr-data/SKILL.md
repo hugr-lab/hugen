@@ -202,14 +202,21 @@ first.
    exact module names returned: dots in names are **structure**, not
    typos (see "Critical Rules" below). Often unnecessary at worker
    tier because the mission named the module in your task string.
-3. **Find data objects** → `hugr-main:discovery-search_module_data_objects`
+3. **Find data objects** → `hugr-main:discovery-search_module_data_objects`. Each `items[]` returns BOTH a type identifier (`items[].name`, for `schema-type_fields` + `_join`) AND the callable GraphQL field names per query flavour (`items[].queries[].{name, query_type}`). **Copy `queries[].name` verbatim** when composing — prefix vs unprefixed is per-deployment, the response is the source of truth. Full naming model, dotted modules, anti-patterns → `skill:ref("hugr-data", "instructions")`.
 4. **Inspect fields** → `hugr-main:schema-type_fields(type_name: "prefix_tablename")` — **MUST** call before building queries.
    - Default `limit: 50` — many real tables have 100+ columns. **If you expect a field to exist and it's not in the response, the response is paginated, not authoritative.** Two complementary tools:
      - **You know the meaning, not the name** (e.g. "the total payment amount", "the soft-delete column") → pass `relevance_query: "<short NL phrase>"`. The server semantically ranks fields by description + name; the top-N comes back first regardless of alphabetical order. This is the right move for wide CMS-style tables (Open Payments, government datasets, FHIR projections, ...). Combine with `include_description: true` to read what each field actually carries.
      - **You want everything** → bump `limit: 200`, then check `total` vs `returned` in the response. If `total > returned`, paginate via `offset` until you've seen every field. Do NOT conclude "field X doesn't exist" from a partial response.
    - Pass `include_arguments: true` when you need to know what filter / order_by / args a field supports (e.g. inspecting a relation's `select` args).
+   - The same response carries **relation fields** (other data-object types, list-typed for many) alongside scalars — note them; step 6 traverses them instead of running a follow-up flat query.
 5. **Explore values** → `hugr-main:discovery-field_values` — understand distributions before filtering
-6. **Build ONE query** — combine aggregations, relations, filters with aliases
+6. **Build ONE query** — read the references for grammar before composing. Key habits:
+   - Traverse **relations** (nested sub-selection) instead of issuing N flat queries.
+   - Filter via relations to cut at the source.
+   - Use **server-side aggregations** (`_aggregation`, `_bucket_aggregation`) over fetching rows and rolling up in Python.
+   - Combine multiple sub-results with **aliases** in one compound query.
+
+   References (read what you need BEFORE composing): `skill:ref("hugr-data", "query")` for select shape, `"query-patterns"` for relations / nested args / `_join`, `"filter-guide"` for filter grammar, `"aggregations"` for `_aggregation` / `_bucket_aggregation`. **Anti-pattern**: separate flat queries per entity + Python join.
 7. **Validate** → `hugr-main:data-validate_graphql_query`
 8. **Execute** —
    - Small inline reply? → `hugr-main:data-inline_graphql_result` (use jq to reshape; increase `max_result_size` up to 5000 if truncated)

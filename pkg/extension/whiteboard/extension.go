@@ -99,6 +99,124 @@ func FromState(state extension.SessionState) *SessionWhiteboard {
 	return h
 }
 
+// HandoffDefaultMaxMessages bounds the auto-injected whiteboard
+// digest in spawn-time first messages. 8 is sized so a typical
+// mission with 4–6 schema-finding / query-pattern broadcasts fits
+// verbatim while a wide-ranging analysis still gets a useful
+// recent slice plus the "call whiteboard:read for full history"
+// header.
+const HandoffDefaultMaxMessages = 8
+
+// FormatForHandoff renders the active whiteboard reachable from
+// state (walks the parent chain via [SessionState.Parent] for
+// the nearest active hosted board — same precedence as the read
+// tool) into a labelled text block suitable for embedding as the
+// top of a spawned child's first user message. Returns "" when
+// no active whiteboard exists or the board has no messages yet
+// (wave-0 / mission first turn).
+//
+// `maxMessages <= 0` falls back to HandoffDefaultMaxMessages. The
+// most-recent slice survives; older messages are dropped but the
+// header notes the total count so the child knows it can call
+// whiteboard:read for the full history.
+func FormatForHandoff(state extension.SessionState, maxMessages int) string {
+	if state == nil {
+		return ""
+	}
+	if maxMessages <= 0 {
+		maxMessages = HandoffDefaultMaxMessages
+	}
+	host := nearestActiveBoard(state)
+	if host == nil {
+		return ""
+	}
+	snap := host.Snapshot()
+	if !snap.Active || len(snap.Messages) == 0 {
+		return ""
+	}
+
+	total := len(snap.Messages)
+	shown := snap.Messages
+	if total > maxMessages {
+		shown = shown[total-maxMessages:]
+	}
+
+	var sb strings.Builder
+	sb.WriteByte('(')
+	if total == 1 {
+		sb.WriteString("1 message")
+	} else {
+		fmt.Fprintf(&sb, "%d messages", total)
+	}
+	fmt.Fprintf(&sb, " on board, active since %s)\n",
+		snap.StartedAt.Format("15:04"))
+	if total > maxMessages {
+		fmt.Fprintf(&sb, "Showing last %d. Call whiteboard:read for the full history.\n",
+			maxMessages)
+	}
+	for _, m := range shown {
+		sb.WriteByte('\n')
+		role := m.FromRole
+		if role == "" {
+			// Defensive — workers always send a role; missions /
+			// non-analyst writers may not. Use "mission" as a
+			// reasonable label so the section header still reads.
+			role = "mission"
+		}
+		// Append the spawn name in parens when it's present so
+		// digests with two siblings of the same role disambiguate
+		// ("data-analyst (top-providers)" vs "data-analyst
+		// (payment-distribution)"). Old broadcasts and the
+		// "mission" fallback land without a name — drop the parens
+		// then so the header stays clean.
+		if m.FromName != "" {
+			fmt.Fprintf(&sb, "#%d @%s from %s (%s):\n",
+				m.Seq, m.At.Format("15:04:05"), role, m.FromName)
+		} else {
+			fmt.Fprintf(&sb, "#%d @%s from %s:\n",
+				m.Seq, m.At.Format("15:04:05"), role)
+		}
+		// Indent message text two spaces so the model can tell where
+		// one broadcast ends and the next begins; pre-existing
+		// newlines in the text survive verbatim. Session IDs are
+		// intentionally omitted from the header — they're noise for
+		// the model, and the role is the meaningful provenance.
+		for _, line := range strings.Split(m.Text, "\n") {
+			sb.WriteString("  ")
+			sb.WriteString(line)
+			sb.WriteByte('\n')
+		}
+		if m.Truncated {
+			sb.WriteString("  (truncated)\n")
+		}
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// nearestActiveBoard walks state.Parent() until it finds a
+// SessionWhiteboard handle reporting Active=true. Mirrors the
+// precedence ReportStatus + callRead use so handoffs surface the
+// same board whiteboard:read would.
+func nearestActiveBoard(state extension.SessionState) *SessionWhiteboard {
+	cur := state
+	for cur != nil {
+		if h := FromState(cur); h != nil {
+			h.mu.Lock()
+			active := h.wb.Active
+			h.mu.Unlock()
+			if active {
+				return h
+			}
+		}
+		p, ok := cur.Parent()
+		if !ok {
+			return nil
+		}
+		cur = p
+	}
+	return nil
+}
+
 // SessionWhiteboard is the per-session typed handle the whiteboard
 // extension stores in [extension.SessionState]. Owns the in-memory
 // [Whiteboard] projection plus a mutex serialising the host fan-in
@@ -280,6 +398,7 @@ type readMessageRow struct {
 	At            string `json:"at"`
 	FromSessionID string `json:"from_session_id,omitempty"`
 	FromRole      string `json:"from_role,omitempty"`
+	FromName      string `json:"from_name,omitempty"`
 	Text          string `json:"text"`
 	Truncated     bool   `json:"truncated,omitempty"`
 }
@@ -380,10 +499,19 @@ func (e *Extension) callWrite(ctx context.Context, state extension.SessionState,
 			"parent session has no active whiteboard to write to")
 	}
 
-	role := e.agentID
+	// Pull author provenance off the calling session — role is the
+	// spawn role from the dispatching skill's sub_agents block,
+	// name is the sanitised spawn name. Both empty for roots
+	// (which can't reach this path anyway since the "no parent"
+	// guard above already short-circuits). Phase 5.4.c stage 3
+	// — fixes a pre-existing bug where role was incorrectly set
+	// to the agent ID.
+	role := state.Role()
+	name := state.SubagentName()
 	payload := writeData{
 		FromSessionID: state.SessionID(),
 		FromRole:      role,
+		FromName:      name,
 		Text:          in.Text,
 	}
 	frame, err := newOpFrame(parentState.SessionID(), state.SessionID(), e.agentParticipant(), OpWrite, payload)
@@ -438,6 +566,7 @@ func (e *Extension) callRead(state extension.SessionState, h *SessionWhiteboard)
 				At:            m.At.UTC().Format(time.RFC3339),
 				FromSessionID: m.FromSessionID,
 				FromRole:      m.FromRole,
+				FromName:      m.FromName,
 				Text:          m.Text,
 				Truncated:     m.Truncated,
 			})
@@ -470,10 +599,14 @@ func (e *Extension) callStop(ctx context.Context, state extension.SessionState, 
 // writeData is the JSON payload of CategoryOp "write" and
 // CategoryMessage "message" extension frames. Same shape both ways:
 // the host stamps Seq when it persists, and broadcasts inherit it.
+// FromName is additive (phase 5.4.c stage 3) — old events
+// recovered from the log without the field deserialise to "" and
+// the digest falls back to the role-only form.
 type writeData struct {
 	Seq           int64  `json:"seq,omitempty"`
 	FromSessionID string `json:"from_session_id,omitempty"`
 	FromRole      string `json:"from_role,omitempty"`
+	FromName      string `json:"from_name,omitempty"`
 	Text          string `json:"text"`
 	Truncated     bool   `json:"truncated,omitempty"`
 }

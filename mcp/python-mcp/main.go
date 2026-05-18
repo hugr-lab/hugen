@@ -73,25 +73,15 @@ func runServerMode(template string, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("python-mcp: resolve --template: %w", err)
 	}
-	workspacesRoot := os.Getenv("WORKSPACES_ROOT")
-	if workspacesRoot == "" {
-		fail(2, "python-mcp: WORKSPACES_ROOT not set")
-	}
-	absRoot, err := filepath.Abs(workspacesRoot)
-	if err != nil {
-		return fmt.Errorf("python-mcp: resolve WORKSPACES_ROOT: %w", err)
-	}
-
 	auth, err := loadAuthSource(log)
 	if err != nil {
 		return err
 	}
 
 	deps := &execDeps{
-		template:       absTpl,
-		workspacesRoot: absRoot,
-		auth:           auth,
-		log:            log,
+		template: absTpl,
+		auth:     auth,
+		log:      log,
 	}
 
 	srv := server.NewMCPServer(
@@ -103,7 +93,6 @@ func runServerMode(template string, log *slog.Logger) error {
 
 	log.Info("python-mcp server starting",
 		"template", absTpl,
-		"workspaces_root", absRoot,
 		"hugr_configured", auth != nil)
 	if err := server.ServeStdio(srv); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("python-mcp: serve: %w", err)

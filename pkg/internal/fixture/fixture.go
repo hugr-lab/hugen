@@ -49,6 +49,8 @@ func defaultPrompts() *prompts.Renderer {
 // Submit.
 type TestSessionState struct {
 	id        string
+	name      string
+	role      string
 	tools     *tool.ToolManager
 	prompts   *prompts.Renderer
 	parentRef *TestSessionState
@@ -100,6 +102,31 @@ func (s *TestSessionState) WithDepth(depth int) *TestSessionState {
 	s.depth = depth
 	return s
 }
+
+// WithName sets the sanitised short name [TestSessionState.Name]
+// reports — disambiguates same-role siblings in tests that exercise
+// the whiteboard digest. Returns the receiver so callers can chain.
+func (s *TestSessionState) WithName(name string) *TestSessionState {
+	s.name = name
+	return s
+}
+
+// WithRole sets the role label [TestSessionState.Role] reports —
+// used by tests covering author-provenance plumbing through the
+// whiteboard. Returns the receiver so callers can chain.
+func (s *TestSessionState) WithRole(role string) *TestSessionState {
+	s.role = role
+	return s
+}
+
+// SubagentName implements [extension.SessionState]. Returns
+// whatever was configured via [TestSessionState.WithName]; empty
+// by default.
+func (s *TestSessionState) SubagentName() string { return s.name }
+
+// Role implements [extension.SessionState]. Returns whatever was
+// configured via [TestSessionState.WithRole]; empty by default.
+func (s *TestSessionState) Role() string { return s.role }
 
 // Depth implements [extension.SessionState]. Returns whatever was
 // configured via [TestSessionState.WithParent] (parent.depth+1)

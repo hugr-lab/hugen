@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	wbext "github.com/hugr-lab/hugen/pkg/extension/whiteboard"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -41,6 +42,21 @@ type spawnSubagentInput struct {
 	Subagents []spawnEntry `json:"subagents"`
 }
 
+// spawnSubagentExpectedShape is the self-correction template that
+// bad_request envelopes embed alongside the error message — same
+// pattern as spawnWaveExpectedShape, minus the wave-only knobs.
+var spawnSubagentExpectedShape = map[string]any{
+	"subagents": []any{
+		map[string]any{
+			"name":   "<short kebab-case id>",
+			"task":   "<self-contained worker brief>",
+			"role":   "<optional role inside the skill>",
+			"skill":  "<optional skill name>",
+			"inputs": map[string]any{"_comment": "optional JSON the worker sees"},
+		},
+	},
+}
+
 type spawnEntry struct {
 	Name   string `json:"name"`
 	Skill  string `json:"skill,omitempty"`
@@ -61,10 +77,17 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 	}
 	var in spawnSubagentInput
 	if err := json.Unmarshal(args, &in); err != nil {
-		return toolErr("bad_request", fmt.Sprintf("invalid spawn_subagent args: %v", err))
+		// Unparseable args — embed as string so the envelope stays
+		// valid JSON. See spawn_wave for the rationale.
+		return toolErrShape("bad_request",
+			fmt.Sprintf("invalid spawn_subagent args: %v", err),
+			string(args), spawnSubagentExpectedShape)
 	}
 	if len(in.Subagents) == 0 {
-		return toolErr("bad_request", "subagents must be a non-empty array")
+		// Self-correction hint — see spawn_wave for the rationale.
+		return toolErrShape("bad_request",
+			"subagents must be a non-empty array",
+			json.RawMessage(args), spawnSubagentExpectedShape)
 	}
 
 	// Atomic batch validation — fail-fast on the first violation so
@@ -151,7 +174,9 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 		// on the settled channel so the child sees the task before
 		// we move to the next batch entry; pre/post IsClosed checks
 		// distinguish "delivered" from "child already gone".
-		first := protocol.NewUserMessage(child.ID(), parent.agent.Participant(), e.Task)
+		first := protocol.NewUserMessage(child.ID(), parent.agent.Participant(),
+			composeChildFirstMessage(e.Task, e.Inputs,
+				wbext.FormatForHandoff(parent, 0)))
 		if !child.IsClosed() {
 			<-child.Submit(ctx, first)
 		}

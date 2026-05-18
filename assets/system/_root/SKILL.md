@@ -187,10 +187,52 @@ session:spawn_mission({
   name:   "<short-kebab-case-id>",    // REQUIRED — addressable handle
   skill:  "<dispatcher skill>",       // see ## Available missions
   goal:   "<the user's ask, restated as the mission's job>",
-  inputs: { /* optional structured context */ },
+  inputs: { /* user-supplied facts; see below */ },
   wait:   "async"                     // default; only pick "sync" per § When sync is the right call
 })
 ```
+
+#### What to put in `inputs`
+
+`inputs` is a free-form JSON object that the runtime prepends as
+an `[Inputs from parent]` block to the mission's first message.
+Whatever you put there, the mission and its workers see verbatim
+and can use without re-discovering.
+
+Pass **facts the user already gave you in their message** —
+nothing you'd have to probe for. The point is to surface the
+user's concrete choices, not to do the mission's research for it.
+
+Useful keys (use only those the user actually named):
+
+- `file_path` — the output destination the user typed
+  (`"~/Downloads/report.html"`). Saves the mission from having
+  to guess a name or location.
+- `data_source` / `module` / `tables` — when the user named the
+  source verbatim ("analyse <module-name>", "from the <X>
+  module"). Skip when the user spoke in generic terms ("the
+  doctors data") — let the mission's planner discover the right
+  object.
+- `output_format` — when the user asked for a specific shape
+  (`"html"`, `"markdown"`, `"csv"`).
+- `time_range` / `filters` / `limit` — when the user constrained
+  scope ("for 2023", "top 100", "only EU customers").
+- `language` — when you're answering in a non-default language
+  ("respond in Russian") so the mission's user-facing
+  artefacts match.
+
+Do NOT put in `inputs`:
+
+- Anything you'd have to probe / guess (schema names you don't
+  know, table lists you'd discover by querying — that's the
+  mission's job).
+- The goal itself (that's the `goal` field).
+- Long prose / paragraphs (goal handles that too).
+- Credentials, secrets, internal session ids.
+
+When the user's message had no concrete facts beyond the goal,
+omit `inputs` entirely. Empty / trivial inputs are harmless but
+add noise to the mission's first message.
 
 `name` is a short kebab-case identifier (`[a-z0-9-]{2,32}`) you
 pick from the user's ask (2-4 words). The runtime sanitises and

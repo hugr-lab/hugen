@@ -380,11 +380,14 @@ func (s *Session) handleToolResult(runCtx context.Context, ev toolResultEvent) {
 		return
 	}
 	delete(st.pendingToolCalls, ev.callID)
-	// Propagate the error flag to the stuck-detection trailing window
-	// (no_progress detector reads recentErrored). Run-goroutine-only
-	// access — the dispatcher already exited the per-call critical
-	// section by the time this event arrives.
-	s.stuckObserveResult(ev.errored)
+	// Propagate the error code (if any) to the stuck-detection
+	// trailing window. The repeated_error detector clusters samples
+	// by (tool, errCode), so we need the actual code — not just a
+	// bool — to distinguish "spawn_wave keeps hitting bad_request"
+	// from "spawn_wave hit one transient infrastructure error".
+	// Run-goroutine-only access; the dispatcher already exited the
+	// per-call critical section by the time this event arrives.
+	s.stuckObserveResult(toolErrorCode(ev.errored, ev.payload))
 	s.history = append(s.history, model.Message{
 		Role:       model.RoleTool,
 		Content:    ev.payload,

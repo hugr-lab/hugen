@@ -95,14 +95,18 @@ patterns below cover the majority of tasks and prevent the typical
    Conventional subdirs: `data/`, `reports/`, `figures/`.
 4. **Surface relative paths** to the user — they read files via the workspace
    root the host exposes.
-5. **`${SESSION_DIR}` is ephemeral.** It is wiped when this worker session
-   closes (typically at the end of the current task / wave). Anything inside
-   does NOT survive into the next user follow-up. If the user explicitly asked
-   for a file to keep / refine later, **either** include its contents in your
-   final `result` text (so root captures it and can hand it back), **or**
-   tell the user the absolute path you'd write to and let them confirm. A
-   dedicated artifact-storage surface is on the roadmap; until it lands,
-   treat SESSION_DIR as scratch.
+5. **`${SESSION_DIR}` lifetime.** Your `${SESSION_DIR}` is shared with every
+   sibling worker in the same task and survives past your own session's
+   close, so a later wave's worker can read whatever you just wrote (the
+   handoff pattern: wave-1 writes `data/foo.parquet`, wave-2 reads it from
+   the same path). The runtime reclaims the dir on its own schedule after
+   the task ends, so it does NOT survive into the next unrelated user
+   follow-up. If the user explicitly asked for a file to keep across
+   conversations, **either** include its contents in your final `result`
+   text (so root captures it and can hand it back), **or** tell the user
+   the absolute path you'd write to and let them confirm. A dedicated
+   artifact-storage surface is on the roadmap; until it lands, treat
+   `${SESSION_DIR}` as task-scoped scratch.
 
 ## Task-Specific Guidance
 

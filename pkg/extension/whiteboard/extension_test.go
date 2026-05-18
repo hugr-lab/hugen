@@ -34,6 +34,125 @@ func dispatchCtx(state extension.SessionState) context.Context {
 	return extension.WithSessionState(context.Background(), state)
 }
 
+// TestFormatForHandoff_NoActiveBoard verifies the empty-state
+// returns "" so callers can splice the result directly into the
+// spawned child's first message without conditional branches.
+func TestFormatForHandoff_NoActiveBoard(t *testing.T) {
+	state := fixture.NewTestSessionState("ses-1")
+	if got := FormatForHandoff(state, 0); got != "" {
+		t.Errorf("no whiteboard handle should produce empty digest, got %q", got)
+	}
+	if got := FormatForHandoff(nil, 0); got != "" {
+		t.Errorf("nil state should produce empty digest, got %q", got)
+	}
+}
+
+// TestFormatForHandoff_EmptyBoard verifies a board that's active
+// but has no broadcasts yet (wave-0 / fresh mission) renders as
+// empty so the [Whiteboard] block is suppressed.
+func TestFormatForHandoff_EmptyBoard(t *testing.T) {
+	e := newExt()
+	state := initState(t, e, "ses-host")
+	h := FromState(state)
+	// Apply OpInit so Active=true but no messages.
+	h.wb = Apply(h.wb, ProjectEvent{Op: OpInit, At: time.Date(2026, 5, 18, 13, 38, 0, 0, time.UTC)})
+	if got := FormatForHandoff(state, 0); got != "" {
+		t.Errorf("active board with no messages should produce empty digest, got %q", got)
+	}
+}
+
+// TestFormatForHandoff_RendersMessages exercises the typical path:
+// active board, multiple broadcasts, header + per-message lines
+// with role + seq + time.
+func TestFormatForHandoff_RendersMessages(t *testing.T) {
+	e := newExt()
+	state := initState(t, e, "ses-host")
+	h := FromState(state)
+	t0 := time.Date(2026, 5, 18, 13, 38, 0, 0, time.UTC)
+	h.wb = Apply(h.wb, ProjectEvent{Op: OpInit, At: t0})
+	h.wb = Apply(h.wb, ProjectEvent{
+		Op: OpWrite, Seq: 1, At: t0.Add(2 * time.Minute),
+		FromSessionID: "ses-planner", FromRole: "planner",
+		Text:          "Validated query: query { op2023 { providers } }",
+	})
+	h.wb = Apply(h.wb, ProjectEvent{
+		Op: OpWrite, Seq: 2, At: t0.Add(5 * time.Minute),
+		FromSessionID: "ses-data", FromRole: "data-analyst",
+		FromName:      "top-providers",
+		Text:          "Top providers parquet: data/x.parquet",
+	})
+
+	got := FormatForHandoff(state, 0)
+	for _, want := range []string{
+		"(2 messages on board",
+		"active since 13:38",
+		"#1 @13:40:00 from planner:",
+		"Validated query",
+		// Name surfaces in parens when present; same role with a
+		// sibling name renders disambiguated.
+		"#2 @13:43:00 from data-analyst (top-providers):",
+		"Top providers parquet",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in digest:\n%s", want, got)
+		}
+	}
+	// Session IDs are intentionally omitted per the noise-vs-signal
+	// rule — role is the meaningful provenance.
+	for _, leaked := range []string{"ses-host", "ses-planner", "ses-data"} {
+		if strings.Contains(got, leaked) {
+			t.Errorf("session id %q leaked into digest:\n%s", leaked, got)
+		}
+	}
+	// The role-only message (#1) must not gain stray parens just
+	// because a sibling has a name.
+	if strings.Contains(got, "planner ()") {
+		t.Errorf("empty-name parens leaked on role-only row:\n%s", got)
+	}
+}
+
+// TestFormatForHandoff_BoundsAndHeader exercises maxMessages: a
+// board with more entries than the bound surfaces only the
+// trailing slice and the header notes the total count.
+func TestFormatForHandoff_BoundsAndHeader(t *testing.T) {
+	e := newExt()
+	state := initState(t, e, "ses-host")
+	h := FromState(state)
+	t0 := time.Date(2026, 5, 18, 13, 38, 0, 0, time.UTC)
+	h.wb = Apply(h.wb, ProjectEvent{Op: OpInit, At: t0})
+	for i := 1; i <= 12; i++ {
+		h.wb = Apply(h.wb, ProjectEvent{
+			Op: OpWrite, Seq: int64(i),
+			At:            t0.Add(time.Duration(i) * time.Minute),
+			FromSessionID: "ses-w", FromRole: "worker",
+			Text:          "broadcast " + strconvI(i),
+		})
+	}
+	got := FormatForHandoff(state, 3)
+	if !strings.Contains(got, "(12 messages on board") {
+		t.Errorf("header total count missing: %s", got)
+	}
+	if !strings.Contains(got, "Showing last 3") {
+		t.Errorf("truncation notice missing: %s", got)
+	}
+	if !strings.Contains(got, "#10 ") || !strings.Contains(got, "#11 ") || !strings.Contains(got, "#12 ") {
+		t.Errorf("last-3 slice missing: %s", got)
+	}
+	if strings.Contains(got, "#1 ") {
+		t.Errorf("older message leaked despite bound: %s", got)
+	}
+}
+
+func strconvI(i int) string {
+	if i < 0 {
+		return "-" + strconvI(-i)
+	}
+	if i < 10 {
+		return string(rune('0' + i))
+	}
+	return strconvI(i/10) + string(rune('0'+i%10))
+}
+
 // TestList covers the static catalogue advertised by the
 // ToolProvider — names, providers, permission objects.
 func TestList(t *testing.T) {
@@ -184,11 +303,17 @@ func TestCallWrite_BadRequest(t *testing.T) {
 }
 
 // TestCallWrite_Submits: a member's write Submits the op-frame to
-// the host's inbox without persisting on the member.
+// the host's inbox without persisting on the member. The payload
+// also carries the child's spawn role + name pulled off
+// SessionState (phase 5.4.c stage 3 — fixes a pre-existing bug
+// where role was the agent ID).
 func TestCallWrite_Submits(t *testing.T) {
 	e := newExt()
 	parent := initState(t, e, "ses-parent")
-	child := initState(t, e, "ses-child").WithParent(parent)
+	child := initState(t, e, "ses-child").
+		WithParent(parent).
+		WithRole("data-analyst").
+		WithName("top-providers")
 	parent.AppendChild(child)
 
 	// Activate parent's board manually via init so write can pass.
@@ -220,6 +345,16 @@ func TestCallWrite_Submits(t *testing.T) {
 	}
 	if ef.FromSessionID() != "ses-child" {
 		t.Errorf("from_session = %q, want ses-child", ef.FromSessionID())
+	}
+	var got writeData
+	if err := json.Unmarshal(ef.Payload.Data, &got); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if got.FromRole != "data-analyst" {
+		t.Errorf("from_role = %q, want data-analyst (pulled off state.Role)", got.FromRole)
+	}
+	if got.FromName != "top-providers" {
+		t.Errorf("from_name = %q, want top-providers (pulled off state.SubagentName)", got.FromName)
 	}
 }
 
@@ -288,7 +423,8 @@ func TestHandleFrame_HostInboundWrite(t *testing.T) {
 
 	payload := writeData{
 		FromSessionID: "ses-a",
-		FromRole:      testAgentID,
+		FromRole:      "scout",
+		FromName:      "auth-explorer",
 		Text:          "found auth_logs",
 	}
 	raw, _ := json.Marshal(payload)
@@ -306,6 +442,12 @@ func TestHandleFrame_HostInboundWrite(t *testing.T) {
 	}
 	if hostWB.Messages[0].FromSessionID != "ses-a" {
 		t.Errorf("from_session_id = %q", hostWB.Messages[0].FromSessionID)
+	}
+	if hostWB.Messages[0].FromRole != "scout" {
+		t.Errorf("from_role = %q, want scout", hostWB.Messages[0].FromRole)
+	}
+	if hostWB.Messages[0].FromName != "auth-explorer" {
+		t.Errorf("from_name = %q, want auth-explorer", hostWB.Messages[0].FromName)
 	}
 
 	// Persisted canonical write frame on host.

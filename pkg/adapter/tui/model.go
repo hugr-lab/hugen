@@ -234,12 +234,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(v)
 
 	case tea.MouseMsg:
-		// Mouse-wheel scrolls the focused tab's chat viewport.
-		// bubbles/viewport handles MouseButtonWheelUp/Down internally
-		// when MouseWheelEnabled is set (default true after viewport.New),
-		// so we just forward the message. macOS users who need native
-		// text selection can hold Option (iTerm2) or Fn (Terminal.app)
-		// to suspend mouse reporting at the terminal level.
+		// Mouse handling is narrow on purpose. We forward to the
+		// chat viewport ONLY for discrete wheel-press events
+		// (MouseActionPress + WheelUp/WheelDown) that land inside
+		// the chat rectangle. Everything else — motion, drag,
+		// release, click — is dropped here without a cmd.
+		//
+		// Why drop the rest: bubbletea schedules a View() render
+		// for every returned (cmd != nil) Update call, and macOS
+		// trackpad two-finger gestures emit a steady stream of
+		// motion events. If we returned per event, that flood
+		// races against the bubbles/textarea blink ticker and the
+		// periodic frame churn — the textarea ends up stuck in
+		// the cursor "off" phase (looks like the input row
+		// vanished) and the tab bar can momentarily disappear
+		// under the redraw thrash. External wheel mice don't show
+		// the bug because they emit one discrete press per click.
+		//
+		// macOS users who want native text selection can hold
+		// Option (iTerm2) / Fn (Terminal.app) to suspend mouse
+		// reporting at the terminal layer.
+		if v.Action != tea.MouseActionPress {
+			return m, nil
+		}
+		if v.Button != tea.MouseButtonWheelUp && v.Button != tea.MouseButtonWheelDown {
+			return m, nil
+		}
+		if !m.mouseInChat(v) {
+			return m, nil
+		}
 		if cur := m.currentTab(); cur != nil {
 			var vpCmd tea.Cmd
 			cur.viewport, vpCmd = cur.viewport.Update(v)
@@ -391,6 +414,37 @@ func (m model) View() string {
 	bar := renderTabBar(m.tabs, m.active, m.width)
 	body := cur.renderBody(chatWidth, m.width, m.sidebarShown)
 	return lipgloss.JoinVertical(lipgloss.Left, bar, body)
+}
+
+// mouseInChat reports whether the mouse event landed inside the
+// chat viewport's rectangle (so wheel scroll on the sidebar or
+// textarea is ignored). Bounds:
+//
+//   - Y in [tabBarHeight, tabBarHeight + viewport.Height) — below
+//     the tab bar, above the textarea / footer.
+//   - X in [0, chatWidth) — left of the sidebar, when shown.
+//
+// When the model has no width yet (pre-WindowSizeMsg) or no active
+// tab, fall back to "in chat" so wheel events on a still-booting
+// model don't get silently dropped.
+func (m model) mouseInChat(msg tea.MouseMsg) bool {
+	cur := m.currentTab()
+	if cur == nil || m.width == 0 {
+		return true
+	}
+	chatWidth := m.width
+	if m.sidebarShown {
+		chatWidth = m.width - sidebarWidth
+	}
+	if msg.X < 0 || msg.X >= chatWidth {
+		return false
+	}
+	yTop := tabBarHeight
+	yBot := tabBarHeight + cur.viewport.Height
+	if msg.Y < yTop || msg.Y >= yBot {
+		return false
+	}
+	return true
 }
 
 // relayout recomputes geometry from the current terminal size and

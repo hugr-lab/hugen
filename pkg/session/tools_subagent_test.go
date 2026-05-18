@@ -52,6 +52,45 @@ func TestCallSpawnMission_Happy(t *testing.T) {
 	}
 }
 
+// TestCallSpawnMission_RootDefaultsToAsync covers the 5.4.c.3
+// rule: when the caller is a chat root (depth 0) and `wait` is
+// omitted, the runtime fills `async` so the auto-summary turn
+// fires when the mission completes. Weak models that drop the
+// optional field still get the documented "_root" behaviour. The
+// returned envelope is the async `spawnMissionResult` shape with
+// status "running" — distinct from sync's spawnSubagentResult
+// shape.
+func TestCallSpawnMission_RootDefaultsToAsync(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+	if parent.depth != 0 {
+		t.Fatalf("test parent must be a root session; got depth=%d", parent.depth)
+	}
+
+	out, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"name":"m","goal":"analyse northwind","skill":"analyst"}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var got spawnMissionResult
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal async result: %v\noutput=%s", err, out)
+	}
+	if got.Status != "running" {
+		t.Errorf("status = %q, want \"running\" (root → async default): %s", got.Status, out)
+	}
+	parent.childMu.Lock()
+	child := parent.children[got.SessionID]
+	parent.childMu.Unlock()
+	if child == nil {
+		t.Fatalf("child not registered: %s", out)
+	}
+	if child.asyncSpawnMode != protocol.SubagentRenderAsyncNotify {
+		t.Errorf("child.asyncSpawnMode = %v, want SubagentRenderAsyncNotify (root → async default)",
+			child.asyncSpawnMode)
+	}
+}
+
 // TestCallSpawnMission_NoMissionSkill_NoArg_NoDefault verifies a
 // missing skill argument with no operator default surfaces a
 // structured no_mission_skill envelope and does not spawn anything.
@@ -192,15 +231,50 @@ func TestCallSpawnWave_BadRequest(t *testing.T) {
 	out, _ := parent.callSpawnWave(us1WithSession(parent),
 		json.RawMessage(`{"subagents":[]}`))
 	mgr_assertErrorCode(t, out, "bad_request")
+	mgr_assertErrorHasShape(t, out)
 
 	out, _ = parent.callSpawnWave(us1WithSession(parent),
 		json.RawMessage(`{not-json`))
 	mgr_assertErrorCode(t, out, "bad_request")
+	mgr_assertErrorHasShape(t, out)
 
 	parent.childMu.Lock()
 	defer parent.childMu.Unlock()
 	if len(parent.children) != 0 {
 		t.Errorf("parent.children = %d after spawn_wave validation failure, want 0", len(parent.children))
+	}
+}
+
+// mgr_assertErrorHasShape verifies that a bad_request envelope
+// carries the 5.4.c self-correction hint: `got` (the args the
+// caller sent) + `expected_shape` (a template the model can
+// copy). Without these fields weak models drift into multi-minute
+// spawn_wave({}) / spawn_subagent({}) retry loops.
+func mgr_assertErrorHasShape(t *testing.T, out json.RawMessage) {
+	t.Helper()
+	var resp toolErrorResponse
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("unmarshal: %v out=%s", err, out)
+	}
+	if resp.Error.Got == nil {
+		t.Errorf("error envelope missing `got` hint: %s", out)
+	}
+	if resp.Error.ExpectedShape == nil {
+		t.Errorf("error envelope missing `expected_shape` hint: %s", out)
+	}
+	// Make sure expected_shape walks through the canonical fields the
+	// model needs to fill — fail loud if a future refactor drops them.
+	shape, _ := resp.Error.ExpectedShape.(map[string]any)
+	subs, _ := shape["subagents"].([]any)
+	if len(subs) == 0 {
+		t.Errorf("expected_shape.subagents missing: %s", out)
+		return
+	}
+	first, _ := subs[0].(map[string]any)
+	for _, key := range []string{"name", "task"} {
+		if _, ok := first[key]; !ok {
+			t.Errorf("expected_shape.subagents[0].%s missing: %s", key, out)
+		}
 	}
 }
 

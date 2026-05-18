@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	wbext "github.com/hugr-lab/hugen/pkg/extension/whiteboard"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -35,7 +36,7 @@ const spawnMissionSchema = `{
     "inputs":     {"description": "Optional JSON the parent passes alongside the goal — schemas, anchors, prior context."},
     "skill":      {"type": "string", "description": "Skill that provides the mission coordinator pattern (e.g. analyst). Must be a mission-eligible skill (metadata.hugen.mission.enabled:true)."},
     "role":       {"type": "string", "description": "Role within the skill. Optional."},
-    "wait":       {"type": "string", "enum": ["sync", "async", "timeout"], "description": "Sync (default): block on the mission's wait_subagents and return its result. Async: return immediately; completion lands as a system message at the next turn boundary. Timeout: like sync but bounded by timeout_ms — partial result if the timer fires first."},
+    "wait":       {"type": "string", "enum": ["sync", "async", "timeout"], "description": "Default depends on caller: chat root (depth 0) defaults to async; missions / workers default to sync. Sync: return a handle immediately; the caller is expected to follow up with wait_subagents on the same turn. Async: return immediately; completion lands as a system message at the next turn boundary and triggers an auto-summary turn. Timeout: like sync but bounded by timeout_ms — partial result if the timer fires first."},
     "timeout_ms": {"type": "integer", "minimum": 1, "description": "Required iff wait=\"timeout\". Soft deadline after which the tool returns a running shape; the mission continues and its completion is delivered as in async mode."},
     "on_complete": {"type": "string", "enum": ["notify", "silent"], "description": "Applies to async / timeout. notify (default): render the completion via interrupts/async_mission_completed.tmpl at the next turn boundary. silent: persist the event without surfacing to the model's history."}
   },
@@ -91,7 +92,20 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 	}
 	wait := strings.TrimSpace(in.Wait)
 	if wait == "" {
-		wait = spawnMissionWaitSync
+		// Phase 5.4.c.3 — runtime mirror of the `_root` SKILL §
+		// "Delegating to a mission" rule. The skill body documents
+		// `wait="async"` as the default for chat-tier callers, but
+		// weak models often drop optional fields; the runtime now
+		// fills the right answer so async-summary turn fires even
+		// when the model omits the arg. Non-root callers (missions
+		// spawning sub-missions — not a real path today) keep sync
+		// as their default for backward-compat with existing
+		// scenarios.
+		if parent.depth == 0 {
+			wait = spawnMissionWaitAsync
+		} else {
+			wait = spawnMissionWaitSync
+		}
 	}
 	switch wait {
 	case spawnMissionWaitSync, spawnMissionWaitAsync, spawnMissionWaitTimeout:
@@ -209,10 +223,14 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 	}
 
 	// Deliver the first user message — the effective task (override
-	// or original goal). Same pre/post IsClosed bracketing as
-	// callSpawnSubagent so a child that died mid-spawn is logged
-	// rather than silently dropped.
-	first := protocol.NewUserMessage(child.ID(), parent.agent.Participant(), task)
+	// or original goal), with the spawn-time inputs prepended as a
+	// labelled JSON block when present (see composeChildFirstMessage
+	// in tools_provider.go for the contract / why). Same pre/post
+	// IsClosed bracketing as callSpawnSubagent so a child that died
+	// mid-spawn is logged rather than silently dropped.
+	first := protocol.NewUserMessage(child.ID(), parent.agent.Participant(),
+		composeChildFirstMessage(task, in.Inputs,
+			wbext.FormatForHandoff(parent, 0)))
 	if !child.IsClosed() {
 		<-child.Submit(ctx, first)
 	}

@@ -34,14 +34,15 @@ type BootstrapConfig struct {
 	// "${HOME}/.hugen" on local mode.
 	StateDir string
 	// WorkspaceDir is the per-session scratch root
-	// (HUGEN_WORKSPACE_DIR). Each Session.Open creates
-	// "<WorkspaceDir>/<session_id>/" and bash-mcp is spawned
-	// with cmd.Dir set to it. Defaults to "./.hugen/workspace".
+	// (HUGEN_WORKSPACE_DIR). Phase 5.4 layout:
+	//   <WorkspaceDir>/<root_id>/                  — chat root
+	//   <WorkspaceDir>/<root_id>/<mission_id>/     — mission (workers in
+	//                                                the same mission
+	//                                                share this dir)
+	// bash-mcp is spawned with cmd.Dir set to the session's resolved
+	// workspace path. Defaults to "./.hugen/workspace".
 	WorkspaceDir string
-	// CleanupOnClose removes the session's workspace directory on
-	// Session.Close. Defaults to true.
-	CleanupOnClose bool
-	Hugr           HugrConfig
+	Hugr         HugrConfig
 }
 
 // HugrConfig — platform connection.
@@ -65,7 +66,6 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 
 	v.SetDefault("HUGR_URL", "http://localhost:15000")
 	v.SetDefault("HUGEN_PORT", 10000)
-	v.SetDefault("HUGEN_WORKSPACE_CLEANUP_ON_CLOSE", true)
 	v.SetDefault("HUGEN_WEBUI_PORT", 10001)
 	v.SetDefault("HUGEN_CONFIG_FILE", "config.yaml")
 	v.SetDefault("HUGEN_BASE_URL", "http://localhost:10000")
@@ -111,8 +111,7 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 		WebUIPort:      v.GetInt("HUGEN_WEBUI_PORT"),
 		BaseURI:        v.GetString("HUGEN_BASE_URL"),
 		StateDir:       v.GetString("HUGEN_STATE"),
-		WorkspaceDir:   v.GetString("HUGEN_WORKSPACE_DIR"),
-		CleanupOnClose: v.GetBool("HUGEN_WORKSPACE_CLEANUP_ON_CLOSE"),
+		WorkspaceDir: v.GetString("HUGEN_WORKSPACE_DIR"),
 		Hugr: HugrConfig{
 			URL:         v.GetString("HUGR_URL"),
 			RedirectURI: v.GetString("HUGR_REDIRECT_URI"),
@@ -216,8 +215,7 @@ func projectRuntimeConfig(boot *BootstrapConfig, logger *slog.Logger) runtime.Co
 		AgentConfigPath: boot.ConfigPath,
 		StateDir:        boot.StateDir,
 		Workspace: runtime.WorkspaceConfig{
-			Dir:            boot.WorkspaceDir,
-			CleanupOnClose: boot.CleanupOnClose,
+			Dir: boot.WorkspaceDir,
 		},
 		HTTP: runtime.HTTPConfig{
 			Port:    boot.Port,

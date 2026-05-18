@@ -61,10 +61,22 @@ shell tools and file tools see exactly the same paths.
 
 1. **Your session scratch directory** — the cwd every tool call
    starts in. Available as `$SESSION_DIR` in shell commands so
-   you can construct absolute paths reliably. It is private to
-   this session and is wiped on close (unless the operator
-   disabled cleanup). Use it for temporary files, scripts you
-   write, downloaded data, intermediate artifacts.
+   you can construct absolute paths reliably. Use it for
+   temporary files, scripts you write, downloaded data, and
+   intermediate artifacts. Its lifetime depends on your role in
+   the spawn tree:
+   - **Standalone session** (no children spawned): `$SESSION_DIR`
+     is private to this session. Treat it as ephemeral — the
+     runtime reclaims it on its own schedule after close. Save
+     anything the user must keep to `$SHARED_DIR`.
+   - **Coordinated task** (you were spawned by a dispatcher, or
+     workers spawned by the same dispatcher are running
+     alongside you): every sibling sees the same `$SESSION_DIR`
+     and the directory survives past your own session's close
+     so the next worker in the same task can read what you
+     wrote. Hand off files between steps by writing to
+     `$SESSION_DIR`; the next worker reads them from the same
+     path.
 
 2. **`$SHARED_DIR`** (env var, optional) — a real host path the
    operator designated as the user-visible exchange folder.
