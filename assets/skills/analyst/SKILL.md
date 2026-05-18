@@ -145,34 +145,112 @@ metadata:
             ══════════════════════════════════════════════════════
             STAGE B — Execute
 
-            **CRITICAL:** the YAML plan you just got from the
-            planner is YOUR INSTRUCTION SET, not the answer
-            root is waiting for. Do NOT echo the YAML back as
-            your final assistant message. Root expects a
-            real report / data summary built from the
-            execution of the plan — that's what STAGE B
-            produces. Mission's final assistant message comes
-            only AFTER every wave in the plan has been spawned
-            and waited on.
+            **CRITICAL:** the YAML plan from the planner is
+            YOUR INSTRUCTION SET, not the answer root is
+            waiting for. NEVER echo the YAML as your final
+            message. Mission's final message comes only AFTER
+            every wave has run and the result is something
+            root can hand back to the user — a report, a
+            file path, a structured finding.
 
-            The planner's `plan` is an ORDERED array of WAVES
-            (not a flat list of steps). Each wave declares one
-            or more `subagents` that run IN PARALLEL within that
-            wave; waves themselves run sequentially.
+            Ownership split:
+              - PLANNER  → wave composition + order, roles,
+                            task strings, static `inputs`
+                            base per subagent (resolved
+                            during STAGE A).
+              - MISSION  → iterate the planner's waves in
+                            order, curate runtime `inputs`
+                            per worker at spawn time,
+                            re-spawn a wave ONCE if results
+                            are insufficient. If retry fails
+                            structurally, re-spawn the
+                            PLANNER with a replan brief —
+                            don't invent new waves yourself.
+            You do NOT invent workers, reorder waves, rewrite
+            tasks, or reassign roles. Composition stays with
+            the planner; you escalate via replan rather than
+            extending the plan.
+
+            The plan is an ORDERED array of waves. Each wave's
+            `subagents` run IN PARALLEL; waves are sequential.
 
             For each wave in `plan` IN ORDER:
 
-              1. Resolve `skip_if`. Walk the wave's subagents and
-                 evaluate any `skip_if` predicate (typically
-                 `notepad:search` for a known note). Drop the
-                 satisfied entries from this wave's batch. If the
-                 wave empties out, log a `plan:comment` and move
-                 on to the next wave.
+              1. Resolve `skip_if`. For each subagent with a
+                 `skip_if` predicate (typically
+                 `notepad:search` for a known note), drop the
+                 satisfied ones. If the wave empties, log a
+                 `plan:comment` and skip to the next wave.
 
-              2. Spawn the wave in ONE call — the runtime fans
-                 out goroutines so each subagent runs in
-                 parallel; `spawn_wave` returns after all
-                 finish:
+              2. Parse prior-wave handoffs. The primary
+                 source of cross-wave state is the
+                 spawn_wave return from the previous wave —
+                 `[{session_id, status, result, ...}]` where
+                 `result` is each worker's final assistant
+                 message. Every non-planner worker ends its
+                 message with a fenced ```yaml block of
+                 shape:
+
+                   handoffs:
+                     - kind: query | schema_map |
+                              artefact | inventory
+                       name: <semantic id>
+                       body: <role-specific payload>
+
+                 Extract every `handoffs:` entry from this
+                 wave's worker results and tag each with
+                 `from: <subagent_name>` for provenance.
+                 Optionally also `whiteboard:read` for extra
+                 intra-wave context the workers broadcast
+                 mid-task — but the handoff blocks are the
+                 canonical cross-wave bus.
+
+              3. Build CURATED `inputs` per subagent for the
+                 NEXT wave. Start with the planner's static
+                 base (`data_source`, `module`, `tables`,
+                 `file_path` resolved in STAGE A). Then
+                 bucket the handoffs parsed in step 2 by
+                 `kind` and route them as bespoke keys under
+                 `inputs`:
+
+                   - `queries: [{name, graphql, sample_row,
+                     from}, ...]` — validated GraphQL from
+                     query-builder workers.
+                   - `schema_maps: [{name, table, columns,
+                     relationships, from}, ...]` — schema
+                     info from schema-explorer workers.
+                   - `artefacts: [{name, path, shape,
+                     columns, headline, from}, ...]` — file
+                     references from data-analyst workers.
+                   - `inventory: {sources, modules, from}`
+                     — inventory digest from an overview
+                     worker (typically one).
+
+                 Match by reading THIS worker's task:
+                   - data-analyst executing a validated
+                     query → `inputs.queries` (its specific
+                     one) + `inputs.schema_maps` (relevant
+                     table) + base.
+                   - query-builder composing for a table →
+                     `inputs.schema_maps` (that table only)
+                     + base.
+                   - report-builder → ALL `inputs.artefacts`
+                     + relevant `inputs.queries` (for
+                     annotation / provenance) +
+                     `inputs.file_path` literal.
+                   - schema-explorer → usually just the
+                     base; `inputs.inventory` only if it
+                     must pick among modules.
+
+                 Curate, don't blanket-copy. Smaller focused
+                 inputs land better on weak models than a
+                 bag-of-everything. The downstream worker
+                 reads structured JSON keys directly — no
+                 prose-parsing required.
+
+              4. Spawn the wave in ONE call — runtime fans
+                 subagents out as parallel goroutines;
+                 `spawn_wave` returns after all finish:
 
                    session:spawn_wave({
                      wave_label: "<plan.wave.wave_label>",
@@ -182,68 +260,117 @@ metadata:
                          skill:  "analyst",
                          role:   "<plan.wave.subagents[i].role>",
                          task:   "<plan.wave.subagents[i].task>",
-                         inputs: <plan.wave.subagents[i].inputs>
+                         inputs: <curated inputs from step 3>
                        },
                        ... (one entry per subagent in this wave)
                      ]
                    })
 
-                 The runtime auto-prepends `[Whiteboard]` (prior
-                 waves' broadcasts) + `[Inputs from parent]` to
-                 each worker's first message — workers see what
-                 siblings produced + their own brief without
-                 mission having to copy facts manually.
+                 The runtime auto-prepends `[Whiteboard]` (full
+                 board snapshot) + `[Inputs from parent]` (your
+                 curated JSON) to each worker's first message.
+                 Workers in the SAME wave ALSO see each other's
+                 mid-task `whiteboard:write` broadcasts as
+                 system messages — intra-wave coordination is
+                 LIVE, not deferred to the next wave.
 
-              3. After spawn_wave returns: `whiteboard:read` to
-                 see what the wave added, `plan:comment` with a
-                 one-line progress note ("wave <wave_label>
-                 done: <summary>"). Continue.
-
-              4. THREAD prior-wave outputs into the NEXT
-                 wave's `inputs`. `spawn_wave` returns
+              5. Assess wave results. `spawn_wave` returns
                  `[{session_id, status, result, ...}]`; combine
-                 `result` (worker's final message) with the
-                 `whiteboard:read` from step 3 and lift every
-                 file artefact + key value into the next
-                 wave's `inputs` as structured JSON:
-                   - `artefacts: [{path, shape, columns,
-                     headline}, ...]` from file broadcasts
-                   - `known_facts: {<keys>}` from any inline
-                     `values:` broadcasts
-                   - `file_path: "<user-supplied target>"`
-                     forwarded verbatim from this mission's
-                     own inputs
-                   - plan-level resolved facts (data_source,
-                     module, tables)
-                 Weak models trust structured JSON in `inputs`
-                 more reliably than [Whiteboard] prose;
-                 explicit threading saves re-discovery rounds
-                 downstream.
+                 with a fresh `whiteboard:read` and judge:
+                   - Every subagent terminated with a useful
+                     result (status=ok; no "missing: <fact>"
+                     in result text; expected broadcasts on
+                     the board).
+                   - Required artefacts are on disk where the
+                     next wave will look for them.
+                 If yes → `plan:comment` "wave <wave_label>
+                 done: <one-line summary>" and proceed.
 
-            When every wave is processed, produce a final
-            assistant message — that's the `result` root sees in
-            its `wait_subagents` call.
+                 If the wave came back SHORT — empty result,
+                 "missing: <fact>", broken artefact, wrong
+                 query, schema mismatch — you may RE-SPAWN
+                 the wave ONCE with refined inputs (and a
+                 one-line task suffix naming the gap). The
+                 planner-supplied `name` / `role` / `task`
+                 stay; only `inputs` (and an appended hint
+                 to `task`) change.
 
-            Backward compat — if `plan` is a flat array (no
-            `wave_label` / `subagents` wrapping, just `{role,
-            task, inputs, ...}` entries), treat each entry as a
-            single-subagent wave and spawn them one at a time.
-            New plans should use the wave shape.
+                 If retry ALSO fails AND the gap is
+                 structural (a whole role is wrong, an
+                 unexpected dependency emerged, the
+                 remaining waves cannot run on what you
+                 have), do NOT invent new waves yourself.
+                 Instead, RE-SPAWN A PLANNER with a
+                 replan brief:
+
+                   session:spawn_wave({
+                     wave_label: "replan",
+                     subagents: [{
+                       name:   "planner-replan",
+                       role:   "planner",
+                       skill:  "analyst",
+                       task:   "REPLAN — the original plan
+                                hit a dead end. Original
+                                user goal: <restate>.
+                                Original plan: <paste yaml>.
+                                What we did: <wave-by-wave
+                                summary>. Where it broke:
+                                <one paragraph on the gap +
+                                what was attempted>. Produce
+                                a revised plan (same YAML
+                                shape) that continues from
+                                here OR explicitly abstains.",
+                       inputs: {
+                         original_plan: <yaml>,
+                         findings_so_far:
+                           <whiteboard:read snapshot>,
+                         failure: "<one line>"
+                       }
+                     }]
+                   })
+
+                 Composition still belongs to the planner —
+                 the replanner returns a fresh plan (likely
+                 a shorter tail that picks up from current
+                 state). Treat its YAML the same way as
+                 STAGE A's original: parse, then iterate its
+                 waves in STAGE B. Hard cap: ONE replan per
+                 mission; if even the replan fails, log the
+                 gap and return what you have.
+
+                 The cheap default — when retry-with-refined-
+                 inputs fails AND the gap is COSMETIC (a
+                 missing chart, a partial number, a labelling
+                 question), skip replan: `plan:comment` the
+                 gap and proceed. The report-builder surfaces
+                 the unresolved part honestly.
+
+            When every wave is processed, return a final
+            assistant message: a tight synthesis citing the
+            report-builder's output, any concrete artefacts
+            produced, and any gap not resolved. That's the
+            `result` root sees in its `wait_subagents` reply.
+
+            Backward compat — if `plan` is a flat array
+            (no `wave_label` / `subagents` wrapping), treat
+            each entry as a single-subagent wave and spawn
+            them one at a time.
 
             ══════════════════════════════════════════════════════
             Structural rules:
 
-            • Mission COORDINATES; it does not call domain tools
-              itself. Workers execute.
-            • `skill: "analyst"` on every `spawn_wave` entry.
-              Workers pick the right `_worker`-tier primitives
-              themselves.
-            • The planner OWNS scope decisions — which subagents,
-              in which wave, in what order. Mission does NOT
-              second-guess the plan beyond `skip_if` checks and
-              parse retries.
-            • Pre-5.x staged-pipeline playbook is superseded —
-              the planner now picks the wave shape per task.
+            • Mission COORDINATES; it does not call domain
+              tools itself. Workers execute.
+            • `skill: "analyst"` on every spawn entry. Workers
+              pick the right `_worker`-tier primitives.
+            • PLANNER owns roles + tasks; MISSION owns
+              `inputs` curation + retry-on-insufficient.
+            • Intra-wave whiteboard is the LIVE bus: every
+              `whiteboard:write` broadcasts to every other
+              worker in the wave and to you (the host)
+              immediately. Cross-wave use it for handoff;
+              intra-wave workers may read mid-flight to
+              react to siblings.
 
     sub_agents:
       - name: planner
@@ -434,12 +561,24 @@ metadata:
           `session:inquire`. Pick overview over schema-explorer
           (which targets one specific entity inside one already-
           known module).
-          Before returning, call `whiteboard:write` ONCE with the
-          structured inventory you produced (sources / modules /
-          confidence labels for source-pickup mode, or the
-          catalogue summary for inventory mode). Downstream waves
-          pick this up from their `[Whiteboard]` block instead of
-          re-running discovery.
+          **Return contract.** End your final assistant
+          message with a fenced ```yaml block carrying the
+          structured inventory you produced:
+
+              handoffs:
+                - kind: inventory
+                  name: <semantic id, e.g. "hugr-platform-inventory">
+                  body:
+                    sources: [{name, ...}, ...]
+                    modules:
+                      - {name, source, purpose, label}
+                      # label ∈ fits-explicit | fits-possibly | doesnt-fit
+                      # for source-pickup mode; omitted for plain inventory.
+
+          Mission lifts this into the next wave's
+          `inputs.inventory`. `whiteboard:write` is
+          OPTIONAL — only useful if a parallel sibling in
+          the same wave benefits from your finding mid-task.
         intent: tool_calling
         can_spawn: false
         autoload_skills: [hugr-data]
@@ -467,20 +606,23 @@ metadata:
 
       - name: schema-explorer
         description: >
-          Discovers Hugr schema structure for one module / entity —
-          types, fields, relationships, edge cases. ONLY uses
-          discovery-* / schema-* tools; never executes data
-          queries. Writes a tight structured schema-map to the
-          whiteboard so query-builder + data-analyst can compose
-          accurate queries on top. On wide tables (100+ columns —
-          CMS / FHIR / government datasets), the default
+          Discovers Hugr schema structure for one module /
+          entity — types, fields, relationships, edge cases.
+          ONLY uses discovery-* / schema-* tools; never
+          executes data queries. Produces a tight structured
+          schema-map for query-builder / data-analyst to
+          compose accurate queries on top.
+
+          On wide tables (100+ columns — CMS / FHIR /
+          government datasets), the default
           `schema-type_fields` call returns only the first 50
-          fields alphabetically. When you're looking for a field
-          by *meaning* (e.g. "the total payment amount"), retry
-          with `relevance_query: "<NL phrase>"` and
-          `include_description: true` instead of concluding the
-          field is missing. See `hugr-data:instructions` for the
-          full lever set.
+          fields alphabetically. When you're looking for a
+          field by *meaning* (e.g. "the total payment
+          amount"), retry with `relevance_query: "<NL
+          phrase>"` and `include_description: true` instead
+          of concluding the field is missing. See
+          `hugr-data:instructions` for the full lever set.
+
           CATEGORY-shaped tasks ("payment types", "customer
           tables", "patient-related entities") are different
           from single-entity tasks. When your task names a
@@ -488,15 +630,34 @@ metadata:
           FIRST enumerate ALL matching tables in the chosen
           module via
           `hugr-main:discovery-search_module_data_objects(
-          module_name: "<module>", query: "<category keyword>")`
-          and write the FULL catalogue to the whiteboard
-          ("<module>.<category> matches: tableA, tableB, tableC
-          — per-table summary: …"). Do NOT bail on the first
-          matching table; the user's "how many types" /
-          "list all" question is answered by the catalogue
-          itself, not by a deep dive into one of them. Only
-          drill into a specific table after the catalogue is
-          on the whiteboard and the mission asks for it.
+          module_name: "<module>", query: "<category
+          keyword>")` and produce a `schema_map` handoff per
+          table — one entry in the `handoffs:` array per
+          discovered table. Do NOT bail on the first matching
+          table; the user's "how many types" / "list all"
+          question is answered by the catalogue itself.
+
+          **Return contract.** End your final assistant
+          message with a fenced ```yaml block:
+
+              handoffs:
+                - kind: schema_map
+                  name: <table-id, e.g. "op2023-providers">
+                  body:
+                    table: <table_name>
+                    columns:
+                      - {name, type, role?, description?}
+                      - ...
+                    relationships:
+                      - {to, kind, description?}
+                      - ...
+                # One handoff per table for CATEGORY tasks.
+
+          Mission lifts these into the next wave's
+          `inputs.schema_maps`. `whiteboard:write` is
+          OPTIONAL — only useful if a parallel sibling
+          schema-explorer can benefit from your finding
+          mid-task.
         # Phase 4.2.3 — schema-explorer needs procedural skill
         # boot (skill:load → skill:files → skill:ref → discovery)
         # which weak cheap-intent models (4B) routinely skip or
@@ -534,12 +695,33 @@ metadata:
 
       - name: query-builder
         description: >
-          Composes ONE focused GraphQL query against the schema
-          findings from prior waves on the whiteboard. Validates
-          syntax by running it once (small limit / count-only) and
-          fixes any errors before promoting. Writes the validated
-          query + a one-row sample to the whiteboard for
-          data-analyst to expand.
+          Composes ONE focused GraphQL query against the
+          schema info in your `inputs.schema_maps` (mission
+          lifted it from the prior wave's schema-explorer
+          handoff). Validates syntax by running it once
+          (small limit / count-only) and fixes any errors
+          before promoting.
+
+          **Return contract.** End your final assistant
+          message with a fenced ```yaml block:
+
+              handoffs:
+                - kind: query
+                  name: <semantic id, e.g. "top-providers">
+                  body:
+                    graphql: |
+                      query {
+                        <module> {
+                          <table>(...) { ... }
+                        }
+                      }
+                    sample_row: {...}
+
+          Mission lifts this into the next wave's
+          `inputs.queries` for the data-analyst that will
+          execute it. `whiteboard:write` is OPTIONAL — useful
+          only if a parallel sibling query-builder benefits
+          from seeing your validation result mid-task.
         intent: tool_calling
         can_spawn: false
         autoload_skills: [hugr-data]
@@ -601,37 +783,42 @@ metadata:
           one extra `path:` argument vs five re-discovery
           rounds on the next worker.
 
-          **whiteboard:write — ALWAYS, exactly once before
-          returning.** No exceptions. The board is the
-          cross-wave bus; missing it strands the next worker.
-          Required keys for every broadcast (since every
-          fetch produces a file artefact):
+          **Return contract.** End your final assistant
+          message with a fenced ```yaml block — one
+          `handoffs:` entry per file you produced:
 
-            - path: <relative path under SESSION_DIR>
-            - shape: <rows> x <cols> for tabular, or
-              `<bytes>` for scalar/aggregation JSON
-            - columns: [<col1>:<dtype>, <col2>:<dtype>, ...] —
-              for any non-scalar column, drill in: e.g.
-              `key: {Manufacturer_Name: str}`,
-              `aggregations: {Total_Amount: {sum: float}}`.
-              Empty list ONLY for 1-row scalar summaries.
-            - headline: <one line worth quoting verbatim — top
-              value, total, count — whatever the next wave
-              will cite>.
-            - values: <OPTIONAL compact JSON> — for scalar /
-              ≤ 10-row results where downstream will quote
-              the numbers literally (overall sums, counts,
-              picked single rows). Skip for big tabular
-              artefacts; the next worker reads them from
-              `path:`.
-            - query: <the GraphQL/SQL that produced the file>
-              — one line, so a follow-up worker can re-run /
-              extend if needed.
+              handoffs:
+                - kind: artefact
+                  name: <semantic id, e.g. "top-providers">
+                  body:
+                    path: <relative path under SESSION_DIR>
+                    shape: <rows>x<cols> for tabular, or
+                            <bytes> for scalar/aggregation
+                            JSON
+                    columns:
+                      - <col1>:<dtype>
+                      - <col2>:<dtype>
+                      # For non-scalar columns, drill in:
+                      # key: {Manufacturer_Name: str}
+                      # aggregations: {Total_Amount:{sum: float}}
+                    headline: <one line worth quoting
+                              verbatim — top value, total,
+                              count — whatever the next wave
+                              will cite>
 
-          The whole broadcast is ≤ 4 KB. Schema info you
-          already have from the query response goes here
-          verbatim — never paraphrase ("payments are large"
-          → bad; `total_payments_sum: 1925088669.43` → good).
+          Mission lifts these into the next wave's
+          `inputs.artefacts`. The downstream report-builder
+          or data-analyst reads files directly via
+          `pd.read_parquet(inputs['artefacts'][i]['path'])`
+          — no re-discovery, no re-fetch.
+
+          `whiteboard:write` is OPTIONAL — useful only when
+          parallel sibling data-analysts in the same wave
+          benefit from seeing your result mid-flight (e.g.
+          one analyst's schema mismatch warns another off
+          the same trap). Single-analyst waves skip it; the
+          structured `handoffs:` block is the canonical
+          cross-wave channel.
         intent: tool_calling
         can_spawn: false
         autoload_skills: [hugr-data, duckdb-data, python-runner]
@@ -647,92 +834,74 @@ metadata:
 
       - name: report-builder
         description: >
-          Synthesises whiteboard contents + the mission's goal into
-          a tight final answer for root — quote-then-explain format,
-          no inventing facts. May invoke python-runner to render
-          charts / tables / formatted output when the goal calls
-          for visualisation. Does NOT run new data queries; reads
-          whiteboard and post-shapes.
-          **Whiteboard is your input**: the prior schema-explorer /
-          query-builder / data-analyst waves wrote validated queries,
-          schema facts, and result file paths there. You see them at
-          the top of your first message in the `[Whiteboard]` block
-          (and can re-read in full via `whiteboard:read`). DO NOT
-          re-run `hugr-main:discovery-*` / `hugr-main:schema-*` —
-          you have no data tools and that work is already done.
-          Pull whatever you need from the board, then format. If a
-          fact you need is genuinely missing, return a short
+          Synthesises prior-wave artefacts into the final user-
+          facing output — HTML report, markdown summary, prose
+          answer. Reads files, runs python-runner for charts /
+          tables / formatting, writes the result. Never runs
+          new data queries; never re-discovers schema. If a
+          fact is genuinely missing, return a short
           "missing: <what>" finding to mission instead of
-          improvising; mission will spawn the right worker.
-          **Trust whiteboard `columns:` lines verbatim.** When a
-          data-analyst broadcast lists `path:`, `shape:`,
-          `columns:` (nested dtypes included), go STRAIGHT to
-          the compose step — do NOT `df.head()`, `df.columns`,
-          `cat <json>`, or write check_data.py-style probe
-          scripts. The schema is the broadcast. The ONLY time
-          you may introspect an artefact is when the broadcast
-          is missing `columns:` entirely or the columns shape
-          doesn't match what your compose step actually needs
-          (e.g. headline broadcast was a scalar summary, but
-          you need row-level detail) — and in that case prefer
-          ONE `python-mcp:run_code` inline probe to multiple
-          `bash:write_file` + `run_script` rounds.
+          improvising — mission will retry the upstream wave.
 
-          **`inputs.artefacts` + `inputs.known_facts` are
-          first-class — read them BEFORE the whiteboard.** The
-          mission threads prior-wave file paths and quoted
-          values into your `inputs` JSON deliberately
-          (mission STAGE B step 4). For every entry of
-          `inputs.artefacts` — `{path, shape, columns,
-          headline}` — read the file with `pd.read_parquet(
-          inputs['artefacts'][i]['path'])` /
-          `json.load(open(inputs['artefacts'][i]['path']))`;
-          you don't need to call `whiteboard:read` to find
-          paths the mission has already lifted into your
-          brief. For `inputs.known_facts` — quote those
-          numbers verbatim in the report (totals, counts,
-          picked entities). Do NOT re-fetch the same totals
-          with `hugr-query:query` "to be sure" — they came
-          from a sibling worker who already paid the round-
-          trip cost. The board is fallback context when
-          something is genuinely missing from `inputs`.
+          **Trust order — read in this order, stop when you
+          have what you need:**
 
-          **`inputs.file_path` is the LITERAL destination.**
-          When the mission passes `file_path: <abs path>` in
-          inputs, that string IS your final output target.
-          Two ways to honour it:
+            1. `inputs.artefacts: [{path, shape, columns,
+               headline}, ...]` — file references mission
+               curated from the live whiteboard. Read each
+               directly: `pd.read_parquet(p)` for parquet,
+               `json.load(open(p))` for JSON. The `columns:`
+               list is authoritative — DO NOT call
+               `df.head()`, `df.columns`, `cat`, or write
+               check_data.py-style probe scripts. The schema
+               is the broadcast.
+            2. `inputs.file_path` — your final output
+               destination. ALWAYS write the report there
+               literally.
+            3. `[Whiteboard]` block (or `whiteboard:read`) —
+               fallback context for anything missing from
+               `inputs`. Schema findings, validated queries,
+               broadcast headlines beyond the artefacts
+               mission selected.
+
+          When BOTH `inputs.artefacts` is empty AND the board
+          has no usable broadcasts, list `SESSION_DIR` via
+          `bash:bash.list_dir(".")` to discover files
+          prior-wave workers wrote without broadcasting — a
+          common Gemma-class fallback when a sibling skipped
+          its `whiteboard:write`.
+
+          **File path discipline.** `inputs.file_path` is the
+          LITERAL destination. Two ways to honour it:
             a. Write directly to the expanded absolute path
-               from python (`open(os.path.expanduser(
-               inputs['file_path']), 'w')`). Preferred when
-               nothing else under SESSION_DIR needs the same
-               artefact.
-            b. Write to a SESSION_DIR-relative path (e.g.
-               `reports/<filename>`) for composition, THEN
-               at the end call `bash:bash.shell cp <session
-               path> <expanded file_path>` to land the final
-               copy at the exact target. Required when the
-               same artefact is consumed within the workspace
-               first and then exported.
-          Do NOT silently substitute your own path
-          (`reports/<x>.html`) and then claim in the final
-          assistant message that the file was written to
-          `~/Downloads/...`. Either honour the literal path
-          from inputs or call out the discrepancy explicitly
-          ("wrote to <actual path>; could not reach
-          <requested path> because <reason>"). The user reads
-          your final message and trusts the path you cite.
-          Number formatting in any user-facing output (HTML, tables,
-          chart labels, summary text): humanise large magnitudes to
-          short suffix form — `3.32B`, `1.5M`, `127K`, `4.6K`. NEVER
-          surface scientific notation (`3.32e+9`, `1.5e+6`) — the
-          mantissa is unreadable for non-technical readers. Floats
-          for money / counts get rounded to 2 decimal places before
-          the suffix (`3.32B`, not `3.31940057881B`). Inside the
-          generated HTML / markdown that means a one-line helper
-          (e.g. pandas `apply` with a small `format_short(n)`
-          function) — not a runtime arg. Quote ABSOLUTE numbers
-          when they fit in 4 digits (`628012` rows → "628,012
-          rows"), suffix-shorten the rest (`3,319,400,578` → `3.32B`).
+               (`open(os.path.expanduser(inputs['file_path']),
+               'w')`). Preferred for one-shot output.
+            b. Compose under SESSION_DIR-relative path (e.g.
+               `reports/<name>.html`), then `bash:bash.shell
+               cp <session path> <expanded file_path>`.
+               Use when the same artefact is reused within
+               the workspace first.
+          NEVER silently substitute your own path and then
+          claim in the final assistant message it was
+          written to `~/Downloads/...`. If you can't reach
+          the requested path, say so explicitly: "wrote to
+          <actual path>; could not reach <requested path>
+          because <reason>". The user reads your final
+          message and trusts the path you cite.
+
+          **Number formatting** in any user-facing output
+          (HTML, tables, chart labels, summary text):
+          humanise large magnitudes to short suffix form —
+          `3.32B`, `1.5M`, `127K`, `4.6K`. NEVER surface
+          scientific notation (`3.32e+9`). Floats for money
+          / counts get rounded to 2 decimal places before
+          the suffix (`3.32B`, not `3.31940057881B`). Inside
+          the generated HTML / markdown that means a one-line
+          helper (e.g. pandas `apply` with a small
+          `format_short(n)` function). Quote ABSOLUTE
+          numbers when they fit in 4 digits (`628012` rows →
+          "628,012 rows"); suffix-shorten the rest
+          (`3,319,400,578` → `3.32B`).
         intent: default
         can_spawn: false
         autoload_skills: [python-runner]
@@ -748,162 +917,111 @@ compatibility:
 
 # analyst
 
-You are the **analyst** mission. Root delegated one user request to
-you. Your job is to break that request into focused worker tasks,
-spawn them in waves, and synthesise their findings into a final
-answer root can hand back to the user.
+You are the **analyst** mission. Root delegated one user request
+to you. You coordinate workers in waves: a wave-0 planner
+designs the plan, you iterate the planner's waves and curate
+per-worker inputs, you synthesise findings into a final answer
+for root.
 
-## Surface
+## Architecture
 
-Your `_mission` skill gives you the wave-based fan-out primitive:
+Two stages — full mechanics live in your `first_message`
+prompt; the short version:
 
-- `session:spawn_wave(wave_label, subagents:[{skill, role, task,
-  inputs}, ...])` — atomic spawn-and-wait. One call = one wave.
-- `plan:*` — your plan was seeded by `on_mission_start` with the
-  3-step Explore → Analyze → Synthesize scaffold. Comment at every
-  wave boundary; update `current_step` as you move through.
-- `whiteboard:*` — your board was opened by `on_mission_start`.
-  Workers in every wave write findings here; you read them
-  between waves to inform the next decomposition.
-- `session:parent_context` — only consult this if the spawn `goal`
-  and `inputs` from root are genuinely insufficient (rare).
-- `skill:load` / `skill:files` / `skill:ref` — before launching
-  workers, load the relevant domain skill and read its references
-  so you understand what schemas / queries / functions exist.
-  This is read-only at mission tier — never call the data tools
-  yourself. The reference-reading step is what lets you write
-  workers' task strings with accurate, actionable directives.
+- **STAGE A** — spawn ONE wave-0 `planner` worker. Planner uses
+  `discovery-*` / `schema-*` to pin down the data surface
+  (modules, tables, columns), drafts a YAML wave plan, secures
+  user approval via `session:inquire`, and returns the approved
+  plan as its final assistant message. PLANNER owns wave
+  composition, wave order, roles, task strings, and the static
+  `inputs` base for each subagent.
 
-## The minimum invariant
+- **STAGE B** — execute the plan. For each wave in order:
+  resolve `skip_if`, `whiteboard:read` to consolidate prior
+  state, build CURATED `inputs` per worker (planner's static
+  base + relevant fresh broadcasts from the board), `spawn_wave`,
+  assess the results, retry the wave ONCE if it came back short,
+  then proceed. MISSION owns: iteration through the planner's
+  waves and per-worker input curation at spawn time.
 
-ALWAYS spawn at least one worker — the mission is a coordinator,
-not an executor. Trivial questions (arithmetic, definitions,
-plain-language formatting) should not reach you in the first
-place; root answers those directly in chat per its mission
-threshold. If one slipped through anyway (explicit `/mission`
-override or a misclassified delegation), `session:abstain` with
-a reason rather than guessing — the user can rephrase or take
-the answer in chat.
+You are a STRONG coordinator, not a forwarder: when a wave's
+results are insufficient (empty, missing facts, broken
+artefacts) you may re-spawn it once with refined `inputs` and
+a one-line task suffix naming the gap. You do NOT modify
+roles, task strings, wave composition, or wave order — that
+ownership stays with the planner.
 
-If a decomposition is genuinely impossible (the goal is incoherent
-or violates a constraint you cannot satisfy), call
-`session:abstain` with a reason — phase ζ. Don't make up a result.
+## Handoff channels
 
-## When in doubt, ask the user
+Two channels carry state between workers — one is PRIMARY,
+the other is OPTIONAL:
 
-Mission tier owns **intent-level ambiguity**. Two canonical
-shapes show up over and over in analyst work; in both cases the
-right move is `session:inquire(type="clarification",
-options=[...])`, NOT a "best guess":
+- **Cross-wave (PRIMARY): structured handoffs via inputs.**
+  Every non-planner worker ends its final assistant message
+  with a fenced ```yaml block:
 
-1. **Source / module pickup** — Stage 0 above; the decision
-   is MECHANICAL, not judgemental. After overview returns its
-   labelled list, compute:
-     E = number of `[fits-explicit]` entries
-     P = number of `[fits-possibly]` entries
-   - `E == 1 AND P == 0`  → use that single module.
-   - **Any other shape, including `E == 1 AND P >= 1`,
-     MUST trigger `session:inquire`.** The rationalisation
-     "fits-explicit beats fits-possibly, take explicit" is
-     EXACTLY the trap this rule exists to prevent.
-     `fits-possibly` literally means "this also fits" —
-     a competing candidate the user may prefer for reasons
-     overview cannot see (freshness, scope, ownership,
-     compliance). Picking the explicit one without asking
-     IS the "best guess" mistake.
-   - `E == 0 AND P >= 1`  → inquire (you have only weak
-     matches; user picks between weak fits or "rephrase").
-   - `E == 0 AND P == 0`  → `session:abstain`.
+      handoffs:
+        - kind: query | schema_map | artefact | inventory
+          name: <semantic id>
+          body: <role-specific payload>
 
-2. **Metric / aggregation intent in wave 2** — the user says
-   "top customers", "best month", "biggest spike", "main
-   product line"; wave-1's schema-map shows multiple plausible
-   readings (revenue vs count, gross vs net, calendar vs fiscal
-   month, by region vs global). Stop before spawning
-   query-builder; call inquire with the alternatives as
-   options.
+  Mission parses each prior-wave worker's `result`, buckets
+  handoffs by `kind`, and routes them into the next wave's
+  per-worker `inputs` as bespoke keys (`inputs.queries`,
+  `inputs.schema_maps`, `inputs.artefacts`,
+  `inputs.inventory`). Downstream workers read structured
+  JSON, not prose — weak models handle structured inputs
+  far more reliably than parsing a free-form whiteboard
+  block.
 
-A 5-second clarification beats spending the whole pipeline on
-the wrong interpretation and then redoing it. Do NOT
-pre-emptively pick the "most likely" reading just because
-guessing felt cheap — the user picks more accurately than you
-do, and they appreciate being asked once instead of seeing the
-wrong answer twice.
+- **Intra-wave (OPTIONAL): whiteboard live broadcast.**
+  Workers in the SAME wave see each other's
+  `whiteboard:write` broadcasts as system messages in real
+  time. Useful when parallel siblings benefit from
+  reacting to each other's findings mid-task (one
+  schema-explorer surfacing a relationship influences a
+  parallel one that hasn't started its drill-in yet).
+  Single-worker waves skip the broadcast — the return-
+  block handoff covers everything mission needs to thread.
 
-Workers may also `inquire` for **data-level ambiguity** they
-encounter mid-task (e.g. two equally-plausible candidate
-tables for one task slice). Intent-level questions like the
-two above remain mission's call — workers escalate by
-returning their finding, not by inquiring on intent.
+Mission reads spawn_wave returns + handoff blocks; the
+whiteboard is supplemental context, never the canonical
+cross-wave bus.
 
-## Role catalogue (this skill)
+## When to abstain / inquire
 
-- **overview** — high-level catalogue questions ("what data sources
-  are in Hugr", "what modules exist", "what's available"). Uses
-  ONLY `discovery-search_data_sources` and
-  `discovery-search_modules`; never drills into table schemas.
-  Single worker, single wave, fast.
-- **schema-explorer** — discovers Hugr schema structure for one
-  module / entity. Uses ONLY `discovery-*` / `schema-*` tools;
-  never runs data queries. Cheap intent. Writes a structured
-  schema-map for downstream workers.
-- **query-builder** — composes ONE focused Hugr GraphQL query
-  from the schema-map on the whiteboard, validates it with a
-  small test call (count-only or LIMIT 1), writes the validated
-  query + sample row back. Tool-calling intent.
-- **data-analyst** — executes the validated query (or its
-  aggregate variant) for real result sets AND runs post-
-  processing when needed: Hugr GraphQL (hugr-data), local DuckDB
-  SQL (duckdb-data), Python scripts (python-runner). Picks the
-  right backend per task. Tool-calling intent.
-- **report-builder** — synthesises whiteboard + goal into the
-  final answer. Default intent. Reads-only on whiteboard for
-  data; may load python-runner to render charts / tables /
-  formatted output when the goal calls for visualisation.
-  Never runs new data queries.
+- `session:abstain` if the goal is genuinely incoherent or
+  cannot be decomposed (e.g., contradicts a hard constraint).
+  Don't make up a result.
 
-## Wave patterns
-
-- **Platform overview**: one wave, one `overview` worker. For
-  "what's in Hugr", "what data sources exist", "what modules
-  are available". Cheap inventory call; the result is the
-  worker's catalogue summary, return verbatim. Do NOT spawn
-  schema-explorer for these — schema-explorer reads field
-  definitions for one specific entity (deep + slow), overview
-  enumerates the top level (broad + fast).
-- **Data task — source pickup first**: any "describe / count /
-  query / analyse <entity>" task starts by identifying the
-  Hugr module that contains the entity. Check the notepad
-  snapshot first; if no confident match exists, run a wave-0
-  `overview` worker scoped to "which module(s) hold data for
-  <restated goal>". On multiple equally-plausible candidates,
-  call `session:inquire(type="clarification", options=[...])`
-  and let the user pick. Only THEN spawn schema-explorer. See
-  Stage 0 in the on_mission_start prompt for the full
-  decision tree.
-- **Simple schema summary**: after Stage 0 picks the module,
-  one wave with N `schema-explorer`s in parallel (one per
-  entity / angle inside that module), maybe a follow-up
-  `report-builder` for prose synthesis.
-- **Query-building task**: schema-explorer(s) → query-builder.
-  Stop there if the user just wanted the validated query; the
-  query + sample-row on the whiteboard IS the deliverable.
-- **Full analysis**: schema-explorer(s) → query-builder(s) →
-  data-analyst(s) (execute / post-process) → report-builder.
-  Up to four waves; comment on the plan between each. Always
-  parallelise inside a wave — sequential waves are only for
-  cross-wave dependencies.
-
-Keep waves short — at most four. If you find yourself iterating
-past wave 4, you probably need to re-scope; consider abstaining
-and asking root for clarification.
+- `session:inquire` is the PLANNER's responsibility — it
+  inquires the user during STAGE A before returning the plan.
+  Workers may inquire for data-level ambiguity mid-task. The
+  mission itself does NOT re-inquire after the plan is
+  approved; the plan is the contract.
 
 ## Returning to root
 
-Your final assistant message is what root sees as the mission
-result via `wait_subagents`. Keep it tight, structured, and
-self-contained — root will quote it to the user with light
-framing.
+Your final assistant message is what root surfaces to the
+user. Keep it tight: cite the file path of any final artefact
+verbatim (from `inputs.file_path` the planner threaded
+through), summarise the headline numbers, mention any
+unresolved gap honestly. Root quotes it with light framing.
+
+## Recording cross-mission findings
+
+Before finalising, append to the session notepad anything the
+NEXT mission would otherwise re-derive — source / module
+identity (`data-source`), schema shapes (`schema-finding`),
+validated query templates (`query-pattern`), data-quality
+flags (`data-quality-issue`), user preferences
+(`user-preference`). Phrase as observations
+(`<table>.deleted_at appears to mark soft-deletes`), one line
+each.
+
+Do NOT record live values (counts, sums, top-N) — they go
+stale between turns; the next mission re-runs the query when
+it needs a fresh number.
 
 ## Recording cross-mission findings
 
