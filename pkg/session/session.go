@@ -36,7 +36,7 @@ import (
 // in one go.
 type Session struct {
 	id               string
-	name             string // sanitised kebab-case; "" for roots. REQUIRED at spawn; addressing identifier exposed to the model.
+	name             string // sanitised kebab-case; "" for roots. REQUIRED at spawn; addressing identifier exposed to the model. Set once during newSession / restore (before the session is published into any parent's children map); subsequent reads need no lock.
 	ownerID          string // owner from SessionRow.OwnerID; inherited by subagents
 	depth            int    // 0 for root; parent.depth+1 for subagent
 	deps             *Deps  // shared bundle; nil only in legacy NewSession callers

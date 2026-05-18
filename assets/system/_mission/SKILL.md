@@ -94,8 +94,8 @@ The autoloaded surface is built around one primitive:
   user / assistant messages only.
 - `plan:set` / `plan:comment` / `plan:show` / `plan:clear` — full
   plan ownership. Set the body at boot (or have it set for you by
-  the dispatching skill's `on_start` hook in phase γ); comment at
-  every wave boundary.
+  the dispatching skill's `on_start` hook); comment at every wave
+  boundary.
 - `whiteboard:init` / `whiteboard:write` / `whiteboard:read` /
   `whiteboard:stop` — full whiteboard ownership. Workers
   participate; the mission hosts.
@@ -107,8 +107,8 @@ Your job is **decomposition + synthesis**:
 1. Read your `goal` (your first user message) and `inputs`
    (structured payload from root). They are authoritative; do
    not second-guess them. If something is genuinely ambiguous,
-   read `parent_context` or call `session:abstain` (phase ζ)
-   rather than guessing.
+   read `parent_context` or call `session:abstain` rather than
+   guessing.
 
    Before composing your first wave, scan the **notepad
    snapshot** in your system prompt (the `## Notepad snapshot`
@@ -118,16 +118,23 @@ Your job is **decomposition + synthesis**:
    snippet looks directly relevant, call `notepad:search` for
    full content before spawning a worker to re-derive it. Each
    saved worker is one less round of latency.
-2. Init the whiteboard so all workers share findings.
+2. **Optional:** open a whiteboard with `whiteboard:init` ONLY
+   when this mission's waves need intra-wave coordination —
+   parallel workers that benefit from each other's broadcasts
+   inside the same wave, or cross-wave context the next wave's
+   workers need at hand. Sequential single-worker waves and
+   mission-curated `inputs` cover most cases without it; skip
+   when in doubt.
 3. For each wave:
    - Decide which workers run *in parallel*. Workers in the same
      wave should be independent — they all see what the previous
-     wave's whiteboard writes produced, but not each other's
-     concurrent writes mid-wave.
+     wave's whiteboard writes produced (if a board is open), but
+     not each other's concurrent writes mid-wave.
    - Call `spawn_wave({wave_label, subagents: [{skill, role, task,
      inputs}, ...]})` once. Wait phase is built in.
-   - Read the whiteboard. Comment on the plan. Decide whether
-     another wave is needed.
+   - If a board is open, read it after the wave returns. Either
+     way, decide whether another wave is needed based on the
+     workers' returned messages and any artefacts they wrote.
 4. When you have enough to answer, produce a final assistant
    message — that becomes the `result` field root sees in its
    `wait_subagents` call. Keep it tight and structured; root

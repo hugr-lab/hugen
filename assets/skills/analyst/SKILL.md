@@ -1010,21 +1010,6 @@ unresolved gap honestly. Root quotes it with light framing.
 
 ## Recording cross-mission findings
 
-Before finalising, append to the session notepad anything the
-NEXT mission would otherwise re-derive — source / module
-identity (`data-source`), schema shapes (`schema-finding`),
-validated query templates (`query-pattern`), data-quality
-flags (`data-quality-issue`), user preferences
-(`user-preference`). Phrase as observations
-(`<table>.deleted_at appears to mark soft-deletes`), one line
-each.
-
-Do NOT record live values (counts, sums, top-N) — they go
-stale between turns; the next mission re-runs the query when
-it needs a fresh number.
-
-## Recording cross-mission findings
-
 Before you finalise your result, append to the session notepad
 anything the **next** mission would otherwise re-derive —
 source / module identity (`data-source` — which module holds

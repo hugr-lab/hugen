@@ -3,6 +3,7 @@ package skill
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
@@ -644,15 +645,16 @@ func (e *Extension) SubagentSpawnHint(ctx context.Context, state extension.Sessi
 // Reads `sub_agents[*].autoload_skills` from the dispatching
 // skill's manifest (via the SkillManager — the skill does NOT need
 // to be loaded on the child) and Load()s each on the child's
-// per-session SessionSkill. Per-skill failures are wrapped and
-// returned; the runtime logs and continues, since a failed
-// autoload should not block the spawn (the worker can still
-// skill:load(...) at runtime).
+// per-session SessionSkill. Per-skill Load failures are joined into
+// the return value but the loop continues so one bad autoload entry
+// does not deny the worker the rest of its base surface; the
+// runtime logs the joined error and proceeds with the spawn (the
+// worker can still skill:load(...) at runtime for anything missing).
 //
 // Tier compatibility is enforced by SessionSkill.Load itself —
 // each target's tier_compatibility must include the child's tier
-// or Load returns ErrTierForbidden, which surfaces here as the
-// wrapped error.
+// or Load returns ErrTierForbidden, which surfaces here joined into
+// the return value.
 func (e *Extension) ApplyOnSubagentSpawn(ctx context.Context, child extension.SessionState, skillName, roleName string) error {
 	if skillName == "" || roleName == "" || e.manager == nil {
 		return nil
@@ -680,12 +682,16 @@ func (e *Extension) ApplyOnSubagentSpawn(ctx context.Context, child extension.Se
 	if h == nil {
 		return nil
 	}
+	var loadErrs []error
 	for _, name := range role.AutoloadSkills {
 		if err := h.Load(ctx, name); err != nil {
-			return fmt.Errorf("autoload %q for role %s/%s: %w", name, skillName, roleName, err)
+			loadErrs = append(loadErrs, fmt.Errorf("autoload %q for role %s/%s: %w", name, skillName, roleName, err))
 		}
 	}
-	return nil
+	if len(loadErrs) == 0 {
+		return nil
+	}
+	return errors.Join(loadErrs...)
 }
 
 // lookupSkillRole walks the loaded skill catalog once to locate a

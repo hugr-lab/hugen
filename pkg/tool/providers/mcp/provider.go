@@ -380,9 +380,10 @@ func (p *Provider) Call(ctx context.Context, name string, args json.RawMessage) 
 	// Per_session MCPs (bash-mcp, duckdb-mcp) get the same fields
 	// but ignore them — their CWD is already set from `ws.Dir()` at
 	// spawn time, which gives the same answer. Tests that bypass
-	// perm.WithSession leave Meta nil; per_agent MCPs that require
-	// the dir then fail their call (no silent fallback to a flat
-	// layout).
+	// perm.WithSession leave Meta nil; calls also omit session_dir
+	// when WorkspaceDir is "" — what happens next is a per-server
+	// decision (per_agent MCPs that need the dir typically fail
+	// their call; others may pick a server-side default).
 	if sc, ok := perm.SessionFromContext(ctx); ok && sc.SessionID != "" {
 		fields := map[string]any{"session_id": sc.SessionID}
 		if sc.WorkspaceDir != "" {

@@ -85,10 +85,7 @@ top-down before doing anything else:
 
 [Inputs from parent]
 {
-  "module": "<resolved>",
-  "tables": ["<resolved>"],
-  "query_draft": "<validated draft>",
-  "file_path": "<resolved>",
+  "<key>": "<value the mission resolved for you>",
   ...
 }
 
@@ -97,12 +94,11 @@ top-down before doing anything else:
 ```
 
 The optional `(<name>)` after `<role>` is the sibling's spawn
-name. When the planner spawns two `data-analyst` workers in one
+name. When a mission spawns two workers of the SAME role in one
 wave, names disambiguate whose finding is whose — e.g. `from
-data-analyst (top-providers)` vs `from data-analyst
-(payment-distribution)`. Missing parens means the author had no
-explicit name (root sessions, single-of-role workers, legacy
-events).
+<role> (<name-a>)` vs `from <role> (<name-b>)`. Missing parens
+means the author had no explicit name (root sessions,
+single-of-role workers, legacy events).
 
 - **`[Whiteboard]`** — shared accumulated findings from siblings
   in earlier waves of this mission. Trust the broadcasts: validated
@@ -122,22 +118,23 @@ events).
 **Trust order: Whiteboard → Inputs → Manual.**
 
 - Whiteboard broadcasts are siblings' validated work — quote
-  query strings, file paths, schema facts verbatim instead of
-  recomputing them. The board is the source of truth between
-  waves.
-- Inputs are mission's specific brief: `module` / `tables` →
-  skip `discovery-search_*`; `query_draft` → execute as-is,
-  skip a from-scratch `schema-type_fields` + validate cycle;
-  `file_path` → write to that path, do not invent a new one.
-  Discover ONLY for keys missing from BOTH whiteboard and
+  resolved values (paths, identifiers, drafts, schema facts)
+  verbatim instead of recomputing them. The board is the source
+  of truth between waves.
+- Inputs are the mission's specific brief for THIS step: a
+  resolved identifier means "skip the discovery you'd otherwise
+  run for that key"; a validated draft means "execute it as-is,
+  skip the from-scratch compose + validate cycle"; a resolved
+  output path means "write to that path, do not invent a new
+  one". Discover ONLY for keys missing from BOTH whiteboard and
   inputs.
 - References (`skill:ref`) carry **syntax + conventions** the
   facts above don't (how to address fields, special operators,
-  quoting rules, gotchas). When you're composing a new query
+  quoting rules, gotchas). When you're composing something new
   (no usable draft in inputs / whiteboard), read the relevant
-  reference FIRST. A validated `query_draft` from the inputs /
+  reference FIRST. A validated draft from the inputs /
   whiteboard can usually run as-is and lets you skip references
-  for that one query — but the moment you alter / compose
+  for that one call — but the moment you alter / compose
   something new, references come back into the picture.
 
 Your role may declare `autoload_skills` in its manifest entry. If
@@ -188,13 +185,24 @@ it admits.
 
 When you finish:
 
-1. Call `whiteboard:write` once with a tight finding your mission
-   and siblings can consume — schema names, row counts,
-   surprising patterns. Do NOT spam — one significant message
-   per worker is the cadence; siblings see every write.
+1. **If a `[Whiteboard]` block appeared in your first message**,
+   the mission opened a board and your siblings expect to see
+   your significant findings on it. Call `whiteboard:write` once
+   with a tight result your mission and siblings can consume —
+   schema names, row counts, surprising patterns, output file
+   paths. Do NOT spam — one significant message per worker is the
+   cadence; siblings see every write. If no `[Whiteboard]` block
+   was present, skip this step — your final assistant message is
+   the only return channel the mission needs.
 2. Return your final result as a normal assistant message — the
    mission consumes it via `wait_subagents`. Quote actual numbers
-   from your tool responses; never paraphrase.
+   from your tool responses; never paraphrase. Your dispatching
+   skill may require a specific structured return shape (e.g. a
+   fenced YAML handoff block listing produced artefacts, validated
+   drafts, or follow-up notes) so the mission can thread results
+   into the next wave's `inputs` — follow the dispatching skill's
+   convention exactly. When no shape is prescribed, plain prose is
+   the contract.
 
 ## What this skill does NOT grant
 

@@ -20,7 +20,7 @@ import (
 const subagentCancelSchema = `{
   "type": "object",
   "properties": {
-    "session_id": {"type": "string", "description": "Target identifier — either the subagent's short Name (returned by spawn) or its session_id. Must resolve to a direct child of the caller."},
+    "session_id": {"type": "string", "description": "Target identifier — either the subagent's short Name (returned by spawn) or its session_id. Must resolve to a direct child of the caller. Name resolution covers LIVE children only; once a child has fully closed, only session_id resolves to an idempotent OK — a stale name surfaces as not_a_child."},
     "reason":     {"type": "string"}
   },
   "required": ["session_id"]
@@ -59,6 +59,16 @@ func (parent *Session) callSubagentCancel(ctx context.Context, args json.RawMess
 	// assertChildOf store fallback). Closed children that already
 	// left s.children fall through to the store-level assertion
 	// using the input as a session_id.
+	//
+	// Known UX gap: a name-addressed cancel issued AFTER the child
+	// has fully closed (children-map entry already removed by
+	// handleSubagentResult) cannot resolve here — the live map has
+	// no entry, and assertChildOf below queries the store keyed by
+	// session_id, so a stale name surfaces as not_a_child rather
+	// than idempotent ok. We don't persist Name in SessionRow today;
+	// once we do, a store-by-name fallback can close this gap.
+	// Schema description steers the model to use session_id for
+	// cancels that may race a close.
 	resolvedID, child, live := parent.resolveChildTarget(in.SessionID)
 	if !live {
 		// Name lookup miss → treat input as session_id for the

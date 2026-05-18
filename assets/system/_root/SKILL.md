@@ -234,10 +234,12 @@ When the user's message had no concrete facts beyond the goal,
 omit `inputs` entirely. Empty / trivial inputs are harmless but
 add noise to the mission's first message.
 
-`name` is a short kebab-case identifier (`[a-z0-9-]{2,32}`) you
-pick from the user's ask (2-4 words). The runtime sanitises and
-auto-suffixes on collision with a live sibling; the resolved name
-comes back in the response. Use it in subsequent
+`name` is a short kebab-case identifier matching
+`^[a-z0-9][a-z0-9-]{1,31}$` (2–32 chars, leading alphanumeric,
+no trailing dash) that you pick from the user's ask (2–4 words).
+The runtime sanitises arbitrary input toward that shape and
+auto-suffixes on collision with a live sibling; the resolved
+name comes back in the response. Use it in subsequent
 addressing calls (`notify_subagent`, `subagent_cancel`,
 `subagent_runs`) where it reads more naturally than the
 session_id.

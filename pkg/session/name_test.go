@@ -197,6 +197,39 @@ func TestSpawn_NameCollision_AutoSuffix(t *testing.T) {
 	}
 }
 
+// TestSpawn_NameCollision_BatchedDuplicates verifies that when a
+// single spawn_subagent call lists two entries with the SAME name,
+// the second entry resolves to an auto-suffixed name (`-2`). The
+// per-spec resolution + pendingNames reservation has to flow
+// through both Spawn calls atomically; without the reservation the
+// two newSession constructions would race and pick the same base.
+func TestSpawn_NameCollision_BatchedDuplicates(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+
+	out, err := parent.callSpawnSubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagents":[{"name":"fetch","task":"a"},{"name":"fetch","task":"b"}]}`))
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	var rows []spawnSubagentResult
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("unmarshal: %v\noutput=%s", err, out)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (output=%s)", len(rows), out)
+	}
+	if rows[0].Name != "fetch" {
+		t.Errorf("rows[0].Name = %q, want %q", rows[0].Name, "fetch")
+	}
+	if rows[1].Name != "fetch-2" {
+		t.Errorf("rows[1].Name = %q, want %q (collision should auto-suffix)", rows[1].Name, "fetch-2")
+	}
+	if rows[0].SessionID == rows[1].SessionID {
+		t.Errorf("rows[0].SessionID == rows[1].SessionID = %q; want distinct", rows[0].SessionID)
+	}
+}
+
 // TestSpawn_SanitisesAtSchemaLayer verifies the runtime sanitises
 // model-supplied names (mixed case / spaces) before persistence
 // and exposes the sanitised form in the response envelope. Models
@@ -337,6 +370,31 @@ func TestWaitSubagents_AddressByName(t *testing.T) {
 	// or empty results both indicate the resolver succeeded.
 	if strings.Contains(string(out), `"not_a_child"`) {
 		t.Errorf("wait_subagents with name input fast-failed not_a_child: %s", out)
+	}
+}
+
+// TestWaitSubagents_DuplicateNamesDedup verifies that when the
+// model passes the same identifier twice in the `ids` array (e.g.
+// `["alpha","alpha"]` or one-name + same-name's-session_id), the
+// in-place name→session_id rewrite collapses to a single pending
+// entry and the call does not double-block or trip not_a_child.
+func TestWaitSubagents_DuplicateNamesDedup(t *testing.T) {
+	parent, cleanup := newTestParent(t)
+	defer cleanup()
+
+	_, err := parent.callSpawnSubagent(us1WithSession(parent),
+		json.RawMessage(`{"subagents":[{"name":"alpha","task":"go"}]}`))
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+
+	args, _ := json.Marshal(waitSubagentsInput{IDs: []string{"alpha", "alpha"}})
+	ctx, cancelCtx := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancelCtx()
+	out, _ := parent.callWaitSubagents(ctx, args)
+
+	if strings.Contains(string(out), `"not_a_child"`) {
+		t.Errorf("duplicate-name wait fast-failed not_a_child: %s", out)
 	}
 }
 
