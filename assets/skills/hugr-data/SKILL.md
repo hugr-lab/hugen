@@ -148,9 +148,27 @@ intent:
   data tools yourself and reply to the user. Keep the sequence
   tight: ~3 tool calls is the target for one quick question
   (search_modules → search_module_data_objects → small data call,
-  or schema lookup → inline result). If the answer needs heavy
-  exploration, multi-step aggregation, or a structured artifact,
-  recognise it as batch-shaped and call
+  or schema lookup → inline result).
+
+  **Disambiguate before you query.** When `discovery-search_*`
+  returns more than one plausible candidate (≥ 2 modules / data
+  sources / tables that match the user's concept by name or
+  description), STOP before the first `data-*` call and call
+  `session:inquire(type="clarification")` with the candidate
+  list as `options`. Asking "which one?" once is cheap; silently
+  picking the first match and returning its number is worse than
+  no answer — the user reads a single figure and treats it as
+  truth without knowing it came from the wrong source. Examples
+  of triggers: two tables with `doctor` in the name across
+  different modules, the same entity exposed in a raw module and
+  a curated module, a metric (e.g. "count of patients") that
+  could mean rows in a registry vs distinct subjects across
+  events. Skip the inquire only when one candidate is an
+  obvious dominant match (alone in its module, or the user
+  named the module explicitly).
+
+  If the answer needs heavy exploration, multi-step aggregation,
+  or a structured artifact, recognise it as batch-shaped and call
   `session:spawn_mission(skill: <analyst-like dispatcher>, ...)`
   instead.
 - **Mission tier** — you loaded `hugr-data` for *reference
