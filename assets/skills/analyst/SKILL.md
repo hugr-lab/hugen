@@ -145,6 +145,16 @@ metadata:
             ══════════════════════════════════════════════════════
             STAGE B — Execute
 
+            **CRITICAL:** the YAML plan you just got from the
+            planner is YOUR INSTRUCTION SET, not the answer
+            root is waiting for. Do NOT echo the YAML back as
+            your final assistant message. Root expects a
+            real report / data summary built from the
+            execution of the plan — that's what STAGE B
+            produces. Mission's final assistant message comes
+            only AFTER every wave in the plan has been spawned
+            and waited on.
+
             The planner's `plan` is an ORDERED array of WAVES
             (not a flat list of steps). Each wave declares one
             or more `subagents` that run IN PARALLEL within that
@@ -189,90 +199,26 @@ metadata:
                  one-line progress note ("wave <wave_label>
                  done: <summary>"). Continue.
 
-              4. THREAD the wave's outputs into the NEXT
-                 wave's worker `inputs`. This is the single
-                 most load-bearing step in the mission loop —
-                 without it, the next wave's worker has only
-                 the [Whiteboard] block to parse and that's
-                 where prose-vs-structured drift creeps in.
-                 `spawn_wave` returns a JSON array of
-                 `{session_id, status, result, reason,
-                 turns_used}` — one entry per subagent.
-                 `result` is the worker's closing assistant
-                 message verbatim. Combine that with the
-                 `whiteboard:read` from step 3 (full
-                 broadcasts incl. `path:` / `shape:` /
-                 `columns:` / `values:`) and lift every
+              4. THREAD prior-wave outputs into the NEXT
+                 wave's `inputs`. `spawn_wave` returns
+                 `[{session_id, status, result, ...}]`; combine
+                 `result` (worker's final message) with the
+                 `whiteboard:read` from step 3 and lift every
                  file artefact + key value into the next
-                 wave's `inputs` BEFORE calling `spawn_wave`.
-
-                 What MUST land in next-wave inputs:
-                   - `artefacts`: array of file references the
-                     consumer will read. Each entry mirrors
-                     the broadcast: `{path, shape, columns,
-                     headline}`. Workers read these from
-                     `inputs.artefacts` directly — no need to
-                     parse [Whiteboard] prose.
-                   - `known_facts`: structured copy of any
-                     `values:` broadcasts (scalar totals,
-                     picked rows, counts). Use the same keys
-                     the broadcast did so the consumer doesn't
-                     have to translate.
-                   - `file_path`: when the user goal specified
-                     a destination (e.g. `~/Downloads/x.html`),
-                     forward it verbatim. This is the FINAL
-                     output target — the last worker writes
-                     there literally.
-                   - Any plan-level resolved facts
-                     (data_source, module, tables) the planner
-                     already verified.
-
-                 Why copy when the runtime auto-prepends
-                 `[Whiteboard]`? The whiteboard is human-
-                 readable prose; `inputs` is structured JSON.
-                 Weak models trust the latter more reliably
-                 and don't drop numbers in transcription.
-                 Treat the board as cross-cutting context and
-                 `inputs` as the contract for THIS worker.
-
-                 Concrete shape — say wave-1 produced two
-                 broadcasts:
-                   #1 (from `metrics-collector`):
-                     path: data/aggregates/payments.json
-                     shape: 89 bytes
-                     headline: total_payments=$1.93B over 628012 rows
-                     values: {rows: 628012,
-                              total_payments_sum: 1925088669.43,
-                              total_payments_avg: 3065.37}
-                   #2 (from `top-providers-fetcher`):
-                     path: data/top/op2023_providers.parquet
-                     shape: 50 x 6
-                     columns: [first_name:str, last_name:str,
-                               npi:int64, total_payments_amount:
-                               float64, total_research_amount:
-                               float64, total_ownership_count:
-                               float64]
-                     headline: top 50 providers by payment
-                 The next wave's report-builder spawn:
-                   inputs: {
-                     file_path: "~/Downloads/op2023_overview.html",
-                     artefacts: [
-                       {path: "data/aggregates/payments.json",
-                        shape: "89B", headline: "..."},
-                       {path: "data/top/op2023_providers.parquet",
-                        shape: "50x6",
-                        columns: [...],
-                        headline: "..."}
-                     ],
-                     known_facts: {
-                       rows: 628012,
-                       total_payments_sum: 1925088669.43,
-                       total_payments_avg: 3065.37
-                     }
-                   }
-                 With this, report-builder writes the report
-                 without re-querying, re-discovering, or
-                 introspecting the parquet — pure compose.
+                 wave's `inputs` as structured JSON:
+                   - `artefacts: [{path, shape, columns,
+                     headline}, ...]` from file broadcasts
+                   - `known_facts: {<keys>}` from any inline
+                     `values:` broadcasts
+                   - `file_path: "<user-supplied target>"`
+                     forwarded verbatim from this mission's
+                     own inputs
+                   - plan-level resolved facts (data_source,
+                     module, tables)
+                 Weak models trust structured JSON in `inputs`
+                 more reliably than [Whiteboard] prose;
+                 explicit threading saves re-discovery rounds
+                 downstream.
 
             When every wave is processed, produce a final
             assistant message — that's the `result` root sees in
