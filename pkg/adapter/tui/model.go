@@ -233,6 +233,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(v)
 
+	case tea.MouseMsg:
+		// Mouse-wheel scrolls the focused tab's chat viewport.
+		// bubbles/viewport handles MouseButtonWheelUp/Down internally
+		// when MouseWheelEnabled is set (default true after viewport.New),
+		// so we just forward the message. macOS users who need native
+		// text selection can hold Option (iTerm2) or Fn (Terminal.app)
+		// to suspend mouse reporting at the terminal level.
+		if cur := m.currentTab(); cur != nil {
+			var vpCmd tea.Cmd
+			cur.viewport, vpCmd = cur.viewport.Update(v)
+			return m, vpCmd
+		}
+		return m, nil
+
 	case frameMsg:
 		return m, m.handleFrame(v.frame)
 
