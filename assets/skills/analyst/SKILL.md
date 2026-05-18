@@ -118,12 +118,26 @@ metadata:
             bubble-up routes the inquire up through this mission to
             root and the user reply bubbles back to the same
             planner. You do NOT re-inquire the user — the plan
-            you receive is already approved. If the YAML body
-            contains a top-level `abstain` key, the planner failed
-            to secure approval; `session:abstain(reason: <value>)`
-            and STOP. If the YAML block is missing or unparseable,
-            spawn ONE more planner with the parse error in the
-            task (one retry, then abstain).
+            you receive is already approved.
+
+            If the YAML body contains a top-level `abstain` key
+            instead of `plan` (user_aborted_plan or
+            refine_loop_exhausted), the planner failed to secure
+            approval. Do NOT spawn any wave. Return a final
+            assistant message of the form:
+
+              "Plan cancelled by user (reason: <abstain value>).
+               No workers were spawned and no data was processed."
+
+            That message becomes the mission's `result` in root's
+            `wait_subagents` reply; root renders it to the user
+            and the mission terminates normally as `subagent_done`.
+
+            If the YAML block is missing or unparseable, spawn ONE
+            more planner with the parse error in the task (one
+            retry). If the second attempt also fails to parse,
+            return a similar final message: "Mission cancelled —
+            planner produced unparseable output after one retry."
 
             ══════════════════════════════════════════════════════
             STAGE B — Execute
