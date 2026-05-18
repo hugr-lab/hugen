@@ -65,6 +65,7 @@ func (e *Extension) handleHostInboundWrite(ctx context.Context, state extension.
 		from = f.FromSessionID()
 	}
 	role := in.FromRole
+	name := in.FromName
 
 	text, truncated := truncate(in.Text)
 	if in.Truncated {
@@ -91,6 +92,7 @@ func (e *Extension) handleHostInboundWrite(ctx context.Context, state extension.
 		At:            at,
 		FromSessionID: from,
 		FromRole:      role,
+		FromName:      name,
 		Text:          text,
 		Truncated:     truncated,
 	})
@@ -100,6 +102,7 @@ func (e *Extension) handleHostInboundWrite(ctx context.Context, state extension.
 		Seq:           seq,
 		FromSessionID: from,
 		FromRole:      role,
+		FromName:      name,
 		Text:          text,
 		Truncated:     truncated,
 	}
@@ -154,6 +157,7 @@ func (e *Extension) handleMemberBroadcast(ctx context.Context, state extension.S
 		At:            at,
 		FromSessionID: in.FromSessionID,
 		FromRole:      in.FromRole,
+		FromName:      in.FromName,
 		Text:          in.Text,
 		Truncated:     in.Truncated,
 	})

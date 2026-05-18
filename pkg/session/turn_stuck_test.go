@@ -89,9 +89,75 @@ func TestSessionToolHash_StableAcrossCalls(t *testing.T) {
 	}
 }
 
+// TestStuckDetector_RepeatedErrorClusters fires on the alt-pattern
+// the existing same-hash detectors miss: spawn_wave({}) → bad_request,
+// then wait_subagents → empty, alternating. Three matching errors
+// inside the trailing window trigger the rising edge; one successful
+// call (errCode="") in the latest slot clears it; the recurrence
+// arms it again.
+func TestStuckDetector_RepeatedErrorClusters(t *testing.T) {
+	s := newStuckTestSession(t)
+	now := time.Now()
+
+	observe := func(tool string, n int, errCode string) {
+		s.stuckObserveCall(tool, map[string]any{"n": n}, "", now)
+		s.stuckObserveResult(errCode)
+		now = now.Add(50 * time.Millisecond)
+	}
+
+	// One error → not enough.
+	observe("session:spawn_wave", 1, "bad_request")
+	observe("session:wait_subagents", 1, "")
+	s.evaluateRepeatedError(nilCtx())
+	if s.stuck.repeatedErrorActive {
+		t.Fatalf("active too early — only one matching error so far")
+	}
+
+	// Two errors — still under K=3.
+	observe("session:spawn_wave", 2, "bad_request")
+	observe("session:wait_subagents", 2, "")
+	s.evaluateRepeatedError(nilCtx())
+	if s.stuck.repeatedErrorActive {
+		t.Fatalf("active too early — two matching errors")
+	}
+
+	// Third matching error — latest sample is errored → rising edge.
+	observe("session:spawn_wave", 3, "bad_request")
+	s.evaluateRepeatedError(nilCtx())
+	if !s.stuck.repeatedErrorActive {
+		t.Fatalf("rising edge missed on third matching error")
+	}
+
+	// A successful call in the latest slot clears the flag so a
+	// later cluster can re-arm it.
+	observe("session:wait_subagents", 3, "")
+	s.evaluateRepeatedError(nilCtx())
+	if s.stuck.repeatedErrorActive {
+		t.Fatalf("flag should clear when latest sample succeeds")
+	}
+
+	// Different tool errors don't count toward the same cluster —
+	// repeated_error keys on (tool, code).
+	observe("session:spawn_subagent", 1, "bad_request")
+	observe("session:spawn_subagent", 2, "bad_request")
+	s.evaluateRepeatedError(nilCtx())
+	if s.stuck.repeatedErrorActive {
+		t.Fatalf("active across different tools — should cluster per (tool, code)")
+	}
+
+	// One more spawn_subagent error completes the (spawn_subagent,
+	// bad_request) cluster, re-firing the rising edge.
+	observe("session:spawn_subagent", 3, "bad_request")
+	s.evaluateRepeatedError(nilCtx())
+	if !s.stuck.repeatedErrorActive {
+		t.Fatalf("rising edge missed on second cluster (different tool)")
+	}
+}
+
 // TestStuckBuffer_FIFOTrim asserts the trailing window stays bounded
-// at max(stuckRepeatedHashWindow, stuckTightDensityCount). Without the
-// trim the window would grow unbounded across a long session.
+// at max(repeatedHashWindow, tightDensityCount, repeatedErrorWindow).
+// Without the trim the window would grow unbounded across a long
+// session.
 func TestStuckBuffer_FIFOTrim(t *testing.T) {
 	s := newStuckTestSession(t)
 	now := time.Now()
@@ -102,11 +168,11 @@ func TestStuckBuffer_FIFOTrim(t *testing.T) {
 	if stuckTightDensityCount > want {
 		want = stuckTightDensityCount
 	}
+	if stuckRepeatedErrorWindow > want {
+		want = stuckRepeatedErrorWindow
+	}
 	if got := len(s.stuck.recentHashes); got != want {
 		t.Errorf("recentHashes len = %d, want trim to %d", got, want)
-	}
-	if got := len(s.stuck.recentErrored); got != want {
-		t.Errorf("recentErrored len = %d, want trim to %d", got, want)
 	}
 }
 

@@ -104,6 +104,7 @@ func RegisterBuiltinCommands(reg *session.CommandRegistry, logger *slog.Logger) 
 		{"cancel", "cancel the in-flight turn", cancelHandler()},
 		{"cancel_subagent", "cancel a running child mission: /cancel_subagent <session_id> [reason]", cancelSubagentHandler()},
 		{"cancel_all_subagents", "cancel every running child mission: /cancel_all_subagents [reason]", cancelAllSubagentsHandler()},
+		{"mission", "list / address a running mission: /mission [<name> [<directive>]]", missionHandler()},
 		{"end", "close the current session", endHandler()},
 		{"model", "switch the model for this session: /model use <intent|provider/name>", modelHandler()},
 	}
@@ -207,6 +208,144 @@ func cancelAllSubagentsHandler() session.CommandHandler {
 				map[string]any{"session_ids": ids, "count": len(ids), "reason": reason}),
 		}, nil
 	}
+}
+
+// missionHandler implements `/mission [<name> [<directive>]]` — the
+// adapter-side counterpart to the model-callable
+// `session:notify_subagent` tool for the chat tier. Phase 5.2 ε.
+//
+// Forms:
+//
+//	/mission                 — list every live direct child mission.
+//	/mission <name>          — list details for one mission.
+//	/mission <name> <words…> — deliver <words…> as a parent-note to
+//	                           the mission addressed by <name>.
+//
+// The bare `/mission` form is intercepted by the TUI before the
+// frame reaches the runtime (opens the cancel-modal). Console users
+// get the text listing produced here.
+func missionHandler() session.CommandHandler {
+	return func(ctx context.Context, env session.CommandEnv, args []string) ([]protocol.Frame, error) {
+		s := env.Session
+		// No args — list live missions.
+		if len(args) == 0 {
+			snaps := s.SnapshotChildren()
+			return []protocol.Frame{
+				protocol.NewAgentMessage(s.ID(), env.AgentAuthor, renderMissionsList(snaps), 0, true),
+				protocol.NewSystemMarker(s.ID(), env.AgentAuthor, "missions_list",
+					map[string]any{"missions": missionsList(snaps)}),
+			}, nil
+		}
+		target := args[0]
+		// One arg — details for a single mission.
+		if len(args) == 1 {
+			match, ok := findMission(s.SnapshotChildren(), target)
+			if !ok {
+				return []protocol.Frame{
+					protocol.NewError(s.ID(), env.AgentAuthor, "no_such_mission",
+						fmt.Sprintf("no live mission with name or id %q", target), false),
+				}, nil
+			}
+			body := fmt.Sprintf("mission %s — session_id=%s, depth=%d", match.Name, match.SessionID, match.Depth)
+			return []protocol.Frame{
+				protocol.NewAgentMessage(s.ID(), env.AgentAuthor, body, 0, true),
+				protocol.NewSystemMarker(s.ID(), env.AgentAuthor, "mission_detail",
+					map[string]any{
+						"session_id": match.SessionID,
+						"name":       match.Name,
+						"depth":      match.Depth,
+					}),
+			}, nil
+		}
+		// Two or more args — deliver as parent-note.
+		directive := joinArgs(args[1:])
+		resolvedID, delivered, err := s.NotifyChild(ctx, target, directive)
+		if errors.Is(err, session.ErrNotifyEmptyTarget) || errors.Is(err, session.ErrNotifyEmptyContent) {
+			return []protocol.Frame{
+				protocol.NewError(s.ID(), env.AgentAuthor, "usage_error",
+					"usage: /mission <name> <directive>", false),
+			}, nil
+		}
+		if err != nil {
+			return []protocol.Frame{
+				protocol.NewError(s.ID(), env.AgentAuthor, "notify_failed", err.Error(), false),
+			}, nil
+		}
+		if !delivered {
+			return []protocol.Frame{
+				protocol.NewError(s.ID(), env.AgentAuthor, "no_such_mission",
+					fmt.Sprintf("no live mission with name or id %q (already completed or typo?)", target), false),
+			}, nil
+		}
+		body := fmt.Sprintf("→ %s: %s", target, directive)
+		return []protocol.Frame{
+			protocol.NewAgentMessage(s.ID(), env.AgentAuthor, body, 0, true),
+			protocol.NewSystemMarker(s.ID(), env.AgentAuthor, "mission_notify_delivered",
+				map[string]any{
+					"session_id": resolvedID,
+					"target":     target,
+					"directive":  directive,
+				}),
+		}, nil
+	}
+}
+
+// renderMissionsList formats SnapshotChildren as a single
+// AgentMessage body for `/mission` (no args). Empty list renders as
+// a single explanatory line.
+func renderMissionsList(snaps []session.ChildSnapshot) string {
+	if len(snaps) == 0 {
+		return "No missions running."
+	}
+	lines := make([]string, 0, len(snaps)+1)
+	lines = append(lines, fmt.Sprintf("%d mission(s) running:", len(snaps)))
+	for _, c := range snaps {
+		lines = append(lines, fmt.Sprintf("  · %s  (session_id=%s, depth=%d)", c.Name, c.SessionID, c.Depth))
+	}
+	return joinLines(lines)
+}
+
+func joinLines(lines []string) string {
+	out := ""
+	for i, l := range lines {
+		if i > 0 {
+			out += "\n"
+		}
+		out += l
+	}
+	return out
+}
+
+// missionsList renders SnapshotChildren as the SystemMarker payload
+// shape for `/mission` (no-args).
+func missionsList(snaps []session.ChildSnapshot) []map[string]any {
+	out := make([]map[string]any, 0, len(snaps))
+	for _, c := range snaps {
+		out = append(out, map[string]any{
+			"session_id": c.SessionID,
+			"name":       c.Name,
+			"depth":      c.Depth,
+		})
+	}
+	return out
+}
+
+// findMission resolves a target string (name or session_id) against
+// a snapshot of live children. Name takes precedence over id when
+// both match (id format is structurally distinct, so collisions are
+// practically impossible).
+func findMission(snaps []session.ChildSnapshot, target string) (session.ChildSnapshot, bool) {
+	for _, c := range snaps {
+		if c.Name == target {
+			return c, true
+		}
+	}
+	for _, c := range snaps {
+		if c.SessionID == target {
+			return c, true
+		}
+	}
+	return session.ChildSnapshot{}, false
 }
 
 func endHandler() session.CommandHandler {

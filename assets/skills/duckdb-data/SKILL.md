@@ -23,7 +23,7 @@ metadata:
     requires: [_system]
     autoload: false
     autoload_for: []
-    tier_compatibility: [mission, worker]
+    tier_compatibility: [root, mission, worker]
     sub_agents: []
     intents: [data_query, file_analysis, spatial_analysis]
 compatibility:
@@ -36,8 +36,19 @@ compatibility:
 Per-session in-memory DuckDB with `spatial` and `httpfs` pre-loaded by the
 operator's `--init-sql`. The connection is born when the session opens and
 dies on close — no on-disk database file, no cross-session leakage. Spill
-files and secrets live under `${SESSION_DIR}/.duckdb/` and are reaped with
-the rest of the workspace.
+files and secrets live under `${SESSION_DIR}/.duckdb/` and are reclaimed
+by the runtime's orphan sweeper on its own schedule.
+
+**Tier note** — loadable on three tiers:
+
+- **Root tier (chat)** — quick SQL on a workspace file you can answer in
+  one or two `execute_query` calls. Reply to the user with the result.
+  If the question expands into joins across several files or multi-step
+  reshaping, recognise it as batch and `session:spawn_mission(...)`.
+- **Worker tier** — run the standard workflow below inside your scoped
+  task; return a structured finding for your mission to read.
+- **Mission tier** — load for reference grounding (`skill:ref`); workers
+  execute the queries.
 
 > Adapted from upstream [`duckdb/duckdb-skills`](https://github.com/duckdb/duckdb-skills)
 > (MIT). Control flow rewritten from `Bash + duckdb` CLI to
@@ -69,11 +80,13 @@ SQL diverges from Postgres in places (FILTER clause, QUALIFY, list / struct
    `ATTACH` is needed for one-off reads.
 3. **Write outputs via COPY** — `COPY (SELECT ...) TO 'data/out.parquet'`.
    Surface relative paths back to the user.
-4. **`${SESSION_DIR}` is ephemeral** — wiped when the worker session
-   closes. Files emitted by COPY survive only for the duration of the
-   current task. If the user expects to keep / re-open a result later,
-   say so in your final answer so root can capture it; a dedicated
-   artifact-storage path is on the roadmap.
+4. **`${SESSION_DIR}` lifetime** — your `${SESSION_DIR}` is shared
+   with every sibling worker in the same task and survives past your
+   own session's close, so a later wave's worker can read the COPY
+   output you just emitted. The runtime reclaims the dir on its own
+   schedule after the task ends. If the user expects to keep /
+   re-open a result later, say so in your final answer so root can
+   capture it; a dedicated artifact-storage path is on the roadmap.
 
 ## Critical rules
 

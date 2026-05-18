@@ -366,15 +366,30 @@ func (p *Provider) Call(ctx context.Context, name string, args json.RawMessage) 
 	req := mcp.CallToolRequest{}
 	req.Params.Name = name
 	req.Params.Arguments = argsAny
-	// Per_agent MCPs (hugr-query today) need the session id to
-	// route file output under the right per-session workspace.
-	// Per_session MCPs see the same field but ignore it. Tests
-	// that bypass perm.WithSession leave Meta nil, which both
-	// kinds tolerate.
+	// Per_agent MCPs need per-call session context to route file
+	// output into the right workspace folder.
+	//
+	//   - session_id   — opaque identifier; useful for log
+	//                    correlation only.
+	//   - session_dir  — absolute path resolved by the workspace
+	//                    extension (5.4 layout: workers in the same
+	//                    mission share their mission ancestor's
+	//                    folder). The single source of truth per_agent
+	//                    MCPs resolve relative output paths against.
+	//
+	// Per_session MCPs (bash-mcp, duckdb-mcp) get the same fields
+	// but ignore them — their CWD is already set from `ws.Dir()` at
+	// spawn time, which gives the same answer. Tests that bypass
+	// perm.WithSession leave Meta nil; calls also omit session_dir
+	// when WorkspaceDir is "" — what happens next is a per-server
+	// decision (per_agent MCPs that need the dir typically fail
+	// their call; others may pick a server-side default).
 	if sc, ok := perm.SessionFromContext(ctx); ok && sc.SessionID != "" {
-		req.Params.Meta = &mcp.Meta{
-			AdditionalFields: map[string]any{"session_id": sc.SessionID},
+		fields := map[string]any{"session_id": sc.SessionID}
+		if sc.WorkspaceDir != "" {
+			fields["session_dir"] = sc.WorkspaceDir
 		}
+		req.Params.Meta = &mcp.Meta{AdditionalFields: fields}
 	}
 
 	res, err := cli.CallTool(ctx, req)

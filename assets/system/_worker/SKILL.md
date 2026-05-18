@@ -36,10 +36,9 @@ metadata:
     # Phase 4.2.3 ε — worker close turn. Same shape as the
     # mission tier (default prompt + [notepad:append] surface
     # + 2-iter cap), but the per-role on_close on the
-    # dispatching skill (analyst's schema-explorer /
-    # query-builder / data-analyst) generally provides a more
-    # specific prompt. Skip the close turn for idle workers
-    # (simple-answerer that returned text without tools).
+    # dispatching skill generally provides a more specific
+    # prompt. Skip the close turn for idle workers that
+    # returned text without tools.
     mission:
       on_close:
         notepad:
@@ -70,12 +69,82 @@ The autoloaded surface is minimal:
 
 ## Doing your task — read the manual first
 
-Your mission passed you a `task` (the user message you boot with)
-and validated `inputs`. Domain skills (`hugr-data`,
-`python-runner`, `duckdb-data`, `duckdb-docs`) are NOT autoloaded
-into worker sessions — you load them on demand.
+Your mission passed you a `task` (the user message you boot with).
+When the mission and prior waves have already done work, three
+labelled blocks land on top of your first message — read them
+top-down before doing anything else:
 
-**Mandatory boot sequence for any task that needs a domain skill:**
+```
+[Whiteboard]
+(N messages on board, active since HH:MM)
+
+#1 @HH:MM from <role>:
+  <broadcast text>
+#2 @HH:MM from <role> (<name>):
+  ...
+
+[Inputs from parent]
+{
+  "<key>": "<value the mission resolved for you>",
+  ...
+}
+
+[Task]
+<task prose>
+```
+
+The optional `(<name>)` after `<role>` is the sibling's spawn
+name. When a mission spawns two workers of the SAME role in one
+wave, names disambiguate whose finding is whose — e.g. `from
+<role> (<name-a>)` vs `from <role> (<name-b>)`. Missing parens
+means the author had no explicit name (root sessions,
+single-of-role workers, legacy events).
+
+- **`[Whiteboard]`** — shared accumulated findings from siblings
+  in earlier waves of this mission. Trust the broadcasts: validated
+  queries, resolved schema facts, file paths to output someone
+  else already produced. **DO NOT re-run discovery / schema /
+  validation for facts already on the board.** If a relevant
+  broadcast is older than the bound (`Showing last N. Call
+  whiteboard:read for the full history.`), call `whiteboard:read`
+  once to load the full set into your context before composing.
+- **`[Inputs from parent]`** — mission-supplied facts for THIS
+  step specifically (module, tables, query_draft, file_path, …).
+  Different from the whiteboard: inputs are this-worker-only
+  briefing, whiteboard is cross-wave context.
+- **`[Task]`** — the actual instruction. Read it last, with
+  whiteboard + inputs already in mind.
+
+**Trust order: Whiteboard → Inputs → Manual.**
+
+- Whiteboard broadcasts are siblings' validated work — quote
+  resolved values (paths, identifiers, drafts, schema facts)
+  verbatim instead of recomputing them. The board is the source
+  of truth between waves.
+- Inputs are the mission's specific brief for THIS step: a
+  resolved identifier means "skip the discovery you'd otherwise
+  run for that key"; a validated draft means "execute it as-is,
+  skip the from-scratch compose + validate cycle"; a resolved
+  output path means "write to that path, do not invent a new
+  one". Discover ONLY for keys missing from BOTH whiteboard and
+  inputs.
+- References (`skill:ref`) carry **syntax + conventions** the
+  facts above don't (how to address fields, special operators,
+  quoting rules, gotchas). When you're composing something new
+  (no usable draft in inputs / whiteboard), read the relevant
+  reference FIRST. A validated draft from the inputs /
+  whiteboard can usually run as-is and lets you skip references
+  for that one call — but the moment you alter / compose
+  something new, references come back into the picture.
+
+Your role may declare `autoload_skills` in its manifest entry. If
+so, those skills are already loaded by the runtime BEFORE your
+first turn — you'll see them in the `## Loaded skills` block of
+your system prompt. In that case, skip step 1 below; the surface
+is ready. Skills not in that block must still be loaded on
+demand.
+
+**Boot sequence for any task that needs a domain skill:**
 
 0. **`notepad:search(query=<key concept from your task>)`** — if
    your task references a concept the conversation has been
@@ -86,8 +155,10 @@ into worker sessions — you load them on demand.
    ground.
 
 1. **`skill:load("<skill-name>")`** — pulls the skill's tool surface
-   into your session. Once loaded, the tools appear in your next
-   turn's snapshot.
+   into your session. SKIP this step for any skill already listed
+   in `## Loaded skills` (your role pre-declared it via
+   `autoload_skills`); calling load on an already-loaded skill is
+   a wasted turn.
 
 2. **`skill:files(name="<skill-name>", subdir="references")`** —
    list the reference documents the skill ships. Each domain skill
@@ -95,15 +166,13 @@ into worker sessions — you load them on demand.
    syntax cheatsheets, gotchas) curated by humans for the model.
 
 3. **`skill:ref(skill="<skill-name>", ref="<base-name>")`** — read
-   the reference relevant to your task BEFORE any data tool call.
-   For example, for `hugr-data` work, the typical first reads are
-   `start`, `overview`, and `query-patterns` (or
-   `queries-deep-dive` for complex GraphQL). Do NOT compose
-   queries from memory — the runtime's GraphQL flavour has
-   skill-specific syntax the reference covers.
+   the reference relevant to your task BEFORE any domain tool
+   call. Each skill ships its own reference catalogue; what to
+   read first is covered in the skill's body. Do NOT compose
+   calls from memory — domain-specific syntax and gotchas live
+   in the references.
 
-4. Now make your domain calls (`hugr-main:*`, `python-mcp:*`,
-   `duckdb-mcp:*`). Use what the reference taught you.
+4. Now make your domain calls. Use what the reference taught you.
 
 Skipping the reference-read step is the single biggest cause of
 malformed queries on weak models. Read the manual first, then act.
@@ -116,13 +185,24 @@ it admits.
 
 When you finish:
 
-1. Call `whiteboard:write` once with a tight finding your mission
-   and siblings can consume — schema names, row counts,
-   surprising patterns. Do NOT spam — one significant message
-   per worker is the cadence; siblings see every write.
+1. **If a `[Whiteboard]` block appeared in your first message**,
+   the mission opened a board and your siblings expect to see
+   your significant findings on it. Call `whiteboard:write` once
+   with a tight result your mission and siblings can consume —
+   schema names, row counts, surprising patterns, output file
+   paths. Do NOT spam — one significant message per worker is the
+   cadence; siblings see every write. If no `[Whiteboard]` block
+   was present, skip this step — your final assistant message is
+   the only return channel the mission needs.
 2. Return your final result as a normal assistant message — the
    mission consumes it via `wait_subagents`. Quote actual numbers
-   from your tool responses; never paraphrase.
+   from your tool responses; never paraphrase. Your dispatching
+   skill may require a specific structured return shape (e.g. a
+   fenced YAML handoff block listing produced artefacts, validated
+   drafts, or follow-up notes) so the mission can thread results
+   into the next wave's `inputs` — follow the dispatching skill's
+   convention exactly. When no shape is prescribed, plain prose is
+   the contract.
 
 ## What this skill does NOT grant
 

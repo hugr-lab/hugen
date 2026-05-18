@@ -2,9 +2,9 @@
 name: _general
 description: >
   Universal mission-tier dispatcher for tasks that don't fit a
-  domain-specific mission skill (analyst, future search, etc).
-  Catch-all fallback. Spawns generic workers that load whatever
-  domain skill(s) they need on demand.
+  domain-specific mission skill. Catch-all fallback. Spawns
+  generic workers that load whatever domain skill(s) they need
+  on demand.
 license: Apache-2.0
 allowed-tools: []
 metadata:
@@ -13,14 +13,21 @@ metadata:
     autoload: false
     tier_compatibility: [mission]
 
+    # _general advertises one extra category (tool-result) on top
+    # of the universal set carried by `_mission` (user-preference,
+    # deferred-question). The skill extension de-dupes by name.
+    notepad:
+      tags:
+        - name: tool-result
+          hint: A useful tool output worth recalling rather than re-running — env values, file paths, stable identifiers. Skip outputs that change every invocation.
+
     mission:
       enabled: true
       summary: >
-        Catch-all mission for non-data work — shell scripting,
-        text manipulation, generic computation, ad-hoc tasks
-        that don't match a specific domain mission. Use when
-        the request does NOT involve Hugr / DuckDB / Python
-        data analysis (those go through `analyst`).
+        Catch-all mission for work that does not match a specific
+        domain dispatcher — shell scripting, text manipulation,
+        generic computation, ad-hoc tasks. Use when no other
+        mission skill in the catalogue is a closer fit.
       keywords:
         - script
         - bash
@@ -43,21 +50,15 @@ metadata:
           current_step: Explore
         whiteboard:
           init: true
-        # Phase 4.2.3 — _general advertises one extra category
-        # (tool-result) on top of the universal set carried by
-        # `_mission` (user-preference, deferred-question).
-        notepad:
-          tags:
-            - name: tool-result
-              hint: A useful tool output worth recalling rather than re-running — env values, file paths, stable identifiers. Skip outputs that change every invocation.
         first_message:
           template: |
             User goal (delegated by root): {{ .UserGoal }}
 
             You are running the `_general` mission — the
             catch-all fallback for tasks that don't fit a
-            specific domain mission (data analysis goes through
-            `analyst`; this skill is for everything else).
+            specific domain mission. Specialized dispatchers in
+            the catalogue handle domain-shaped work; this skill
+            handles everything else.
 
             ══════════════════════════════════════════════════════
             PRE-FLIGHT CHECKLIST — do this BEFORE the first
@@ -84,8 +85,7 @@ metadata:
             Role catalogue (this skill):
 
               - `generic-worker` — free-form. Loads any
-                worker-tier domain skill on demand
-                (`bash-mcp`, `python-runner`, etc.) and runs
+                worker-tier domain skill on demand and runs
                 whatever the task needs.
 
             Every `session:spawn_wave` entry sets
@@ -117,12 +117,11 @@ metadata:
       - name: generic-worker
         description: >
           Free-form worker. Loads any worker-tier domain skill
-          on demand (bash-mcp, python-runner, future
-          web-search, etc.), reads its references per the
-          worker boot sequence, and executes whatever the
-          mission's task directive says. The mission's job is
-          decomposition; the worker's job is to pick the right
-          skill and run it end-to-end.
+          on demand, reads its references per the worker boot
+          sequence, and executes whatever the mission's task
+          directive says. The mission's job is decomposition;
+          the worker's job is to pick the right skill and run
+          it end-to-end.
         intent: tool_calling
         can_spawn: false
         tools:
@@ -141,22 +140,23 @@ more specific applies — for example shell scripting, text
 transformation, file manipulation, or any one-off compute the
 user wants done.
 
-## When to use this vs. `analyst`
+## When to use this vs. a domain dispatcher
 
-Choose `_general` when the goal does NOT involve data exploration,
-schema work, SQL/GraphQL queries, aggregations, or charts. Those
-go through `analyst`, which has the staged pipeline and the
-domain role catalogue tuned for Hugr data work.
+Choose `_general` when no specialized mission skill in the
+catalogue matches the user's goal. Domain dispatchers — when
+present — carry staged pipelines and role catalogues tuned for
+their domain; pick them first when their Summary fits.
 
-Choose `_general` when the user wants something like:
+`_general` is the right pick for things like:
 
 - "Format this text into a table."
 - "Compute X from these inputs."
 - "Run a shell command and tell me what it printed."
 - "Write a small script that does Y."
 
-If you cannot tell, prefer `analyst` — it covers more of the
-common path. `_general` is an explicit "not that" fallback.
+If a domain dispatcher's Summary clearly covers the request,
+prefer it. `_general` is an explicit "no specific match"
+fallback.
 
 ## Pattern
 

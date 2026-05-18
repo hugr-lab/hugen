@@ -16,7 +16,7 @@ import (
 const notifySubagentSchema = `{
   "type": "object",
   "properties": {
-    "subagent_id": {"type": "string", "description": "Direct child session id. Must already be in the caller's children map."},
+    "subagent_id": {"type": "string", "description": "Target identifier — either the subagent's short Name (returned by spawn) or its session_id. Must resolve to a direct child of the caller. Name lookup is per-parent live-children scope."},
     "content":     {"type": "string", "description": "Focused directive crafted by the caller. NOT raw user text — the caller is responsible for translating the user's intent into a child-actionable note."},
     "urgent":      {"type": "boolean", "description": "Prepends '(urgent) ' to the content. No separate flag is carried on the frame."}
   },
@@ -54,12 +54,14 @@ func (parent *Session) callNotifySubagent(ctx context.Context, args json.RawMess
 	// permission stack handles role-tier gating
 	// (`hugen:subagent:notify` is granted to _root / _mission, not
 	// _worker).
-	parent.childMu.Lock()
-	child, ok := parent.children[in.SubagentID]
-	parent.childMu.Unlock()
-	if !ok || child == nil {
+	//
+	// Phase 5.2 α.1b: target can be either the session_id or the
+	// child's short Name. resolveChildTarget falls back through
+	// both lookups against parent.children.
+	_, child, ok := parent.resolveChildTarget(in.SubagentID)
+	if !ok {
 		return toolErr("not_a_child",
-			fmt.Sprintf("session %q is not a direct child of the caller", in.SubagentID))
+			fmt.Sprintf("target %q is not a direct child of the caller (looked up by session_id and by name)", in.SubagentID))
 	}
 	if child.IsClosed() {
 		return toolErr("session_gone",

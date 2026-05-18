@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	wbext "github.com/hugr-lab/hugen/pkg/extension/whiteboard"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -24,12 +25,13 @@ const spawnSubagentSchema = `{
       "items": {
         "type": "object",
         "properties": {
+          "name":   {"type": "string", "description": "Short human-readable identifier for the worker (kebab-case, [a-z0-9-]{2,32}). Used in subsequent calls like notify_subagent / subagent_cancel. Runtime sanitises the value and auto-suffixes on collision with a live sibling. REQUIRED."},
           "skill":  {"type": "string", "description": "Skill name providing the role."},
           "role":   {"type": "string", "description": "Role within the skill."},
           "task":   {"type": "string", "description": "Free-form prompt the child sees as its first user message."},
           "inputs": {"description": "Optional JSON the parent passes to the child."}
         },
-        "required": ["task"]
+        "required": ["name", "task"]
       }
     }
   },
@@ -40,7 +42,23 @@ type spawnSubagentInput struct {
 	Subagents []spawnEntry `json:"subagents"`
 }
 
+// spawnSubagentExpectedShape is the self-correction template that
+// bad_request envelopes embed alongside the error message — same
+// pattern as spawnWaveExpectedShape, minus the wave-only knobs.
+var spawnSubagentExpectedShape = map[string]any{
+	"subagents": []any{
+		map[string]any{
+			"name":   "<short kebab-case id>",
+			"task":   "<self-contained worker brief>",
+			"role":   "<optional role inside the skill>",
+			"skill":  "<optional skill name>",
+			"inputs": map[string]any{"_comment": "optional JSON the worker sees"},
+		},
+	},
+}
+
 type spawnEntry struct {
+	Name   string `json:"name"`
 	Skill  string `json:"skill,omitempty"`
 	Role   string `json:"role,omitempty"`
 	Task   string `json:"task"`
@@ -48,6 +66,7 @@ type spawnEntry struct {
 }
 
 type spawnSubagentResult struct {
+	Name      string `json:"name"`
 	SessionID string `json:"session_id"`
 	Depth     int    `json:"depth"`
 }
@@ -58,10 +77,17 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 	}
 	var in spawnSubagentInput
 	if err := json.Unmarshal(args, &in); err != nil {
-		return toolErr("bad_request", fmt.Sprintf("invalid spawn_subagent args: %v", err))
+		// Unparseable args — embed as string so the envelope stays
+		// valid JSON. See spawn_wave for the rationale.
+		return toolErrShape("bad_request",
+			fmt.Sprintf("invalid spawn_subagent args: %v", err),
+			string(args), spawnSubagentExpectedShape)
 	}
 	if len(in.Subagents) == 0 {
-		return toolErr("bad_request", "subagents must be a non-empty array")
+		// Self-correction hint — see spawn_wave for the rationale.
+		return toolErrShape("bad_request",
+			"subagents must be a non-empty array",
+			json.RawMessage(args), spawnSubagentExpectedShape)
 	}
 
 	// Atomic batch validation — fail-fast on the first violation so
@@ -72,6 +98,10 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 		maxDepth = parent.deps.MaxDepth
 	}
 	for i, e := range in.Subagents {
+		if strings.TrimSpace(e.Name) == "" {
+			return toolErr("bad_request",
+				fmt.Sprintf("subagents[%d].name is required", i))
+		}
 		if strings.TrimSpace(e.Task) == "" {
 			return toolErr("bad_request",
 				fmt.Sprintf("subagents[%d].task is required", i))
@@ -111,6 +141,7 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 	out := make([]spawnSubagentResult, 0, len(in.Subagents))
 	for i, e := range in.Subagents {
 		spec := SpawnSpec{
+			Name:   e.Name,
 			Skill:  e.Skill,
 			Role:   e.Role,
 			Task:   e.Task,
@@ -127,7 +158,12 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 		// Apply tier-default + per-role intent override on the
 		// freshly-spawned child. Phase 4.2.2 §11.
 		parent.applyChildIntent(ctx, child, e.Skill, e.Role)
+		// Apply per-role spawn appliers (skill autoload, ...) BEFORE
+		// the task UserMessage so the worker's first turn sees the
+		// surface ready.
+		parent.applyChildSpawnAppliers(ctx, child, e.Skill, e.Role)
 		out = append(out, spawnSubagentResult{
+			Name:      child.name,
 			SessionID: child.ID(),
 			Depth:     child.depth,
 		})
@@ -138,7 +174,9 @@ func (parent *Session) callSpawnSubagent(ctx context.Context, args json.RawMessa
 		// on the settled channel so the child sees the task before
 		// we move to the next batch entry; pre/post IsClosed checks
 		// distinguish "delivered" from "child already gone".
-		first := protocol.NewUserMessage(child.ID(), parent.agent.Participant(), e.Task)
+		first := protocol.NewUserMessage(child.ID(), parent.agent.Participant(),
+			composeChildFirstMessage(e.Task, e.Inputs,
+				wbext.FormatForHandoff(parent, 0)))
 		if !child.IsClosed() {
 			<-child.Submit(ctx, first)
 		}

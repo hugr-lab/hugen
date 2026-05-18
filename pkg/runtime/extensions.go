@@ -43,7 +43,7 @@ func phaseExtensions(_ context.Context, core *Core) error {
 	// inter-extension state reads at InitState; their order is
 	// purely aesthetic.
 	exts := []extension.Extension{
-		wsext.NewExtension(core.Cfg.Workspace.Dir, core.Cfg.Workspace.CleanupOnClose),
+		wsext.NewExtension(core.Cfg.Workspace.Dir, core.Logger),
 		notepadext.NewExtension(core.Store, core.Agent.ID(), notepadext.Config{}),
 		planext.NewExtension(core.Agent.ID()),
 		wbext.NewExtension(core.Agent.ID()),

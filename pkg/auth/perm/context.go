@@ -7,9 +7,21 @@ import "context"
 // Data and Filter values. AgentID and Role are agent-stable and
 // come from the constructor (identity.Source); SessionID and
 // SessionMetadata vary per call and flow through context.
+//
+// WorkspaceDir is the absolute path of the calling session's
+// workspace as resolved by the workspace extension (5.4 layout:
+// root dirs at top, mission dirs nested under root, workers
+// inheriting their mission ancestor). Per_agent MCP providers
+// like hugr-query / python-mcp use this — passed through MCP
+// `_meta.session_dir` — to route file output into the right
+// shared mission folder instead of computing a flat
+// `<workspace_root>/<session_id>/` path. Empty when the dispatch
+// site has no workspace bound (test fixtures, one-off /skill list,
+// pre-extension callers).
 type SessionContext struct {
 	SessionID       string
 	SessionMetadata map[string]string
+	WorkspaceDir    string
 }
 
 type sessionCtxKey struct{}

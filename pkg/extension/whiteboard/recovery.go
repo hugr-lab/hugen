@@ -44,6 +44,7 @@ func (e *Extension) Recover(_ context.Context, state extension.SessionState, eve
 				At:            ev.CreatedAt,
 				FromSessionID: payload.FromSessionID,
 				FromRole:      payload.FromRole,
+				FromName:      payload.FromName,
 				Text:          payload.Text,
 				Truncated:     payload.Truncated,
 			})

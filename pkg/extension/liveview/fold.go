@@ -126,21 +126,32 @@ func (v *sessionView) foldOwnFrame(f protocol.Frame) bool {
 	defer v.reportMu.Unlock()
 	switch fr := f.(type) {
 	case *protocol.SessionStatus:
+		// Reconcile each enrichment field independently — no early
+		// returns. A SessionStatus carries a coherent snapshot from
+		// populateStatusSnapshot; if PendingInquiry is nil in the
+		// payload, the session's pending map is empty and we must
+		// clear the cached ref. Pre-fix this branch only ever set
+		// v.pendingInquiry, never cleared it, so once an inquiry
+		// was observed the badge persisted forever.
+		changed := false
 		if v.lifecycleState != fr.Payload.State {
 			v.lifecycleState = fr.Payload.State
-			return true
+			changed = true
 		}
-		// Pending inquiry / last tool call may travel embedded
-		// in the marker (phase-α enrichment).
+		var nextPending *protocol.PendingInquiryRef
 		if fr.Payload.PendingInquiry != nil {
 			cp := *fr.Payload.PendingInquiry
-			v.pendingInquiry = &cp
-			return true
+			nextPending = &cp
+		}
+		if !samePendingInquiry(v.pendingInquiry, nextPending) {
+			v.pendingInquiry = nextPending
+			changed = true
 		}
 		if fr.Payload.LastToolCall != nil {
 			cp := *fr.Payload.LastToolCall
 			v.lastTool = &cp
 		}
+		return changed
 	case *protocol.ToolCall:
 		ref := protocol.ToolCallRef{
 			Name:      fr.Payload.Name,
@@ -167,15 +178,19 @@ func (v *sessionView) foldOwnFrame(f protocol.Frame) bool {
 		// be invisible until the burst ends.
 		return true
 	case *protocol.InquiryRequest:
+		// Eager: set v.pendingInquiry off the request frame so the
+		// badge surfaces immediately, before the next SessionStatus
+		// snapshot lands. SessionStatus drives clearing via the
+		// reconcile branch above — InquiryResponse never round-trips
+		// through outbox emit (it routes via RouteInternal +
+		// dispatchInquiryResponse), so a foldOwnFrame branch for
+		// *InquiryResponse would be dead code.
 		v.pendingInquiry = &protocol.PendingInquiryRef{
 			RequestID: fr.Payload.RequestID,
 			Type:      fr.Payload.Type,
 			Question:  fr.Payload.Question,
 			StartedAt: time.Now().UTC(),
 		}
-		return true
-	case *protocol.InquiryResponse:
-		v.pendingInquiry = nil
 		return true
 	case *protocol.SubagentStarted:
 		// Lifecycle change for THIS session: it has a new child.
@@ -205,6 +220,22 @@ func (v *sessionView) foldOwnFrame(f protocol.Frame) bool {
 		return true
 	}
 	return false
+}
+
+// samePendingInquiry reports whether two pending-inquiry refs
+// describe the same in-flight question. nil/nil is equal; nil/non-nil
+// is not. Comparison is by RequestID — the unique runtime id is
+// enough to detect "same request" vs "different question". Used by
+// foldOwnFrame's SessionStatus reconcile path to skip a no-op write
+// + force-emit when the snapshot is unchanged.
+func samePendingInquiry(a, b *protocol.PendingInquiryRef) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.RequestID == b.RequestID
 }
 
 // foldChildFrame updates the cached child status when a child's

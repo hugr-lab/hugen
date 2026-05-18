@@ -157,7 +157,7 @@ func newDuckDBCoreWithInitSQL(t *testing.T, vendorPath, initSQL string) *integra
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
 		manager.WithExtensions(
-			wsext.NewExtension(workspaceDir, true),
+			wsext.NewExtension(workspaceDir, logger),
 			mcpext.NewExtension(cfgSvc.ToolProviders(), logger),
 		),
 	)

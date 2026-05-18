@@ -33,7 +33,7 @@ func TestCallSpawnMission_Happy(t *testing.T) {
 	defer cleanup()
 
 	out, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"analyse northwind","skill":"analyst"}`))
+		json.RawMessage(`{"name":"m","goal":"analyse northwind","skill":"analyst"}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -52,6 +52,45 @@ func TestCallSpawnMission_Happy(t *testing.T) {
 	}
 }
 
+// TestCallSpawnMission_RootDefaultsToAsync covers the 5.4.c.3
+// rule: when the caller is a chat root (depth 0) and `wait` is
+// omitted, the runtime fills `async` so the auto-summary turn
+// fires when the mission completes. Weak models that drop the
+// optional field still get the documented "_root" behaviour. The
+// returned envelope is the async `spawnMissionResult` shape with
+// status "running" — distinct from sync's spawnSubagentResult
+// shape.
+func TestCallSpawnMission_RootDefaultsToAsync(t *testing.T) {
+	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
+	defer cleanup()
+	if parent.depth != 0 {
+		t.Fatalf("test parent must be a root session; got depth=%d", parent.depth)
+	}
+
+	out, err := parent.callSpawnMission(us1WithSession(parent),
+		json.RawMessage(`{"name":"m","goal":"analyse northwind","skill":"analyst"}`))
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var got spawnMissionResult
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal async result: %v\noutput=%s", err, out)
+	}
+	if got.Status != "running" {
+		t.Errorf("status = %q, want \"running\" (root → async default): %s", got.Status, out)
+	}
+	parent.childMu.Lock()
+	child := parent.children[got.SessionID]
+	parent.childMu.Unlock()
+	if child == nil {
+		t.Fatalf("child not registered: %s", out)
+	}
+	if child.asyncSpawnMode != protocol.SubagentRenderAsyncNotify {
+		t.Errorf("child.asyncSpawnMode = %v, want SubagentRenderAsyncNotify (root → async default)",
+			child.asyncSpawnMode)
+	}
+}
+
 // TestCallSpawnMission_NoMissionSkill_NoArg_NoDefault verifies a
 // missing skill argument with no operator default surfaces a
 // structured no_mission_skill envelope and does not spawn anything.
@@ -61,7 +100,7 @@ func TestCallSpawnMission_NoMissionSkill_NoArg_NoDefault(t *testing.T) {
 	defer cleanup()
 
 	out, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"analyse northwind"}`))
+		json.RawMessage(`{"name":"m","goal":"analyse northwind"}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -82,7 +121,7 @@ func TestCallSpawnMission_DispatchByDefault(t *testing.T) {
 	parent.deps.DefaultMissionSkill = "analyst"
 
 	out, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"analyse northwind"}`))
+		json.RawMessage(`{"name":"m","goal":"analyse northwind"}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -104,7 +143,7 @@ func TestCallSpawnMission_RejectsNonDispatcherSkill(t *testing.T) {
 	defer cleanup()
 
 	out, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"x","skill":"non-existent-skill"}`))
+		json.RawMessage(`{"name":"m","goal":"x","skill":"non-existent-skill"}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -118,7 +157,7 @@ func TestCallSpawnMission_GoalRequired(t *testing.T) {
 	defer cleanup()
 
 	out, _ := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":""}`))
+		json.RawMessage(`{"name":"m","goal":""}`))
 	mgr_assertErrorCode(t, out, "bad_request")
 
 	out, _ = parent.callSpawnMission(us1WithSession(parent),
@@ -155,7 +194,7 @@ func TestCallSpawnMission_OnStartHook_AppliesScaffolding(t *testing.T) {
 	defer cleanup()
 
 	out, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"analyse northwind","skill":"analyst"}`))
+		json.RawMessage(`{"name":"m","goal":"analyse northwind","skill":"analyst"}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -192,15 +231,50 @@ func TestCallSpawnWave_BadRequest(t *testing.T) {
 	out, _ := parent.callSpawnWave(us1WithSession(parent),
 		json.RawMessage(`{"subagents":[]}`))
 	mgr_assertErrorCode(t, out, "bad_request")
+	mgr_assertErrorHasShape(t, out)
 
 	out, _ = parent.callSpawnWave(us1WithSession(parent),
 		json.RawMessage(`{not-json`))
 	mgr_assertErrorCode(t, out, "bad_request")
+	mgr_assertErrorHasShape(t, out)
 
 	parent.childMu.Lock()
 	defer parent.childMu.Unlock()
 	if len(parent.children) != 0 {
 		t.Errorf("parent.children = %d after spawn_wave validation failure, want 0", len(parent.children))
+	}
+}
+
+// mgr_assertErrorHasShape verifies that a bad_request envelope
+// carries the 5.4.c self-correction hint: `got` (the args the
+// caller sent) + `expected_shape` (a template the model can
+// copy). Without these fields weak models drift into multi-minute
+// spawn_wave({}) / spawn_subagent({}) retry loops.
+func mgr_assertErrorHasShape(t *testing.T, out json.RawMessage) {
+	t.Helper()
+	var resp toolErrorResponse
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("unmarshal: %v out=%s", err, out)
+	}
+	if resp.Error.Got == nil {
+		t.Errorf("error envelope missing `got` hint: %s", out)
+	}
+	if resp.Error.ExpectedShape == nil {
+		t.Errorf("error envelope missing `expected_shape` hint: %s", out)
+	}
+	// Make sure expected_shape walks through the canonical fields the
+	// model needs to fill — fail loud if a future refactor drops them.
+	shape, _ := resp.Error.ExpectedShape.(map[string]any)
+	subs, _ := shape["subagents"].([]any)
+	if len(subs) == 0 {
+		t.Errorf("expected_shape.subagents missing: %s", out)
+		return
+	}
+	first, _ := subs[0].(map[string]any)
+	for _, key := range []string{"name", "task"} {
+		if _, ok := first[key]; !ok {
+			t.Errorf("expected_shape.subagents[0].%s missing: %s", key, out)
+		}
 	}
 }
 
@@ -215,7 +289,7 @@ func TestCallSpawnWave_PropagatesSpawnError(t *testing.T) {
 	parent.depth = 5
 
 	out, err := parent.callSpawnWave(us1WithSession(parent),
-		json.RawMessage(`{"wave_label":"explore","subagents":[{"task":"x"}]}`))
+		json.RawMessage(`{"wave_label":"explore","subagents":[{"name":"w","task":"x"}]}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -231,7 +305,7 @@ func TestCallSpawnSubagent_Happy(t *testing.T) {
 	defer cleanup()
 
 	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"task":"explore"}]}`))
+		json.RawMessage(`{"subagents":[{"name":"w","task":"explore"}]}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -267,7 +341,7 @@ func TestCallSpawnSubagent_DepthExceeded(t *testing.T) {
 	parent.depth = 5
 
 	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"task":"x"}]}`))
+		json.RawMessage(`{"subagents":[{"name":"w","task":"x"}]}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -291,7 +365,7 @@ func TestCallSpawnSubagent_BadRequest(t *testing.T) {
 	mgr_assertErrorCode(t, out, "bad_request")
 
 	out, _ = parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"task":""}]}`))
+		json.RawMessage(`{"subagents":[{"name":"w","task":""}]}`))
 	mgr_assertErrorCode(t, out, "bad_request")
 }
 
@@ -303,7 +377,7 @@ func TestCallSpawnSubagent_BatchFailFast(t *testing.T) {
 	defer cleanup()
 
 	out, _ := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"task":"good"},{"task":""}]}`))
+		json.RawMessage(`{"subagents":[{"name":"w","task":"good"},{"name":"w2","task":""}]}`))
 	mgr_assertErrorCode(t, out, "bad_request")
 
 	parent.childMu.Lock()
@@ -344,7 +418,7 @@ func TestCallSpawnSubagent_RoleIntentOverride(t *testing.T) {
 	defer cleanup()
 
 	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"skill":"hugr-data","role":"explorer","task":"t"}]}`))
+		json.RawMessage(`{"subagents":[{"name":"w","skill":"hugr-data","role":"explorer","task":"t"}]}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -381,7 +455,7 @@ func TestCallSpawnSubagent_TierIntent_AppliesAtSpawn(t *testing.T) {
 	}
 
 	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"task":"t"}]}`))
+		json.RawMessage(`{"subagents":[{"name":"w","task":"t"}]}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -410,7 +484,7 @@ func TestCallSpawnSubagent_RoleIntent_OverridesTierIntent(t *testing.T) {
 	}
 
 	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"skill":"hugr-data","role":"explorer","task":"t"}]}`))
+		json.RawMessage(`{"subagents":[{"name":"w","skill":"hugr-data","role":"explorer","task":"t"}]}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -432,7 +506,7 @@ func TestCallSpawnSubagent_NoIntent_KeepsParentDefault(t *testing.T) {
 	defer cleanup()
 
 	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"task":"t"}]}`))
+		json.RawMessage(`{"subagents":[{"name":"w","task":"t"}]}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -460,7 +534,7 @@ func TestCallSpawnSubagent_SessionGone(t *testing.T) {
 	parent.MarkClosed()
 
 	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"task":"t"}]}`))
+		json.RawMessage(`{"subagents":[{"name":"w","task":"t"}]}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -483,7 +557,7 @@ func TestCallWaitSubagents_Happy_LiveResult(t *testing.T) {
 	// Spawn a real child so the id exists; we'll synthesise a result
 	// for it without waiting for real natural termination.
 	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"task":"t"}]}`))
+		json.RawMessage(`{"subagents":[{"name":"w","task":"t"}]}`))
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
@@ -557,7 +631,7 @@ func TestCallSpawnMission_Async(t *testing.T) {
 	defer cleanup()
 
 	out, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"explore","skill":"analyst","wait":"async"}`))
+		json.RawMessage(`{"name":"m","goal":"explore","skill":"analyst","wait":"async"}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -593,7 +667,7 @@ func TestCallSpawnMission_AsyncSilent(t *testing.T) {
 	defer cleanup()
 
 	out, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"explore","skill":"analyst","wait":"async","on_complete":"silent"}`))
+		json.RawMessage(`{"name":"m","goal":"explore","skill":"analyst","wait":"async","on_complete":"silent"}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
@@ -619,12 +693,12 @@ func TestCallSpawnMission_AsyncCap(t *testing.T) {
 
 	// First async spawn — fills the cap.
 	if _, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"a","skill":"analyst","wait":"async"}`)); err != nil {
+		json.RawMessage(`{"name":"m","goal":"a","skill":"analyst","wait":"async"}`)); err != nil {
 		t.Fatalf("first async: %v", err)
 	}
 	// Second async spawn — rejected.
 	out, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"b","skill":"analyst","wait":"async"}`))
+		json.RawMessage(`{"name":"m","goal":"b","skill":"analyst","wait":"async"}`))
 	if err != nil {
 		t.Fatalf("second async call: %v", err)
 	}
@@ -642,12 +716,12 @@ func TestCallSpawnMission_TwoAsyncInOneTurn(t *testing.T) {
 	parent.deps.MaxAsyncMissionsPerRoot = 4
 
 	out1, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"orders summary","skill":"analyst","wait":"async"}`))
+		json.RawMessage(`{"name":"m","goal":"orders summary","skill":"analyst","wait":"async"}`))
 	if err != nil {
 		t.Fatalf("first async: %v", err)
 	}
 	out2, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"inventory count","skill":"analyst","wait":"async"}`))
+		json.RawMessage(`{"name":"m","goal":"inventory count","skill":"analyst","wait":"async"}`))
 	if err != nil {
 		t.Fatalf("second async: %v", err)
 	}
@@ -688,7 +762,7 @@ func TestCallSpawnMission_BadWait(t *testing.T) {
 	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
 	defer cleanup()
 	out, _ := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"x","skill":"analyst","wait":"sometime"}`))
+		json.RawMessage(`{"name":"m","goal":"x","skill":"analyst","wait":"sometime"}`))
 	mgr_assertErrorCode(t, out, "bad_request")
 }
 
@@ -698,7 +772,7 @@ func TestCallSpawnMission_TimeoutRequiresMs(t *testing.T) {
 	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
 	defer cleanup()
 	out, _ := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"goal":"x","skill":"analyst","wait":"timeout"}`))
+		json.RawMessage(`{"name":"m","goal":"x","skill":"analyst","wait":"timeout"}`))
 	mgr_assertErrorCode(t, out, "bad_request")
 }
 
@@ -710,7 +784,7 @@ func TestCallNotifySubagent_Happy(t *testing.T) {
 	defer cleanup()
 
 	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"task":"t","role":"explorer"}]}`))
+		json.RawMessage(`{"subagents":[{"name":"w","task":"t","role":"explorer"}]}`))
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
@@ -763,7 +837,7 @@ func TestCallNotifySubagent_UrgentPrefix(t *testing.T) {
 	defer cleanup()
 
 	out, _ := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"task":"t"}]}`))
+		json.RawMessage(`{"subagents":[{"name":"w","task":"t"}]}`))
 	var spawned []spawnSubagentResult
 	_ = json.Unmarshal(out, &spawned)
 	childID := spawned[0].SessionID
@@ -969,7 +1043,7 @@ func TestCallWaitSubagents_UserFollowUp_Interrupts(t *testing.T) {
 	// Spawn a real child so the id exists; the child won't terminate
 	// during this test — the interrupt fires from a different path.
 	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"task":"explore catalog","role":"explorer"}]}`))
+		json.RawMessage(`{"subagents":[{"name":"w","task":"explore catalog","role":"explorer"}]}`))
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}

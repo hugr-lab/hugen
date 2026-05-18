@@ -30,6 +30,27 @@ type SessionState interface {
 	Value(name string) (any, bool)
 	SetValue(name string, value any)
 
+	// SubagentName returns the sanitised short name this session
+	// was spawned with (the addressing identifier used by
+	// notify_subagent / cancel and surfaced on cross-mission
+	// broadcasts). Empty string for root sessions and for sessions
+	// whose spawner did not pass an explicit name. Named
+	// SubagentName, not Name, to avoid colliding with the
+	// [tool.ToolProvider.Name] method *session.Session already
+	// satisfies (the session doubles as a tool provider).
+	// Phase 5.4.c stage 3 — disambiguates same-role workers in a
+	// wave on the whiteboard digest.
+	SubagentName() string
+
+	// Role returns the role label this session was spawned under
+	// (e.g. "planner", "data-analyst") — the per-skill role key
+	// from the dispatching skill's sub_agents block. Empty string
+	// for root sessions whose role is implicit. Same plumbing as
+	// Name(); reading state.Role() is the canonical way for
+	// extensions to attribute author provenance on cross-session
+	// frames without poking into [*session.Session] internals.
+	Role() string
+
 	// Depth returns this session's depth in the spawn tree: 0 for
 	// the user-facing root, 1 for the mission root spawned, ≥2 for
 	// workers spawned by missions (or by workers via opt-in

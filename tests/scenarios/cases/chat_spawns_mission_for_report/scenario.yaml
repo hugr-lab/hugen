@@ -1,0 +1,155 @@
+# chat_spawns_mission_for_report — phase 5.2 root-as-chat
+# acceptance.
+#
+# A substantive multi-aspect report ask is the batch shape:
+# root should NOT try to answer inline. It must call
+# session:spawn_mission(name=..., skill=analyst, ...) and
+# return to chat. The new required `name` arg (δ cherry-pick)
+# must be present and well-formed.
+#
+# By-eye assertions:
+#
+#   1. Root's tool_calls contains exactly one
+#      session:spawn_mission. tool_args carries:
+#        - name: short kebab-case [a-z0-9-]{2,32} that captures
+#          the topic
+#        - skill: "analyst"
+#        - wait: "async" (per 5.1c.async-root default)
+#        - goal: non-empty
+#      Root does NOT itself call hugr-data / duckdb-* / python-
+#      runner tools — that's the worker's job inside the
+#      mission. Root may emit one announce-on-spawn
+#      agent_message after the spawn (per async-root rule).
+#
+#   2. Exactly one mission session exists under root.
+#      metadata.spawn_skill == "analyst", and
+#      metadata.spawn_name (or whatever field carries the
+#      sanitised name — by-eye reviewer checks both column +
+#      metadata) matches the name the model passed.
+#
+#   3. The mission's first subagent_started event (or
+#      equivalent — the spawn frame) carries the name the
+#      model passed, sanitised to the kebab-case primitive.
+#      This is the user-visible identifier in liveview / TUI /
+#      `/mission <name>` slash addressing.
+#
+#   4. The mission runs at least one spawn_wave (analyst always
+#      decomposes into workers) — the existing three-tier
+#      contract is preserved end-to-end. No need to assert
+#      mission completion here; the routing decision is what
+#      this scenario gates.
+#
+# requires: [hugr] — analyst skill expects a live data source
+# for its boot sequence.
+name: chat_spawns_mission_for_report
+requires: [hugr]
+
+steps:
+  - say: |
+      Build me a short report on the `northwind` data source:
+      what business domain it covers, the main fact/dimension
+      tables, the time range the data spans, and one
+      observation about data quality (nulls, gaps, anything
+      suspicious). Take your time — I have other questions to
+      ask in the meantime, no need to block on this.
+    # Root spawn + announce + async return ≈ 2-3 turns. The
+    # mission itself doesn't have to complete for the scenario
+    # to pass — the routing decision is what we're gating —
+    # but we give wait_for_subagents room for the announce
+    # turn to settle.
+    budget: 480s
+    wait_for_subagents: 60s
+
+    queries:
+      # Root's tool_calls. The pass shape:
+      #   - exactly one session:spawn_mission with
+      #     tool_args.skill == "analyst", a non-empty
+      #     tool_args.name matching ^[a-z0-9][a-z0-9-]{1,31}$,
+      #     tool_args.wait == "async", and a non-empty goal.
+      #   - zero hugr-* / duckdb-* / python-* / discovery-*
+      #     calls from root itself.
+      #   - one optional final agent_message from root after
+      #     spawn (announce-on-spawn).
+      - name: tool_calls_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Mission row — exactly one child with
+      # spawn_skill="analyst". By-eye reviewer confirms the
+      # name field (column or metadata) carries the sanitised
+      # kebab-case identifier the model chose.
+      - name: mission_row
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # subagent_started event(s) on root — carries the
+      # mission's sanitised name in metadata.name (or
+      # metadata.subagent_name; whatever the runtime emits).
+      # Cross-checks the addressing primitive's frame payload
+      # extension from α.1a.
+      - name: subagent_started_on_root
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "subagent_started"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq event_type metadata }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Mission's tool sequence — proves the existing analyst
+      # boot path still runs (skill:ref → spawn_wave → ...).
+      # The point of this scenario is the routing decision on
+      # root, not the analyst pipeline itself, so we keep the
+      # assertion shallow.
+      - name: mission_tool_calls
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, tools: (.events // []) | map({seq, tool: .tool_name})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "tool_call"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq tool_name
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Root's announce-on-spawn agent_message. Async-root
+      # rule: root must follow the spawn_mission call with one
+      # short user-visible line confirming the kickoff and
+      # naming the topic. By-eye reviewer checks the body
+      # mentions the mission name or its topic.
+      - name: root_announce_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 3
+              ) { seq content created_at }
+            }}}
+          }
+        vars: { sid: "$sid" }

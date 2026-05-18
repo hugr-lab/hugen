@@ -29,37 +29,47 @@ const (
 	stuckTightDensityWindow = 2 * time.Second
 )
 
-// stuckState owns the runtime side of the three detectors. Singleton
+// stuckRepeatedErrorCount / stuckRepeatedErrorWindow tune the
+// repeated_error detector — K errored results sharing the same
+// (tool, code) within a trailing window of W samples. Unlike
+// repeated_hash this counts a CLUSTER (not strict consecutivity),
+// so an alt-pattern `spawn_wave(err) / wait_subagents(empty) /
+// spawn_wave(err) / …` that the same-hash detectors miss still
+// fires once on the third matching error.
+const (
+	stuckRepeatedErrorCount  = 3
+	stuckRepeatedErrorWindow = 6
+)
+
+// stuckState owns the runtime side of the four detectors. Singleton
 // per Session, mutated only on the Run goroutine — no locks. Restart
 // resets every field to zero by design (spec: in-memory only).
 type stuckState struct {
-	// recentHashes is the trailing window of tool-call hashes used to
-	// drive both repeated_hash (any N consecutive equal) and tight_
-	// density (any N within window). Cap = max(stuckRepeatedHashWindow,
-	// stuckTightDensityCount); we trim by length so the slice never
-	// grows past that bound.
+	// recentHashes is the trailing window of tool-call samples used
+	// by every detector. Cap = max(repeatedHashWindow,
+	// tightDensityCount, repeatedErrorWindow); we trim by length so
+	// the slice never grows past that bound. Each sample carries the
+	// hash, the tool name (for cross-tool error clustering), the
+	// error code returned (empty = success), and dispatch time.
 	recentHashes []hashSample
-
-	// recentErroredHashes pairs each call with whether its tool_result
-	// surfaced as an error. Sampled at handleToolResult time. Used by
-	// the no_progress detector — same hash repeated AFTER an errored
-	// result is the signature of "model didn't read the error".
-	recentErrored []bool
 
 	// Rising-edge flags. nudge fires only on false→true transitions.
 	// A break in the pattern (different hash, density relaxed below
 	// threshold, no error chain) clears the flag so a later recurrence
 	// can fire again.
-	repeatedHashActive bool
-	tightDensityActive bool
-	noProgressActive   bool
+	repeatedHashActive  bool
+	tightDensityActive  bool
+	repeatedErrorActive bool
+	noProgressActive    bool
 }
 
 // hashSample is one entry in the trailing window: the hash of the
-// dispatched tool call + the wall-clock timestamp of dispatch.
+// dispatched tool call + bookkeeping the detectors need.
 type hashSample struct {
-	hash string
-	at   time.Time
+	hash    string
+	tool    string    // canonical tool name; lets repeated_error cluster across hashes
+	errCode string    // populated by stuckObserveResult; "" = success
+	at      time.Time // wall-clock timestamp of dispatch (used by tight_density)
 }
 
 // stuckObserveCall is invoked from the tool dispatch path right after
@@ -85,22 +95,25 @@ func (s *Session) stuckObserveCall(name string, args any, providedHash string, a
 	if stuckTightDensityCount > max {
 		max = stuckTightDensityCount
 	}
-	s.stuck.recentHashes = append(s.stuck.recentHashes, hashSample{hash: h, at: at})
-	s.stuck.recentErrored = append(s.stuck.recentErrored, false)
+	if stuckRepeatedErrorWindow > max {
+		max = stuckRepeatedErrorWindow
+	}
+	s.stuck.recentHashes = append(s.stuck.recentHashes, hashSample{hash: h, tool: name, at: at})
 	if extra := len(s.stuck.recentHashes) - max; extra > 0 {
 		s.stuck.recentHashes = append(s.stuck.recentHashes[:0], s.stuck.recentHashes[extra:]...)
-		s.stuck.recentErrored = append(s.stuck.recentErrored[:0], s.stuck.recentErrored[extra:]...)
 	}
 }
 
-// stuckObserveResult flips the trailing-window's last "errored?" flag
-// when the matching tool_result surfaced an error. Called from the
-// dispatchToolCall error branches just before the function returns.
-func (s *Session) stuckObserveResult(errored bool) {
-	if len(s.stuck.recentErrored) == 0 {
+// stuckObserveResult records the error code of the trailing
+// sample's tool_result (empty when the call succeeded). Called
+// from the dispatchToolCall result-handling branches just before
+// the function returns; the repeated_error / no_progress
+// detectors read it on the next stuckEvaluate pass.
+func (s *Session) stuckObserveResult(errCode string) {
+	if len(s.stuck.recentHashes) == 0 {
 		return
 	}
-	s.stuck.recentErrored[len(s.stuck.recentErrored)-1] = errored
+	s.stuck.recentHashes[len(s.stuck.recentHashes)-1].errCode = errCode
 }
 
 // stuckBuffersEnabled gates buffer growth on the bindings flag — when
@@ -127,6 +140,7 @@ func (s *Session) stuckEvaluate(runCtx context.Context) {
 	}
 	s.evaluateRepeatedHash(runCtx)
 	s.evaluateTightDensity(runCtx)
+	s.evaluateRepeatedError(runCtx)
 	s.evaluateNoProgress(runCtx)
 }
 
@@ -199,6 +213,62 @@ func (s *Session) evaluateTightDensity(runCtx context.Context) {
 	))
 }
 
+// evaluateRepeatedError fires once when K = stuckRepeatedErrorCount
+// samples inside the trailing W = stuckRepeatedErrorWindow share
+// the same (tool, errCode) and at least one of them is the most
+// recent sample. Counts a CLUSTER — unlike repeated_hash, the K
+// matching samples do not have to be strictly consecutive — so it
+// catches the alt-pattern
+//
+//	spawn_wave({}) → bad_request
+//	wait_subagents({}) → []
+//	spawn_wave({}) → bad_request
+//	wait_subagents({}) → []
+//	spawn_wave({}) → bad_request                  ← detector fires here
+//
+// that the existing same-hash detectors miss. The nudge prompt
+// renders the offending tool name + error code so the model sees
+// what it kept failing on, not just "you seem stuck".
+func (s *Session) evaluateRepeatedError(runCtx context.Context) {
+	K := stuckRepeatedErrorCount
+	if len(s.stuck.recentHashes) < K {
+		s.stuck.repeatedErrorActive = false
+		return
+	}
+	last := s.stuck.recentHashes[len(s.stuck.recentHashes)-1]
+	if last.errCode == "" {
+		// Latest sample succeeded — pattern broken, allow re-arm.
+		s.stuck.repeatedErrorActive = false
+		return
+	}
+	window := s.stuck.recentHashes
+	if len(window) > stuckRepeatedErrorWindow {
+		window = window[len(window)-stuckRepeatedErrorWindow:]
+	}
+	matches := 0
+	for _, e := range window {
+		if e.tool == last.tool && e.errCode == last.errCode {
+			matches++
+		}
+	}
+	if matches < K {
+		s.stuck.repeatedErrorActive = false
+		return
+	}
+	if s.stuck.repeatedErrorActive {
+		return
+	}
+	s.stuck.repeatedErrorActive = true
+	s.injectStuckNudge(runCtx, s.deps.Prompts.MustRender(
+		"interrupts/stuck_repeated_error",
+		map[string]any{
+			"K":    K,
+			"Tool": last.tool,
+			"Code": last.errCode,
+		},
+	))
+}
+
 // evaluateNoProgress fires (as a system_marker, not a system_message —
 // per spec §8.3 the no_progress detector surfaces via adapter only)
 // when the latest hash matches a prior hash AND the prior tool_result
@@ -211,7 +281,8 @@ func (s *Session) evaluateNoProgress(runCtx context.Context) {
 	last := s.stuck.recentHashes[len(s.stuck.recentHashes)-1]
 	hit := false
 	for i := len(s.stuck.recentHashes) - 2; i >= 0; i-- {
-		if s.stuck.recentHashes[i].hash == last.hash && s.stuck.recentErrored[i] {
+		e := s.stuck.recentHashes[i]
+		if e.hash == last.hash && e.errCode != "" {
 			hit = true
 			break
 		}
@@ -249,6 +320,30 @@ func (s *Session) injectStuckNudge(runCtx context.Context, content string) {
 		Role:    model.RoleUser,
 		Content: fmt.Sprintf("[system: %s] %s", protocol.SystemMessageStuckNudge, content),
 	})
+}
+
+// toolErrorCode extracts the `error.code` string from a tool_result
+// payload when `errored` is true. Returns the empty string for
+// success results, malformed envelopes, or unknown error shapes.
+// Used by handleToolResult to feed stuckObserveResult with a
+// signal richer than a bare bool — the repeated_error detector
+// clusters by code so it can cite the offending failure in its
+// nudge.
+func toolErrorCode(errored bool, payload string) string {
+	if !errored {
+		return ""
+	}
+	var env toolErrorResponse
+	if err := json.Unmarshal([]byte(payload), &env); err != nil {
+		// Errored but the envelope isn't a toolErrorResponse —
+		// fall back to a generic marker so detectors still see
+		// "this call failed" without misattributing the code.
+		return "unknown"
+	}
+	if env.Error.Code == "" {
+		return "unknown"
+	}
+	return env.Error.Code
 }
 
 // sessionToolHash mirrors pkg/models/hugr.go::hashToolCall in shape so

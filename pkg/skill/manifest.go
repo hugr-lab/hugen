@@ -183,6 +183,16 @@ type HugenMetadata struct {
 	SubAgents []SubAgentRole            `json:"sub_agents,omitempty"`
 	Memory    map[string]MemoryCategory `json:"memory,omitempty"`
 
+	// Notepad declares which categories the model loading this
+	// skill is encouraged to use when calling notepad:append. The
+	// skill extension walks every loaded skill's Notepad.Tags and
+	// renders them into the session's system prompt (Block A) with
+	// a call-shape header — universal across tiers. Categories
+	// vary with which skills are currently loaded: each skill
+	// teaches the model what shape of fact belongs in the
+	// notepad for that domain.
+	Notepad NotepadBlock `json:"notepad,omitempty" yaml:"notepad,omitempty"`
+
 	// Mission, when Enabled, declares the skill as a mission
 	// dispatcher: root sees its Summary in the "Available
 	// missions" prompt block and may pass it to session:spawn_mission.
@@ -422,6 +432,17 @@ type SubAgentRole struct {
 	// to the dispatching skill's mission-level on_close, then to
 	// the autoloaded `_worker` base. Per-role override wins.
 	OnClose MissionOnClose `json:"on_close,omitempty" yaml:"on_close,omitempty"`
+
+	// AutoloadSkills lists skills the runtime loads on the freshly
+	// spawned worker BEFORE its first model turn. The names are
+	// resolved through the SkillManager and routed through the
+	// child's SessionSkill.Load — same tier check applies (each
+	// target must be loadable in the worker's tier). Removes the
+	// "every worker calls skill:load(...) before doing anything"
+	// ritual when the role's tool surface is known at design time.
+	// Per-skill failures log and continue — one bad autoload must
+	// not deny the worker its base surface.
+	AutoloadSkills []string `json:"autoload_skills,omitempty" yaml:"autoload_skills,omitempty"`
 }
 
 // CanSpawnEffective resolves SubAgentRole.CanSpawn to the boolean
@@ -477,7 +498,6 @@ type MissionOnStart struct {
 	Plan         MissionOnStartPlan         `json:"plan,omitempty" yaml:"plan,omitempty"`
 	Whiteboard   MissionOnStartWhiteboard   `json:"whiteboard,omitempty" yaml:"whiteboard,omitempty"`
 	FirstMessage MissionOnStartFirstMessage `json:"first_message,omitempty" yaml:"first_message,omitempty"`
-	Notepad      MissionOnStartNotepad      `json:"notepad,omitempty" yaml:"notepad,omitempty"`
 }
 
 // MissionOnStartPlan declares the plan body the runtime sets on
@@ -504,13 +524,13 @@ type MissionOnStartFirstMessage struct {
 	Template string `json:"template,omitempty" yaml:"template,omitempty"`
 }
 
-// MissionOnStartNotepad advertises recommended categories the
-// mission's worker pool tends to use. Phase 4.2.3 — the runtime
-// surfaces Tags into the mission's system prompt (Block A) so
-// the model uses consistent labels at notepad:append time.
-// Pure recommendation: notepad:append accepts any category string;
-// these are listed for retrieval coherence.
-type MissionOnStartNotepad struct {
+// NotepadBlock advertises recommended notepad categories. Lives
+// at the top of HugenMetadata (sibling to Mission) — every loaded
+// skill can declare which categories the model is encouraged to
+// use when calling notepad:append while this skill is loaded.
+// Pure recommendation: notepad:append accepts any category
+// string; these are listed for retrieval coherence.
+type NotepadBlock struct {
 	Tags []NotepadTagDecl `json:"tags,omitempty" yaml:"tags,omitempty"`
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	wbext "github.com/hugr-lab/hugen/pkg/extension/whiteboard"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -30,18 +31,20 @@ import (
 const spawnMissionSchema = `{
   "type": "object",
   "properties": {
+    "name":       {"type": "string", "description": "Short human-readable identifier for the mission (kebab-case, [a-z0-9-]{2,32}). Used in subsequent calls like notify_subagent / subagent_cancel. Runtime sanitises and auto-suffixes on collision. REQUIRED."},
     "goal":       {"type": "string", "description": "What the mission must accomplish. Becomes the mission's first user message unless the dispatching skill's on_start overrides it."},
     "inputs":     {"description": "Optional JSON the parent passes alongside the goal — schemas, anchors, prior context."},
     "skill":      {"type": "string", "description": "Skill that provides the mission coordinator pattern (e.g. analyst). Must be a mission-eligible skill (metadata.hugen.mission.enabled:true)."},
     "role":       {"type": "string", "description": "Role within the skill. Optional."},
-    "wait":       {"type": "string", "enum": ["sync", "async", "timeout"], "description": "Sync (default): block on the mission's wait_subagents and return its result. Async: return immediately; completion lands as a system message at the next turn boundary. Timeout: like sync but bounded by timeout_ms — partial result if the timer fires first."},
+    "wait":       {"type": "string", "enum": ["sync", "async", "timeout"], "description": "Default depends on caller: chat root (depth 0) defaults to async; missions / workers default to sync. Sync: return a handle immediately; the caller is expected to follow up with wait_subagents on the same turn. Async: return immediately; completion lands as a system message at the next turn boundary and triggers an auto-summary turn. Timeout: like sync but bounded by timeout_ms — partial result if the timer fires first."},
     "timeout_ms": {"type": "integer", "minimum": 1, "description": "Required iff wait=\"timeout\". Soft deadline after which the tool returns a running shape; the mission continues and its completion is delivered as in async mode."},
     "on_complete": {"type": "string", "enum": ["notify", "silent"], "description": "Applies to async / timeout. notify (default): render the completion via interrupts/async_mission_completed.tmpl at the next turn boundary. silent: persist the event without surfacing to the model's history."}
   },
-  "required": ["goal"]
+  "required": ["name", "goal"]
 }`
 
 type spawnMissionInput struct {
+	Name       string `json:"name"`
 	Goal       string `json:"goal"`
 	Inputs     any    `json:"inputs,omitempty"`
 	Skill      string `json:"skill,omitempty"`
@@ -63,6 +66,7 @@ const (
 // continue parsing the same fields. Status is always set; Result
 // is populated only on sync / timeout-completed paths.
 type spawnMissionResult struct {
+	Name      string `json:"name"`
 	MissionID string `json:"mission_id"`
 	SessionID string `json:"session_id"`
 	Depth     int    `json:"depth"`
@@ -80,12 +84,28 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 	if err := json.Unmarshal(args, &in); err != nil {
 		return toolErr("bad_request", fmt.Sprintf("invalid spawn_mission args: %v", err))
 	}
+	if strings.TrimSpace(in.Name) == "" {
+		return toolErr("bad_request", "name is required")
+	}
 	if strings.TrimSpace(in.Goal) == "" {
 		return toolErr("bad_request", "goal is required")
 	}
 	wait := strings.TrimSpace(in.Wait)
 	if wait == "" {
-		wait = spawnMissionWaitSync
+		// Phase 5.4.c.3 — runtime mirror of the `_root` SKILL §
+		// "Delegating to a mission" rule. The skill body documents
+		// `wait="async"` as the default for chat-tier callers, but
+		// weak models often drop optional fields; the runtime now
+		// fills the right answer so async-summary turn fires even
+		// when the model omits the arg. Non-root callers (missions
+		// spawning sub-missions — not a real path today) keep sync
+		// as their default for backward-compat with existing
+		// scenarios.
+		if parent.depth == 0 {
+			wait = spawnMissionWaitAsync
+		} else {
+			wait = spawnMissionWaitSync
+		}
 	}
 	switch wait {
 	case spawnMissionWaitSync, spawnMissionWaitAsync, spawnMissionWaitTimeout:
@@ -160,6 +180,7 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 	}
 
 	spec := SpawnSpec{
+		Name:   in.Name,
 		Skill:  skillName,
 		Role:   in.Role,
 		Task:   task,
@@ -181,6 +202,12 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 
 	// Tier-default + per-role intent override on the spawned mission.
 	parent.applyChildIntent(ctx, child, skillName, in.Role)
+	// Per-role spawn appliers (autoload_skills, …) on the new
+	// session BEFORE the task UserMessage. Missions usually
+	// don't declare autoload (the dispatching skill is itself
+	// the mission's surface), but the hook is symmetric so a
+	// mission role CAN opt in if needed.
+	parent.applyChildSpawnAppliers(ctx, child, skillName, in.Role)
 
 	// Tag the child's terminal SubagentResult with the projection
 	// hint the parent's pump will copy into the payload. Async +
@@ -196,10 +223,14 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 	}
 
 	// Deliver the first user message — the effective task (override
-	// or original goal). Same pre/post IsClosed bracketing as
-	// callSpawnSubagent so a child that died mid-spawn is logged
-	// rather than silently dropped.
-	first := protocol.NewUserMessage(child.ID(), parent.agent.Participant(), task)
+	// or original goal), with the spawn-time inputs prepended as a
+	// labelled JSON block when present (see composeChildFirstMessage
+	// in tools_provider.go for the contract / why). Same pre/post
+	// IsClosed bracketing as callSpawnSubagent so a child that died
+	// mid-spawn is logged rather than silently dropped.
+	first := protocol.NewUserMessage(child.ID(), parent.agent.Participant(),
+		composeChildFirstMessage(task, in.Inputs,
+			wbext.FormatForHandoff(parent, 0)))
 	if !child.IsClosed() {
 		<-child.Submit(ctx, first)
 	}
@@ -214,6 +245,7 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 		// will deliver the SubagentResult through pendingInbound
 		// at next mission completion.
 		return json.Marshal(spawnMissionResult{
+			Name:      child.name,
 			MissionID: child.ID(),
 			SessionID: child.ID(),
 			Depth:     child.depth,
@@ -234,6 +266,7 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 	// models; until then the legacy contract is preserved so
 	// existing scenarios are not regressed.
 	return json.Marshal(spawnSubagentResult{
+		Name:      child.name,
 		SessionID: child.ID(),
 		Depth:     child.depth,
 	})
@@ -301,6 +334,7 @@ func waitForMission(ctx context.Context, parent, child *Session,
 	if len(rows) == 0 {
 		// Timeout fired before completion. Mission keeps running.
 		return json.Marshal(spawnMissionResult{
+			Name:      child.name,
 			MissionID: child.ID(),
 			SessionID: child.ID(),
 			Depth:     child.depth,
@@ -310,6 +344,7 @@ func waitForMission(ctx context.Context, parent, child *Session,
 	}
 	row := rows[0]
 	return json.Marshal(spawnMissionResult{
+		Name:      child.name,
 		MissionID: row.SessionID,
 		SessionID: row.SessionID,
 		Depth:     child.depth,

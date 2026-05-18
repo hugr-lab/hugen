@@ -237,6 +237,23 @@ type SubagentSpawnHinter interface {
 	SubagentSpawnHint(ctx context.Context, state SessionState, skill, role string) (SubagentSpawnHint, error)
 }
 
+// SubagentSpawnApplier is the side-effect counterpart of
+// [SubagentSpawnHinter]: instead of returning data the runtime
+// applies, the extension itself mutates the freshly-spawned child.
+// Canonical use today is role-declared skill autoload — the skill
+// extension reads `sub_agents[*].autoload_skills` from the
+// dispatching skill's manifest and invokes the child's per-session
+// loader BEFORE the child's first model turn.
+//
+// Run-once contract: the runtime calls every registered applier
+// exactly once per spawn, AFTER Session.Spawn returns and AFTER
+// the intent hint has been applied, but BEFORE the task
+// UserMessage lands in the child's inbox. Errors are logged and
+// skipped — a misbehaving applier must not block the spawn.
+type SubagentSpawnApplier interface {
+	ApplyOnSubagentSpawn(ctx context.Context, child SessionState, skill, role string) error
+}
+
 // MissionDispatcher extensions own a skill catalogue and can
 // answer whether a given skill name is registered AND declares
 // itself mission-eligible (metadata.hugen.mission.enabled:true).

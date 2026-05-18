@@ -66,25 +66,31 @@ type Whiteboard struct {
 // Message is one retained broadcast — Newest at the end of
 // Whiteboard.Messages. Truncated means the text was clipped at
 // MaxMessageBytes when the broadcast was originally written.
+// FromName is the sanitised spawn-name of the author session
+// (empty when the author was a root or didn't carry a name),
+// used by the handoff digest to disambiguate same-role siblings
+// in a wave.
 type Message struct {
 	Seq           int64
 	At            time.Time
 	FromSessionID string
 	FromRole      string
+	FromName      string
 	Text          string
 	Truncated     bool
 }
 
 // ProjectEvent is the wire-shape the session package converts to
 // before calling Project / Apply. Op is one of OpInit / OpWrite /
-// OpStop. For OpWrite, Seq and FromSessionID + FromRole + Text +
-// Truncated populate the resulting Message.
+// OpStop. For OpWrite, Seq + FromSessionID + FromRole + FromName
+// + Text + Truncated populate the resulting Message.
 type ProjectEvent struct {
 	At            time.Time
 	Op            string
 	Seq           int64
 	FromSessionID string
 	FromRole      string
+	FromName      string
 	Text          string
 	Truncated     bool
 }
@@ -133,6 +139,7 @@ func Apply(wb Whiteboard, ev ProjectEvent) Whiteboard {
 			At:            ev.At,
 			FromSessionID: ev.FromSessionID,
 			FromRole:      ev.FromRole,
+			FromName:      ev.FromName,
 			Text:          text,
 			Truncated:     truncated,
 		}

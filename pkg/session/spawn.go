@@ -38,6 +38,23 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 		return nil, ErrDepthExceeded
 	}
 	childDepth := s.depth + 1
+
+	// Phase 5.2 α: sanitise the model-supplied name and reserve a
+	// collision-free slot among the parent's live children +
+	// in-flight spawns. The reservation is released after we add
+	// the child to s.children (or on error). Holding s.childMu
+	// across resolve+reserve is fine — neither does I/O. Required-
+	// ness of `name` is enforced at the JSON-schema layer of the
+	// spawn tools; the sanitiser produces a fallback ("subagent")
+	// for programmatic callers (tests) that leave it empty.
+	s.childMu.Lock()
+	if s.pendingNames == nil {
+		s.pendingNames = make(map[string]struct{})
+	}
+	resolvedName := s.resolveChildNameLocked(spec.Name)
+	s.pendingNames[resolvedName] = struct{}{}
+	s.childMu.Unlock()
+
 	childMeta := map[string]any{
 		"depth":       childDepth,
 		"spawn_role":  spec.Role,
@@ -54,9 +71,13 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 		// queries and prompt-time Block B "current mission" can
 		// surface it without scanning events.
 		Mission: spec.Task,
+		Name:    resolvedName,
 	}
 	child, err := newSession(ctx, s, s.deps, req)
 	if err != nil {
+		s.childMu.Lock()
+		delete(s.pendingNames, resolvedName)
+		s.childMu.Unlock()
 		return nil, fmt.Errorf("session: spawn: %w", err)
 	}
 	// Phase 4.2.3 ε — duplicate spawn metadata on the in-memory
@@ -69,6 +90,7 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	s.logger.Debug("session: spawn: child constructed",
 		"parent", s.id,
 		"child", child.id,
+		"name", resolvedName,
 		"parent_depth", s.depth,
 		"child_depth", child.depth,
 		"spawn_skill", spec.Skill,
@@ -79,6 +101,7 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 		s.children = make(map[string]*Session)
 	}
 	s.children[child.id] = child
+	delete(s.pendingNames, resolvedName)
 	s.childMu.Unlock()
 
 	// childWG bookkeeping is now inside child.Start: it observes
@@ -105,6 +128,7 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 
 	started := protocol.NewSubagentStarted(s.id, s.deps.Agent.Participant(), protocol.SubagentStartedPayload{
 		ChildSessionID: child.ID(),
+		Name:           resolvedName,
 		Skill:          spec.Skill,
 		Role:           spec.Role,
 		Task:           spec.Task,

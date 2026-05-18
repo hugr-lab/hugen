@@ -1,0 +1,28 @@
+# Phase 5.2 η — root-as-chat mixed model gate.
+#
+# Root + mission run on Gemini Pro 3.1 (cloud). Workers run on
+# local gemma4-26b via `cheap` route. This is the inverse of
+# `llm-gemini-pro.yaml` (which routes root + mission cheap; that
+# fits the pre-5.2 design where root was pure router and workers
+# carried heavy reasoning).
+#
+# Phase 5.2 root-as-chat reverses that contract: root IS the
+# chat agent and answers data questions directly, so root needs
+# capability. Mission is still orchestration but it boots
+# skills + dispatches roles in a way that benefits from the
+# stronger model. Workers are the loop — query execution,
+# whiteboard writes, narrow grunt work — and can run cheap.
+#
+# Requires GEMINI_API_KEY + LLM_LOCAL_URL in the harness's
+# .test.env.
+models:
+  mode: local
+  model: gemini-pro-3-1
+  max_tokens: 8192
+  routes:
+    cheap:
+      mode: local
+      model: gemma4-26b
+      max_tokens: 4096
+  tier_intents:
+    worker: cheap

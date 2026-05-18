@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,12 +23,22 @@ import (
 
 // execDeps groups the per-server immutable dependencies the tool
 // handlers consult on every call. Constructed once in main, passed
-// to registerTools.
+// to registerTools. The session_dir comes per call via MCP
+// `_meta.session_dir` (resolved by the runtime's workspace
+// extension) — there is no agent-wide workspaces root cached here.
 type execDeps struct {
-	template       string // absolute path to the relocatable template venv
-	workspacesRoot string // absolute path of <state>/workspaces (parent of <sid>/)
-	auth           *authSource
-	log            *slog.Logger
+	template string // absolute path to the relocatable template venv
+	auth     *authSource
+	log      *slog.Logger
+
+	// bootstrapMu serialises venv bootstrap per session-dir within
+	// this single python-mcp process. Two workers in the same
+	// mission share their session_dir under 5.4 — without this map
+	// they could both pass the stamp check, both wipe + recopy, and
+	// race on the partial .venv state. We're per_agent (one
+	// process), so an in-memory mutex suffices.
+	bootstrapMu   sync.Mutex
+	bootstrapLock map[string]*sync.Mutex
 }
 
 // Tool result envelope. Shared between run_code and run_script.
@@ -84,16 +95,16 @@ type runRequest struct {
 }
 
 func handleRun(ctx context.Context, req mcp.CallToolRequest, deps *execDeps, base runRequest) (*mcp.CallToolResult, error) {
-	sid := sessionIDFromRequest(req)
-	if sid == "" {
-		return errResult(&toolError{Code: "arg_validation", Msg: "session_id missing in tool call metadata"}), nil
+	sessDir := sessionDirFromRequest(req)
+	if sessDir == "" {
+		return errResult(&toolError{Code: "arg_validation", Msg: "session_dir missing in tool call metadata"}), nil
 	}
 	r := base
 	if err := parseRunArgs(req, &r); err != nil {
 		return errResult(err), nil
 	}
 
-	sessDir, sessVenv, err := ensureSessionVenv(deps, sid)
+	sessVenv, err := ensureSessionVenv(deps, sessDir)
 	if err != nil {
 		return errResult(&toolError{Code: "venv_bootstrap_failed", Msg: err.Error()}), nil
 	}
@@ -144,42 +155,75 @@ func parseRunArgs(req mcp.CallToolRequest, r *runRequest) error {
 	return nil
 }
 
-// ensureSessionVenv resolves <workspacesRoot>/<sid>/.venv and
-// guarantees it is a complete copy of the template before
-// returning. Fast path: a single os.Stat on the bootstrap stamp.
-// Slow path: wipe partial dir, copyTree, write stamp.
-func ensureSessionVenv(deps *execDeps, sid string) (sessDir, sessVenv string, err error) {
-	sessDir = filepath.Join(deps.workspacesRoot, sid)
+// ensureSessionVenv resolves <sessDir>/.venv and guarantees it is
+// a complete copy of the template before returning. Fast path: a
+// single os.Stat on the bootstrap stamp. Slow path: take a per-dir
+// mutex (so siblings sharing the same mission folder under 5.4
+// don't race on wipe+recopy), wipe partial dir, copyTree, write
+// stamp.
+func ensureSessionVenv(deps *execDeps, sessDir string) (sessVenv string, err error) {
 	sessVenv = filepath.Join(sessDir, ".venv")
 	stamp := filepath.Join(sessVenv, stampName)
 
+	// Fast path — stamp present, no lock needed.
 	if _, statErr := os.Stat(stamp); statErr == nil {
-		return sessDir, sessVenv, nil
+		return sessVenv, nil
+	}
+
+	// Acquire a per-session-dir bootstrap mutex. Held only across
+	// the (potentially slow) copyTree path; a sibling worker that
+	// arrived 100 ms later will re-stat the stamp on the way in and
+	// return immediately.
+	lk := deps.acquireBootstrapLock(sessDir)
+	lk.Lock()
+	defer lk.Unlock()
+
+	// Re-check under lock — earlier holder may have finished
+	// bootstrap while we were queued.
+	if _, statErr := os.Stat(stamp); statErr == nil {
+		return sessVenv, nil
 	}
 
 	// Verify the template is itself usable. Without this every
 	// session call returns the same generic copy error; pinpoint
 	// the operator-side problem instead.
 	if _, statErr := os.Stat(filepath.Join(deps.template, stampName)); statErr != nil {
-		return "", "", fmt.Errorf("template missing or incomplete: %s", deps.template)
+		return "", fmt.Errorf("template missing or incomplete: %s", deps.template)
 	}
 
 	if err := os.MkdirAll(sessDir, 0o755); err != nil {
-		return "", "", fmt.Errorf("mkdir session dir: %w", err)
+		return "", fmt.Errorf("mkdir session dir: %w", err)
 	}
 	// Wipe any partial copy from a crashed previous attempt.
 	if err := os.RemoveAll(sessVenv); err != nil {
-		return "", "", fmt.Errorf("rm partial venv: %w", err)
+		return "", fmt.Errorf("rm partial venv: %w", err)
 	}
 	if err := copyTree(deps.template, sessVenv); err != nil {
-		return "", "", err
+		return "", err
 	}
 	if err := os.WriteFile(stamp, nil, 0o644); err != nil {
-		return "", "", fmt.Errorf("write stamp: %w", err)
+		return "", fmt.Errorf("write stamp: %w", err)
 	}
 	deps.log.Info("python-mcp: session venv ready",
-		"session", sid, "venv", sessVenv)
-	return sessDir, sessVenv, nil
+		"session_dir", sessDir, "venv", sessVenv)
+	return sessVenv, nil
+}
+
+// acquireBootstrapLock returns the per-session-dir mutex, creating
+// it on first call. Lazy init under bootstrapMu keeps the map
+// concurrency-safe without a separate constructor.
+func (deps *execDeps) acquireBootstrapLock(sessDir string) *sync.Mutex {
+	deps.bootstrapMu.Lock()
+	defer deps.bootstrapMu.Unlock()
+	if deps.bootstrapLock == nil {
+		deps.bootstrapLock = make(map[string]*sync.Mutex)
+	}
+	if mu, ok := deps.bootstrapLock[sessDir]; ok {
+		return mu
+	}
+	mu := &sync.Mutex{}
+	deps.bootstrapLock[sessDir] = mu
+	return mu
 }
 
 // copyTree copies src into dst using the platform-appropriate CoW
@@ -372,13 +416,14 @@ func (c *cappedBuffer) String() string {
 	return c.buf.String() + "\n[output truncated]"
 }
 
-// sessionIDFromRequest mirrors mcp/hugr-query's helper so test
-// fixtures can stuff the id into AdditionalFields directly.
-func sessionIDFromRequest(req mcp.CallToolRequest) string {
+// sessionDirFromRequest reads the resolved workspace directory the
+// runtime injects via MCP `_meta.session_dir`. Tests can put the
+// path directly into AdditionalFields.
+func sessionDirFromRequest(req mcp.CallToolRequest) string {
 	if req.Params.Meta == nil {
 		return ""
 	}
-	if v, ok := req.Params.Meta.AdditionalFields["session_id"]; ok {
+	if v, ok := req.Params.Meta.AdditionalFields["session_dir"]; ok {
 		if s, ok := v.(string); ok {
 			return s
 		}

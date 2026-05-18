@@ -136,7 +136,17 @@ func TestAnalyst_Python(t *testing.T) {
 		t.Fatalf("bash-mcp:bash.write_file missing: %v", toolNames(snap.Tools))
 	}
 
-	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
+	// Phase 5.4.b: per_agent MCPs (python-mcp here) require
+	// session_dir in MCP _meta; the runtime fills it from
+	// workspace.FromState(state).Dir() in session.dispatchToolCall.
+	// This test bypasses the session loop and dispatches via
+	// Tools().Resolve/Dispatch directly, so we mirror the same
+	// plumbing manually.
+	scx := perm.SessionContext{SessionID: sess.ID()}
+	if ws := wsext.FromState(sess); ws != nil {
+		scx.WorkspaceDir = ws.Dir()
+	}
+	dispatchCtx := perm.WithSession(ctx, scx)
 
 	dispatch := func(label string, tl tool.Tool, args any) string {
 		t.Helper()
@@ -198,7 +208,9 @@ func TestAnalyst_Python(t *testing.T) {
 		t.Errorf("nonzero exit envelope missing stderr: %s", exitRaw)
 	}
 
-	// Criterion 11 — close the session, assert <sid>/.venv is gone.
+	// Criterion 11 — phase 5.4 contract: CloseSession is forget-only.
+	// The session dir (and its lazy .venv underneath) must persist
+	// past Terminate; reclamation is the orphan sweeper's job.
 	sessDir := filepath.Join(core.workspaceDir, sess.ID())
 	if _, err := os.Stat(filepath.Join(sessDir, ".venv")); err != nil {
 		t.Fatalf("session venv missing before close: %v", err)
@@ -206,8 +218,8 @@ func TestAnalyst_Python(t *testing.T) {
 	if err := core.manager.Terminate(ctx, sess.ID(), "user:/end"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if _, err := os.Stat(sessDir); !os.IsNotExist(err) {
-		t.Errorf("session dir not cleaned: %s", sessDir)
+	if _, err := os.Stat(sessDir); err != nil {
+		t.Errorf("session dir removed by close (5.4 expects persistence): %v", err)
 	}
 }
 
@@ -271,7 +283,7 @@ func newPythonIntegrationCore(t *testing.T, pyBin, tmpl string) *integrationCore
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
 		manager.WithExtensions(
-			wsext.NewExtension(workspaceDir, true),
+			wsext.NewExtension(workspaceDir, logger),
 			mcpext.NewExtension(cfgSvc.ToolProviders(), logger),
 		),
 	)

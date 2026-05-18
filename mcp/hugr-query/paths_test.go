@@ -7,23 +7,24 @@ import (
 	"testing"
 )
 
-func newDeps(t *testing.T) (*queryDeps, string) {
+func newSessionDir(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	wsRoot := filepath.Join(root, "workspaces")
-	if err := os.MkdirAll(wsRoot, 0o755); err != nil {
+	// Simulate the 5.4 mission-shared layout: <workspaces>/<root>/<mission>/
+	dir := filepath.Join(root, "workspaces", "ses-root", "ses-mission")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return &queryDeps{workspace: wsRoot}, wsRoot
+	return dir
 }
 
 func TestResolveOutDir_DefaultUnderSessionData(t *testing.T) {
-	d, ws := newDeps(t)
-	got, err := d.resolveOutDir("sess1", "", "qid")
+	sessDir := newSessionDir(t)
+	got, err := resolveOutDir(sessDir, "", "qid")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(ws, "sess1", "data", "qid")
+	want := filepath.Join(sessDir, "data", "qid")
 	if got != want {
 		t.Fatalf("got %s want %s", got, want)
 	}
@@ -33,12 +34,12 @@ func TestResolveOutDir_DefaultUnderSessionData(t *testing.T) {
 }
 
 func TestResolveOutDir_RelativeAnchorsToSessionRoot(t *testing.T) {
-	d, ws := newDeps(t)
-	got, err := d.resolveOutDir("sess1", "results", "qid")
+	sessDir := newSessionDir(t)
+	got, err := resolveOutDir(sessDir, "results", "qid")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(ws, "sess1", "results")
+	want := filepath.Join(sessDir, "results")
 	if got != want {
 		t.Fatalf("got %s want %s", got, want)
 	}
@@ -48,20 +49,20 @@ func TestResolveOutDir_RelativeAnchorsToSessionRoot(t *testing.T) {
 }
 
 func TestResolveOutDir_NestedRelative(t *testing.T) {
-	d, ws := newDeps(t)
-	got, err := d.resolveOutDir("sess1", "data/customers/2026", "qid")
+	sessDir := newSessionDir(t)
+	got, err := resolveOutDir(sessDir, "data/customers/2026", "qid")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(ws, "sess1", "data", "customers", "2026")
+	want := filepath.Join(sessDir, "data", "customers", "2026")
 	if got != want {
 		t.Fatalf("got %s want %s", got, want)
 	}
 }
 
 func TestResolveOutDir_AbsoluteRejected(t *testing.T) {
-	d, _ := newDeps(t)
-	_, err := d.resolveOutDir("sess1", "/etc", "qid")
+	sessDir := newSessionDir(t)
+	_, err := resolveOutDir(sessDir, "/etc", "qid")
 	if err == nil {
 		t.Fatal("expected arg_validation error")
 	}
@@ -72,9 +73,9 @@ func TestResolveOutDir_AbsoluteRejected(t *testing.T) {
 }
 
 func TestResolveOutDir_DotDotEscapeRejected(t *testing.T) {
-	d, _ := newDeps(t)
+	sessDir := newSessionDir(t)
 	for _, in := range []string{"../leak", "..", "data/../../leak"} {
-		_, err := d.resolveOutDir("sess1", in, "qid")
+		_, err := resolveOutDir(sessDir, in, "qid")
 		if err == nil {
 			t.Errorf("%q: expected error", in)
 			continue
@@ -86,11 +87,10 @@ func TestResolveOutDir_DotDotEscapeRejected(t *testing.T) {
 	}
 }
 
-func TestResolveOutDir_MissingSessionID(t *testing.T) {
-	d, _ := newDeps(t)
-	_, err := d.resolveOutDir("", "results", "qid")
+func TestResolveOutDir_MissingSessionDir(t *testing.T) {
+	_, err := resolveOutDir("", "results", "qid")
 	if err == nil {
-		t.Fatal("expected error")
+		t.Fatal("expected error when session_dir is missing")
 	}
 }
 

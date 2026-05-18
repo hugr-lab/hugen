@@ -59,9 +59,8 @@ func run(log *slog.Logger) error {
 	)
 
 	deps := &queryDeps{
-		client:    cli,
-		timeouts:  timeouts,
-		workspace: os.Getenv("WORKSPACES_ROOT"),
+		client:   cli,
+		timeouts: timeouts,
 	}
 
 	srv := server.NewMCPServer(
@@ -74,7 +73,6 @@ func run(log *slog.Logger) error {
 	log.Info("hugr-query: starting stdio server",
 		"hugr_url", authCfg.HugrURL,
 		"token_url", authCfg.TokenURL,
-		"workspaces_root", deps.workspace,
 		"timeout_default_ms", timeouts.DefaultMS,
 		"timeout_max_ms", timeouts.MaxMS,
 	)
@@ -83,8 +81,8 @@ func run(log *slog.Logger) error {
 }
 
 // registerTools wires hugr.Query and hugr.QueryJQ onto the MCP
-// server. Each handler reads session_id from the per-call MCP
-// metadata (`_meta.session_id`); the runtime injects it before
+// server. Each handler reads session_dir from the per-call MCP
+// metadata (`_meta.session_dir`); the runtime injects it before
 // dispatch. Direct callers (tests) populate the same key.
 func registerTools(srv *server.MCPServer, deps *queryDeps) {
 	srv.AddTool(mcp.NewTool("query",
@@ -133,8 +131,8 @@ Empty / null parts are NOT written to disk — the entry just carries field+null
 		if err := req.BindArguments(&args); err != nil {
 			return errResult(&toolError{Code: "arg_validation", Msg: err.Error()}), nil
 		}
-		sid := sessionIDFromRequest(req)
-		out, err := deps.runQuery(ctx, sid, args)
+		sdir := sessionDirFromRequest(req)
+		out, err := deps.runQuery(ctx, sdir, args)
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -153,8 +151,8 @@ Empty / null parts are NOT written to disk — the entry just carries field+null
 		if err := req.BindArguments(&args); err != nil {
 			return errResult(&toolError{Code: "arg_validation", Msg: err.Error()}), nil
 		}
-		sid := sessionIDFromRequest(req)
-		out, err := deps.runQueryJQ(ctx, sid, args)
+		sdir := sessionDirFromRequest(req)
+		out, err := deps.runQueryJQ(ctx, sdir, args)
 		if err != nil {
 			return errResult(err), nil
 		}
@@ -162,14 +160,17 @@ Empty / null parts are NOT written to disk — the entry just carries field+null
 	})
 }
 
-// sessionIDFromRequest extracts the runtime-supplied session id
-// from MCP per-call metadata. The runtime puts it under
-// `_meta.session_id`. Tests can put it directly into AdditionalFields.
-func sessionIDFromRequest(req mcp.CallToolRequest) string {
+// sessionDirFromRequest extracts the runtime-supplied workspace
+// directory from MCP per-call metadata. The runtime resolves it
+// via the workspace extension (per-session for chat root, mission-
+// shared for workers under 5.4) and puts it under
+// `_meta.session_dir`. Tests can put it directly into
+// AdditionalFields.
+func sessionDirFromRequest(req mcp.CallToolRequest) string {
 	if req.Params.Meta == nil {
 		return ""
 	}
-	if v, ok := req.Params.Meta.AdditionalFields["session_id"]; ok {
+	if v, ok := req.Params.Meta.AdditionalFields["session_dir"]; ok {
 		if s, ok := v.(string); ok {
 			return s
 		}

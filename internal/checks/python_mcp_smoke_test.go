@@ -82,11 +82,10 @@ func TestPythonMCPSmoke(t *testing.T) {
 		Transport: mcpprov.TransportStdio,
 		Command:   bin,
 		Args:      []string{"--template", templateDir},
-		Env: map[string]string{
-			"WORKSPACES_ROOT": wsRoot,
-			// Hugr env intentionally absent — exercises the US5 path
-			// (no Hugr → run_code still works).
-		},
+		// Phase 5.4.b: python-mcp no longer needs WORKSPACES_ROOT
+		// from env — the session_dir comes per call via MCP
+		// `_meta.session_dir`. Hugr env intentionally absent —
+		// exercises the US5 path (no Hugr → run_code still works).
 		Lifetime:   tool.LifetimePerAgent,
 		PermObject: "hugen:tool:python-mcp",
 	}, slog.New(slog.DiscardHandler))
@@ -115,13 +114,19 @@ func TestPythonMCPSmoke(t *testing.T) {
 		}
 	}
 
-	// Drive run_code with a session_id metadata so the server can
-	// build per-session venv path.
+	// Drive run_code with session_dir metadata so the server can
+	// build per-session venv path. Phase 5.4.b: the field on
+	// perm.SessionContext is the resolved absolute path, mirroring
+	// what session.dispatchToolCall fills in production.
 	sid := "ses-smoke"
-	if err := os.MkdirAll(filepath.Join(wsRoot, sid), 0o755); err != nil {
+	sessDir := filepath.Join(wsRoot, sid)
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	callCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sid})
+	callCtx := perm.WithSession(ctx, perm.SessionContext{
+		SessionID:    sid,
+		WorkspaceDir: sessDir,
+	})
 
 	args, _ := json.Marshal(map[string]any{"code": "print('hi')"})
 	out, err := prov.Call(callCtx, "run_code", args)
@@ -132,7 +137,7 @@ func TestPythonMCPSmoke(t *testing.T) {
 		t.Errorf("run_code envelope missing 'hi': %s", string(out))
 	}
 	// Subsequent call: stamp must already exist (fast path).
-	stamp := filepath.Join(wsRoot, sid, ".venv", ".bootstrap-complete")
+	stamp := filepath.Join(sessDir, ".venv", ".bootstrap-complete")
 	if _, err := os.Stat(stamp); err != nil {
 		t.Errorf("session venv stamp missing after first call: %v", err)
 	}

@@ -86,7 +86,7 @@ func TestAdmin_DropProviders(t *testing.T) {
 	mgr := manager.NewManager(
 		store, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
-		manager.WithExtensions(wsext.NewExtension(workspaceDir, true), skillExt, mcpExt),
+		manager.WithExtensions(wsext.NewExtension(workspaceDir, logger), skillExt, mcpExt),
 		manager.WithSessionOptions(
 			session.WithPerms(perms),
 		),

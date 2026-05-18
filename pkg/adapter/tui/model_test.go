@@ -254,3 +254,103 @@ func lastSpanKind(c *chatBuffer) chatSpanKind {
 	}
 	return c.spans[len(c.spans)-1].kind
 }
+
+// TestModel_MouseWheel_ScrollsViewport — phase 5.2 #4. Mouse-wheel
+// events arrive as tea.MouseMsg; the model must forward them to the
+// focused tab's viewport so chat history scrolls under the operator.
+// Before the fix, MouseCellMotion was on (events flowed) but the
+// reducer dropped them, so wheel did nothing.
+func TestModel_MouseWheel_ScrollsViewport(t *testing.T) {
+	m, _ := newTestModel(t)
+	cur := m.currentTab()
+
+	// Push enough chat content that viewport content exceeds its
+	// height. Viewport is 120×~35 after relayout; 80 short lines
+	// is well past that.
+	for i := 0; i < 80; i++ {
+		cur.chat.appendUser("tester", "line-"+strings.Repeat("x", 8))
+	}
+	cur.refreshChat()
+	cur.viewport.GotoBottom()
+	startY := cur.viewport.YOffset
+	if startY == 0 {
+		t.Fatalf("seed failed: viewport still at top (YOffset=0) — content too short to scroll")
+	}
+
+	// WheelUp must move the offset UP (smaller YOffset). X/Y must
+	// land inside the chat rectangle — the reducer drops wheel events
+	// whose cursor is outside chat (sidebar / textarea / tab bar).
+	m2, _ := m.Update(tea.MouseMsg(tea.MouseEvent{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonWheelUp,
+		X:      10,
+		Y:      10,
+	}))
+	m = m2.(model)
+	if got := m.currentTab().viewport.YOffset; got >= startY {
+		t.Fatalf("WheelUp did not scroll: YOffset = %d, want < %d", got, startY)
+	}
+
+	// WheelDown brings us back toward the bottom.
+	midY := m.currentTab().viewport.YOffset
+	m2, _ = m.Update(tea.MouseMsg(tea.MouseEvent{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonWheelDown,
+		X:      10,
+		Y:      10,
+	}))
+	m = m2.(model)
+	if got := m.currentTab().viewport.YOffset; got <= midY {
+		t.Fatalf("WheelDown did not scroll: YOffset = %d, want > %d", got, midY)
+	}
+}
+
+// TestModel_MouseWheel_OutOfChat_NoScroll guards the bounds check:
+// wheel events on the sidebar (X past chatWidth) or below the chat
+// (Y past viewport.Height) must be dropped, otherwise scrolling
+// over an unrelated panel drags the chat history.
+func TestModel_MouseWheel_OutOfChat_NoScroll(t *testing.T) {
+	m, _ := newTestModel(t)
+	cur := m.currentTab()
+	for i := 0; i < 80; i++ {
+		cur.chat.appendUser("tester", "line-"+strings.Repeat("x", 8))
+	}
+	cur.refreshChat()
+	cur.viewport.GotoBottom()
+	before := cur.viewport.YOffset
+
+	// Y=0 sits on the tab bar — must NOT scroll chat.
+	m2, _ := m.Update(tea.MouseMsg(tea.MouseEvent{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonWheelUp,
+		X:      10,
+		Y:      0,
+	}))
+	mm := m2.(model)
+	if got := mm.currentTab().viewport.YOffset; got != before {
+		t.Errorf("wheel on tab-bar moved chat: YOffset %d → %d", before, got)
+	}
+
+	// X far past the chat width sits on the sidebar / off-screen.
+	m2, _ = m.Update(tea.MouseMsg(tea.MouseEvent{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonWheelUp,
+		X:      200,
+		Y:      10,
+	}))
+	mm = m2.(model)
+	if got := mm.currentTab().viewport.YOffset; got != before {
+		t.Errorf("wheel on sidebar moved chat: YOffset %d → %d", before, got)
+	}
+
+	// Motion event in chat must be ignored (no scroll).
+	m2, _ = m.Update(tea.MouseMsg(tea.MouseEvent{
+		Action: tea.MouseActionMotion,
+		X:      10,
+		Y:      10,
+	}))
+	mm = m2.(model)
+	if got := mm.currentTab().viewport.YOffset; got != before {
+		t.Errorf("motion event moved chat: YOffset %d → %d", before, got)
+	}
+}

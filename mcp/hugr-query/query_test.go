@@ -36,11 +36,12 @@ func makeArrowTable(t *testing.T) types.ArrowTable {
 }
 
 func TestWriteResponse_TabularToParquet(t *testing.T) {
-	d, ws := newDeps(t)
+	d := &queryDeps{}
+	sessDir := newSessionDir(t)
 	resp := &types.Response{
 		Data: map[string]any{"customers": makeArrowTable(t)},
 	}
-	written, err := d.writeResponse("sess1", "", "qid", resp)
+	written, err := d.writeResponse(sessDir, "", "qid", resp)
 	if err != nil {
 		t.Fatalf("writeResponse: %v", err)
 	}
@@ -61,11 +62,11 @@ func TestWriteResponse_TabularToParquet(t *testing.T) {
 		t.Fatalf("schema names = %+v", w.Schema)
 	}
 
-	// Validate the file exists under <session>/data/<queryID>/ and
-	// is a real Parquet (not a sentinel). Default-dir layout puts
-	// each part inside the per-call directory keyed by the
+	// Validate the file exists under <session_dir>/data/<queryID>/
+	// and is a real Parquet (not a sentinel). Default-dir layout
+	// puts each part inside the per-call directory keyed by the
 	// sanitized GraphQL field path.
-	want := filepath.Join(ws, "sess1", "data", "qid", "customers.parquet")
+	want := filepath.Join(sessDir, "data", "qid", "customers.parquet")
 	if w.Path != want {
 		t.Fatalf("path=%s want %s", w.Path, want)
 	}
@@ -83,11 +84,12 @@ func TestWriteResponse_TabularToParquet(t *testing.T) {
 }
 
 func TestWriteResponse_ScalarTopLevelGoesToJSON(t *testing.T) {
-	d, ws := newDeps(t)
+	d := &queryDeps{}
+	sessDir := newSessionDir(t)
 	resp := &types.Response{
 		Data: map[string]any{"count": 42.0},
 	}
-	written, err := d.writeResponse("sess1", "", "qid", resp)
+	written, err := d.writeResponse(sessDir, "", "qid", resp)
 	if err != nil {
 		t.Fatalf("writeResponse: %v", err)
 	}
@@ -105,8 +107,8 @@ func TestWriteResponse_ScalarTopLevelGoesToJSON(t *testing.T) {
 	if string(body) != "42" {
 		t.Fatalf("file=%q want 42", string(body))
 	}
-	if !filepath.IsAbs(w.Path) || filepath.Dir(w.Path) != filepath.Join(ws, "sess1", "data", "qid") {
-		t.Fatalf("path=%s not under <sid>/data/<qid>/", w.Path)
+	if !filepath.IsAbs(w.Path) || filepath.Dir(w.Path) != filepath.Join(sessDir, "data", "qid") {
+		t.Fatalf("path=%s not under <session_dir>/data/<qid>/", w.Path)
 	}
 	if w.Preview != "42" {
 		t.Fatalf("preview=%q want 42", w.Preview)
@@ -114,14 +116,15 @@ func TestWriteResponse_ScalarTopLevelGoesToJSON(t *testing.T) {
 }
 
 func TestWriteResponse_MultiOutput(t *testing.T) {
-	d, _ := newDeps(t)
+	d := &queryDeps{}
+	sessDir := newSessionDir(t)
 	resp := &types.Response{
 		Data: map[string]any{
 			"customers": makeArrowTable(t),
 			"summary":   map[string]any{"total": 3},
 		},
 	}
-	written, err := d.writeResponse("sess1", "", "qid", resp)
+	written, err := d.writeResponse(sessDir, "", "qid", resp)
 	if err != nil {
 		t.Fatalf("writeResponse: %v", err)
 	}
@@ -139,20 +142,22 @@ func TestWriteResponse_MultiOutput(t *testing.T) {
 }
 
 func TestRunQueryJQ_ValidatesEmptyArgs(t *testing.T) {
-	d, _ := newDeps(t)
-	_, err := d.runQueryJQ(t.Context(), "sess1", queryJQArgs{})
+	d := &queryDeps{}
+	sessDir := newSessionDir(t)
+	_, err := d.runQueryJQ(t.Context(), sessDir, queryJQArgs{})
 	if err == nil {
 		t.Fatal("expected error on empty graphql")
 	}
-	_, err = d.runQueryJQ(t.Context(), "sess1", queryJQArgs{GraphQL: "{ foo }"})
+	_, err = d.runQueryJQ(t.Context(), sessDir, queryJQArgs{GraphQL: "{ foo }"})
 	if err == nil {
 		t.Fatal("expected error on empty jq")
 	}
 }
 
 func TestRunQuery_ValidatesEmptyGraphql(t *testing.T) {
-	d, _ := newDeps(t)
-	_, err := d.runQuery(t.Context(), "sess1", queryArgs{})
+	d := &queryDeps{}
+	sessDir := newSessionDir(t)
+	_, err := d.runQuery(t.Context(), sessDir, queryArgs{})
 	if err == nil {
 		t.Fatal("expected error on empty graphql")
 	}

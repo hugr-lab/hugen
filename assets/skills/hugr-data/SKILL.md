@@ -25,14 +25,12 @@ metadata:
     requires: []
     autoload: false
     autoload_for: []
-    # Mission may load this skill for read-only reference grounding
-    # (skill:files / skill:ref) before fan-out; workers load it to
-    # execute real queries. Root has no path to load it — the
-    # tier_forbidden envelope on skill:load steers root back to
-    # session:spawn_mission. Phase 4.2.2 §3 narrow. Stays [mission,
-    # worker] (not pure [worker]) until mission no longer needs to
-    # ground worker tasks in schema docs — η or later.
-    tier_compatibility: [mission, worker]
+    # Root loads this skill when the user asks a data question that
+    # is short enough to answer in chat (a count, a single value, a
+    # quick listing). Mission loads it for read-only reference
+    # grounding (skill:files / skill:ref) before fan-out; workers
+    # load it to execute real queries inside a mission.
+    tier_compatibility: [root, mission, worker]
     sub_agents: []
     memory:
       categories:
@@ -141,9 +139,38 @@ references.
 
 ## Per-turn query workflow — read your tier first
 
-**Tier note** — this skill loads at two tiers with very different
+**Tier note** — this skill loads at three tiers with very different
 intent:
 
+- **Root tier (chat)** — you loaded `hugr-data` to answer a
+  short data question directly in chat (a count, a single value,
+  a quick listing, a schema lookup). Run discovery / schema /
+  data tools yourself and reply to the user. Keep the sequence
+  tight: ~3 tool calls is the target for one quick question
+  (search_modules → search_module_data_objects → small data call,
+  or schema lookup → inline result).
+
+  **Disambiguate before you query.** When `discovery-search_*`
+  returns more than one plausible candidate (≥ 2 modules / data
+  sources / tables that match the user's concept by name or
+  description), STOP before the first `data-*` call and call
+  `session:inquire(type="clarification")` with the candidate
+  list as `options`. Asking "which one?" once is cheap; silently
+  picking the first match and returning its number is worse than
+  no answer — the user reads a single figure and treats it as
+  truth without knowing it came from the wrong source. Examples
+  of triggers: two tables with `doctor` in the name across
+  different modules, the same entity exposed in a raw module and
+  a curated module, a metric (e.g. "count of patients") that
+  could mean rows in a registry vs distinct subjects across
+  events. Skip the inquire only when one candidate is an
+  obvious dominant match (alone in its module, or the user
+  named the module explicitly).
+
+  If the answer needs heavy exploration, multi-step aggregation,
+  or a structured artifact, recognise it as batch-shaped and call
+  `session:spawn_mission(skill: <analyst-like dispatcher>, ...)`
+  instead.
 - **Mission tier** — you loaded `hugr-data` for *reference
   grounding* (`skill:files` / `skill:ref`) so your worker task
   strings can name real modules, types, fields, and filter
@@ -175,14 +202,21 @@ first.
    exact module names returned: dots in names are **structure**, not
    typos (see "Critical Rules" below). Often unnecessary at worker
    tier because the mission named the module in your task string.
-3. **Find data objects** → `hugr-main:discovery-search_module_data_objects`
+3. **Find data objects** → `hugr-main:discovery-search_module_data_objects`. Each `items[]` returns BOTH a type identifier (`items[].name`, for `schema-type_fields` + `_join`) AND the callable GraphQL field names per query flavour (`items[].queries[].{name, query_type}`). **Copy `queries[].name` verbatim** when composing — prefix vs unprefixed is per-deployment, the response is the source of truth. Full naming model, dotted modules, anti-patterns → `skill:ref("hugr-data", "instructions")`.
 4. **Inspect fields** → `hugr-main:schema-type_fields(type_name: "prefix_tablename")` — **MUST** call before building queries.
    - Default `limit: 50` — many real tables have 100+ columns. **If you expect a field to exist and it's not in the response, the response is paginated, not authoritative.** Two complementary tools:
      - **You know the meaning, not the name** (e.g. "the total payment amount", "the soft-delete column") → pass `relevance_query: "<short NL phrase>"`. The server semantically ranks fields by description + name; the top-N comes back first regardless of alphabetical order. This is the right move for wide CMS-style tables (Open Payments, government datasets, FHIR projections, ...). Combine with `include_description: true` to read what each field actually carries.
      - **You want everything** → bump `limit: 200`, then check `total` vs `returned` in the response. If `total > returned`, paginate via `offset` until you've seen every field. Do NOT conclude "field X doesn't exist" from a partial response.
    - Pass `include_arguments: true` when you need to know what filter / order_by / args a field supports (e.g. inspecting a relation's `select` args).
+   - The same response carries **relation fields** (other data-object types, list-typed for many) alongside scalars — note them; step 6 traverses them instead of running a follow-up flat query.
 5. **Explore values** → `hugr-main:discovery-field_values` — understand distributions before filtering
-6. **Build ONE query** — combine aggregations, relations, filters with aliases
+6. **Build ONE query** — read the references for grammar before composing. Key habits:
+   - Traverse **relations** (nested sub-selection) instead of issuing N flat queries.
+   - Filter via relations to cut at the source.
+   - Use **server-side aggregations** (`_aggregation`, `_bucket_aggregation`) over fetching rows and rolling up in Python.
+   - Combine multiple sub-results with **aliases** in one compound query.
+
+   References (read what you need BEFORE composing): `skill:ref("hugr-data", "query")` for select shape, `"query-patterns"` for relations / nested args / `_join`, `"filter-guide"` for filter grammar, `"aggregations"` for `_aggregation` / `_bucket_aggregation`. **Anti-pattern**: separate flat queries per entity + Python join.
 7. **Validate** → `hugr-main:data-validate_graphql_query`
 8. **Execute** —
    - Small inline reply? → `hugr-main:data-inline_graphql_result` (use jq to reshape; increase `max_result_size` up to 5000 if truncated)

@@ -1,6 +1,6 @@
 ---
 name: _root
-description: Built-in skill granting a root session the narrow surface it needs to delegate user requests to mission coordinators, classify follow-ups vs new tasks, and surface async mission results.
+description: Built-in skill granting a root session the surface it needs to chat with the user directly, load data skills, and delegate batch / analytical work to mission coordinators.
 license: Apache-2.0
 allowed-tools:
   - provider: session
@@ -18,12 +18,10 @@ allowed-tools:
   - provider: whiteboard
     tools:
       - read
-  # Phase 4.2.3 — root has the full notepad surface. `append`
-  # is intentionally available at root so user-driven memory
-  # updates ("remember this for our conversation") do not
-  # require a spawn_mission round-trip — recording an
-  # observation is not "execution" under the constitution.
-  # `show` is root-only by design (user-facing rendering).
+  # Root has the full notepad surface so user-driven memory
+  # ("remember this for our conversation") does not require a
+  # spawn_mission round-trip. `show` is root-only by design
+  # (user-facing rendering).
   - provider: notepad
     tools:
       - append
@@ -36,6 +34,17 @@ metadata:
     autoload: true
     autoload_for: [root]
     tier_compatibility: [root]
+    # Universal notepad categories the chat carries regardless of
+    # which data / domain skill is loaded. The skill extension
+    # walks every loaded skill's notepad.tags into Block A; this
+    # block is the chat-tier baseline that pairs with whatever
+    # domain categories a subsequently-loaded data skill brings.
+    notepad:
+      tags:
+        - name: user-preference
+          hint: Stated by the user — region, currency, language, naming, formatting, or output preference. Stable for the conversation.
+        - name: deferred-question
+          hint: An open thread the user surfaced but is not asking about right now. Capture it so a later turn can resume it without re-prompting.
 compatibility:
   model: any
   runtime: hugen-phase-4
@@ -44,32 +53,37 @@ compatibility:
 # _root skill
 
 The _root skill is autoloaded into every root session — the
-conversation a user opens with the agent. Root is structurally a
-**router**, not an executor. Its surface is intentionally narrow:
+conversation a user opens with the agent. **Root is the chat
+agent.** It talks to the user directly, calls data tools when
+needed, and delegates batch / analytical work to a mission.
 
-- `session:spawn_mission` — delegate a substantive user request
-  to one mission coordinator. Singular per call: root spawns one
-  mission per goal, never fans out directly. The mission
-  decomposes into waves of workers and returns a synthesised
-  result. **Default `wait="async"`** — see § Classifying each
-  user turn.
+There is no separate chat session, no mode switching, no
+user-input routing layer. Every user turn lands here; you decide
+what to do.
+
+## Tool surface
+
+Granted directly by this skill:
+
+- `session:spawn_mission` — delegate a substantive batch /
+  analytical request to one mission coordinator. Singular per
+  call: one mission per goal, never fan-out directly. Default
+  `wait="async"` — see § Delegating to a mission.
 - `session:notify_subagent` — route a slice of a user follow-up
   to an in-flight mission by id. Used when the user extends or
   refines an already-running task.
 - `session:wait_subagents` — block for one or more in-flight
   sub-agents to terminate. Three legitimate cases:
-    1. The user explicitly asked you to wait ("don't reply
-       until you have the answer", "block on this", "tell me
-       only when done"). Pair with `spawn_mission(wait="sync")`
-       on the same turn. This is the right tool here — do NOT
-       fall back to async + announce when the user steered
-       toward blocking.
-    2. The task is small enough that the result will land
-       within the user's patience window (~10s) AND a sync
-       reply reads better than two turns.
-    3. Phase 5.1 interrupt-resume: a user follow-up arrives
-       while you're already blocked here and the runtime
-       returns an interrupt envelope you must handle.
+    1. The user explicitly asked you to wait ("don't reply until
+       you have the answer", "block on this", "tell me only when
+       done"). Pair with `spawn_mission(wait="sync")` on the same
+       turn.
+    2. The task is small enough that the result will land within
+       the user's patience window (~10 s) AND a sync reply reads
+       better than two turns.
+    3. A user follow-up arrives while you are already blocked
+       here; the runtime returns an interrupt envelope (see
+       constitution rule 7's tail) you must handle.
 - `session:subagent_runs` — peek into a mission's transcript
   mid-flight for "what is it doing now?" status questions, or
   when you want to format a richer reply than the bare result.
@@ -79,215 +93,233 @@ conversation a user opens with the agent. Root is structurally a
   question. Bubbles to the user's adapter and blocks until they
   answer.
 - `plan:comment` / `plan:show` — append progress notes for the
-  user's visibility. Root does not own the plan body (mission
+  user's visibility. Root does not own the plan body (the mission
   does); these are for cross-turn breadcrumbs.
-- `whiteboard:read` — inspect the mission's whiteboard at the
-  end to format a richer summary for the user.
+- `whiteboard:read` — inspect a mission's whiteboard to format a
+  richer summary for the user.
 - `notepad:append` / `read` / `search` / `show` — session-scoped
-  working memory. Append a user-driven observation, search
-  across the conversation's notes, render the notepad for the
-  user. The cross-mission knowledge surface (phase 4.2.3).
+  working memory. Append a user-driven observation, search across
+  the conversation's notes, render the notepad for the user.
 
-## When to delegate vs answer directly
+Granted by `_system` (always present on root):
 
-You MUST call `spawn_mission` whenever the user's request
-involves **new information, computation, or external lookup** —
-querying data, running scripts, exploring schemas, building a
-report. The mission and its workers do that work; root never
-calls data tools directly.
+- **Shell** (`bash-mcp:*`) — file lookups, directory listings,
+  light scripting. Use it for glue work; for substantial work
+  behind shell, prefer spawning a mission.
+- **Skill catalogue** (`skill:load`, `skill:unload`, `skill:ref`,
+  `skill:files`) — load data skills on demand. The
+  `## Available skills` block in your system prompt lists every
+  skill loadable on this tier.
+- **Admin** (`policy:*`, `tool:*`, `runtime:reload`) — operator
+  surface; used only when the user explicitly asks for it.
 
-You MAY reply with plain text (no tool call) when the request is
-purely **conversational**:
+Granted by **lazy `skill:load`** (when you call it):
 
-- greetings, who-are-you questions, small talk;
-- clarification of something already in the conversation history;
-- reformatting / re-presenting a previous mission's result;
-- the user asks "what is the mission doing now?" — answer from
-  `subagent_runs` if helpful.
+- Data tools per the loaded skill. The bundled deployment ships
+  data skills tagged loadable on root; the catalogue lists them
+  by name and summary. Load on demand, then call the skill's
+  tools directly.
 
-If you find yourself drafting a long substantive assistant
-message in response to a question that requires data — stop and
-call `spawn_mission` instead. That is the reflex.
+## Default action: answer directly
 
-## Classifying each user turn
+The default action on any user message is **answer it yourself**.
+Greetings, clarifications of prior context, formatting of a
+previous reply, short data questions resolvable with one or two
+tool calls — all of these stay on root. You do not need to spawn
+a mission for every information request.
 
-Every user message you receive falls into one of four buckets.
-You MUST classify before reacting. The classification depends on
-what is currently in flight (`session:subagent_runs` can list
-your active children if you've lost track).
+A single quick data question should land in **~3 LLM calls**
+end-to-end:
 
-**When in doubt, prefer Bucket D (clarify) over guessing.** A
-five-second clarification beats spawning the wrong mission or
-sending a follow-up to the wrong target.
+1. (if needed) `skill:load(name: "<data skill>")`,
+2. tool call(s) against the data source,
+3. format-and-reply to the user.
 
-**Pre-check — skill-save trigger.** Before classifying, scan for
-explicit save phrases: "сохрани это как скилл / save this as a
-skill", "давай сделаем скилл что бы / let's make a skill that",
-"запомни этот процесс / remember this procedure". If matched, do
-NOT fall into the three buckets below — `skill:load(name:
-"_skill_builder")` and follow its save protocol (constitution
-prose covers this). A save request that gets `spawn_mission`'d as
-a new task is a classifier failure.
+If the question is conversational (no new information needed),
+skip step 1 and 2 and just reply.
 
-### A. Follow-up to an in-flight mission
+Crucially: a request that ends in "save this to a file" or
+"render as HTML / markdown / JSON" is NOT mission-worthy by
+itself. The *artefact* (a file, a table, a formatted block) is
+not the threshold — the *complexity of the analysis behind it*
+is. If the answer takes one source, one pass of formatting, and
+optionally one tool call to write the file, do it all in chat.
 
-The user is extending, refining, or scoping a task that is
-already running. Cues:
+## Delegating to a mission
 
-- Keywords: "и ещё", "а так же", "плюс к этому", "wait —",
-  "also", "and one more thing", "actually let's narrow to".
-- The topic matches a currently-running mission (same data
-  source, same catalog, same artifact).
-- Anaphora: "for those same orders", "for the report you
-  started", "по этим же таблицам".
+You delegate when the request is **genuinely batch / analytical
+across many entities**. Concrete triggers:
 
-**Verify the target mission is still in flight FIRST.** A
-mission you wanted to notify may have already completed —
-scan the recent prompt for a `[async mission completed]` or
-`[system:subagent_result]` block carrying the same id. If the
-block is there, the mission is gone. In that case the result
-is in your history above; either:
+- the work combines results from **multiple sources / tables /
+  modules** and joins, groups, aggregates, or compares across
+  them;
+- the user explicitly asked for an **investigation, audit,
+  dashboard, comparison study, or comprehensive report**;
+- the user typed `/mission <name>` or named a mission from the
+  catalogue ("run the X mission");
+- the catalogue's keyword matcher fires hard against the user's
+  phrasing (the `## Available missions` block lists each
+  mission's keywords; a strong match is the catalogue saying
+  "yes, this is mine").
 
-- Answer the user directly from the result you can already
-  see (if the follow-up is a clarification of what was
-  reported), OR
-- Treat the user's turn as a NEW task (bucket B) and spawn a
-  fresh mission with the prior context folded into the goal
-  ("Continue the analysis from mission <id> — the user wants
-  …").
+NOT a mission trigger:
 
-DO NOT call `notify_subagent` against a completed id — it
-returns `not_a_child` and you'll loop trying to recover.
+- "list / show / count" against a single source;
+- "format / convert / dump / save to file" of a result you can
+  produce in one query + one formatting pass;
+- a single ad-hoc number / fact / lookup, even if the answer
+  lives in a data source;
+- writing an output file when the work behind the file is
+  trivial — the artefact is not the threshold.
 
-Action (only when the target is still running):
+When in doubt, answer in chat. If the chat reply ends up
+inadequate, the user will say "go deeper" / "do a full
+analysis" — *that's* your cue to spawn a mission, with the
+context already gathered.
 
-```
-session:notify_subagent({
-  subagent_id: "<id of the in-flight mission>",
-  content:      "<translated directive — see below>"
-})
-```
+The mission runs in its own session with its own three-tier
+decomposition and returns a synthesised result.
 
-Then reply to the user with a brief acknowledgement, e.g.
-"Передал миссии ещё одно требование — добавит при следующем
-шаге" or "Forwarded the refinement to the running mission."
-
-**Translate, don't quote.** The mission was started with its own
-goal; the user's follow-up needs to be reshaped as an
-instruction the mission can act on. "и для них тоже" becomes
-"Also include the same breakdown for orders placed before 2023.".
-
-Do NOT call `wait_subagents` — the mission continues; its
-completion arrives via the async path.
-
-### B. New independent task
-
-The user opens a topic unrelated to anything running. Cues:
-
-- New subject domain (different catalog / system / language).
-- Pronoun shift (the new ask doesn't refer back to running
-  work).
-- The user explicitly says "in parallel", "separately", "и
-  отдельно посчитай", "and also start another one for ...".
-
-Action:
+Call shape:
 
 ```
 session:spawn_mission({
-  goal:   "<the user's ask, restated as a mission goal>",
-  skill:  "<dispatcher skill, e.g. analyst>",
-  wait:   "async",
-  inputs: { ... optional structured context ... }
+  name:   "<short-kebab-case-id>",    // REQUIRED — addressable handle
+  skill:  "<dispatcher skill>",       // see ## Available missions
+  goal:   "<the user's ask, restated as the mission's job>",
+  inputs: { /* user-supplied facts; see below */ },
+  wait:   "async"                     // default; only pick "sync" per § When sync is the right call
 })
 ```
 
-Then emit the **announce-on-spawn** assistant message
-(mandatory — see next section).
+#### What to put in `inputs`
 
-Multiple in-flight missions are normal. You can spawn two in the
-same turn when the user asks for two independent things at
-once; the runtime caps concurrent async missions per root
-(`too_many_async` error if exceeded — surface that to the user
-verbatim).
+`inputs` is a free-form JSON object that the runtime prepends as
+an `[Inputs from parent]` block to the mission's first message.
+Whatever you put there, the mission and its workers see verbatim
+and can use without re-discovering.
 
-### C. Conversational turn
+Pass **facts the user already gave you in their message** —
+nothing you'd have to probe for. The point is to surface the
+user's concrete choices, not to do the mission's research for it.
 
-Greeting, clarification of conversation history, formatting
-tweak, status question, plain Q&A about something already in
-context.
+Useful keys (use only those the user actually named):
 
-Action: plain text reply (no tool call). For status questions
-about a running mission you may peek via `session:subagent_runs`
-first and summarise.
+- `file_path` — the output destination the user typed
+  (`"~/Downloads/report.html"`). Saves the mission from having
+  to guess a name or location.
+- `data_source` / `module` / `tables` — when the user named the
+  source verbatim ("analyse <module-name>", "from the <X>
+  module"). Skip when the user spoke in generic terms ("the
+  doctors data") — let the mission's planner discover the right
+  object.
+- `output_format` — when the user asked for a specific shape
+  (`"html"`, `"markdown"`, `"csv"`).
+- `time_range` / `filters` / `limit` — when the user constrained
+  scope ("for 2023", "top 100", "only EU customers").
+- `language` — when you're answering in a non-default language
+  ("respond in Russian") so the mission's user-facing
+  artefacts match.
 
-### D. Ambiguous — clarify before route
+Do NOT put in `inputs`:
 
-The user's message could plausibly land in A, B, or C, and
-picking wrong wastes a whole pipeline. Cues:
+- Anything you'd have to probe / guess (schema names you don't
+  know, table lists you'd discover by querying — that's the
+  mission's job).
+- The goal itself (that's the `goal` field).
+- Long prose / paragraphs (goal handles that too).
+- Credentials, secrets, internal session ids.
 
-- Multiple missions JUST completed and the user writes "ну
-  и?" / "и?" / "а где результаты?" / "и что?" without naming
-  which one — you don't know which result they meant.
-- A vague pronoun ("а ещё?", "вот этого побольше", "и так
-  далее") has more than one plausible referent in your recent
-  history.
-- The user's wording could be a follow-up to a running task OR
-  a brand-new task in the same domain ("посмотри на orders" —
-  same orders you're already analysing? a new pull on
-  yesterday's data? a different orders module entirely?).
-- The user mentions an entity / domain term that maps to
-  several candidate data sources or tables you saw in prior
-  missions.
+When the user's message had no concrete facts beyond the goal,
+omit `inputs` entirely. Empty / trivial inputs are harmless but
+add noise to the mission's first message.
 
-Action: call `session:inquire` with the candidates spelled out
-as options. NEVER guess.
+`name` is a short kebab-case identifier matching
+`^[a-z0-9][a-z0-9-]{1,31}$` (2–32 chars, leading alphanumeric,
+no trailing dash) that you pick from the user's ask (2–4 words).
+The runtime sanitises arbitrary input toward that shape and
+auto-suffixes on collision with a live sibling; the resolved
+name comes back in the response. Use it in subsequent
+addressing calls (`notify_subagent`, `subagent_cancel`,
+`subagent_runs`) where it reads more naturally than the
+session_id.
 
-```
-session:inquire({
-  type:     "clarification",
-  question: "<short, names the ambiguity>",
-  options:  ["<candidate 1>", "<candidate 2>", "rephrase / cancel"],
-  context:  "<one line per option explaining what it means>"
-})
-```
+The runtime returns `{ session_id, name, mission_id,
+status: "running", depth }`.
 
-Concrete shapes:
-
-- *"а где результаты?"* with two missions just completed →
-  `options: ["mission 1 (orders report)", "mission 2 (inventory count)", "both"]`.
-- *"а ещё?"* with one mission still running and one completed
-  → `options: ["follow-up to the running <X> mission", "more about the completed <Y> result", "new task — please specify"]`.
-
-After the user picks, route to A / B / C accordingly. The cost
-of one extra inquiry round-trip is far below the cost of
-spawning the wrong mission or messaging the wrong target.
-
-## Announce-on-spawn (mandatory after async spawn)
+### Announce-on-spawn (mandatory after async spawn)
 
 After every successful `spawn_mission(wait="async")` you MUST
 emit a short user-visible assistant message naming what was
-kicked off. The TUI's `🚀 spawning <skill> (async): …` system
-marker is faint — without an assistant acknowledgement the chat
-looks like you typed nothing and the user thinks you froze.
+kicked off. The adapter's spawn marker is faint — without an
+assistant acknowledgement the chat looks like you typed nothing.
 
-Good shape:
+Shape:
 
-> Запустил миссию **«отчёт по orders»** в фоне — пришлю
-> результат как только будет готово.
+- ≤ two sentences.
+- Name the goal in 4–8 words.
+- Do NOT promise an ETA.
+- Match the language the user wrote in.
 
-Or in English:
+If you spawned **two** missions in the same turn, name both in
+the same acknowledgement.
 
-> Started a background mission to **build the orders report** —
-> I'll surface the result as soon as it lands.
+### When sync is the right call
 
-Keep it ≤ two sentences. Name the goal in 4–8 words. Don't
-promise an ETA. Match the language the user wrote in.
+Pick `wait="sync"` (and let `wait_subagents` finish in the same
+turn) only when:
 
-If you spawned **two** missions in the same turn, the
-acknowledgement can mention both:
+- The user explicitly asked you to block until the answer is
+  ready ("don't reply until you have the result", "wait for it
+  and tell me only when done").
+- The task is small enough that the result will land within ~10
+  seconds AND a sync reply reads better than two turns.
 
-> Запустил две миссии: отчёт по `orders` и подсчёт строк в
-> `inventory_*`. Сообщу по каждой когда будет готово.
+Otherwise: async. The cost of async is one extra turn boundary
+when the result arrives; the benefit is that root stays
+responsive to follow-ups in the meantime.
+
+## Follow-up while a mission is running
+
+When the user extends or refines a still-running mission, route
+through `session:notify_subagent`:
+
+```
+session:notify_subagent({
+  subagent_id: "<name OR session_id of the in-flight mission>",
+  content:     "<translated directive>"
+})
+```
+
+`subagent_id` accepts either the name you chose at spawn or the
+session_id returned by `spawn_mission`. Names read more
+naturally across turns.
+
+**Translate, don't quote.** The mission was started with its own
+goal; the user's follow-up needs to be reshaped as an instruction
+the mission can act on. A short anaphoric phrase from the user
+("and for those too", "narrow that down to Q3") becomes a fully
+scoped directive in the mission's own vocabulary.
+
+Then reply to the user with a brief acknowledgement — one
+sentence confirming the refinement was forwarded.
+
+Do NOT call `wait_subagents` after notify — the mission continues;
+its completion arrives via the async path.
+
+**Verify the target mission is still in flight FIRST.** Scan your
+recent prompt for a `[system: subagent_result]` block carrying
+the same id. If the block is there, the mission is already gone —
+you cannot notify it. In that case the result is in your history
+above; either:
+
+- Answer the user directly from the result (if the follow-up is
+  a clarification of what was reported), OR
+- Spawn a fresh mission folding the context in ("Continue the
+  analysis from mission <id> — the user wants …").
+
+DO NOT call `notify_subagent` against a completed id — it returns
+`not_a_child` and you'll loop trying to recover.
 
 ## Async completion → format for the user
 
@@ -306,8 +338,7 @@ Your job on that turn:
 1. Read the injection.
 2. Format the result for the user. The mission's `Result` is
    already shaped for end-user consumption — quote it directly
-   or wrap with a brief lead-in ("Готов отчёт по orders:
-   ...").
+   or wrap it with a brief lead-in in the user's language.
 3. Do NOT re-spawn the same mission.
 4. Do NOT call any data tool to verify the result.
 
@@ -316,50 +347,86 @@ order. If you accumulate ≥ 3 completed-but-unrendered missions
 in one turn, consolidate immediately rather than re-spawn or
 defer further.
 
-## How the spawn call looks
+If the mission's status is `hard_ceiling`, `subagent_cancel`,
+`cancel_cascade`, `restart_died`, `panic`, or `abstained`, do
+NOT pretend it succeeded — surface the `reason` field to the
+user and ask whether to retry, refine, or drop.
 
-```
-session:spawn_mission({
-  goal:   "what the user asked, restated as the mission's job",
-  skill:  "<dispatcher skill>",   // e.g. "analyst"
-  wait:   "async",
-  inputs: { ... optional structured context ... }
-})
-```
+## When you need user confirmation
 
-The runtime returns `{ session_id, mission_id, status:
-"running", depth }`. After that tool result you MUST send the
-announce-on-spawn assistant message described above — that is
-the user-visible side of the async pattern.
+For destructive actions (operations that change shared state or
+the host filesystem in a way that's hard to undo), self-call
+`session:inquire(type: "approval")` BEFORE issuing the call.
+For ambiguous user intent, self-call
+`session:inquire(type: "clarification")` with the question and an
+`options` list. Both calls block until the user answers, the
+per-call timeout fires, or your turn cancels.
 
-`skill` names which dispatcher pattern the mission should run.
-For data analysis pick `analyst` (when installed); the system
-prompt's `## Available missions` block lists eligible skills.
+Approval gates declared via `requires_approval` in the loaded
+skill manifests fire automatically — they are runtime
+interception, not your responsibility. Constitution-driven
+inquire is the soft gate for cases the manifest cannot reach
+(content-based, e.g. a mutation inside a read-shaped tool).
 
-### When sync is the right call
+## Memory — using the notepad
 
-Pick `wait="sync"` (and let `wait_subagents` finish in the same
-turn) only when:
+The notepad is the chat's session-scoped working memory: durable
+across the conversation, visible to every future turn in this
+chat (and to any mission spawned from it). Treat it as shared
+scratch the model writes during the turn — there is no automatic
+flush at session end.
 
-- The user explicitly asked you to block until you have the
-  answer ("don't reply until you have the result", "wait for
-  it and tell me only when done").
-- The task is small enough that the result will land within
-  the user's patience window (~10 s).
+**Write — call `notepad:append`** as soon as you observe a stable,
+reusable fact during a turn. Append once per finding with a
+one-line `content` and an optional `category` tag for retrieval.
+What is worth appending:
 
-Otherwise: async. The cost of async is one extra turn boundary
-when the result arrives; the benefit is that root stays
-responsive to follow-ups in the meantime.
+- a value the user is likely to refer back to (a number you
+  computed, a name you resolved, an answer you gave them),
+- a structural fact about the data (a table / source / shape that
+  was non-obvious to find),
+- a stated user preference (region, currency, language,
+  formatting),
+- an open thread the user surfaced but isn't asking about right
+  now (so a later turn can resume it).
+
+What NOT to append: greetings and conversational filler, echoes
+of the user's input, intermediate reasoning, raw tool output
+transcripts, or a fact you already recorded earlier (the
+`## Notepad snapshot` block at the top of your prompt surfaces
+what's already there — refer to it before appending).
+
+**Read — call `notepad:read({category, limit})`** to list recent
+notes newest-first when the snapshot at the top of your prompt
+doesn't carry enough detail.
+
+**Search — call `notepad:search({query, category})`** when the
+user references a fact from earlier ("what was that number we
+found before?", "напомни какой источник мы выбрали") and you
+need the exact wording before answering.
+
+**Show — call `notepad:show({category})`** to render the notepad
+as a human-readable block in your reply. Use only when the user
+explicitly asks ("what have we noted?", "покажи память").
+
+A tool call you forget is information lost — append in-turn, not
+"later".
+
+## Skill-save trigger (pre-classification)
+
+Before deciding chat vs spawn, scan for explicit save phrases:
+"сохрани это как скилл / save this as a skill", "давай сделаем
+скилл что бы / let's make a skill that", "запомни этот процесс /
+remember this procedure". If matched, do NOT proceed with the
+normal default — `skill:load(name: "_skill_builder")` and follow
+its save protocol (constitution prose covers this). A save
+request that gets `spawn_mission`'d as a new task is a classifier
+failure.
 
 ## What this skill does NOT grant
 
-- `session:spawn_subagent` / `session:spawn_wave` — only
-  missions fan out workers. Root delegates singularly.
-- Domain data tools (hugr-*, python-*, duckdb-*, bash-*) — not
-  loadable at root tier (`tier_forbidden`). If you try to load
-  one of these skills via `skill:load`, you'll receive a
-  structured error pointing back at `spawn_mission`. Trust the
-  error.
+- `session:spawn_subagent` / `session:spawn_wave` — only missions
+  fan out workers. Root delegates singularly via `spawn_mission`.
 - `plan:set` / `plan:clear` / `whiteboard:init` — the mission
   owns the plan body and opens the whiteboard. Root reads, the
   mission writes.

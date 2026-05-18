@@ -102,7 +102,7 @@ func newIntegrationCore(t *testing.T, ruleSet []config.PermissionRule) *integrat
 		&stubStore{}, agent, router,
 		session.NewCommandRegistry(), protocol.NewCodec(), tools, nil,
 		manager.WithExtensions(
-			wsext.NewExtension(workspaceDir, true),
+			wsext.NewExtension(workspaceDir, logger),
 			mcpext.NewExtension(cfgSvc.ToolProviders(), logger),
 		),
 	)
@@ -290,7 +290,15 @@ func TestBashMCP_PermissionDenied(t *testing.T) {
 // the (now-internal) tracker — same-package access lets the test
 // drive sweepOrphans without re-exporting the API.
 
-func TestWorkspace_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
+// TestWorkspace_SharedRoundTrip_AndPersistOnClose verifies the
+// phase-5.4 contract: a root session writes to its workspace, closes
+// cleanly, and the directory survives — reclamation is the orphan
+// sweeper's / phase-6 cron's job, not CloseSession's. The "shared"
+// file path (under the user-configured shared root, outside the
+// workspace tree) must also survive close (sanity check that
+// nothing in the close path reaches for absolute paths the user
+// owns).
+func TestWorkspace_SharedRoundTrip_AndPersistOnClose(t *testing.T) {
 	core := newIntegrationCore(t, nil)
 
 	ctx := context.Background()
@@ -333,8 +341,11 @@ func TestWorkspace_SharedRoundTrip_AndCleanupOnClose(t *testing.T) {
 	if err := core.manager.Terminate(ctx, sess.ID(), "user:/end"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if _, err := os.Stat(sessDir); !os.IsNotExist(err) {
-		t.Errorf("workspace dir not cleaned: %v", err)
+	// Phase 5.4: CloseSession is forget-only. The dir must
+	// persist; reclamation belongs to the orphan sweeper / phase-6
+	// cron.
+	if _, err := os.Stat(sessDir); err != nil {
+		t.Errorf("workspace dir removed by close (5.4 expects persistence): %v", err)
 	}
 	if _, err := os.Stat(sharedFile); err != nil {
 		t.Errorf("shared file removed: %v", err)

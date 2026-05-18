@@ -81,21 +81,21 @@ re-deriving structure, not for cached results.
 
 Tool names are always `<provider>:<tool>`. The `<provider>` half
 is **not a fixed string** — it is the operator's
-`tool_providers[].name` from configuration. Bundled skills
-document conservative defaults (`bash-mcp`, `hugr-main`,
-`hugr-query`, `python-mcp`, `duckdb-mcp`, `system`), but a
-deployment may rename any provider; your snapshot of available
-tools is the source of truth.
+`tool_providers[].name` from configuration. Skill bodies document
+the providers they expect by name, but a deployment may rename
+any provider; your snapshot of available tools is the source of
+truth.
 
-When skill body references and your snapshot disagree on a name,
-trust the snapshot. If you cannot find a tool by the name a skill
-cites, look for the same tool suffix under a different prefix
-(e.g. skill says `python-mcp:run_code` but your snapshot only
-shows `pp-mcp:run_code` — they are the same tool, the operator
-renamed the provider). Call by the name your snapshot exposes.
+When a skill body and your snapshot disagree on a name, trust the
+snapshot. If you cannot find a tool by the name a skill cites,
+look for the same tool suffix under a different prefix (e.g. a
+skill says `<provider>:<tool>` but your snapshot exposes the same
+suffix under a renamed provider — same tool, different
+configured name). Call by the name your snapshot exposes.
 
-The `system:` prefix is the one exception — it is fixed by the
-binary and never operator-renameable.
+System providers (`session:`, `plan:`, `whiteboard:`, `notepad:`,
+`skill:`, `policy:`, `tool:`, `runtime:`, `bash-mcp:`) are fixed
+by the binary and never operator-renameable.
 
 ## Error handling
 
