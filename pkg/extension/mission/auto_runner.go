@@ -129,7 +129,10 @@ func (e *Extension) driveMission(mission extension.SessionState, spawner extensi
 // result. The synthesis worker loads its prompt + tools from the
 // mission's own skill (same convention as a regular wave subagent).
 func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, mission extension.SessionState, role, missionSkill, goal string) (string, error) {
-	task := buildSynthesisTask(mission, goal)
+	task, err := buildSynthesisTask(mission, goal)
+	if err != nil {
+		return "", fmt.Errorf("synthesis: build task: %w", err)
+	}
 	wave := Wave{
 		Label: synthesisWaveLabel,
 		Subagents: []SubagentSpec{{
@@ -193,12 +196,13 @@ type synthesisHandoffView struct {
 // teaches the canonical kind=synthesis handoff fence — synthesis
 // workers can be spawned under any dispatching skill, so the fence
 // instruction has to come from the runtime rather than from a
-// skill-specific prompt. Falls back to a minimal literal when the
-// renderer is unavailable (test fixtures that skip prompts wiring).
-func buildSynthesisTask(mission extension.SessionState, goal string) string {
+// skill-specific prompt. Returns an error when the prompts renderer
+// is unavailable or the template fails — there is no inline fallback
+// by design ([[feedback-prompts-in-assets]]).
+func buildSynthesisTask(mission extension.SessionState, goal string) (string, error) {
 	data := struct {
-		Goal      string
-		Handoffs  []synthesisHandoffView
+		Goal     string
+		Handoffs []synthesisHandoffView
 	}{Goal: goal}
 	if m := FromState(mission); m != nil {
 		for _, h := range m.Handoffs.List() {
@@ -214,13 +218,9 @@ func buildSynthesisTask(mission extension.SessionState, goal string) string {
 	}
 	renderer := mission.Prompts()
 	if renderer == nil {
-		return synthesisTaskFallback(data.Goal, data.Handoffs)
+		return "", fmt.Errorf("mission: synthesis task: no prompts renderer on session")
 	}
-	out, err := renderer.Render("mission/synthesis_task", data)
-	if err != nil {
-		return synthesisTaskFallback(data.Goal, data.Handoffs)
-	}
-	return out
+	return renderer.Render("mission/synthesis_task", data)
 }
 
 // synthesisHandoffBody reduces the handoff's `body` field to the
@@ -241,38 +241,6 @@ func synthesisHandoffBody(body any) string {
 		}
 		return string(raw)
 	}
-}
-
-// synthesisTaskFallback is the embedded-literal mirror of the
-// mission/synthesis_task template. Used only when the prompts
-// renderer is absent (test fixtures wiring SessionState by hand)
-// so production paths stay template-driven and the fallback never
-// silently masks a missing template at runtime.
-func synthesisTaskFallback(goal string, handoffs []synthesisHandoffView) string {
-	var b strings.Builder
-	b.WriteString("Synthesize the mission's results.\n")
-	if goal != "" {
-		b.WriteString("\nMission goal:\n")
-		b.WriteString(goal)
-		b.WriteString("\n")
-	}
-	if len(handoffs) > 0 {
-		b.WriteString("\nPrior handoffs:\n")
-		for _, h := range handoffs {
-			fmt.Fprintf(&b, "- %s (%s/%s, status=%s)\n", h.Ref, h.Role, h.Skill, h.Status)
-			if h.MemorySummary != "" {
-				fmt.Fprintf(&b, "  summary: %s\n", h.MemorySummary)
-			}
-			if h.Body != "" {
-				fmt.Fprintf(&b, "  body: %s\n", h.Body)
-			}
-		}
-	}
-	b.WriteString("\nReply with a single fenced block — nothing else, no narration:\n\n")
-	b.WriteString("```handoff\n")
-	b.WriteString(`{"kind":"synthesis","status":"ok","body":"<one-paragraph user-facing answer summarising the prior handoffs>"}`)
-	b.WriteString("\n```\n")
-	return b.String()
 }
 
 // emitWaveComplete publishes a mission:wave_complete ExtensionFrame
