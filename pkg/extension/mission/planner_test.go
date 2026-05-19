@@ -58,10 +58,15 @@ type plannerFakeSpawner struct {
 	nextID      atomic.Int64
 	requests    []SpawnRequest
 	plannerStep int // 1-indexed; bumped on each planner spawn.
+	checkerStep int // 1-indexed; bumped on each checker spawn.
 
 	// onPlannerSpawn returns the handoff body the planner emits for
 	// this iteration. Called with the 1-indexed iteration number.
 	onPlannerSpawn func(iteration int) Handoff
+
+	// onCheckerSpawn returns the handoff body the checker emits.
+	// Called with the 1-indexed iteration number. Phase C.
+	onCheckerSpawn func(iteration int) Handoff
 
 	// onWorkerSpawn returns the handoff body a non-planner worker
 	// emits. Called with the spawn request.
@@ -76,6 +81,11 @@ type plannerFakeSpawner struct {
 	// fake-emitted handoffs without a real InquiryRequest bubble.
 	// Used by the approval-gate happy-path test.
 	autoMarkInquired bool
+
+	// autoMarkCheckerInquired, when true, flips the inquired flag
+	// on every checker spawn id — the Phase-C equivalent for
+	// verdict=inquire validation in unit tests.
+	autoMarkCheckerInquired bool
 }
 
 func (f *plannerFakeSpawner) spawn(_ context.Context, _ extension.SessionState, req SpawnRequest) (SpawnResult, error) {
@@ -97,7 +107,9 @@ func (f *plannerFakeSpawner) spawn(_ context.Context, _ extension.SessionState, 
 
 	var h Handoff
 	isPlanner := strings.HasPrefix(wave, plannerWaveLabelPrefix)
-	if isPlanner {
+	isChecker := strings.HasPrefix(wave, checkerWaveLabelPrefix)
+	switch {
+	case isPlanner:
 		f.mu.Lock()
 		f.plannerStep++
 		step := f.plannerStep
@@ -108,8 +120,21 @@ func (f *plannerFakeSpawner) spawn(_ context.Context, _ extension.SessionState, 
 		if f.autoMarkInquired {
 			m.MarkInquired(id)
 		}
-	} else if f.onWorkerSpawn != nil {
-		h = f.onWorkerSpawn(req)
+	case isChecker:
+		f.mu.Lock()
+		f.checkerStep++
+		step := f.checkerStep
+		f.mu.Unlock()
+		if f.onCheckerSpawn != nil {
+			h = f.onCheckerSpawn(step)
+		}
+		if f.autoMarkCheckerInquired {
+			m.MarkInquired(id)
+		}
+	default:
+		if f.onWorkerSpawn != nil {
+			h = f.onWorkerSpawn(req)
+		}
 	}
 	h.Ref = ref
 	h.Subagent = SubagentRef{SessionID: id, Name: req.Name, Role: req.Role, Skill: req.Skill}
@@ -464,6 +489,278 @@ func TestPlannerLoop_ApprovalGate_AcceptsWhenInquiryFlagSet(t *testing.T) {
 	}
 }
 
+func TestPlannerLoop_Checker_Continue_FollowedByPlanComplete(t *testing.T) {
+	state := newRenderedFakeState("mis-checker-cont", productionRenderer(t))
+	installMissionState(&state.fakeState)
+
+	manifest := MissionManifest{
+		Name: "checker-continue",
+		Plan: MissionPlanManifest{
+			Role:     "planner",
+			Approval: NormalizePlanApproval(PlanApproval{Initial: ApprovalInitialSkip}),
+			MaxWaves: 5,
+		},
+		Control: ControlManifest{Role: "checker"},
+	}
+
+	spawner := &plannerFakeSpawner{state: state}
+	spawner.onPlannerSpawn = func(iteration int) Handoff {
+		switch iteration {
+		case 1:
+			return Handoff{
+				Kind:   KindPlan,
+				Status: "ok",
+				Body: map[string]any{
+					"next_wave": map[string]any{
+						"label":     "wave-1",
+						"subagents": []any{map[string]any{"name": "w", "role": "echo", "task": "t"}},
+					},
+					"roadmap":   []any{},
+					"rationale": "first wave",
+				},
+			}
+		default:
+			return Handoff{
+				Kind:   KindPlan,
+				Status: "ok",
+				Body:   map[string]any{"next_wave": nil, "roadmap": []any{}, "rationale": "done"},
+			}
+		}
+	}
+	spawner.onWorkerSpawn = func(_ SpawnRequest) Handoff {
+		return Handoff{Kind: KindHandoff, Status: "ok", Body: "ok"}
+	}
+	spawner.onCheckerSpawn = func(_ int) Handoff {
+		return Handoff{
+			Kind:   KindVerdict,
+			Status: "ok",
+			Body:   map[string]any{"decision": "continue", "reason": "on track"},
+		}
+	}
+
+	ext := newPlannerExtension()
+	executor := NewExecutor(spawner.spawn, ext.logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	aborted, err := ext.runPlannerLoop(ctx, executor, state, manifest, manifest.Name, "go")
+	if err != nil {
+		t.Fatalf("runPlannerLoop: %v", err)
+	}
+	if aborted {
+		t.Fatal("aborted = true, want false")
+	}
+	// Expected spawn sequence: _plan-1, wave-1 (w), _check-1, _plan-2.
+	if len(spawner.requests) != 4 {
+		t.Fatalf("spawn requests = %d, want 4 (got %v)", len(spawner.requests), waveNames(spawner.requests))
+	}
+}
+
+func TestPlannerLoop_Checker_Finish_ExitsLoopEarly(t *testing.T) {
+	state := newRenderedFakeState("mis-checker-finish", productionRenderer(t))
+	installMissionState(&state.fakeState)
+
+	manifest := MissionManifest{
+		Name: "checker-finish",
+		Plan: MissionPlanManifest{
+			Role:     "planner",
+			Approval: NormalizePlanApproval(PlanApproval{Initial: ApprovalInitialSkip}),
+			MaxWaves: 5,
+		},
+		Control: ControlManifest{Role: "checker"},
+	}
+
+	spawner := &plannerFakeSpawner{state: state}
+	spawner.onPlannerSpawn = func(_ int) Handoff {
+		return Handoff{
+			Kind:   KindPlan,
+			Status: "ok",
+			Body: map[string]any{
+				"next_wave": map[string]any{
+					"label":     "wave-1",
+					"subagents": []any{map[string]any{"name": "w", "role": "echo", "task": "t"}},
+				},
+				"roadmap":   []any{},
+				"rationale": "wave",
+			},
+		}
+	}
+	spawner.onWorkerSpawn = func(_ SpawnRequest) Handoff {
+		return Handoff{Kind: KindHandoff, Status: "ok", Body: "ok"}
+	}
+	spawner.onCheckerSpawn = func(_ int) Handoff {
+		return Handoff{
+			Kind:   KindVerdict,
+			Status: "ok",
+			Body:   map[string]any{"decision": "finish", "reason": "satisfied"},
+		}
+	}
+
+	ext := newPlannerExtension()
+	executor := NewExecutor(spawner.spawn, ext.logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	aborted, err := ext.runPlannerLoop(ctx, executor, state, manifest, manifest.Name, "go")
+	if err != nil {
+		t.Fatalf("runPlannerLoop: %v", err)
+	}
+	if aborted {
+		t.Fatal("aborted = true, want false")
+	}
+	// Single iteration only — planner + wave + checker. Loop exits
+	// without spawning another planner.
+	if len(spawner.requests) != 3 {
+		t.Fatalf("spawn requests = %d, want 3 (got %v)", len(spawner.requests), waveNames(spawner.requests))
+	}
+}
+
+func TestPlannerLoop_Checker_Amend_CarriesIssuesToNextPlanner(t *testing.T) {
+	state := newRenderedFakeState("mis-checker-amend", productionRenderer(t))
+	installMissionState(&state.fakeState)
+
+	manifest := MissionManifest{
+		Name: "checker-amend",
+		Plan: MissionPlanManifest{
+			Role:     "planner",
+			Approval: NormalizePlanApproval(PlanApproval{Initial: ApprovalInitialSkip}),
+			MaxWaves: 3,
+		},
+		Control: ControlManifest{Role: "checker"},
+	}
+
+	// Capture each planner spawn's rendered task — the SECOND
+	// planner spawn must include a [Recent verdict] section with
+	// the amend issues.
+	plannerTasks := make([]string, 0)
+	spawner := &plannerFakeSpawner{state: state}
+	spawner.onPlannerSpawn = func(iteration int) Handoff {
+		// Grab the most recent request's task body — the spawner
+		// records it just before calling onPlannerSpawn.
+		spawner.mu.Lock()
+		if n := len(spawner.requests); n > 0 {
+			plannerTasks = append(plannerTasks, spawner.requests[n-1].Task)
+		}
+		spawner.mu.Unlock()
+		switch iteration {
+		case 1:
+			return Handoff{
+				Kind:   KindPlan,
+				Status: "ok",
+				Body: map[string]any{
+					"next_wave": map[string]any{
+						"label":     "wave-1",
+						"subagents": []any{map[string]any{"name": "w", "role": "echo", "task": "t"}},
+					},
+					"roadmap":   []any{},
+					"rationale": "first",
+				},
+			}
+		default:
+			return Handoff{
+				Kind:   KindPlan,
+				Status: "ok",
+				Body:   map[string]any{"next_wave": nil, "roadmap": []any{}, "rationale": "done"},
+			}
+		}
+	}
+	spawner.onWorkerSpawn = func(_ SpawnRequest) Handoff {
+		return Handoff{Kind: KindHandoff, Status: "ok", Body: "ok"}
+	}
+	spawner.onCheckerSpawn = func(_ int) Handoff {
+		return Handoff{
+			Kind:   KindVerdict,
+			Status: "ok",
+			Body: map[string]any{
+				"decision": "amend",
+				"issues":   []any{"wrong filter", "missing column"},
+				"reason":   "replan",
+			},
+		}
+	}
+
+	ext := newPlannerExtension()
+	executor := NewExecutor(spawner.spawn, ext.logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	aborted, err := ext.runPlannerLoop(ctx, executor, state, manifest, manifest.Name, "x")
+	if err != nil {
+		t.Fatalf("runPlannerLoop: %v", err)
+	}
+	if aborted {
+		t.Fatal("aborted = true, want false")
+	}
+	if len(plannerTasks) < 2 {
+		t.Fatalf("plannerTasks captured = %d, want 2+", len(plannerTasks))
+	}
+	// First planner task: no recent verdict block.
+	if strings.Contains(plannerTasks[0], "[Recent verdict]") {
+		t.Errorf("first planner task should not carry [Recent verdict]:\n%s", plannerTasks[0])
+	}
+	// Second planner task: carries amend issues verbatim.
+	for _, want := range []string{"[Recent verdict]", "amend", "wrong filter", "missing column"} {
+		if !strings.Contains(plannerTasks[1], want) {
+			t.Errorf("second planner task missing %q:\n%s", want, plannerTasks[1])
+		}
+	}
+}
+
+func TestPlannerLoop_Checker_InquireRejectedWithoutInquiry(t *testing.T) {
+	state := newRenderedFakeState("mis-checker-inq-reject", productionRenderer(t))
+	installMissionState(&state.fakeState)
+
+	manifest := MissionManifest{
+		Name: "checker-inq",
+		Plan: MissionPlanManifest{
+			Role:     "planner",
+			Approval: NormalizePlanApproval(PlanApproval{Initial: ApprovalInitialSkip}),
+			MaxWaves: 3,
+		},
+		Control: ControlManifest{Role: "checker"},
+	}
+
+	spawner := &plannerFakeSpawner{state: state}
+	spawner.onPlannerSpawn = func(_ int) Handoff {
+		return Handoff{
+			Kind:   KindPlan,
+			Status: "ok",
+			Body: map[string]any{
+				"next_wave": map[string]any{
+					"label":     "wave-1",
+					"subagents": []any{map[string]any{"name": "w", "role": "echo", "task": "t"}},
+				},
+				"roadmap":   []any{},
+				"rationale": "first",
+			},
+		}
+	}
+	spawner.onWorkerSpawn = func(_ SpawnRequest) Handoff {
+		return Handoff{Kind: KindHandoff, Status: "ok", Body: "ok"}
+	}
+	// Checker says inquire but autoMarkCheckerInquired is OFF — the
+	// gate must reject.
+	spawner.onCheckerSpawn = func(_ int) Handoff {
+		return Handoff{
+			Kind:   KindVerdict,
+			Status: "ok",
+			Body:   map[string]any{"decision": "inquire", "reason": "need user input"},
+		}
+	}
+
+	ext := newPlannerExtension()
+	executor := NewExecutor(spawner.spawn, ext.logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	aborted, err := ext.runPlannerLoop(ctx, executor, state, manifest, manifest.Name, "x")
+	if err == nil {
+		t.Fatal("runPlannerLoop: want error from missing-inquiry checker gate, got nil")
+	}
+	if !aborted {
+		t.Fatal("aborted = false, want true")
+	}
+	if !strings.Contains(err.Error(), "session:inquire") {
+		t.Errorf("err = %v, want substring 'session:inquire'", err)
+	}
+}
+
 func TestApprovalRequiredForIteration(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -497,7 +794,7 @@ func TestBuildPlannerTask_RendersApprovalDirective(t *testing.T) {
 			MaxWaves: 7,
 		},
 	}
-	task, err := buildPlannerTask(state, manifest, "do the thing", 1)
+	task, err := buildPlannerTask(state, manifest, "do the thing", 1, nil)
 	if err != nil {
 		t.Fatalf("buildPlannerTask: %v", err)
 	}
@@ -508,7 +805,7 @@ func TestBuildPlannerTask_RendersApprovalDirective(t *testing.T) {
 	}
 
 	// Iteration 2 with initial-only — no approval directive.
-	task2, err := buildPlannerTask(state, manifest, "go", 2)
+	task2, err := buildPlannerTask(state, manifest, "go", 2, nil)
 	if err != nil {
 		t.Fatalf("buildPlannerTask iter 2: %v", err)
 	}

@@ -501,6 +501,21 @@ type MissionBlock struct {
 	// final answer after the last wave. Phase A — minimal shape
 	// (role name only); Phase B may add inline templates.
 	Synthesis MissionSynthesisBlock `json:"synthesis,omitempty" yaml:"synthesis,omitempty"`
+
+	// Control declares the verdict-emitting role spawned after
+	// every non-planner wave. When set, the runtime auto-routes
+	// the planner loop based on the checker's `decision` field
+	// (continue / amend / inquire / finish). Absent control falls
+	// back to the implicit `continue` path the Phase-B loop uses.
+	// Phase C.
+	Control MissionControlBlock `json:"control,omitempty" yaml:"control,omitempty"`
+}
+
+// MissionControlBlock names the role the runtime spawns to check
+// each wave's output and emit a verdict. v1 — role-only; Phase I
+// may add inline `verdict.template` or escalation rules.
+type MissionControlBlock struct {
+	Role string `json:"role,omitempty" yaml:"role,omitempty"`
 }
 
 // MissionPlanBlock is the mission-PDCA `plan:` section. Phase B

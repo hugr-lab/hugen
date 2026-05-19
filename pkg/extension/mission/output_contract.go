@@ -229,8 +229,60 @@ func validateRequired(kind OutputContractKind, h Handoff, raw map[string]any) er
 		if decision == "" {
 			return &ParseError{Reason: "kind=verdict requires body.decision"}
 		}
+		if !VerdictDecision(decision).Known() {
+			return &ParseError{Reason: fmt.Sprintf("kind=verdict: unknown decision %q (allowed: continue | amend | inquire | finish)", decision)}
+		}
 	}
 	return nil
+}
+
+// VerdictDecision is the typed enum the checker emits to direct
+// the planner loop. Phase C — four-valued: continue, amend,
+// inquire, finish. Unknown values are rejected at validateRequired
+// time so the loop only ever branches on a known shape.
+type VerdictDecision string
+
+const (
+	VerdictContinue VerdictDecision = "continue"
+	VerdictAmend    VerdictDecision = "amend"
+	VerdictInquire  VerdictDecision = "inquire"
+	VerdictFinish   VerdictDecision = "finish"
+)
+
+// Known reports whether v is one of the four declared decisions.
+func (v VerdictDecision) Known() bool {
+	switch v {
+	case VerdictContinue, VerdictAmend, VerdictInquire, VerdictFinish:
+		return true
+	default:
+		return false
+	}
+}
+
+// DecodeVerdict re-marshals a parsed kind=verdict body into the
+// typed Verdict AST. Pre-condition: h.Kind == KindVerdict and
+// ParseHandoff succeeded (so validateRequired passed). Returns
+// (Verdict, nil) on success.
+func DecodeVerdict(h Handoff) (Verdict, error) {
+	if h.Kind != KindVerdict {
+		return Verdict{}, fmt.Errorf("mission: DecodeVerdict: handoff kind=%q, want verdict", h.Kind)
+	}
+	body, ok := h.Body.(map[string]any)
+	if !ok {
+		return Verdict{}, fmt.Errorf("mission: DecodeVerdict: body is not an object (got %T)", h.Body)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return Verdict{}, fmt.Errorf("mission: DecodeVerdict: marshal body: %w", err)
+	}
+	var v Verdict
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return Verdict{}, fmt.Errorf("mission: DecodeVerdict: unmarshal: %w", err)
+	}
+	if !v.Decision.Known() {
+		return Verdict{}, fmt.Errorf("mission: DecodeVerdict: decision %q is unknown", v.Decision)
+	}
+	return v, nil
 }
 
 // DecodePlan re-marshals a parsed kind=plan body into the typed

@@ -131,6 +131,9 @@ func projectMissionManifest(m skillpkg.Manifest) *missionext.MissionManifest {
 	if mb.Synthesis.Role != "" {
 		out.Synthesis = missionext.SynthesisManifest{Role: mb.Synthesis.Role}
 	}
+	if mb.Control.Role != "" {
+		out.Control = missionext.ControlManifest{Role: mb.Control.Role}
+	}
 	return out
 }
 

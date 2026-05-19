@@ -124,7 +124,14 @@ func TestParseHandoff_Kind(t *testing.T) {
 			wantErr: "decision",
 		},
 		{
-			name: "verdict happy path",
+			name: "verdict kind rejects unknown decision",
+			raw: "```verdict\n" +
+				`{"status":"ok","body":{"decision":"yolo"}}` +
+				"\n```",
+			wantErr: "unknown decision",
+		},
+		{
+			name: "verdict happy path: continue + DecodeVerdict",
 			raw: "```verdict\n" +
 				`{"status":"ok","body":{"decision":"continue"}}` +
 				"\n```",
@@ -132,6 +139,45 @@ func TestParseHandoff_Kind(t *testing.T) {
 			check: func(t *testing.T, h Handoff) {
 				if h.Kind != KindVerdict {
 					t.Errorf("Kind = %q, want verdict", h.Kind)
+				}
+				v, err := DecodeVerdict(h)
+				if err != nil {
+					t.Fatalf("DecodeVerdict: %v", err)
+				}
+				if v.Decision != VerdictContinue {
+					t.Errorf("Decision = %q, want continue", v.Decision)
+				}
+			},
+		},
+		{
+			name: "verdict amend carries issues",
+			raw: "```verdict\n" +
+				`{"status":"ok","body":{"decision":"amend","issues":["missing table","wrong filter"]}}` +
+				"\n```",
+			wantOk: true,
+			check: func(t *testing.T, h Handoff) {
+				v, err := DecodeVerdict(h)
+				if err != nil {
+					t.Fatalf("DecodeVerdict: %v", err)
+				}
+				if v.Decision != VerdictAmend {
+					t.Errorf("Decision = %q, want amend", v.Decision)
+				}
+				if len(v.Issues) != 2 || v.Issues[0] != "missing table" {
+					t.Errorf("Issues = %v", v.Issues)
+				}
+			},
+		},
+		{
+			name: "verdict finish",
+			raw: "```verdict\n" +
+				`{"status":"ok","body":{"decision":"finish","reason":"goal met"}}` +
+				"\n```",
+			wantOk: true,
+			check: func(t *testing.T, h Handoff) {
+				v, _ := DecodeVerdict(h)
+				if v.Decision != VerdictFinish {
+					t.Errorf("Decision = %q, want finish", v.Decision)
 				}
 			},
 		},

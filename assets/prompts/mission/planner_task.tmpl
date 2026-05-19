@@ -31,6 +31,13 @@ goal explicitly demands them.
 {{end}}{{end}}{{if .Recent}}
 [Recent waves]
 {{range .Recent}}- {{.Wave}}: {{.Status}}
+{{end}}{{end}}{{with .RecentVerdict}}
+[Recent verdict]
+decision: {{.Decision}}
+{{if .Reason}}reason: {{.Reason}}
+{{end}}{{if .Issues}}issues:
+{{range .Issues}}- {{.}}
+{{end}}{{end}}{{if eq .Decision "amend"}}Use the issues above to revise the plan — the prior wave produced output that the checker flagged. Spawn a wave that directly addresses the issues; do not repeat the prior wave's mistake.
 {{end}}{{end}}{{if .ApprovalRequired}}
 [approval_required]
 Call `session:inquire` to obtain explicit user approval for this

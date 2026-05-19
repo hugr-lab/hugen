@@ -53,6 +53,18 @@ type MissionManifest struct {
 	// worker may declare its own output_contract / capabilities;
 	// later phases extend.
 	Workers []WorkerManifest
+
+	// Control names the verdict-emitting role spawned after each
+	// non-planner wave. Empty when the manifest declares no
+	// control — the planner loop falls back to the implicit
+	// `continue` routing. Phase C.
+	Control ControlManifest
+}
+
+// ControlManifest names the checker role for the verdict phase.
+// Empty Role means "no checker spawned"; the loop auto-continues.
+type ControlManifest struct {
+	Role string
 }
 
 // MissionPlanManifest is the typed plan section of a PDCA mission.

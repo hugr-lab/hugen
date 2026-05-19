@@ -65,20 +65,31 @@ type SubagentRef struct {
 	Skill     string `json:"skill,omitempty"`
 }
 
-// Verdict is the structured body for kind=verdict handoffs (phase
+// Verdict is the structured body for kind=verdict handoffs (Phase
 // C). Decision drives runtime routing; Issues are passed to the
-// next planner when Decision=amend.
+// next planner when Decision=amend; Reason mirrors the handoff's
+// top-level reason so downstream code only needs to read one
+// struct.
+//
+// Decoded from the kind=verdict body via [DecodeVerdict] after
+// the output_contract parser validates the required fields.
 type Verdict struct {
-	// Decision is one of continue | amend | inquire | finish. The
-	// runtime routes each: continue → next iteration, amend →
-	// replan with Issues attached, inquire → checker calls
-	// session:inquire, finish → emit plan_complete.
-	Decision string `json:"decision"`
+	// Decision is one of continue | amend | inquire | finish (see
+	// [VerdictDecision] for the typed enum). The runtime routes
+	// each: continue → next iteration, amend → replan with Issues
+	// attached, inquire → checker calls session:inquire, finish →
+	// emit plan_complete.
+	Decision VerdictDecision `json:"decision"`
 
 	// Issues lists concrete amendments the checker recommends.
 	// Rendered into the next planner's first message as [Recent
-	// verdict].
+	// verdict] when Decision=amend.
 	Issues []string `json:"issues,omitempty"`
+
+	// Reason is the checker's free-form justification — kept on
+	// the typed AST so downstream consumers don't have to read
+	// both Handoff.Reason and the kind=verdict body separately.
+	Reason string `json:"reason,omitempty"`
 
 	// Confidence is an optional 0-1 self-rating. Not load-bearing
 	// in v1; recorded for telemetry.
