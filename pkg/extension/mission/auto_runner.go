@@ -174,9 +174,12 @@ func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, missio
 }
 
 // buildSynthesisTask renders the synthesizer's first-message body:
-// the mission goal + every prior wave's handoffs. Verbose but
-// deterministic — Phase B replaces it with a template once the
-// PlanContext renderer lands.
+// the mission goal + every prior wave's handoffs + a strict
+// instruction to reply with a kind=synthesis handoff fence. The
+// fence format is taught inline because synthesis workers can be
+// spawned under skills that don't include a synthesizer prompt of
+// their own (Phase A fixture among them). Phase B replaces this
+// with a template once the PlanContext renderer lands.
 func buildSynthesisTask(mission extension.SessionState, goal string) string {
 	var b strings.Builder
 	b.WriteString("Synthesize the mission's results.\n\n")
@@ -197,7 +200,15 @@ func buildSynthesisTask(mission extension.SessionState, goal string) string {
 				fmt.Fprintf(&b, "  body: %s\n", body)
 			}
 		}
+		b.WriteString("\n")
 	}
+	b.WriteString("Reply with a single fenced block — nothing else, no narration:\n\n")
+	b.WriteString("```handoff\n")
+	b.WriteString(`{"kind":"synthesis","status":"ok","body":"<one-paragraph user-facing answer summarising the prior handoffs>"}`)
+	b.WriteString("\n```\n\n")
+	b.WriteString("The triple-backticks and the word `handoff` are mandatory; ")
+	b.WriteString("the JSON inside must parse. The `body` field is the text the ")
+	b.WriteString("user will see — write it for them, not for another agent.\n")
 	return b.String()
 }
 
