@@ -215,6 +215,14 @@ func (e *Extension) ingestHandoff(m *MissionState, childSessionID string, cur wo
 	}
 	h.CreatedAt = nowFn()
 	m.Handoffs.Put(h)
+	// Phase D — auto-extract memory_summary into the plan_context
+	// journal. AppendHandoff is a no-op when MemorySummary is
+	// empty, so handoffs from skills that don't write summaries
+	// silently pass through.
+	m.mu.Lock()
+	iter := m.IterationCounter
+	m.mu.Unlock()
+	m.PlanContext.AppendHandoff(iter, wave, h)
 }
 
 // recordError stores a synthetic error handoff for a worker that

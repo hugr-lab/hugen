@@ -761,6 +761,34 @@ func TestPlannerLoop_Checker_InquireRejectedWithoutInquiry(t *testing.T) {
 	}
 }
 
+func TestBuildPlannerTask_RendersPlanContextSection(t *testing.T) {
+	state := newRenderedFakeState("mis-pc", productionRenderer(t))
+	m := installMissionState(&state.fakeState)
+	m.PlanContext.Append(PlanContextEntry{
+		Iteration: 1, Phase: "do", Summary: "explored orders table",
+	})
+	m.PlanContext.Append(PlanContextEntry{
+		Iteration: 1, Phase: "verdict", Summary: "checker said amend",
+	})
+	manifest := MissionManifest{
+		Name: "pc-test",
+		Plan: MissionPlanManifest{
+			Role:     "planner",
+			Approval: PlanApproval{Initial: ApprovalInitialSkip, Iteration: ApprovalIterationNever},
+			MaxWaves: 5,
+		},
+	}
+	task, err := buildPlannerTask(state, manifest, "goal", 2, nil)
+	if err != nil {
+		t.Fatalf("buildPlannerTask: %v", err)
+	}
+	for _, want := range []string{"[Plan context]", "explored orders table", "checker said amend"} {
+		if !strings.Contains(task, want) {
+			t.Errorf("planner task missing %q. Task:\n%s", want, task)
+		}
+	}
+}
+
 func TestApprovalRequiredForIteration(t *testing.T) {
 	cases := []struct {
 		name      string

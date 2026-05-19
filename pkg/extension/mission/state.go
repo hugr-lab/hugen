@@ -34,8 +34,15 @@ const providerName = "mission"
 type MissionState struct {
 	mu sync.Mutex
 
-	Plan      PlanState
-	Handoffs  *Handoffs
+	Plan        PlanState
+	Handoffs    *Handoffs
+	PlanContext *PlanContext
+
+	// IterationCounter mirrors the planner-loop's current
+	// iteration index. Used by ingestHandoff so plan_context
+	// entries auto-tag with the right iteration. Updated by the
+	// planner loop on every iteration_start emit.
+	IterationCounter int
 
 	// currentWave names the wave the executor is currently filling.
 	// Empty between waves. ChildFrameObserver reads this to assign
@@ -71,6 +78,7 @@ type workerCursor struct {
 func NewMissionState() *MissionState {
 	return &MissionState{
 		Handoffs:      NewHandoffs(),
+		PlanContext:   NewPlanContext(),
 		workersInWave: make(map[string]workerCursor),
 		inquired:      make(map[string]bool),
 	}

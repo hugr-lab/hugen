@@ -4,7 +4,10 @@ to route the next iteration.
 
 [Iteration]
 {{.Iteration}}
-{{if .Handoffs}}
+{{if .PlanContext}}
+[Plan context]
+{{range .PlanContext}}- iteration {{.Iteration}} ({{.Phase}}): {{.Summary}}
+{{end}}{{end}}{{if .Handoffs}}
 [Handoffs to check]
 {{range .Handoffs}}- {{.Ref}} ({{.Role}}/{{.Skill}}, status={{.Status}})
 {{if .MemorySummary}}  summary: {{.MemorySummary}}

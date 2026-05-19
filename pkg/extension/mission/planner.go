@@ -119,6 +119,14 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 	var recentVerdict *Verdict
 
 	for iteration := 1; iteration <= maxIter; iteration++ {
+		// Stamp the iteration on MissionState so ingestHandoff
+		// tags plan_context entries with the right number even
+		// when the handoff arrives between iterations.
+		if m := FromState(mission); m != nil {
+			m.mu.Lock()
+			m.IterationCounter = iteration
+			m.mu.Unlock()
+		}
 		e.emitIterationStart(mission, iteration, manifest.Plan.MaxWaves)
 
 		// 1. Spawn the planner subagent.
@@ -479,6 +487,7 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		MaxWaves:         manifest.Plan.MaxWaves,
 		ApprovalRequired: approval,
 		Recent:           collectRecentWaves(mission),
+		PlanContext:      collectPlanContext(mission),
 	}
 	if recentVerdict != nil {
 		view.RecentVerdict = &plannerVerdictView{
@@ -494,23 +503,49 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 	return renderer.Render("mission/planner_task", view)
 }
 
+// collectPlanContext projects PlanContext.List() into the
+// plannerContextEntry shape the planner / checker / synthesizer
+// templates render. Phase D — every entry surfaces; FIFO trim
+// inside PlanContext already bounded the size.
+func collectPlanContext(mission extension.SessionState) []plannerContextEntry {
+	m := FromState(mission)
+	if m == nil || m.PlanContext == nil {
+		return nil
+	}
+	rows := m.PlanContext.List()
+	out := make([]plannerContextEntry, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, plannerContextEntry{
+			Iteration: r.Iteration,
+			Phase:     r.Phase,
+			Summary:   r.Summary,
+		})
+	}
+	return out
+}
+
 // checkerTaskView is the typed payload the checker_task template
-// renders against. Phase C — minimal shape: mission goal,
-// iteration index, and the handoffs the checker should validate.
+// renders against. Phase C — mission goal, iteration index, and
+// the handoffs the checker should validate. Phase D — PlanContext
+// projection so the checker sees prior-iteration memory summaries
+// without re-reading every handoff body.
 type checkerTaskView struct {
-	Goal      string
-	Iteration int
-	Handoffs  []synthesisHandoffView
+	Goal        string
+	Iteration   int
+	Handoffs    []synthesisHandoffView
+	PlanContext []plannerContextEntry
 }
 
 // buildCheckerTask renders the checker subagent's first message
 // via assets/prompts/mission/checker_task.tmpl. The template
 // teaches the kind=verdict fence shape and includes every handoff
-// produced by the just-completed wave for the checker to inspect.
+// produced by the just-completed wave for the checker to inspect,
+// plus the plan_context journal for cross-iteration awareness.
 func buildCheckerTask(mission extension.SessionState, _ MissionManifest, iteration int) (string, error) {
 	view := checkerTaskView{
-		Goal:      "",
-		Iteration: iteration,
+		Goal:        "",
+		Iteration:   iteration,
+		PlanContext: collectPlanContext(mission),
 	}
 	if m := FromState(mission); m != nil {
 		for _, h := range m.Handoffs.List() {
