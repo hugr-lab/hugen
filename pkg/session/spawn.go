@@ -87,6 +87,13 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	child.spawnSkill = spec.Skill
 	child.spawnRole = spec.Role
 	child.mission = spec.Task
+	// Mission-PDCA phase A — let external extensions (mission ext's
+	// Plan Executor) request a non-default render mode without
+	// reaching into the unexported `asyncSpawnMode` field. Mirrors
+	// the existing in-package writes by tools_subagent_spawn_mission.go.
+	if spec.RenderMode != "" {
+		child.asyncSpawnMode = spec.RenderMode
+	}
 	s.logger.Debug("session: spawn: child constructed",
 		"parent", s.id,
 		"child", child.id,

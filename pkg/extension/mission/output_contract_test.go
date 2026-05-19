@@ -1,0 +1,145 @@
+package mission
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestParseHandoff_Kind(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantOk  bool
+		wantErr string
+		check   func(t *testing.T, h Handoff)
+	}{
+		{
+			name: "handoff JSON inside ```handoff fence",
+			raw: "Some prose first.\n\n```handoff\n" +
+				`{"status":"ok","body":"hello world","memory_summary":"echoed"}` +
+				"\n```\nMore prose after.",
+			wantOk: true,
+			check: func(t *testing.T, h Handoff) {
+				if h.Kind != KindHandoff {
+					t.Errorf("Kind = %q, want handoff", h.Kind)
+				}
+				if h.Status != "ok" {
+					t.Errorf("Status = %q, want ok", h.Status)
+				}
+				if h.MemorySummary != "echoed" {
+					t.Errorf("MemorySummary = %q, want echoed", h.MemorySummary)
+				}
+				if s, _ := h.Body.(string); s != "hello world" {
+					t.Errorf("Body = %v, want hello world", h.Body)
+				}
+			},
+		},
+		{
+			name: "plan kind requires next_wave",
+			raw: "```plan\n" +
+				`{"status":"ok","body":{"rationale":"missing next_wave"}}` +
+				"\n```",
+			wantErr: "next_wave",
+		},
+		{
+			name: "verdict kind requires decision",
+			raw: "```verdict\n" +
+				`{"status":"ok","body":{"issues":["x"]}}` +
+				"\n```",
+			wantErr: "decision",
+		},
+		{
+			name: "verdict happy path",
+			raw: "```verdict\n" +
+				`{"status":"ok","body":{"decision":"continue"}}` +
+				"\n```",
+			wantOk: true,
+			check: func(t *testing.T, h Handoff) {
+				if h.Kind != KindVerdict {
+					t.Errorf("Kind = %q, want verdict", h.Kind)
+				}
+			},
+		},
+		{
+			name: "synthesis happy path",
+			raw: "```synthesis\n" +
+				`{"status":"ok","body":"final answer here"}` +
+				"\n```",
+			wantOk: true,
+			check: func(t *testing.T, h Handoff) {
+				if h.Kind != KindSynthesis {
+					t.Errorf("Kind = %q, want synthesis", h.Kind)
+				}
+			},
+		},
+		{
+			name:    "no fence",
+			raw:     "just prose with no fenced block",
+			wantErr: "no fenced handoff block",
+		},
+		{
+			name:    "empty",
+			raw:     "",
+			wantErr: "empty body",
+		},
+		{
+			name: "status required",
+			raw: "```handoff\n" +
+				`{"body":"missing status"}` +
+				"\n```",
+			wantErr: "status is required",
+		},
+		{
+			name: "non-ok status needs reason",
+			raw: "```handoff\n" +
+				`{"status":"error","body":"oops"}` +
+				"\n```",
+			wantErr: "reason is required",
+		},
+		{
+			name: "json fence with inferred kind",
+			raw: "```json\n" +
+				`{"kind":"handoff","status":"ok","body":"x"}` +
+				"\n```",
+			wantOk: true,
+			check: func(t *testing.T, h Handoff) {
+				if h.Kind != KindHandoff {
+					t.Errorf("inferred Kind = %q, want handoff", h.Kind)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := ParseHandoff(tc.raw)
+			if tc.wantOk {
+				if err != nil {
+					t.Fatalf("ParseHandoff: unexpected error %v", err)
+				}
+				if tc.check != nil {
+					tc.check(t, h)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ParseHandoff: want error containing %q, got nil", tc.wantErr)
+			}
+			if tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("ParseHandoff: error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestOutputContractKindKnown(t *testing.T) {
+	good := []OutputContractKind{KindHandoff, KindPlan, KindVerdict, KindSynthesis}
+	for _, k := range good {
+		if !k.Known() {
+			t.Errorf("Known(%q) = false, want true", k)
+		}
+	}
+	if OutputContractKind("nope").Known() {
+		t.Errorf("Known(nope) = true, want false")
+	}
+}
