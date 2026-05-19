@@ -18,6 +18,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/auth/sources/oidc"
+	missionfixture "github.com/hugr-lab/hugen/pkg/extension/mission/fixture"
 	"github.com/hugr-lab/hugen/pkg/runtime"
 )
 
@@ -101,12 +102,23 @@ func Setup(ctx context.Context, t *testing.T, opts SetupOpts) *Runtime {
 		runDir,
 		filepath.Join(runDir, "state"),
 		filepath.Join(runDir, "state", "skills", "system"),
+		filepath.Join(runDir, "state", "skills", "local"),
 		filepath.Join(runDir, "workspaces"),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatalf("harness.Setup: mkdir %s: %v", d, err)
 		}
+	}
+
+	// Mission-PDCA Phase A — drop the `_mission_v2` fixture skill
+	// into the local tier so the mission_pdca_minimal scenario can
+	// spawn it via session:spawn_mission. The fixture is harmless to
+	// every other scenario: nothing else references the name. Phase
+	// B deletes both the fixture package and this install hook.
+	localSkills := filepath.Join(runDir, "state", "skills", "local")
+	if err := missionfixture.WriteTo(localSkills); err != nil {
+		t.Fatalf("harness.Setup: install mission fixture: %v", err)
 	}
 
 	// Merge: prod config.yaml ← LLM overlay ← topology overlay.
@@ -149,8 +161,7 @@ func Setup(ctx context.Context, t *testing.T, opts SetupOpts) *Runtime {
 		AgentConfigPath: agentCfgPath,
 		StateDir:        filepath.Join(runDir, "state"),
 		Workspace: runtime.WorkspaceConfig{
-			Dir:            filepath.Join(runDir, "workspaces"),
-			CleanupOnClose: false,
+			Dir: filepath.Join(runDir, "workspaces"),
 		},
 		HTTP: runtime.HTTPConfig{
 			Port:    port,
