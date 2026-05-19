@@ -50,14 +50,23 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 	if manifest == nil {
 		return fmt.Errorf("mission: RunMission: skill %q is not a PDCA mission", skill)
 	}
-	if manifest.Plan.ExperimentalInline == nil || len(manifest.Plan.ExperimentalInline.Waves) == 0 {
-		return fmt.Errorf("mission: RunMission: skill %q has no executable plan (Phase A requires plan.experimental_inline)", skill)
+	hasInline := manifest.Plan.ExperimentalInline != nil && len(manifest.Plan.ExperimentalInline.Waves) > 0
+	hasPlanner := manifest.Plan.Role != ""
+	if !hasInline && !hasPlanner {
+		return fmt.Errorf("mission: RunMission: skill %q has no executable plan (need plan.experimental_inline or plan.role)", skill)
 	}
 	spawner, ok := mission.(extension.SessionSpawner)
 	if !ok {
 		return errors.New("mission: RunMission: mission state does not satisfy extension.SessionSpawner")
 	}
 
+	// Dispatch by configured plan shape. The planner-driven loop
+	// wins when both selectors are set — the inline waves are
+	// Phase-A fixtures, the planner is the production path.
+	if hasPlanner {
+		go e.driveMissionPlanner(mission, spawner, *manifest, skill, goal, inputs)
+		return nil
+	}
 	go e.driveMission(mission, spawner, *manifest, skill, goal, inputs)
 	return nil
 }
@@ -69,22 +78,7 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 // completion is published as a mission:wave_complete ExtensionFrame
 // on the mission session for observability / recovery.
 func (e *Extension) driveMission(mission extension.SessionState, spawner extension.SessionSpawner, manifest MissionManifest, missionSkill, goal string, inputs any) {
-	executor := NewExecutor(func(ctx context.Context, parent extension.SessionState, req SpawnRequest) (SpawnResult, error) {
-		child, err := spawner.SpawnChild(ctx, extension.SpawnSpec{
-			Name:       req.Name,
-			Skill:      req.Skill,
-			Role:       req.Role,
-			Task:       req.Task,
-			Inputs:     req.Inputs,
-			RenderMode: req.RenderMode,
-		})
-		if err != nil {
-			return SpawnResult{}, err
-		}
-		first := protocol.NewUserMessage(child.SessionID(), agentParticipant(mission, e.agentID), req.Task)
-		settled := child.Submit(context.Background(), first)
-		return SpawnResult{SessionID: child.SessionID(), Settled: settled}, nil
-	}, e.logger)
+	executor := NewExecutor(e.makeSpawnerCallback(mission, spawner), e.logger)
 
 	ctx := context.Background()
 	_ = inputs
