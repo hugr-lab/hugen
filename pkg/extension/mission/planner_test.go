@@ -70,6 +70,12 @@ type plannerFakeSpawner struct {
 	// state references the parent mission state; the spawner stamps
 	// handoffs into it directly (skipping the OnChildFrame path).
 	state *renderedFakeState
+
+	// autoMarkInquired, when true, calls MissionState.MarkInquired
+	// on every planner spawn id so the approval gate accepts the
+	// fake-emitted handoffs without a real InquiryRequest bubble.
+	// Used by the approval-gate happy-path test.
+	autoMarkInquired bool
 }
 
 func (f *plannerFakeSpawner) spawn(_ context.Context, _ extension.SessionState, req SpawnRequest) (SpawnResult, error) {
@@ -90,13 +96,17 @@ func (f *plannerFakeSpawner) spawn(_ context.Context, _ extension.SessionState, 
 	m.RegisterWorker(id, workerCursor{Name: req.Name, Role: req.Role, Skill: req.Skill})
 
 	var h Handoff
-	if strings.HasPrefix(wave, plannerWaveLabelPrefix) {
+	isPlanner := strings.HasPrefix(wave, plannerWaveLabelPrefix)
+	if isPlanner {
 		f.mu.Lock()
 		f.plannerStep++
 		step := f.plannerStep
 		f.mu.Unlock()
 		if f.onPlannerSpawn != nil {
 			h = f.onPlannerSpawn(step)
+		}
+		if f.autoMarkInquired {
+			m.MarkInquired(id)
 		}
 	} else if f.onWorkerSpawn != nil {
 		h = f.onWorkerSpawn(req)
@@ -341,6 +351,116 @@ func TestPlannerLoop_AbortsOnDecodeFailure(t *testing.T) {
 	}
 	if pe.Iteration != 1 {
 		t.Errorf("PlannerError.Iteration = %d, want 1", pe.Iteration)
+	}
+}
+
+func TestPlannerLoop_ApprovalGate_RejectsMissingInquiry(t *testing.T) {
+	state := newRenderedFakeState("mis-approval-1", productionRenderer(t))
+	installMissionState(&state.fakeState)
+
+	manifest := MissionManifest{
+		Name: "approval-required",
+		Plan: MissionPlanManifest{
+			Role:     "planner",
+			Approval: PlanApproval{Initial: ApprovalInitialRequired, Iteration: ApprovalIterationInitOnly},
+			MaxWaves: 3,
+		},
+	}
+
+	spawner := &plannerFakeSpawner{state: state}
+	spawner.onPlannerSpawn = func(_ int) Handoff {
+		// Valid plan shape but the planner never called
+		// session:inquire — the approval gate must reject it.
+		return Handoff{
+			Kind:   KindPlan,
+			Status: "ok",
+			Body: map[string]any{
+				"next_wave": map[string]any{
+					"label":     "wave-1",
+					"subagents": []any{map[string]any{"name": "w", "role": "echo", "task": "t"}},
+				},
+				"roadmap":   []any{},
+				"rationale": "skip approval",
+			},
+		}
+	}
+
+	ext := newPlannerExtension()
+	executor := NewExecutor(spawner.spawn, ext.logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	aborted, err := ext.runPlannerLoop(ctx, executor, state, manifest, manifest.Name, "x")
+	if err == nil {
+		t.Fatal("runPlannerLoop: want error from missing-approval gate, got nil")
+	}
+	if !aborted {
+		t.Fatal("aborted = false, want true")
+	}
+	if !strings.Contains(err.Error(), "session:inquire") {
+		t.Errorf("err = %v, want substring 'session:inquire'", err)
+	}
+}
+
+func TestPlannerLoop_ApprovalGate_AcceptsWhenInquiryFlagSet(t *testing.T) {
+	state := newRenderedFakeState("mis-approval-2", productionRenderer(t))
+	installMissionState(&state.fakeState)
+
+	manifest := MissionManifest{
+		Name: "approval-required",
+		Plan: MissionPlanManifest{
+			Role:     "planner",
+			Approval: PlanApproval{Initial: ApprovalInitialRequired, Iteration: ApprovalIterationInitOnly},
+			MaxWaves: 2,
+		},
+	}
+
+	spawner := &plannerFakeSpawner{state: state, autoMarkInquired: true}
+	// autoMarkInquired simulates an InquiryRequest bubble landing
+	// before the planner closes: every planner spawn id is flagged
+	// post-spawn so the approval gate sees a positive signal at
+	// post-handoff validation.
+	spawner.onPlannerSpawn = func(iteration int) Handoff {
+		if iteration == 1 {
+			return Handoff{
+				Kind:   KindPlan,
+				Status: "ok",
+				Body: map[string]any{
+					"next_wave": map[string]any{
+						"label":     "wave-1",
+						"subagents": []any{map[string]any{"name": "w", "role": "echo", "task": "t"}},
+					},
+					"roadmap":   []any{},
+					"rationale": "approved",
+				},
+			}
+		}
+		return Handoff{
+			Kind:   KindPlan,
+			Status: "ok",
+			Body: map[string]any{
+				"next_wave": nil,
+				"roadmap":   []any{},
+				"rationale": "done",
+			},
+		}
+	}
+	spawner.onWorkerSpawn = func(_ SpawnRequest) Handoff {
+		return Handoff{Kind: KindHandoff, Status: "ok", Body: "ok"}
+	}
+
+	ext := newPlannerExtension()
+	executor := NewExecutor(spawner.spawn, ext.logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	aborted, err := ext.runPlannerLoop(ctx, executor, state, manifest, manifest.Name, "x")
+	if err != nil {
+		t.Fatalf("runPlannerLoop: %v", err)
+	}
+	if aborted {
+		t.Fatal("aborted = true, want false (inquiry flag was set)")
 	}
 }
 

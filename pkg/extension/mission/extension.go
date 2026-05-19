@@ -122,6 +122,18 @@ func (e *Extension) OnChildFrame(_ context.Context, parent extension.SessionStat
 	if m == nil {
 		return
 	}
+	// InquiryRequest frames from any registered child set the
+	// inquired-flag for that session id — the planner approval
+	// gate reads this post-handoff to verify the planner called
+	// session:inquire when policy required it. The flag stays set
+	// even after the child closes so a late-arriving bubble is
+	// still attributable. Done before the worker/wave gate so
+	// workers that inquire mid-turn count, too — useful for the
+	// future checker/decider approval flows.
+	if _, ok := frame.(*protocol.InquiryRequest); ok {
+		m.MarkInquired(childSessionID)
+		return
+	}
 	cur, known := m.LookupWorker(childSessionID)
 	if !known {
 		return

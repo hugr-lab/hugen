@@ -206,6 +206,20 @@ func (e *Extension) spawnAndAwaitPlanner(ctx context.Context, executor *Executor
 	if h.Kind != KindPlan {
 		return nil, &PlannerError{Iteration: iteration, Reason: fmt.Sprintf("expected kind=plan, got %q", h.Kind)}
 	}
+	// Approval gate (spec § 0.4b step 2). When policy requires
+	// approval for this iteration but the planner never emitted an
+	// InquiryRequest during its turn, reject the handoff. The
+	// inquired-flag is set by OnChildFrame on any
+	// *protocol.InquiryRequest from the planner; absence after the
+	// wave settled is conclusive.
+	if approvalRequiredForIteration(manifest.Plan.Approval, iteration) {
+		if !m.Inquired(h.Subagent.SessionID) {
+			return nil, &PlannerError{
+				Iteration: iteration,
+				Reason:    "planner emitted plan without the required session:inquire approval",
+			}
+		}
+	}
 	plan, decodeErr := DecodePlan(h)
 	if decodeErr != nil {
 		return nil, &PlannerError{Iteration: iteration, Reason: "decode plan", Err: decodeErr}

@@ -46,6 +46,15 @@ type MissionState struct {
 	// active wave. Keyed by child session id, value is the worker's
 	// configured name (the ref's left-hand side).
 	workersInWave map[string]workerCursor
+
+	// inquired tracks per-child session ids that have observed at
+	// least one *protocol.InquiryRequest frame bubble through the
+	// mission's ChildFrameObserver. The planner approval gate (γ)
+	// reads this map post-handoff to verify the planner actually
+	// asked for approval when policy required it. Entries persist
+	// across waves so a late-arriving frame on a closed planner
+	// session is still attributable.
+	inquired map[string]bool
 }
 
 // workerCursor names a spawned worker so ChildFrameObserver can
@@ -63,6 +72,7 @@ func NewMissionState() *MissionState {
 	return &MissionState{
 		Handoffs:      NewHandoffs(),
 		workersInWave: make(map[string]workerCursor),
+		inquired:      make(map[string]bool),
 	}
 }
 
@@ -104,6 +114,36 @@ func (m *MissionState) LookupWorker(sessionID string) (workerCursor, bool) {
 	defer m.mu.Unlock()
 	cur, ok := m.workersInWave[sessionID]
 	return cur, ok
+}
+
+// MarkInquired records that the child at sessionID emitted at
+// least one *protocol.InquiryRequest frame. Idempotent — repeated
+// inquiry frames on the same session collapse to a single bit.
+// Called from [Extension.OnChildFrame] for the planner approval
+// gate.
+func (m *MissionState) MarkInquired(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.inquired == nil {
+		m.inquired = make(map[string]bool)
+	}
+	m.inquired[sessionID] = true
+}
+
+// Inquired reports whether sessionID has been marked via
+// [MarkInquired] at any point in this mission's lifetime. Used by
+// the planner approval gate to verify the planner called
+// session:inquire when policy required it.
+func (m *MissionState) Inquired(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.inquired[sessionID]
 }
 
 // FromState resolves the [*MissionState] handle attached to state,
