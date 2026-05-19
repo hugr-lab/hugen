@@ -9,7 +9,6 @@ allowed-tools:
       - wait_subagents
       - subagent_runs
       - subagent_cancel
-      - notify_subagent
       - inquire
   - provider: mission
     tools:
@@ -71,10 +70,14 @@ Granted directly by this skill:
 - `session:spawn_mission` — delegate a substantive batch /
   analytical request to one mission coordinator. Singular per
   call: one mission per goal, never fan-out directly. Default
-  `wait="async"` — see § Delegating to a mission.
-- `session:notify_subagent` — route a slice of a user follow-up
-  to an in-flight mission by id. Used when the user extends or
-  refines an already-running task.
+  `wait="async"` — see § Delegating to a mission. The runtime
+  drives the mission as a PDCA loop (Plan → Do → Check →
+  Synthesis); you do not spawn workers yourself.
+- `mission:notify` — route a slice of a user follow-up to an
+  in-flight mission by name or session_id. The followup lands
+  in the mission's plan_context journal under
+  `phase: user-followup`; the next planner spawn sees it in
+  `[Plan context]` and replans accordingly.
 - `session:wait_subagents` — block for one or more in-flight
   sub-agents to terminate. Three legitimate cases:
     1. The user explicitly asked you to wait ("don't reply until
@@ -243,7 +246,7 @@ no trailing dash) that you pick from the user's ask (2–4 words).
 The runtime sanitises arbitrary input toward that shape and
 auto-suffixes on collision with a live sibling; the resolved
 name comes back in the response. Use it in subsequent
-addressing calls (`notify_subagent`, `subagent_cancel`,
+addressing calls (`mission:notify`, `subagent_cancel`,
 `subagent_runs`) where it reads more naturally than the
 session_id.
 
@@ -285,18 +288,21 @@ responsive to follow-ups in the meantime.
 ## Follow-up while a mission is running
 
 When the user extends or refines a still-running mission, route
-through `session:notify_subagent`:
+through `mission:notify`:
 
 ```
-session:notify_subagent({
-  subagent_id: "<name OR session_id of the in-flight mission>",
-  content:     "<translated directive>"
+mission:notify({
+  name: "<name OR session_id of the in-flight mission>",
+  text: "<translated directive>"
 })
 ```
 
-`subagent_id` accepts either the name you chose at spawn or the
+`name` accepts either the name you chose at spawn or the
 session_id returned by `spawn_mission`. Names read more
-naturally across turns.
+naturally across turns. The followup lands in the mission's
+plan_context journal under `phase: user-followup`; the next
+planner spawn sees it in `[Plan context]` and replans
+accordingly.
 
 **Translate, don't quote.** The mission was started with its own
 goal; the user's follow-up needs to be reshaped as an instruction
@@ -321,8 +327,8 @@ above; either:
 - Spawn a fresh mission folding the context in ("Continue the
   analysis from mission <id> — the user wants …").
 
-DO NOT call `notify_subagent` against a completed id — it returns
-`not_a_child` and you'll loop trying to recover.
+DO NOT call `mission:notify` against a completed id — it returns
+`not_found` and you'll loop trying to recover.
 
 ## Async completion → format for the user
 
@@ -428,8 +434,15 @@ failure.
 
 ## What this skill does NOT grant
 
-- `session:spawn_subagent` / `session:spawn_wave` — only missions
-  fan out workers. Root delegates singularly via `spawn_mission`.
-- `plan:set` / `plan:clear` / `whiteboard:init` — the mission
-  owns the plan body and opens the whiteboard. Root reads, the
-  mission writes.
+- `session:spawn_subagent` / `session:spawn_wave` — removed under
+  mission-PDCA (design 003). Root delegates singularly via
+  `session:spawn_mission`; the mission's planner role inside the
+  PDCA loop decomposes into workers.
+- `session:parent_context` / `session:notify_subagent` — removed
+  alongside the legacy spawn surface. Mid-mission notify is now
+  `mission:notify`; workers receive their context inline in the
+  first message (no pull-side API).
+- `plan:set` / `plan:clear` / `whiteboard:init` — root keeps
+  `plan:comment` / `plan:show` for cross-turn breadcrumbs and
+  `whiteboard:read` for observability of legacy mission state;
+  PDCA missions do not use the whiteboard at all.

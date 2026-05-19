@@ -25,19 +25,19 @@ func us1WithSession(parent *Session) context.Context {
 // ---------- spawn_mission ----------
 
 // TestCallSpawnMission_Happy verifies the singular spawn variant
-// adapts a goal/inputs payload into a one-entry batch under the
-// hood and returns a single object (not an array) shaped like
-// spawnSubagentResult.
+// returns a spawnMissionResult envelope with a registered child
+// in parent.children. wait="sync" forces the synchronous shape so
+// the test doesn't depend on the root-defaults-to-async rule.
 func TestCallSpawnMission_Happy(t *testing.T) {
 	parent, cleanup := newTestParent(t, withMissionDispatcher("analyst"))
 	defer cleanup()
 
 	out, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"name":"m","goal":"analyse northwind","skill":"analyst"}`))
+		json.RawMessage(`{"name":"m","goal":"analyse northwind","skill":"analyst","wait":"sync"}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
-	var got spawnSubagentResult
+	var got spawnMissionResult
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("unmarshal singular result: %v\noutput=%s", err, out)
 	}
@@ -121,11 +121,11 @@ func TestCallSpawnMission_DispatchByDefault(t *testing.T) {
 	parent.deps.DefaultMissionSkill = "analyst"
 
 	out, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"name":"m","goal":"analyse northwind"}`))
+		json.RawMessage(`{"name":"m","goal":"analyse northwind","wait":"sync"}`))
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
-	var got spawnSubagentResult
+	var got spawnMissionResult
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("unmarshal: %v\noutput=%s", err, out)
 	}
@@ -184,322 +184,19 @@ func TestCallSpawnMission_GoalRequired(t *testing.T) {
 
 // TestCallSpawnWave_BadRequest covers the empty-subagents and
 // invalid-JSON refusals before any spawn happens.
-func TestCallSpawnWave_BadRequest(t *testing.T) {
-	parent, cleanup := newTestParent(t)
-	defer cleanup()
+// ---------- spawn_wave / spawn_subagent tests removed by Phase H ----------
+// The legacy session:spawn_wave / session:spawn_subagent /
+// session:parent_context / session:notify_subagent LLM tools were
+// removed under mission-PDCA Phase H (design 003). Runtime owns
+// mission dispatch via the mission ext; root delegates only via
+// session:spawn_mission. Tests for the deleted handlers are gone
+// with them; spawn coverage now lives under spawn_mission +
+// pkg/extension/mission/* tests.
 
-	out, _ := parent.callSpawnWave(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[]}`))
-	mgr_assertErrorCode(t, out, "bad_request")
-	mgr_assertErrorHasShape(t, out)
-
-	out, _ = parent.callSpawnWave(us1WithSession(parent),
-		json.RawMessage(`{not-json`))
-	mgr_assertErrorCode(t, out, "bad_request")
-	mgr_assertErrorHasShape(t, out)
-
-	parent.childMu.Lock()
-	defer parent.childMu.Unlock()
-	if len(parent.children) != 0 {
-		t.Errorf("parent.children = %d after spawn_wave validation failure, want 0", len(parent.children))
-	}
-}
-
-// mgr_assertErrorHasShape verifies that a bad_request envelope
-// carries the 5.4.c self-correction hint: `got` (the args the
-// caller sent) + `expected_shape` (a template the model can
-// copy). Without these fields weak models drift into multi-minute
-// spawn_wave({}) / spawn_subagent({}) retry loops.
-func mgr_assertErrorHasShape(t *testing.T, out json.RawMessage) {
-	t.Helper()
-	var resp toolErrorResponse
-	if err := json.Unmarshal(out, &resp); err != nil {
-		t.Fatalf("unmarshal: %v out=%s", err, out)
-	}
-	if resp.Error.Got == nil {
-		t.Errorf("error envelope missing `got` hint: %s", out)
-	}
-	if resp.Error.ExpectedShape == nil {
-		t.Errorf("error envelope missing `expected_shape` hint: %s", out)
-	}
-	// Make sure expected_shape walks through the canonical fields the
-	// model needs to fill — fail loud if a future refactor drops them.
-	shape, _ := resp.Error.ExpectedShape.(map[string]any)
-	subs, _ := shape["subagents"].([]any)
-	if len(subs) == 0 {
-		t.Errorf("expected_shape.subagents missing: %s", out)
-		return
-	}
-	first, _ := subs[0].(map[string]any)
-	for _, key := range []string{"name", "task"} {
-		if _, ok := first[key]; !ok {
-			t.Errorf("expected_shape.subagents[0].%s missing: %s", key, out)
-		}
-	}
-}
-
-// TestCallSpawnWave_PropagatesSpawnError verifies the wave tool
-// surfaces a spawn-phase validation refusal as the underlying
-// tool_error envelope (depth_exceeded here) without entering the
-// wait phase.
-func TestCallSpawnWave_PropagatesSpawnError(t *testing.T) {
-	parent, cleanup := newTestParent(t)
-	defer cleanup()
-	parent.deps.MaxDepth = 0
-	parent.depth = 5
-
-	out, err := parent.callSpawnWave(us1WithSession(parent),
-		json.RawMessage(`{"wave_label":"explore","subagents":[{"name":"w","task":"x"}]}`))
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-	mgr_assertErrorCode(t, out, "depth_exceeded")
-}
-
-// ---------- spawn_subagent ----------
-
-// TestCallSpawnSubagent_Happy verifies the simplest path: a single
-// child entry succeeds and the result names the new id at depth 1.
-func TestCallSpawnSubagent_Happy(t *testing.T) {
-	parent, cleanup := newTestParent(t)
-	defer cleanup()
-
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"w","task":"explore"}]}`))
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-
-	var got []spawnSubagentResult
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("unmarshal: %v\noutput=%s", err, out)
-	}
-	if len(got) != 1 {
-		t.Fatalf("len = %d, want 1; out=%s", len(got), out)
-	}
-	if got[0].SessionID == "" || got[0].Depth != 1 {
-		t.Errorf("unexpected entry %+v", got[0])
-	}
-	// Child should be in parent.children — direct lookup, never a
-	// tree walk: each session knows only its own immediate children.
-	parent.childMu.Lock()
-	_, inChildren := parent.children[got[0].SessionID]
-	parent.childMu.Unlock()
-	if !inChildren {
-		t.Errorf("spawned child %q not in parent.children", got[0].SessionID)
-	}
-}
-
-// TestCallSpawnSubagent_DepthExceeded asserts the validation refusal
-// when parent.depth+1 > max_depth. The handler must return a
-// tool_error JSON and NOT spawn anything.
-func TestCallSpawnSubagent_DepthExceeded(t *testing.T) {
-	parent, cleanup := newTestParent(t)
-	defer cleanup()
-	// Force the cap so the next spawn would exceed it.
-	parent.deps.MaxDepth = 0
-	parent.depth = 5
-
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"w","task":"x"}]}`))
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-	mgr_assertErrorCode(t, out, "depth_exceeded")
-	// No child registered.
-	parent.childMu.Lock()
-	defer parent.childMu.Unlock()
-	if len(parent.children) != 0 {
-		t.Errorf("parent.children = %d, want 0 after depth refusal", len(parent.children))
-	}
-}
-
-// TestCallSpawnSubagent_BadRequest covers the empty-task and empty-
-// batch refusals.
-func TestCallSpawnSubagent_BadRequest(t *testing.T) {
-	parent, cleanup := newTestParent(t)
-	defer cleanup()
-
-	out, _ := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[]}`))
-	mgr_assertErrorCode(t, out, "bad_request")
-
-	out, _ = parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"w","task":""}]}`))
-	mgr_assertErrorCode(t, out, "bad_request")
-}
-
-// TestCallSpawnSubagent_BatchFailFast asserts that on the first
-// invalid entry the whole batch fails — earlier entries are not
-// spawned. (Validation runs before any parent.Spawn call.)
-func TestCallSpawnSubagent_BatchFailFast(t *testing.T) {
-	parent, cleanup := newTestParent(t)
-	defer cleanup()
-
-	out, _ := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"w","task":"good"},{"name":"w2","task":""}]}`))
-	mgr_assertErrorCode(t, out, "bad_request")
-
-	parent.childMu.Lock()
-	defer parent.childMu.Unlock()
-	if len(parent.children) != 0 {
-		t.Errorf("parent.children = %d after fail-fast batch, want 0", len(parent.children))
-	}
-}
-
-// stubSpawnHinter is a minimal SubagentSpawnHinter for the
-// per-skill-intent wiring test. Implements the runtime's expected
-// composition: it pretends to advertise one skill ("hugr-data") with
-// one role ("explorer") whose Intent is "cheap".
-type stubSpawnHinter struct {
-	skill, role, intent string
-	calls               int
-}
-
-func (h *stubSpawnHinter) Name() string { return "stub-hinter" }
-
-func (h *stubSpawnHinter) SubagentSpawnHint(_ context.Context, _ extension.SessionState,
-	skill, role string,
-) (extension.SubagentSpawnHint, error) {
-	h.calls++
-	if skill == h.skill && role == h.role {
-		return extension.SubagentSpawnHint{Intent: h.intent}, nil
-	}
-	return extension.SubagentSpawnHint{}, nil
-}
-
-// TestCallSpawnSubagent_RoleIntentOverride asserts that a skill
-// manifest's role.intent surfaces as a per-session default-intent
-// override on the spawned child. Phase-4.1d wiring: skill ext's
-// SubagentSpawnHint → child.SetDefaultIntent.
-func TestCallSpawnSubagent_RoleIntentOverride(t *testing.T) {
-	hinter := &stubSpawnHinter{skill: "hugr-data", role: "explorer", intent: "cheap"}
-	parent, cleanup := newTestParent(t, withTestExtensions(hinter))
-	defer cleanup()
-
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"w","skill":"hugr-data","role":"explorer","task":"t"}]}`))
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-	if hinter.calls == 0 {
-		t.Errorf("SubagentSpawnHint never called — wiring broken")
-	}
-	var got []spawnSubagentResult
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("unmarshal: %v\nout=%s", err, out)
-	}
-	if len(got) != 1 {
-		t.Fatalf("len(got)=%d, want 1; out=%s", len(got), out)
-	}
-	parent.childMu.Lock()
-	child := parent.children[got[0].SessionID]
-	parent.childMu.Unlock()
-	if child == nil {
-		t.Fatalf("child %q missing from parent.children", got[0].SessionID)
-	}
-	if want, got := "cheap", string(child.DefaultIntent()); got != want {
-		t.Errorf("child.DefaultIntent() = %q, want %q", got, want)
-	}
-}
-
-// TestCallSpawnSubagent_TierIntent_AppliesAtSpawn verifies the
-// γ tier-intent default: when deps.TierIntents has an entry for
-// the spawned child's tier, applyChildIntent uses it as the
-// default before per-role overrides. Phase 4.2.2 §11.
-func TestCallSpawnSubagent_TierIntent_AppliesAtSpawn(t *testing.T) {
-	parent, cleanup := newTestParent(t)
-	defer cleanup()
-	parent.deps.TierIntents = map[string]string{
-		"mission": "cheap", // child is depth 1 → tier=mission
-	}
-
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"w","task":"t"}]}`))
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-	var got []spawnSubagentResult
-	_ = json.Unmarshal(out, &got)
-	parent.childMu.Lock()
-	child := parent.children[got[0].SessionID]
-	parent.childMu.Unlock()
-	if child == nil {
-		t.Fatalf("child missing")
-	}
-	if want, got := "cheap", string(child.DefaultIntent()); got != want {
-		t.Errorf("child.DefaultIntent() = %q, want %q (tier-intent default)", got, want)
-	}
-}
-
-// TestCallSpawnSubagent_RoleIntent_OverridesTierIntent verifies
-// the override precedence: per-role intent from a skill manifest
-// wins over the tier-intent default. Phase 4.2.2 §11.
-func TestCallSpawnSubagent_RoleIntent_OverridesTierIntent(t *testing.T) {
-	hinter := &stubSpawnHinter{skill: "hugr-data", role: "explorer", intent: "cheap"}
-	parent, cleanup := newTestParent(t, withTestExtensions(hinter))
-	defer cleanup()
-	parent.deps.TierIntents = map[string]string{
-		"mission": "default", // role's "cheap" must override this
-	}
-
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"w","skill":"hugr-data","role":"explorer","task":"t"}]}`))
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-	var got []spawnSubagentResult
-	_ = json.Unmarshal(out, &got)
-	parent.childMu.Lock()
-	child := parent.children[got[0].SessionID]
-	parent.childMu.Unlock()
-	if want, got := "cheap", string(child.DefaultIntent()); got != want {
-		t.Errorf("child.DefaultIntent() = %q, want %q (role override of tier intent)", got, want)
-	}
-}
-
-// TestCallSpawnSubagent_NoIntent_KeepsParentDefault asserts the
-// default path: when the skill role doesn't declare an intent, the
-// child stays on IntentDefault — no spurious override.
-func TestCallSpawnSubagent_NoIntent_KeepsParentDefault(t *testing.T) {
-	parent, cleanup := newTestParent(t)
-	defer cleanup()
-
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"w","task":"t"}]}`))
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-	var got []spawnSubagentResult
-	_ = json.Unmarshal(out, &got)
-	parent.childMu.Lock()
-	child := parent.children[got[0].SessionID]
-	parent.childMu.Unlock()
-	if child == nil {
-		t.Fatalf("child missing")
-	}
-	if got := string(child.DefaultIntent()); got != "default" {
-		t.Errorf("child.DefaultIntent() = %q, want default", got)
-	}
-}
-
-// TestCallSpawnSubagent_SessionGone verifies the closed-session guard
-// — Post phase-4.1b-pre stage A handlers receive *Session directly so
-// the only "no-caller" failure mode is calling against a session that
-// has already terminated. The dispatcher will not normally route here
-// after close, but the guard keeps the handler honest.
-func TestCallSpawnSubagent_SessionGone(t *testing.T) {
-	parent, cleanup := newTestParent(t)
-	defer cleanup()
-	parent.MarkClosed()
-
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"w","task":"t"}]}`))
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-	mgr_assertErrorCode(t, out, "session_gone")
-}
+// All TestCallSpawnSubagent_* tests removed under mission-PDCA
+// Phase H — the legacy LLM tool is gone. Spawn intent / depth /
+// session-gone coverage now lives under spawn_mission tests below
+// + pkg/extension/mission integration tests.
 
 // ---------- wait_subagents ----------
 
@@ -515,15 +212,14 @@ func TestCallWaitSubagents_Happy_LiveResult(t *testing.T) {
 	defer cleanup()
 
 	// Spawn a real child so the id exists; we'll synthesise a result
-	// for it without waiting for real natural termination.
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"w","task":"t"}]}`))
+	// for it without waiting for real natural termination. Direct
+	// parent.Spawn (Go API) — the legacy spawn_subagent LLM tool is
+	// gone under mission-PDCA Phase H.
+	child, err := parent.Spawn(context.Background(), SpawnSpec{Name: "w", Task: "t"})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	var spawned []spawnSubagentResult
-	_ = json.Unmarshal(out, &spawned)
-	childID := spawned[0].SessionID
+	childID := child.ID()
 	drainOutboxOnce(parent.Outbox()) // subagent_started
 
 	// wait runs in goroutine; its activeToolFeed registration races
@@ -736,93 +432,10 @@ func TestCallSpawnMission_TimeoutRequiresMs(t *testing.T) {
 	mgr_assertErrorCode(t, out, "bad_request")
 }
 
-// TestCallNotifySubagent_Happy verifies the tool emits a
-// SystemMessage with FromSession=parent.id and kind=parent_note,
-// and that the frame settles into the child's inbox.
-func TestCallNotifySubagent_Happy(t *testing.T) {
-	parent, cleanup := newTestParent(t, withTestRunLoop())
-	defer cleanup()
-
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"w","task":"t","role":"explorer"}]}`))
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
-	var spawned []spawnSubagentResult
-	_ = json.Unmarshal(out, &spawned)
-	childID := spawned[0].SessionID
-	drainOutboxOnce(parent.Outbox())
-
-	args, _ := json.Marshal(notifySubagentInput{
-		SubagentID: childID,
-		Content:    "narrow to last 24h only",
-	})
-	out, err = parent.callNotifySubagent(us1WithSession(parent), args)
-	if err != nil {
-		t.Fatalf("notify: %v err=%v out=%s", err, err, out)
-	}
-	var res notifySubagentOutput
-	if err := json.Unmarshal(out, &res); err != nil {
-		t.Fatalf("unmarshal: %v out=%s", err, out)
-	}
-	if !res.Delivered {
-		t.Errorf("delivered=false; want true: %+v", res)
-	}
-	if res.FrameID == "" {
-		t.Errorf("frame_id empty: %+v", res)
-	}
-}
-
-// TestCallNotifySubagent_RejectsNonChild verifies the dispatcher
-// refuses to address an id that is not a direct child of the
-// caller. The error code surfaces "not_a_child" so the model
-// distinguishes it from a session-gone path.
-func TestCallNotifySubagent_RejectsNonChild(t *testing.T) {
-	parent, cleanup := newTestParent(t, withTestRunLoop())
-	defer cleanup()
-
-	args, _ := json.Marshal(notifySubagentInput{
-		SubagentID: "totally-not-a-real-id",
-		Content:    "hi",
-	})
-	out, _ := parent.callNotifySubagent(us1WithSession(parent), args)
-	mgr_assertErrorCode(t, out, "not_a_child")
-}
-
-// TestCallNotifySubagent_UrgentPrefix verifies the urgent flag
-// prepends "(urgent) " to the content. The flag does NOT live on
-// the frame (per spec § 3.4 — urgency is content prefix only).
-func TestCallNotifySubagent_UrgentPrefix(t *testing.T) {
-	parent, cleanup := newTestParent(t, withTestRunLoop())
-	defer cleanup()
-
-	out, _ := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"w","task":"t"}]}`))
-	var spawned []spawnSubagentResult
-	_ = json.Unmarshal(out, &spawned)
-	childID := spawned[0].SessionID
-	drainOutboxOnce(parent.Outbox())
-
-	args, _ := json.Marshal(notifySubagentInput{
-		SubagentID: childID,
-		Content:    "stop",
-		Urgent:     true,
-	})
-	out, err := parent.callNotifySubagent(us1WithSession(parent), args)
-	if err != nil {
-		t.Fatalf("notify: %v out=%s", err, out)
-	}
-	var res notifySubagentOutput
-	_ = json.Unmarshal(out, &res)
-	if !res.Delivered {
-		t.Fatalf("delivered=false")
-	}
-	// The frame is in the child's inbox; we don't drain it here, but
-	// the content is checked by callSpawnSubagent's child machinery
-	// at handle time. The acceptance assertion for urgent prefix
-	// happens through the scenario harness; this test pins the
-	// successful delivery path.
-}
+// TestCallNotifySubagent_* removed under mission-PDCA Phase H —
+// the legacy notify_subagent LLM tool is gone. Mid-mission notify
+// is now exposed at root via mission:notify; the Go API
+// (Session.NotifyChild) stays for runtime-level interrupt delivery.
 
 // TestCallInquire_Approval_HappyPath drives the full session:
 // inquire round-trip at root: emit request, deliver response via
@@ -1002,14 +615,15 @@ func TestCallWaitSubagents_UserFollowUp_Interrupts(t *testing.T) {
 
 	// Spawn a real child so the id exists; the child won't terminate
 	// during this test — the interrupt fires from a different path.
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"w","task":"explore catalog","role":"explorer"}]}`))
+	// Direct parent.Spawn (Go API) — mission-PDCA Phase H removed the
+	// legacy spawn_subagent LLM tool.
+	child, err := parent.Spawn(context.Background(), SpawnSpec{
+		Name: "w", Task: "explore catalog", Role: "explorer",
+	})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	var spawned []spawnSubagentResult
-	_ = json.Unmarshal(out, &spawned)
-	childID := spawned[0].SessionID
+	childID := child.ID()
 	drainOutboxOnce(parent.Outbox()) // subagent_started
 
 	type res struct {
@@ -1344,127 +958,11 @@ func TestCallSubagentCancel_Idempotent(t *testing.T) {
 	}
 }
 
-// ---------- parent_context ----------
-
-// TestCallParentContext_Filtering seeds a parent's events with a mix
-// of types and asserts only user/assistant messages flow through.
-func TestCallParentContext_Filtering(t *testing.T) {
-	testStore := fixture.NewTestStore()
-	parent, cleanup := newTestParent(t, withTestStore(testStore))
-	defer cleanup()
-
-	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
-
-	// Seed parent events: 1 user, 1 final assistant, 1 reasoning, 1
-	// tool_call, 1 non-final assistant chunk.
-	at := time.Now().Add(-time.Hour)
-	mustAppend := func(et string, content string, meta map[string]any) {
-		t.Helper()
-		_ = testStore.AppendEvent(context.Background(), EventRow{
-			ID:        "x",
-			SessionID: parent.ID(),
-			AgentID:   "a1",
-			EventType: et,
-			Author:    "u1",
-			Content:   content,
-			Metadata:  meta,
-			CreatedAt: at,
-		}, "")
-		at = at.Add(time.Second)
-	}
-	mustAppend(string(protocol.KindUserMessage), "user-says", nil)
-	mustAppend(string(protocol.KindAgentMessage), "assistant-final", map[string]any{"final": true, "consolidated": true})
-	mustAppend(string(protocol.KindReasoning), "thinking", nil)
-	mustAppend(string(protocol.KindToolCall), "tool", nil)
-	mustAppend(string(protocol.KindAgentMessage), "assistant-mid", map[string]any{"final": false})
-
-	args, _ := json.Marshal(parentContextInput{Limit: 20})
-	out, err := child.callParentContext(extension.WithSessionState(context.Background(), child), args)
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-	var got parentContextOutput
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	// Expect 2 messages: user-says + assistant-final. Reasoning,
-	// tool_call, non-final assistant filtered out.
-	if len(got.Messages) != 2 {
-		t.Errorf("len = %d, want 2; got=%+v", len(got.Messages), got.Messages)
-	}
-	roles := make(map[string]string)
-	for _, m := range got.Messages {
-		roles[m.Role] = m.Content
-	}
-	if roles["user"] != "user-says" {
-		t.Errorf("user msg = %q, want %q", roles["user"], "user-says")
-	}
-	if roles["assistant"] != "assistant-final" {
-		t.Errorf("assistant msg = %q, want %q", roles["assistant"], "assistant-final")
-	}
-}
-
-// TestCallParentContext_QueryAndTimeWindow combines substring + from
-// filter.
-func TestCallParentContext_QueryAndTimeWindow(t *testing.T) {
-	testStore := fixture.NewTestStore()
-	parent, cleanup := newTestParent(t, withTestStore(testStore))
-	defer cleanup()
-
-	child, err := parent.Spawn(context.Background(), SpawnSpec{Task: "t"})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
-
-	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-	rows := []struct {
-		offset time.Duration
-		text   string
-	}{
-		{0, "old apple message"},
-		{time.Hour, "newer banana note"},
-		{2 * time.Hour, "cherry payload here"},
-	}
-	for _, r := range rows {
-		_ = testStore.AppendEvent(context.Background(), EventRow{
-			ID: "x", SessionID: parent.ID(), AgentID: "a1",
-			EventType: string(protocol.KindUserMessage),
-			Content:   r.text, CreatedAt: base.Add(r.offset),
-		}, "")
-	}
-
-	from := base.Add(30 * time.Minute).Format(time.RFC3339)
-	args, _ := json.Marshal(parentContextInput{
-		Query: "BANANA",
-		From:  from,
-	})
-	out, err := child.callParentContext(extension.WithSessionState(context.Background(), child), args)
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-	var got parentContextOutput
-	_ = json.Unmarshal(out, &got)
-	if len(got.Messages) != 1 || got.Messages[0].Content != "newer banana note" {
-		t.Errorf("filtered messages = %+v, want only 'newer banana note'", got.Messages)
-	}
-}
-
-// TestCallParentContext_NoParentForRoot — root sessions surface
-// no_parent.
-func TestCallParentContext_NoParentForRoot(t *testing.T) {
-	root, cleanup := newTestParent(t)
-	defer cleanup()
-
-	out, err := root.callParentContext(extension.WithSessionState(context.Background(), root),
-		json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-	mgr_assertErrorCode(t, out, "no_parent")
-}
+// TestCallParentContext_* removed under mission-PDCA Phase H —
+// the parent_context LLM tool is gone. Workers now receive a
+// structured [Plan context] / [Resolved depends_on] / [Available
+// handoffs] surface in their first message instead of pulling
+// from the parent's event log at runtime.
 
 // ---------- helpers ----------
 

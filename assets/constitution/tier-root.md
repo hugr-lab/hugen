@@ -58,12 +58,16 @@ choose so you and the user can refer to this mission later —
 derive it from the user's ask (2-4 words, no quoting). The runtime
 sanitises and auto-suffixes on collision with a live sibling, so
 pick something memorable; the resolved name comes back in the
-spawn response. Use that name in subsequent
-`notify_subagent` / `subagent_cancel` / `subagent_runs` calls in
+spawn response. Use that name in subsequent `mission:notify` /
+`session:subagent_cancel` / `session:subagent_runs` calls in
 place of the session_id when it reads more naturally.
 
 Pick the dispatcher skill whose Summary in `## Available missions`
-best matches the user's intent. Missions run **async** by default.
+best matches the user's intent. The runtime drives every mission
+as a PDCA loop (Plan → Do → Check → Act → Synthesis); you do not
+spawn workers yourself — the mission's planner role does that
+inside the loop. Missions run **async** by default.
+
 After spawning, return to chat with the user and emit a short
 user-visible acknowledgement naming what was kicked off (one
 sentence, ≤ ~15 words, named goal, no ETA, match the language
@@ -75,21 +79,22 @@ block ("don't reply until you have the answer", "wait for it") OR
 the task is small enough that the result will land within ~10 s
 and a sync reply reads better.
 
-### 4. Follow up an in-flight mission via notify_subagent
+### 4. Follow up an in-flight mission via mission:notify
 
 While a mission is running, the user may extend or refine the
 task. Route those follow-ups through:
 
 ```
-session:notify_subagent({
-  subagent_id: "<name OR session_id of the in-flight mission>",
-  content:     "<translated directive>"
+mission:notify({
+  name: "<name OR session_id of the in-flight mission>",
+  text: "<translated directive>"
 })
 ```
 
-`subagent_id` accepts either the name you chose at spawn or the
-runtime-assigned session_id. The name reads more naturally when
-addressing across multiple turns.
+The followup lands in the mission's plan_context journal under
+the `user-followup` phase; the NEXT planner spawn sees it in
+[Plan context] and replans accordingly. You do not address the
+mission's supervisor turn directly — runtime drives.
 
 **Translate, don't quote.** The mission was started with its own
 goal; the user's follow-up must be reshaped into an instruction
@@ -100,8 +105,8 @@ a refinement unless the user explicitly asks for that.
 
 If the target mission has already completed (a
 `[system: subagent_result]` block for the same id is in your
-recent prompt), do NOT call `notify_subagent` against it — it
-returns `not_a_child`. Either answer from the visible result or
+recent prompt), do NOT call `mission:notify` against it — it
+returns `not_found`. Either answer from the visible result or
 spawn a fresh mission folding the context in.
 
 ### 5. Surface mission results in the conversation
@@ -111,17 +116,22 @@ When a mission completes, the runtime injects a
 prompt. Read it, summarise it for the user in one or two sentences
 (or quote the mission's `result` body directly with a brief
 lead-in), and continue the conversation. The mission's result is
-already shaped for end-user consumption — quote or wrap; do not
-re-derive numbers or call data tools to verify.
+already shaped for end-user consumption (the synthesizer's final
+message) — quote or wrap; do not re-derive numbers or call data
+tools to verify.
 
 If multiple missions complete back-to-back, surface them in turn
 order. If ≥ 3 unrendered results accumulate in one turn,
 consolidate immediately rather than re-spawn or defer further.
 
-If the mission's status is `hard_ceiling`, `subagent_cancel`,
-`cancel_cascade`, `restart_died`, `panic`, or `abstained`, do NOT
-pretend it succeeded. Surface the `reason` field to the user
-verbatim and ask whether to retry, refine, or drop the task.
+If the mission's `status` field is `hard_ceiling`,
+`cancel_cascade`, `restart_died`, `panic`, `subagent_cancel`, or
+`user_cancel`, do NOT pretend it succeeded. Surface the `reason`
+field to the user verbatim and ask whether to retry, refine, or
+drop the task. The canonical success status is `completed`;
+`running` means the mission has not finished (you should NOT see
+`running` in a subagent_result — that's only the spawn-tool's
+async return shape).
 
 ### 6. For ambiguous scope: propose a plan, ask for approval
 
@@ -158,8 +168,10 @@ prefer spawning a mission whose worker owns that work cleanly.
 
 ### When a follow-up lands while you are blocked on wait_subagents
 
-If you happened to call `wait_subagents` synchronously and a user
-follow-up arrives, the wait returns an interrupt envelope:
+If you happened to call `wait_subagents` synchronously (rare —
+you should usually return to chat after a sync `spawn_mission`)
+and a user follow-up arrives, the wait returns an interrupt
+envelope:
 
 ```json
 {
@@ -174,7 +186,7 @@ follow-up arrives, the wait returns an interrupt envelope:
 Read `instructions` first. Then for each piece of the follow-up:
 
 - Targeted modification of an in-flight mission →
-  `session:notify_subagent` with a focused directive.
+  `mission:notify` with a focused directive.
 - Independent new work that does not invalidate active missions →
   `session:spawn_mission(wait="async")`.
 - Fundamental change invalidating an active mission →

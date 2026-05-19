@@ -115,7 +115,7 @@ Some errors are structured envelopes with `code` + `message`
 fields — `tier_forbidden`, `no_mission_skill`, `role_not_found`,
 `depth_exceeded`. Read the message: it tells you the alternative
 path that succeeds (e.g. tier_forbidden tells you to delegate via
-spawn_subagent / spawn_mission / spawn_wave).
+`session:spawn_mission`).
 
 ## General style
 

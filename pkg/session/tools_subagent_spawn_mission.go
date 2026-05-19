@@ -218,17 +218,15 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 		return waitForMission(ctx, parent, child, in.TimeoutMs)
 	}
 
-	// Sync mode (default + backward compat): return immediately
-	// with the legacy shape. The caller (model) is responsible
-	// for calling wait_subagents separately. Phase 5.1's tighter
-	// "sync = internal wait" semantics are deferred until scenario
-	// tuning in κ can validate the round-trip latency for weak
-	// models; until then the legacy contract is preserved so
-	// existing scenarios are not regressed.
-	return json.Marshal(spawnSubagentResult{
+	// Sync mode: return a running envelope; caller (root) is
+	// expected to follow up with wait_subagents on the same turn
+	// to collect the synth result.
+	return json.Marshal(spawnMissionResult{
 		Name:      child.name,
+		MissionID: child.ID(),
 		SessionID: child.ID(),
 		Depth:     child.depth,
+		Status:    "running",
 	})
 }
 
