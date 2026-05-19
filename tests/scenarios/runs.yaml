@@ -159,6 +159,11 @@ runs:
       # weak-model gate. Approval disabled in the fixture so the
       # scenario stays headless.
       - mission_pdca_planner
+      # Mission-PDCA Phase C/D/E acceptance — full PDCA pipeline
+      # through the `_mission_v4` fixture. Validates planner +
+      # checker (verdict_ready frames) + plan_context journal
+      # carrying memory summaries into iteration 2's planner.
+      - mission_pdca_checker
 
   # Phase 5.2 η — root-as-chat mixed model gate. Root + mission
   # on Gemini Pro 3.1; workers on local gemma4-26b. Same

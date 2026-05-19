@@ -1,0 +1,87 @@
+# mission_pdca_checker — Phase C/D/E acceptance scenario. The
+# full PDCA pipeline end-to-end: planner emits a kind=plan
+# handoff, executor runs the planner-emitted wave, checker emits a
+# kind=verdict handoff, planner re-spawns with [Plan context] +
+# [Recent verdict] and signals plan_complete, synthesizer folds
+# the result.
+#
+# Fixture skill is `_mission_v4` (installed by the harness in
+# Setup; see pkg/extension/mission/fixture/checker.go).
+#
+# What this scenario validates end-to-end:
+#
+#   1. Root spawns `_mission_v4` via session:spawn_mission.
+#   2. iteration_start frames emitted for each iteration.
+#   3. wave_complete frames for `_plan-N`, the planner-emitted
+#      wave, `_check-N`, and `_synthesis`.
+#   4. verdict_ready frames carry the checker's decision.
+#   5. Root sees a subagent_result for the mission with non-empty
+#      result text (the synthesizer's body).
+#
+# Approval is disabled in the fixture. The checker is allowed to
+# emit either `continue` (loop runs another iteration) or `finish`
+# (loop exits cleanly) on iteration 1; either path lands the test.
+# 8-minute budget covers boot + 2 iterations × (planner + worker
+# + checker) + synthesis on the slowest weak-model topology.
+name: mission_pdca_checker
+requires: []
+
+steps:
+  - say: |
+      Run mission `_mission_v4` with goal "echo hello world".
+      Use session:spawn_mission with skill="_mission_v4".
+    budget: 600s
+    wait_for_subagents: 480s
+
+    queries:
+      - name: root_tool_calls
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      - name: mission_row
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # All extension_frame events on the mission session —
+      # iteration_start, wave_complete, verdict_ready.
+      - name: mission_pdca_frames
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id
+                events(
+                  filter: {event_type: {eq: "extension_frame"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq event_type metadata }
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      - name: root_subagent_results
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "subagent_result"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq metadata content }
+            }}}
+          }
+        vars: { sid: "$sid" }

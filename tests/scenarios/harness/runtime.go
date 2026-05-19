@@ -125,6 +125,9 @@ func Setup(ctx context.Context, t *testing.T, opts SetupOpts) *Runtime {
 	if err := missionfixture.WritePlannerTo(localSkills); err != nil {
 		t.Fatalf("harness.Setup: install mission fixture v3: %v", err)
 	}
+	if err := missionfixture.WriteCheckerTo(localSkills); err != nil {
+		t.Fatalf("harness.Setup: install mission fixture v4: %v", err)
+	}
 
 	// Merge: prod config.yaml ← LLM overlay ← topology overlay.
 	// Output written into runDir so the run's exact agent-config is
