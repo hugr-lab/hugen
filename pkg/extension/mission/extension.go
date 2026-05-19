@@ -37,14 +37,18 @@ import (
 type Extension struct {
 	agentID string
 	logger  *slog.Logger
+	catalog Catalog
 }
 
 // Config carries the agent-id stamp used on emitted extension
-// frames + a structured logger. Optional fields default to
-// reasonable values.
+// frames + a structured logger + the mission catalog mission ext
+// reads to validate spawn_mission's `skill` arg. Optional fields
+// default to reasonable values; Catalog defaults to an empty
+// static catalogue (every skill not mission-eligible).
 type Config struct {
 	AgentID string
 	Logger  *slog.Logger
+	Catalog Catalog
 }
 
 // NewExtension constructs the mission ext.
@@ -53,9 +57,14 @@ func NewExtension(cfg Config) *Extension {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	catalog := cfg.Catalog
+	if catalog == nil {
+		catalog = NewStaticCatalog()
+	}
 	return &Extension{
 		agentID: cfg.AgentID,
 		logger:  logger,
+		catalog: catalog,
 	}
 }
 
@@ -67,6 +76,9 @@ var (
 	_ extension.StateInitializer   = (*Extension)(nil)
 	_ extension.ChildFrameObserver = (*Extension)(nil)
 	_ extension.StatusReporter     = (*Extension)(nil)
+	_ extension.MissionDispatcher  = (*Extension)(nil)
+	_ extension.MissionAutoRunner  = (*Extension)(nil)
+	_ extension.Advertiser         = (*Extension)(nil)
 	_ tool.ToolProvider            = (*Extension)(nil)
 )
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -153,5 +154,29 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	// out-of-turn callers (test fixtures that Spawn directly
 	// without driving a UserMessage). Guard drops the duplicate.
 	s.markStatus(ctx, protocol.SessionStatusActive, "spawn")
+	return child, nil
+}
+
+// SpawnChild implements [extension.SessionSpawner]. The capability
+// lets external extensions (mission ext's Plan Executor) open a
+// child session through a stable interface in pkg/extension —
+// pkg/session never imports pkg/extension/mission so the spawner
+// crosses the boundary structurally. Body is a thin translation
+// to the in-package SpawnSpec; semantics are identical.
+//
+// Returning extension.SessionState (not *Session) keeps the
+// public API in pkg/extension surface-clean.
+func (s *Session) SpawnChild(ctx context.Context, spec extension.SpawnSpec) (extension.SessionState, error) {
+	child, err := s.Spawn(ctx, SpawnSpec{
+		Name:       spec.Name,
+		Skill:      spec.Skill,
+		Role:       spec.Role,
+		Task:       spec.Task,
+		Inputs:     spec.Inputs,
+		RenderMode: spec.RenderMode,
+	})
+	if err != nil {
+		return nil, err
+	}
 	return child, nil
 }

@@ -231,67 +231,12 @@ func TestGeneration_BumpsOnLoadUnload(t *testing.T) {
 	}
 }
 
-// TestAdvertiseSystemPrompt_AvailableMissions_RootOnly verifies the
-// "## Available missions" block appears in root-tier sessions only
-// — mission/worker tier never see the dispatch catalogue because
-// they cannot call session:spawn_mission. Phase 4.2.2 §6.
-func TestAdvertiseSystemPrompt_AvailableMissions_RootOnly(t *testing.T) {
-	ctx := context.Background()
-	missionSkill := `---
-name: analyst
-description: data analysis skill.
-metadata:
-  hugen:
-    tier_compatibility: [mission]
-    mission:
-      enabled: true
-      summary: Data analysis, queries, reports.
----
-body
-`
-	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
-		"analyst": []byte(missionSkill),
-	}})
-	mgr := skillpkg.NewSkillManager(store, nil)
-	ext := NewExtension(mgr, nil, "a1")
-
-	// root tier: block must render.
-	rootState := fixture.NewTestSessionState("ses-root").WithDepth(0)
-	if err := ext.InitState(ctx, rootState); err != nil {
-		t.Fatalf("InitState root: %v", err)
-	}
-	rootOut := ext.AdvertiseSystemPrompt(ctx, rootState)
-	if !strings.Contains(rootOut, "## Available missions") {
-		t.Errorf("root prompt missing Available missions heading: %s", rootOut)
-	}
-	if !strings.Contains(rootOut, "`analyst`") {
-		t.Errorf("root prompt missing analyst bullet: %s", rootOut)
-	}
-	if !strings.Contains(rootOut, "Data analysis") {
-		t.Errorf("root prompt missing analyst summary: %s", rootOut)
-	}
-
-	// mission tier: block must NOT appear (mission cannot spawn
-	// another mission; the catalogue is dead weight there).
-	missState := fixture.NewTestSessionState("ses-mission").WithDepth(1)
-	if err := ext.InitState(ctx, missState); err != nil {
-		t.Fatalf("InitState mission: %v", err)
-	}
-	missOut := ext.AdvertiseSystemPrompt(ctx, missState)
-	if strings.Contains(missOut, "## Available missions") {
-		t.Errorf("mission prompt leaked Available missions: %s", missOut)
-	}
-
-	// worker tier: also no.
-	wkState := fixture.NewTestSessionState("ses-worker").WithDepth(2)
-	if err := ext.InitState(ctx, wkState); err != nil {
-		t.Fatalf("InitState worker: %v", err)
-	}
-	wkOut := ext.AdvertiseSystemPrompt(ctx, wkState)
-	if strings.Contains(wkOut, "## Available missions") {
-		t.Errorf("worker prompt leaked Available missions: %s", wkOut)
-	}
-}
+// TestAdvertiseSystemPrompt_AvailableMissions_MovedToMissionExt
+// — placeholder for the deleted coverage: the "## Available
+// missions" block is now owned by pkg/extension/mission's
+// Advertiser, not skill ext. The new path is exercised in
+// pkg/extension/mission/dispatcher_test.go. Mission-PDCA
+// (design 003) — no fallback.
 
 // TestAdvertiseSystemPrompt_NotepadTagsBlockA verifies the Block
 // A section ("## Notepad — recommended tags") appears when a

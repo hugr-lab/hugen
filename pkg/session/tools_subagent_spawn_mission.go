@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
-	wbext "github.com/hugr-lab/hugen/pkg/extension/whiteboard"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -149,33 +148,10 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 		"resolved_skill", skillName,
 		"goal_len", len(in.Goal))
 
-	// Resolve on_start block — produces rendered plan body /
-	// whiteboard flag / first-message override.
-	block := resolveMissionStartBlock(ctx, parent, skillName, in.Goal, in.Inputs)
-	if block != nil {
-		parent.logger.Debug("session: spawn_mission: on_start resolved",
-			"parent", parent.id,
-			"skill", skillName,
-			"plan_text_len", len(block.PlanText),
-			"plan_current_step", block.PlanCurrentStep,
-			"whiteboard_init", block.WhiteboardInit,
-			"first_message_override_len", len(block.FirstMessageOverride))
-	} else {
-		parent.logger.Debug("session: spawn_mission: no on_start block",
-			"parent", parent.id, "skill", skillName)
-	}
-
-	// Effective task: override from on_start wins; otherwise the
-	// caller-supplied goal.
-	task := in.Goal
-	if block != nil && block.FirstMessageOverride != "" {
-		task = block.FirstMessageOverride
-	}
-
 	// Per-entry validation reuses spawn_subagent's helper machinery
 	// (depth, skill/role describe). Mirroring the batch loop ensures
 	// the LLM sees the same envelope shape from both tools.
-	if rawErr := validateSpawnEntry(ctx, parent, skillName, in.Role, task); rawErr != nil {
+	if rawErr := validateSpawnEntry(ctx, parent, skillName, in.Role, in.Goal); rawErr != nil {
 		return rawErr, nil
 	}
 
@@ -183,7 +159,7 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 		Name:   in.Name,
 		Skill:  skillName,
 		Role:   in.Role,
-		Task:   task,
+		Task:   in.Goal,
 		Inputs: in.Inputs,
 	}
 	child, err := parent.Spawn(ctx, spec)
@@ -191,22 +167,10 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 		return toolErr("io", fmt.Sprintf("spawn_mission: spawn: %v", err))
 	}
 
-	// on_mission_start writes (plan + whiteboard) land on the
-	// child's state AFTER Spawn (child goroutine running, idle
-	// on inbox) and BEFORE Submit. The child's first turn picks
-	// them up via state replay; emit ordering is preserved per
-	// session via the internal event-log lock.
-	if block != nil {
-		applyMissionStartWrites(ctx, parent, child, block)
-	}
-
 	// Tier-default + per-role intent override on the spawned mission.
 	parent.applyChildIntent(ctx, child, skillName, in.Role)
 	// Per-role spawn appliers (autoload_skills, …) on the new
-	// session BEFORE the task UserMessage. Missions usually
-	// don't declare autoload (the dispatching skill is itself
-	// the mission's surface), but the hook is symmetric so a
-	// mission role CAN opt in if needed.
+	// session BEFORE the auto-runner fires.
 	parent.applyChildSpawnAppliers(ctx, child, skillName, in.Role)
 
 	// Tag the child's terminal SubagentResult with the projection
@@ -222,21 +186,17 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 		child.asyncSpawnMode = protocol.SubagentRenderAsyncNotify
 	}
 
-	// Deliver the first user message — the effective task (override
-	// or original goal), with the spawn-time inputs prepended as a
-	// labelled JSON block when present (see composeChildFirstMessage
-	// in tools_provider.go for the contract / why). Same pre/post
-	// IsClosed bracketing as callSpawnSubagent so a child that died
-	// mid-spawn is logged rather than silently dropped.
-	first := protocol.NewUserMessage(child.ID(), parent.agent.Participant(),
-		composeChildFirstMessage(task, in.Inputs,
-			wbext.FormatForHandoff(parent, 0)))
-	if !child.IsClosed() {
-		<-child.Submit(ctx, first)
-	}
-	if child.IsClosed() {
-		parent.logger.Warn("session: spawn_mission: child rejected initial task",
-			"parent", parent.id, "child", child.ID())
+	// Hand the mission off to the MissionAutoRunner extension. The
+	// auto-runner (mission ext) owns the mission's lifecycle from
+	// here: spawns workers via SessionSpawner, collects handoffs,
+	// terminates the mission when synthesis completes. Mission-PDCA
+	// (design 003) — no fallback to UserMessage-driven supervisor
+	// LLM; the auto-runner IS the supervisor.
+	if err := dispatchMissionAutoRunner(ctx, parent, child, skillName, in.Goal, in.Inputs); err != nil {
+		parent.logger.Warn("session: spawn_mission: auto-runner kickoff failed",
+			"parent", parent.id, "child", child.ID(),
+			"skill", skillName, "err", err)
+		return toolErr("mission_kickoff_failed", err.Error())
 	}
 
 	switch wait {
@@ -396,86 +356,34 @@ func validateSpawnEntry(ctx context.Context, parent *Session, skill, role, task 
 	return nil
 }
 
-// resolveMissionStartBlock walks deps.Extensions for the first
-// MissionStartLookup and asks it to render the named skill's
-// on_start. Returns nil when the skill has no on_start, no
-// lookup is registered, or a lookup errored (logged + skipped).
-func resolveMissionStartBlock(ctx context.Context, parent *Session, skill, goal string, inputs any) *extension.MissionStartBlock {
-	if skill == "" || parent.deps == nil {
+// dispatchMissionAutoRunner walks deps.Extensions for the first
+// MissionAutoRunner and hands the freshly-spawned mission session
+// to it. The auto-runner is the SINGLE entry point through which
+// a mission session is driven — no UserMessage-based supervisor
+// fallback exists. Mission-PDCA (design 003).
+//
+// Returns nil when the runner accepted the kickoff, or when no
+// runner is registered (config error logged separately). Any error
+// surfaces as a `mission_kickoff_failed` envelope to the caller.
+func dispatchMissionAutoRunner(ctx context.Context, parent, child *Session, skill, goal string, inputs any) error {
+	if parent.deps == nil {
+		parent.logger.Warn("session: spawn_mission: no deps; auto-runner not invoked",
+			"parent", parent.id, "child", child.id)
 		return nil
 	}
 	for _, ext := range parent.deps.Extensions {
-		lookup, ok := ext.(extension.MissionStartLookup)
+		runner, ok := ext.(extension.MissionAutoRunner)
 		if !ok {
 			continue
 		}
-		b, err := lookup.ResolveMissionStart(ctx, skill, goal, inputs)
-		if err != nil {
-			parent.logger.Warn("session: spawn_mission: ResolveMissionStart failed",
-				"parent", parent.id, "skill", skill, "err", err)
-			continue
+		if err := runner.RunMission(ctx, child, skill, goal, inputs); err != nil {
+			return fmt.Errorf("auto-runner %q: %w", ext.Name(), err)
 		}
-		if b != nil {
-			return b
-		}
+		return nil
 	}
+	parent.logger.Warn("session: spawn_mission: no MissionAutoRunner registered; mission session will idle",
+		"parent", parent.id, "child", child.id, "skill", skill)
 	return nil
-}
-
-// applyMissionStartWrites fires the plan + whiteboard system-
-// principal write paths on the freshly-spawned mission's state
-// per the resolved block. Errors are logged and swallowed — a
-// misconfigured on_start template must not block the spawn.
-func applyMissionStartWrites(ctx context.Context, parent *Session, child *Session, block *extension.MissionStartBlock) {
-	if block == nil {
-		return
-	}
-	if block.PlanText != "" {
-		var ran bool
-		for _, ext := range parent.deps.Extensions {
-			writer, ok := ext.(extension.PlanSystemWriter)
-			if !ok {
-				continue
-			}
-			ran = true
-			if err := writer.SystemSet(ctx, child, block.PlanText, block.PlanCurrentStep); err != nil {
-				parent.logger.Warn("session: spawn_mission: plan.SystemSet failed",
-					"parent", parent.id, "child", child.id, "err", err)
-			} else {
-				parent.logger.Debug("session: spawn_mission: plan.SystemSet applied",
-					"parent", parent.id, "child", child.id,
-					"plan_text_len", len(block.PlanText),
-					"current_step", block.PlanCurrentStep)
-			}
-			break
-		}
-		if !ran {
-			parent.logger.Warn("session: spawn_mission: no PlanSystemWriter registered; plan body discarded",
-				"parent", parent.id, "child", child.id)
-		}
-	}
-	if block.WhiteboardInit {
-		var ran bool
-		for _, ext := range parent.deps.Extensions {
-			writer, ok := ext.(extension.WhiteboardSystemWriter)
-			if !ok {
-				continue
-			}
-			ran = true
-			if err := writer.SystemInit(ctx, child); err != nil {
-				parent.logger.Warn("session: spawn_mission: whiteboard.SystemInit failed",
-					"parent", parent.id, "child", child.id, "err", err)
-			} else {
-				parent.logger.Debug("session: spawn_mission: whiteboard.SystemInit applied",
-					"parent", parent.id, "child", child.id)
-			}
-			break
-		}
-		if !ran {
-			parent.logger.Warn("session: spawn_mission: no WhiteboardSystemWriter registered; init skipped",
-				"parent", parent.id, "child", child.id)
-		}
-	}
 }
 
 // missionValidationError carries the structured tool_error envelope

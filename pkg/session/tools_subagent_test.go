@@ -171,54 +171,14 @@ func TestCallSpawnMission_GoalRequired(t *testing.T) {
 	}
 }
 
-// TestCallSpawnMission_OnStartHook_AppliesScaffolding verifies the
-// γ on_mission_start hook fires plan.SystemSet + whiteboard.SystemInit
-// between Spawn and Submit, AND that a FirstMessageOverride in the
-// resolved block replaces the bare goal as the child's first user
-// message. Phase 4.2.2 §7.
-func TestCallSpawnMission_OnStartHook_AppliesScaffolding(t *testing.T) {
-	block := &extension.MissionStartBlock{
-		PlanText:             "# Analyse northwind\n1. Explore\n2. Synthesize",
-		PlanCurrentStep:      "Explore",
-		WhiteboardInit:       true,
-		FirstMessageOverride: "User goal: analyse northwind. Start with wave 1.",
-	}
-	planStub := &stubPlanWriter{}
-	wbStub := &stubWhiteboardWriter{}
-	parent, cleanup := newTestParent(t,
-		withMissionDispatcher("analyst"),
-		withMissionStartLookup("analyst", block),
-		withPlanSystemWriter(planStub),
-		withWhiteboardSystemWriter(wbStub),
-	)
-	defer cleanup()
-
-	out, err := parent.callSpawnMission(us1WithSession(parent),
-		json.RawMessage(`{"name":"m","goal":"analyse northwind","skill":"analyst"}`))
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-	var got spawnSubagentResult
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("unmarshal: %v\noutput=%s", err, out)
-	}
-	if got.SessionID == "" {
-		t.Fatalf("no child spawned: %s", out)
-	}
-
-	if len(planStub.calls) != 1 {
-		t.Fatalf("plan.SystemSet calls = %d, want 1", len(planStub.calls))
-	}
-	if planStub.calls[0].Text != block.PlanText {
-		t.Errorf("plan body = %q, want %q", planStub.calls[0].Text, block.PlanText)
-	}
-	if planStub.calls[0].CurrentStep != "Explore" {
-		t.Errorf("plan current_step = %q, want Explore", planStub.calls[0].CurrentStep)
-	}
-	if wbStub.calls != 1 {
-		t.Errorf("whiteboard.SystemInit calls = %d, want 1", wbStub.calls)
-	}
-}
+// Mission-PDCA (design 003): the on_mission_start hook
+// (plan.SystemSet + whiteboard.SystemInit + FirstMessageOverride)
+// has been removed. Missions are driven by mission ext's
+// MissionAutoRunner — no plan/whiteboard pre-writes, no
+// UserMessage-based supervisor. The replacement coverage lives
+// in pkg/extension/mission's auto_runner tests +
+// pkg/session/integration_mission_pdca_test.go (end-to-end via
+// real Executor).
 
 // ---------- spawn_wave ----------
 

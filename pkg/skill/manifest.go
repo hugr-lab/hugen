@@ -487,6 +487,65 @@ type MissionBlock struct {
 	// mission-tier session itself (and as fallback for workers
 	// whose role doesn't override).
 	OnClose MissionOnClose `json:"on_close,omitempty" yaml:"on_close,omitempty"`
+
+	// Plan declares the mission's planning configuration —
+	// mission-PDCA (design 003) shape. When present, the mission ext
+	// treats this skill as a PDCA mission. v1 supports the
+	// `experimental_inline` Phase-A escape hatch; v2 will add
+	// `role: planner` for LLM-driven planning. Phase A — only
+	// ExperimentalInline is recognised; Plan absent means "not a
+	// PDCA mission".
+	Plan MissionPlanBlock `json:"plan,omitempty" yaml:"plan,omitempty"`
+
+	// Synthesis declares the role that produces the mission's
+	// final answer after the last wave. Phase A — minimal shape
+	// (role name only); Phase B may add inline templates.
+	Synthesis MissionSynthesisBlock `json:"synthesis,omitempty" yaml:"synthesis,omitempty"`
+}
+
+// MissionPlanBlock is the mission-PDCA `plan:` section. Phase A
+// shape — ExperimentalInline only. Phase B introduces Role for
+// LLM-driven planning + Approval policy + MaxWaves cap.
+type MissionPlanBlock struct {
+	// ExperimentalInline is the Phase-A-only escape hatch: the
+	// skill author hardcodes the waves directly in the manifest,
+	// bypassing the planner LLM. Removed at Phase B end once the
+	// planner role lands. Nil/empty when not used.
+	ExperimentalInline *MissionPlanInline `json:"experimental_inline,omitempty" yaml:"experimental_inline,omitempty"`
+}
+
+// MissionPlanInline carries a fixed wave sequence for Phase-A
+// scenarios. Real PDCA missions emit waves dynamically through a
+// planner role; this struct exists so the executor's primitives
+// can be exercised end-to-end without an LLM in the loop.
+type MissionPlanInline struct {
+	Waves []MissionPlanWave `json:"waves,omitempty" yaml:"waves,omitempty"`
+}
+
+// MissionPlanWave is one parallel batch of subagent spawns inside
+// an inline plan. Mirrors the in-flight Wave AST consumed by Plan
+// Executor (pkg/extension/mission.Wave).
+type MissionPlanWave struct {
+	Label     string                `json:"label" yaml:"label"`
+	Subagents []MissionPlanSubagent `json:"subagents,omitempty" yaml:"subagents,omitempty"`
+}
+
+// MissionPlanSubagent declares one worker within a wave.
+type MissionPlanSubagent struct {
+	Name      string   `json:"name" yaml:"name"`
+	Skill     string   `json:"skill,omitempty" yaml:"skill,omitempty"`
+	Role      string   `json:"role,omitempty" yaml:"role,omitempty"`
+	Task      string   `json:"task,omitempty" yaml:"task,omitempty"`
+	Inputs    any      `json:"inputs,omitempty" yaml:"inputs,omitempty"`
+	DependsOn []string `json:"depends_on,omitempty" yaml:"depends_on,omitempty"`
+}
+
+// MissionSynthesisBlock names the role that produces the
+// mission's final answer. Phase A — role name only; absent
+// SynthesisBlock means "no synthesis step" (executor closes the
+// mission immediately after the last wave).
+type MissionSynthesisBlock struct {
+	Role string `json:"role,omitempty" yaml:"role,omitempty"`
 }
 
 // MissionOnStart describes the per-skill boot sequence the runtime
