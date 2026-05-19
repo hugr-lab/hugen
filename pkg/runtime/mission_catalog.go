@@ -69,17 +69,31 @@ func (c *skillManagerMissionCatalog) ListMissions(ctx context.Context) ([]missio
 }
 
 // isPdcaMission returns true when the skill carries a mission.plan
-// section recognised by mission ext's Phase-A shape. Phase B
-// extends this with `plan.role: planner` (LLM-driven planning).
+// section recognised by mission ext. Phase A — inline waves; Phase
+// B — `plan.role` (LLM planner). Either is sufficient; the runtime
+// dispatch path picks the active mode at run time.
 func isPdcaMission(m skillpkg.Manifest) bool {
-	inline := m.Hugen.Mission.Plan.ExperimentalInline
-	return inline != nil && len(inline.Waves) > 0
+	plan := m.Hugen.Mission.Plan
+	if plan.ExperimentalInline != nil && len(plan.ExperimentalInline.Waves) > 0 {
+		return true
+	}
+	if plan.Role != "" {
+		return true
+	}
+	return false
 }
 
 // projectMissionManifest converts a skill.Manifest's mission
 // section into mission ext's typed shape. Returns nil when the
 // skill is not a PDCA mission so the caller short-circuits
 // without filling a partial struct.
+//
+// Approval defaults follow spec § Phase B (Initial=required,
+// Iteration=initial-only); MaxWaves defaults to
+// missionext.DefaultMaxWaves when the manifest leaves it zero.
+// Both inline AND role-driven manifests carry these defaults so a
+// future v2 that lets inline plans request approval doesn't have
+// to special-case projection.
 func projectMissionManifest(m skillpkg.Manifest) *missionext.MissionManifest {
 	if !isPdcaMission(m) {
 		return nil
@@ -101,6 +115,18 @@ func projectMissionManifest(m skillpkg.Manifest) *missionext.MissionManifest {
 			})
 		}
 		out.Plan.ExperimentalInline = &missionext.InlinePlan{Waves: waves}
+	}
+	out.Plan.Role = mb.Plan.Role
+	out.Plan.Approval = missionext.NormalizePlanApproval(missionext.PlanApproval{
+		Initial:   mb.Plan.Approval.Initial,
+		Iteration: mb.Plan.Approval.Iteration,
+	})
+	out.Plan.MaxWaves = mb.Plan.MaxWaves
+	if out.Plan.MaxWaves <= 0 {
+		out.Plan.MaxWaves = missionext.DefaultMaxWaves
+	}
+	if out.Plan.MaxWaves > missionext.MaxMaxWaves {
+		out.Plan.MaxWaves = missionext.MaxMaxWaves
 	}
 	if mb.Synthesis.Role != "" {
 		out.Synthesis = missionext.SynthesisManifest{Role: mb.Synthesis.Role}

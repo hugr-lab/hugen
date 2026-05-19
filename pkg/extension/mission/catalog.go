@@ -56,12 +56,71 @@ type MissionManifest struct {
 }
 
 // MissionPlanManifest is the typed plan section of a PDCA mission.
-// In Phase A only the inline shape is supported.
+// Either ExperimentalInline (Phase A) or Role (Phase B) is non-zero
+// for a mission-eligible skill; the runtime picks the dispatch
+// path off whichever field is populated. The two shapes never
+// co-exist on a single manifest — the runtime catalog projection
+// rejects ambiguous manifests at load.
 type MissionPlanManifest struct {
 	// ExperimentalInline is the Phase-A escape hatch: the skill
 	// author lists waves directly. Nil when the manifest declares
-	// a planner role instead (Phase B).
+	// a planner role instead. Removed at Phase H.
 	ExperimentalInline *InlinePlan
+
+	// Role names the planner sub-agent role from the skill's
+	// `sub_agents` block. Empty when the manifest uses the inline
+	// path. Phase B.
+	Role string
+
+	// Approval is the typed approval policy for planner spawns.
+	// Defaults applied at projection time so consumers can read
+	// the policy without re-normalising.
+	Approval PlanApproval
+
+	// MaxWaves caps how many planner-driven iterations run before
+	// the runtime forces synthesis. Zero leaves the consumer to
+	// apply its own default; the runtime projection fills the
+	// canonical default (10).
+	MaxWaves int
+}
+
+// PlanApproval is the typed projection of MissionPlanApproval
+// (skill manifest). Initial / Iteration are normalised against
+// the v1 enums at projection time — consumers can rely on these
+// strings being one of the canonical values.
+type PlanApproval struct {
+	// Initial — "required" | "skip". Default "required".
+	Initial string
+	// Iteration — "always" | "never" | "initial-only". Default
+	// "initial-only".
+	Iteration string
+}
+
+// Canonical approval values. Constants kept narrow — the v1 enum
+// surface is tight per spec § 0.4 / Phase B; Phase I broadens it.
+const (
+	ApprovalInitialRequired    = "required"
+	ApprovalInitialSkip        = "skip"
+	ApprovalIterationAlways    = "always"
+	ApprovalIterationNever     = "never"
+	ApprovalIterationInitOnly  = "initial-only"
+	DefaultMaxWaves            = 10
+	MaxMaxWaves                = 50
+)
+
+// NormalizePlanApproval fills empty fields with their spec
+// defaults. Unknown values pass through unchanged so the executor
+// can fail-loud at first use — the runtime projection rejects
+// unknown values up front; this helper is a safety net for
+// in-memory test fixtures that bypass projection.
+func NormalizePlanApproval(p PlanApproval) PlanApproval {
+	if p.Initial == "" {
+		p.Initial = ApprovalInitialRequired
+	}
+	if p.Iteration == "" {
+		p.Iteration = ApprovalIterationInitOnly
+	}
+	return p
 }
 
 // InlinePlan carries the fixed-wave sequence for a Phase-A

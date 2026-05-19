@@ -503,15 +503,64 @@ type MissionBlock struct {
 	Synthesis MissionSynthesisBlock `json:"synthesis,omitempty" yaml:"synthesis,omitempty"`
 }
 
-// MissionPlanBlock is the mission-PDCA `plan:` section. Phase A
-// shape — ExperimentalInline only. Phase B introduces Role for
-// LLM-driven planning + Approval policy + MaxWaves cap.
+// MissionPlanBlock is the mission-PDCA `plan:` section. Phase B
+// adds `Role` (LLM-driven planner) + `Approval` policy + `MaxWaves`
+// cap. `ExperimentalInline` stays as the Phase-A escape hatch
+// (deleted at Phase H) so the new and old worlds coexist behind
+// the same manifest schema during migration.
+//
+// A skill is a PDCA mission when either ExperimentalInline is
+// populated OR Role is non-empty. The mission ext picks the
+// dispatch path off the first non-empty selector.
 type MissionPlanBlock struct {
-	// ExperimentalInline is the Phase-A-only escape hatch: the
-	// skill author hardcodes the waves directly in the manifest,
-	// bypassing the planner LLM. Removed at Phase B end once the
-	// planner role lands. Nil/empty when not used.
+	// ExperimentalInline is the Phase-A escape hatch: the skill
+	// author hardcodes the waves directly in the manifest,
+	// bypassing the planner LLM. Removed at Phase H. Nil/empty
+	// when not used.
 	ExperimentalInline *MissionPlanInline `json:"experimental_inline,omitempty" yaml:"experimental_inline,omitempty"`
+
+	// Role names the planner sub-agent role declared in the
+	// skill's sub_agents block. When non-empty, mission ext drives
+	// the mission via the iterative planner loop (Phase B): spawn
+	// planner with current plan_context → parse plan handoff →
+	// run wave → re-spawn planner. Empty falls back to the inline
+	// path above.
+	Role string `json:"role,omitempty" yaml:"role,omitempty"`
+
+	// Approval declares when the planner must obtain user approval
+	// via session:inquire before its plan can be applied. Defaults
+	// (Initial=required, Iteration=initial-only) match spec § Phase
+	// B; explicit empty strings are normalised to those defaults
+	// at projection time.
+	Approval MissionPlanApproval `json:"approval,omitempty" yaml:"approval,omitempty"`
+
+	// MaxWaves caps how many planner-driven iterations the runtime
+	// runs before forcing synthesis. Doubles as the approval-loop
+	// safety cap (canon § 0.5). Zero falls back to the runtime
+	// default (10). Max 50 per safety rail.
+	MaxWaves int `json:"max_waves,omitempty" yaml:"max_waves,omitempty"`
+}
+
+// MissionPlanApproval declares the approval policy applied to the
+// planner's first message + every subsequent iteration. Phase B
+// recognises a v1 enum surface; Phase I broadens to
+// `when_roadmap_shifted` etc.
+type MissionPlanApproval struct {
+	// Initial controls the FIRST planner spawn's approval gate:
+	//   - "required"  → planner MUST call session:inquire and
+	//                   obtain a positive response before handoff.
+	//   - "skip"      → no approval inquiry expected; runtime auto-
+	//                   accepts the planner's first plan.
+	// Empty defaults to "required" per spec § Phase B.
+	Initial string `json:"initial,omitempty" yaml:"initial,omitempty"`
+
+	// Iteration controls approval on subsequent planner spawns:
+	//   - "always"        → every iteration's plan requires approval.
+	//   - "never"         → never re-approve after the first plan.
+	//   - "initial-only"  → only the first iteration's plan
+	//                       inquires; subsequent ones auto-close.
+	// Empty defaults to "initial-only" per spec § Phase B.
+	Iteration string `json:"iteration,omitempty" yaml:"iteration,omitempty"`
 }
 
 // MissionPlanInline carries a fixed wave sequence for Phase-A

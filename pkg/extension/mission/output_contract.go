@@ -171,10 +171,16 @@ func decodeHandoff(kind OutputContractKind, body string) (Handoff, error) {
 }
 
 // validateRequired enforces the per-kind required-field discipline.
-// kind=handoff/synthesis: status required.
-// kind=plan: status required + body must look like a Plan
 //
-//	(next_wave present).
+// kind=handoff/synthesis: status required; reason required when
+// status != "ok".
+//
+// kind=plan: status required; body must be an object carrying ALL
+// three top-level keys — `next_wave`, `roadmap`, `rationale` — per
+// spec §Phase B. `next_wave` may be JSON-null to signal "planner is
+// done" (plan_complete). When present, `next_wave` must carry a
+// non-empty `label` plus at least one entry in `subagents` — the
+// shape the Plan Executor expects to run.
 //
 // kind=verdict: status + body.decision required.
 func validateRequired(kind OutputContractKind, h Handoff, raw map[string]any) error {
@@ -188,10 +194,31 @@ func validateRequired(kind OutputContractKind, h Handoff, raw map[string]any) er
 	case KindPlan:
 		body, _ := raw["body"].(map[string]any)
 		if body == nil {
-			return &ParseError{Reason: "kind=plan requires a body object with next_wave"}
+			return &ParseError{Reason: "kind=plan requires a body object with next_wave, roadmap, rationale"}
 		}
 		if _, ok := body["next_wave"]; !ok {
-			return &ParseError{Reason: "kind=plan requires body.next_wave"}
+			return &ParseError{Reason: "kind=plan requires body.next_wave (use null to signal plan_complete)"}
+		}
+		if _, ok := body["roadmap"]; !ok {
+			return &ParseError{Reason: "kind=plan requires body.roadmap (empty array allowed)"}
+		}
+		if _, ok := body["rationale"]; !ok {
+			return &ParseError{Reason: "kind=plan requires body.rationale"}
+		}
+		// next_wave may be null (plan_complete) or a wave object.
+		if nw := body["next_wave"]; nw != nil {
+			wave, ok := nw.(map[string]any)
+			if !ok {
+				return &ParseError{Reason: "kind=plan: body.next_wave must be an object or null"}
+			}
+			label, _ := wave["label"].(string)
+			if strings.TrimSpace(label) == "" {
+				return &ParseError{Reason: "kind=plan: body.next_wave.label is required"}
+			}
+			subs, _ := wave["subagents"].([]any)
+			if len(subs) == 0 {
+				return &ParseError{Reason: "kind=plan: body.next_wave.subagents must list at least one worker"}
+			}
 		}
 	case KindVerdict:
 		body, _ := raw["body"].(map[string]any)
@@ -204,6 +231,46 @@ func validateRequired(kind OutputContractKind, h Handoff, raw map[string]any) er
 		}
 	}
 	return nil
+}
+
+// DecodePlan re-marshals a parsed kind=plan body into the typed
+// Plan AST the executor consumes. Pre-condition: h.Kind == KindPlan
+// and ParseHandoff succeeded (so validateRequired passed). Returns
+// (nil, nil) when next_wave was JSON-null — the planner's
+// "plan_complete" signal. Returns (Plan, nil) otherwise with
+// NextWave fully populated.
+//
+// Decoding goes through encoding/json (the parser already kept the
+// body as a generic map; DecodePlan re-marshals + strict-unmarshals
+// into Plan so unknown fields land in the struct's tag-matched
+// slots and unrecognised fields are silently dropped — Phase I
+// tightens this with output_contract.schema).
+func DecodePlan(h Handoff) (*Plan, error) {
+	if h.Kind != KindPlan {
+		return nil, fmt.Errorf("mission: DecodePlan: handoff kind=%q, want plan", h.Kind)
+	}
+	body, ok := h.Body.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("mission: DecodePlan: body is not an object (got %T)", h.Body)
+	}
+	if body["next_wave"] == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("mission: DecodePlan: marshal body: %w", err)
+	}
+	var p Plan
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("mission: DecodePlan: unmarshal: %w", err)
+	}
+	if p.NextWave.Label == "" {
+		return nil, fmt.Errorf("mission: DecodePlan: next_wave.label is empty after decode")
+	}
+	if len(p.NextWave.Subagents) == 0 {
+		return nil, fmt.Errorf("mission: DecodePlan: next_wave.subagents is empty after decode")
+	}
+	return &p, nil
 }
 
 func truncateBody(s string, n int) string {

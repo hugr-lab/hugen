@@ -35,11 +35,86 @@ func TestParseHandoff_Kind(t *testing.T) {
 			},
 		},
 		{
-			name: "plan kind requires next_wave",
+			name: "plan kind requires next_wave key",
 			raw: "```plan\n" +
-				`{"status":"ok","body":{"rationale":"missing next_wave"}}` +
+				`{"status":"ok","body":{"rationale":"missing next_wave","roadmap":[]}}` +
 				"\n```",
 			wantErr: "next_wave",
+		},
+		{
+			name: "plan kind requires roadmap key",
+			raw: "```plan\n" +
+				`{"status":"ok","body":{"next_wave":null,"rationale":"r"}}` +
+				"\n```",
+			wantErr: "roadmap",
+		},
+		{
+			name: "plan kind requires rationale key",
+			raw: "```plan\n" +
+				`{"status":"ok","body":{"next_wave":null,"roadmap":[]}}` +
+				"\n```",
+			wantErr: "rationale",
+		},
+		{
+			name: "plan kind accepts next_wave: null (plan_complete signal)",
+			raw: "```plan\n" +
+				`{"status":"ok","body":{"next_wave":null,"roadmap":[],"rationale":"all done"}}` +
+				"\n```",
+			wantOk: true,
+			check: func(t *testing.T, h Handoff) {
+				if h.Kind != KindPlan {
+					t.Errorf("Kind = %q, want plan", h.Kind)
+				}
+				p, err := DecodePlan(h)
+				if err != nil {
+					t.Fatalf("DecodePlan: %v", err)
+				}
+				if p != nil {
+					t.Errorf("DecodePlan: got %+v, want nil (plan_complete signal)", p)
+				}
+			},
+		},
+		{
+			name: "plan kind: next_wave missing label",
+			raw: "```plan\n" +
+				`{"status":"ok","body":{"next_wave":{"subagents":[{"name":"w1"}]},"roadmap":[],"rationale":"r"}}` +
+				"\n```",
+			wantErr: "next_wave.label",
+		},
+		{
+			name: "plan kind: next_wave missing subagents",
+			raw: "```plan\n" +
+				`{"status":"ok","body":{"next_wave":{"label":"wave-1"},"roadmap":[],"rationale":"r"}}` +
+				"\n```",
+			wantErr: "next_wave.subagents",
+		},
+		{
+			name: "plan kind: full happy path round-trips through DecodePlan",
+			raw: "```plan\n" +
+				`{"status":"ok","body":{"next_wave":{"label":"discover","subagents":[{"name":"explorer","role":"schema-explorer","task":"map tables"}]},"roadmap":["analyse"],"rationale":"discover first"}}` +
+				"\n```",
+			wantOk: true,
+			check: func(t *testing.T, h Handoff) {
+				p, err := DecodePlan(h)
+				if err != nil {
+					t.Fatalf("DecodePlan: %v", err)
+				}
+				if p == nil {
+					t.Fatal("DecodePlan returned nil; want a Plan")
+				}
+				if p.NextWave.Label != "discover" {
+					t.Errorf("NextWave.Label = %q, want discover", p.NextWave.Label)
+				}
+				if len(p.NextWave.Subagents) != 1 || p.NextWave.Subagents[0].Name != "explorer" {
+					t.Errorf("NextWave.Subagents = %+v", p.NextWave.Subagents)
+				}
+				if p.Rationale != "discover first" {
+					t.Errorf("Rationale = %q", p.Rationale)
+				}
+				if len(p.Roadmap) != 1 || p.Roadmap[0] != "analyse" {
+					t.Errorf("Roadmap = %v", p.Roadmap)
+				}
+			},
 		},
 		{
 			name: "verdict kind requires decision",
