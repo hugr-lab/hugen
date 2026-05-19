@@ -224,3 +224,159 @@ func TestMissionPDCA_RunWave_EndToEnd(t *testing.T) {
 		t.Errorf("subagent_result events with render_mode=silent = %d, want 2 — RenderMode plumbing may be broken", silentSeen)
 	}
 }
+
+// TestMissionPDCA_RunMission_TerminatesMission is the α.4 integration
+// test: validates that the full driveMission goroutine — wave loop,
+// wave_complete emit, synthesis worker, terminal AgentMessage —
+// produces a mission session that cleanly tears itself down via the
+// parent's normal handleSubagentResult / SessionClose pipeline.
+//
+// Topology:
+//
+//	root (test parent, no turn driven)
+//	└── mission (mission ext attached + RunMission'd; receives no
+//	             UserMessage — the auto-runner drives the entire flow)
+//	    ├── w1 (wave-1 worker; emits a handoff)
+//	    └── synthesizer (_synthesis wave; emits a final handoff whose
+//	                     body becomes the mission's AgentMessage text)
+//
+// Asserts:
+//   - mission.Done() closes within a deadline (mission terminated).
+//   - mission's event log contains at least two extension_frame
+//     rows with op=wave_complete (one per wave, one per _synthesis).
+//   - root sees a subagent_result with Reason="completed" and a
+//     non-empty Result string (the synthesizer's body).
+func TestMissionPDCA_RunMission_TerminatesMission(t *testing.T) {
+	handoffText := "```handoff\n" +
+		`{"status":"ok","body":"synthesis result","memory_summary":"summed up"}` +
+		"\n```"
+
+	store := fixture.NewTestStore()
+	missionManifest := &missionext.MissionManifest{
+		Name:    "echo-mission",
+		Summary: "Phase A α.4 fixture",
+		Plan: missionext.MissionPlanManifest{
+			ExperimentalInline: &missionext.InlinePlan{
+				Waves: []missionext.Wave{
+					{
+						Label: "wave-1",
+						Subagents: []missionext.SubagentSpec{
+							{Name: "w1", Task: "say hi"},
+						},
+					},
+				},
+			},
+		},
+		Synthesis: missionext.SynthesisManifest{Role: "synthesizer"},
+	}
+	ext := missionext.NewExtension(missionext.Config{
+		AgentID: "a1",
+		Catalog: missionext.NewStaticCatalog(missionManifest),
+	})
+	root, cleanup := newTestParent(t,
+		withTestStore(store),
+		withTestRunLoop(),
+		withTestExtensions(ext),
+	)
+	defer cleanup()
+
+	// Every spawned worker (wave-1's w1 and _synthesis's synthesizer)
+	// runs the same scripted handoff-emitting model. Root + mission
+	// never run a turn — root is a passive parent and the mission's
+	// supervisor LLM is not exercised in Phase A.
+	mdl := &scriptedModel{
+		chunks: []model.Chunk{
+			{Content: ptr(handoffText), Final: true},
+		},
+	}
+	router := newRouterWithModel(t, mdl)
+	root.models = router
+	if root.deps != nil {
+		root.deps.Models = router
+	}
+
+	ctx := context.Background()
+	mission, err := root.Spawn(ctx, SpawnSpec{
+		Name:  "mission-1",
+		Skill: "echo-mission",
+		Task:  "synthesize hello",
+	})
+	if err != nil {
+		t.Fatalf("spawn mission: %v", err)
+	}
+
+	if err := ext.RunMission(ctx, mission, "echo-mission", "synthesize hello", nil); err != nil {
+		t.Fatalf("RunMission: %v", err)
+	}
+
+	select {
+	case <-mission.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatalf("mission did not terminate within 10s")
+	}
+
+	// Mission's event log should carry wave_complete ExtensionFrames
+	// for both wave-1 and _synthesis.
+	events, err := store.ListEvents(ctx, mission.ID(), sessionstore.ListEventsOpts{})
+	if err != nil {
+		t.Fatalf("ListEvents(mission): %v", err)
+	}
+	waveCompletes := make(map[string]bool)
+	for _, ev := range events {
+		if ev.EventType != string(protocol.KindExtensionFrame) {
+			continue
+		}
+		op, _ := ev.Metadata["op"].(string)
+		if op != "wave_complete" {
+			continue
+		}
+		// payload data carries the wave label
+		data, _ := ev.Metadata["data"].(map[string]any)
+		if label, _ := data["label"].(string); label != "" {
+			waveCompletes[label] = true
+		}
+	}
+	if !waveCompletes["wave-1"] {
+		t.Errorf("missing wave_complete for wave-1 (events=%v)", waveCompletes)
+	}
+	if !waveCompletes["_synthesis"] {
+		t.Errorf("missing wave_complete for _synthesis (events=%v)", waveCompletes)
+	}
+
+	// Root must have seen a subagent_result for the mission carrying
+	// the synthesizer's body as Result text. mission.Done() closes
+	// when the mission's goroutine exits, but root's routeInbound
+	// runs the persist call AFTER waiting on child.Done(), so the
+	// event row may land a beat later. Poll briefly.
+	sawMissionResult := false
+	deadline := time.Now().Add(2 * time.Second)
+	var resultText string
+	for time.Now().Before(deadline) && !sawMissionResult {
+		rootEvents, err := store.ListEvents(ctx, root.ID(), sessionstore.ListEventsOpts{})
+		if err != nil {
+			t.Fatalf("ListEvents(root): %v", err)
+		}
+		for _, ev := range rootEvents {
+			if ev.EventType != string(protocol.KindSubagentResult) {
+				continue
+			}
+			sid, _ := ev.Metadata["session_id"].(string)
+			if sid != mission.ID() {
+				continue
+			}
+			sawMissionResult = true
+			resultText = ev.Content
+			break
+		}
+		if sawMissionResult {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !sawMissionResult {
+		t.Errorf("root never saw subagent_result for mission %s", mission.ID())
+	} else if resultText != "synthesis result" {
+		t.Errorf("mission subagent_result Result = %q, want %q (synthesizer body)",
+			resultText, "synthesis result")
+	}
+}
