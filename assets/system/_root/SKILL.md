@@ -11,6 +11,9 @@ allowed-tools:
       - subagent_cancel
       - notify_subagent
       - inquire
+  - provider: mission
+    tools:
+      - notify
   - provider: plan
     tools:
       - comment

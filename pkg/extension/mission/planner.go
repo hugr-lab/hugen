@@ -661,6 +661,35 @@ func missionHasHandoffs(mission extension.SessionState) bool {
 	return m.Handoffs.Len() > 0
 }
 
+// emitUserFollowup publishes a user_followup ExtensionFrame on
+// the mission's event log. Phase E — fires from mission:notify
+// after the followup lands in plan_context so adapters /
+// scenarios can observe the delivery without polling the
+// journal.
+func (e *Extension) emitUserFollowup(mission extension.SessionState, text string) {
+	payload := struct {
+		Text string `json:"text"`
+	}{Text: text}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		e.logger.Warn("mission: emitUserFollowup: marshal failed",
+			"mission_session", mission.SessionID(), "err", err)
+		return
+	}
+	frame := protocol.NewExtensionFrame(
+		mission.SessionID(),
+		agentParticipant(mission, e.agentID),
+		providerName,
+		protocol.CategoryOp,
+		"user_followup",
+		data,
+	)
+	if err := mission.Emit(context.Background(), frame); err != nil {
+		e.logger.Warn("mission: emitUserFollowup: emit failed",
+			"mission_session", mission.SessionID(), "err", err)
+	}
+}
+
 // emitIterationStart publishes an iteration_start ExtensionFrame on
 // the mission session's event log so liveview / scenario harnesses
 // can observe planner spawns without parsing wave_complete frames.

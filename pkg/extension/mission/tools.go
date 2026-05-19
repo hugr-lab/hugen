@@ -10,11 +10,13 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
-// Permission objects gated by the 3-tier perm stack. Phase A only
-// uses :finish and :get_handoff; later phases extend the list.
+// Permission objects gated by the 3-tier perm stack. Phase A
+// shipped :finish + :get_handoff; Phase E adds :notify so root
+// can deliver mid-mission followups without re-spawning.
 const (
 	PermFinish     = "hugen:mission:finish"
 	PermGetHandoff = "hugen:mission:get_handoff"
+	PermNotify     = "hugen:mission:notify"
 )
 
 const (
@@ -43,6 +45,21 @@ const (
   },
   "required": ["ref"]
 }`
+
+	missionNotifySchema = `{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Mission name (the 'name' arg used at session:spawn_mission) OR session_id. Required."
+    },
+    "text": {
+      "type": "string",
+      "description": "Followup text the user wants the mission to consider. Lands in the mission's plan_context journal under phase=user-followup so the next planner sees it. Required."
+    }
+  },
+  "required": ["name", "text"]
+}`
 )
 
 type finishInput struct {
@@ -52,6 +69,11 @@ type finishInput struct {
 
 type getHandoffInput struct {
 	Ref string `json:"ref"`
+}
+
+type notifyInput struct {
+	Name string `json:"name"`
+	Text string `json:"text"`
 }
 
 type toolError struct {
@@ -84,6 +106,13 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 			PermissionObject: PermGetHandoff,
 			ArgSchema:        json.RawMessage(missionGetHandoffSchema),
 		},
+		{
+			Name:             providerName + ":notify",
+			Description:      "Deliver a mid-mission followup from the user to a running mission. Append-only; lands in the mission's plan_context under phase=user-followup so the next planner sees it on its next spawn. Root-tier callers only.",
+			Provider:         providerName,
+			PermissionObject: PermNotify,
+			ArgSchema:        json.RawMessage(missionNotifySchema),
+		},
 	}, nil
 }
 
@@ -95,6 +124,8 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 		return e.callFinish(ctx, args)
 	case "get_handoff":
 		return e.callGetHandoff(ctx, args)
+	case "notify":
+		return e.callNotify(ctx, args)
 	default:
 		return nil, fmt.Errorf("%w: mission:%s", tool.ErrUnknownTool, short)
 	}
@@ -148,6 +179,90 @@ func (e *Extension) callFinish(ctx context.Context, args json.RawMessage) (json.
 		out["text_len"] = len(in.Text)
 	}
 	return json.Marshal(out)
+}
+
+// callNotify delivers a mid-mission followup from a root-tier
+// session to the named mission. Phase E — minimum viable cut:
+// synchronous append to the mission's PlanContext under
+// phase=user-followup, plus a user_followup ExtensionFrame on
+// the mission session for observability. The 5-second debounce
+// queue specced in canon §16.9 is deferred to a follow-up — v1's
+// synchronous path is sufficient for the integration scenario.
+//
+// Resolution rules:
+//
+//   - the caller MUST be a root session (depth 0). Workers /
+//     missions calling :notify are rejected with `forbidden`.
+//   - `name` matches either the spawn-time name OR the mission
+//     session id. First match in state.Children() wins; the
+//     surface stays single-mission for v1.
+//
+// Returns an ok envelope with the mission session id on success,
+// or a structured error envelope on resolution failure.
+func (e *Extension) callNotify(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	state, ok := extension.SessionStateFromContext(ctx)
+	if !ok || state == nil {
+		return toolErr("session_gone", "no session attached to dispatch ctx")
+	}
+	if state.Depth() != 0 {
+		return toolErr("forbidden", "mission:notify can only be called from a root session")
+	}
+	var in notifyInput
+	if err := json.Unmarshal(args, &in); err != nil {
+		return toolErr("bad_request", fmt.Sprintf("invalid mission:notify args: %v", err))
+	}
+	if strings.TrimSpace(in.Name) == "" {
+		return toolErr("bad_request", "name is required")
+	}
+	if strings.TrimSpace(in.Text) == "" {
+		return toolErr("bad_request", "text is required")
+	}
+
+	target, missionState := resolveMissionByName(state, in.Name)
+	if target == nil {
+		return toolErr("not_found", fmt.Sprintf("no mission named %q under this root", in.Name))
+	}
+	if missionState == nil {
+		return toolErr("unavailable", "mission state not initialised on target session")
+	}
+	missionState.PlanContext.Append(PlanContextEntry{
+		Iteration: readIterationCounter(missionState),
+		Phase:     "user-followup",
+		Summary:   strings.TrimSpace(in.Text),
+	})
+	e.emitUserFollowup(target, in.Text)
+	return json.Marshal(map[string]any{
+		"ok":         true,
+		"session_id": target.SessionID(),
+		"name":       in.Name,
+	})
+}
+
+// resolveMissionByName walks state.Children() looking for a
+// session whose SubagentName matches name OR whose SessionID
+// equals name. Returns (childState, missionState) on hit;
+// (nil, nil) when nothing matched.
+func resolveMissionByName(root extension.SessionState, name string) (extension.SessionState, *MissionState) {
+	for _, child := range root.Children() {
+		if child == nil {
+			continue
+		}
+		if child.SubagentName() == name || child.SessionID() == name {
+			return child, FromState(child)
+		}
+	}
+	return nil, nil
+}
+
+// readIterationCounter returns the mission's current iteration
+// without exporting the lock.
+func readIterationCounter(m *MissionState) int {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.IterationCounter
 }
 
 // callGetHandoff reads a handoff from the per-mission store. Any
