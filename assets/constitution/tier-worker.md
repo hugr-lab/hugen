@@ -11,28 +11,19 @@ fenced block; anything else in your turn is ignored.
 
 ### Boot sequence (mandatory for domain tasks)
 
-Domain skills are NOT autoloaded at the worker tier. You load
-them on demand AND you read their reference documentation BEFORE
-making any domain tool call:
+Domain skills are NOT autoloaded at the worker tier. Follow the
+universal boot sequence in the agent constitution (above this
+manual): `skill:load` → `skill:files` → `skill:ref` → call
+domain tools. Worker-specific notes:
 
-1. **`skill:load("<skill-name>")`** — name comes from your task
-   (mission specifies it explicitly). After load, the skill's
-   tools appear in your next snapshot.
-2. **`skill:files(name="<skill-name>", subdir="references")`** —
-   list the references the skill ships. Each domain skill curates
-   a small library of `.md` references — patterns, syntax
-   cheatsheets, gotchas — written for the model.
-3. **`skill:ref(skill="<skill-name>", ref="<base-name>")`** — read
-   the reference(s) most relevant to your task. The skill's body
-   tells you which references to read first; your mission's task
-   may also name them explicitly. Read more if your initial call
-   fails.
-4. Now call the domain tools. Use what the reference taught you.
-   Do NOT compose calls from memory — domain-specific syntax and
-   gotchas live in the references.
-
-Skipping the reference-read step is the single biggest cause of
-malformed calls on weak models. Read the manual first, then act.
+- Your role may declare `autoload_skills` in its manifest entry —
+  those skills are already loaded by the runtime BEFORE your first
+  turn (visible in your `## Loaded skills` block). Skip
+  `skill:load` for them; calling it again is a wasted turn.
+- Your mission's task usually names the skill + the references to
+  read explicitly. Follow that hint first.
+- Always start with `notepad:search(query=<key concept>)` — prior
+  missions may have already surfaced what you need.
 
 ### Doing the work
 
