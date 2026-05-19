@@ -152,6 +152,13 @@ runs:
       # mission termination. Fixture installed by the harness in
       # Setup.
       - mission_pdca_minimal
+      # Mission-PDCA Phase B δ — planner-driven pipeline through
+      # the fixture skill `_mission_v3`. Validates iterative
+      # planner spawns, iteration_start frames, kind=plan
+      # handoffs, plan_complete signal, and synthesis on the
+      # weak-model gate. Approval disabled in the fixture so the
+      # scenario stays headless.
+      - mission_pdca_planner
 
   # Phase 5.2 η — root-as-chat mixed model gate. Root + mission
   # on Gemini Pro 3.1; workers on local gemma4-26b. Same

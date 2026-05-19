@@ -111,14 +111,19 @@ func Setup(ctx context.Context, t *testing.T, opts SetupOpts) *Runtime {
 		}
 	}
 
-	// Mission-PDCA Phase A — drop the `_mission_v2` fixture skill
-	// into the local tier so the mission_pdca_minimal scenario can
-	// spawn it via session:spawn_mission. The fixture is harmless to
-	// every other scenario: nothing else references the name. Phase
-	// B deletes both the fixture package and this install hook.
+	// Mission-PDCA fixtures — drop the Phase-A (`_mission_v2`,
+	// inline plan) and Phase-B (`_mission_v3`, planner-driven)
+	// fixture skills into the local tier so the harness scenarios
+	// (mission_pdca_minimal, mission_pdca_planner) can spawn them
+	// via session:spawn_mission. Both names are harmless to every
+	// other scenario; Phase H deletes the fixture package and
+	// these install hooks.
 	localSkills := filepath.Join(runDir, "state", "skills", "local")
 	if err := missionfixture.WriteTo(localSkills); err != nil {
-		t.Fatalf("harness.Setup: install mission fixture: %v", err)
+		t.Fatalf("harness.Setup: install mission fixture v2: %v", err)
+	}
+	if err := missionfixture.WritePlannerTo(localSkills); err != nil {
+		t.Fatalf("harness.Setup: install mission fixture v3: %v", err)
 	}
 
 	// Merge: prod config.yaml ← LLM overlay ← topology overlay.

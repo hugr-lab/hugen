@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -73,7 +74,7 @@ func (e *Extension) driveMissionPlanner(mission extension.SessionState, spawner 
 	}
 
 	var synthText string
-	if !aborted && manifest.Synthesis.Role != "" {
+	if !aborted && manifest.Synthesis.Role != "" && missionHasHandoffs(mission) {
 		text, synthErr := e.runSynthesis(ctx, executor, mission, manifest.Synthesis.Role, missionSkill, goal)
 		if synthErr != nil {
 			e.logger.Warn("mission: driveMissionPlanner: synthesis failed",
@@ -124,8 +125,19 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 			return false, nil
 		}
 
-		// 3. Run the planner-emitted wave.
-		status, _, runErr := executor.RunWave(ctx, mission, plan.NextWave, RunWaveOptions{})
+		// 3. Run the planner-emitted wave. Each subagent's task is
+		// decorated with the runtime-injected handoff contract so
+		// the worker knows to end its turn with a fenced handoff
+		// block — without this most weak models go off and start
+		// executing the task literally (calling bash, hanging on
+		// approval) instead of emitting a result fence.
+		decorated, decorateErr := decorateWaveTasks(mission, plan.NextWave)
+		if decorateErr != nil {
+			e.logger.Warn("mission: planner loop: decorate wave tasks failed",
+				"mission_session", mission.SessionID(), "iteration", iteration, "err", decorateErr)
+			return true, decorateErr
+		}
+		status, _, runErr := executor.RunWave(ctx, mission, decorated, RunWaveOptions{})
 		e.emitWaveComplete(mission, plan.NextWave.Label, status, runErr)
 		if runErr != nil || status == WaveStatusFailed {
 			e.logger.Warn("mission: planner loop: executed wave failed",
@@ -287,7 +299,9 @@ type plannerRecentEntry struct {
 // via assets/prompts/mission/planner_task.tmpl. Approval-required
 // flag is set when the iteration's policy demands a session:inquire
 // before the handoff (Initial=required for iteration 1; Iteration
-// policy for later spawns).
+// policy for later spawns). Recent populated from PlanState.Done
+// so the planner can tell what waves already ran (cheap stand-in
+// for the full Phase-D plan_context journal).
 func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, goal string, iteration int) (string, error) {
 	approval := approvalRequiredForIteration(manifest.Plan.Approval, iteration)
 	view := plannerTaskView{
@@ -295,12 +309,38 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		Iteration:        iteration,
 		MaxWaves:         manifest.Plan.MaxWaves,
 		ApprovalRequired: approval,
+		Recent:           collectRecentWaves(mission),
 	}
 	renderer := mission.Prompts()
 	if renderer == nil {
 		return "", fmt.Errorf("mission: planner task: no prompts renderer on session")
 	}
 	return renderer.Render("mission/planner_task", view)
+}
+
+// collectRecentWaves projects PlanState.Done into the template's
+// [Recent waves] section. Skips planner / synthesis waves
+// (underscore-prefixed labels) — those are runtime-internal and
+// don't carry mission-meaningful work for the planner to react
+// to. Empty when no waves have run yet (iteration 1).
+func collectRecentWaves(mission extension.SessionState) []plannerRecentEntry {
+	m := FromState(mission)
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]plannerRecentEntry, 0, len(m.Plan.Done))
+	for _, w := range m.Plan.Done {
+		if strings.HasPrefix(w.Label, "_") {
+			continue
+		}
+		out = append(out, plannerRecentEntry{
+			Wave:   w.Label,
+			Status: string(w.Status),
+		})
+	}
+	return out
 }
 
 // approvalRequiredForIteration applies the v1 approval policy to
@@ -320,6 +360,54 @@ func approvalRequiredForIteration(policy PlanApproval, iteration int) bool {
 	default:
 		return false
 	}
+}
+
+// decorateWaveTasks appends the bundled mission/worker_contract
+// template to each subagent's task body. Workers spawned by the
+// planner-driven loop see plain-prose instructions from the
+// planner plus the canonical handoff-fence contract from the
+// runtime — the planner doesn't have to remember to teach the
+// fence shape itself.
+//
+// Returns a shallow copy of wave with decorated tasks; the
+// original wave value is not mutated. Errors only when the prompts
+// renderer can't load the contract template (a missing template
+// is a runtime bug, not user input).
+func decorateWaveTasks(mission extension.SessionState, wave Wave) (Wave, error) {
+	renderer := mission.Prompts()
+	if renderer == nil {
+		return Wave{}, fmt.Errorf("mission: decorateWaveTasks: no prompts renderer on session")
+	}
+	contract, err := renderer.Render("mission/worker_contract", nil)
+	if err != nil {
+		return Wave{}, fmt.Errorf("mission: decorateWaveTasks: render worker_contract: %w", err)
+	}
+	out := wave
+	out.Subagents = make([]SubagentSpec, len(wave.Subagents))
+	copy(out.Subagents, wave.Subagents)
+	for i := range out.Subagents {
+		original := out.Subagents[i].Task
+		if original == "" {
+			out.Subagents[i].Task = contract
+			continue
+		}
+		out.Subagents[i].Task = original + "\n\n" + contract
+	}
+	return out, nil
+}
+
+// missionHasHandoffs reports whether the mission's Handoffs store
+// carries at least one entry — i.e. some wave produced a result.
+// Used by the planner driver to skip a synthesis spawn that would
+// have nothing to summarise (an empty plan_complete on iteration 1
+// is the canonical case). Returns false when the mission has no
+// MissionState attached.
+func missionHasHandoffs(mission extension.SessionState) bool {
+	m := FromState(mission)
+	if m == nil {
+		return false
+	}
+	return m.Handoffs.Len() > 0
 }
 
 // emitIterationStart publishes an iteration_start ExtensionFrame on

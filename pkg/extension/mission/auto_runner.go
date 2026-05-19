@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -136,7 +137,12 @@ func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, missio
 			Task:  task,
 		}},
 	}
-	status, _, err := executor.RunWave(ctx, mission, wave, RunWaveOptions{})
+	// Hard cap the synthesis wave — a confused synthesizer that
+	// never emits its kind=synthesis fence would otherwise wedge
+	// the mission until the parent's hard ceiling fires. 5
+	// minutes covers gemma-class weak models comfortably; faster
+	// models settle in seconds.
+	status, _, err := executor.RunWave(ctx, mission, wave, RunWaveOptions{Timeout: 5 * time.Minute})
 	e.emitWaveComplete(mission, synthesisWaveLabel, status, err)
 	if err != nil {
 		return "", err

@@ -16,9 +16,11 @@ import (
 // `mission.enabled:true` flag is NOT consulted; missions in
 // hugen are PDCA-shaped only.
 //
-// Phase A: only ExperimentalInline-shaped plans count. Phase B
-// extends with `plan.role` (LLM planner) — same MissionSkillExists
-// returns true.
+// Either shape counts as "exists": ExperimentalInline waves (Phase
+// A escape hatch) or a non-empty Plan.Role (Phase B planner-driven
+// loop). A manifest declaring NEITHER section is in-progress and
+// surfaces as not-found until completed, so spawn_mission can't
+// kick off a mission with no executable plan.
 func (e *Extension) MissionSkillExists(ctx context.Context, skill string) (bool, error) {
 	if skill == "" || e.catalog == nil {
 		return false, nil
@@ -30,10 +32,9 @@ func (e *Extension) MissionSkillExists(ctx context.Context, skill string) (bool,
 	if m == nil {
 		return false, nil
 	}
-	// Only mission shapes the runtime can actually drive count as
-	// "exists". A manifest declaring no Plan section yet is
-	// in-progress and should surface as not-found until completed.
-	if m.Plan.ExperimentalInline == nil || len(m.Plan.ExperimentalInline.Waves) == 0 {
+	hasInline := m.Plan.ExperimentalInline != nil && len(m.Plan.ExperimentalInline.Waves) > 0
+	hasPlanner := m.Plan.Role != ""
+	if !hasInline && !hasPlanner {
 		return false, nil
 	}
 	return true, nil
