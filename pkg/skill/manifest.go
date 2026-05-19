@@ -443,6 +443,30 @@ type SubAgentRole struct {
 	// Per-skill failures log and continue — one bad autoload must
 	// not deny the worker its base surface.
 	AutoloadSkills []string `json:"autoload_skills,omitempty" yaml:"autoload_skills,omitempty"`
+
+	// Capabilities declares the per-role mission-PDCA capability
+	// opt-ins applied by the mission ext at worker spawn time.
+	// Empty leaves capability defaults in place (phase-role classes
+	// — planner/checker/synthesizer — get plan_context: read; Do
+	// roles get it off). Phase F (design 003).
+	Capabilities SubAgentCapabilities `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
+}
+
+// SubAgentCapabilities declares which mission-PDCA surfaces the
+// worker session of this role opts into. Each field is a stringly-
+// typed access mode (`off` | `read`) so the manifest can express
+// "this Do role should see plan_context but not write to it" in
+// one place. Empty fields fall through to the runtime's
+// role-class default (phase roles default `read`, Do roles default
+// `off`). Phase F (design 003).
+type SubAgentCapabilities struct {
+	// PlanContext gates the [Plan context] section in the worker's
+	// first message. Values: "off" (default for Do roles) | "read"
+	// (default for phase roles: planner / checker / synthesizer).
+	// Write access is implicit: workers populate plan_context via
+	// the `memory_summary` field on their handoff regardless of
+	// the read setting.
+	PlanContext string `json:"plan_context,omitempty" yaml:"plan_context,omitempty"`
 }
 
 // CanSpawnEffective resolves SubAgentRole.CanSpawn to the boolean
@@ -509,6 +533,38 @@ type MissionBlock struct {
 	// back to the implicit `continue` path the Phase-B loop uses.
 	// Phase C.
 	Control MissionControlBlock `json:"control,omitempty" yaml:"control,omitempty"`
+
+	// Capabilities declares which mission-PDCA surfaces are
+	// active on the mission session itself (the supervisor tier).
+	// Used by skill authors to make implicit defaults explicit —
+	// today the listed extensions (notepad, whiteboard,
+	// plan_context) are always available, so absent values keep
+	// the runtime defaults. Phase F (design 003) lands the
+	// declarative schema; future phases can narrow defaults to
+	// "off unless declared".
+	Capabilities MissionCapabilities `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
+}
+
+// MissionCapabilities lists the mission-tier opt-in toggles.
+// Pointer-bool fields preserve the "unset → use default" semantics
+// so a deliberate `notepad: false` reads differently from "field
+// absent". Phase F (design 003).
+type MissionCapabilities struct {
+	// Notepad — when set, opt the mission session in (`true`) or
+	// out (`false`) of notepad surface. Unset (nil) means "use the
+	// runtime default": today notepad is always on for mission
+	// sessions; future hardening may flip to off-by-default.
+	Notepad *bool `json:"notepad,omitempty" yaml:"notepad,omitempty"`
+
+	// Whiteboard — same shape as Notepad. Unset (nil) keeps the
+	// runtime default; today whiteboard is on for mission tier.
+	Whiteboard *bool `json:"whiteboard,omitempty" yaml:"whiteboard,omitempty"`
+
+	// PlanContext — same shape as Notepad. Unset (nil) keeps the
+	// runtime default; the journal is always active inside the
+	// mission ext regardless. Future phases may use this knob to
+	// gate plan_context auto-extraction.
+	PlanContext *bool `json:"plan_context,omitempty" yaml:"plan_context,omitempty"`
 }
 
 // MissionControlBlock names the role the runtime spawns to check
@@ -829,6 +885,19 @@ func (m *Manifest) validateHugen() error {
 				return fmt.Errorf("metadata.hugen.autoload_for contains %q but tier_compatibility (effective %v) does not — autoload_for must be a subset of tier_compatibility",
 					t, compat)
 			}
+		}
+	}
+
+	// Phase F (design 003) — per-role capability access modes.
+	// Accepted: empty (defer to runtime default), "off", "read".
+	// Unknown values fail-loud so weak-model-authored manifests
+	// don't silently fall back to default.
+	for i, r := range m.Hugen.SubAgents {
+		switch r.Capabilities.PlanContext {
+		case "", "off", "read":
+		default:
+			return fmt.Errorf("metadata.hugen.sub_agents[%d].capabilities.plan_context = %q: must be one of [\"\", \"off\", \"read\"]",
+				i, r.Capabilities.PlanContext)
 		}
 	}
 	return nil

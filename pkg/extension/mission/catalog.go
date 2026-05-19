@@ -59,7 +59,46 @@ type MissionManifest struct {
 	// control — the planner loop falls back to the implicit
 	// `continue` routing. Phase C.
 	Control ControlManifest
+
+	// Capabilities declares the mission-tier capability toggles.
+	// Phase F (design 003) — declarative schema only; current
+	// runtime keeps notepad / whiteboard / plan_context always
+	// available on mission sessions.
+	Capabilities MissionCapabilities
+
+	// Roles maps role-name → typed capabilities the mission ext
+	// honours at worker-spawn time. Populated by the runtime
+	// catalog adapter from the skill's `sub_agents` block. Empty
+	// for roles that declare no Capabilities; resolution falls
+	// through to the role-class default.
+	Roles map[string]RoleCapabilities
 }
+
+// MissionCapabilities is the mission-tier capability projection.
+// Each pointer-bool field preserves "unset → defer to runtime
+// default"; an explicit `false` is a deliberate opt-out. Phase F.
+type MissionCapabilities struct {
+	Notepad     *bool
+	Whiteboard  *bool
+	PlanContext *bool
+}
+
+// RoleCapabilities is the per-role capability projection consumed
+// by the executor's worker-spawn path. v1 surface is narrow —
+// PlanContextAccess gates the [Plan context] section injection.
+// Future fields (notepad read/write, refs read/write) land here.
+// Phase F.
+type RoleCapabilities struct {
+	// PlanContextAccess: "off" | "read". Empty inherits the
+	// role-class default at resolution time.
+	PlanContextAccess string
+}
+
+// PlanContext access modes.
+const (
+	PlanContextOff  = "off"
+	PlanContextRead = "read"
+)
 
 // ControlManifest names the checker role for the verdict phase.
 // Empty Role means "no checker spawned"; the loop auto-continues.

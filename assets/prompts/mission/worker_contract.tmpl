@@ -1,3 +1,9 @@
+{{- if .PlanContext }}
+[Plan context — what prior iterations recorded]
+{{ range .PlanContext -}}
+- iter {{ .Iteration }} / {{ .Phase }}: {{ .Summary }}
+{{ end }}
+{{ end -}}
 [Handoff contract — read this BEFORE doing anything else]
 Your ONLY job is to emit a single fenced `handoff` block describing
 the result of the task above. You are NOT a shell, you are NOT a

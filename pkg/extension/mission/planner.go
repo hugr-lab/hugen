@@ -149,7 +149,7 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 		// block — without this most weak models go off and start
 		// executing the task literally (calling bash, hanging on
 		// approval) instead of emitting a result fence.
-		decorated, decorateErr := decorateWaveTasks(mission, plan.NextWave)
+		decorated, decorateErr := decorateWaveTasks(mission, manifest, plan.NextWave)
 		if decorateErr != nil {
 			e.logger.Warn("mission: planner loop: decorate wave tasks failed",
 				"mission_session", mission.SessionID(), "iteration", iteration, "err", decorateErr)
@@ -613,6 +613,16 @@ func approvalRequiredForIteration(policy PlanApproval, iteration int) bool {
 	}
 }
 
+// workerContractView is the typed payload the
+// mission/worker_contract template renders against. PlanContext
+// is rendered only for roles that opt-in via the manifest's
+// `capabilities.plan_context: read` knob; for everyone else the
+// section is omitted entirely (template gates on the slice being
+// non-empty). Phase F.
+type workerContractView struct {
+	PlanContext []plannerContextEntry
+}
+
 // decorateWaveTasks appends the bundled mission/worker_contract
 // template to each subagent's task body. Workers spawned by the
 // planner-driven loop see plain-prose instructions from the
@@ -620,23 +630,34 @@ func approvalRequiredForIteration(policy PlanApproval, iteration int) bool {
 // runtime — the planner doesn't have to remember to teach the
 // fence shape itself.
 //
+// Phase F — workers whose role declares `capabilities.plan_context:
+// read` (or whose role-class default resolves to read) get a
+// [Plan context] section prepended to the contract. Resolution
+// happens per subagent so a mixed wave (Do role + reading role)
+// emits the right contract for each.
+//
 // Returns a shallow copy of wave with decorated tasks; the
 // original wave value is not mutated. Errors only when the prompts
 // renderer can't load the contract template (a missing template
 // is a runtime bug, not user input).
-func decorateWaveTasks(mission extension.SessionState, wave Wave) (Wave, error) {
+func decorateWaveTasks(mission extension.SessionState, manifest MissionManifest, wave Wave) (Wave, error) {
 	renderer := mission.Prompts()
 	if renderer == nil {
 		return Wave{}, fmt.Errorf("mission: decorateWaveTasks: no prompts renderer on session")
 	}
-	contract, err := renderer.Render("mission/worker_contract", nil)
-	if err != nil {
-		return Wave{}, fmt.Errorf("mission: decorateWaveTasks: render worker_contract: %w", err)
-	}
+	planCtx := collectPlanContext(mission)
 	out := wave
 	out.Subagents = make([]SubagentSpec, len(wave.Subagents))
 	copy(out.Subagents, wave.Subagents)
 	for i := range out.Subagents {
+		view := workerContractView{}
+		if ResolvePlanContextAccess(manifest, out.Subagents[i].Role) == PlanContextRead {
+			view.PlanContext = planCtx
+		}
+		contract, err := renderer.Render("mission/worker_contract", view)
+		if err != nil {
+			return Wave{}, fmt.Errorf("mission: decorateWaveTasks: render worker_contract: %w", err)
+		}
 		original := out.Subagents[i].Task
 		if original == "" {
 			out.Subagents[i].Task = contract

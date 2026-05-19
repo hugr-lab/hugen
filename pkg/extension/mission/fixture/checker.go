@@ -35,14 +35,26 @@ const CheckerManifestYAML = "---\n" +
 	"    sub_agents:\n" +
 	"      - name: planner\n" +
 	"        description: Emit the next wave for the mission, or signal plan_complete.\n" +
+	"        capabilities:\n" +
+	"          plan_context: read\n" +
 	"      - name: checker\n" +
 	"        description: Inspect the prior wave's handoffs and emit a verdict (continue / amend / inquire / finish).\n" +
+	"        capabilities:\n" +
+	"          plan_context: read\n" +
 	"      - name: echo\n" +
 	"        description: Echo the inputs back as a handoff fence.\n" +
+	"        capabilities:\n" +
+	"          plan_context: off\n" +
 	"      - name: synthesizer\n" +
 	"        description: Combine prior handoffs into the mission's final answer.\n" +
+	"        capabilities:\n" +
+	"          plan_context: read\n" +
 	"    mission:\n" +
 	"      summary: \"Phase C/D/E smoke-test mission — planner + checker + synthesis loop.\"\n" +
+	"      capabilities:\n" +
+	"        notepad: true\n" +
+	"        whiteboard: false\n" +
+	"        plan_context: true\n" +
 	"      plan:\n" +
 	"        role: planner\n" +
 	"        max_waves: 3\n" +

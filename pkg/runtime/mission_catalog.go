@@ -134,6 +134,46 @@ func projectMissionManifest(m skillpkg.Manifest) *missionext.MissionManifest {
 	if mb.Control.Role != "" {
 		out.Control = missionext.ControlManifest{Role: mb.Control.Role}
 	}
+	out.Capabilities = projectMissionCapabilities(mb.Capabilities)
+	out.Roles = projectRoleCapabilities(m.Hugen.SubAgents)
+	return out
+}
+
+// projectMissionCapabilities mirrors skill.MissionCapabilities onto
+// mission ext's typed shape. Pointer-bool fields pass through
+// verbatim — unset stays nil.
+func projectMissionCapabilities(in skillpkg.MissionCapabilities) missionext.MissionCapabilities {
+	return missionext.MissionCapabilities{
+		Notepad:     in.Notepad,
+		Whiteboard:  in.Whiteboard,
+		PlanContext: in.PlanContext,
+	}
+}
+
+// projectRoleCapabilities walks the skill's sub_agents list and
+// returns the per-role capabilities map mission ext consumes at
+// worker-spawn time. Roles with no declared capabilities are
+// omitted; mission ext falls through to role-class defaults for
+// those names. Phase F.
+func projectRoleCapabilities(roles []skillpkg.SubAgentRole) map[string]missionext.RoleCapabilities {
+	if len(roles) == 0 {
+		return nil
+	}
+	out := make(map[string]missionext.RoleCapabilities, len(roles))
+	for _, r := range roles {
+		if r.Name == "" {
+			continue
+		}
+		if r.Capabilities.PlanContext == "" {
+			continue
+		}
+		out[r.Name] = missionext.RoleCapabilities{
+			PlanContextAccess: r.Capabilities.PlanContext,
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
 }
 
