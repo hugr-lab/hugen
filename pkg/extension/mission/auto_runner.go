@@ -173,42 +173,105 @@ func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, missio
 	}
 }
 
-// buildSynthesisTask renders the synthesizer's first-message body:
-// the mission goal + every prior wave's handoffs + a strict
-// instruction to reply with a kind=synthesis handoff fence. The
-// fence format is taught inline because synthesis workers can be
-// spawned under skills that don't include a synthesizer prompt of
-// their own (Phase A fixture among them). Phase B replaces this
-// with a template once the PlanContext renderer lands.
+// synthesisHandoffView is the per-handoff projection the
+// mission/synthesis_task template iterates. Mirrors the fields the
+// runtime stores on a Handoff but drops the SubagentRef envelope
+// so the template body stays terse — Role/Skill are pulled up
+// directly. Body is reduced to its string form when the worker's
+// output is structured; non-string bodies are rendered as JSON.
+type synthesisHandoffView struct {
+	Ref           string
+	Role          string
+	Skill         string
+	Status        string
+	MemorySummary string
+	Body          string
+}
+
+// buildSynthesisTask renders the synthesizer's first-message body
+// via the bundled `mission/synthesis_task` template. The template
+// teaches the canonical kind=synthesis handoff fence — synthesis
+// workers can be spawned under any dispatching skill, so the fence
+// instruction has to come from the runtime rather than from a
+// skill-specific prompt. Falls back to a minimal literal when the
+// renderer is unavailable (test fixtures that skip prompts wiring).
 func buildSynthesisTask(mission extension.SessionState, goal string) string {
-	var b strings.Builder
-	b.WriteString("Synthesize the mission's results.\n\n")
-	if goal != "" {
-		b.WriteString("Mission goal:\n")
-		b.WriteString(goal)
-		b.WriteString("\n\n")
-	}
+	data := struct {
+		Goal      string
+		Handoffs  []synthesisHandoffView
+	}{Goal: goal}
 	if m := FromState(mission); m != nil {
-		b.WriteString("Prior handoffs:\n")
 		for _, h := range m.Handoffs.List() {
-			fmt.Fprintf(&b, "- %s (%s/%s, status=%s)\n",
-				h.Ref, h.Subagent.Role, h.Subagent.Skill, h.Status)
+			data.Handoffs = append(data.Handoffs, synthesisHandoffView{
+				Ref:           h.Ref,
+				Role:          h.Subagent.Role,
+				Skill:         h.Subagent.Skill,
+				Status:        h.Status,
+				MemorySummary: h.MemorySummary,
+				Body:          synthesisHandoffBody(h.Body),
+			})
+		}
+	}
+	renderer := mission.Prompts()
+	if renderer == nil {
+		return synthesisTaskFallback(data.Goal, data.Handoffs)
+	}
+	out, err := renderer.Render("mission/synthesis_task", data)
+	if err != nil {
+		return synthesisTaskFallback(data.Goal, data.Handoffs)
+	}
+	return out
+}
+
+// synthesisHandoffBody reduces the handoff's `body` field to the
+// string form the template iterates. The output_contract parser
+// stores `body` as `any` (string for kind=handoff/synthesis, struct
+// for kind=plan/verdict); the synthesizer only needs a single
+// human-readable rendering.
+func synthesisHandoffBody(body any) string {
+	switch v := body.(type) {
+	case string:
+		return v
+	case nil:
+		return ""
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return ""
+		}
+		return string(raw)
+	}
+}
+
+// synthesisTaskFallback is the embedded-literal mirror of the
+// mission/synthesis_task template. Used only when the prompts
+// renderer is absent (test fixtures wiring SessionState by hand)
+// so production paths stay template-driven and the fallback never
+// silently masks a missing template at runtime.
+func synthesisTaskFallback(goal string, handoffs []synthesisHandoffView) string {
+	var b strings.Builder
+	b.WriteString("Synthesize the mission's results.\n")
+	if goal != "" {
+		b.WriteString("\nMission goal:\n")
+		b.WriteString(goal)
+		b.WriteString("\n")
+	}
+	if len(handoffs) > 0 {
+		b.WriteString("\nPrior handoffs:\n")
+		for _, h := range handoffs {
+			fmt.Fprintf(&b, "- %s (%s/%s, status=%s)\n", h.Ref, h.Role, h.Skill, h.Status)
 			if h.MemorySummary != "" {
 				fmt.Fprintf(&b, "  summary: %s\n", h.MemorySummary)
 			}
-			if body, ok := h.Body.(string); ok && body != "" {
-				fmt.Fprintf(&b, "  body: %s\n", body)
+			if h.Body != "" {
+				fmt.Fprintf(&b, "  body: %s\n", h.Body)
 			}
 		}
-		b.WriteString("\n")
 	}
-	b.WriteString("Reply with a single fenced block — nothing else, no narration:\n\n")
+	b.WriteString("\nReply with a single fenced block — nothing else, no narration:\n\n")
 	b.WriteString("```handoff\n")
 	b.WriteString(`{"kind":"synthesis","status":"ok","body":"<one-paragraph user-facing answer summarising the prior handoffs>"}`)
-	b.WriteString("\n```\n\n")
-	b.WriteString("The triple-backticks and the word `handoff` are mandatory; ")
-	b.WriteString("the JSON inside must parse. The `body` field is the text the ")
-	b.WriteString("user will see — write it for them, not for another agent.\n")
+	b.WriteString("\n```\n")
 	return b.String()
 }
 

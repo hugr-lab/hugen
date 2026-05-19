@@ -1,0 +1,19 @@
+Synthesize the mission's results.
+{{if .Goal}}
+Mission goal:
+{{.Goal}}
+{{end}}{{if .Handoffs}}
+Prior handoffs:
+{{range .Handoffs}}- {{.Ref}} ({{.Role}}/{{.Skill}}, status={{.Status}})
+{{if .MemorySummary}}  summary: {{.MemorySummary}}
+{{end}}{{if .Body}}  body: {{.Body}}
+{{end}}{{end}}{{end}}
+Reply with a single fenced block — nothing else, no narration:
+
+```handoff
+{"kind":"synthesis","status":"ok","body":"<one-paragraph user-facing answer summarising the prior handoffs>"}
+```
+
+The triple-backticks and the word `handoff` are mandatory; the JSON
+inside must parse. The `body` field is the text the user will see —
+write it for them, not for another agent.
