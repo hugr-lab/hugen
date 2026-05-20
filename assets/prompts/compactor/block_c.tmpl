@@ -1,0 +1,29 @@
+## History digest (last compacted at iter {{.Iteration}}, seq cutoff {{.CutoffSeq}})
+
+This block compresses everything in the conversation up to
+seq {{.CutoffSeq}}. Frames AFTER that seq are still in the
+live transcript below — refer to them by content. Do NOT
+quote the "(compacted)" marker text to the user; it's an
+internal note.
+
+{{if .KeptVerbatim -}}
+### Key turns preserved verbatim
+{{range .KeptVerbatim -}}
+- **{{.Kind}}** @ seq {{.Seq}}: {{.Text}}
+{{end}}
+{{end -}}
+
+{{if .SummaryBlocks -}}
+### Intermediate work (chronological)
+{{range .SummaryBlocks}}
+**[iter {{.Iter}} · seq {{.From}}–{{.To}}]**
+{{.Text}}
+{{end}}
+{{end -}}
+
+{{if .SubagentRefs -}}
+### Subagent results referenced earlier
+{{range .SubagentRefs -}}
+- session={{.SessionID}} reason={{.Reason}}{{if .Wave}} wave={{.Wave}}{{end}}{{if .Role}} role={{.Role}}{{end}}
+{{end}}
+{{end -}}

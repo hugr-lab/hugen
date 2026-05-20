@@ -25,17 +25,17 @@ type fakeState struct {
 
 func newFakeState(id string) *fakeState { return &fakeState{id: id} }
 
-func (s *fakeState) SessionID() string                      { return s.id }
-func (s *fakeState) SubagentName() string                   { return "" }
-func (s *fakeState) Role() string                           { return "" }
-func (s *fakeState) Skill() string                          { return "" }
-func (s *fakeState) Depth() int                             { return 0 }
-func (s *fakeState) Parent() (extension.SessionState, bool) { return nil, false }
-func (s *fakeState) Children() []extension.SessionState     { return nil }
-func (s *fakeState) Tools() *tool.ToolManager               { return nil }
-func (s *fakeState) Prompts() *prompts.Renderer             { return nil }
-func (s *fakeState) Value(name string) (any, bool)          { v, ok := s.values.Load(name); return v, ok }
-func (s *fakeState) SetValue(name string, value any)        { s.values.Store(name, value) }
+func (s *fakeState) SessionID() string                              { return s.id }
+func (s *fakeState) SubagentName() string                           { return "" }
+func (s *fakeState) Role() string                                   { return "" }
+func (s *fakeState) Skill() string                                  { return "" }
+func (s *fakeState) Depth() int                                     { return 0 }
+func (s *fakeState) Parent() (extension.SessionState, bool)         { return nil, false }
+func (s *fakeState) Children() []extension.SessionState             { return nil }
+func (s *fakeState) Tools() *tool.ToolManager                       { return nil }
+func (s *fakeState) Prompts() *prompts.Renderer                     { return nil }
+func (s *fakeState) Value(name string) (any, bool)                  { v, ok := s.values.Load(name); return v, ok }
+func (s *fakeState) SetValue(name string, value any)                { s.values.Store(name, value) }
 func (s *fakeState) Emit(_ context.Context, _ protocol.Frame) error { return nil }
 func (s *fakeState) IsClosed() bool                                 { return false }
 func (s *fakeState) Submit(_ context.Context, _ protocol.Frame) <-chan struct{} {
@@ -49,7 +49,7 @@ func (s *fakeState) RequestInquiry(_ context.Context, _ protocol.InquiryRequestP
 
 func newTestExtension(t *testing.T) *Extension {
 	t.Helper()
-	return NewExtension(slog.Default(), DefaultConfig())
+	return NewExtension(slog.Default(), DefaultConfig(), Deps{})
 }
 
 // --- state.go ---
@@ -147,9 +147,10 @@ func TestExtension_NameAndAdvertiseEmptyByDefault(t *testing.T) {
 
 // --- trigger.go ---
 
-func TestExtension_OnTurnBoundary_AlphaInert(t *testing.T) {
-	// α: shouldCompact returns false unconditionally, so
-	// OnTurnBoundary is a no-op that always returns nil.
+func TestExtension_OnTurnBoundary_NoDepsSkips(t *testing.T) {
+	// β: with no Router / Store wired the trigger predicate
+	// short-circuits — OnTurnBoundary is a no-op that always
+	// returns nil. Mirrors the test-fixture / α-style boot path.
 	e := newTestExtension(t)
 	st := newFakeState("ses-4")
 	if err := e.InitState(context.Background(), st); err != nil {
@@ -161,7 +162,7 @@ func TestExtension_OnTurnBoundary_AlphaInert(t *testing.T) {
 }
 
 func TestExtension_OnTurnBoundary_DisabledShortCircuits(t *testing.T) {
-	e := NewExtension(slog.Default(), Config{Enabled: false})
+	e := NewExtension(slog.Default(), Config{Enabled: false}, Deps{})
 	st := newFakeState("ses-5")
 	if err := e.InitState(context.Background(), st); err != nil {
 		t.Fatalf("InitState: %v", err)

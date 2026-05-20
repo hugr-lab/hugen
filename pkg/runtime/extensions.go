@@ -48,13 +48,16 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		wsext.NewExtension(core.Cfg.Workspace.Dir, core.Logger),
 		notepadext.NewExtension(core.Store, core.Agent.ID(), notepadext.Config{}),
 		// Compactor lands AFTER notepad so its Advertiser
-		// Block C composes after notepad's Block B. β fills
-		// in the LLM pipeline + per-Kind dispatch; α (this
-		// commit) wires the extension inert so persisted
-		// digest frames replay correctly and the
-		// FrameObserver-maintained boundary index starts
-		// accumulating from session start. Phase 5.2.
-		compactorext.NewExtension(core.Logger, compactorext.DefaultConfig()),
+		// Block C composes after notepad's Block B. β wires the
+		// real LLM pipeline + per-Kind dispatch + cap-driven
+		// collapse; Deps carry the model router (intent-routed
+		// summariser calls) and the runtime store (event
+		// selection in the compactable range). Phase 5.2.
+		compactorext.NewExtension(core.Logger, compactorext.DefaultConfig(), compactorext.Deps{
+			Router:  core.Models,
+			Store:   core.Store,
+			AgentID: core.Agent.ID(),
+		}),
 		planext.NewExtension(core.Agent.ID()),
 		wbext.NewExtension(core.Agent.ID()),
 		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()),
