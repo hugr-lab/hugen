@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	compactorext "github.com/hugr-lab/hugen/pkg/extension/compactor"
 	liveviewext "github.com/hugr-lab/hugen/pkg/extension/liveview"
 	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
 	missionext "github.com/hugr-lab/hugen/pkg/extension/mission"
@@ -46,6 +47,14 @@ func phaseExtensions(_ context.Context, core *Core) error {
 	exts := []extension.Extension{
 		wsext.NewExtension(core.Cfg.Workspace.Dir, core.Logger),
 		notepadext.NewExtension(core.Store, core.Agent.ID(), notepadext.Config{}),
+		// Compactor lands AFTER notepad so its Advertiser
+		// Block C composes after notepad's Block B. β fills
+		// in the LLM pipeline + per-Kind dispatch; α (this
+		// commit) wires the extension inert so persisted
+		// digest frames replay correctly and the
+		// FrameObserver-maintained boundary index starts
+		// accumulating from session start. Phase 5.2.
+		compactorext.NewExtension(core.Logger, compactorext.DefaultConfig()),
 		planext.NewExtension(core.Agent.ID()),
 		wbext.NewExtension(core.Agent.ID()),
 		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()),

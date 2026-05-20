@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
@@ -151,6 +152,14 @@ func (s *Session) startTurn(runCtx context.Context, f *protocol.UserMessage) {
 		s.logger.Warn("materialise failed; proceeding with empty history",
 			"session", s.id, "err", err)
 	}
+	// TurnBoundaryHook: per phase 5.2 §4.1, every implementing
+	// extension gets a synchronous callback at the idle→active
+	// boundary, AFTER materialise + AFTER the user message
+	// emitted so FrameObserver-maintained projections (e.g. the
+	// compactor's boundary index) reflect the just-arrived
+	// frame. Errors are logged warn-not-fatal — the next
+	// boundary retries; the new turn proceeds regardless.
+	s.runTurnBoundaryHooks(runCtx)
 	if err := s.emitPendingSwitch(runCtx); err != nil {
 		s.logger.Debug("startTurn: emit pending switch", "session", s.id, "err", err)
 		return
@@ -676,4 +685,36 @@ func (s *Session) drainPendingInbound(runCtx context.Context) {
 		_ = s.emit(runCtx, f)
 	}
 	s.pendingInbound = s.pendingInbound[:0]
+}
+
+// runTurnBoundaryHooks invokes every registered
+// [extension.TurnBoundaryHook] in registration order at the
+// idle→active boundary. Errors are logged warn-not-fatal — a
+// misbehaving hook must not block the new turn.
+//
+// Hook ordering: matches deps.Extensions slice — extensions
+// registered earlier run first. The wiring in
+// `pkg/runtime/extensions.go` controls the order; phase 5.2
+// places compactor after notepad so any future hook needing
+// to read compactor state (e.g. phase 6 scheduler) registers
+// later still.
+//
+// Concurrency: hooks run synchronously on the session's Run
+// goroutine. They may block on LLM calls (compactor's β
+// summariser) — implementations own their own deadlines /
+// ctx-derived timeouts.
+func (s *Session) runTurnBoundaryHooks(runCtx context.Context) {
+	if s.deps == nil {
+		return
+	}
+	for _, ext := range s.deps.Extensions {
+		hook, ok := ext.(extension.TurnBoundaryHook)
+		if !ok {
+			continue
+		}
+		if err := hook.OnTurnBoundary(runCtx, s); err != nil {
+			s.logger.Warn("session: turn boundary hook failed",
+				"session", s.id, "extension", ext.Name(), "err", err)
+		}
+	}
 }

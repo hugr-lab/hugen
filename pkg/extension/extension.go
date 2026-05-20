@@ -405,3 +405,31 @@ type WhiteboardSystemWriter interface {
 type FrameRouter interface {
 	HandleFrame(ctx context.Context, state SessionState, f *protocol.ExtensionFrame) error
 }
+
+// TurnBoundaryHook extensions get a synchronous callback once per
+// user-turn at the idle→active boundary, AFTER pendingInbound has
+// drained into s.history and BEFORE the model resolve / prompt
+// build runs. The hook owns the boundary moment: it sees the
+// settled history slice + the calling session's state, and may
+// perform side-effects (emit ExtensionFrames, mutate own per-
+// session projection) before the new turn fires.
+//
+// Canonical implementor is the [compactor] extension (phase 5.2):
+// runs its hybrid trigger predicate against the FrameObserver-
+// maintained boundary index and either dispatches a compaction
+// LLM call or returns nil. Future implementors (cron / scheduler
+// in phase 6) will register additional hooks on the same shape.
+//
+// Concurrency: invoked synchronously on the session's Run
+// goroutine — implementations may block on LLM calls but MUST
+// respect ctx.Done so /cancel and turn-level deadlines unwind
+// cleanly. Errors are logged warn-not-fatal — the next boundary
+// retries, the new turn proceeds regardless.
+//
+// Ordering: hooks fire in extension-registration order. An
+// implementation that reads state another hook wrote (e.g. a
+// scheduler reading compactor digest) registers later in the
+// runtime.Build slice.
+type TurnBoundaryHook interface {
+	OnTurnBoundary(ctx context.Context, state SessionState) error
+}
