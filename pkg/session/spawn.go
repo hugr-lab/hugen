@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -87,6 +88,13 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 	child.spawnSkill = spec.Skill
 	child.spawnRole = spec.Role
 	child.mission = spec.Task
+	// Mission-PDCA phase A — let external extensions (mission ext's
+	// Plan Executor) request a non-default render mode without
+	// reaching into the unexported `asyncSpawnMode` field. Mirrors
+	// the existing in-package writes by tools_subagent_spawn_mission.go.
+	if spec.RenderMode != "" {
+		child.asyncSpawnMode = spec.RenderMode
+	}
 	s.logger.Debug("session: spawn: child constructed",
 		"parent", s.id,
 		"child", child.id,
@@ -140,11 +148,46 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 		s.deps.Logger.Warn("session: emit subagent_started",
 			"parent", s.id, "child", child.ID(), "err", err)
 	}
+	// Apply per-role intent override (tier-default + skill-role hint)
+	// and run every registered SubagentSpawnApplier (autoload_skills,
+	// …) against the freshly-constructed child. Fires on every
+	// Spawn() — session:spawn_mission tool, mission ext's executor
+	// worker dispatch, tests. Phase H deleted the legacy
+	// session:spawn_subagent LLM tool that used to own this wiring;
+	// design-003 mission-PDCA brings it back here so worker roles
+	// with `autoload_skills:` on their SubAgentRole actually receive
+	// the bound skills before their first turn.
+	s.applyChildIntent(ctx, child, spec.Skill, spec.Role)
+	s.applyChildSpawnAppliers(ctx, child, spec.Skill, spec.Role)
 	// Lifecycle: a parent with live children is not idle. The
 	// in-flight-tool-call path already marked us active when the
 	// turn started; this transition is the defensive backstop for
 	// out-of-turn callers (test fixtures that Spawn directly
 	// without driving a UserMessage). Guard drops the duplicate.
 	s.markStatus(ctx, protocol.SessionStatusActive, "spawn")
+	return child, nil
+}
+
+// SpawnChild implements [extension.SessionSpawner]. The capability
+// lets external extensions (mission ext's Plan Executor) open a
+// child session through a stable interface in pkg/extension —
+// pkg/session never imports pkg/extension/mission so the spawner
+// crosses the boundary structurally. Body is a thin translation
+// to the in-package SpawnSpec; semantics are identical.
+//
+// Returning extension.SessionState (not *Session) keeps the
+// public API in pkg/extension surface-clean.
+func (s *Session) SpawnChild(ctx context.Context, spec extension.SpawnSpec) (extension.SessionState, error) {
+	child, err := s.Spawn(ctx, SpawnSpec{
+		Name:       spec.Name,
+		Skill:      spec.Skill,
+		Role:       spec.Role,
+		Task:       spec.Task,
+		Inputs:     spec.Inputs,
+		RenderMode: spec.RenderMode,
+	})
+	if err != nil {
+		return nil, err
+	}
 	return child, nil
 }

@@ -1,0 +1,107 @@
+# mission_pdca_minimal — Phase A α.4 acceptance scenario for the
+# mission-PDCA pipeline (design 003). Drives one wave with a single
+# echo worker plus a synthesis worker via the fixture skill
+# `_mission_v2` (installed onto the local tier by the harness in
+# Setup; see pkg/extension/mission/fixture/).
+#
+# What this scenario validates end-to-end:
+#
+#   1. Root reads the "Available missions" prompt block (rendered
+#      by mission ext's Advertiser) and chooses to spawn
+#      `_mission_v2` via session:spawn_mission. The skill name is
+#      explicit in the user instruction below to avoid the model
+#      drifting to a different mission — the test exercises the
+#      executor, not the LLM's routing.
+#
+#   2. The mission session has zero LLM tool calls in Phase A
+#      (the executor drives the whole flow). Its event log
+#      carries two mission:wave_complete ExtensionFrames
+#      (`wave-1` + `_synthesis`).
+#
+#   3. The wave-1 worker session emits a handoff fence and
+#      terminates cleanly. The synthesis worker consumes the
+#      handoff and emits the mission's final answer.
+#
+#   4. Root sees a subagent_result for the mission with non-empty
+#      result text (the synthesizer's body).
+#
+# Requires a real LLM endpoint because the wave-1 + synthesis
+# workers are LLM-driven (they pick the handoff-fence shape from
+# the worker prompt). Weak models (gemma 4 26B) are sufficient —
+# the contract is "emit a handoff fence", not domain reasoning.
+name: mission_pdca_minimal
+requires: []
+
+steps:
+  - say: |
+      Run mission `_mission_v2` with goal "echo hello world".
+      Use session:spawn_mission with skill="_mission_v2".
+    # Two LLM-driven workers (echo + synthesizer) on weak models
+    # take ~30-60s each. 5 minutes covers boot + worker spawn +
+    # synthesis settle on the slowest local-LLM topology.
+    budget: 360s
+    wait_for_subagents: 240s
+
+    queries:
+      # Root's tool calls — expect exactly one session:spawn_mission
+      # against `_mission_v2`. Anything else (no spawn, multiple
+      # spawns, wrong skill) is a routing regression on root.
+      - name: root_tool_calls
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # The spawned mission session row — exactly one child of
+      # root with spawn_skill="_mission_v2".
+      - name: mission_row
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Mission's event log — wave_complete frames for wave-1 and
+      # _synthesis are the explicit Phase A α.4 contract.
+      - name: mission_wave_complete_frames
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.sessions | map({mission_id: .id, frames: (.events // []) | map(select(.event_type == \"extension_frame\" and .metadata.extension == \"mission\" and .metadata.op == \"wave_complete\")) | map({seq, label: .metadata.data.label, status: .metadata.data.status})})") {
+              hub { db { agent {
+                sessions(filter: {parent_session_id: {eq: $sid}}) {
+                  id
+                  events(filter: {event_type: {eq: "extension_frame"}}, order_by: [{field: "seq", direction: ASC}]) {
+                    seq event_type metadata
+                  }
+                }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Root's subagent_result projections — every child terminal
+      # surfaces here. For mission_pdca_minimal we want one row
+      # whose session_id matches the mission's id and whose
+      # `result` carries the synthesizer's body (non-empty).
+      - name: root_subagent_results
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "subagent_result"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq metadata content }
+            }}}
+          }
+        vars: { sid: "$sid" }

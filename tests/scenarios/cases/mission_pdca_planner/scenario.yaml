@@ -1,0 +1,117 @@
+# mission_pdca_planner — Phase B δ acceptance scenario for the
+# planner-driven mission-PDCA pipeline (design 003). Exercises the
+# iterative loop end-to-end: planner LLM emits a kind=plan handoff,
+# executor runs the emitted wave, planner re-spawns and emits
+# next_wave: null to signal plan_complete, synthesis fires.
+#
+# Fixture skill is `_mission_v3` (installed by the harness in
+# Setup; see pkg/extension/mission/fixture/planner.go). Approval is
+# skipped (`initial: skip`, `iteration: never`) so the scenario
+# runs headless — the approval gate has its own unit tests.
+#
+# What this scenario validates end-to-end:
+#
+#   1. Root spawns `_mission_v3` via session:spawn_mission.
+#
+#   2. Mission ext's planner loop runs:
+#      - iteration_start frame emitted before each planner spawn.
+#      - planner subagent (role=planner) reads the rendered
+#        planner_task template + goal + iteration counter.
+#      - First planner emit: kind=plan handoff with one wave
+#        (echo worker). Executor runs the wave.
+#      - Second planner emit: next_wave: null (plan_complete).
+#        Loop exits cleanly.
+#
+#   3. wave_complete ExtensionFrames are emitted on the mission
+#      session for `_plan-1`, the planner-emitted wave label,
+#      `_plan-2`, and `_synthesis`.
+#
+#   4. Root sees a subagent_result for the mission with non-empty
+#      result text (the synthesizer's body).
+#
+# Weak models can struggle with the kind=plan fence shape because
+# the JSON body is more elaborate than kind=handoff (next_wave +
+# roadmap + rationale). 6-minute budget covers boot + 2 planner
+# spawns + 1 echo worker + synthesis settle on the slowest local
+# topology; if this regresses, tune planner_task.tmpl prose first.
+name: mission_pdca_planner
+requires: []
+
+steps:
+  - say: |
+      Run mission `_mission_v3` with goal "echo hello world".
+      Use session:spawn_mission with skill="_mission_v3".
+    budget: 480s
+    wait_for_subagents: 360s
+
+    queries:
+      - name: root_tool_calls
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "tool_call"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq tool_name tool_args }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      - name: mission_row
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id status session_type metadata
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # The planner loop emits iteration_start frames on every
+      # cycle — observable proof that the planner-driven path is
+      # active. Phase B contract: at least one iteration_start.
+      - name: mission_iteration_starts
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id
+                events(
+                  filter: {event_type: {eq: "extension_frame"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq event_type metadata }
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # wave_complete frames for _plan-N + the planner-emitted
+      # wave label + _synthesis. Same shape as the inline
+      # scenario's mission_wave_complete_frames query.
+      - name: mission_wave_complete_frames
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              sessions(filter: {parent_session_id: {eq: $sid}}) {
+                id
+                events(
+                  filter: {event_type: {eq: "extension_frame"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq event_type metadata }
+              }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      - name: root_subagent_results
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "subagent_result"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq metadata content }
+            }}}
+          }
+        vars: { sid: "$sid" }

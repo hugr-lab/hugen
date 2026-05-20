@@ -578,6 +578,70 @@ metadata:
 	}
 }
 
+// TestParse_SubAgentCapabilitiesPlanContext verifies the Phase-F
+// per-role capability schema. Accepted values for
+// sub_agents[*].capabilities.plan_context are the empty string,
+// "off", and "read". Anything else fails at parse time so a
+// typo in a hand-authored manifest surfaces immediately.
+func TestParse_SubAgentCapabilitiesPlanContext(t *testing.T) {
+	t.Run("accepts known values", func(t *testing.T) {
+		src := `---
+name: caps-skill
+description: Phase F per-role capabilities accepted values.
+license: MIT
+metadata:
+  hugen:
+    sub_agents:
+      - name: planner
+        description: planner role
+        capabilities:
+          plan_context: read
+      - name: do-worker
+        description: do worker role
+        capabilities:
+          plan_context: off
+      - name: silent-worker
+        description: no capabilities declared
+---
+`
+		m, err := Parse([]byte(src))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if got := m.Hugen.SubAgents[0].Capabilities.PlanContext; got != "read" {
+			t.Errorf("planner.capabilities.plan_context = %q, want read", got)
+		}
+		if got := m.Hugen.SubAgents[1].Capabilities.PlanContext; got != "off" {
+			t.Errorf("do-worker.capabilities.plan_context = %q, want off", got)
+		}
+		if got := m.Hugen.SubAgents[2].Capabilities.PlanContext; got != "" {
+			t.Errorf("silent-worker.capabilities.plan_context = %q, want empty", got)
+		}
+	})
+	t.Run("rejects unknown value", func(t *testing.T) {
+		src := `---
+name: caps-bad
+description: Unknown plan_context access mode fails parse.
+license: MIT
+metadata:
+  hugen:
+    sub_agents:
+      - name: worker
+        description: worker
+        capabilities:
+          plan_context: write
+---
+`
+		_, err := Parse([]byte(src))
+		if err == nil || !errors.Is(err, ErrManifestInvalid) {
+			t.Fatalf("Parse: err = %v, want ErrManifestInvalid", err)
+		}
+		if !strings.Contains(err.Error(), "plan_context") {
+			t.Errorf("err should mention plan_context: %v", err)
+		}
+	})
+}
+
 // TestParse_RejectsLegacyTierVocab verifies the aggressive cleanup
 // per phase 4.2.2 §Migration: the legacy [subagent] alias is gone
 // — autoload_for must use the new [root, mission, worker] vocab.

@@ -78,6 +78,14 @@ type SpawnSpec struct {
 	// after the manager fills in metadata["depth"] / metadata["spawn_role"]
 	// / metadata["spawn_skill"]. Caller-supplied keys win on collision.
 	Metadata map[string]any
+	// RenderMode tags the child's terminal SubagentResult with a
+	// projection hint copied into the payload by the parent's pump.
+	// Mirrors the values defined in pkg/protocol
+	// ([protocol.SubagentRenderSilent] et al.). Empty falls back to
+	// the default render. Used by external extensions (mission ext's
+	// Plan Executor) that need to suppress history projection of
+	// internal workers without reaching into Session internals.
+	RenderMode string
 }
 
 // newSessionID returns a fresh ses-<hex> identifier. Used by both

@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"sort"
 	"strings"
-	"text/template"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/prompts"
@@ -34,6 +33,13 @@ import (
 // (extension.go).
 
 // Compile-time interface assertions.
+//
+// Mission-PDCA (design 003): the MissionDispatcher / MissionStartLookup
+// capabilities have moved to pkg/extension/mission. Skill ext no
+// longer participates in mission dispatch; the manifest's
+// `metadata.hugen.mission.{enabled,on_start,summary}` fields are
+// inert under the new model — the PDCA shape lives in
+// `metadata.hugen.mission.plan.*` and mission ext owns parsing it.
 var (
 	_ extension.Advertiser          = (*Extension)(nil)
 	_ extension.ToolFilter          = (*Extension)(nil)
@@ -42,8 +48,6 @@ var (
 	_ extension.SubagentDescriber   = (*Extension)(nil)
 	_ extension.SubagentSpawnHinter = (*Extension)(nil)
 	_ extension.SubagentSpawnApplier = (*Extension)(nil)
-	_ extension.MissionDispatcher   = (*Extension)(nil)
-	_ extension.MissionStartLookup  = (*Extension)(nil)
 	_ extension.CloseTurnLookup     = (*Extension)(nil)
 	_ extension.StatusReporter      = (*Extension)(nil)
 )
@@ -77,103 +81,6 @@ func (e *Extension) ReportStatus(ctx context.Context, state extension.SessionSta
 	return data
 }
 
-// MissionSkillExists implements [extension.MissionDispatcher].
-// Returns (true, nil) when the named skill is installed AND its
-// manifest declares metadata.hugen.mission.enabled:true. Phase
-// 4.2.2 §6.
-func (e *Extension) MissionSkillExists(ctx context.Context, skill string) (bool, error) {
-	if skill == "" || e.manager == nil {
-		return false, nil
-	}
-	all, err := e.manager.List(ctx)
-	if err != nil {
-		return false, err
-	}
-	for _, sk := range all {
-		if sk.Manifest.Name == skill && sk.Manifest.Hugen.Mission.Enabled {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// missionStartTemplateData is the fixed-vocabulary context the
-// on_start templates render against. Limited vocabulary by design
-// — complex logic lives in code, not in templates. Phase 4.2.2 §7.
-type missionStartTemplateData struct {
-	UserGoal    string
-	ParentSkill string
-	Inputs      any
-}
-
-// ResolveMissionStart implements [extension.MissionStartLookup].
-// Looks up the named skill, returns nil if it is not mission-enabled
-// or declares no on_start, otherwise renders the on_start templates
-// against the supplied (goal, inputs) and returns the post-render
-// MissionStartBlock the runtime applies. Phase 4.2.2 §7.
-func (e *Extension) ResolveMissionStart(ctx context.Context, skill, goal string, inputs any) (*extension.MissionStartBlock, error) {
-	if skill == "" || e.manager == nil {
-		return nil, nil
-	}
-	all, err := e.manager.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var found *skillpkg.Skill
-	for i, sk := range all {
-		if sk.Manifest.Name == skill {
-			found = &all[i]
-			break
-		}
-	}
-	if found == nil || !found.Manifest.Hugen.Mission.Enabled {
-		return nil, nil
-	}
-	on := found.Manifest.Hugen.Mission.OnStart
-	if on.Plan.BodyTemplate == "" && !on.Whiteboard.Init && on.FirstMessage.Template == "" {
-		return nil, nil
-	}
-	data := missionStartTemplateData{
-		UserGoal:    goal,
-		ParentSkill: skill,
-		Inputs:      inputs,
-	}
-	out := &extension.MissionStartBlock{
-		PlanCurrentStep: on.Plan.CurrentStep,
-		WhiteboardInit:  on.Whiteboard.Init,
-	}
-	if on.Plan.BodyTemplate != "" {
-		body, err := renderMissionTemplate("plan.body_template", on.Plan.BodyTemplate, data)
-		if err != nil {
-			return nil, err
-		}
-		out.PlanText = body
-	}
-	if on.FirstMessage.Template != "" {
-		msg, err := renderMissionTemplate("first_message.template", on.FirstMessage.Template, data)
-		if err != nil {
-			return nil, err
-		}
-		out.FirstMessageOverride = msg
-	}
-	return out, nil
-}
-
-// renderMissionTemplate runs `body` through text/template with the
-// fixed mission-start vocabulary (UserGoal / ParentSkill / Inputs).
-// Errors propagate with the field name so a malformed template
-// surfaces a precise diagnostic at spawn time. Phase 4.2.2 §7.
-func renderMissionTemplate(field, body string, data missionStartTemplateData) (string, error) {
-	tpl, err := template.New(field).Parse(body)
-	if err != nil {
-		return "", fmt.Errorf("mission.on_start.%s: parse: %w", field, err)
-	}
-	var buf strings.Builder
-	if err := tpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("mission.on_start.%s: execute: %w", field, err)
-	}
-	return buf.String(), nil
-}
 
 // ResolveCloseTurn implements [extension.CloseTurnLookup]. Walks
 // the calling session's loaded skills and returns the most-
@@ -291,15 +198,8 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	}
 	renderer := state.Prompts()
 	var parts []string
-	// Available missions — root-only block listing every
-	// dispatch-eligible skill (mission.enabled:true) with its
-	// Summary so the root model can pick a skill argument for
-	// session:spawn_mission. Phase 4.2.2 §6.
-	if h.tier == skillpkg.TierRoot {
-		if missions := renderAvailableMissions(ctx, renderer, h); missions != "" {
-			parts = append(parts, missions)
-		}
-	}
+	// Available missions — moved to pkg/extension/mission's
+	// Advertiser. Mission-PDCA (design 003).
 	if meta := renderLoadedSkillsMeta(h); meta != "" {
 		parts = append(parts, meta)
 	}
@@ -319,47 +219,6 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 		return ""
 	}
 	return strings.Join(parts, "\n\n")
-}
-
-// renderAvailableMissions enumerates every skill in the manager's
-// store with metadata.hugen.mission.enabled:true and renders a
-// "## Available missions" prompt section listing each by name +
-// Summary. Returns "" when no mission-enabled skills are installed
-// — root then has no dispatch options and spawn_mission surfaces
-// `no_mission_skill`. Phase 4.2.2 §6.
-func renderAvailableMissions(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill) string {
-	all, err := h.manager.List(ctx)
-	if err != nil {
-		return ""
-	}
-	type missionItem struct {
-		Name    string
-		Summary string
-	}
-	var picked []missionItem
-	for _, sk := range all {
-		if !sk.Manifest.Hugen.Mission.Enabled {
-			continue
-		}
-		summary := strings.TrimSpace(sk.Manifest.Hugen.Mission.Summary)
-		if summary == "" {
-			summary = strings.TrimSpace(sk.Manifest.Description)
-		}
-		picked = append(picked, missionItem{
-			Name:    sk.Manifest.Name,
-			Summary: summary,
-		})
-	}
-	if len(picked) == 0 {
-		return ""
-	}
-	sort.Slice(picked, func(i, j int) bool {
-		return picked[i].Name < picked[j].Name
-	})
-	return strings.TrimRight(renderer.MustRender(
-		"skill/available_missions",
-		map[string]any{"Missions": picked},
-	), "\n")
 }
 
 // renderLoadedSkillsMeta produces the per-loaded-skill metadata
@@ -560,7 +419,7 @@ func (e *Extension) FilterTools(ctx context.Context, state extension.SessionStat
 	if h == nil || h.manager == nil {
 		return all
 	}
-	allowed := allowedFromHandle(ctx, h)
+	allowed := allowedFromHandle(ctx, h, state)
 	if allowed == nil {
 		return all
 	}
@@ -812,37 +671,101 @@ func (a *allowedSet) match(name string) bool {
 
 // allowedFromHandle compiles the loaded-skill bindings into an
 // allowedSet. Returns nil when h is nil (no skill ext wired);
-// an empty (non-nil) set when the session has no loaded skills;
-// populated otherwise.
-func allowedFromHandle(ctx context.Context, h *SessionSkill) *allowedSet {
+// an empty (non-nil) set when the session has no loaded skills
+// and no role-scoped grants; populated otherwise.
+//
+// Role-scoped grants: when state carries a (Skill, Role) pair
+// resolving to a SubAgentRole in the manager, that role's Tools
+// field augments the allow-set on top of the loaded-skill union.
+// This is the wiring under design 003 that lets per-role surfaces
+// declared in the dispatching skill's manifest (e.g. analyst
+// planner role granting `mission:validate_plan`) actually reach
+// the worker's snapshot WITHOUT auto-loading the dispatching skill.
+func allowedFromHandle(ctx context.Context, h *SessionSkill, state extension.SessionState) *allowedSet {
 	if h == nil {
 		return nil
-	}
-	b, err := h.Bindings(ctx)
-	if err != nil || len(b.AllowedTools) == 0 {
-		return &allowedSet{exact: map[string]bool{}}
 	}
 	out := &allowedSet{
 		exact:             map[string]bool{},
 		approvalExact:     map[string]struct{}{},
 		approvalProviders: map[string]struct{}{},
 	}
-	for _, g := range b.AllowedTools {
+	b, err := h.Bindings(ctx)
+	if err == nil {
+		for _, g := range b.AllowedTools {
+			for _, t := range g.Tools {
+				full := g.Provider + ":" + t
+				if strings.HasSuffix(t, "*") {
+					out.patterns = append(out.patterns, strings.TrimSuffix(full, "*"))
+					continue
+				}
+				out.exact[full] = true
+			}
+			for _, name := range g.RequiresApproval {
+				if name == "*" {
+					out.approvalProviders[g.Provider] = struct{}{}
+					continue
+				}
+				out.approvalExact[g.Provider+":"+name] = struct{}{}
+			}
+		}
+	}
+	if state != nil {
+		mergeRoleTools(ctx, h, state, out)
+	}
+	return out
+}
+
+// mergeRoleTools looks up the SubAgentRole that matches the
+// session's (Skill, Role) pair in the dispatching skill's manifest
+// and adds its Tools entries to allow. Silent no-op when:
+//
+//   - state has no Role / no Skill (root sessions, externally-
+//     spawned workers without skill metadata),
+//   - the manager doesn't know the dispatching skill,
+//   - the role name isn't in the manifest's sub_agents block.
+//
+// requires_approval flags on role.Tools entries are honoured the
+// same as loaded-skill grants — keeps the approval surface
+// consistent across both sources.
+func mergeRoleTools(ctx context.Context, h *SessionSkill, state extension.SessionState, allow *allowedSet) {
+	if h == nil || h.manager == nil || state == nil {
+		return
+	}
+	skillName := state.Skill()
+	roleName := state.Role()
+	if skillName == "" || roleName == "" {
+		return
+	}
+	sk, err := h.manager.Get(ctx, skillName)
+	if err != nil {
+		return
+	}
+	var role *skillpkg.SubAgentRole
+	for i := range sk.Manifest.Hugen.SubAgents {
+		if sk.Manifest.Hugen.SubAgents[i].Name == roleName {
+			role = &sk.Manifest.Hugen.SubAgents[i]
+			break
+		}
+	}
+	if role == nil {
+		return
+	}
+	for _, g := range role.Tools {
 		for _, t := range g.Tools {
 			full := g.Provider + ":" + t
 			if strings.HasSuffix(t, "*") {
-				out.patterns = append(out.patterns, strings.TrimSuffix(full, "*"))
+				allow.patterns = append(allow.patterns, strings.TrimSuffix(full, "*"))
 				continue
 			}
-			out.exact[full] = true
+			allow.exact[full] = true
 		}
 		for _, name := range g.RequiresApproval {
 			if name == "*" {
-				out.approvalProviders[g.Provider] = struct{}{}
+				allow.approvalProviders[g.Provider] = struct{}{}
 				continue
 			}
-			out.approvalExact[g.Provider+":"+name] = struct{}{}
+			allow.approvalExact[g.Provider+":"+name] = struct{}{}
 		}
 	}
-	return out
 }

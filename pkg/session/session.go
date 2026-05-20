@@ -430,6 +430,14 @@ func (s *Session) SubagentName() string { return s.name }
 // frames without touching [*Session] internals. Empty for roots.
 func (s *Session) Role() string { return s.spawnRole }
 
+// Skill implements [extension.SessionState]. Returns spawnSkill —
+// the dispatching skill name passed to [Spawn] when the session
+// was opened. Pairs with [Role] so extensions can resolve the
+// session's SubAgentRole inside the dispatching skill's manifest.
+// Empty for root sessions and for spawners that did not pass an
+// explicit skill.
+func (s *Session) Skill() string { return s.spawnSkill }
+
 // Inbox is the channel callers push frames onto.
 func (s *Session) Inbox() chan<- protocol.Frame { return s.in }
 

@@ -133,6 +133,16 @@ func renderSidebar(s *liveviewStatus, width int) string {
 		sb.WriteString(renderPlan(plan, width))
 	}
 
+	// Mission — PDCA progress for mission-tier sessions: active
+	// wave, completed wave count with per-wave status badges, and
+	// the handoff store size. Worker / planner / checker tiers see
+	// nothing here (mission ext only emits this payload on mission
+	// sessions).
+	if mission := parseMissionStatus(s.Extensions); mission != nil {
+		sb.WriteString("\n")
+		sb.WriteString(renderMission(mission, width))
+	}
+
 	// Notepad — count + per-category breakdown.
 	if buckets := parseNotepadCounts(s.Extensions); len(buckets) > 0 {
 		sb.WriteString("\n")
@@ -312,6 +322,86 @@ func renderNotepad(buckets []categoryCount, width int) string {
 	for _, b := range buckets {
 		line := fmt.Sprintf("  %s (%d)", b.Category, b.Count)
 		sb.WriteString(truncate(line, width))
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// missionStatus mirrors pkg/extension/mission.ReportStatus's wire
+// shape. Used by renderMission to surface PDCA progress (current
+// wave, completed wave statuses, handoff store size) in the
+// sidebar's mission section. Only populated on mission-tier
+// sessions; root / worker / planner / checker tiers parse nil.
+type missionStatus struct {
+	Plan struct {
+		Done []struct {
+			Label     string `json:"label"`
+			Status    string `json:"status"`
+			Subagents []struct {
+				Name   string `json:"name"`
+				Role   string `json:"role,omitempty"`
+				Status string `json:"status,omitempty"`
+			} `json:"subagents,omitempty"`
+		} `json:"done"`
+	} `json:"plan"`
+	ActiveWave   string `json:"active_wave,omitempty"`
+	HandoffCount int    `json:"handoff_count"`
+}
+
+// parseMissionStatus extracts the mission payload from a status
+// frame's extensions map. Returns nil when the session is not a
+// mission (mission ext only contributes on mission-tier sessions).
+func parseMissionStatus(exts map[string]json.RawMessage) *missionStatus {
+	raw, ok := exts["mission"]
+	if !ok {
+		return nil
+	}
+	var s missionStatus
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil
+	}
+	if s.ActiveWave == "" && len(s.Plan.Done) == 0 && s.HandoffCount == 0 {
+		return nil
+	}
+	return &s
+}
+
+// renderMission prints the PDCA progress block. Internal waves
+// (label starts with `_`, e.g. `_plan-1`, `_check-1`, `_synth`)
+// stay folded behind a counter so the operator sees the Do-waves
+// as the primary timeline.
+func renderMission(m *missionStatus, width int) string {
+	var sb strings.Builder
+	heading := fmt.Sprintf("Mission · %d handoffs", m.HandoffCount)
+	sb.WriteString(styleSidebarHeading.Render(heading))
+	sb.WriteString("\n")
+	if m.ActiveWave != "" {
+		line := "→ " + m.ActiveWave
+		if strings.HasPrefix(m.ActiveWave, "_") {
+			line = "→ " + m.ActiveWave + " (internal)"
+		}
+		sb.WriteString(truncate(line, width))
+		sb.WriteString("\n")
+	}
+	internal := 0
+	for _, w := range m.Plan.Done {
+		if strings.HasPrefix(w.Label, "_") {
+			internal++
+			continue
+		}
+		badge := "✓"
+		if w.Status == "failed" {
+			badge = "✗"
+		} else if w.Status != "ok" && w.Status != "" {
+			badge = "·"
+		}
+		line := fmt.Sprintf("  %s %s", badge, w.Label)
+		sb.WriteString(styleSidebarFaint.Render(truncate(line, width)))
+		sb.WriteString("\n")
+	}
+	if internal > 0 {
+		line := fmt.Sprintf("  · %d planner/checker waves", internal)
+		sb.WriteString(styleSidebarFaint.Render(truncate(line, width)))
 		sb.WriteString("\n")
 	}
 	return sb.String()

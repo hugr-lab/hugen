@@ -155,31 +155,25 @@ func TestSpawn_NameCollision_AutoSuffix(t *testing.T) {
 	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
-	// First spawn — name "data-fetch" picked verbatim.
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"data-fetch","task":"first"}]}`))
+	// First spawn — name "data-fetch" picked verbatim. Direct
+	// parent.Spawn (Go API) — Phase H removed the legacy
+	// spawn_subagent LLM tool but the underlying Go Spawn path
+	// stays.
+	c1, err := parent.Spawn(context.Background(), SpawnSpec{Name: "data-fetch", Task: "first"})
 	if err != nil {
 		t.Fatalf("first spawn: %v", err)
 	}
-	var rows []spawnSubagentResult
-	if err := json.Unmarshal(out, &rows); err != nil {
-		t.Fatalf("first spawn unmarshal: %v\noutput=%s", err, out)
-	}
-	if len(rows) != 1 || rows[0].Name != "data-fetch" {
-		t.Errorf("first spawn name = %q, want %q (full result %+v)", rows[0].Name, "data-fetch", rows)
+	if c1.SubagentName() != "data-fetch" {
+		t.Errorf("first spawn name = %q, want %q", c1.SubagentName(), "data-fetch")
 	}
 
 	// Second spawn — same name → auto-suffix to "data-fetch-2".
-	out, err = parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"data-fetch","task":"second"}]}`))
+	c2, err := parent.Spawn(context.Background(), SpawnSpec{Name: "data-fetch", Task: "second"})
 	if err != nil {
 		t.Fatalf("second spawn: %v", err)
 	}
-	if err := json.Unmarshal(out, &rows); err != nil {
-		t.Fatalf("second spawn unmarshal: %v\noutput=%s", err, out)
-	}
-	if len(rows) != 1 || rows[0].Name != "data-fetch-2" {
-		t.Errorf("second spawn name = %q, want %q (full result %+v)", rows[0].Name, "data-fetch-2", rows)
+	if c2.SubagentName() != "data-fetch-2" {
+		t.Errorf("second spawn name = %q, want %q", c2.SubagentName(), "data-fetch-2")
 	}
 
 	// Verify in-memory state: both children alive with the
@@ -207,26 +201,26 @@ func TestSpawn_NameCollision_BatchedDuplicates(t *testing.T) {
 	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"fetch","task":"a"},{"name":"fetch","task":"b"}]}`))
+	// Two back-to-back Spawn calls with the same name — collision
+	// resolution must auto-suffix the second. Mission-PDCA Phase H
+	// removed the batched spawn_subagent LLM tool; the underlying
+	// Spawn path is unchanged.
+	c1, err := parent.Spawn(context.Background(), SpawnSpec{Name: "fetch", Task: "a"})
 	if err != nil {
-		t.Fatalf("spawn: %v", err)
+		t.Fatalf("spawn 1: %v", err)
 	}
-	var rows []spawnSubagentResult
-	if err := json.Unmarshal(out, &rows); err != nil {
-		t.Fatalf("unmarshal: %v\noutput=%s", err, out)
+	c2, err := parent.Spawn(context.Background(), SpawnSpec{Name: "fetch", Task: "b"})
+	if err != nil {
+		t.Fatalf("spawn 2: %v", err)
 	}
-	if len(rows) != 2 {
-		t.Fatalf("rows = %d, want 2 (output=%s)", len(rows), out)
+	if c1.SubagentName() != "fetch" {
+		t.Errorf("c1.Name = %q, want %q", c1.SubagentName(), "fetch")
 	}
-	if rows[0].Name != "fetch" {
-		t.Errorf("rows[0].Name = %q, want %q", rows[0].Name, "fetch")
+	if c2.SubagentName() != "fetch-2" {
+		t.Errorf("c2.Name = %q, want %q (collision auto-suffix)", c2.SubagentName(), "fetch-2")
 	}
-	if rows[1].Name != "fetch-2" {
-		t.Errorf("rows[1].Name = %q, want %q (collision should auto-suffix)", rows[1].Name, "fetch-2")
-	}
-	if rows[0].SessionID == rows[1].SessionID {
-		t.Errorf("rows[0].SessionID == rows[1].SessionID = %q; want distinct", rows[0].SessionID)
+	if c1.ID() == c2.ID() {
+		t.Errorf("c1.ID == c2.ID = %q; want distinct", c1.ID())
 	}
 }
 
@@ -238,17 +232,12 @@ func TestSpawn_SanitisesAtSchemaLayer(t *testing.T) {
 	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"Data Fetch","task":"x"}]}`))
+	c, err := parent.Spawn(context.Background(), SpawnSpec{Name: "Data Fetch", Task: "x"})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	var rows []spawnSubagentResult
-	if err := json.Unmarshal(out, &rows); err != nil {
-		t.Fatalf("unmarshal: %v\noutput=%s", err, out)
-	}
-	if len(rows) != 1 || rows[0].Name != "data-fetch" {
-		t.Errorf("spawn name = %q, want %q", rows[0].Name, "data-fetch")
+	if c.SubagentName() != "data-fetch" {
+		t.Errorf("spawn name = %q, want %q (sanitised)", c.SubagentName(), "data-fetch")
 	}
 }
 
@@ -273,57 +262,50 @@ func TestSpawn_PropagatesNameToStartedFrame(t *testing.T) {
 	}
 }
 
-// TestNotify_AddressByName verifies notify_subagent accepts the
-// child's Name as the target identifier (in addition to the legacy
-// session_id form). Phase 5.2 α.1b.
+// TestNotify_AddressByName verifies Session.NotifyChild — the
+// Go API used by the runtime's interrupt delivery path — accepts
+// either a child Name or session_id as the target. Phase H
+// removed the legacy notify_subagent LLM tool; the Go API stays.
 func TestNotify_AddressByName(t *testing.T) {
 	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
-	out, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"fetch","task":"go"}]}`))
+	c, err := parent.Spawn(context.Background(), SpawnSpec{Name: "fetch", Task: "go"})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	var rows []spawnSubagentResult
-	if err := json.Unmarshal(out, &rows); err != nil || len(rows) != 1 {
-		t.Fatalf("spawn unmarshal: %v (output=%s)", err, out)
-	}
 
 	// Address by Name.
-	out, err = parent.callNotifySubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagent_id":"fetch","content":"check rows"}`))
+	resolved, delivered, err := parent.NotifyChild(context.Background(), "fetch", "check rows")
 	if err != nil {
 		t.Fatalf("notify by name: %v", err)
 	}
-	var nout notifySubagentOutput
-	if err := json.Unmarshal(out, &nout); err != nil {
-		t.Fatalf("notify unmarshal: %v (output=%s)", err, out)
+	if !delivered {
+		t.Errorf("notify by name not delivered (resolved=%q)", resolved)
 	}
-	if !nout.Delivered {
-		t.Errorf("notify by name not delivered (output=%s)", out)
+	if resolved != c.ID() {
+		t.Errorf("notify by name resolved id = %q, want %q", resolved, c.ID())
 	}
 
 	// Address by session_id (legacy path) still works.
-	idJSON, _ := json.Marshal(map[string]string{
-		"subagent_id": rows[0].SessionID,
-		"content":     "ping",
-	})
-	out, err = parent.callNotifySubagent(us1WithSession(parent), idJSON)
+	resolved, delivered, err = parent.NotifyChild(context.Background(), c.ID(), "ping")
 	if err != nil {
 		t.Fatalf("notify by session_id: %v", err)
 	}
-	if err := json.Unmarshal(out, &nout); err != nil {
-		t.Fatalf("notify (by id) unmarshal: %v (output=%s)", err, out)
+	if !delivered {
+		t.Errorf("notify by session_id not delivered")
 	}
-	if !nout.Delivered {
-		t.Errorf("notify by session_id not delivered (output=%s)", out)
+	if resolved != c.ID() {
+		t.Errorf("notify by session_id resolved id = %q, want %q", resolved, c.ID())
 	}
 
-	// Unknown identifier surfaces not_a_child.
-	out, _ = parent.callNotifySubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagent_id":"nonexistent","content":"x"}`))
-	mgr_assertErrorCode(t, out, "not_a_child")
+	// Unknown identifier surfaces as delivered=false (or ErrNotifyEmpty
+	// for empty input). Spec keeps the API quiet on missing target
+	// — caller checks delivered.
+	_, delivered, _ = parent.NotifyChild(context.Background(), "nonexistent", "x")
+	if delivered {
+		t.Errorf("notify against unknown id delivered=true; want false")
+	}
 }
 
 // TestWaitSubagents_AddressByName verifies wait_subagents accepts a
@@ -335,10 +317,11 @@ func TestWaitSubagents_AddressByName(t *testing.T) {
 	defer cleanup()
 
 	// Spawn two children with explicit names.
-	_, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"alpha","task":"go"},{"name":"beta","task":"go"}]}`))
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
+	if _, err := parent.Spawn(context.Background(), SpawnSpec{Name: "alpha", Task: "go"}); err != nil {
+		t.Fatalf("spawn alpha: %v", err)
+	}
+	if _, err := parent.Spawn(context.Background(), SpawnSpec{Name: "beta", Task: "go"}); err != nil {
+		t.Fatalf("spawn beta: %v", err)
 	}
 
 	// Build the wait args using one name + one session_id (mixed).
@@ -382,9 +365,7 @@ func TestWaitSubagents_DuplicateNamesDedup(t *testing.T) {
 	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
-	_, err := parent.callSpawnSubagent(us1WithSession(parent),
-		json.RawMessage(`{"subagents":[{"name":"alpha","task":"go"}]}`))
-	if err != nil {
+	if _, err := parent.Spawn(context.Background(), SpawnSpec{Name: "alpha", Task: "go"}); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
 

@@ -127,12 +127,22 @@ type RootSpec struct {
 // (Say sends a UserMessage; Tick is a no-op tick that lets the
 // inbox drain). WaitForSubagents and WaitForCondition are optional
 // settling sentinels run before Queries.
+//
+// NOTE: every snake_case field needs an explicit `json:"…"` tag.
+// oasdiff/yaml encodes YAML through encoding/json, which lowercases
+// Go field names but does NOT introduce underscores — so
+// `WaitForSubagents` (Go) and `wait_for_subagents` (YAML) only line
+// up when the json tag forces the match. Fields without the tag are
+// silently parsed as zero values. This caught the Phase A
+// mission_pdca_minimal scenario, where a missing wait skipped the
+// settle step entirely and t.Cleanup cancelled the in-flight
+// mission.
 type Step struct {
-	Say              string    `yaml:"say,omitempty"`
-	Tick             bool      `yaml:"tick,omitempty"`
-	Budget           Duration  `yaml:"budget,omitempty"` // overrides default 60s
-	WaitForSubagents Duration  `yaml:"wait_for_subagents,omitempty"`
-	WaitForCondition *WaitCond `yaml:"wait_for_condition,omitempty"`
+	Say              string    `json:"say,omitempty" yaml:"say,omitempty"`
+	Tick             bool      `json:"tick,omitempty" yaml:"tick,omitempty"`
+	Budget           Duration  `json:"budget,omitempty" yaml:"budget,omitempty"` // overrides default 60s
+	WaitForSubagents Duration  `json:"wait_for_subagents,omitempty" yaml:"wait_for_subagents,omitempty"`
+	WaitForCondition *WaitCond `json:"wait_for_condition,omitempty" yaml:"wait_for_condition,omitempty"`
 	// InquiryResponses scripts answers to session:inquire calls that
 	// bubble up while this step is active. The harness pump matches
 	// each *protocol.InquiryRequest against the rules in order; the
@@ -148,11 +158,11 @@ type Step struct {
 // specific side-effect before logging queries (e.g. notepad rows
 // for a sub-agent that's still running).
 type WaitCond struct {
-	GraphQL  string         `yaml:"graphql"`
-	Vars     map[string]any `yaml:"vars,omitempty"`
-	Path     string         `yaml:"path,omitempty"`
-	Expected int            `yaml:"expected_rows"`
-	Budget   Duration       `yaml:"budget,omitempty"`
+	GraphQL  string         `json:"graphql" yaml:"graphql"`
+	Vars     map[string]any `json:"vars,omitempty" yaml:"vars,omitempty"`
+	Path     string         `json:"path,omitempty" yaml:"path,omitempty"`
+	Expected int            `json:"expected_rows" yaml:"expected_rows"`
+	Budget   Duration       `json:"budget,omitempty" yaml:"budget,omitempty"`
 }
 
 // Query is one inspection clause logged after the step's primary

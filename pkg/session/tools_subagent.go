@@ -10,38 +10,32 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
-// initSubagent registers the five sub-agent orchestration tools
-// into the per-session dispatch table set up in tools_provider.go.
-// Per phase-4-spec §15 step 7 + contracts/tools-subagent.md these
-// surface to the LLM as session:spawn_subagent /
-// session:wait_subagents / session:subagent_runs /
-// session:subagent_cancel / session:parent_context.
+// initSubagent registers the sub-agent orchestration tools into
+// the per-session dispatch table set up in tools_provider.go.
+// Mission-PDCA (design 003) Phase H pared this surface down: the
+// legacy `spawn_subagent` / `spawn_wave` / `parent_context` /
+// `notify_subagent` LLM tools are gone — runtime owns mission
+// dispatch via the mission ext. The surviving surface is:
+//
+//   - session:spawn_mission — root delegates one user request to
+//     a single mission coordinator.
+//   - session:wait_subagents — block on in-flight children
+//     (sync-mode mission completion; user-asked-to-wait).
+//   - session:subagent_runs / session:subagent_cancel —
+//     observability + user-initiated cancel.
+//   - session:inquire — HITL bubble to root → user.
 //
 // Each tool's schema, payload types, and handler live in its own
 // tools_subagent_<name>.go file; this shell only wires the
 // dispatch table + the helpers (describeSubagent /
 // hasSubagentDescriber / assertChildOf) every handler shares.
 func (s *Session) initSubagent() {
-	s.sessionTools["spawn_subagent"] = sessionToolDescriptor{
-		Name:             "spawn_subagent",
-		Description:      "Spawn one or more sub-agent sessions. Non-blocking — returns child session ids immediately; results arrive asynchronously via wait_subagents.",
-		PermissionObject: permObjectSubagentSpawn,
-		ArgSchema:        json.RawMessage(spawnSubagentSchema),
-		Handler:          s.callSpawnSubagent,
-	}
 	s.sessionTools["spawn_mission"] = sessionToolDescriptor{
 		Name:             "spawn_mission",
 		Description:      "Delegate the current user request to a single mission coordinator. Singular — root spawns one mission per request, never fans out directly.",
 		PermissionObject: permObjectSubagentSpawn,
 		ArgSchema:        json.RawMessage(spawnMissionSchema),
 		Handler:          s.callSpawnMission,
-	}
-	s.sessionTools["spawn_wave"] = sessionToolDescriptor{
-		Name:             "spawn_wave",
-		Description:      "Atomic spawn+wait: fan out a set of workers and block until each terminates. The mission's coordination primitive — one call per wave, returns per-worker results.",
-		PermissionObject: permObjectSubagentSpawn,
-		ArgSchema:        json.RawMessage(spawnWaveSchema),
-		Handler:          s.callSpawnWave,
 	}
 	s.sessionTools["wait_subagents"] = sessionToolDescriptor{
 		Name:             "wait_subagents",
@@ -64,20 +58,6 @@ func (s *Session) initSubagent() {
 		ArgSchema:        json.RawMessage(subagentCancelSchema),
 		Handler:          s.callSubagentCancel,
 	}
-	s.sessionTools["parent_context"] = sessionToolDescriptor{
-		Name:             "parent_context",
-		Description:      "Sub-agent's window into its direct parent's user-facing communication. Filtered to user/assistant messages.",
-		PermissionObject: permObjectSubagentParentContext,
-		ArgSchema:        json.RawMessage(parentContextSchema),
-		Handler:          s.callParentContext,
-	}
-	s.sessionTools["notify_subagent"] = sessionToolDescriptor{
-		Name:             "notify_subagent",
-		Description:      "Send a focused directive (KindSystemMessage with parent_note) to a direct child. Phase 5.1 § 3.5 — root / mission use this to route the relevant slice of a user follow-up to an in-flight sub-agent.",
-		PermissionObject: permObjectSubagentNotify,
-		ArgSchema:        json.RawMessage(notifySubagentSchema),
-		Handler:          s.callNotifySubagent,
-	}
 	s.sessionTools["inquire"] = sessionToolDescriptor{
 		Name:             "inquire",
 		Description:      "Blocking ask the user. REQUIRED args: type (\"approval\" | \"clarification\") + question. Optional: context, options, timeout_ms. type=approval surfaces a yes/no prompt; type=clarification surfaces a free-form question. Phase 5.1 § 2 — the call bubbles up the parent chain to root's adapter and blocks until the user answers, the per-call timeout fires, or ctx cancels.",
@@ -91,14 +71,15 @@ func (s *Session) initSubagent() {
 // system tools". These names are baked into the Tool descriptors
 // returned by Manager.List so the 3-tier permission stack can gate
 // each tool independently.
+//
+// Mission-PDCA Phase H removed the parent_context + notify perm
+// objects alongside the LLM tools they gated.
 const (
-	permObjectSubagentSpawn         = "hugen:subagent:spawn"
-	permObjectSubagentWait          = "hugen:subagent:wait"
-	permObjectSubagentRead          = "hugen:subagent:read"
-	permObjectSubagentCancel        = "hugen:subagent:cancel"
-	permObjectSubagentParentContext = "hugen:subagent:parent_context"
-	permObjectSubagentNotify        = "hugen:subagent:notify"
-	permObjectInquire               = "hugen:inquire"
+	permObjectSubagentSpawn  = "hugen:subagent:spawn"
+	permObjectSubagentWait   = "hugen:subagent:wait"
+	permObjectSubagentRead   = "hugen:subagent:read"
+	permObjectSubagentCancel = "hugen:subagent:cancel"
+	permObjectInquire        = "hugen:inquire"
 )
 
 // describeSubagent walks every [extension.SubagentDescriber] on

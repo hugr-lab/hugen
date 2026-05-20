@@ -8,6 +8,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/extension"
 	liveviewext "github.com/hugr-lab/hugen/pkg/extension/liveview"
 	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
+	missionext "github.com/hugr-lab/hugen/pkg/extension/mission"
 	notepadext "github.com/hugr-lab/hugen/pkg/extension/notepad"
 	planext "github.com/hugr-lab/hugen/pkg/extension/plan"
 	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
@@ -48,6 +49,19 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		planext.NewExtension(core.Agent.ID()),
 		wbext.NewExtension(core.Agent.ID()),
 		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()),
+		// Mission ext owns the entire mission-PDCA dispatch
+		// surface — MissionDispatcher (validates spawn_mission's
+		// `skill` arg), MissionAutoRunner (drives the executor
+		// goroutine), and the "Available missions" prompt block.
+		// Catalog is backed by the shared SkillManager so any
+		// installed skill declaring metadata.hugen.mission.plan
+		// auto-appears as a dispatch target. Mission-PDCA
+		// (design 003).
+		missionext.NewExtension(missionext.Config{
+			AgentID: core.Agent.ID(),
+			Logger:  core.Logger,
+			Catalog: newSkillManagerMissionCatalog(core.Skills),
+		}),
 		mcpext.NewExtension(core.Config.ToolProviders(), core.Logger),
 		// liveview lands last so its FrameObserver / ChildFrameObserver
 		// see frames AFTER siblings have processed them via their own

@@ -1,24 +1,14 @@
 ---
 name: _worker
-description: Built-in skill granting a worker-tier session minimal context-reading + whiteboard surface; no spawn by default.
+description: Built-in skill granting a worker-tier session minimal context-reading surface; no spawn by default. Workers run under mission-PDCA — they emit a fenced handoff block as their terminal message.
 license: Apache-2.0
 allowed-tools:
   - provider: session
     tools:
-      - parent_context
-      # Phase 5.1 follow-up — workers may inquire when the
-      # AMBIGUITY IS IN THE DATA (e.g. two equally-plausible
-      # source tables / columns for the user's request). The
-      # runtime approval gate already routes worker tool-call
-      # approvals through the same cascade; granting clarification
-      # symmetrically closes that gap. Mission still owns
-      # intent-ambiguity ("which goal did you mean") — see
-      # tier-worker.md for the rule.
+      # Phase 5.1 — workers may inquire when the AMBIGUITY IS IN
+      # THE DATA (two equally-plausible source tables / columns).
+      # Intent ambiguity still belongs to the planner.
       - inquire
-  - provider: whiteboard
-    tools:
-      - write
-      - read
   # Phase 4.2.3 — workers read prior cross-mission findings but
   # do not write by default. Roles that need write capability can
   # extend allowed-tools at the role level (sub_agents block in
@@ -27,6 +17,12 @@ allowed-tools:
     tools:
       - read
       - search
+  # Mission-PDCA Phase H — workers fetch prior-wave handoffs by ref
+  # via mission:get_handoff when their depends_on / catalog points
+  # them at one. Read-only; storage is managed by the executor.
+  - provider: mission
+    tools:
+      - get_handoff
 metadata:
   hugen:
     requires_skills: []
@@ -34,11 +30,10 @@ metadata:
     autoload_for: [worker]
     tier_compatibility: [worker]
     # Phase 4.2.3 ε — worker close turn. Same shape as the
-    # mission tier (default prompt + [notepad:append] surface
-    # + 2-iter cap), but the per-role on_close on the
-    # dispatching skill generally provides a more specific
-    # prompt. Skip the close turn for idle workers that
-    # returned text without tools.
+    # mission tier; the per-role on_close on the dispatching
+    # skill generally provides a more specific prompt. Skip the
+    # close turn for idle workers that returned text without
+    # tools.
     mission:
       on_close:
         notepad:
@@ -50,169 +45,43 @@ compatibility:
 
 # _worker skill
 
-The _worker skill is autoloaded into every worker-tier session —
-depth ≥ 2 leaves a mission spawned to do focused domain work.
-Worker is a leaf executor: it does the actual data work, writes a
-finding to the whiteboard, and returns a result to its mission.
+Autoloaded into every worker-tier session. The full operating
+rules — fenced-handoff contract, first-message section ordering,
+boot sequence, what NOT to do — live in your tier manual
+(`tier-worker.md`). This skill body documents the tool surface
+and worker-specific knobs.
 
-The autoloaded surface is minimal:
+## Tool surface (granted by this skill)
 
-- `session:parent_context` — read your mission's (parent's)
-  user-facing conversation so you can resolve ambiguity in the
-  task you were spawned with. Filtered to user and assistant
-  messages only.
-- `whiteboard:write` — broadcast one structured finding to your
-  siblings and your mission. Caps: 4 KB per message, fan-out is
-  global within the mission's whiteboard.
-- `whiteboard:read` — read the current whiteboard projection.
-  Useful when sibling findings inform what you should look at next.
+- `session:inquire` — narrow data-level ambiguity only. Intent
+  ambiguity belongs to the planner; return a `status: "error"`
+  handoff instead.
+- `notepad:read` / `notepad:search` — cross-mission findings
+  (`schema-finding` / `data-source` / `query-pattern` /
+  `data-quality-issue`). Always check before re-discovering.
+- `mission:get_handoff(ref)` — fetch a prior-wave handoff body
+  by ref. Refs come from `[Resolved depends_on]` (bytes auto-
+  injected) and `[Available handoffs]` (catalog) in your first
+  message; never invent ref names.
 
-## Doing your task — read the manual first
+Granted by `_system` (always present): shell (`bash-mcp:*`),
+skill catalogue (`skill:load` / `unload` / `ref` / `files`),
+admin tools.
 
-Your mission passed you a `task` (the user message you boot with).
-When the mission and prior waves have already done work, three
-labelled blocks land on top of your first message — read them
-top-down before doing anything else:
-
-```
-[Whiteboard]
-(N messages on board, active since HH:MM)
-
-#1 @HH:MM from <role>:
-  <broadcast text>
-#2 @HH:MM from <role> (<name>):
-  ...
-
-[Inputs from parent]
-{
-  "<key>": "<value the mission resolved for you>",
-  ...
-}
-
-[Task]
-<task prose>
-```
-
-The optional `(<name>)` after `<role>` is the sibling's spawn
-name. When a mission spawns two workers of the SAME role in one
-wave, names disambiguate whose finding is whose — e.g. `from
-<role> (<name-a>)` vs `from <role> (<name-b>)`. Missing parens
-means the author had no explicit name (root sessions,
-single-of-role workers, legacy events).
-
-- **`[Whiteboard]`** — shared accumulated findings from siblings
-  in earlier waves of this mission. Trust the broadcasts: validated
-  queries, resolved schema facts, file paths to output someone
-  else already produced. **DO NOT re-run discovery / schema /
-  validation for facts already on the board.** If a relevant
-  broadcast is older than the bound (`Showing last N. Call
-  whiteboard:read for the full history.`), call `whiteboard:read`
-  once to load the full set into your context before composing.
-- **`[Inputs from parent]`** — mission-supplied facts for THIS
-  step specifically (module, tables, query_draft, file_path, …).
-  Different from the whiteboard: inputs are this-worker-only
-  briefing, whiteboard is cross-wave context.
-- **`[Task]`** — the actual instruction. Read it last, with
-  whiteboard + inputs already in mind.
-
-**Trust order: Whiteboard → Inputs → Manual.**
-
-- Whiteboard broadcasts are siblings' validated work — quote
-  resolved values (paths, identifiers, drafts, schema facts)
-  verbatim instead of recomputing them. The board is the source
-  of truth between waves.
-- Inputs are the mission's specific brief for THIS step: a
-  resolved identifier means "skip the discovery you'd otherwise
-  run for that key"; a validated draft means "execute it as-is,
-  skip the from-scratch compose + validate cycle"; a resolved
-  output path means "write to that path, do not invent a new
-  one". Discover ONLY for keys missing from BOTH whiteboard and
-  inputs.
-- References (`skill:ref`) carry **syntax + conventions** the
-  facts above don't (how to address fields, special operators,
-  quoting rules, gotchas). When you're composing something new
-  (no usable draft in inputs / whiteboard), read the relevant
-  reference FIRST. A validated draft from the inputs /
-  whiteboard can usually run as-is and lets you skip references
-  for that one call — but the moment you alter / compose
-  something new, references come back into the picture.
-
-Your role may declare `autoload_skills` in its manifest entry. If
-so, those skills are already loaded by the runtime BEFORE your
-first turn — you'll see them in the `## Loaded skills` block of
-your system prompt. In that case, skip step 1 below; the surface
-is ready. Skills not in that block must still be loaded on
-demand.
-
-**Boot sequence for any task that needs a domain skill:**
-
-0. **`notepad:search(query=<key concept from your task>)`** — if
-   your task references a concept the conversation has been
-   discussing (a table name, data source, user preference,
-   recurring query pattern), check the session notepad first.
-   Prior missions may have already surfaced what you need; reuse
-   beats re-deriving. Skip when the task is genuinely fresh
-   ground.
-
-1. **`skill:load("<skill-name>")`** — pulls the skill's tool surface
-   into your session. SKIP this step for any skill already listed
-   in `## Loaded skills` (your role pre-declared it via
-   `autoload_skills`); calling load on an already-loaded skill is
-   a wasted turn.
-
-2. **`skill:files(name="<skill-name>", subdir="references")`** —
-   list the reference documents the skill ships. Each domain skill
-   ships a small library of `references/*.md` (schema patterns,
-   syntax cheatsheets, gotchas) curated by humans for the model.
-
-3. **`skill:ref(skill="<skill-name>", ref="<base-name>")`** — read
-   the reference relevant to your task BEFORE any domain tool
-   call. Each skill ships its own reference catalogue; what to
-   read first is covered in the skill's body. Do NOT compose
-   calls from memory — domain-specific syntax and gotchas live
-   in the references.
-
-4. Now make your domain calls. Use what the reference taught you.
-
-Skipping the reference-read step is the single biggest cause of
-malformed queries on weak models. Read the manual first, then act.
-
-If you don't see a tool you expect AFTER skill:load, check
-`skill:tools_catalog` to confirm the skill is loaded + what tools
-it admits.
-
-## Returning
-
-When you finish:
-
-1. **If a `[Whiteboard]` block appeared in your first message**,
-   the mission opened a board and your siblings expect to see
-   your significant findings on it. Call `whiteboard:write` once
-   with a tight result your mission and siblings can consume —
-   schema names, row counts, surprising patterns, output file
-   paths. Do NOT spam — one significant message per worker is the
-   cadence; siblings see every write. If no `[Whiteboard]` block
-   was present, skip this step — your final assistant message is
-   the only return channel the mission needs.
-2. Return your final result as a normal assistant message — the
-   mission consumes it via `wait_subagents`. Quote actual numbers
-   from your tool responses; never paraphrase. Your dispatching
-   skill may require a specific structured return shape (e.g. a
-   fenced YAML handoff block listing produced artefacts, validated
-   drafts, or follow-up notes) so the mission can thread results
-   into the next wave's `inputs` — follow the dispatching skill's
-   convention exactly. When no shape is prescribed, plain prose is
-   the contract.
+Lazy via `skill:load`: domain tools per the loaded skill (your
+role may pre-declare loaded skills via `autoload_skills`).
 
 ## What this skill does NOT grant
 
-- `session:spawn_subagent` and the rest of the spawn surface. By
-  default workers do not fan out further; they are leaves. A role
-  that explicitly declares `can_spawn: true` and grants
-  `session:spawn_*` in its `tools:` block opts back in — that's
-  the contract.
-- `plan:*` — workers do not own the plan. Read it via parent
-  context if you need to.
-- `whiteboard:init` / `whiteboard:stop` — the host of the
-  whiteboard is your mission; workers participate, they don't open
-  the channel.
+- `session:spawn_*` — workers are leaves under mission-PDCA;
+  there is no fan-out tool at this tier.
+- `session:parent_context` / `session:notify_subagent` /
+  `session:wait_subagents` — removed under Phase H. Workers
+  receive every relevant context fragment up front (resolved
+  depends_on, inputs, plan_context, catalog); the legacy
+  pull-side APIs are gone.
+- `plan:*` — workers do not own a plan; the dispatching mission's
+  planner owns the wave shape.
+- `whiteboard:*` — PDCA missions do not use the whiteboard;
+  cross-wave state flows through the handoff store + plan_context
+  journal.

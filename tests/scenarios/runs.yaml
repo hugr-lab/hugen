@@ -146,6 +146,24 @@ runs:
       - chat_quick_question
       - chat_followup_continuity
       - chat_spawns_mission_for_report
+      # Mission-PDCA (design 003) Phase A α.4 — minimal end-to-
+      # end pipeline through the fixture skill `_mission_v2`.
+      # Validates wave_complete frames, synthesis worker, and
+      # mission termination. Fixture installed by the harness in
+      # Setup.
+      - mission_pdca_minimal
+      # Mission-PDCA Phase B δ — planner-driven pipeline through
+      # the fixture skill `_mission_v3`. Validates iterative
+      # planner spawns, iteration_start frames, kind=plan
+      # handoffs, plan_complete signal, and synthesis on the
+      # weak-model gate. Approval disabled in the fixture so the
+      # scenario stays headless.
+      - mission_pdca_planner
+      # Mission-PDCA Phase C/D/E acceptance — full PDCA pipeline
+      # through the `_mission_v4` fixture. Validates planner +
+      # checker (verdict_ready frames) + plan_context journal
+      # carrying memory summaries into iteration 2's planner.
+      - mission_pdca_checker
 
   # Phase 5.2 η — root-as-chat mixed model gate. Root + mission
   # on Gemini Pro 3.1; workers on local gemma4-26b. Same

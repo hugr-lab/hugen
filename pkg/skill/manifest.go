@@ -443,6 +443,30 @@ type SubAgentRole struct {
 	// Per-skill failures log and continue — one bad autoload must
 	// not deny the worker its base surface.
 	AutoloadSkills []string `json:"autoload_skills,omitempty" yaml:"autoload_skills,omitempty"`
+
+	// Capabilities declares the per-role mission-PDCA capability
+	// opt-ins applied by the mission ext at worker spawn time.
+	// Empty leaves capability defaults in place (phase-role classes
+	// — planner/checker/synthesizer — get plan_context: read; Do
+	// roles get it off). Phase F (design 003).
+	Capabilities SubAgentCapabilities `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
+}
+
+// SubAgentCapabilities declares which mission-PDCA surfaces the
+// worker session of this role opts into. Each field is a stringly-
+// typed access mode (`off` | `read`) so the manifest can express
+// "this Do role should see plan_context but not write to it" in
+// one place. Empty fields fall through to the runtime's
+// role-class default (phase roles default `read`, Do roles default
+// `off`). Phase F (design 003).
+type SubAgentCapabilities struct {
+	// PlanContext gates the [Plan context] section in the worker's
+	// first message. Values: "off" (default for Do roles) | "read"
+	// (default for phase roles: planner / checker / synthesizer).
+	// Write access is implicit: workers populate plan_context via
+	// the `memory_summary` field on their handoff regardless of
+	// the read setting.
+	PlanContext string `json:"plan_context,omitempty" yaml:"plan_context,omitempty"`
 }
 
 // CanSpawnEffective resolves SubAgentRole.CanSpawn to the boolean
@@ -487,6 +511,161 @@ type MissionBlock struct {
 	// mission-tier session itself (and as fallback for workers
 	// whose role doesn't override).
 	OnClose MissionOnClose `json:"on_close,omitempty" yaml:"on_close,omitempty"`
+
+	// Plan declares the mission's planning configuration —
+	// mission-PDCA (design 003) shape. When present, the mission ext
+	// treats this skill as a PDCA mission. v1 supports the
+	// `experimental_inline` Phase-A escape hatch; v2 will add
+	// `role: planner` for LLM-driven planning. Phase A — only
+	// ExperimentalInline is recognised; Plan absent means "not a
+	// PDCA mission".
+	Plan MissionPlanBlock `json:"plan,omitempty" yaml:"plan,omitempty"`
+
+	// Synthesis declares the role that produces the mission's
+	// final answer after the last wave. Phase A — minimal shape
+	// (role name only); Phase B may add inline templates.
+	Synthesis MissionSynthesisBlock `json:"synthesis,omitempty" yaml:"synthesis,omitempty"`
+
+	// Control declares the verdict-emitting role spawned after
+	// every non-planner wave. When set, the runtime auto-routes
+	// the planner loop based on the checker's `decision` field
+	// (continue / amend / inquire / finish). Absent control falls
+	// back to the implicit `continue` path the Phase-B loop uses.
+	// Phase C.
+	Control MissionControlBlock `json:"control,omitempty" yaml:"control,omitempty"`
+
+	// Capabilities declares which mission-PDCA surfaces are
+	// active on the mission session itself (the supervisor tier).
+	// Used by skill authors to make implicit defaults explicit —
+	// today the listed extensions (notepad, whiteboard,
+	// plan_context) are always available, so absent values keep
+	// the runtime defaults. Phase F (design 003) lands the
+	// declarative schema; future phases can narrow defaults to
+	// "off unless declared".
+	Capabilities MissionCapabilities `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
+}
+
+// MissionCapabilities lists the mission-tier opt-in toggles.
+// Pointer-bool fields preserve the "unset → use default" semantics
+// so a deliberate `notepad: false` reads differently from "field
+// absent". Phase F (design 003).
+type MissionCapabilities struct {
+	// Notepad — when set, opt the mission session in (`true`) or
+	// out (`false`) of notepad surface. Unset (nil) means "use the
+	// runtime default": today notepad is always on for mission
+	// sessions; future hardening may flip to off-by-default.
+	Notepad *bool `json:"notepad,omitempty" yaml:"notepad,omitempty"`
+
+	// Whiteboard — same shape as Notepad. Unset (nil) keeps the
+	// runtime default; today whiteboard is on for mission tier.
+	Whiteboard *bool `json:"whiteboard,omitempty" yaml:"whiteboard,omitempty"`
+
+	// PlanContext — same shape as Notepad. Unset (nil) keeps the
+	// runtime default; the journal is always active inside the
+	// mission ext regardless. Future phases may use this knob to
+	// gate plan_context auto-extraction.
+	PlanContext *bool `json:"plan_context,omitempty" yaml:"plan_context,omitempty"`
+}
+
+// MissionControlBlock names the role the runtime spawns to check
+// each wave's output and emit a verdict. v1 — role-only; Phase I
+// may add inline `verdict.template` or escalation rules.
+type MissionControlBlock struct {
+	Role string `json:"role,omitempty" yaml:"role,omitempty"`
+}
+
+// MissionPlanBlock is the mission-PDCA `plan:` section. Phase B
+// adds `Role` (LLM-driven planner) + `Approval` policy + `MaxWaves`
+// cap. `ExperimentalInline` stays as the Phase-A escape hatch
+// (deleted at Phase H) so the new and old worlds coexist behind
+// the same manifest schema during migration.
+//
+// A skill is a PDCA mission when either ExperimentalInline is
+// populated OR Role is non-empty. The mission ext picks the
+// dispatch path off the first non-empty selector.
+type MissionPlanBlock struct {
+	// ExperimentalInline is the Phase-A escape hatch: the skill
+	// author hardcodes the waves directly in the manifest,
+	// bypassing the planner LLM. Removed at Phase H. Nil/empty
+	// when not used.
+	ExperimentalInline *MissionPlanInline `json:"experimental_inline,omitempty" yaml:"experimental_inline,omitempty"`
+
+	// Role names the planner sub-agent role declared in the
+	// skill's sub_agents block. When non-empty, mission ext drives
+	// the mission via the iterative planner loop (Phase B): spawn
+	// planner with current plan_context → parse plan handoff →
+	// run wave → re-spawn planner. Empty falls back to the inline
+	// path above.
+	Role string `json:"role,omitempty" yaml:"role,omitempty"`
+
+	// Approval declares when the planner must obtain user approval
+	// via session:inquire before its plan can be applied. Defaults
+	// (Initial=required, Iteration=initial-only) match spec § Phase
+	// B; explicit empty strings are normalised to those defaults
+	// at projection time.
+	Approval MissionPlanApproval `json:"approval,omitempty" yaml:"approval,omitempty"`
+
+	// MaxWaves caps how many planner-driven iterations the runtime
+	// runs before forcing synthesis. Doubles as the approval-loop
+	// safety cap (canon § 0.5). Zero falls back to the runtime
+	// default (10). Max 50 per safety rail.
+	MaxWaves int `json:"max_waves,omitempty" yaml:"max_waves,omitempty"`
+}
+
+// MissionPlanApproval declares the approval policy applied to the
+// planner's first message + every subsequent iteration. Phase B
+// recognises a v1 enum surface; Phase I broadens to
+// `when_roadmap_shifted` etc.
+type MissionPlanApproval struct {
+	// Initial controls the FIRST planner spawn's approval gate:
+	//   - "required"  → planner MUST call session:inquire and
+	//                   obtain a positive response before handoff.
+	//   - "skip"      → no approval inquiry expected; runtime auto-
+	//                   accepts the planner's first plan.
+	// Empty defaults to "required" per spec § Phase B.
+	Initial string `json:"initial,omitempty" yaml:"initial,omitempty"`
+
+	// Iteration controls approval on subsequent planner spawns:
+	//   - "always"        → every iteration's plan requires approval.
+	//   - "never"         → never re-approve after the first plan.
+	//   - "initial-only"  → only the first iteration's plan
+	//                       inquires; subsequent ones auto-close.
+	// Empty defaults to "initial-only" per spec § Phase B.
+	Iteration string `json:"iteration,omitempty" yaml:"iteration,omitempty"`
+}
+
+// MissionPlanInline carries a fixed wave sequence for Phase-A
+// scenarios. Real PDCA missions emit waves dynamically through a
+// planner role; this struct exists so the executor's primitives
+// can be exercised end-to-end without an LLM in the loop.
+type MissionPlanInline struct {
+	Waves []MissionPlanWave `json:"waves,omitempty" yaml:"waves,omitempty"`
+}
+
+// MissionPlanWave is one parallel batch of subagent spawns inside
+// an inline plan. Mirrors the in-flight Wave AST consumed by Plan
+// Executor (pkg/extension/mission.Wave).
+type MissionPlanWave struct {
+	Label     string                `json:"label" yaml:"label"`
+	Subagents []MissionPlanSubagent `json:"subagents,omitempty" yaml:"subagents,omitempty"`
+}
+
+// MissionPlanSubagent declares one worker within a wave.
+type MissionPlanSubagent struct {
+	Name      string   `json:"name" yaml:"name"`
+	Skill     string   `json:"skill,omitempty" yaml:"skill,omitempty"`
+	Role      string   `json:"role,omitempty" yaml:"role,omitempty"`
+	Task      string   `json:"task,omitempty" yaml:"task,omitempty"`
+	Inputs    any      `json:"inputs,omitempty" yaml:"inputs,omitempty"`
+	DependsOn []string `json:"depends_on,omitempty" yaml:"depends_on,omitempty"`
+}
+
+// MissionSynthesisBlock names the role that produces the
+// mission's final answer. Phase A — role name only; absent
+// SynthesisBlock means "no synthesis step" (executor closes the
+// mission immediately after the last wave).
+type MissionSynthesisBlock struct {
+	Role string `json:"role,omitempty" yaml:"role,omitempty"`
 }
 
 // MissionOnStart describes the per-skill boot sequence the runtime
@@ -706,6 +885,19 @@ func (m *Manifest) validateHugen() error {
 				return fmt.Errorf("metadata.hugen.autoload_for contains %q but tier_compatibility (effective %v) does not — autoload_for must be a subset of tier_compatibility",
 					t, compat)
 			}
+		}
+	}
+
+	// Phase F (design 003) — per-role capability access modes.
+	// Accepted: empty (defer to runtime default), "off", "read".
+	// Unknown values fail-loud so weak-model-authored manifests
+	// don't silently fall back to default.
+	for i, r := range m.Hugen.SubAgents {
+		switch r.Capabilities.PlanContext {
+		case "", "off", "read":
+		default:
+			return fmt.Errorf("metadata.hugen.sub_agents[%d].capabilities.plan_context = %q: must be one of [\"\", \"off\", \"read\"]",
+				i, r.Capabilities.PlanContext)
 		}
 	}
 	return nil

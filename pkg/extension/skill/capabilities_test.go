@@ -231,67 +231,12 @@ func TestGeneration_BumpsOnLoadUnload(t *testing.T) {
 	}
 }
 
-// TestAdvertiseSystemPrompt_AvailableMissions_RootOnly verifies the
-// "## Available missions" block appears in root-tier sessions only
-// — mission/worker tier never see the dispatch catalogue because
-// they cannot call session:spawn_mission. Phase 4.2.2 §6.
-func TestAdvertiseSystemPrompt_AvailableMissions_RootOnly(t *testing.T) {
-	ctx := context.Background()
-	missionSkill := `---
-name: analyst
-description: data analysis skill.
-metadata:
-  hugen:
-    tier_compatibility: [mission]
-    mission:
-      enabled: true
-      summary: Data analysis, queries, reports.
----
-body
-`
-	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
-		"analyst": []byte(missionSkill),
-	}})
-	mgr := skillpkg.NewSkillManager(store, nil)
-	ext := NewExtension(mgr, nil, "a1")
-
-	// root tier: block must render.
-	rootState := fixture.NewTestSessionState("ses-root").WithDepth(0)
-	if err := ext.InitState(ctx, rootState); err != nil {
-		t.Fatalf("InitState root: %v", err)
-	}
-	rootOut := ext.AdvertiseSystemPrompt(ctx, rootState)
-	if !strings.Contains(rootOut, "## Available missions") {
-		t.Errorf("root prompt missing Available missions heading: %s", rootOut)
-	}
-	if !strings.Contains(rootOut, "`analyst`") {
-		t.Errorf("root prompt missing analyst bullet: %s", rootOut)
-	}
-	if !strings.Contains(rootOut, "Data analysis") {
-		t.Errorf("root prompt missing analyst summary: %s", rootOut)
-	}
-
-	// mission tier: block must NOT appear (mission cannot spawn
-	// another mission; the catalogue is dead weight there).
-	missState := fixture.NewTestSessionState("ses-mission").WithDepth(1)
-	if err := ext.InitState(ctx, missState); err != nil {
-		t.Fatalf("InitState mission: %v", err)
-	}
-	missOut := ext.AdvertiseSystemPrompt(ctx, missState)
-	if strings.Contains(missOut, "## Available missions") {
-		t.Errorf("mission prompt leaked Available missions: %s", missOut)
-	}
-
-	// worker tier: also no.
-	wkState := fixture.NewTestSessionState("ses-worker").WithDepth(2)
-	if err := ext.InitState(ctx, wkState); err != nil {
-		t.Fatalf("InitState worker: %v", err)
-	}
-	wkOut := ext.AdvertiseSystemPrompt(ctx, wkState)
-	if strings.Contains(wkOut, "## Available missions") {
-		t.Errorf("worker prompt leaked Available missions: %s", wkOut)
-	}
-}
+// TestAdvertiseSystemPrompt_AvailableMissions_MovedToMissionExt
+// — placeholder for the deleted coverage: the "## Available
+// missions" block is now owned by pkg/extension/mission's
+// Advertiser, not skill ext. The new path is exercised in
+// pkg/extension/mission/dispatcher_test.go. Mission-PDCA
+// (design 003) — no fallback.
 
 // TestAdvertiseSystemPrompt_NotepadTagsBlockA verifies the Block
 // A section ("## Notepad — recommended tags") appears when a
@@ -895,6 +840,120 @@ func writeBundledSkillInto(t *testing.T, root, name, manifest string, files map[
 		if err := os.WriteFile(full, data, 0o644); err != nil {
 			t.Fatalf("write %s: %v", full, err)
 		}
+	}
+}
+
+// TestMergeRoleTools_GrantsRoleSpecificSurface covers the Phase
+// I.18 wiring: a SubAgentRole.Tools entry on the dispatching skill
+// admits the named tools onto a child session whose (Skill, Role)
+// pair matches the role declaration — WITHOUT the child having to
+// load the dispatching skill into its own SessionSkill bindings.
+//
+// The test uses a non-loaded host skill (only registered in the
+// store, not Load()ed on the child) and verifies that
+// FilterTools admits `host-provider:special` purely on the basis
+// of the role's Tools grant.
+func TestMergeRoleTools_GrantsRoleSpecificSurface(t *testing.T) {
+	ctx := context.Background()
+	const inlineHost = `---
+name: host
+description: host skill declaring a role with a tool grant.
+license: MIT
+metadata:
+  hugen:
+    tier_compatibility: [mission]
+    sub_agents:
+      - name: planner
+        description: role with role-specific tool grant.
+        tools:
+          - provider: host-provider
+            tools:
+              - special
+              - approval-*
+            requires_approval:
+              - special
+---
+host body
+`
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"host": []byte(inlineHost),
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a-rolectx")
+
+	in := []tool.Tool{
+		{Name: "host-provider:special", Provider: "host-provider"},
+		{Name: "host-provider:approval-approve", Provider: "host-provider"},
+		{Name: "host-provider:other", Provider: "host-provider"},
+		{Name: "unrelated:unrelated", Provider: "unrelated"},
+	}
+
+	// Worker session matching the (skill=host, role=planner) pair.
+	// Skill NOT loaded into child's bindings — the role-side grant
+	// is the only admission path.
+	roleChild := fixture.NewTestSessionState("ses-role-match").
+		WithDepth(2).
+		WithSkill("host").
+		WithRole("planner")
+	if err := ext.InitState(ctx, roleChild); err != nil {
+		t.Fatalf("InitState role-match: %v", err)
+	}
+	got := map[string]bool{}
+	for _, tt := range ext.FilterTools(ctx, roleChild, in) {
+		got[tt.Name] = true
+	}
+	if !got["host-provider:special"] {
+		t.Errorf("special should be admitted via role-tool grant; got %v", got)
+	}
+	if !got["host-provider:approval-approve"] {
+		t.Errorf("approval-* wildcard should match approval-approve; got %v", got)
+	}
+	if got["host-provider:other"] {
+		t.Errorf("other should NOT be admitted; got %v", got)
+	}
+
+	// requires_approval on the role grant should propagate.
+	var specialTool *tool.Tool
+	for _, tt := range ext.FilterTools(ctx, roleChild, in) {
+		if tt.Name == "host-provider:special" {
+			t2 := tt
+			specialTool = &t2
+		}
+	}
+	if specialTool == nil {
+		t.Fatal("host-provider:special missing from filtered set")
+	}
+	if !specialTool.RequiresApproval {
+		t.Errorf("RequiresApproval = false for special; want true (role declared it under requires_approval)")
+	}
+
+	// Worker without matching role pair → no admission.
+	roleless := fixture.NewTestSessionState("ses-role-empty").WithDepth(2)
+	if err := ext.InitState(ctx, roleless); err != nil {
+		t.Fatalf("InitState roleless: %v", err)
+	}
+	emptyOut := map[string]bool{}
+	for _, tt := range ext.FilterTools(ctx, roleless, in) {
+		emptyOut[tt.Name] = true
+	}
+	if emptyOut["host-provider:special"] {
+		t.Errorf("special leaked through without a matching role pair; got %v", emptyOut)
+	}
+
+	// Worker with matching skill but unknown role → no admission.
+	wrongRole := fixture.NewTestSessionState("ses-role-mis").
+		WithDepth(2).
+		WithSkill("host").
+		WithRole("not-a-real-role")
+	if err := ext.InitState(ctx, wrongRole); err != nil {
+		t.Fatalf("InitState wrong-role: %v", err)
+	}
+	wrongOut := map[string]bool{}
+	for _, tt := range ext.FilterTools(ctx, wrongRole, in) {
+		wrongOut[tt.Name] = true
+	}
+	if wrongOut["host-provider:special"] {
+		t.Errorf("special leaked for unknown role; got %v", wrongOut)
 	}
 }
 
