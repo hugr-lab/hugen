@@ -33,14 +33,19 @@ type collapseInput struct {
 // configured intent through the router, streams the model
 // response, and returns the trimmed body. Errors bubble back
 // so the caller can apply the hard-fallback marker (spec §5.6).
-func (e *Extension) runSummariser(ctx context.Context, state extension.SessionState, prior *DigestPayload, c classified, fromSeq, toSeq int64) (string, error) {
+//
+// γ: cfg is the resolved per-tier / per-skill / per-role config
+// produced by [Extension.resolveTierConfig]. LLMTimeout +
+// LLMIntent are read from cfg so a per-role override (e.g. a
+// cheap intent for a fast worker) lands without recompiling.
+func (e *Extension) runSummariser(ctx context.Context, state extension.SessionState, cfg Config, prior *DigestPayload, c classified, fromSeq, toSeq int64) (string, error) {
 	if state.Prompts() == nil {
 		return "", fmt.Errorf("prompts renderer not available")
 	}
-	timeoutCtx, cancel := context.WithTimeout(ctx, e.cfg.LLMTimeout)
+	timeoutCtx, cancel := context.WithTimeout(ctx, cfg.LLMTimeout)
 	defer cancel()
 
-	mdl, _, err := e.deps.Router.Resolve(timeoutCtx, model.Hint{Intent: e.cfg.LLMIntent})
+	mdl, _, err := e.deps.Router.Resolve(timeoutCtx, model.Hint{Intent: cfg.LLMIntent})
 	if err != nil {
 		return "", fmt.Errorf("resolve model: %w", err)
 	}
@@ -80,14 +85,17 @@ func (e *Extension) runSummariser(ctx context.Context, state extension.SessionSt
 // current SummaryBlocks + KeptVerbatim shadow and asks the
 // model to fold them into a single replacement block. Returns
 // the trimmed body or an error.
-func (e *Extension) runCollapse(ctx context.Context, state extension.SessionState, blocks []SummaryBlock, kept []KeptSection) (string, error) {
+//
+// γ: cfg supplies the resolved LLMTimeout + LLMIntent — same
+// reasoning as runSummariser.
+func (e *Extension) runCollapse(ctx context.Context, state extension.SessionState, cfg Config, blocks []SummaryBlock, kept []KeptSection) (string, error) {
 	if state.Prompts() == nil {
 		return "", fmt.Errorf("prompts renderer not available")
 	}
-	timeoutCtx, cancel := context.WithTimeout(ctx, e.cfg.LLMTimeout)
+	timeoutCtx, cancel := context.WithTimeout(ctx, cfg.LLMTimeout)
 	defer cancel()
 
-	mdl, _, err := e.deps.Router.Resolve(timeoutCtx, model.Hint{Intent: e.cfg.LLMIntent})
+	mdl, _, err := e.deps.Router.Resolve(timeoutCtx, model.Hint{Intent: cfg.LLMIntent})
 	if err != nil {
 		return "", fmt.Errorf("resolve model: %w", err)
 	}

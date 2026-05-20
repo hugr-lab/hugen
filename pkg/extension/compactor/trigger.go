@@ -15,11 +15,18 @@ import (
 // logged warn-not-fatal and the next boundary retries. Returning
 // nil keeps the turn flowing — compaction failure must never
 // stall the model loop.
+//
+// γ: the per-tier / per-skill / per-role resolved Config is
+// computed ONCE per fire and passed through to the pipeline so
+// the trigger predicate and the compaction body see consistent
+// thresholds even if a /compactor command races with a boundary
+// hook.
 func (e *Extension) OnTurnBoundary(ctx context.Context, state extension.SessionState) error {
-	if !e.shouldCompact(state) {
+	cfg := e.resolveTierConfig(ctx, state)
+	if !e.shouldCompact(state, cfg) {
 		return nil
 	}
-	if err := e.compact(ctx, state); err != nil {
+	if err := e.compactWithConfig(ctx, state, cfg); err != nil {
 		e.logger.Warn("compactor: compaction failed",
 			"session", state.SessionID(), "err", err)
 	}
@@ -35,10 +42,12 @@ func (e *Extension) OnTurnBoundary(ctx context.Context, state extension.SessionS
 //   - the anti-thrash gate (MinTurnGap completed turns since the
 //     last fire) is satisfied.
 //
-// Per-tier config / per-skill manifest overrides are γ's
-// problem; β reads the flat [Config] verbatim.
-func (e *Extension) shouldCompact(state extension.SessionState) bool {
-	if !e.cfg.Enabled {
+// γ: cfg is the resolved per-tier / per-skill / per-role
+// configuration produced by [Extension.resolveTierConfig]. The
+// caller computes it once per fire so the predicate and the
+// compaction body see the same thresholds.
+func (e *Extension) shouldCompact(state extension.SessionState, cfg Config) bool {
+	if !cfg.Enabled {
 		return false
 	}
 	// Trigger requires both a model router (to call the LLM)
@@ -54,7 +63,7 @@ func (e *Extension) shouldCompact(state extension.SessionState) bool {
 	}
 	// Not enough completed user-turns past the preserved
 	// window to compact anything yet.
-	if s.BoundaryCount() <= e.cfg.PreservedRecentTurns {
+	if s.BoundaryCount() <= cfg.PreservedRecentTurns {
 		return false
 	}
 	// Anti-thrash gate: require MinTurnGap completed turns
@@ -67,17 +76,19 @@ func (e *Extension) shouldCompact(state extension.SessionState) bool {
 			}
 			completedSinceLast++
 		}
-		if completedSinceLast < e.cfg.MinTurnGap {
+		if completedSinceLast < cfg.MinTurnGap {
 			return false
 		}
 	}
 	// Turn-count limb.
-	if e.cfg.MaxTurns > 0 && s.BoundaryCount() > e.cfg.MaxTurns {
+	if cfg.MaxTurns > 0 && s.BoundaryCount() > cfg.MaxTurns {
 		return true
 	}
-	// Token-budget limb (absolute floor in β; γ adds a ratio
-	// against the resolved model's MaxPromptTokens).
-	if e.cfg.MaxTokens > 0 && s.EstimatedPromptTokens() > e.cfg.MaxTokens {
+	// Token-budget limb. TokenBudgetRatio rides through every
+	// resolve layer but stays unused at the predicate level
+	// until a MaxPromptTokens accessor lands on pkg/model — see
+	// [Config.TokenBudgetRatio] and the spec note in extension.go.
+	if cfg.MaxTokens > 0 && s.EstimatedPromptTokens() > cfg.MaxTokens {
 		return true
 	}
 	return false

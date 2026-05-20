@@ -54,17 +54,36 @@ type classified struct {
 	refs      []SubagentRef
 }
 
-// compact runs one full compaction iteration: range select,
-// per-Kind dispatch, summariser LLM call, cap-driven collapse,
-// persist, projection update. Errors bubble back to the
-// boundary hook which logs and retries on the next boundary.
+// compact runs one full compaction iteration with the
+// extension's top-level [Config], skipping the per-tier /
+// per-skill resolver. Used by [Extension.OnTurnBoundary] for
+// alpha-style fixtures and by the `/compactor compact` slash
+// command — the latter wants the user-visible config the
+// `/compactor status` line shows, not whatever the resolver
+// would produce for the calling session.
+//
+// Callers that want the resolver applied call
+// [Extension.compactWithConfig] directly.
 func (e *Extension) compact(ctx context.Context, state extension.SessionState) error {
+	return e.compactWithConfig(ctx, state, e.resolveTierConfig(ctx, state))
+}
+
+// compactWithConfig runs one full compaction iteration against
+// the supplied resolved Config: range select, per-Kind dispatch,
+// summariser LLM call, cap-driven collapse, persist, projection
+// update. Errors bubble back to the boundary hook which logs and
+// retries on the next boundary.
+//
+// γ: cfg is the resolver output computed once per fire. The body
+// reads cfg.* exclusively — e.cfg.* references stay out of this
+// path so the per-tier / per-skill / per-role overrides land
+// uniformly.
+func (e *Extension) compactWithConfig(ctx context.Context, state extension.SessionState, cfg Config) error {
 	s := FromState(state)
 	if s == nil {
 		return nil
 	}
 	prior := s.Digest()
-	cfg := e.cfg
 
 	// Compute the cutoff seq: the seq just before the k-th-
 	// from-end user_message, where k = PreservedRecentTurns.
@@ -108,7 +127,7 @@ func (e *Extension) compact(ctx context.Context, state extension.SessionState) e
 	// Summariser LLM call. On error, fall back to a marker
 	// block (spec §5.6) so high-signal content still survives
 	// via KeptVerbatim.
-	summary, llmErr := e.runSummariser(ctx, state, prior, c, priorCutoff+1, newCutoff)
+	summary, llmErr := e.runSummariser(ctx, state, cfg, prior, c, priorCutoff+1, newCutoff)
 	if llmErr != nil {
 		e.logger.Warn("compactor: summariser failed; using fallback marker",
 			"session", state.SessionID(), "err", llmErr)
@@ -162,7 +181,7 @@ func (e *Extension) compact(ctx context.Context, state extension.SessionState) e
 	// DigestMaxTokens (spec §5.5). Collapse failure leaves the
 	// digest un-collapsed for this iteration; next fire retries.
 	if cfg.DigestMaxTokens > 0 && estimateDigestTokens(next) > cfg.DigestMaxTokens {
-		collapsed, err := e.runCollapse(ctx, state, next.SummaryBlocks, next.KeptVerbatim)
+		collapsed, err := e.runCollapse(ctx, state, cfg, next.SummaryBlocks, next.KeptVerbatim)
 		if err != nil {
 			e.logger.Warn("compactor: collapse failed; leaving digest over cap",
 				"session", state.SessionID(), "err", err)

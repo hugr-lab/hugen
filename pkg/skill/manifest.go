@@ -252,6 +252,17 @@ type HugenMetadata struct {
 	// default tier — authors declare placement deliberately.
 	AutoloadFor []string `json:"autoload_for,omitempty" yaml:"autoload_for,omitempty"`
 
+	// Compactor is the optional per-mission override for the
+	// phase-5.2 history compactor. Applied when this skill is the
+	// dispatching mission for the active session (mission tier).
+	// Pointer so an absent block is distinct from
+	// "block present with all defaults". Fields inside are also
+	// pointers — the three-layer resolver
+	// (top-level → tier → mission → role) only overwrites
+	// explicitly-set values. See
+	// design/004-runtime-post-phase-i/phase-5.2-compactor-spec.md §4.4.
+	Compactor *CompactorOverride `json:"compactor,omitempty" yaml:"compactor,omitempty"`
+
 	// TierCompatibility lists the tiers where the skill may be
 	// loaded at all, whether via autoload or via explicit
 	// skill:load. Outside this set the skill is invisible: it does
@@ -450,6 +461,39 @@ type SubAgentRole struct {
 	// — planner/checker/synthesizer — get plan_context: read; Do
 	// roles get it off). Phase F (design 003).
 	Capabilities SubAgentCapabilities `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
+
+	// Compactor is the optional per-role override for the phase-5.2
+	// history compactor. Applied to worker sessions spawned for
+	// this role. Wins over both the tier default and the
+	// dispatching mission's mission-level override. Pointer so
+	// absent reads differently from "present with all defaults".
+	// See design/004-runtime-post-phase-i/phase-5.2-compactor-spec.md
+	// §4.4 — the narrow "let one worker role opt in to compactor
+	// while peers stay cheap" lever.
+	Compactor *CompactorOverride `json:"compactor,omitempty" yaml:"compactor,omitempty"`
+}
+
+// CompactorOverride is the per-skill / per-role override block
+// for the phase-5.2 history compactor. Same field surface as the
+// operator-level CompactorTier (pkg/config), kept here as a
+// separate type so pkg/skill never imports pkg/config — the
+// dependency arrow stays config → skill, not the other way. The
+// compactor extension reconciles both shapes at resolve time
+// (pkg/extension/compactor/resolve.go).
+//
+// Every field is a pointer so an absent key is distinct from an
+// explicit zero. The three-layer resolver only overwrites
+// explicitly-set fields.
+type CompactorOverride struct {
+	Enabled              *bool    `json:"enabled,omitempty"                yaml:"enabled,omitempty"`
+	MaxTurns             *int     `json:"max_turns,omitempty"              yaml:"max_turns,omitempty"`
+	MaxTokens            *int     `json:"max_tokens,omitempty"             yaml:"max_tokens,omitempty"`
+	PreservedRecentTurns *int     `json:"preserved_recent_turns,omitempty" yaml:"preserved_recent_turns,omitempty"`
+	DigestMaxTokens      *int     `json:"digest_max_tokens,omitempty"      yaml:"digest_max_tokens,omitempty"`
+	MinTurnGap           *int     `json:"min_turn_gap,omitempty"           yaml:"min_turn_gap,omitempty"`
+	LLMTimeoutMs         *int     `json:"llm_timeout_ms,omitempty"         yaml:"llm_timeout_ms,omitempty"`
+	LLMIntent            *string  `json:"llm_intent,omitempty"             yaml:"llm_intent,omitempty"`
+	TokenBudgetRatio     *float64 `json:"token_budget_ratio,omitempty"     yaml:"token_budget_ratio,omitempty"`
 }
 
 // SubAgentCapabilities declares which mission-PDCA surfaces the

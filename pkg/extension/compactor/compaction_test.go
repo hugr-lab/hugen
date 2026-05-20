@@ -309,7 +309,7 @@ func TestCompactor_Smoke(t *testing.T) {
 	cfg.MinTurnGap = 3
 	cfg.DigestMaxTokens = 0 // disable cap-collapse for this test
 
-	e := NewExtension(slog.Default(), cfg, Deps{
+	e := NewExtensionWithConfig(slog.Default(), cfg, Deps{
 		Router:  router,
 		Store:   storeR,
 		AgentID: "a1",
@@ -364,7 +364,7 @@ func TestCompactor_MultiIteration(t *testing.T) {
 	cfg.MinTurnGap = 3
 	cfg.DigestMaxTokens = 0 // keep blocks separate
 
-	e := NewExtension(slog.Default(), cfg, Deps{
+	e := NewExtensionWithConfig(slog.Default(), cfg, Deps{
 		Router:  router,
 		Store:   storeR,
 		AgentID: "a1",
@@ -416,7 +416,7 @@ func TestCompactor_CapCollapse(t *testing.T) {
 	cfg.MinTurnGap = 3
 	cfg.DigestMaxTokens = 50 // very low to force collapse on second fire
 
-	e := NewExtension(slog.Default(), cfg, Deps{
+	e := NewExtensionWithConfig(slog.Default(), cfg, Deps{
 		Router:  router,
 		Store:   storeR,
 		AgentID: "a1",
@@ -459,7 +459,7 @@ func TestCompactor_HardFallback(t *testing.T) {
 	cfg.MinTurnGap = 3
 	cfg.DigestMaxTokens = 0
 
-	e := NewExtension(slog.Default(), cfg, Deps{
+	e := NewExtensionWithConfig(slog.Default(), cfg, Deps{
 		Router:  router,
 		Store:   storeR,
 		AgentID: "a1",
@@ -502,7 +502,7 @@ func TestCompactor_MinTurnGap(t *testing.T) {
 	cfg.MinTurnGap = 100 // wildly large gap; second fire must block
 	cfg.DigestMaxTokens = 0
 
-	e := NewExtension(slog.Default(), cfg, Deps{
+	e := NewExtensionWithConfig(slog.Default(), cfg, Deps{
 		Router:  router,
 		Store:   storeR,
 		AgentID: "a1",
@@ -541,7 +541,7 @@ func TestAdvertise_RendersBlockC(t *testing.T) {
 	cfg.MinTurnGap = 3
 	cfg.DigestMaxTokens = 0
 
-	e := NewExtension(slog.Default(), cfg, Deps{
+	e := NewExtensionWithConfig(slog.Default(), cfg, Deps{
 		Router:  router,
 		Store:   storeR,
 		AgentID: "a1",

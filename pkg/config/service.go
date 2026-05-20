@@ -14,6 +14,7 @@ type Service interface {
 	ToolProviders() ToolProvidersView
 	Subagents() SubagentsView
 	Hitl() HitlView
+	Compactor() CompactorView
 
 	// Subscribe streams coarse "config changed" events for any
 	// caller that wants a single signal across all domains. Per-

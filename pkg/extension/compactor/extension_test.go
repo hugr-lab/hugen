@@ -49,7 +49,7 @@ func (s *fakeState) RequestInquiry(_ context.Context, _ protocol.InquiryRequestP
 
 func newTestExtension(t *testing.T) *Extension {
 	t.Helper()
-	return NewExtension(slog.Default(), DefaultConfig(), Deps{})
+	return NewExtensionWithConfig(slog.Default(), DefaultConfig(), Deps{})
 }
 
 // --- state.go ---
@@ -162,7 +162,7 @@ func TestExtension_OnTurnBoundary_NoDepsSkips(t *testing.T) {
 }
 
 func TestExtension_OnTurnBoundary_DisabledShortCircuits(t *testing.T) {
-	e := NewExtension(slog.Default(), Config{Enabled: false}, Deps{})
+	e := NewExtensionWithConfig(slog.Default(), Config{Enabled: false}, Deps{})
 	st := newFakeState("ses-5")
 	if err := e.InitState(context.Background(), st); err != nil {
 		t.Fatalf("InitState: %v", err)
