@@ -1,6 +1,7 @@
 package mission
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
@@ -62,6 +63,63 @@ type MissionState struct {
 	// across waves so a late-arriving frame on a closed planner
 	// session is still attributable.
 	inquired map[string]bool
+
+	// currentApprovedMarker is the canonical sha256-hex of the plan
+	// body the user most recently approved (Phase I.23). Empty when
+	// no plan is currently approved — either because no inquire has
+	// landed yet, or because a downstream worker invalidated the
+	// approval via its handoff body's `invalidates_plan_approval`
+	// flag. mission:validate_and_approve checks against this:
+	//
+	//   - marker(body) == currentApprovedMarker → already approved,
+	//     return idempotently without re-inquiring (the planner
+	//     re-emitted the SAME body — a refine loop converging).
+	//   - mismatch / empty → run the inquire; on approve overwrite
+	//     with the new marker.
+	//
+	// spawnAndAwaitPlanner's gate uses the same value to verify the
+	// planner emits the SAME body it had approved.
+	//
+	// Skill-agnostic by design: the runtime knows nothing about
+	// research / Do / control role names; it only knows
+	// "approved-or-not". Skills express their own per-role
+	// invalidation policy via the `invalidates_plan_approval`
+	// handoff field — e.g. analyst's `researcher` role sets it true
+	// because clarifying user inputs almost always changes the next
+	// plan, while a `data-analyst` may leave it false to let the
+	// approved plan flow through.
+	currentApprovedMarker string
+
+	// plannerApproval mirrors MissionManifest.Plan.Approval so the
+	// validate_and_approve tool handler (which doesn't see the full
+	// manifest) can apply the same approval-required predicate as
+	// the runtime's post-close gate. Stamped by the auto-runner at
+	// RunMission time.
+	plannerApproval PlanApproval
+
+	// currentMissionGoal is the latest planner's restatement of what
+	// the mission delivers. Snapshotted from Plan.MissionGoal after
+	// spawnAndAwaitPlanner accepts a planner handoff. Surfaced in
+	// the checker's task as `[Mission goal (planner's framing)]`.
+	// Phase I.26.
+	currentMissionGoal string
+
+	// currentMissionAC is the latest planner's list of mission
+	// acceptance criteria. Snapshotted from
+	// Plan.MissionAcceptanceCriteria after spawnAndAwaitPlanner
+	// accepts a planner handoff. Surfaced in the checker's task as
+	// `[Mission acceptance criteria]`; the checker emits per-
+	// criterion satisfied flags in its verdict body. Phase I.26.
+	currentMissionAC []string
+
+	// currentWaveAC tracks the acceptance criteria of the wave
+	// currently in flight (or just completed). Set by
+	// spawnAndAwaitPlanner from Plan.NextWave.AcceptanceCriteria
+	// when accepting the plan, surfaced to the checker as `[Wave
+	// acceptance criteria]`. Cleared on wave boundary. Optional
+	// per the plan shape — empty when the planner didn't narrow.
+	// Phase I.26.
+	currentWaveAC []string
 }
 
 // workerCursor names a spawned worker so ChildFrameObserver can
@@ -152,6 +210,80 @@ func (m *MissionState) Inquired(sessionID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.inquired[sessionID]
+}
+
+// SetPlannerApproval stamps the dispatching mission's approval
+// policy on the mission state so the validate_and_approve tool can
+// branch on it without seeing the full MissionManifest. Idempotent;
+// the auto-runner calls it once at RunMission time.
+func (m *MissionState) SetPlannerApproval(policy PlanApproval) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.plannerApproval = policy
+}
+
+// PlannerApproval returns the stamped approval policy, zero-valued
+// when SetPlannerApproval never fired.
+func (m *MissionState) PlannerApproval() PlanApproval {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.plannerApproval
+}
+
+// SetApprovedPlanMarker overwrites the mission's current approved
+// plan marker. Empty input is treated as "clear approval". Called
+// by the validate_and_approve tool after the user's approve reply.
+func (m *MissionState) SetApprovedPlanMarker(marker string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.currentApprovedMarker = marker
+}
+
+// ApprovedPlanMarker returns the mission's currently approved plan
+// marker, or "" when no plan is approved (either no inquire has
+// landed yet, or a worker invalidated the prior approval).
+func (m *MissionState) ApprovedPlanMarker() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.currentApprovedMarker
+}
+
+// InvalidatePlanApproval clears the mission's currently approved
+// plan marker. Called by ingestHandoff when a worker emits a
+// handoff body carrying `invalidates_plan_approval: true` — the
+// worker's discovery (e.g. user-clarified inputs) means the next
+// planner spawn cannot rely on the prior approval and must
+// re-validate from scratch.
+//
+// Skill-agnostic: the runtime decides "the next plan needs fresh
+// approval"; per-skill prose decides which roles set the flag.
+func (m *MissionState) InvalidatePlanApproval() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.currentApprovedMarker = ""
+}
+
+// SetMissionFrame stamps the planner's current understanding of
+// what the mission delivers + the exit criteria the checker reads.
+// Called by spawnAndAwaitPlanner when accepting a non-complete
+// plan; latest wins (each iteration's planner re-emits the full
+// list, runtime keeps the snapshot). Phase I.26.
+func (m *MissionState) SetMissionFrame(goal string, mission []string, wave []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.currentMissionGoal = strings.TrimSpace(goal)
+	m.currentMissionAC = append(m.currentMissionAC[:0:0], mission...)
+	m.currentWaveAC = append(m.currentWaveAC[:0:0], wave...)
+}
+
+// MissionFrame reads the latest planner-set frame. Returns empty
+// values when no plan has been accepted yet. Phase I.26.
+func (m *MissionState) MissionFrame() (goal string, mission []string, wave []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mission = append([]string(nil), m.currentMissionAC...)
+	wave = append([]string(nil), m.currentWaveAC...)
+	return m.currentMissionGoal, mission, wave
 }
 
 // FromState resolves the [*MissionState] handle attached to state,

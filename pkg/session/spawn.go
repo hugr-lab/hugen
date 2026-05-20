@@ -148,6 +148,17 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 		s.deps.Logger.Warn("session: emit subagent_started",
 			"parent", s.id, "child", child.ID(), "err", err)
 	}
+	// Apply per-role intent override (tier-default + skill-role hint)
+	// and run every registered SubagentSpawnApplier (autoload_skills,
+	// …) against the freshly-constructed child. Fires on every
+	// Spawn() — session:spawn_mission tool, mission ext's executor
+	// worker dispatch, tests. Phase H deleted the legacy
+	// session:spawn_subagent LLM tool that used to own this wiring;
+	// design-003 mission-PDCA brings it back here so worker roles
+	// with `autoload_skills:` on their SubAgentRole actually receive
+	// the bound skills before their first turn.
+	s.applyChildIntent(ctx, child, spec.Skill, spec.Role)
+	s.applyChildSpawnAppliers(ctx, child, spec.Skill, spec.Role)
 	// Lifecycle: a parent with live children is not idle. The
 	// in-flight-tool-call path already marked us active when the
 	// turn started; this transition is the defensive backstop for

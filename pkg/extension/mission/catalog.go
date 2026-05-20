@@ -187,9 +187,13 @@ type SynthesisManifest struct {
 }
 
 // WorkerManifest is the per-role catalogue entry. Phase A — name
-// only; Phase B adds OutputContract for kind validation.
+// only; Phase B adds OutputContract for kind validation. Description
+// carries the role's `sub_agents[].description` so the planner can
+// render the catalogue of valid Do-roles into its first message and
+// pick a real role instead of guessing a generic "worker" name.
 type WorkerManifest struct {
-	Role string
+	Role        string
+	Description string
 }
 
 // MissionCatalogEntry is the row a [Catalog.ListMissions] caller

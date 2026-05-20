@@ -419,7 +419,7 @@ func (e *Extension) FilterTools(ctx context.Context, state extension.SessionStat
 	if h == nil || h.manager == nil {
 		return all
 	}
-	allowed := allowedFromHandle(ctx, h)
+	allowed := allowedFromHandle(ctx, h, state)
 	if allowed == nil {
 		return all
 	}
@@ -671,37 +671,101 @@ func (a *allowedSet) match(name string) bool {
 
 // allowedFromHandle compiles the loaded-skill bindings into an
 // allowedSet. Returns nil when h is nil (no skill ext wired);
-// an empty (non-nil) set when the session has no loaded skills;
-// populated otherwise.
-func allowedFromHandle(ctx context.Context, h *SessionSkill) *allowedSet {
+// an empty (non-nil) set when the session has no loaded skills
+// and no role-scoped grants; populated otherwise.
+//
+// Role-scoped grants: when state carries a (Skill, Role) pair
+// resolving to a SubAgentRole in the manager, that role's Tools
+// field augments the allow-set on top of the loaded-skill union.
+// This is the wiring under design 003 that lets per-role surfaces
+// declared in the dispatching skill's manifest (e.g. analyst
+// planner role granting `mission:validate_plan`) actually reach
+// the worker's snapshot WITHOUT auto-loading the dispatching skill.
+func allowedFromHandle(ctx context.Context, h *SessionSkill, state extension.SessionState) *allowedSet {
 	if h == nil {
 		return nil
-	}
-	b, err := h.Bindings(ctx)
-	if err != nil || len(b.AllowedTools) == 0 {
-		return &allowedSet{exact: map[string]bool{}}
 	}
 	out := &allowedSet{
 		exact:             map[string]bool{},
 		approvalExact:     map[string]struct{}{},
 		approvalProviders: map[string]struct{}{},
 	}
-	for _, g := range b.AllowedTools {
+	b, err := h.Bindings(ctx)
+	if err == nil {
+		for _, g := range b.AllowedTools {
+			for _, t := range g.Tools {
+				full := g.Provider + ":" + t
+				if strings.HasSuffix(t, "*") {
+					out.patterns = append(out.patterns, strings.TrimSuffix(full, "*"))
+					continue
+				}
+				out.exact[full] = true
+			}
+			for _, name := range g.RequiresApproval {
+				if name == "*" {
+					out.approvalProviders[g.Provider] = struct{}{}
+					continue
+				}
+				out.approvalExact[g.Provider+":"+name] = struct{}{}
+			}
+		}
+	}
+	if state != nil {
+		mergeRoleTools(ctx, h, state, out)
+	}
+	return out
+}
+
+// mergeRoleTools looks up the SubAgentRole that matches the
+// session's (Skill, Role) pair in the dispatching skill's manifest
+// and adds its Tools entries to allow. Silent no-op when:
+//
+//   - state has no Role / no Skill (root sessions, externally-
+//     spawned workers without skill metadata),
+//   - the manager doesn't know the dispatching skill,
+//   - the role name isn't in the manifest's sub_agents block.
+//
+// requires_approval flags on role.Tools entries are honoured the
+// same as loaded-skill grants — keeps the approval surface
+// consistent across both sources.
+func mergeRoleTools(ctx context.Context, h *SessionSkill, state extension.SessionState, allow *allowedSet) {
+	if h == nil || h.manager == nil || state == nil {
+		return
+	}
+	skillName := state.Skill()
+	roleName := state.Role()
+	if skillName == "" || roleName == "" {
+		return
+	}
+	sk, err := h.manager.Get(ctx, skillName)
+	if err != nil {
+		return
+	}
+	var role *skillpkg.SubAgentRole
+	for i := range sk.Manifest.Hugen.SubAgents {
+		if sk.Manifest.Hugen.SubAgents[i].Name == roleName {
+			role = &sk.Manifest.Hugen.SubAgents[i]
+			break
+		}
+	}
+	if role == nil {
+		return
+	}
+	for _, g := range role.Tools {
 		for _, t := range g.Tools {
 			full := g.Provider + ":" + t
 			if strings.HasSuffix(t, "*") {
-				out.patterns = append(out.patterns, strings.TrimSuffix(full, "*"))
+				allow.patterns = append(allow.patterns, strings.TrimSuffix(full, "*"))
 				continue
 			}
-			out.exact[full] = true
+			allow.exact[full] = true
 		}
 		for _, name := range g.RequiresApproval {
 			if name == "*" {
-				out.approvalProviders[g.Provider] = struct{}{}
+				allow.approvalProviders[g.Provider] = struct{}{}
 				continue
 			}
-			out.approvalExact[g.Provider+":"+name] = struct{}{}
+			allow.approvalExact[g.Provider+":"+name] = struct{}{}
 		}
 	}
-	return out
 }

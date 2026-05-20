@@ -31,6 +31,7 @@ func newFakeState(id string) *fakeState {
 func (s *fakeState) SessionID() string                  { return s.id }
 func (s *fakeState) SubagentName() string               { return "" }
 func (s *fakeState) Role() string                       { return "" }
+func (s *fakeState) Skill() string                      { return "" }
 func (s *fakeState) Depth() int                         { return 0 }
 func (s *fakeState) Parent() (extension.SessionState, bool) {
 	if s.parent == nil {
@@ -53,6 +54,9 @@ func (s *fakeState) IsClosed() bool                                           { 
 func (s *fakeState) Submit(_ context.Context, _ protocol.Frame) <-chan struct{} { return nil }
 func (s *fakeState) OutboxOnly(_ context.Context, _ protocol.Frame) error     { return nil }
 func (s *fakeState) Extensions() []extension.Extension                        { return nil }
+func (s *fakeState) RequestInquiry(_ context.Context, _ protocol.InquiryRequestPayload) (*protocol.InquiryResponse, error) {
+	return nil, nil
+}
 
 // fakeSpawner is the executor's spawner double. It records every
 // spawn request and triggers the user-supplied ingestion callback

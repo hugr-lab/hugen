@@ -4,7 +4,22 @@ to route the next iteration.
 
 [Iteration]
 {{.Iteration}}
-{{if .PlanContext}}
+{{if .Goal}}
+[User goal — what the user actually typed at mission spawn]
+{{.Goal}}
+{{end}}{{if .PlannerGoal}}
+[Mission goal (planner's framing — latest restatement after research / refine / follow-ups)]
+{{.PlannerGoal}}
+{{end}}{{if .MissionAC}}
+[Mission acceptance criteria — every entry MUST be satisfied for `finish`]
+{{range .MissionAC}}- {{.}}
+{{end}}{{end}}{{if .WaveAC}}
+[Wave acceptance criteria — what THIS wave was meant to deliver]
+{{range .WaveAC}}- {{.}}
+{{end}}{{end}}{{if .PendingRoadmap}}
+[Pending roadmap — planner committed, runtime has NOT executed yet]
+{{range .PendingRoadmap}}- `{{.Label}}`{{if .Description}} — {{.Description}}{{end}}
+{{end}}{{end}}{{if .PlanContext}}
 [Plan context]
 {{range .PlanContext}}- iteration {{.Iteration}} ({{.Phase}}): {{.Summary}}
 {{end}}{{end}}{{if .Handoffs}}
@@ -28,20 +43,69 @@ Pick exactly one decision. The runtime will route on this value:
   synthesis and end the mission. Use this confidently; you do
   not need to add a verification wave.
 
+[Verdict body — acceptance criteria status]
+
+You MUST evaluate each acceptance criterion in [Mission acceptance
+criteria] AND each in [Wave acceptance criteria] against the
+prior waves' handoffs + plan_context. Emit per-criterion status
+inside the verdict body:
+
+- `wave_ac_status[]` — one entry per [Wave acceptance criteria]
+  item: `{criterion: "<verbatim>", satisfied: true|false,
+  evidence: "<handoff ref or short quote>"}`. Empty when there
+  are no wave AC.
+- `mission_ac_status[]` — same shape, one entry per [Mission
+  acceptance criteria] item.
+
+Evidence rule: a criterion is satisfied ONLY when a handoff
+carries actual proof:
+- "file saved" → a handoff body with a `path` field whose value
+  is an absolute path the worker confirmed exists.
+- "data extracted" → a handoff body with `numbers` / `series` /
+  `tables` populated by the producing worker.
+- "report rendered" → a handoff body with `path` for the report
+  file AND the report file's existence verified.
+Data sitting in plan_context summaries is NOT proof; a model
+saying "we did it" without a corresponding handoff body field
+is NOT proof.
+
+[Finish discipline — refuse to finish prematurely]
+
+`finish` is ONLY valid when:
+
+1. Every entry in `mission_ac_status[]` has `satisfied=true`
+   with credible `evidence`.
+2. [Pending roadmap] is empty (planner has no committed-but-
+   unexecuted waves).
+3. [User goal] is covered by [Mission acceptance criteria] —
+   if you spot drift (user asked for X, planner's AC never
+   mentions X), emit `amend` with an issue describing the
+   missed requirement so the next planner expands the AC.
+
+If any check fails, emit `continue` (mission still in progress,
+planner spawns the next wave) or `amend` (the just-completed
+wave's output is wrong, planner needs to fix it). Wave AC
+unsatisfied → typically `amend` (the wave didn't deliver what
+it promised). Mission AC unsatisfied but wave AC satisfied →
+typically `continue` (we're on track, just not done).
+
+If unsure, emit `continue` over `finish`. `continue` is the
+safe default; `finish` ends the mission.
+
 Reply with EXACTLY ONE fenced block (no other text, no narration):
 
 ```verdict
-{"status":"ok","body":{"decision":"continue","issues":[],"reason":"<one sentence>"}}
+{"status":"ok","body":{"decision":"continue","issues":[],"reason":"<one sentence>","wave_ac_status":[{"criterion":"...","satisfied":true,"evidence":"<ref>"}],"mission_ac_status":[{"criterion":"...","satisfied":false,"evidence":"none yet"}]}}
 ```
 
 Examples of valid verdict shapes:
 
 ```verdict
-{"status":"ok","body":{"decision":"amend","issues":["wave wrote to wrong table","filter missed null rows"],"reason":"replan needed"}}
+{"status":"ok","body":{"decision":"amend","issues":["wave wrote to wrong table","filter missed null rows"],"reason":"replan needed","wave_ac_status":[{"criterion":"Numbers cover 4 tables","satisfied":false,"evidence":"only 3 tables in handoff"}]}}
 ```
 
 ```verdict
-{"status":"ok","body":{"decision":"finish","reason":"goal met by wave-1"}}
+{"status":"ok","body":{"decision":"finish","reason":"goal met","mission_ac_status":[{"criterion":"HTML saved at ~/Downloads/r.html","satisfied":true,"evidence":"reporter@build-report path=/Users/x/Downloads/r.html"}]}}
 ```
 
 The triple-backticks and the word `verdict` are mandatory; the

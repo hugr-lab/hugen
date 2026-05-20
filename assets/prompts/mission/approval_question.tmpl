@@ -1,0 +1,14 @@
+Approve this plan?
+
+Next wave: `{{.NextWave.Label}}`
+{{range .NextWave.Subagents}}- `{{.Name}}` (role: `{{.Role}}`){{if .Task}} — {{.Task}}{{end}}
+{{end}}{{if .Roadmap}}
+Roadmap (anticipated waves after the next one):
+{{range .Roadmap}}- `{{.Label}}`{{if .Description}} — {{.Description}}{{end}}
+{{end}}{{else}}
+Roadmap: this is expected to be the final wave; synthesis will follow.
+{{end}}{{if .Rationale}}
+Rationale: {{.Rationale}}
+{{end}}
+Reply approve to run the plan as-is, deny to abort, or reply with
+free-text feedback for the planner to amend.

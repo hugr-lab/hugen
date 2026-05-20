@@ -28,6 +28,7 @@ type rootWithChild struct {
 func (s *rootWithChild) SessionID() string                  { return s.id }
 func (s *rootWithChild) SubagentName() string               { return s.subagentName }
 func (s *rootWithChild) Role() string                       { return "" }
+func (s *rootWithChild) Skill() string                      { return "" }
 func (s *rootWithChild) Depth() int                         { return s.depth }
 func (s *rootWithChild) Parent() (extension.SessionState, bool) {
 	if s.parent == nil {
@@ -48,6 +49,9 @@ func (s *rootWithChild) IsClosed() bool                                         
 func (s *rootWithChild) Submit(_ context.Context, _ protocol.Frame) <-chan struct{} { return nil }
 func (s *rootWithChild) OutboxOnly(_ context.Context, _ protocol.Frame) error     { return nil }
 func (s *rootWithChild) Extensions() []extension.Extension                        { return nil }
+func (s *rootWithChild) RequestInquiry(_ context.Context, _ protocol.InquiryRequestPayload) (*protocol.InquiryResponse, error) {
+	return nil, nil
+}
 
 func TestCallNotify_DeliversToPlanContext(t *testing.T) {
 	ext := newPlannerExtension()

@@ -51,6 +51,7 @@ type TestSessionState struct {
 	id        string
 	name      string
 	role      string
+	skill     string
 	tools     *tool.ToolManager
 	prompts   *prompts.Renderer
 	parentRef *TestSessionState
@@ -68,6 +69,16 @@ type TestSessionState struct {
 	closed  bool
 
 	extensions []extension.Extension
+
+	// Phase I — RequestInquiry stub state. inquiryResponse /
+	// inquiryError are read on every call (under inboxMu); tests
+	// install them via SetInquiryResponse before exercising the
+	// approval path. inquiryRequests records every payload the
+	// code under test sent through RequestInquiry, in order, so
+	// tests can assert on the rendered question + context.
+	inquiryResponse  *protocol.InquiryResponse
+	inquiryError     error
+	inquiryRequests  []protocol.InquiryRequestPayload
 }
 
 // NewTestSessionState builds a TestSessionState bound to the given
@@ -119,6 +130,15 @@ func (s *TestSessionState) WithRole(role string) *TestSessionState {
 	return s
 }
 
+// WithSkill sets the dispatching skill name [TestSessionState.Skill]
+// reports — used by tests that exercise role-scoped tool grants
+// (the SubAgentRole.Tools allow-set wiring). Returns the receiver
+// so callers can chain.
+func (s *TestSessionState) WithSkill(skill string) *TestSessionState {
+	s.skill = skill
+	return s
+}
+
 // SubagentName implements [extension.SessionState]. Returns
 // whatever was configured via [TestSessionState.WithName]; empty
 // by default.
@@ -127,6 +147,10 @@ func (s *TestSessionState) SubagentName() string { return s.name }
 // Role implements [extension.SessionState]. Returns whatever was
 // configured via [TestSessionState.WithRole]; empty by default.
 func (s *TestSessionState) Role() string { return s.role }
+
+// Skill implements [extension.SessionState]. Returns whatever was
+// configured via [TestSessionState.WithSkill]; empty by default.
+func (s *TestSessionState) Skill() string { return s.skill }
 
 // Depth implements [extension.SessionState]. Returns whatever was
 // configured via [TestSessionState.WithParent] (parent.depth+1)
@@ -290,6 +314,56 @@ func (s *TestSessionState) Extensions() []extension.Extension {
 // discovery.
 func (s *TestSessionState) SetExtensions(exts []extension.Extension) {
 	s.extensions = exts
+}
+
+// RequestInquiry stub — tests that exercise the runtime-driven
+// approval path (Phase I) install their own response by setting
+// [TestSessionState.InquiryResponse] before invoking the code
+// under test. The default returns an "approved=true" stub so
+// tests that don't care about the gate proceed without setup.
+func (s *TestSessionState) RequestInquiry(ctx context.Context, payload protocol.InquiryRequestPayload) (*protocol.InquiryResponse, error) {
+	s.inboxMu.Lock()
+	s.inquiryRequests = append(s.inquiryRequests, payload)
+	canned := s.inquiryResponse
+	canned_err := s.inquiryError
+	s.inboxMu.Unlock()
+	if canned_err != nil {
+		return nil, canned_err
+	}
+	if canned != nil {
+		clone := *canned
+		clone.Payload.RequestID = payload.RequestID
+		clone.Payload.CallerSessionID = s.id
+		return &clone, nil
+	}
+	approved := true
+	return &protocol.InquiryResponse{
+		Payload: protocol.InquiryResponsePayload{
+			RequestID:       payload.RequestID,
+			CallerSessionID: s.id,
+			Approved:        &approved,
+			Response:        "approve",
+		},
+	}, nil
+}
+
+// SetInquiryResponse installs a canned response for the next
+// (and subsequent) RequestInquiry call. Reset by passing nil.
+func (s *TestSessionState) SetInquiryResponse(resp *protocol.InquiryResponse, err error) {
+	s.inboxMu.Lock()
+	defer s.inboxMu.Unlock()
+	s.inquiryResponse = resp
+	s.inquiryError = err
+}
+
+// InquiryRequests returns every payload RequestInquiry was
+// called with. Order matches call order.
+func (s *TestSessionState) InquiryRequests() []protocol.InquiryRequestPayload {
+	s.inboxMu.Lock()
+	defer s.inboxMu.Unlock()
+	out := make([]protocol.InquiryRequestPayload, len(s.inquiryRequests))
+	copy(out, s.inquiryRequests)
+	return out
 }
 
 // Inbox returns a snapshot of every frame Submit accepted, in

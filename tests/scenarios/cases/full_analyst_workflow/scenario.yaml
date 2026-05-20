@@ -46,6 +46,20 @@ steps:
     budget: 900s
     wait_for_subagents: 780s
 
+    # PDCA: planner role enforces `approval: initial: required` on
+    # iteration 1 — the runtime injects `[approval_required:
+    # initial]` into the planner's first message, and the planner
+    # MUST call session:inquire before returning its handoff. The
+    # bubble lands at root and the harness answers here. Subsequent
+    # iterations are `initial-only` so they close silently — one
+    # rule is enough. Phase G analyst SKILL.md + design 003 §0.4.
+    inquiry_responses:
+      - match:
+          question_contains: approve
+        respond:
+          response: "approve"
+        delay: 200ms
+
     queries:
       # Root: still narrow — spawn_mission + wait_subagents + at
       # most a plan:comment.

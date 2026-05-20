@@ -53,6 +53,13 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 	}
 	hasInline := manifest.Plan.ExperimentalInline != nil && len(manifest.Plan.ExperimentalInline.Waves) > 0
 	hasPlanner := manifest.Plan.Role != ""
+	// Phase I.19 — stamp the approval policy on MissionState so the
+	// validate_and_approve tool branches on the same predicate as
+	// the runtime's post-close gate without having to see the full
+	// manifest.
+	if mState := FromState(mission); mState != nil {
+		mState.SetPlannerApproval(manifest.Plan.Approval)
+	}
 	if !hasInline && !hasPlanner {
 		return fmt.Errorf("mission: RunMission: skill %q has no executable plan (need plan.experimental_inline or plan.role)", skill)
 	}
@@ -79,7 +86,7 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 // completion is published as a mission:wave_complete ExtensionFrame
 // on the mission session for observability / recovery.
 func (e *Extension) driveMission(mission extension.SessionState, spawner extension.SessionSpawner, manifest MissionManifest, missionSkill, goal string, inputs any) {
-	executor := NewExecutor(e.makeSpawnerCallback(mission, spawner), e.logger)
+	executor := NewExecutor(e.makeSpawnerCallback(mission, spawner, missionSkill), e.logger)
 
 	ctx := context.Background()
 	_ = inputs

@@ -94,6 +94,27 @@ type Verdict struct {
 	// Confidence is an optional 0-1 self-rating. Not load-bearing
 	// in v1; recorded for telemetry.
 	Confidence float64 `json:"confidence,omitempty"`
+
+	// WaveACStatus lists per-criterion satisfaction for the
+	// just-completed wave's acceptance_criteria. Empty when the
+	// planner didn't set wave AC. Phase I.26.
+	WaveACStatus []ACCriterionStatus `json:"wave_ac_status,omitempty"`
+
+	// MissionACStatus lists per-criterion satisfaction for the
+	// mission's acceptance_criteria as of this verdict. Runtime
+	// gates `finish` on every entry being satisfied — a finish
+	// verdict with any unsatisfied criterion is coerced to a
+	// synthetic amend so the next planner can address the gap.
+	// Phase I.26.
+	MissionACStatus []ACCriterionStatus `json:"mission_ac_status,omitempty"`
+}
+
+// ACCriterionStatus is one row of the per-criterion check the
+// checker emits. Phase I.26.
+type ACCriterionStatus struct {
+	Criterion string `json:"criterion"`
+	Satisfied bool   `json:"satisfied"`
+	Evidence  string `json:"evidence,omitempty"`
 }
 
 // Handoffs is the per-mission store: a flat map keyed by Ref. The

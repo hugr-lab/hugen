@@ -223,6 +223,37 @@ func (e *Extension) ingestHandoff(m *MissionState, childSessionID string, cur wo
 	iter := m.IterationCounter
 	m.mu.Unlock()
 	m.PlanContext.AppendHandoff(iter, wave, h)
+	// Phase I.23 — skill-driven approval invalidation. Any worker
+	// (regardless of role) can request that the mission's current
+	// plan approval be reset by including
+	// `invalidates_plan_approval: true` in its handoff body. The
+	// next planner spawn then must re-call validate_and_approve
+	// (its prior body's marker is gone), and the user sees a
+	// fresh modal. Skill prose decides which roles wave this flag
+	// — runtime stays role-agnostic.
+	if invalidatesPlanApproval(h.Body) {
+		m.InvalidatePlanApproval()
+		e.logger.Info("mission: ingestHandoff: worker invalidated plan approval",
+			"ref", ref, "child", childSessionID, "role", cur.Role)
+	}
+}
+
+// invalidatesPlanApproval extracts the `invalidates_plan_approval`
+// flag from a handoff body. Returns true only when the body is a
+// map whose value at that key parses as boolean true. Any other
+// shape — missing key, non-bool, body that isn't a map — yields
+// false (the default-safe behaviour: invalidation is opt-in).
+func invalidatesPlanApproval(body any) bool {
+	m, ok := body.(map[string]any)
+	if !ok {
+		return false
+	}
+	v, ok := m["invalidates_plan_approval"]
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
 }
 
 // recordError stores a synthetic error handoff for a worker that

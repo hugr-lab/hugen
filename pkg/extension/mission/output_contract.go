@@ -219,6 +219,30 @@ func validateRequired(kind OutputContractKind, h Handoff, raw map[string]any) er
 			if len(subs) == 0 {
 				return &ParseError{Reason: "kind=plan: body.next_wave.subagents must list at least one worker"}
 			}
+			// Phase I.26 — mission_goal + mission_acceptance_criteria
+			// are REQUIRED on every non-complete plan. They drive the
+			// checker's exit gate (and surface in the approval modal
+			// so the user can refine if the planner misread the goal).
+			goal, _ := body["mission_goal"].(string)
+			if strings.TrimSpace(goal) == "" {
+				return &ParseError{Reason: "kind=plan: body.mission_goal is required (planner's current restatement of what the mission delivers)"}
+			}
+			acRaw, present := body["mission_acceptance_criteria"]
+			if !present {
+				return &ParseError{Reason: "kind=plan: body.mission_acceptance_criteria is required (array of strings — what makes the mission `finish`-able)"}
+			}
+			acList, ok := acRaw.([]any)
+			if !ok {
+				return &ParseError{Reason: "kind=plan: body.mission_acceptance_criteria must be an array of strings"}
+			}
+			if len(acList) == 0 {
+				return &ParseError{Reason: "kind=plan: body.mission_acceptance_criteria must contain at least one criterion"}
+			}
+			for i, e := range acList {
+				if s, ok := e.(string); !ok || strings.TrimSpace(s) == "" {
+					return &ParseError{Reason: fmt.Sprintf("kind=plan: body.mission_acceptance_criteria[%d] must be a non-empty string", i)}
+				}
+			}
 		}
 	case KindVerdict:
 		body, _ := raw["body"].(map[string]any)

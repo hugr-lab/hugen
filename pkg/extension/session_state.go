@@ -51,6 +51,16 @@ type SessionState interface {
 	// frames without poking into [*session.Session] internals.
 	Role() string
 
+	// Skill returns the dispatching skill name this session was
+	// spawned under (e.g. "analyst"). Empty string for root
+	// sessions and for sessions whose spawner did not pass an
+	// explicit skill. Pairs with Role() to identify a
+	// SubAgentRole inside the dispatching skill's manifest —
+	// extensions read both to apply role-scoped surfaces
+	// (role.Tools grants, role.OnClose overrides, …) on the
+	// worker's per-turn snapshot.
+	Skill() string
+
 	// Depth returns this session's depth in the spawn tree: 0 for
 	// the user-facing root, 1 for the mission root spawned, ≥2 for
 	// workers spawned by missions (or by workers via opt-in
@@ -126,6 +136,20 @@ type SessionState interface {
 	// [StatusReporter]) without hardcoding extension names.
 	// Phase 5.1b.
 	Extensions() []Extension
+
+	// RequestInquiry is the runtime-side counterpart to the
+	// `session:inquire` tool. Extensions driving deterministic
+	// HITL flows (notably mission ext's approval gate after the
+	// planner closes its handoff) emit an InquiryRequest from
+	// THIS session and block on the response, without the model
+	// having to formulate the inquire payload itself. The
+	// returned response carries Approved / Reason / Response
+	// exactly like the tool path. Error covers timeout,
+	// ctx cancel, or session-closed. The implementation MUST
+	// allocate its own RequestID + CallerSessionID; callers pass
+	// Type / Question / Context / Options / TimeoutMs only.
+	// Phase I (design 003) — runtime-driven approval inquire.
+	RequestInquiry(ctx context.Context, payload protocol.InquiryRequestPayload) (*protocol.InquiryResponse, error)
 }
 
 type sessionStateKey struct{}

@@ -166,12 +166,9 @@ func (parent *Session) callSpawnMission(ctx context.Context, args json.RawMessag
 	if err != nil {
 		return toolErr("io", fmt.Sprintf("spawn_mission: spawn: %v", err))
 	}
-
-	// Tier-default + per-role intent override on the spawned mission.
-	parent.applyChildIntent(ctx, child, skillName, in.Role)
-	// Per-role spawn appliers (autoload_skills, …) on the new
-	// session BEFORE the auto-runner fires.
-	parent.applyChildSpawnAppliers(ctx, child, skillName, in.Role)
+	// Per-role intent override + spawn appliers (autoload_skills, …)
+	// now fire inside Session.Spawn — see pkg/session/spawn.go. No
+	// duplicate dispatch needed here.
 
 	// Tag the child's terminal SubagentResult with the projection
 	// hint the parent's pump will copy into the payload. Async +

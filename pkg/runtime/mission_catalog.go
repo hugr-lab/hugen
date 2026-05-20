@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 
 	missionext "github.com/hugr-lab/hugen/pkg/extension/mission"
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
@@ -136,6 +137,43 @@ func projectMissionManifest(m skillpkg.Manifest) *missionext.MissionManifest {
 	}
 	out.Capabilities = projectMissionCapabilities(mb.Capabilities)
 	out.Roles = projectRoleCapabilities(m.Hugen.SubAgents)
+	out.Workers = projectDoWorkers(m.Hugen.SubAgents, mb.Plan.Role, mb.Control.Role, mb.Synthesis.Role)
+	return out
+}
+
+// projectDoWorkers filters the skill's sub_agents down to the
+// "Do" roles — everything that isn't the planner, the checker, or
+// the synthesizer — and carries the role name + description into
+// mission ext's WorkerManifest catalogue. The planner's first
+// message renders this catalogue so the model picks a real role
+// (`schema-explorer`, `query-builder`, …) instead of guessing
+// `worker` and falling through to the generic _worker autoload.
+func projectDoWorkers(roles []skillpkg.SubAgentRole, plannerRole, controlRole, synthesisRole string) []missionext.WorkerManifest {
+	if len(roles) == 0 {
+		return nil
+	}
+	skip := map[string]struct{}{}
+	for _, r := range []string{plannerRole, controlRole, synthesisRole} {
+		if r != "" {
+			skip[r] = struct{}{}
+		}
+	}
+	out := make([]missionext.WorkerManifest, 0, len(roles))
+	for _, r := range roles {
+		if r.Name == "" {
+			continue
+		}
+		if _, drop := skip[r.Name]; drop {
+			continue
+		}
+		out = append(out, missionext.WorkerManifest{
+			Role:        r.Name,
+			Description: strings.TrimSpace(r.Description),
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
 }
 

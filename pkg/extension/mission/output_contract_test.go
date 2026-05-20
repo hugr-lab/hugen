@@ -91,7 +91,7 @@ func TestParseHandoff_Kind(t *testing.T) {
 		{
 			name: "plan kind: full happy path round-trips through DecodePlan",
 			raw: "```plan\n" +
-				`{"status":"ok","body":{"next_wave":{"label":"discover","subagents":[{"name":"explorer","role":"schema-explorer","task":"map tables"}]},"roadmap":["analyse"],"rationale":"discover first"}}` +
+				`{"status":"ok","body":{"mission_goal":"map tables","mission_acceptance_criteria":["discovery produces table list"],"next_wave":{"label":"discover","subagents":[{"name":"explorer","role":"schema-explorer","task":"map tables"}]},"roadmap":["analyse"],"rationale":"discover first"}}` +
 				"\n```",
 			wantOk: true,
 			check: func(t *testing.T, h Handoff) {
@@ -111,7 +111,7 @@ func TestParseHandoff_Kind(t *testing.T) {
 				if p.Rationale != "discover first" {
 					t.Errorf("Rationale = %q", p.Rationale)
 				}
-				if len(p.Roadmap) != 1 || p.Roadmap[0] != "analyse" {
+				if len(p.Roadmap) != 1 || p.Roadmap[0].Label != "analyse" {
 					t.Errorf("Roadmap = %v", p.Roadmap)
 				}
 			},

@@ -95,7 +95,7 @@ func (h *SessionSkill) callToolsCatalog(ctx context.Context, args json.RawMessag
 
 	// granted_to_session: tools the loaded skills admit (the same
 	// allow-set FilterTools applies to the model-facing snapshot).
-	allowed := allowedFromHandle(ctx, h)
+	allowed := allowedFromHandle(ctx, h, state)
 	// Tier filter on available_in_skills (phase 4.2.2 §3.3.3): the
 	// discovery channel hides skills the caller's tier cannot load.
 	// Out of sight, out of mind for weak models that would

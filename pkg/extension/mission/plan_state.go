@@ -22,10 +22,13 @@ type PlanState struct {
 	// iterations, or after synthesis).
 	Active *Wave `json:"active,omitempty"`
 
-	// Roadmap is the planner's latest forecast — labels of waves
-	// it expects to follow Active. Overwritten on every planner
-	// iteration. Model-readable only.
-	Roadmap []string `json:"roadmap,omitempty"`
+	// Roadmap is the planner's latest forecast — upcoming waves
+	// (label + one-line description) the planner expects to
+	// follow Active. Overwritten on every planner iteration.
+	// Model-readable + rendered into the approval inquire question
+	// so the user sees the bigger picture before approving the
+	// immediate next wave.
+	Roadmap []RoadmapEntry `json:"roadmap,omitempty"`
 
 	// Iteration counts planner cycles completed. Increments on
 	// every planner_invalid retry exhaustion or wave_complete that

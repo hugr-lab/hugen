@@ -66,7 +66,7 @@ func (e *PlannerError) Unwrap() error { return e.Err }
 // Returns when the mission session has emitted its final
 // AgentMessage; the caller (RunMission) drives nothing further.
 func (e *Extension) driveMissionPlanner(mission extension.SessionState, spawner extension.SessionSpawner, manifest MissionManifest, missionSkill, goal string, inputs any) {
-	executor := NewExecutor(e.makeSpawnerCallback(mission, spawner), e.logger)
+	executor := NewExecutor(e.makeSpawnerCallback(mission, spawner, missionSkill), e.logger)
 	ctx := context.Background()
 	_ = inputs
 
@@ -132,7 +132,23 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 		// 1. Spawn the planner subagent.
 		plan, plannerErr := e.spawnAndAwaitPlanner(ctx, executor, mission, manifest, missionSkill, goal, iteration, recentVerdict)
 		if plannerErr != nil {
-			return true, plannerErr
+			e.logger.Warn("mission: planner loop: planner closed with an invalid plan — handing back to planner for amend",
+				"mission_session", mission.SessionID(),
+				"iteration", iteration, "err", plannerErr)
+			// A *PlannerError indicates the planner closed with a
+			// malformed handoff (parse / decode / role / output-
+			// contract failure). The handoff is NOT actionable, but
+			// the loop is — surface the parser's reason to the next
+			// planner spawn as a synthetic amend verdict so it can
+			// re-emit a valid plan. max_waves caps the retry budget;
+			// genuinely broken planners hit the cap and synthesis
+			// recaps the partial state.
+			recentVerdict = &Verdict{
+				Decision: VerdictAmend,
+				Reason:   "previous planner handoff was invalid — re-emit a clean plan",
+				Issues:   []string{plannerErr.Error()},
+			}
+			continue
 		}
 
 		// 2. plan_complete signal — no more waves to run.
@@ -142,6 +158,13 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 				"iteration", iteration)
 			return false, nil
 		}
+
+		// Phase I.10 — approval is the planner's in-turn job via
+		// mission:validate_plan(request_approval=true). The gate
+		// is enforced earlier in spawnAndAwaitPlanner — by the time
+		// we reach this point with a non-nil plan, approval has
+		// either succeeded or the iteration policy didn't require
+		// it. No post-close fallback inquire.
 
 		// 3. Run the planner-emitted wave. Each subagent's task is
 		// decorated with the runtime-injected handoff contract so
@@ -158,20 +181,40 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 		status, _, runErr := executor.RunWave(ctx, mission, decorated, RunWaveOptions{})
 		e.emitWaveComplete(mission, plan.NextWave.Label, status, runErr)
 		if runErr != nil || status == WaveStatusFailed {
-			e.logger.Warn("mission: planner loop: executed wave failed",
+			e.logger.Warn("mission: planner loop: executed wave failed — handing to planner for amend",
 				"mission_session", mission.SessionID(),
 				"iteration", iteration,
 				"wave", plan.NextWave.Label,
 				"status", status,
 				"err", runErr)
-			return true, runErr
+			// Fold wave failure into a synthetic verdict so the next
+			// planner spawn sees the failure under [Recent verdict]
+			// and replans rather than aborting the mission. Caps at
+			// max_waves cleanly; consecutive identical failures get
+			// flushed when the iteration counter hits the cap and
+			// synthesis recaps whatever partial state was produced.
+			recentVerdict = &Verdict{
+				Decision: VerdictAmend,
+				Reason:   fmt.Sprintf("wave %q failed", plan.NextWave.Label),
+				Issues:   collectWaveFailureIssues(mission, plan.NextWave.Label, runErr),
+			}
+			continue
 		}
 
 		// 4. Phase C — verdict phase. Spawn checker if declared,
 		// route on its decision. Absent control collapses to the
-		// implicit `continue` path.
+		// implicit `continue` path. Phase I.9: planner may set
+		// `next_wave.skip_check: true` for trivial waves whose
+		// verdict is obvious (one worker, status=ok); runtime
+		// skips the checker spawn entirely. SkipCheck is ignored
+		// on wave failures (those go through the synthetic amend
+		// path above before reaching this block).
 		recentVerdict = nil
-		if manifest.Control.Role != "" {
+		if plan.NextWave.SkipCheck {
+			e.logger.Info("mission: planner loop: checker skipped per next_wave.skip_check",
+				"mission_session", mission.SessionID(),
+				"iteration", iteration, "wave", plan.NextWave.Label)
+		} else if manifest.Control.Role != "" {
 			verdict, checkErr := e.spawnAndAwaitChecker(ctx, executor, mission, manifest, missionSkill, goal, iteration)
 			if checkErr != nil {
 				e.logger.Warn("mission: planner loop: checker failed",
@@ -193,6 +236,25 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 				// the checker closed; the next planner sees the
 				// verdict's reason in its [Recent verdict] block.
 			case VerdictFinish:
+				// Phase I.26 — runtime gate. The checker may only
+				// finish when every mission AC is satisfied. Any
+				// unsatisfied entry in mission_ac_status coerces the
+				// verdict into a synthetic amend with the gaps
+				// folded into issues, so the next planner can revise
+				// the plan to address them.
+				if pendings := unsatisfiedMissionAC(verdict); len(pendings) > 0 {
+					e.logger.Warn("mission: planner loop: rejecting finish — mission acceptance criteria unsatisfied",
+						"mission_session", mission.SessionID(),
+						"iteration", iteration,
+						"unsatisfied", pendings)
+					synthetic := Verdict{
+						Decision: VerdictAmend,
+						Reason:   "checker proposed finish but mission acceptance criteria are not all satisfied; replan to close the gaps",
+						Issues:   pendings,
+					}
+					recentVerdict = &synthetic
+					continue
+				}
 				e.logger.Info("mission: planner loop: checker verdict=finish",
 					"mission_session", mission.SessionID(),
 					"iteration", iteration)
@@ -269,25 +331,118 @@ func (e *Extension) spawnAndAwaitPlanner(ctx context.Context, executor *Executor
 	if h.Kind != KindPlan {
 		return nil, &PlannerError{Iteration: iteration, Reason: fmt.Sprintf("expected kind=plan, got %q", h.Kind)}
 	}
-	// Approval gate (spec § 0.4b step 2). When policy requires
-	// approval for this iteration but the planner never emitted an
-	// InquiryRequest during its turn, reject the handoff. The
-	// inquired-flag is set by OnChildFrame on any
-	// *protocol.InquiryRequest from the planner; absence after the
-	// wave settled is conclusive.
-	if approvalRequiredForIteration(manifest.Plan.Approval, iteration) {
-		if !m.Inquired(h.Subagent.SessionID) {
-			return nil, &PlannerError{
-				Iteration: iteration,
-				Reason:    "planner emitted plan without the required session:inquire approval",
-			}
-		}
-	}
+	// Decode the typed plan from the handoff. plan_complete
+	// (next_wave=null) returns nil here; the caller treats that
+	// as the mission's done-signal.
 	plan, decodeErr := DecodePlan(h)
 	if decodeErr != nil {
 		return nil, &PlannerError{Iteration: iteration, Reason: "decode plan", Err: decodeErr}
 	}
+
+	// Phase I.23 — skill-agnostic approval gate. Mission state
+	// carries ONE marker: the body the user most recently
+	// approved (or empty when no plan is currently approved).
+	// The planner MUST have called `mission:validate_and_approve`
+	// with the same body it now emits in the handoff fence,
+	// AND that body must produce the same canonical marker the
+	// tool stamped. Mismatch → reject the handoff. Worker
+	// invalidation (handoff body `invalidates_plan_approval:
+	// true`) clears the marker between iterations, forcing the
+	// next planner to re-validate from scratch.
+	//
+	// Missions whose policy opts out (Initial=skip) skip the
+	// gate entirely — automation / test missions take the
+	// approved-by-default branch.
+	if approvalRequiredForIteration(manifest.Plan.Approval, iteration, m) {
+		emittedMarker, markerErr := canonicalPlanMarker(h.Body)
+		if markerErr != nil {
+			return nil, &PlannerError{Iteration: iteration, Reason: "compute emitted plan marker", Err: markerErr}
+		}
+		stored := m.ApprovedPlanMarker()
+		switch {
+		case stored == "":
+			return nil, &PlannerError{
+				Iteration: iteration,
+				Reason:    "planner emitted a plan handoff without a recorded approval; call mission:validate_and_approve with the body you intend to emit, then ship the fence verbatim",
+			}
+		case stored != emittedMarker:
+			return nil, &PlannerError{
+				Iteration: iteration,
+				Reason: fmt.Sprintf(
+					"plan body marker mismatch: approved=%s emitted=%s — the body you shipped in the handoff is not the body the user approved. Re-call mission:validate_and_approve with the body you intend to commit, or emit the previously-approved body verbatim.",
+					stored, emittedMarker,
+				),
+			}
+		}
+	}
+	// Phase I.26 — snapshot the planner's current mission frame
+	// (goal restatement + mission AC + wave AC) so the checker sees
+	// the latest definition of done. plan_complete (nil plan) skips
+	// the snapshot — the existing frame remains as the synthesizer's
+	// reference.
+	if plan != nil && plan.NextWave.Label != "" {
+		m.SetMissionFrame(plan.MissionGoal, plan.MissionAcceptanceCriteria, plan.NextWave.AcceptanceCriteria)
+	}
 	return plan, nil
+}
+
+// planIsResearchOnly was a phase-I.15 helper consulted by the
+// approval gate; Phase I.23 dropped runtime knowledge of
+// skill-specific role names in favour of worker-driven approval
+// invalidation. Kept here as a stub to avoid breaking external
+// callers — always returns false.
+//
+// Deprecated: do not call.
+func planIsResearchOnly(plan *Plan) bool {
+	_ = plan
+	return false
+}
+
+// unsatisfiedMissionAC walks the checker's per-criterion mission
+// AC report and returns a string slice of "<criterion> (evidence:
+// <text>)" entries for every row whose `satisfied` flag is false.
+// Empty MissionACStatus is treated as "every criterion still
+// pending" — a checker proposing `finish` without filling AC
+// status is misbehaving and the runtime keeps it honest by
+// surfacing the gap via the synthetic-amend issue list. Phase I.26.
+func unsatisfiedMissionAC(v Verdict) []string {
+	if len(v.MissionACStatus) == 0 {
+		return []string{
+			"checker proposed finish but emitted no mission_ac_status — fill mission_ac_status[] with per-criterion satisfaction so the runtime can verify completion",
+		}
+	}
+	var out []string
+	for _, entry := range v.MissionACStatus {
+		if entry.Satisfied {
+			continue
+		}
+		msg := entry.Criterion
+		if msg == "" {
+			msg = "(unnamed criterion)"
+		}
+		if ev := strings.TrimSpace(entry.Evidence); ev != "" {
+			msg = msg + " (evidence: " + ev + ")"
+		} else {
+			msg = msg + " (no evidence in handoffs)"
+		}
+		out = append(out, msg)
+	}
+	return out
+}
+
+// _unused keeps the deprecated planIsResearchOnly tied to its
+// original sentinel-only signature for any test reference; the
+// helper has no runtime callers as of Phase I.23.
+func _unusedPlanIsResearchOnly(plan *Plan) bool {
+	if plan == nil || plan.NextWave.Label == "" || len(plan.NextWave.Subagents) == 0 {
+		return false
+	}
+	for _, s := range plan.NextWave.Subagents {
+		if s.Role != "researcher" {
+			return false
+		}
+	}
+	return true
 }
 
 // spawnAndAwaitChecker runs one checker iteration. Spawns the
@@ -303,7 +458,7 @@ func (e *Extension) spawnAndAwaitChecker(ctx context.Context, executor *Executor
 	if manifest.Control.Role == "" {
 		return Verdict{}, &PlannerError{Iteration: iteration, Reason: "manifest.control.role is empty"}
 	}
-	task, err := buildCheckerTask(mission, manifest, iteration)
+	task, err := buildCheckerTask(mission, manifest, _goal, iteration)
 	if err != nil {
 		return Verdict{}, &PlannerError{Iteration: iteration, Reason: "build checker task", Err: err}
 	}
@@ -404,11 +559,22 @@ func (e *Extension) emitVerdictReady(mission extension.SessionState, iteration i
 // open child sessions. Mirrors driveMission's closure literal —
 // extracted so both the inline and planner driver paths share one
 // implementation (and tests can substitute it).
-func (e *Extension) makeSpawnerCallback(mission extension.SessionState, spawner extension.SessionSpawner) Spawner {
+//
+// missionSkill names the mission's dispatching skill (e.g.
+// "analyst"); the closure substitutes it for any SpawnRequest with
+// an empty Skill so role lookups (ApplyOnSubagentSpawn, intent
+// override) resolve against the right manifest. The planner only
+// emits role names from its own dispatching skill, so a missing
+// `skill:` on a wave subagent always means "use the mission's".
+func (e *Extension) makeSpawnerCallback(mission extension.SessionState, spawner extension.SessionSpawner, missionSkill string) Spawner {
 	return func(ctx context.Context, _ extension.SessionState, req SpawnRequest) (SpawnResult, error) {
+		effectiveSkill := req.Skill
+		if effectiveSkill == "" {
+			effectiveSkill = missionSkill
+		}
 		child, err := spawner.SpawnChild(ctx, extension.SpawnSpec{
 			Name:       req.Name,
-			Skill:      req.Skill,
+			Skill:      effectiveSkill,
 			Role:       req.Role,
 			Task:       req.Task,
 			Inputs:     req.Inputs,
@@ -443,6 +609,19 @@ type plannerTaskView struct {
 	// rendered into [Recent verdict]. Nil on iteration 1 and when
 	// no control role is declared.
 	RecentVerdict *plannerVerdictView
+	// DoRoles enumerates the manifest's `sub_agents` Do-roles
+	// (non-planner / non-checker / non-synthesizer) so the planner
+	// sees a closed catalogue and picks a real role name instead
+	// of guessing `worker` and falling through to the generic
+	// _worker autoload (which has no domain tools).
+	DoRoles []plannerDoRoleView
+}
+
+// plannerDoRoleView is one row in the planner's
+// [Available Do roles] catalogue.
+type plannerDoRoleView struct {
+	Role        string
+	Description string
 }
 
 // plannerVerdictView is the per-iteration verdict projection the
@@ -465,9 +644,14 @@ type plannerContextEntry struct {
 
 // plannerRecentEntry is the per-wave outcome the template renders
 // under [Recent waves]. Phase D fills these from PlanState.Done.
+// Refs exposes the full handoff refs (`<name>@<wave>`) produced by
+// the wave so the planner knows what addressable depends_on values
+// are available for downstream subagents — without it the model
+// tends to pass bare wave-labels which fail the ref lookup.
 type plannerRecentEntry struct {
 	Wave   string
 	Status string
+	Refs   []string
 }
 
 // buildPlannerTask renders the planner subagent's first message
@@ -480,12 +664,23 @@ type plannerRecentEntry struct {
 // non-nil, surfaces the prior iteration's checker decision +
 // issues under [Recent verdict].
 func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, goal string, iteration int, recentVerdict *Verdict) (string, error) {
-	approval := approvalRequiredForIteration(manifest.Plan.Approval, iteration)
+	approval := approvalRequiredForIteration(manifest.Plan.Approval, iteration, FromState(mission))
+	doRoles := make([]plannerDoRoleView, 0, len(manifest.Workers))
+	for _, w := range manifest.Workers {
+		if w.Role == "" {
+			continue
+		}
+		doRoles = append(doRoles, plannerDoRoleView{
+			Role:        w.Role,
+			Description: w.Description,
+		})
+	}
 	view := plannerTaskView{
 		Goal:             goal,
 		Iteration:        iteration,
 		MaxWaves:         manifest.Plan.MaxWaves,
 		ApprovalRequired: approval,
+		DoRoles:          doRoles,
 		Recent:           collectRecentWaves(mission),
 		PlanContext:      collectPlanContext(mission),
 	}
@@ -528,24 +723,44 @@ func collectPlanContext(mission extension.SessionState) []plannerContextEntry {
 // renders against. Phase C — mission goal, iteration index, and
 // the handoffs the checker should validate. Phase D — PlanContext
 // projection so the checker sees prior-iteration memory summaries
-// without re-reading every handoff body.
+// without re-reading every handoff body. Phase I.25 — Goal +
+// PendingRoadmap surfaced so the checker can refuse `finish`
+// when the user goal still has unexecuted roadmap commitments.
 type checkerTaskView struct {
-	Goal        string
-	Iteration   int
-	Handoffs    []synthesisHandoffView
-	PlanContext []plannerContextEntry
+	Goal              string
+	PlannerGoal       string
+	MissionAC         []string
+	WaveAC            []string
+	Iteration         int
+	Handoffs          []synthesisHandoffView
+	PlanContext       []plannerContextEntry
+	PendingRoadmap    []plannerRoadmapView
+}
+
+// plannerRoadmapView projects one un-executed roadmap entry from
+// the most recent planner handoff, used by the checker's
+// completeness gate.
+type plannerRoadmapView struct {
+	Label       string
+	Description string
 }
 
 // buildCheckerTask renders the checker subagent's first message
 // via assets/prompts/mission/checker_task.tmpl. The template
 // teaches the kind=verdict fence shape and includes every handoff
 // produced by the just-completed wave for the checker to inspect,
-// plus the plan_context journal for cross-iteration awareness.
-func buildCheckerTask(mission extension.SessionState, _ MissionManifest, iteration int) (string, error) {
+// plus the plan_context journal for cross-iteration awareness,
+// the user goal, and any roadmap entries the planner committed to
+// but the runtime hasn't executed yet.
+func buildCheckerTask(mission extension.SessionState, _ MissionManifest, goal string, iteration int) (string, error) {
 	view := checkerTaskView{
-		Goal:        "",
-		Iteration:   iteration,
-		PlanContext: collectPlanContext(mission),
+		Goal:           goal,
+		Iteration:      iteration,
+		PlanContext:    collectPlanContext(mission),
+		PendingRoadmap: collectPendingRoadmap(mission),
+	}
+	if m := FromState(mission); m != nil {
+		view.PlannerGoal, view.MissionAC, view.WaveAC = m.MissionFrame()
 	}
 	if m := FromState(mission); m != nil {
 		for _, h := range m.Handoffs.List() {
@@ -569,6 +784,50 @@ func buildCheckerTask(mission extension.SessionState, _ MissionManifest, iterati
 	return renderer.Render("mission/checker_task", view)
 }
 
+// collectPendingRoadmap walks the most recent planner handoff's
+// roadmap and filters out entries whose `label` already appears
+// as a Done wave label in PlanState — what's left is "the planner
+// promised this and the mission hasn't done it yet". The checker
+// sees this list and refuses `finish` when it isn't empty.
+func collectPendingRoadmap(mission extension.SessionState) []plannerRoadmapView {
+	m := FromState(mission)
+	if m == nil {
+		return nil
+	}
+	// Find the most recent planner handoff and its roadmap.
+	var latestPlan *Plan
+	for _, h := range m.Handoffs.List() {
+		if !strings.HasPrefix(h.Ref, "planner@") {
+			continue
+		}
+		p, err := DecodePlan(h)
+		if err != nil {
+			continue
+		}
+		latestPlan = p
+	}
+	if latestPlan == nil || len(latestPlan.Roadmap) == 0 {
+		return nil
+	}
+	done := map[string]bool{}
+	for _, dw := range m.Plan.Done {
+		if dw.Label != "" {
+			done[dw.Label] = true
+		}
+	}
+	if latestPlan.NextWave.Label != "" {
+		done[latestPlan.NextWave.Label] = true
+	}
+	out := make([]plannerRoadmapView, 0, len(latestPlan.Roadmap))
+	for _, r := range latestPlan.Roadmap {
+		if r.Label == "" || done[r.Label] {
+			continue
+		}
+		out = append(out, plannerRoadmapView{Label: r.Label, Description: r.Description})
+	}
+	return out
+}
+
 // collectRecentWaves projects PlanState.Done into the template's
 // [Recent waves] section. Skips planner / synthesis waves
 // (underscore-prefixed labels) — those are runtime-internal and
@@ -586,31 +845,72 @@ func collectRecentWaves(mission extension.SessionState) []plannerRecentEntry {
 		if strings.HasPrefix(w.Label, "_") {
 			continue
 		}
+		refs := make([]string, 0, len(w.Subagents))
+		for _, s := range w.Subagents {
+			if s.Ref != "" {
+				refs = append(refs, s.Ref)
+			}
+		}
 		out = append(out, plannerRecentEntry{
 			Wave:   w.Label,
 			Status: string(w.Status),
+			Refs:   refs,
 		})
 	}
 	return out
 }
 
-// approvalRequiredForIteration applies the v1 approval policy to
-// the given iteration index. Iteration 1 reads Initial; iterations
-// >1 read Iteration. Empty values are treated as the spec defaults
-// (initial=required, iteration=initial-only).
-func approvalRequiredForIteration(policy PlanApproval, iteration int) bool {
+// collectWaveFailureIssues drains per-subagent error reasons from
+// the just-failed wave's PlanState entry plus the wave-level error
+// (when one was reported) into the issue list the planner will see
+// under [Recent verdict] on its next spawn. Empty when the wave
+// failed without recording per-subagent diagnostics — the
+// synthetic verdict's `reason` still carries the wave label.
+func collectWaveFailureIssues(mission extension.SessionState, waveLabel string, runErr error) []string {
+	var issues []string
+	if m := FromState(mission); m != nil {
+		m.mu.Lock()
+		for i := len(m.Plan.Done) - 1; i >= 0; i-- {
+			w := m.Plan.Done[i]
+			if w.Label != waveLabel {
+				continue
+			}
+			for _, s := range w.Subagents {
+				if s.Status == "error" && s.Error != "" {
+					issues = append(issues, fmt.Sprintf("%s (role %s): %s", s.Name, s.Role, s.Error))
+				}
+			}
+			break
+		}
+		m.mu.Unlock()
+	}
+	if runErr != nil {
+		issues = append(issues, "wave run error: "+runErr.Error())
+	}
+	return issues
+}
+
+// approvalRequiredForIteration reports whether the mission's
+// approval policy demands a user approval for iteration's plan.
+//
+// Phase I.23 simplification — approval is policy-driven only, no
+// per-iteration scaling. Every planner iteration that emits a
+// non-empty next_wave runs the inquire; the only opt-out is
+// `policy.Initial == ApprovalInitialSkip`, which disables the
+// approval gate for the entire mission. The `iteration` arg is
+// kept on the signature for telemetry and future per-iteration
+// policy work, but is unused under the current rule.
+//
+// Rationale: the original tri-state (initial-only / always /
+// never) added confusion without operational value. Weak models
+// tripped on "this iter needs approval, that one doesn't" cues,
+// and the research-first pattern made the "initial iteration"
+// itself ambiguous. A uniform "every plan emits an inquire"
+// matches the user mental model and lets the marker discipline
+// in spawnAndAwaitPlanner stay symmetric.
+func approvalRequiredForIteration(policy PlanApproval, _ int, _ *MissionState) bool {
 	policy = NormalizePlanApproval(policy)
-	if iteration <= 1 {
-		return policy.Initial == ApprovalInitialRequired
-	}
-	switch policy.Iteration {
-	case ApprovalIterationAlways:
-		return true
-	case ApprovalIterationNever, ApprovalIterationInitOnly:
-		return false
-	default:
-		return false
-	}
+	return policy.Initial != ApprovalInitialSkip
 }
 
 // workerContractView is the typed payload the

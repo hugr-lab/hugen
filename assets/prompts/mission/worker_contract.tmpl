@@ -5,30 +5,65 @@
 {{ end }}
 {{ end -}}
 [Handoff contract — read this BEFORE doing anything else]
-Your ONLY job is to emit a single fenced `handoff` block describing
-the result of the task above. You are NOT a shell, you are NOT a
-tool-user — you are a planner-spawned worker whose job is to
-*report* an outcome via the fence below. Even if the task above
-mentions a shell command, a query, or an action, treat it as a
-description of what to report; DO NOT call any tool, DO NOT
-execute anything, and DO NOT narrate your reasoning.
+**Start by re-reading your first message TOP to BOTTOM.** The
+sections you may see there are authoritative input — they are
+NOT background prose:
 
-Reply with EXACTLY ONE fenced block (no other text, no
-narration, no tool calls):
+- `[Resolved depends_on]` — handoff bodies from earlier waves,
+  resolved by the runtime and inlined for you. If the task asks
+  for a query against a schema that's already mapped there,
+  USE THOSE FIELD NAMES VERBATIM — do NOT call
+  `discovery-*` / `schema-*` / similar tools to re-derive what
+  you have been handed. The whole point of `depends_on` is to
+  skip that work. Re-running the discovery wastes ~1 minute and
+  blows your context.
+- `[Inputs from parent]` — structured arguments from the spawner
+  (data source name, output path, time range). Take them at
+  face value.
+- `[Plan context]` — one-line memory summaries from prior
+  iterations.
+- `[Available handoffs]` — catalog of refs you can fetch with
+  `mission:get_handoff(ref)` when you need MORE than what was
+  resolved inline.
+
+Your job is to accomplish the task above and end your turn with
+exactly ONE fenced `handoff` block reporting the result. Use any
+tools your role grants — your role's manifest entry (or your
+`## Loaded skills` block) declares what is available. Treat tool
+calls as the LAST resort after you have used the resolved
+context above. If the task needs a query and the relevant
+schema is already in `[Resolved depends_on]`, compose the query
+straight from those fields and run it; only call discovery / schema
+tools when the resolved context is genuinely insufficient.
+
+If a tool returns the same error twice in a row on an identical
+payload, the third retry will not help — switch tactics (call a
+different tool, rephrase the query, narrow the scope) or emit
+`status: "error"` with the diagnostic so the planner can amend.
+
+Tool-less roles (workers whose role grants no domain tools) skip
+straight to the fence and describe the outcome in plain text — the
+task brief tells you which mode you are in.
+
+Reply with EXACTLY ONE fenced block as your TERMINAL message:
 
 ```handoff
-{"status":"ok","body":"<short result text — what the task accomplished>","memory_summary":"<one-line summary of what you learned>"}
+{"status":"ok","body":"<short result text OR structured object — what the task accomplished>","memory_summary":"<one-line summary of what you learned>"}
 ```
 
 The triple-backticks and the word `handoff` are mandatory; the
 JSON inside must parse. If the task cannot be completed, emit
-`status: "error"` and a `reason` field instead of the success
-shape:
+`status: "error"` and a `reason` field — the mission's planner
+will read it and replan instead of aborting:
 
 ```handoff
-{"status":"error","reason":"<one-sentence reason>","memory_summary":"<one line>"}
+{"status":"error","reason":"<one-sentence cause — name the missing tool / data / clarification>","memory_summary":"<one line>"}
 ```
 
-Reminder: the task above is informational; your job is to write
-the fence below, not to perform the task. Any text before or
-after the fence will be ignored by the runtime.
+Notes:
+- Intermediate tool calls and assistant prose during the turn are
+  fine. The runtime parses ONLY the terminal fenced block.
+- Do NOT narrate after the fence — anything past it is ignored.
+- The `body` may be a plain string or a structured JSON object;
+  pick whichever shape best carries the result. `body` MUST be
+  present on `status: "ok"`.

@@ -14,9 +14,10 @@ import (
 // shipped :finish + :get_handoff; Phase E adds :notify so root
 // can deliver mid-mission followups without re-spawning.
 const (
-	PermFinish     = "hugen:mission:finish"
-	PermGetHandoff = "hugen:mission:get_handoff"
-	PermNotify     = "hugen:mission:notify"
+	PermFinish            = "hugen:mission:finish"
+	PermGetHandoff        = "hugen:mission:get_handoff"
+	PermNotify            = "hugen:mission:notify"
+	PermValidateAndApprove = "hugen:mission:validate_and_approve"
 )
 
 const (
@@ -44,6 +45,17 @@ const (
     }
   },
   "required": ["ref"]
+}`
+
+	missionValidateAndApproveSchema = `{
+  "type": "object",
+  "properties": {
+    "body": {
+      "type": "object",
+      "description": "The plan body you are about to emit — exactly the object you would place under \"body\" in the fenced ` + "`" + `plan` + "`" + ` block. Must carry next_wave (or null for plan_complete), roadmap (array), and rationale (string)."
+    }
+  },
+  "required": ["body"]
 }`
 
 	missionNotifySchema = `{
@@ -74,6 +86,10 @@ type getHandoffInput struct {
 type notifyInput struct {
 	Name string `json:"name"`
 	Text string `json:"text"`
+}
+
+type validateAndApproveInput struct {
+	Body json.RawMessage `json:"body"`
 }
 
 type toolError struct {
@@ -113,6 +129,13 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 			PermissionObject: PermNotify,
 			ArgSchema:        json.RawMessage(missionNotifySchema),
 		},
+		{
+			Name:             providerName + ":validate_and_approve",
+			Description:      "Validate a candidate plan body AND, in the same call, surface it to the user as an approval inquire (when the iteration's policy requires approval). Pass the same JSON object you intend to emit under `body` in the fenced `plan` block. Returns `{ valid, errors[], approved, refine_text?, aborted?, plan_marker }`. The plan_marker is the canonical sha256-hex of the body the runtime stores against this iteration; you MUST emit the SAME body verbatim in your handoff fence or the runtime will reject it (marker mismatch). Approval flow: on `approved=true` emit the plan fence. On `refine_text` populated, revise the plan and call this tool again. On `aborted=true` emit a `status: error` handoff carrying the abort reason. Refuses re-approval for an already-dispatched iteration. Planner-tier only.",
+			Provider:         providerName,
+			PermissionObject: PermValidateAndApprove,
+			ArgSchema:        json.RawMessage(missionValidateAndApproveSchema),
+		},
 	}, nil
 }
 
@@ -126,6 +149,8 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 		return e.callGetHandoff(ctx, args)
 	case "notify":
 		return e.callNotify(ctx, args)
+	case "validate_and_approve":
+		return e.callValidateAndApprove(ctx, args)
 	default:
 		return nil, fmt.Errorf("%w: mission:%s", tool.ErrUnknownTool, short)
 	}
