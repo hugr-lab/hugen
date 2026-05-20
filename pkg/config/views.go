@@ -205,12 +205,30 @@ type CompactorConfig struct {
 	// absolute floor. See pkg/extension/compactor/resolve.go.
 	TokenBudgetRatio float64 `mapstructure:"token_budget_ratio" yaml:"token_budget_ratio,omitempty"`
 
+	// UIMarker carries the adapter-side transcript marker
+	// configuration. Phase 5.2 δ. A sub-struct (rather than a
+	// flat bool) so future ui knobs (style, glyph, label format)
+	// land alongside without breaking the YAML schema.
+	UIMarker CompactorUIMarker `mapstructure:"ui_marker" yaml:"ui_marker,omitempty"`
+
 	// Tiers carries per-tier overrides (root | mission | worker).
 	// Each entry's non-zero fields override the corresponding
 	// top-level field for sessions in that tier; absent or empty
 	// entries inherit top-level verbatim. The compactor extension
 	// resolves the active tier from skill.TierFromDepth(state.Depth()).
 	Tiers map[string]CompactorTier `mapstructure:"tiers" yaml:"tiers,omitempty"`
+}
+
+// CompactorUIMarker carries the transcript-marker UI knobs the
+// adapters consume. Phase 5.2 δ — only Enabled today; future
+// stylistic knobs (label format, glyph, color) land alongside.
+//
+// Global (no per-tier override) in v1: most operators want either
+// marker-on or marker-off across the whole agent. Pointer for
+// Enabled so an absent YAML key reads as "inherit runtime default"
+// (true), explicit `false` disables.
+type CompactorUIMarker struct {
+	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
 }
 
 // CompactorTier is the per-tier override shape. All fields are

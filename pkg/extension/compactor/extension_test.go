@@ -231,6 +231,116 @@ func TestExtension_OnFrameEmit_StreamingAgentMessageIgnored(t *testing.T) {
 	}
 }
 
+// --- ReportStatus / StatusReporter (Phase 5.2 δ) ---
+
+func TestExtension_ReportStatus_NilWhenNoState(t *testing.T) {
+	e := newTestExtension(t)
+	st := newFakeState("ses-rs-1")
+	// InitState not called — FromState returns nil, ReportStatus
+	// must return nil (siblings interpret nil as "no contribution").
+	if got := e.ReportStatus(context.Background(), st); got != nil {
+		t.Fatalf("ReportStatus without InitState = %s, want nil", got)
+	}
+}
+
+func TestExtension_ReportStatus_NilWhenNoDigest(t *testing.T) {
+	e := newTestExtension(t)
+	st := newFakeState("ses-rs-2")
+	if err := e.InitState(context.Background(), st); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	// Boundary recorded but no compaction has fired yet — digest
+	// is nil, ReportStatus must return nil.
+	user := protocol.NewUserMessage(st.id, protocol.ParticipantInfo{}, "hi")
+	user.SetSeq(1)
+	e.OnFrameEmit(context.Background(), st, user)
+	if got := e.ReportStatus(context.Background(), st); got != nil {
+		t.Fatalf("ReportStatus with no digest = %s, want nil", got)
+	}
+}
+
+func TestExtension_ReportStatus_ProjectsDigest(t *testing.T) {
+	e := newTestExtension(t)
+	st := newFakeState("ses-rs-3")
+	if err := e.InitState(context.Background(), st); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	digest := &DigestPayload{
+		Version:        1,
+		Iteration:      2,
+		CutoffSeq:      42,
+		CompactedAtSeq: 50,
+		KeptVerbatim: []KeptSection{
+			{Kind: "user_message", Seq: 1, Text: "hi"},
+			{Kind: "user_message", Seq: 3, Text: "follow"},
+			{Kind: "agent_message", Seq: 4, Text: "ok"},
+		},
+		SummaryBlocks: []SummaryBlock{
+			{Iter: 1, From: 0, To: 20, Text: "block1"},
+			{Iter: 2, From: 21, To: 42, Text: "block2"},
+		},
+		BuiltAt: now,
+	}
+	FromState(st).SetDigest(digest)
+
+	raw := e.ReportStatus(context.Background(), st)
+	if raw == nil {
+		t.Fatalf("ReportStatus with digest = nil; want JSON payload")
+	}
+	var got StatusPayload
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal status payload: %v (raw=%s)", err, raw)
+	}
+	if got.Iteration != 2 {
+		t.Errorf("Iteration = %d, want 2", got.Iteration)
+	}
+	if got.CutoffSeq != 42 {
+		t.Errorf("CutoffSeq = %d, want 42", got.CutoffSeq)
+	}
+	if got.BlocksCount != 2 {
+		t.Errorf("BlocksCount = %d, want 2", got.BlocksCount)
+	}
+	if got.KeptCount != 3 {
+		t.Errorf("KeptCount = %d, want 3", got.KeptCount)
+	}
+	if !got.UIMarkerEnabled {
+		t.Errorf("UIMarkerEnabled = false, want true (DefaultConfig)")
+	}
+	if !got.BuiltAt.Equal(now) {
+		t.Errorf("BuiltAt = %v, want %v", got.BuiltAt, now)
+	}
+}
+
+func TestExtension_ReportStatus_UIMarkerDisabled(t *testing.T) {
+	// Edge case: operator turned off ui_marker.enabled in config;
+	// ReportStatus must echo the flag through so adapters know to
+	// suppress the marker.
+	cfg := DefaultConfig()
+	cfg.UIMarkerEnabled = false
+	e := NewExtensionWithConfig(slog.Default(), cfg, Deps{})
+	st := newFakeState("ses-rs-4")
+	if err := e.InitState(context.Background(), st); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	FromState(st).SetDigest(&DigestPayload{
+		Version:   1,
+		Iteration: 1,
+		CutoffSeq: 5,
+	})
+	raw := e.ReportStatus(context.Background(), st)
+	if raw == nil {
+		t.Fatalf("ReportStatus returned nil; want payload")
+	}
+	var got StatusPayload
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.UIMarkerEnabled {
+		t.Errorf("UIMarkerEnabled = true; want false (operator disabled)")
+	}
+}
+
 // --- recovery.go ---
 
 func TestRecover_LatestDigestSetWins(t *testing.T) {

@@ -3,6 +3,7 @@ package console
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -43,6 +44,15 @@ type Adapter struct {
 	// dispatching each line. nil when no inquiry is open.
 	// Phase 5.1 § 2.
 	pending atomic.Pointer[PendingInquiry]
+
+	// compactorMarkerDisabled tracks the operator's
+	// `compactor.ui_marker.enabled` toggle, mirrored from the
+	// most-recent liveview/status frame's `extensions.compactor`
+	// projection. Default is "enabled" (zero value = false → not
+	// disabled); a status frame with ui_marker_enabled=false
+	// flips this to true and suppresses subsequent markers.
+	// Phase 5.2 δ.
+	compactorMarkerDisabled atomic.Bool
 
 	closed chan struct{} // closed when session_closed is observed
 }
@@ -299,6 +309,8 @@ func (a *Adapter) render(f protocol.Frame) {
 		default:
 			close(a.closed)
 		}
+	case *protocol.ExtensionFrame:
+		a.renderExtensionFrame(v)
 	case *protocol.SessionOpened,
 		*protocol.SlashCommand, *protocol.Cancel, *protocol.Heartbeat:
 		// Lifecycle / control frames are silent; the user can see
@@ -306,6 +318,95 @@ func (a *Adapter) render(f protocol.Frame) {
 	default:
 		_ = v
 	}
+}
+
+// renderExtensionFrame draws inline markers for extension-driven
+// signals the operator should see in the transcript. Phase 5.2 δ —
+// compactor's `digest_set` op produces a faint horizontal-rule
+// marker at the cutoff boundary; liveview's `status` op updates the
+// `compactor.ui_marker_enabled` cache so the marker honours the
+// operator's `compactor.ui_marker.enabled` toggle in real time.
+//
+// Other extensions stay silent; the frame is still persisted (the
+// SystemMarker / persisted transcript path covers any future
+// per-extension renderings).
+func (a *Adapter) renderExtensionFrame(v *protocol.ExtensionFrame) {
+	switch {
+	case v.Payload.Extension == "liveview" && v.Payload.Op == "status":
+		a.updateCompactorMarkerFlag(v.Payload.Data)
+	case v.Payload.Extension == "compactor" && v.Payload.Op == "digest_set":
+		a.renderCompactorDigestSet(v)
+	}
+}
+
+// updateCompactorMarkerFlag inspects a liveview/status payload and
+// mirrors its `extensions.compactor.ui_marker_enabled` field onto
+// the adapter's atomic. A missing field is treated as "enabled"
+// (default-on) per spec §11.7.
+func (a *Adapter) updateCompactorMarkerFlag(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	var envelope struct {
+		Extensions map[string]json.RawMessage `json:"extensions,omitempty"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return
+	}
+	raw, ok := envelope.Extensions["compactor"]
+	if !ok || len(raw) == 0 {
+		return
+	}
+	var c struct {
+		UIMarkerEnabled bool `json:"ui_marker_enabled"`
+	}
+	c.UIMarkerEnabled = true // default-on if the field is absent
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return
+	}
+	a.compactorMarkerDisabled.Store(!c.UIMarkerEnabled)
+}
+
+// renderCompactorDigestSet draws the transcript marker for a
+// compactor digest_set frame. Suppressed when the operator's
+// ui_marker.enabled flag is off (mirrored via
+// updateCompactorMarkerFlag).
+func (a *Adapter) renderCompactorDigestSet(v *protocol.ExtensionFrame) {
+	if a.compactorMarkerDisabled.Load() {
+		return
+	}
+	var p struct {
+		Iteration   int `json:"iteration"`
+		KeptCount   int `json:"kept_count"`
+		BlocksCount int `json:"blocks_count"`
+		// DigestPayload uses kept_verbatim + summary_blocks as
+		// arrays — fall back to len() through nested decoding when
+		// the dedicated count fields are absent (digest_set body
+		// carries the raw DigestPayload, not the StatusPayload).
+		KeptVerbatim  []json.RawMessage `json:"kept_verbatim"`
+		SummaryBlocks []json.RawMessage `json:"summary_blocks"`
+	}
+	if err := json.Unmarshal(v.Payload.Data, &p); err != nil {
+		return
+	}
+	msgCount := p.KeptCount
+	if msgCount == 0 {
+		msgCount = len(p.KeptVerbatim)
+	}
+	if msgCount == 0 {
+		msgCount = p.BlocksCount
+	}
+	if msgCount == 0 {
+		msgCount = len(p.SummaryBlocks)
+	}
+	if a.currentSection != "" {
+		fmt.Fprintln(a.out)
+		a.currentSection = ""
+	}
+	fmt.Fprintf(a.out,
+		"─── history compacted (iter %d, %d msgs) ───\n",
+		p.Iteration, msgCount)
+	fmt.Fprint(a.out, "> ")
 }
 
 func defaultUserParticipant() protocol.ParticipantInfo {

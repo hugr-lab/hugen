@@ -73,6 +73,16 @@ type tab struct {
 	// that case so the operator never sees a misleading "0
 	// events" before the first sample lands.
 	eventsCount int
+
+	// Phase 5.2 δ — operator-resolved compactor.ui_marker.enabled
+	// flag, mirrored from each liveview/status frame's
+	// `extensions.compactor.ui_marker_enabled` field. Default true:
+	// fresh tabs render markers until a status frame says
+	// otherwise. Setting `compactor.ui_marker.enabled: false` in
+	// agent_config.yaml flips this to false at first status
+	// arrival, suppressing subsequent compactor/digest_set
+	// markers in this tab's chat.
+	compactorMarkerEnabled bool
 }
 
 // newTab builds a fresh tab bound to sessionID. The terminal
@@ -95,16 +105,17 @@ func newTab(sessionID string, u protocol.ParticipantInfo, submit func(protocol.F
 	vp.KeyMap = viewport.KeyMap{}
 
 	return &tab{
-		sessionID:   sessionID,
-		user:        u,
-		logger:      logger,
-		submit:      submit,
-		viewport:    vp,
-		textarea:    ta,
-		chat:        newChatBuffer(),
-		statusLine:  "ready",
-		historyIdx:  -1,
-		eventsCount: -1,
+		sessionID:              sessionID,
+		user:                   u,
+		logger:                 logger,
+		submit:                 submit,
+		viewport:               vp,
+		textarea:               ta,
+		chat:                   newChatBuffer(),
+		statusLine:             "ready",
+		historyIdx:             -1,
+		eventsCount:            -1,
+		compactorMarkerEnabled: true, // default-on per spec §11.7
 	}
 }
 

@@ -1,0 +1,41 @@
+# compactor_disabled — phase 5.2 δ negative-path scenario.
+#
+# DEFERRED: harness gap blocks this scenario from being a
+# meaningful test. See `compactor_token_trigger` for the same
+# gap discussion.
+#
+# Intent (once the gap is closed):
+#
+#   When the operator sets `compactor.enabled: false` in
+#   agent_config.yaml (or via a future `agent_config_overrides:`
+#   primitive on Scenario YAML), the trigger predicate short-
+#   circuits on every boundary. Even after 30 turns:
+#     - zero ExtensionFrame{extension=compactor, op=digest_set},
+#     - zero `─── history compacted ───` markers in the
+#       transcript adapter (verified by inspecting the
+#       liveview/status frames — extensions.compactor stays
+#       absent because ReportStatus returns nil when no digest
+#       is built).
+#
+# Why it cannot ship in δ:
+#
+#   The harness builds one runtime per Run and shares it across
+#   every scenario listed under that Run. A `compactor:
+#   enabled: false` block in the topology overlay would
+#   suppress compaction for ALL scenarios under that topology —
+#   defeating the point of a negative test. The clean fix is
+#   per-scenario config overrides, tracked as an ε / fast-follow
+#   item.
+#
+# Status: skeleton kept for the schema; runs.yaml does NOT
+# enrol this scenario. Re-enrol it once
+# `agent_config_overrides:` lands on the harness.
+name: compactor_disabled
+requires: []
+
+steps:
+  - tick: true
+    queries:
+      - name: placeholder
+        graphql: |
+          query { __typename }

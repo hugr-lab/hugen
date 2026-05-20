@@ -146,6 +146,15 @@ runs:
       - chat_quick_question
       - chat_followup_continuity
       - chat_spawns_mission_for_report
+      # Phase 5.2 δ — compactor smoke test. Drives six trivial
+      # turns to exercise the boundary tracker + ReportStatus
+      # wiring end-to-end. Permissive: no digest_set fire is
+      # expected under prod defaults (max_turns=50). Hard
+      # assertions (compactor_disabled / compactor_with_mission)
+      # are deferred behind a per-scenario config-override
+      # primitive — see scenario.yaml comments + δ deliverable
+      # notes.
+      - compactor_token_trigger
       # Mission-PDCA (design 003) Phase A α.4 — minimal end-to-
       # end pipeline through the fixture skill `_mission_v2`.
       # Validates wave_complete frames, synthesis worker, and

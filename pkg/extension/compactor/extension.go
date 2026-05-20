@@ -2,6 +2,7 @@ package compactor
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"time"
 
@@ -99,6 +100,16 @@ type Config struct {
 	// rides through every resolve layer untouched so the
 	// switch lands behind one local change in shouldCompact.
 	TokenBudgetRatio float64
+
+	// UIMarkerEnabled toggles the adapter-side transcript marker
+	// ("─── history compacted (iter N, M msgs) ───") drawn at the
+	// digest cutoff boundary. Defaults to true; operators can
+	// turn it off via `compactor.ui_marker.enabled: false`. The
+	// flag is global (no per-tier override) in v1 — operators
+	// want either marker-on or marker-off. Resolved value is
+	// surfaced via [Extension.ReportStatus] so adapters can read
+	// the cutoff + flag from one liveview payload. Phase 5.2 δ.
+	UIMarkerEnabled bool
 
 	// Tiers maps tier label (root | mission | worker) to the
 	// per-tier overlay applied during resolveTierConfig. nil /
@@ -201,6 +212,7 @@ func DefaultConfig() Config {
 		MinTurnGap:           3,
 		LLMTimeout:           30 * time.Second,
 		LLMIntent:            model.IntentSummarize,
+		UIMarkerEnabled:      true,
 	}
 }
 
@@ -262,6 +274,7 @@ var (
 	_ extension.Advertiser       = (*Extension)(nil)
 	_ extension.FrameObserver    = (*Extension)(nil)
 	_ extension.TurnBoundaryHook = (*Extension)(nil)
+	_ extension.StatusReporter   = (*Extension)(nil)
 )
 
 // Name implements [extension.Extension].
@@ -288,4 +301,78 @@ func FromState(state extension.SessionState) *CompactorState {
 	}
 	s, _ := v.(*CompactorState)
 	return s
+}
+
+// StatusPayload is the wire shape emitted by [Extension.ReportStatus]
+// and folded into the liveview/status frame under
+// `extensions.compactor`. Adapters consume this to render the
+// transcript marker at the cutoff boundary. Phase 5.2 δ — keep
+// fields additive; older adapters tolerate unknown keys via
+// encoding/json's default ignore-unknown behaviour.
+type StatusPayload struct {
+	// Iteration is the latest digest's iteration counter (≥ 1
+	// when a digest is active).
+	Iteration int `json:"iteration"`
+	// CutoffSeq is the seq immediately AFTER which the live
+	// (uncompacted) history begins. Adapters draw the marker
+	// between the frame with seq == CutoffSeq and the next.
+	CutoffSeq int64 `json:"cutoff_seq"`
+	// BlocksCount is len(SummaryBlocks) — informational, drives
+	// the marker label ("iter N, M msgs" — M here is
+	// KeptCount, not BlocksCount; both fields surfaced so the
+	// adapter can pick).
+	BlocksCount int `json:"blocks_count"`
+	// KeptCount is len(KeptVerbatim) — informational; the
+	// adapter renders this as the "msgs" count on the marker.
+	KeptCount int `json:"kept_count"`
+	// BuiltAt is the time the latest digest was written.
+	BuiltAt time.Time `json:"built_at"`
+	// UIMarkerEnabled echoes the resolved config flag so the
+	// adapter can read both the cutoff and the toggle from one
+	// payload. Defaults to true; operator sets
+	// `compactor.ui_marker.enabled: false` to suppress.
+	UIMarkerEnabled bool `json:"ui_marker_enabled"`
+}
+
+// ReportStatus implements [extension.StatusReporter]. Returns the
+// JSON encoding of the active digest's projection (iteration,
+// cutoff_seq, blocks_count, kept_count, built_at) plus the
+// resolved ui_marker_enabled flag. Returns nil when no digest has
+// been written yet — liveview omits the entry from the payload in
+// that case.
+//
+// The ui_marker_enabled flag rides the same projection so adapters
+// can read both the cutoff + the toggle from one liveview frame,
+// avoiding a separate lookup path through the runtime config
+// surface. Reads the top-level [Extension.baseConfig] (not the
+// per-session resolver) because the flag is a v1 global toggle
+// per spec §11.7 — per-tier override is out-of-scope.
+//
+// Phase 5.2 δ.
+func (e *Extension) ReportStatus(_ context.Context, state extension.SessionState) json.RawMessage {
+	s := FromState(state)
+	if s == nil {
+		return nil
+	}
+	d := s.Digest()
+	if d == nil {
+		return nil
+	}
+	payload := StatusPayload{
+		Iteration:       d.Iteration,
+		CutoffSeq:       d.CutoffSeq,
+		BlocksCount:     len(d.SummaryBlocks),
+		KeptCount:       len(d.KeptVerbatim),
+		BuiltAt:         d.BuiltAt,
+		UIMarkerEnabled: e.baseConfig().UIMarkerEnabled,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		if e.logger != nil {
+			e.logger.Warn("compactor: marshal status payload",
+				"session", state.SessionID(), "err", err)
+		}
+		return nil
+	}
+	return data
 }

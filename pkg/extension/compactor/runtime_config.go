@@ -53,6 +53,9 @@ func BuildConfig(in config.CompactorConfig, logger *slog.Logger) Config {
 	if in.TokenBudgetRatio > 0 {
 		cfg.TokenBudgetRatio = in.TokenBudgetRatio
 	}
+	if in.UIMarker.Enabled != nil {
+		cfg.UIMarkerEnabled = *in.UIMarker.Enabled
+	}
 
 	if len(in.Tiers) > 0 {
 		cfg.Tiers = make(map[string]TierOverride, len(in.Tiers))

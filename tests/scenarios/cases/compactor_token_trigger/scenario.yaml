@@ -1,0 +1,122 @@
+# compactor_token_trigger — phase 5.2 δ smoke test for the
+# compactor's end-to-end pipeline. Drives a long conversation
+# (six sequential trivial user-message turns) so the boundary
+# counter and token estimate grow past their gates, and the
+# digest_set ExtensionFrame should fire at least once on root.
+#
+# Harness limitation (documented as δ scope-cut):
+#
+#   The scenario harness does NOT support per-scenario
+#   agent_config_overrides today (runner.go builds one
+#   *runtime.Core per Run; every scenario in the Run shares the
+#   same compactor.* thresholds). The default thresholds
+#   (max_turns=50, max_tokens=80k) are too high for a short
+#   smoke test to trip reliably — this scenario relies on the
+#   absolute floor being lowered in the prod config.yaml when
+#   operators want compaction to fire frequently, OR on a future
+#   ε fast-follow that extends Scenario YAML with
+#   `agent_config_overrides:` so this kind of scenario can pin
+#   compactor.max_turns=8.
+#
+#   For now the scenario is a permissive smoke test: it logs
+#   whether a digest_set frame landed and reports the digest
+#   projection if so. Hard assertions (#2 compactor_disabled and
+#   #3 compactor_with_mission) are documented in their own
+#   scenario.yaml files but deferred until the override primitive
+#   ships.
+#
+# By-eye assertions (queries below):
+#
+#   1. The compactor extension is wired and InitState ran on
+#      the root session — surfaced via the on-state compactor
+#      key (no direct query; the absence of crashes through the
+#      six-turn run is the signal).
+#
+#   2. boundary_count ≥ 6 — every user_message persists as a
+#      session_events row; the compactor's FrameObserver folds
+#      each one into the boundary tracker.
+#
+#   3. IF an ExtensionFrame{extension=compactor, op=digest_set}
+#      lands on root.outbox during the run, its Payload.Data
+#      decodes to a DigestPayload with cutoff_seq > 0 and
+#      iteration ≥ 1. Zero such frames is acceptable under prod
+#      defaults — log-and-pass behaviour.
+#
+# requires: [] — the scenario uses trivial Q&A that any LLM can
+# answer from priors; no Hugr data dependency.
+name: compactor_token_trigger
+requires: []
+
+steps:
+  # Six sequential trivial turns. Each `say:` lands one
+  # user_message and waits for one final agent_message. The
+  # default compactor configuration tracks 6 boundary entries
+  # plus the running token estimate; aggressive operator config
+  # (max_turns=4 / max_tokens=2000) would already be tripping
+  # by turn 5.
+  - say: "What's 2 + 2?"
+    budget: 240s
+  - say: "What's 3 + 3?"
+    budget: 240s
+  - say: "What's 4 + 4?"
+    budget: 240s
+  - say: "What's 5 + 5?"
+    budget: 240s
+  - say: "What's 6 + 6?"
+    budget: 240s
+  - say: "What's 7 + 7?"
+    budget: 240s
+    queries:
+      # Every persisted user_message contributes to the
+      # boundary tracker; six say-steps must persist six
+      # user_message rows (zero compaction would have removed
+      # them — the runtime never deletes session_events).
+      - name: user_messages_count
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "user_message"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq event_type }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Compactor digest_set ExtensionFrames on root. Expect 0
+      # under prod defaults (max_turns=50 still un-tripped after
+      # 6 turns); ≥1 only when the operator config lowered the
+      # threshold OR a future ε override landed. The query
+      # exists so the harness logs the digest payload when one
+      # appears — invaluable for dogfood inspection.
+      - name: compactor_digest_frames
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {
+                  session_id: {eq: $sid},
+                  event_type: {eq: "extension_frame"}
+                }
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq event_type metadata }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Final agent_message after step 6 — proves the
+      # conversation reached its end without the compactor
+      # pipeline crashing the session. A failing turn would
+      # surface as an error frame instead.
+      - name: root_final_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 1
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }

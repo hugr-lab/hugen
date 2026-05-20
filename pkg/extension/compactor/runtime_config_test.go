@@ -36,6 +36,32 @@ func TestBuildCompactorConfig_DefaultsApply(t *testing.T) {
 	}
 }
 
+// TestBuildCompactorConfig_UIMarkerEnabled verifies the
+// `compactor.ui_marker.enabled` YAML toggle wires through to
+// Config.UIMarkerEnabled. Phase 5.2 δ — global flag, no per-tier
+// override.
+func TestBuildCompactorConfig_UIMarkerEnabled(t *testing.T) {
+	// Absent — defaults to true via DefaultConfig.
+	def := BuildConfig(config.CompactorConfig{}, slog.Default())
+	if !def.UIMarkerEnabled {
+		t.Errorf("absent ui_marker block: UIMarkerEnabled = false, want true (default)")
+	}
+	// Explicit false — operator turned the marker off.
+	off := BuildConfig(config.CompactorConfig{
+		UIMarker: config.CompactorUIMarker{Enabled: ptrBool(false)},
+	}, slog.Default())
+	if off.UIMarkerEnabled {
+		t.Errorf("explicit ui_marker.enabled=false: UIMarkerEnabled = true, want false")
+	}
+	// Explicit true — operator re-enabled (round-trip).
+	on := BuildConfig(config.CompactorConfig{
+		UIMarker: config.CompactorUIMarker{Enabled: ptrBool(true)},
+	}, slog.Default())
+	if !on.UIMarkerEnabled {
+		t.Errorf("explicit ui_marker.enabled=true: UIMarkerEnabled = false, want true")
+	}
+}
+
 // TestBuildCompactorConfig_OperatorYAMLLaysOverDefaults verifies
 // that explicit YAML values land on top of DefaultConfig.
 func TestBuildCompactorConfig_OperatorYAMLLaysOverDefaults(t *testing.T) {
