@@ -214,16 +214,19 @@ func driveBoundaries(t *testing.T, e *Extension, st extension.SessionState, coun
 }
 
 // fixtureRows builds canned EventRow rows representing
-// `count` user/agent turn pairs starting at startSeq. Mirrors
-// the shape driveBoundaries produces on the FrameObserver path.
+// `count` user/agent turn pairs starting at startSeq, with a
+// tool_call+tool_result pair injected every 3rd turn so the
+// per-Kind dispatch has non-empty toolPairs to feed the
+// summariser (production paths almost always carry tool calls;
+// pure-chat sessions hit the short-circuit branch tested
+// separately in [TestCompactor_PureChat_NoLLMCall]).
 func fixtureRows(count int, startSeq int) []store.EventRow {
-	rows := make([]store.EventRow, 0, count*2)
+	rows := make([]store.EventRow, 0, count*3)
+	seq := startSeq
 	for i := 0; i < count; i++ {
-		userSeq := startSeq + i*2
-		agentSeq := userSeq + 1
 		rows = append(rows, store.EventRow{
-			ID:        fmt.Sprintf("u%d", userSeq),
-			Seq:       userSeq,
+			ID:        fmt.Sprintf("u%d", seq),
+			Seq:       seq,
 			EventType: string(protocol.KindUserMessage),
 			Author:    "u1",
 			Content:   fmt.Sprintf("user msg #%d", i+1),
@@ -231,9 +234,41 @@ func fixtureRows(count int, startSeq int) []store.EventRow {
 				"text": fmt.Sprintf("user msg #%d", i+1),
 			},
 		})
+		seq++
+		// Inject a tool_call + tool_result pair every 3rd turn
+		// so the classifier has non-empty toolPairs.
+		if i%3 == 0 {
+			callID := fmt.Sprintf("tc%d", i)
+			rows = append(rows, store.EventRow{
+				ID:        fmt.Sprintf("call%d", seq),
+				Seq:       seq,
+				EventType: string(protocol.KindToolCall),
+				Author:    "a1",
+				ToolName:  "demo:do_thing",
+				ToolArgs:  map[string]any{"i": i},
+				Metadata: map[string]any{
+					"tool_id": callID,
+					"name":    "demo:do_thing",
+				},
+			})
+			seq++
+			rows = append(rows, store.EventRow{
+				ID:         fmt.Sprintf("res%d", seq),
+				Seq:        seq,
+				EventType:  string(protocol.KindToolResult),
+				Author:     "tool",
+				ToolName:   "demo:do_thing",
+				ToolResult: fmt.Sprintf("result #%d", i+1),
+				Metadata: map[string]any{
+					"tool_id": callID,
+					"result":  fmt.Sprintf("result #%d", i+1),
+				},
+			})
+			seq++
+		}
 		rows = append(rows, store.EventRow{
-			ID:        fmt.Sprintf("a%d", agentSeq),
-			Seq:       agentSeq,
+			ID:        fmt.Sprintf("a%d", seq),
+			Seq:       seq,
 			EventType: string(protocol.KindAgentMessage),
 			Author:    "a1",
 			Content:   fmt.Sprintf("agent reply #%d", i+1),
@@ -243,6 +278,7 @@ func fixtureRows(count int, startSeq int) []store.EventRow {
 				"consolidated": true,
 			},
 		})
+		seq++
 	}
 	return rows
 }
@@ -483,6 +519,110 @@ func TestCompactor_HardFallback(t *testing.T) {
 	}
 	if len(d.KeptVerbatim) == 0 {
 		t.Fatalf("KeptVerbatim empty on fallback path; want populated")
+	}
+}
+
+// TestCompactor_PureChat_NoLLMCall verifies the pure-chat
+// short-circuit: when the compactable range carries only
+// user_message + agent_message rows (no tool calls, no
+// inquiries), the summariser LLM call is skipped entirely
+// and the SummaryBlock carries an informational placeholder
+// pointing at the verbatim turns. Phase 5.2 δ dogfood follow-up.
+func TestCompactor_PureChat_NoLLMCall(t *testing.T) {
+	const turns = 60
+	startSeq := 1
+	st := newFakeIntegrationState(t, "ses-purechat")
+	mdl := &stubModel{summary: "should not be called"}
+	router := newStubRouter(t, mdl)
+	// pureChatRows skips the every-3rd-turn tool_call+result pair
+	// fixtureRows injects — the classifier ends up with empty
+	// toolPairs + empty inquiries, triggering the short-circuit.
+	rows := pureChatRows(turns, startSeq)
+	storeR := &fakeStoreReader{rows: rows}
+
+	cfg := DefaultConfig()
+	cfg.MaxTurns = 50
+	cfg.PreservedRecentTurns = 10
+	cfg.MinTurnGap = 3
+	cfg.DigestMaxTokens = 0
+
+	e := NewExtensionWithConfig(slog.Default(), cfg, Deps{
+		Router:  router,
+		Store:   storeR,
+		AgentID: "a1",
+	})
+	if err := e.InitState(context.Background(), st); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	driveBoundariesFromRows(t, e, st, rows)
+	if err := e.OnTurnBoundary(context.Background(), st); err != nil {
+		t.Fatalf("OnTurnBoundary: %v", err)
+	}
+	// The short-circuit must not have touched the model.
+	if got := mdl.callCount(); got != 0 {
+		t.Fatalf("model called %d times on pure-chat short-circuit; want 0", got)
+	}
+	if got := countDigestSetFrames(st); got != 1 {
+		t.Fatalf("digest_set frames = %d, want 1 (digest still emits with placeholder)", got)
+	}
+	d := extractLatestDigest(t, st)
+	if len(d.SummaryBlocks) != 1 {
+		t.Fatalf("summary blocks = %d, want 1", len(d.SummaryBlocks))
+	}
+	if !strings.Contains(d.SummaryBlocks[0].Text, "no tool-call sequence") {
+		t.Fatalf("placeholder text = %q, want 'no tool-call sequence' marker", d.SummaryBlocks[0].Text)
+	}
+	if len(d.KeptVerbatim) == 0 {
+		t.Fatalf("KeptVerbatim empty; want populated from user/agent turns")
+	}
+}
+
+// pureChatRows is fixtureRows's tool-free sibling — emits a
+// user_message + final agent_message pair per turn, nothing
+// else. Used by the pure-chat short-circuit test.
+func pureChatRows(count int, startSeq int) []store.EventRow {
+	rows := make([]store.EventRow, 0, count*2)
+	seq := startSeq
+	for i := 0; i < count; i++ {
+		rows = append(rows, store.EventRow{
+			ID:        fmt.Sprintf("u%d", seq),
+			Seq:       seq,
+			EventType: string(protocol.KindUserMessage),
+			Author:    "u1",
+			Content:   fmt.Sprintf("chat msg #%d", i+1),
+			Metadata:  map[string]any{"text": fmt.Sprintf("chat msg #%d", i+1)},
+		})
+		seq++
+		rows = append(rows, store.EventRow{
+			ID:        fmt.Sprintf("a%d", seq),
+			Seq:       seq,
+			EventType: string(protocol.KindAgentMessage),
+			Author:    "a1",
+			Content:   fmt.Sprintf("agent reply #%d", i+1),
+			Metadata: map[string]any{
+				"text":         fmt.Sprintf("agent reply #%d", i+1),
+				"final":        true,
+				"consolidated": true,
+			},
+		})
+		seq++
+	}
+	return rows
+}
+
+// driveBoundariesFromRows feeds user_message rows into the
+// FrameObserver path so the boundary tracker advances. Used by
+// pure-chat-style tests whose fixture rows have variable seq
+// gaps (no fixed startSeq + count arithmetic to walk).
+func driveBoundariesFromRows(t *testing.T, e *Extension, st *fakeIntegrationState, rows []store.EventRow) {
+	t.Helper()
+	for _, r := range rows {
+		if protocol.Kind(r.EventType) != protocol.KindUserMessage {
+			continue
+		}
+		msg := protocol.NewUserMessage(st.SessionID(), protocol.ParticipantInfo{}, r.Content)
+		msg.SetSeq(r.Seq)
+		e.OnFrameEmit(context.Background(), st, msg)
 	}
 }
 

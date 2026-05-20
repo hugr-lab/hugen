@@ -1,0 +1,42 @@
+# Local Gemma4-26B with the compactor trigger thresholds lowered
+# so a short scenario (~6 turns) reliably trips compaction. Used
+# by the `gemma4-26b-compactor` run in runs.yaml — keeps the
+# normal `gemma4-26b` run on prod defaults (max_turns=50) so
+# other scenarios there aren't affected.
+#
+# Phase 5.2 δ — dogfood the compactor end-to-end against a real
+# LLM (LM Studio) + real Hugr. The summariser intent stays
+# `summarize` and falls back to the same gemma route since the
+# Gemma config doesn't carry a dedicated cheap/summarize alias.
+models:
+  mode: local
+  model: gemma4-26b
+  max_tokens: 8192
+  routes:
+    cheap:
+      mode: local
+      model: gemma4-26b
+      max_tokens: 8192
+    summarize:
+      mode: local
+      model: gemma4-26b
+      max_tokens: 4096
+
+compactor:
+  enabled: true
+  # Aggressive threshold so the smoke scenario (~6 user turns)
+  # reliably trips the turn-count limb without dragging the run
+  # out for 50+ trivial turns.
+  max_turns: 4
+  preserved_recent_turns: 2
+  min_turn_gap: 1
+  # Keep absolute token floor in place but at a level the smoke
+  # scenario won't accidentally trip first — the turn-count limb
+  # is the one we want to exercise here.
+  max_tokens: 100000
+  digest_max_tokens: 1500
+  llm_timeout_ms: 60000
+  llm_intent: summarize
+  tiers:
+    worker:
+      enabled: false

@@ -124,16 +124,33 @@ func (e *Extension) compactWithConfig(ctx context.Context, state extension.Sessi
 	// Per-Kind dispatch (spec §5.2).
 	c := classifyRows(selected)
 
-	// Summariser LLM call. On error, fall back to a marker
-	// block (spec §5.6) so high-signal content still survives
-	// via KeptVerbatim.
-	summary, llmErr := e.runSummariser(ctx, state, cfg, prior, c, priorCutoff+1, newCutoff)
-	if llmErr != nil {
-		e.logger.Warn("compactor: summariser failed; using fallback marker",
-			"session", state.SessionID(), "err", llmErr)
+	// Pure conversational ranges (no tool calls, no inquiries)
+	// have nothing for the summariser to do — KeptVerbatim
+	// already carries every high-signal turn. Skip the LLM
+	// round-trip and stamp an informational placeholder so the
+	// digest still surfaces the range boundary in Block C
+	// without misleading the reader with a "summary failed"
+	// marker.
+	var (
+		summary string
+		llmErr  error
+	)
+	if len(c.toolPairs) == 0 && len(c.inquiries) == 0 {
 		summary = fmt.Sprintf(
-			"(LLM summary failed: %s; tool sequence in seq %d-%d was dropped from prompt — see full transcript for details)",
-			llmErr.Error(), priorCutoff+1, newCutoff)
+			"(no tool-call sequence or user inquiry in seq %d-%d; full chat turns preserved in Key turns above)",
+			priorCutoff+1, newCutoff)
+	} else {
+		// Summariser LLM call. On error, fall back to a marker
+		// block (spec §5.6) so high-signal content still survives
+		// via KeptVerbatim.
+		summary, llmErr = e.runSummariser(ctx, state, cfg, prior, c, priorCutoff+1, newCutoff)
+		if llmErr != nil {
+			e.logger.Warn("compactor: summariser failed; using fallback marker",
+				"session", state.SessionID(), "err", llmErr)
+			summary = fmt.Sprintf(
+				"(LLM summary failed: %s; tool sequence in seq %d-%d was dropped from prompt — see full transcript for details)",
+				llmErr.Error(), priorCutoff+1, newCutoff)
+		}
 	}
 
 	// Build the next payload by appending to the prior.
