@@ -72,7 +72,7 @@ Phase plan:
 | 5.x.skill-polish-1. `_root` Bucket D (clarify before route) + verify-mission-alive pre-check; analyst category enumeration via `discovery-search_module_data_objects` so workers don't bail on first matched table; TUI cancel-ux R-followups (modal live rebuild on liveview status, async-summary flag gated by route). | shipped (`9be1fdd`, 2026-05-16, PR #19) |
 | 5.2 root-as-chat. Bundled with 5.4.b workspace + 5.4.c.1-10 weak-model hardening + Stage 3 FromName + analyst SKILL review. 18 commits. | shipped (`1c0e0a7`, 2026-05-18, PR #21) |
 | A + I. Mission-PDCA runtime (`pkg/extension/mission`) — planner / checker / synthesizer executor; `mission:validate_and_approve` atomic validate+inquire+marker stamp (frame-only); skill-agnostic approval state with `invalidates_plan_approval` worker signal; `mission_goal` + `mission_acceptance_criteria` in plan with runtime AC-gated `finish` (synthetic amend coercion); 28 sub-phases (I.1-I.28). | shipped (`e83b003`, 2026-05-20, PR #22) |
-| 5.2. Compactor — content-aware history summarisation; replaces phase-3 `defaultHistoryWindow=50` stop-gap; composes with 4.2.3 notepad (notepad = cross-mission, compactor = within-session) | open — **next up**, not yet specced |
+| 5.2. Compactor — content-aware history summarisation (`pkg/extension/compactor`). TurnBoundaryHook capability; FrameObserver-maintained boundary index; hybrid trigger (turn-count + abs token budget); per-Kind dispatch with incremental SummaryBlocks + cap-driven collapse; pure-chat short-circuit; three-layer config resolver (operator YAML view → tier overlay → skill manifest overrides); StatusReporter projection; console + TUI inline marker rendering; `/compactor status|reset|compact` slash commands. Live Gemma 4-26B dogfood pass. | shipped on `025-phase-5.2-compactor` (5 commits α-ε; PR in flight) |
 | 6. Cron + scheduler | open |
 | 7. Memory pipeline + LLM Wiki — cross-conversation distilled knowledge. Reads 4.2.3 notepad as input; session-scoped working memory is owned by 4.2.3. | open |
 | 8. Artifacts | open |
@@ -85,27 +85,26 @@ Goal: finish design-001 cleanly, then move to **hub integration**
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
 
-## Active focus — Phase I shipped; 5.2 compactor next, B13 may land independently
+## Active focus — Phase 5 closed; B13 + Phase 6 (cron) next
+
+Phase 5.2 (compactor) closed Phase 5. The five-commit branch
+`025-phase-5.2-compactor` lands α-ε in one PR: skeleton +
+TurnBoundaryHook capability (α), per-Kind dispatch + LLM
+summariser + incremental digest (β), per-tier config + skill
+manifest opt-in + slash commands (γ), SnapshotSession
+projection + UI markers + scenarios (δ), dogfood polish
+(pure-chat short-circuit) verified on Gemma 4-26B.
 
 Phase I (PR #22, `e83b003`, 2026-05-20) closed the mission-PDCA
-work: `pkg/extension/mission` runs planner/checker/synthesizer;
-`mission:validate_and_approve` does atomic validate + approval
-inquire + frame-only marker stamp; checker emits per-criterion
-`mission_ac_status` and the runtime coerces premature `finish`
-into synthetic amends. Phase 5.2 root-as-chat (PR #21,
+work earlier in the cycle. Phase 5.2 root-as-chat (PR #21,
 `1c0e0a7`, 2026-05-18) bundled weak-model hardening + analyst
 SKILL review. Phase 5.x.skill-polish-1 (PR #19, `9be1fdd`,
 2026-05-16) closed cancel-ux R-followups + Bucket-D clarify.
 
-- **5.2 compactor** *(next up, not yet specced)* — content-aware
-  history summarisation at turn boundaries. Composes with 4.2.3
-  notepad (cross-mission) vs compactor (within-session). The
-  remaining piece of Phase 5; unblocks long-running sessions on
-  context-window-tight models.
 - **B13 — planner-signalled re-approval** *(tactical fix, ~80
   LOC)* — drop sha256 frame-hashing in favour of planner-
   emitted `requires_reapproval: true` flag. Tracked in
-  `004/backlog.md`. May land independently of 5.2.
+  `004/backlog.md`. May land independently before Phase 6.
 - **B11 — structured AC with identity** *(queued)* — long-term
   replacement for freeform AC strings. Composes with B13. Spec
   pending.
