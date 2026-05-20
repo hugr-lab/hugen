@@ -10,6 +10,35 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
+// TestInvalidatesPlanApproval is a table-driven check for the
+// Phase I.23 skill-agnostic invalidation hook. The runtime only
+// honours a literal boolean true under the `invalidates_plan_approval`
+// key on a map-shaped handoff body; every other shape (missing key,
+// non-bool, non-map body) collapses to false so the default is
+// "the approved plan stands".
+func TestInvalidatesPlanApproval(t *testing.T) {
+	cases := []struct {
+		name string
+		body any
+		want bool
+	}{
+		{"nil body", nil, false},
+		{"string body", "hello", false},
+		{"map without key", map[string]any{"summary": "ok"}, false},
+		{"map with non-bool value", map[string]any{"invalidates_plan_approval": "yes"}, false},
+		{"map with bool false", map[string]any{"invalidates_plan_approval": false}, false},
+		{"map with bool true", map[string]any{"invalidates_plan_approval": true}, true},
+		{"map with extra fields + true", map[string]any{"invalidates_plan_approval": true, "summary": "scope expanded"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := invalidatesPlanApproval(tc.body); got != tc.want {
+				t.Errorf("invalidatesPlanApproval(%v) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestExtension_InitState(t *testing.T) {
 	ext := NewExtension(Config{AgentID: "ag-1"})
 	state := newFakeState("ses-1")

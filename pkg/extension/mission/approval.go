@@ -67,14 +67,19 @@ func (e *Extension) runApprovalInquire(ctx context.Context, mission extension.Se
 
 // approvalQuestionView is the typed payload the
 // `mission/approval_question` template renders against. Mirrors
-// the planner's NextWave + Roadmap + Rationale so the template
-// renders the same fields the typed Plan body carries — the user
-// sees the bigger picture (label + per-subagent role/task +
-// upcoming-wave hints) before approving.
+// the planner's mission frame (goal + AC) + NextWave + Roadmap +
+// Rationale so the user sees the same contract the runtime is
+// about to hash into the plan marker. The mission frame is what
+// the user is actually signing off on — wave/roadmap can evolve
+// freely after approval, but mission_goal + mission_acceptance_
+// criteria changes reopen the modal.
 type approvalQuestionView struct {
-	NextWave  approvalWaveView
-	Roadmap   []RoadmapEntry
-	Rationale string
+	MissionGoal               string
+	MissionAcceptanceCriteria []string
+	NextWave                  approvalWaveView
+	WaveAcceptanceCriteria    []string
+	Roadmap                   []RoadmapEntry
+	Rationale                 string
 }
 
 type approvalWaveView struct {
@@ -94,12 +99,15 @@ type approvalSubagentView struct {
 // reads a high-level pitch, not the full per-worker brief.
 func renderApprovalQuestion(mission extension.SessionState, plan Plan) (string, error) {
 	view := approvalQuestionView{
+		MissionGoal:               strings.TrimSpace(plan.MissionGoal),
+		MissionAcceptanceCriteria: trimStrings(plan.MissionAcceptanceCriteria),
 		NextWave: approvalWaveView{
 			Label:     plan.NextWave.Label,
 			Subagents: make([]approvalSubagentView, 0, len(plan.NextWave.Subagents)),
 		},
-		Roadmap:   plan.Roadmap,
-		Rationale: strings.TrimSpace(plan.Rationale),
+		WaveAcceptanceCriteria: trimStrings(plan.NextWave.AcceptanceCriteria),
+		Roadmap:                plan.Roadmap,
+		Rationale:              strings.TrimSpace(plan.Rationale),
 	}
 	for _, s := range plan.NextWave.Subagents {
 		view.NextWave.Subagents = append(view.NextWave.Subagents, approvalSubagentView{
@@ -113,6 +121,24 @@ func renderApprovalQuestion(mission extension.SessionState, plan Plan) (string, 
 		return "", fmt.Errorf("mission: approval: no prompts renderer on session")
 	}
 	return renderer.Render("mission/approval_question", view)
+}
+
+// trimStrings returns a copy with each entry TrimSpaced and empty
+// entries dropped. Keeps the rendered template tight — empty bullets
+// in a modal look like a planner bug.
+func trimStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // shortenForInquire trims a long worker-task brief down to a

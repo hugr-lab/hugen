@@ -1,8 +1,16 @@
 Approve this plan?
-
+{{if .MissionGoal}}
+Mission goal: {{.MissionGoal}}
+{{end}}{{if .MissionAcceptanceCriteria}}
+Mission acceptance criteria (the mission ends when ALL are satisfied):
+{{range .MissionAcceptanceCriteria}}- {{.}}
+{{end}}{{end}}
 Next wave: `{{.NextWave.Label}}`
 {{range .NextWave.Subagents}}- `{{.Name}}` (role: `{{.Role}}`){{if .Task}} — {{.Task}}{{end}}
-{{end}}{{if .Roadmap}}
+{{end}}{{if .WaveAcceptanceCriteria}}
+Wave acceptance criteria (what THIS wave must deliver):
+{{range .WaveAcceptanceCriteria}}- {{.}}
+{{end}}{{end}}{{if .Roadmap}}
 Roadmap (anticipated waves after the next one):
 {{range .Roadmap}}- `{{.Label}}`{{if .Description}} — {{.Description}}{{end}}
 {{end}}{{else}}

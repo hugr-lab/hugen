@@ -81,13 +81,12 @@ type MissionState struct {
 	// planner emits the SAME body it had approved.
 	//
 	// Skill-agnostic by design: the runtime knows nothing about
-	// research / Do / control role names; it only knows
-	// "approved-or-not". Skills express their own per-role
-	// invalidation policy via the `invalidates_plan_approval`
-	// handoff field — e.g. analyst's `researcher` role sets it true
-	// because clarifying user inputs almost always changes the next
-	// plan, while a `data-analyst` may leave it false to let the
-	// approved plan flow through.
+	// role names; it only knows "approved-or-not". Skills express
+	// their own per-role invalidation policy via the
+	// `invalidates_plan_approval` handoff field — clarification /
+	// scoping roles typically set it true because their findings
+	// reshape what the next planner should propose, while execution
+	// roles leave it false so the approved plan flows through.
 	currentApprovedMarker string
 
 	// plannerApproval mirrors MissionManifest.Plan.Approval so the

@@ -843,6 +843,120 @@ func writeBundledSkillInto(t *testing.T, root, name, manifest string, files map[
 	}
 }
 
+// TestMergeRoleTools_GrantsRoleSpecificSurface covers the Phase
+// I.18 wiring: a SubAgentRole.Tools entry on the dispatching skill
+// admits the named tools onto a child session whose (Skill, Role)
+// pair matches the role declaration — WITHOUT the child having to
+// load the dispatching skill into its own SessionSkill bindings.
+//
+// The test uses a non-loaded host skill (only registered in the
+// store, not Load()ed on the child) and verifies that
+// FilterTools admits `host-provider:special` purely on the basis
+// of the role's Tools grant.
+func TestMergeRoleTools_GrantsRoleSpecificSurface(t *testing.T) {
+	ctx := context.Background()
+	const inlineHost = `---
+name: host
+description: host skill declaring a role with a tool grant.
+license: MIT
+metadata:
+  hugen:
+    tier_compatibility: [mission]
+    sub_agents:
+      - name: planner
+        description: role with role-specific tool grant.
+        tools:
+          - provider: host-provider
+            tools:
+              - special
+              - approval-*
+            requires_approval:
+              - special
+---
+host body
+`
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"host": []byte(inlineHost),
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a-rolectx")
+
+	in := []tool.Tool{
+		{Name: "host-provider:special", Provider: "host-provider"},
+		{Name: "host-provider:approval-approve", Provider: "host-provider"},
+		{Name: "host-provider:other", Provider: "host-provider"},
+		{Name: "unrelated:unrelated", Provider: "unrelated"},
+	}
+
+	// Worker session matching the (skill=host, role=planner) pair.
+	// Skill NOT loaded into child's bindings — the role-side grant
+	// is the only admission path.
+	roleChild := fixture.NewTestSessionState("ses-role-match").
+		WithDepth(2).
+		WithSkill("host").
+		WithRole("planner")
+	if err := ext.InitState(ctx, roleChild); err != nil {
+		t.Fatalf("InitState role-match: %v", err)
+	}
+	got := map[string]bool{}
+	for _, tt := range ext.FilterTools(ctx, roleChild, in) {
+		got[tt.Name] = true
+	}
+	if !got["host-provider:special"] {
+		t.Errorf("special should be admitted via role-tool grant; got %v", got)
+	}
+	if !got["host-provider:approval-approve"] {
+		t.Errorf("approval-* wildcard should match approval-approve; got %v", got)
+	}
+	if got["host-provider:other"] {
+		t.Errorf("other should NOT be admitted; got %v", got)
+	}
+
+	// requires_approval on the role grant should propagate.
+	var specialTool *tool.Tool
+	for _, tt := range ext.FilterTools(ctx, roleChild, in) {
+		if tt.Name == "host-provider:special" {
+			t2 := tt
+			specialTool = &t2
+		}
+	}
+	if specialTool == nil {
+		t.Fatal("host-provider:special missing from filtered set")
+	}
+	if !specialTool.RequiresApproval {
+		t.Errorf("RequiresApproval = false for special; want true (role declared it under requires_approval)")
+	}
+
+	// Worker without matching role pair → no admission.
+	roleless := fixture.NewTestSessionState("ses-role-empty").WithDepth(2)
+	if err := ext.InitState(ctx, roleless); err != nil {
+		t.Fatalf("InitState roleless: %v", err)
+	}
+	emptyOut := map[string]bool{}
+	for _, tt := range ext.FilterTools(ctx, roleless, in) {
+		emptyOut[tt.Name] = true
+	}
+	if emptyOut["host-provider:special"] {
+		t.Errorf("special leaked through without a matching role pair; got %v", emptyOut)
+	}
+
+	// Worker with matching skill but unknown role → no admission.
+	wrongRole := fixture.NewTestSessionState("ses-role-mis").
+		WithDepth(2).
+		WithSkill("host").
+		WithRole("not-a-real-role")
+	if err := ext.InitState(ctx, wrongRole); err != nil {
+		t.Fatalf("InitState wrong-role: %v", err)
+	}
+	wrongOut := map[string]bool{}
+	for _, tt := range ext.FilterTools(ctx, wrongRole, in) {
+		wrongOut[tt.Name] = true
+	}
+	if wrongOut["host-provider:special"] {
+		t.Errorf("special leaked for unknown role; got %v", wrongOut)
+	}
+}
+
 // Empty store → AdvertiseSystemPrompt returns "" (skipped section).
 func TestAdvertiseSystemPrompt_EmptyStore(t *testing.T) {
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{}})

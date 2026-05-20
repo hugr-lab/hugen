@@ -144,19 +144,26 @@ metadata:
           user deliverables; they live under the mission's
           workspace and don't need a path inquire.
 
-          Iteration 1 approval gate. When `[approval_required]`
-          appears in your first message, call
+          Approval gate (every iteration with
+          `[approval_required]`). Call
           `mission:validate_and_approve` with your final plan
           body BEFORE emitting the fenced block. It atomically
-          validates + asks the user, returning
+          validates + (when the mission frame changed) asks the
+          user, returning
           `{ valid, errors[], approved, refine_text?, aborted?,
-             reason?, plan_marker }`. On `approved: true` emit
-          the fenced block carrying the SAME `body` verbatim
-          (the runtime hashes the body and rejects mismatches).
-          On `refine_text` populated, revise per the text and
-          re-call (a new modal opens). On `aborted: true` emit
-          `status: "error"` carrying `reason`. Later iterations
-          close silently.
+             reason?, plan_marker }`. The marker hashes ONLY
+          `mission_goal` + `mission_acceptance_criteria` — wave
+          / roadmap / rationale changes do NOT reopen the
+          modal. On `approved: true` emit the fenced block; you
+          may freely refine `next_wave` / `roadmap` /
+          `rationale` against the approved frame. On
+          `refine_text` populated, revise per the text and
+          re-call (a new modal opens only if you edited the
+          mission frame). On `aborted: true` emit
+          `status: "error"` carrying `reason`. Researcher
+          handoffs invalidate the prior approval, so the next
+          planner iteration will see a fresh modal regardless
+          of frame edits.
 
           Task-complexity → wave shape (pick the SMALLEST plan
           that hits the goal):
@@ -866,11 +873,11 @@ each role's manifest entry above documents the domain contract.
 2. Runtime spawns `planner` with [Plan context], [Recent waves],
    [Recent verdict], [Available Do roles] in its first message.
    Planner does notepad-first + lightweight discovery (broad
-   only — sources / modules / table names), then either calls
-   `mission:validate_and_approve` (iter 1 — atomic validate +
-   user approval; tool stores a body hash the runtime verifies
-   against the emitted handoff) or emits a kind=plan handoff
-   directly.
+   only — sources / modules / table names), then calls
+   `mission:validate_and_approve` (mandatory when the iteration
+   carries `[approval_required]` — atomic validate + user
+   approval whenever the mission frame changed; tool stamps a
+   marker the runtime verifies against the emitted handoff).
 3. Runtime executes the planner's wave (Do workers in parallel).
 4. Unless `next_wave.skip_check` was set, runtime spawns
    `checker` with the wave's handoffs; checker emits

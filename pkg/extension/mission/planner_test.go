@@ -1197,6 +1197,212 @@ func TestBuildPlannerTask_RendersPlanContextSection(t *testing.T) {
 	}
 }
 
+// TestUnsatisfiedMissionAC covers the Phase I.26 runtime gate:
+// the helper takes a checker verdict and returns the unsatisfied
+// mission criteria as human-readable strings. Empty status array
+// is treated as "the checker misbehaved" and surfaces a single
+// reminder so the planner can ask for proper mission_ac_status
+// next iteration.
+func TestUnsatisfiedMissionAC(t *testing.T) {
+	cases := []struct {
+		name        string
+		verdict     Verdict
+		wantCount   int
+		wantSubstr  []string
+		wantEvidence []string
+	}{
+		{
+			name:       "empty status produces guidance",
+			verdict:    Verdict{},
+			wantCount:  1,
+			wantSubstr: []string{"mission_ac_status"},
+		},
+		{
+			name: "all satisfied returns nil",
+			verdict: Verdict{
+				MissionACStatus: []ACCriterionStatus{
+					{Criterion: "HTML saved", Satisfied: true, Evidence: "wrk@x path=/a"},
+					{Criterion: "charts render", Satisfied: true, Evidence: "wrk@x carries svg"},
+				},
+			},
+			wantCount: 0,
+		},
+		{
+			name: "mixed surfaces only unsatisfied",
+			verdict: Verdict{
+				MissionACStatus: []ACCriterionStatus{
+					{Criterion: "HTML saved", Satisfied: true, Evidence: "wrk@x path=/a"},
+					{Criterion: "charts render", Satisfied: false, Evidence: "no svg in handoff body"},
+					{Criterion: "data complete", Satisfied: false},
+				},
+			},
+			wantCount:    2,
+			wantSubstr:   []string{"charts render", "data complete"},
+			wantEvidence: []string{"no svg in handoff body", "no evidence in handoffs"},
+		},
+		{
+			name: "blank criterion gets placeholder name",
+			verdict: Verdict{
+				MissionACStatus: []ACCriterionStatus{
+					{Criterion: "", Satisfied: false, Evidence: "blank"},
+				},
+			},
+			wantCount:  1,
+			wantSubstr: []string{"unnamed criterion"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := unsatisfiedMissionAC(tc.verdict)
+			if len(got) != tc.wantCount {
+				t.Fatalf("len(out) = %d, want %d (out=%v)", len(got), tc.wantCount, got)
+			}
+			for _, want := range tc.wantSubstr {
+				found := false
+				for _, line := range got {
+					if strings.Contains(line, want) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("missing substring %q in %v", want, got)
+				}
+			}
+			for _, ev := range tc.wantEvidence {
+				found := false
+				for _, line := range got {
+					if strings.Contains(line, ev) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("missing evidence text %q in %v", ev, got)
+				}
+			}
+		})
+	}
+}
+
+// TestPlannerLoop_Checker_FinishWithUnsatisfiedAC_CoercesToAmend
+// covers the Phase I.26 runtime gate inside runPlannerLoop. When
+// the checker proposes `finish` while mission_ac_status carries
+// any unsatisfied entry, the loop must coerce that verdict into a
+// synthetic amend so the next planner spawn sees the gap. The
+// recovery flows when the planner replans, the next checker
+// closes the gap, and the loop exits cleanly.
+func TestPlannerLoop_Checker_FinishWithUnsatisfiedAC_CoercesToAmend(t *testing.T) {
+	state := newRenderedFakeState("mis-checker-finish-gated", productionRenderer(t))
+	installMissionState(&state.fakeState)
+
+	manifest := MissionManifest{
+		Name: "checker-finish-gated",
+		Plan: MissionPlanManifest{
+			Role:     "planner",
+			Approval: NormalizePlanApproval(PlanApproval{Initial: ApprovalInitialSkip}),
+			MaxWaves: 5,
+		},
+		Control: ControlManifest{Role: "checker"},
+	}
+
+	plannerTasks := make([]string, 0)
+	spawner := &plannerFakeSpawner{state: state}
+	spawner.onPlannerSpawn = func(iteration int) Handoff {
+		spawner.mu.Lock()
+		if n := len(spawner.requests); n > 0 {
+			plannerTasks = append(plannerTasks, spawner.requests[n-1].Task)
+		}
+		spawner.mu.Unlock()
+		switch iteration {
+		case 1, 2:
+			return Handoff{
+				Kind:   KindPlan,
+				Status: "ok",
+				Body: map[string]any{
+					"mission_goal":                "deliver dashboard",
+					"mission_acceptance_criteria": []any{"HTML saved", "charts render"},
+					"next_wave": map[string]any{
+						"label":     "wave-" + numToStr(iteration),
+						"subagents": []any{map[string]any{"name": "w", "role": "echo", "task": "t"}},
+					},
+					"roadmap":   []any{},
+					"rationale": "iter " + numToStr(iteration),
+				},
+			}
+		default:
+			return Handoff{
+				Kind:   KindPlan,
+				Status: "ok",
+				Body:   map[string]any{"next_wave": nil, "roadmap": []any{}, "rationale": "done"},
+			}
+		}
+	}
+	spawner.onWorkerSpawn = func(_ SpawnRequest) Handoff {
+		return Handoff{Kind: KindHandoff, Status: "ok", Body: "ok"}
+	}
+	// First checker: finish with unsatisfied AC → must be coerced.
+	// Second checker: finish with everything satisfied → loop exits.
+	spawner.onCheckerSpawn = func(iteration int) Handoff {
+		switch iteration {
+		case 1:
+			return Handoff{
+				Kind:   KindVerdict,
+				Status: "ok",
+				Body: map[string]any{
+					"decision": "finish",
+					"reason":   "looks done",
+					"mission_ac_status": []any{
+						map[string]any{"criterion": "HTML saved", "satisfied": true, "evidence": "w@wave-1 carries path"},
+						map[string]any{"criterion": "charts render", "satisfied": false, "evidence": "no svg yet"},
+					},
+				},
+			}
+		default:
+			return Handoff{
+				Kind:   KindVerdict,
+				Status: "ok",
+				Body: map[string]any{
+					"decision": "finish",
+					"reason":   "now satisfied",
+					"mission_ac_status": []any{
+						map[string]any{"criterion": "HTML saved", "satisfied": true, "evidence": "w@wave-2 carries path"},
+						map[string]any{"criterion": "charts render", "satisfied": true, "evidence": "w@wave-2 produced svg"},
+					},
+				},
+			}
+		}
+	}
+
+	ext := newPlannerExtension()
+	executor := NewExecutor(spawner.spawn, ext.logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	aborted, err := ext.runPlannerLoop(ctx, executor, state, manifest, manifest.Name, "build dashboard")
+	if err != nil {
+		t.Fatalf("runPlannerLoop: %v", err)
+	}
+	if aborted {
+		t.Fatal("aborted = true, want false")
+	}
+	// Expected spawn sequence: _plan-1, wave-1, _check-1 (finish→coerced to amend),
+	// _plan-2, wave-2, _check-2 (finish, clean) = 6 spawns.
+	if got := len(spawner.requests); got != 6 {
+		t.Fatalf("spawn requests = %d, want 6 (got %v)", got, waveNames(spawner.requests))
+	}
+	// The SECOND planner task should carry the unsatisfied AC under
+	// [Recent verdict] (coerced into a synthetic amend with the gap
+	// in issues).
+	if len(plannerTasks) < 2 {
+		t.Fatalf("plannerTasks captured = %d, want 2+", len(plannerTasks))
+	}
+	for _, want := range []string{"[Recent verdict]", "amend", "charts render"} {
+		if !strings.Contains(plannerTasks[1], want) {
+			t.Errorf("second planner task missing %q:\n%s", want, plannerTasks[1])
+		}
+	}
+}
+
 func TestApprovalRequiredForIteration(t *testing.T) {
 	// Phase I.23 — approval is policy-only and uniform across
 	// iterations. The iteration arg is kept for telemetry but

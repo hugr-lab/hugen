@@ -333,3 +333,126 @@ func containsAny(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// TestCanonicalPlanMarker_FrameOnly proves the Phase I.27 invariant:
+// the marker hashes ONLY mission_goal + mission_acceptance_criteria.
+// Plans that share the same frame but differ in next_wave / roadmap
+// / rationale must collapse to the same digest so the approval modal
+// doesn't reopen on every iteration.
+func TestCanonicalPlanMarker_FrameOnly(t *testing.T) {
+	frame := map[string]any{
+		"mission_goal":                "Build sales dashboard",
+		"mission_acceptance_criteria": []any{"HTML saved", "charts render"},
+	}
+	bodyA := map[string]any{
+		"mission_goal":                frame["mission_goal"],
+		"mission_acceptance_criteria": frame["mission_acceptance_criteria"],
+		"next_wave": map[string]any{
+			"label":     "discover",
+			"subagents": []any{map[string]any{"name": "w", "role": "schema-explorer", "task": "look"}},
+		},
+		"roadmap":   []any{map[string]any{"label": "analyse", "description": "aggregate"}},
+		"rationale": "begin with discovery",
+	}
+	bodyB := map[string]any{
+		"mission_goal":                frame["mission_goal"],
+		"mission_acceptance_criteria": frame["mission_acceptance_criteria"],
+		"next_wave": map[string]any{
+			"label":     "analyse", // different wave
+			"subagents": []any{map[string]any{"name": "x", "role": "data-analyst", "task": "compute"}},
+		},
+		"roadmap":   []any{map[string]any{"label": "report", "description": "produce final"}},
+		"rationale": "now we crunch numbers",
+	}
+	markerA, err := canonicalPlanMarker(bodyA)
+	if err != nil {
+		t.Fatalf("canonicalPlanMarker(A): %v", err)
+	}
+	markerB, err := canonicalPlanMarker(bodyB)
+	if err != nil {
+		t.Fatalf("canonicalPlanMarker(B): %v", err)
+	}
+	if markerA != markerB {
+		t.Errorf("frame-only marker: A=%q B=%q want identical (only wave/roadmap differ)", markerA, markerB)
+	}
+	if markerA == "" {
+		t.Error("marker is empty")
+	}
+}
+
+// TestCanonicalPlanMarker_FrameChange covers the contrast: any edit
+// to mission_goal or mission_acceptance_criteria must produce a
+// distinct marker so the runtime forces a fresh approval modal.
+func TestCanonicalPlanMarker_FrameChange(t *testing.T) {
+	base := map[string]any{
+		"mission_goal":                "Build sales dashboard",
+		"mission_acceptance_criteria": []any{"HTML saved", "charts render"},
+		"next_wave":                   map[string]any{"label": "x", "subagents": []any{map[string]any{"name": "w", "role": "r", "task": "t"}}},
+		"roadmap":                     []any{},
+		"rationale":                   "v1",
+	}
+	baseMarker, err := canonicalPlanMarker(base)
+	if err != nil {
+		t.Fatalf("canonicalPlanMarker(base): %v", err)
+	}
+
+	cases := []struct {
+		name  string
+		mutate func(m map[string]any)
+	}{
+		{"goal reworded", func(m map[string]any) {
+			m["mission_goal"] = "Build sales dashboard for Q4"
+		}},
+		{"AC added", func(m map[string]any) {
+			m["mission_acceptance_criteria"] = []any{"HTML saved", "charts render", "deployed to dist/"}
+		}},
+		{"AC dropped", func(m map[string]any) {
+			m["mission_acceptance_criteria"] = []any{"HTML saved"}
+		}},
+		{"AC reordered", func(m map[string]any) {
+			m["mission_acceptance_criteria"] = []any{"charts render", "HTML saved"}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			modified := map[string]any{}
+			for k, v := range base {
+				modified[k] = v
+			}
+			tc.mutate(modified)
+			got, err := canonicalPlanMarker(modified)
+			if err != nil {
+				t.Fatalf("canonicalPlanMarker: %v", err)
+			}
+			if got == baseMarker {
+				t.Errorf("marker did not change after frame edit %q: still %q", tc.name, got)
+			}
+		})
+	}
+}
+
+// TestCanonicalPlanMarker_TrimsWhitespace verifies cosmetic
+// whitespace around mission_goal / AC entries doesn't flip the
+// marker — the planner can re-emit with stray spaces and the user
+// won't be re-prompted.
+func TestCanonicalPlanMarker_TrimsWhitespace(t *testing.T) {
+	clean := map[string]any{
+		"mission_goal":                "Build sales dashboard",
+		"mission_acceptance_criteria": []any{"HTML saved", "charts render"},
+	}
+	whitespaced := map[string]any{
+		"mission_goal":                "  Build sales dashboard  ",
+		"mission_acceptance_criteria": []any{"  HTML saved", "charts render  "},
+	}
+	a, err := canonicalPlanMarker(clean)
+	if err != nil {
+		t.Fatalf("canonicalPlanMarker(clean): %v", err)
+	}
+	b, err := canonicalPlanMarker(whitespaced)
+	if err != nil {
+		t.Fatalf("canonicalPlanMarker(whitespaced): %v", err)
+	}
+	if a != b {
+		t.Errorf("whitespace-only diff flipped marker: clean=%q whitespaced=%q", a, b)
+	}
+}

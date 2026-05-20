@@ -386,18 +386,6 @@ func (e *Extension) spawnAndAwaitPlanner(ctx context.Context, executor *Executor
 	return plan, nil
 }
 
-// planIsResearchOnly was a phase-I.15 helper consulted by the
-// approval gate; Phase I.23 dropped runtime knowledge of
-// skill-specific role names in favour of worker-driven approval
-// invalidation. Kept here as a stub to avoid breaking external
-// callers — always returns false.
-//
-// Deprecated: do not call.
-func planIsResearchOnly(plan *Plan) bool {
-	_ = plan
-	return false
-}
-
 // unsatisfiedMissionAC walks the checker's per-criterion mission
 // AC report and returns a string slice of "<criterion> (evidence:
 // <text>)" entries for every row whose `satisfied` flag is false.
@@ -428,21 +416,6 @@ func unsatisfiedMissionAC(v Verdict) []string {
 		out = append(out, msg)
 	}
 	return out
-}
-
-// _unused keeps the deprecated planIsResearchOnly tied to its
-// original sentinel-only signature for any test reference; the
-// helper has no runtime callers as of Phase I.23.
-func _unusedPlanIsResearchOnly(plan *Plan) bool {
-	if plan == nil || plan.NextWave.Label == "" || len(plan.NextWave.Subagents) == 0 {
-		return false
-	}
-	for _, s := range plan.NextWave.Subagents {
-		if s.Role != "researcher" {
-			return false
-		}
-	}
-	return true
 }
 
 // spawnAndAwaitChecker runs one checker iteration. Spawns the

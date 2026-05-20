@@ -57,36 +57,52 @@ decision: {{.Decision}}
 {{end}}{{end}}{{if eq .Decision "amend"}}Use the issues above to revise the plan — the prior wave produced output that the checker flagged. Spawn a wave that directly addresses the issues; do not repeat the prior wave's mistake.
 {{end}}{{end}}{{if .ApprovalRequired}}
 [approval_required]
-This iteration requires user approval before the plan is
-applied. You MUST call `mission:validate_and_approve` ONCE
-with your final plan body BEFORE emitting your fenced
-```plan``` block — the runtime rejects handoffs that skip
-this gate or ship a body different from the one approved.
+This iteration requires user sign-off on the mission
+contract — `mission_goal` + `mission_acceptance_criteria`.
+You MUST call `mission:validate_and_approve` with your final
+plan body BEFORE emitting your fenced ```plan``` block. The
+runtime rejects any planner handoff whose mission frame
+(goal + AC) does not match what the user most recently
+approved.
 
 The tool atomically: (a) validates the plan shape — invalid
 returns `{ valid: false, errors: [...] }` and you fix +
-re-call; (b) renders the typed plan body to the user as an
+re-call; (b) when the mission frame has changed (or no plan
+has ever been approved), renders the plan to the user as an
 approval modal; (c) returns
 `{ valid: true, approved: bool, refine_text?: string,
    aborted?: bool, reason?: string, plan_marker: "<sha256>" }`.
 
-The `plan_marker` is the runtime's canonical hash of the
-body you just validated. The runtime stores it against this
-iteration and verifies the body you emit in your fenced
-```plan``` block produces the same hash. **Emit the body
-VERBATIM** — any change (re-ordering, adding a field,
-rewording rationale) breaks the marker and the runtime
-rejects your handoff.
+The `plan_marker` is the canonical sha256 of just the
+mission frame (`mission_goal` + `mission_acceptance_criteria`).
+Wave / roadmap / rationale changes do NOT affect the marker
+— iterations that keep the same contract pass through
+silently. The runtime stores the marker the user approved
+and re-verifies it on every planner handoff:
 
-- `approved: true` → emit the fenced ```plan``` block with
-  the EXACT same `body` you passed to validate_and_approve.
-  Done.
+- Same mission frame (goal + AC unchanged) → marker matches
+  → no modal, even if `next_wave` / `roadmap` / `rationale`
+  evolved. This is the routine case as the mission executes.
+- Edited mission frame (you reworded the goal or added /
+  dropped an AC) → marker mismatch → new modal opens. Edit
+  the frame ONLY when discovery / refine-loop / follow-ups
+  actually reshape what "done" means.
+- Worker downstream emits `invalidates_plan_approval: true`
+  → runtime clears the marker → next planner iteration
+  re-runs the modal regardless of frame edits.
+
+Response branches:
+
+- `approved: true` → emit the fenced ```plan``` block. You
+  may freely refine `next_wave` / `roadmap` / `rationale`
+  against the approved frame; the runtime hashes only the
+  frame.
 - `refine_text` populated (or any free-form non-approve
-  reply) → the user wants edits. Revise the plan using the
-  text as guidance, then re-call `mission:validate_and_approve`
-  with the revised body. A NEW approval modal opens each
-  time — the user keeps shaping the plan until they approve
-  or abort.
+  reply) → the user wants edits. Revise per the text, then
+  re-call `mission:validate_and_approve` with the revised
+  body. If your revision changed the frame a new modal
+  opens; if you only refined wave/roadmap/rationale the
+  call returns approved=true idempotently.
 - `aborted: true` → the user wants out. Emit
   `status: "error"` with `reason` carrying the user's
   feedback; the mission gracefully terminates.
@@ -94,6 +110,11 @@ rejects your handoff.
 Quality checks (the runtime won't enforce these, but the user
 sees them in the modal):
 
+- `body.mission_goal` must be a single concise sentence —
+  the user reads it as the headline of the modal.
+- `body.mission_acceptance_criteria` entries must each be a
+  short, singularly-satisfiable statement — the user scans
+  them to decide whether to approve.
 - `body.rationale` must be one or two clear sentences — the
   user reads them as the inquire's Context.
 - Every roadmap entry must carry a short `description` so
@@ -137,7 +158,7 @@ inside must parse. Required keys when `next_wave` is non-null:
 - `body.mission_goal` — YOUR CURRENT RESTATEMENT of what the
   mission delivers. Distinct from the raw user goal text — this
   is your interpretation, refreshed every iteration as new info
-  arrives (researcher findings, refine-loop feedback,
+  arrives (worker findings, refine-loop feedback,
   mission:notify follow-ups). The checker compares it against
   the raw user goal to detect drift.
 - `body.mission_acceptance_criteria` — array of plain-string
