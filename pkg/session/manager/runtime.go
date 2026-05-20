@@ -57,6 +57,13 @@ type Runtime struct {
 
 	subMu       sync.Mutex
 	subscribers map[string][]chan protocol.Frame
+
+	// ctx is captured at Start() entry and cancelled when the
+	// errgroup unwinds (adapter exit or external shutdown). The
+	// fanout uses it to bail out of an otherwise blocking send so
+	// no goroutine deadlocks on a subscriber that won't drain
+	// during teardown.
+	ctx context.Context
 }
 
 // NewRuntime constructs the supervisor. Adapters are started by Start.
@@ -80,6 +87,7 @@ func (r *Runtime) Manager() *Manager { return r.manager }
 // is done or one of the adapters errors.
 func (r *Runtime) Start(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
+	r.ctx = gctx
 	for _, a := range r.adapters {
 		adapter := a
 		host := &adapterHost{rt: r, ctx: gctx}
@@ -113,31 +121,74 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 // fanout pushes a Frame to every subscriber of its session.
 //
 // Concurrency: a snapshot of the subscriber slice is taken under
-// subMu; the actual sends happen unlocked so a slow subscriber
-// never blocks the rest. Shutdown closes channels concurrently;
-// the per-channel send is wrapped in a recover so the rare
-// send-to-closed-channel race during teardown surfaces as a
-// silent drop rather than a process panic.
+// subMu; the actual sends happen unlocked so the send loop never
+// holds subMu. Each per-channel send blocks until the subscriber
+// drains or the runtime ctx cancels — backpressure flows from the
+// adapter through the session pump to [Session.emit] so streaming
+// deltas cannot be silently dropped under burst (e.g., a chatty
+// LLM emitting 100+ BPE-token deltas per turn against a TUI whose
+// per-frame render briefly stalls). A warn log fires if any send
+// blocks longer than [fanoutWarnAfter] to make a stuck subscriber
+// observable; the wait then continues — drops only happen on ctx
+// cancellation (runtime teardown).
 func (r *Runtime) fanout(f protocol.Frame) {
 	r.subMu.Lock()
 	chans := append([]chan protocol.Frame(nil), r.subscribers[f.SessionID()]...)
 	r.subMu.Unlock()
 	for _, c := range chans {
-		safeFanoutSend(c, f)
+		r.fanoutSend(c, f)
 	}
 }
 
-// safeFanoutSend tries a non-blocking send and absorbs the panic
-// from a concurrent close (Shutdown closed the channel between
-// the snapshot copy and our send). Slow subscribers (full buffer)
-// drop via the default branch.
-func safeFanoutSend(c chan protocol.Frame, f protocol.Frame) {
+// fanoutWarnAfter is the soft deadline before a slow subscriber
+// trips a warn log. Tuned for the worst-case TUI render: a turn
+// that emits a few hundred deltas should comfortably fit in the
+// per-subscriber buffer; if a single delta waits this long, the
+// adapter is stuck.
+const fanoutWarnAfter = 30 * time.Second
+
+// fanoutSend pushes one Frame onto one subscriber channel. Blocks
+// until the subscriber drains so deltas accrue rather than getting
+// silently dropped at the fanout. Three escape hatches keep the
+// loop honest:
+//
+//   - ctx cancellation → bail out (runtime teardown).
+//   - subscriber closed concurrently (Shutdown raced our send) →
+//     the recover deferral absorbs the panic and returns.
+//   - 30s soft warn → emits one log entry naming the session +
+//     frame kind so a stuck subscriber is observable in real time
+//     rather than discovered post-hoc; the send keeps waiting.
+func (r *Runtime) fanoutSend(c chan protocol.Frame, f protocol.Frame) {
 	defer func() { _ = recover() }()
+	ctx := r.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Fast path: avoid timer allocation when the buffer has room.
 	select {
 	case c <- f:
+		return
 	default:
-		// Slow subscriber — drop. Adapters that need lossless
-		// streams must size their buffer accordingly.
+	}
+	timer := time.NewTimer(fanoutWarnAfter)
+	defer timer.Stop()
+	select {
+	case c <- f:
+		return
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+		if r.logger != nil {
+			r.logger.Warn("runtime: subscriber slow drain",
+				"session", f.SessionID(),
+				"frame_kind", string(f.Kind()),
+				"waited", fanoutWarnAfter,
+				"buffer_cap", cap(c))
+		}
+	}
+	select {
+	case c <- f:
+	case <-ctx.Done():
 	}
 }
 
@@ -202,7 +253,14 @@ func (h *adapterHost) Submit(ctx context.Context, f protocol.Frame) error {
 }
 
 func (h *adapterHost) Subscribe(ctx context.Context, sessionID string) (<-chan protocol.Frame, error) {
-	c := make(chan protocol.Frame, 64)
+	// 256 is dimensioned to absorb a chatty turn's worth of
+	// streaming deltas (gpt-class models can emit ~100-200
+	// per-BPE-token deltas before any consumer-side render hops
+	// can drain). The fanout send is blocking so headroom only
+	// controls how often backpressure ripples back to the model
+	// goroutine; lossless delivery is the channel's job, not the
+	// buffer's.
+	c := make(chan protocol.Frame, 256)
 	h.rt.subMu.Lock()
 	h.rt.subscribers[sessionID] = append(h.rt.subscribers[sessionID], c)
 	h.rt.subMu.Unlock()
