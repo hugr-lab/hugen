@@ -460,4 +460,18 @@ type TurnBoundaryHook interface {
 // η.2 flips the switch.
 type HistoryOwner interface {
 	ProvideHistory(ctx context.Context, state SessionState) []model.Message
+
+	// RollbackTo drops history entries with Seq > seq. Called
+	// from the session's turn loop when a /cancel or stream
+	// error retires a turn — the cancelled iter's
+	// consolidated assistant + tool_result entries must
+	// disappear from the model's next prompt build so it
+	// doesn't see an orphaned tool_call → result chain. The
+	// user message that started the cancelled turn (Seq ==
+	// baseline) is preserved by intent (η spec §6).
+	//
+	// Phase 5.2.η.3 — exposed through the interface so
+	// pkg/session can call it without importing
+	// pkg/extension/compactor.
+	RollbackTo(ctx context.Context, state SessionState, seq int64)
 }

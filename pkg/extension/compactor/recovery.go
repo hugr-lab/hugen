@@ -22,57 +22,114 @@ import (
 // Best-effort by [extension.Recovery] contract: a malformed row
 // logs a warning and is skipped; recovery never blocks session
 // start.
-func (e *Extension) Recover(_ context.Context, state extension.SessionState, events []store.EventRow) error {
+func (e *Extension) Recover(ctx context.Context, state extension.SessionState, events []store.EventRow) error {
 	s := FromState(state)
 	if s == nil {
 		return nil
 	}
-	var (
-		latest  *DigestPayload
-		entries = make([]HistoryEntry, 0, len(events))
-	)
-	renderer := state.Prompts()
+	// First pass: find the latest digest_set / digest_clear so
+	// the history projection knows where the verbatim tail starts.
+	// Events before CutoffSeq are summarised inside the digest's
+	// Block C / KeptVerbatim — re-projecting them as verbatim
+	// would double-feed them into the next prompt.
+	var latest *DigestPayload
 	for i := range events {
 		r := events[i]
-		if protocol.Kind(r.EventType) == protocol.KindExtensionFrame {
-			ext, _ := r.Metadata["extension"].(string)
-			if ext == providerName {
-				op, _ := r.Metadata["op"].(string)
-				switch op {
-				case OpDigestSet:
-					d, err := decodeDigest(r.Metadata)
-					if err != nil {
-						e.logger.Warn("compactor recovery: malformed digest_set",
-							"session", state.SessionID(), "err", err)
-						continue
-					}
-					if d.Version > CurrentPayloadVersion {
-						e.logger.Debug("compactor recovery: future version skipped",
-							"session", state.SessionID(),
-							"version", d.Version,
-							"current", CurrentPayloadVersion)
-						continue
-					}
-					latest = d
-				case OpDigestClear:
-					latest = nil
-				default:
-					e.logger.Debug("compactor recovery: unknown op",
-						"session", state.SessionID(), "op", op)
-				}
+		if protocol.Kind(r.EventType) != protocol.KindExtensionFrame {
+			continue
+		}
+		if ext, _ := r.Metadata["extension"].(string); ext != providerName {
+			continue
+		}
+		switch op, _ := r.Metadata["op"].(string); op {
+		case OpDigestSet:
+			d, err := decodeDigest(r.Metadata)
+			if err != nil {
+				e.logger.Warn("compactor recovery: malformed digest_set",
+					"session", state.SessionID(), "err", err)
+				continue
 			}
+			if d.Version > CurrentPayloadVersion {
+				e.logger.Debug("compactor recovery: future version skipped",
+					"session", state.SessionID(),
+					"version", d.Version,
+					"current", CurrentPayloadVersion)
+				continue
+			}
+			latest = d
+		case OpDigestClear:
+			latest = nil
+		default:
+			e.logger.Debug("compactor recovery: unknown op",
+				"session", state.SessionID(), "op", op)
+		}
+	}
+
+	// Reset boundary + history state — Recover replays from the
+	// authoritative event log, replacing whatever the live emit
+	// path may have appended pre-materialise.
+	s.boundary.mu.Lock()
+	s.boundary.userMessageSeqs = nil
+	s.boundary.estimatedTokens = 0
+	s.boundary.mu.Unlock()
+
+	// Second pass: rebuild boundary tracker from ALL events
+	// (we need the full user-message seq list for cutoff math
+	// on the NEXT compaction) and project history entries from
+	// events strictly past CutoffSeq (or all of them when no
+	// digest is set).
+	cutoff := int64(0)
+	if latest != nil {
+		cutoff = latest.CutoffSeq
+	}
+	renderer := state.Prompts()
+	entries := make([]HistoryEntry, 0, len(events))
+	for i := range events {
+		r := events[i]
+		// Boundary tracker mirrors live OnFrameEmit accounting.
+		seq := int64(r.Seq)
+		switch protocol.Kind(r.EventType) {
+		case protocol.KindUserMessage:
+			s.appendBoundary(seq, estimateTokens(r.Content))
+		case protocol.KindAgentMessage:
+			if cons, _ := metadataBool(r.Metadata, "consolidated"); cons {
+				s.addTokens(estimateTokens(r.Content))
+			}
+		case protocol.KindToolResult:
+			body := r.ToolResult
+			if body == "" {
+				body = r.Content
+			}
+			s.addTokens(estimateTokens(body))
+		}
+		// History projection: skip pre-cutoff frames — they
+		// already live inside Block C / KeptVerbatim of the
+		// restored digest. ExtensionFrames never project.
+		if seq <= cutoff {
+			continue
+		}
+		if protocol.Kind(r.EventType) == protocol.KindExtensionFrame {
 			continue
 		}
 		if entry, ok := projectRowToEntry(renderer, &r); ok {
 			entries = append(entries, entry)
 		}
 	}
+
 	if latest != nil {
 		s.SetDigest(latest)
 	} else {
 		s.ClearDigest()
 	}
 	s.resetHistory(entries)
+
+	// Apply per-strategy post-restore trim. summarize already
+	// has the right shape (history was filtered to post-cutoff
+	// only); window enforces its FIFO cap; off leaves it alone.
+	cfg := e.resolveTierConfig(ctx, state)
+	if effectiveStrategy(cfg.Strategy) == StrategyWindow {
+		s.pruneWindow(cfg.WindowSize)
+	}
 	return nil
 }
 

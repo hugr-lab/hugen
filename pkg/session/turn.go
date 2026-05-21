@@ -350,13 +350,25 @@ func (s *Session) applyChunk(runCtx context.Context, chunk model.Chunk) {
 		}
 		// Phase 5.2 (context-budget observability) — fold the
 		// final chunk's Usage block (when the provider populates
-		// it) into the per-turn accumulator. Persistent fold into
-		// Session.cumulativeUsage happens at the Final=true
-		// Consolidated emit so /cancel'd or stream-errored iters
-		// don't double-count.
+		// it) eagerly into BOTH the per-turn accumulator and
+		// the session-cumulative counter. Eager fold means a
+		// /cancel or stream error AFTER this iter completed
+		// still counts those tokens (the provider already
+		// billed for them); only iters whose stream was
+		// interrupted BEFORE the final chunk landed escape
+		// accounting — and there's no Usage record to fold
+		// for those anyway.
+		//
+		// dogfood 2026-05-21 ε.2 follow-up: previously the
+		// fold happened at Final=true Consolidated emit only,
+		// which dropped multi-iter turns' usage on cancel.
 		if chunk.Usage != nil {
 			st.turnUsage.PromptTokens += chunk.Usage.PromptTokens
 			st.turnUsage.CompletionTokens += chunk.Usage.CompletionTokens
+			s.foldSessionUsage(protocol.TokenUsage{
+				PromptTokens:     chunk.Usage.PromptTokens,
+				CompletionTokens: chunk.Usage.CompletionTokens,
+			})
 		}
 	}
 }
@@ -564,15 +576,13 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 			st.thinking, st.thoughtSignature)
 		// Phase 5.2 (context-budget observability) — stamp turn
 		// usage on the Final=true Consolidated frame so the
-		// outbox carries the cost number. Intermediate iter-only
-		// frames (Final=false) leave Usage nil; the next iter's
-		// applyChunk keeps folding into st.turnUsage so the
-		// stamp at turn close carries the full sum. Persistent
-		// fold into Session.cumulativeUsage happens here too.
+		// outbox carries the cost number. The cumulative
+		// session counter was already folded eagerly in
+		// applyChunk on every iter's Final chunk; this stamp is
+		// outbox-only.
 		if !hasToolCalls && (st.turnUsage.PromptTokens > 0 || st.turnUsage.CompletionTokens > 0) {
 			snap := st.turnUsage
 			consolidated.Payload.Usage = &snap
-			s.foldSessionUsage(snap)
 		}
 		_ = s.emit(runCtx, consolidated)
 	}
@@ -641,8 +651,8 @@ func (s *Session) rollbackTurn() {
 	if st == nil {
 		return
 	}
-	if owner := s.compactorHistoryOwner(); owner != nil {
-		owner.RollbackTo(st.seqBaseline)
+	if owner := s.historyOwner(); owner != nil {
+		owner.RollbackTo(context.Background(), s, st.seqBaseline)
 	}
 }
 

@@ -100,6 +100,73 @@ func TestSession_TurnUsage_StampedOnConsolidatedAndPersistedInStatus(t *testing.
 	}
 }
 
+// TestSession_TurnUsage_EagerFold_SurvivesCancel verifies the
+// ε.2 fix: the cumulative counter folds eagerly inside
+// applyChunk on every iter's Final chunk so a /cancel between
+// iters doesn't drop previously-completed iterations' usage.
+//
+// Without the eager fold, the previous behaviour deferred the
+// fold to the Final=true Consolidated emit at turn close — a
+// mid-turn cancel discarded turnUsage entirely. Adapters then
+// underreported lifetime spend in cancel-heavy sessions.
+func TestSession_TurnUsage_EagerFold_SurvivesCancel(t *testing.T) {
+	testStore := fixture.NewTestStore()
+	_ = testStore.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
+
+	// Drive an iter that completes (Final chunk with Usage)
+	// then immediately /cancel. Eager fold means the iter's
+	// usage IS in cumulativeUsage; deferred fold would lose it.
+	mdl := &scriptedModel{
+		chunks: []model.Chunk{
+			{Content: ptr("iter 1 output"), Final: true, Usage: &model.Usage{
+				PromptTokens:     200,
+				CompletionTokens: 50,
+			}},
+		},
+	}
+	sess, cancel := newTestSession(t, testStore, mdl)
+	defer cancel()
+	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
+	sess.Inbox() <- protocol.NewUserMessage("s1", user, "hi")
+
+	// Wait until the consolidated AgentMessage lands, then
+	// inject /cancel BEFORE the post-turn idle status emits.
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	sawConsolidated := false
+	gotIdle := false
+	for !gotIdle {
+		select {
+		case f, ok := <-sess.Outbox():
+			if !ok {
+				t.Fatalf("outbox closed early")
+			}
+			switch v := f.(type) {
+			case *protocol.AgentMessage:
+				if v.Payload.Consolidated && v.Payload.Final {
+					sawConsolidated = true
+				}
+			case *protocol.SessionStatus:
+				if v.Payload.State == protocol.SessionStatusIdle {
+					gotIdle = true
+				}
+			}
+		case <-deadline.C:
+			t.Fatalf("timeout; consolidated=%v idle=%v", sawConsolidated, gotIdle)
+		}
+	}
+	if !sawConsolidated {
+		t.Fatalf("expected consolidated AgentMessage")
+	}
+	got := sess.snapshotSessionUsage()
+	if got == nil {
+		t.Fatalf("session usage nil after completed iter; eager fold missed")
+	}
+	if got.PromptTokens != 200 || got.CompletionTokens != 50 {
+		t.Errorf("cumulative usage = %+v, want 200→50", got)
+	}
+}
+
 // TestSession_TurnUsage_RestoredFromSessionStatus verifies a
 // fresh Session reading the existing events log picks up the
 // cumulative counter from the latest session_status row carrying

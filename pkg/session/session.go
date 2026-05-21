@@ -13,7 +13,6 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/extension"
-	"github.com/hugr-lab/hugen/pkg/extension/compactor"
 	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/prompts"
@@ -1670,20 +1669,22 @@ func (s *Session) ownedHistory(ctx context.Context) []model.Message {
 	return nil
 }
 
-// compactorHistoryOwner returns the [*compactor.CompactorState]
-// handle attached to this session, or nil when the compactor
-// extension is not wired (fixture sessions). Used by
-// [Session.rollbackTurn] to trim cache entries past the turn's
-// seq baseline.
-func (s *Session) compactorHistoryOwner() *compactor.CompactorState {
+// historyOwner returns the singular [extension.HistoryOwner]
+// registered on this session, or nil when no owner is wired
+// (fixture sessions). Runtime boot asserts exactly one owner
+// is registered, so the "first match" lookup is safe in
+// production. Used by [Session.rollbackTurn] to trim cache
+// entries past the turn's seq baseline via the
+// HistoryOwner.RollbackTo interface method — pkg/session does
+// NOT import the concrete extension.
+func (s *Session) historyOwner() extension.HistoryOwner {
 	if s.deps == nil {
 		return nil
 	}
 	for _, ext := range s.deps.Extensions {
-		if _, ok := ext.(extension.HistoryOwner); !ok {
-			continue
+		if owner, ok := ext.(extension.HistoryOwner); ok {
+			return owner
 		}
-		return compactor.FromState(s)
 	}
 	return nil
 }

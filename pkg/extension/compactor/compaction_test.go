@@ -832,6 +832,126 @@ func TestCompactor_Reset_RebuildsHistoryFromStore(t *testing.T) {
 	}
 }
 
+// TestCompactor_Recover_RebuildsBoundaryAndPostCutoffHistory
+// covers the η.3.fix path: after a process restart, Recover
+// must (a) rebuild the full boundary tracker so shouldCompact
+// fires on subsequent turns, AND (b) project history ONLY for
+// events past the latest digest's CutoffSeq so pre-cutoff
+// frames (already inside Block C / KeptVerbatim) don't
+// double-feed.
+func TestCompactor_Recover_RebuildsBoundaryAndPostCutoffHistory(t *testing.T) {
+	const turns = 60
+	startSeq := 1
+	st := newFakeIntegrationState(t, "ses-recov")
+	mdl := &stubModel{summary: "- recover summary"}
+	router := newStubRouter(t, mdl)
+	rows := fixtureRows(turns, startSeq)
+	storeR := &fakeStoreReader{rows: rows}
+
+	cfg := DefaultConfig()
+	cfg.MaxTurns = 50
+	cfg.PreservedRecentTurns = 10
+	cfg.MinTurnGap = 3
+	cfg.DigestMaxTokens = 0
+
+	e := NewExtensionWithConfig(slog.Default(), cfg, Deps{
+		Router:  router,
+		Store:   storeR,
+		AgentID: "a1",
+	})
+	ctx := context.Background()
+	if err := e.InitState(ctx, st); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	driveBoundaries(t, e, st, turns, startSeq)
+	if err := e.OnTurnBoundary(ctx, st); err != nil {
+		t.Fatalf("OnTurnBoundary: %v", err)
+	}
+	d := FromState(st).Digest()
+	if d == nil {
+		t.Fatalf("expected a digest after first compaction")
+	}
+	preBoundaryCount := FromState(st).BoundaryCount()
+
+	// Simulate a process restart: bring up a fresh state +
+	// extension, replay the events log (rows the fixture store
+	// would surface) PLUS the digest_set emit we just observed.
+	st2 := newFakeIntegrationState(t, "ses-recov")
+	e2 := NewExtensionWithConfig(slog.Default(), cfg, Deps{
+		Router:  router,
+		Store:   storeR,
+		AgentID: "a1",
+	})
+	if err := e2.InitState(ctx, st2); err != nil {
+		t.Fatalf("InitState (restart): %v", err)
+	}
+	digestRows := digestSetRows(t, st, int(d.CutoffSeq+1))
+	replay := append([]store.EventRow(nil), rows...)
+	replay = append(replay, digestRows...)
+	if err := e2.Recover(ctx, st2, replay); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	// Boundary tracker must mirror the count we had pre-restart
+	// — the trigger predicate relies on this for anti-thrash +
+	// cutoff math.
+	if got := FromState(st2).BoundaryCount(); got != preBoundaryCount {
+		t.Fatalf("post-Recover BoundaryCount = %d, want %d",
+			got, preBoundaryCount)
+	}
+
+	// Owned history projection must carry ONLY post-cutoff
+	// entries. Every entry's Seq > digest.CutoffSeq.
+	owned := e2.ProvideHistory(ctx, st2)
+	if len(owned) == 0 {
+		t.Fatalf("post-Recover history empty; want preserved-recent-tail entries")
+	}
+	for _, ent := range FromState(st2).historySnapshot() {
+		if ent.Seq <= d.CutoffSeq {
+			t.Errorf("post-Recover history entry seq=%d <= cutoff=%d — pre-cutoff frames must stay in Block C",
+				ent.Seq, d.CutoffSeq)
+		}
+	}
+
+	// Digest restored.
+	if got := FromState(st2).Digest(); got == nil ||
+		got.CutoffSeq != d.CutoffSeq {
+		t.Fatalf("post-Recover digest = %+v, want CutoffSeq=%d",
+			got, d.CutoffSeq)
+	}
+}
+
+// digestSetRows synthesises a digest_set EventRow from the
+// extension's last emitted ExtensionFrame so the Recover test
+// can replay a "real" event log that includes the digest.
+func digestSetRows(t *testing.T, st *fakeIntegrationState, seq int) []store.EventRow {
+	t.Helper()
+	for _, f := range st.emittedFrames() {
+		ef, ok := f.(*protocol.ExtensionFrame)
+		if !ok {
+			continue
+		}
+		if ef.Payload.Extension != providerName || ef.Payload.Op != OpDigestSet {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(ef.Payload.Data, &payload); err != nil {
+			t.Fatalf("digest_set payload unmarshal: %v", err)
+		}
+		return []store.EventRow{{
+			Seq:       seq,
+			EventType: string(protocol.KindExtensionFrame),
+			Metadata: map[string]any{
+				"extension": providerName,
+				"op":        OpDigestSet,
+				"data":      payload,
+			},
+		}}
+	}
+	t.Fatalf("no digest_set frame emitted")
+	return nil
+}
+
 // TestCompactor_MinTurnGap blocks the second compaction when not
 // enough completed turns have elapsed since the first fire.
 func TestCompactor_MinTurnGap(t *testing.T) {

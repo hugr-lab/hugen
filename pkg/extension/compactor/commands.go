@@ -133,29 +133,19 @@ func (e *Extension) cmdCompactorReset(ctx context.Context, state extension.Sessi
 	}
 	s.ClearDigest()
 	// η.2 — rebuild history from the event log so the live
-	// model view sees the full transcript again. Without this
-	// the post-cutoff entries that pruneToCutoff dropped on the
-	// last fire would stay missing. The /compactor reset path
-	// is user-triggered and runs once per invocation — paying
-	// for a full ListEvents scan here is fine.
+	// model view sees the full transcript again; reuse the
+	// Recovery logic so reset and restart share one code path
+	// (boundary tracker + post-cutoff projection + strategy
+	// post-trim). /compactor reset is user-triggered and runs
+	// once per invocation; a full ListEvents scan here is fine.
 	if e.deps.Store != nil {
 		events, err := e.deps.Store.ListEvents(ctx, sessionID, store.ListEventsOpts{Limit: 100_000})
 		if err != nil {
 			e.logger.Warn("compactor reset: list events for rebuild failed",
 				"session", sessionID, "err", err)
-		} else {
-			renderer := state.Prompts()
-			entries := make([]HistoryEntry, 0, len(events))
-			for i := range events {
-				r := events[i]
-				if protocol.Kind(r.EventType) == protocol.KindExtensionFrame {
-					continue
-				}
-				if entry, ok := projectRowToEntry(renderer, &r); ok {
-					entries = append(entries, entry)
-				}
-			}
-			s.resetHistory(entries)
+		} else if err := e.Recover(ctx, state, events); err != nil {
+			e.logger.Warn("compactor reset: rebuild via Recover failed",
+				"session", sessionID, "err", err)
 		}
 	}
 	return []protocol.Frame{

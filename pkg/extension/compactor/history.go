@@ -50,6 +50,18 @@ func (e *Extension) ProvideHistory(_ context.Context, state extension.SessionSta
 	return out
 }
 
+// RollbackTo implements [extension.HistoryOwner]. Delegates to
+// the per-session state's RollbackTo so pkg/session can call
+// through the interface without importing this package.
+// Phase 5.2.η.3.
+func (e *Extension) RollbackTo(_ context.Context, state extension.SessionState, seq int64) {
+	s := FromState(state)
+	if s == nil {
+		return
+	}
+	s.RollbackTo(seq)
+}
+
 // projectFrameToEntry maps a live frame onto a [HistoryEntry],
 // returning ok=false for kinds the model never sees. Mirrors the
 // allow-list `pkg/session/visibility.go::projectFrameToHistory`
