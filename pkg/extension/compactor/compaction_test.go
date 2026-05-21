@@ -92,6 +92,7 @@ func (s *fakeIntegrationState) Submit(_ context.Context, _ protocol.Frame) <-cha
 	return nil
 }
 func (s *fakeIntegrationState) OutboxOnly(_ context.Context, _ protocol.Frame) error { return nil }
+func (s *fakeIntegrationState) ToolCatalogTokens(_ context.Context) int               { return 0 }
 func (s *fakeIntegrationState) Extensions() []extension.Extension                    { return nil }
 func (s *fakeIntegrationState) RequestInquiry(_ context.Context, _ protocol.InquiryRequestPayload) (*protocol.InquiryResponse, error) {
 	return nil, nil

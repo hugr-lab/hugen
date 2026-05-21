@@ -300,6 +300,11 @@ func (s *TestSessionState) OutboxOnly(_ context.Context, frame protocol.Frame) e
 	return nil
 }
 
+// ToolCatalogTokens implements [extension.SessionState]. The
+// fixture wires no ToolManager so the catalogue is empty; tests
+// that need a concrete value should stand up a Session.
+func (s *TestSessionState) ToolCatalogTokens(_ context.Context) int { return 0 }
+
 // Extensions implements [extension.SessionState]. Returns the
 // extensions slice installed via [TestSessionState.SetExtensions];
 // nil by default — tests that don't exercise aggregation skip

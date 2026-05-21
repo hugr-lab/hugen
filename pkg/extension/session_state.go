@@ -137,6 +137,15 @@ type SessionState interface {
 	// Phase 5.1b.
 	Extensions() []Extension
 
+	// ToolCatalogTokens returns the estimated token weight of
+	// the session's currently-visible tool catalogue (Name +
+	// Description + ArgSchema bytes across every Tool the
+	// model receives this turn). Cached behind the snapshot
+	// cache key so the value moves in lockstep with skill
+	// load / unload events. Returns 0 when no ToolManager is
+	// wired (fixture sessions). Phase 5.2 (context-budget δ).
+	ToolCatalogTokens(ctx context.Context) int
+
 	// RequestInquiry is the runtime-side counterpart to the
 	// `session:inquire` tool. Extensions driving deterministic
 	// HITL flows (notably mission ext's approval gate after the

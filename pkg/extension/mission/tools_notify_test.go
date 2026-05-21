@@ -48,6 +48,7 @@ func (s *rootWithChild) Emit(_ context.Context, _ protocol.Frame) error         
 func (s *rootWithChild) IsClosed() bool                                           { return false }
 func (s *rootWithChild) Submit(_ context.Context, _ protocol.Frame) <-chan struct{} { return nil }
 func (s *rootWithChild) OutboxOnly(_ context.Context, _ protocol.Frame) error     { return nil }
+func (s *rootWithChild) ToolCatalogTokens(_ context.Context) int                  { return 0 }
 func (s *rootWithChild) Extensions() []extension.Extension                        { return nil }
 func (s *rootWithChild) RequestInquiry(_ context.Context, _ protocol.InquiryRequestPayload) (*protocol.InquiryResponse, error) {
 	return nil, nil
