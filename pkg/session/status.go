@@ -109,6 +109,43 @@ func (s *Session) populateStatusSnapshot(payload *protocol.SessionStatusPayload)
 		clone := *last
 		payload.LastToolCall = &clone
 	}
+	payload.Usage = s.snapshotSessionUsage()
+}
+
+// foldSessionUsage adds one turn's reported usage into the
+// session's cumulative counter. Called from
+// foldAssistantAndMaybeDispatch at the Final=true Consolidated
+// emit so /cancel'd or stream-errored iters don't double-count.
+// Phase 5.2 (context-budget observability).
+func (s *Session) foldSessionUsage(u protocol.TokenUsage) {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	s.cumulativeUsage.PromptTokens += u.PromptTokens
+	s.cumulativeUsage.CompletionTokens += u.CompletionTokens
+}
+
+// restoreSessionUsage replaces the cumulative counter from a
+// persisted SessionStatusPayload.Usage. Used by materialise to
+// recover the running total across restart.
+func (s *Session) restoreSessionUsage(u protocol.TokenUsage) {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	s.cumulativeUsage = u
+}
+
+// snapshotSessionUsage returns the cumulative per-session token
+// counts, or nil when no turn has reported usage yet. Phase 5.2
+// (context-budget observability). The latest persisted value is
+// the authoritative restore point — Session.materialise reads
+// the newest session_status row carrying Usage.
+func (s *Session) snapshotSessionUsage() *protocol.TokenUsage {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.cumulativeUsage.PromptTokens == 0 && s.cumulativeUsage.CompletionTokens == 0 {
+		return nil
+	}
+	clone := s.cumulativeUsage
+	return &clone
 }
 
 // snapshotActiveSubagents iterates the session's children map

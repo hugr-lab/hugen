@@ -174,6 +174,15 @@ type Session struct {
 	materialised atomic.Bool
 	matOnce      sync.Once
 
+	// cumulativeUsage tracks the session's running prompt +
+	// completion token totals across every turn. Updated when an
+	// iteration's final model.Chunk carries a Usage block.
+	// Persisted on every status transition via SessionStatusPayload.Usage;
+	// restored on materialise from the latest persisted
+	// session_status row. Phase 5.2 (context-budget observability).
+	usageMu         sync.Mutex
+	cumulativeUsage protocol.TokenUsage
+
 	// softWarningDone caches "we already injected the soft-warning
 	// nudge for this session". Loaded once at materialise from the
 	// session's events (event-source as truth) and flipped at the

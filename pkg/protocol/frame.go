@@ -177,6 +177,16 @@ type UserMessagePayload struct {
 	Text string `json:"text"`
 }
 
+// TokenUsage carries per-turn token counts the model provider
+// reports on the final stream chunk. Stamped on the consolidated
+// final AgentMessage so the outbox carries the "this turn cost"
+// number for adapters to render alongside the assistant message.
+// Phase 5.2 (context-budget observability).
+type TokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+}
+
 type AgentMessagePayload struct {
 	Text     string `json:"text"`
 	ChunkSeq int    `json:"chunk_seq"`
@@ -200,6 +210,14 @@ type AgentMessagePayload struct {
 	ToolCalls        []ToolCallPayload `json:"tool_calls,omitempty"`
 	Thinking         string            `json:"thinking,omitempty"`
 	ThoughtSignature string            `json:"thought_signature,omitempty"`
+
+	// Usage holds the assistant TURN's aggregated token spend
+	// when the underlying provider reported it. Stamped on the
+	// Final=true Consolidated frame only — intermediate
+	// iter-only Consolidated rows leave it nil. Adapters render
+	// this as "this turn cost N→M tokens" next to the assistant
+	// message. Phase 5.2 (context-budget observability).
+	Usage *TokenUsage `json:"usage,omitempty"`
 }
 
 type ReasoningPayload struct {
@@ -503,11 +521,22 @@ const (
 // `omitempty` — adapters that only read State / Reason continue
 // to work unchanged.
 type SessionStatusPayload struct {
-	State           string             `json:"state"`
-	Reason          string             `json:"reason,omitempty"`
+	State           string              `json:"state"`
+	Reason          string              `json:"reason,omitempty"`
 	ActiveSubagents []ActiveSubagentRef `json:"active_subagents,omitempty"`
 	PendingInquiry  *PendingInquiryRef  `json:"pending_inquiry,omitempty"`
 	LastToolCall    *ToolCallRef        `json:"last_tool_call,omitempty"`
+
+	// Usage carries the session's cumulative token spend at the
+	// time of this transition. Stamped on every status emit
+	// once at least one model turn has retired; nil for the
+	// pre-first-turn transitions (`active` on initial
+	// user_message, …) so adapters can distinguish "no data yet"
+	// from "0 tokens spent". The latest persisted row is
+	// authoritative on restore — Session.materialise restores
+	// the in-memory cumulative counter from it.
+	// Phase 5.2 (context-budget observability).
+	Usage *TokenUsage `json:"usage,omitempty"`
 }
 
 // ActiveSubagentRef is one entry in SessionStatusPayload.ActiveSubagents.

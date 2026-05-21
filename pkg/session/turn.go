@@ -47,6 +47,14 @@ type turnState struct {
 	agentSeq         int
 	reasoningSeq     int
 
+	// turnUsage aggregates each iter's model.Usage over the turn.
+	// Stamped on the Final=true Consolidated AgentMessage so the
+	// outbox carries the turn's total cost. NOT reset between
+	// iters — it's per-turn, not per-iter. Folded into
+	// Session.cumulativeUsage at the same emit. Phase 5.2
+	// (context-budget observability).
+	turnUsage protocol.TokenUsage
+
 	// Tool-result tracking for the current iteration. Pending = call
 	// dispatched but result not yet seen on toolResults; len==0 means
 	// "all tool_results matched" and the loop can build the next prompt.
@@ -340,6 +348,16 @@ func (s *Session) applyChunk(runCtx context.Context, chunk model.Chunk) {
 		if chunk.ThoughtSignature != "" {
 			st.thoughtSignature = chunk.ThoughtSignature
 		}
+		// Phase 5.2 (context-budget observability) — fold the
+		// final chunk's Usage block (when the provider populates
+		// it) into the per-turn accumulator. Persistent fold into
+		// Session.cumulativeUsage happens at the Final=true
+		// Consolidated emit so /cancel'd or stream-errored iters
+		// don't double-count.
+		if chunk.Usage != nil {
+			st.turnUsage.PromptTokens += chunk.Usage.PromptTokens
+			st.turnUsage.CompletionTokens += chunk.Usage.CompletionTokens
+		}
 	}
 }
 
@@ -544,6 +562,18 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 			st.finalText, st.agentSeq, !hasToolCalls,
 			toolCallPayloads(st.toolCalls),
 			st.thinking, st.thoughtSignature)
+		// Phase 5.2 (context-budget observability) — stamp turn
+		// usage on the Final=true Consolidated frame so the
+		// outbox carries the cost number. Intermediate iter-only
+		// frames (Final=false) leave Usage nil; the next iter's
+		// applyChunk keeps folding into st.turnUsage so the
+		// stamp at turn close carries the full sum. Persistent
+		// fold into Session.cumulativeUsage happens here too.
+		if !hasToolCalls && (st.turnUsage.PromptTokens > 0 || st.turnUsage.CompletionTokens > 0) {
+			snap := st.turnUsage
+			consolidated.Payload.Usage = &snap
+			s.foldSessionUsage(snap)
+		}
 		_ = s.emit(runCtx, consolidated)
 	}
 	st.assistantFolded = true
