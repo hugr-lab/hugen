@@ -490,6 +490,7 @@ type CompactorOverride struct {
 	MaxTokens            *int     `json:"max_tokens,omitempty"             yaml:"max_tokens,omitempty"`
 	PreservedRecentTurns *int     `json:"preserved_recent_turns,omitempty" yaml:"preserved_recent_turns,omitempty"`
 	DigestMaxTokens      *int     `json:"digest_max_tokens,omitempty"      yaml:"digest_max_tokens,omitempty"`
+	KeptVerbatimMax      *int     `json:"kept_verbatim_max,omitempty"      yaml:"kept_verbatim_max,omitempty"`
 	MinTurnGap           *int     `json:"min_turn_gap,omitempty"           yaml:"min_turn_gap,omitempty"`
 	LLMTimeoutMs         *int     `json:"llm_timeout_ms,omitempty"         yaml:"llm_timeout_ms,omitempty"`
 	LLMIntent            *string  `json:"llm_intent,omitempty"             yaml:"llm_intent,omitempty"`

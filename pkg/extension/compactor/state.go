@@ -89,6 +89,13 @@ type DigestPayload struct {
 	// BuiltAt — timestamp for debug + audit. NOT load-bearing
 	// for replay correctness.
 	BuiltAt time.Time `json:"built_at"`
+
+	// UIMarkerEnabled echoes the resolved config flag at compaction
+	// time so adapters can read the marker toggle directly off the
+	// `digest_set` frame — without waiting for the next liveview
+	// status payload. Defaults to true; operators set
+	// `compactor.ui_marker.enabled: false` to suppress.
+	UIMarkerEnabled bool `json:"ui_marker_enabled"`
 }
 
 // SummaryBlock is one LLM-generated narrative covering the

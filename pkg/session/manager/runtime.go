@@ -67,6 +67,13 @@ type Runtime struct {
 }
 
 // NewRuntime constructs the supervisor. Adapters are started by Start.
+//
+// ctx defaults to [context.Background] so [fanoutSend] (called from
+// session-pump goroutines) has a non-nil escape hatch even if
+// fanout fires before [Runtime.Start] swaps in the errgroup ctx.
+// The Start path overwrites this field once, before any adapter
+// goroutine launches; the swap is safe because session pumps are
+// created by adapters (which can only run via Start).
 func NewRuntime(manager *Manager, adapters []Adapter, logger *slog.Logger) *Runtime {
 	if logger == nil {
 		logger = slog.Default()
@@ -76,6 +83,7 @@ func NewRuntime(manager *Manager, adapters []Adapter, logger *slog.Logger) *Runt
 		adapters:    adapters,
 		logger:      logger,
 		subscribers: make(map[string][]chan protocol.Frame),
+		ctx:         context.Background(),
 	}
 }
 
@@ -159,9 +167,24 @@ const fanoutWarnAfter = 30 * time.Second
 //     frame kind so a stuck subscriber is observable in real time
 //     rather than discovered post-hoc; the send keeps waiting.
 func (r *Runtime) fanoutSend(c chan protocol.Frame, f protocol.Frame) {
-	defer func() { _ = recover() }()
+	// Recover catches send-on-closed-channel during Shutdown — the
+	// channel is closed under subMu but fanoutSend reads its slice
+	// snapshot lock-free, so a races against the close is possible
+	// during graceful teardown. Debug log so a real panic from
+	// anything else is visible rather than silently swallowed.
+	defer func() {
+		if rec := recover(); rec != nil && r.logger != nil {
+			r.logger.Debug("runtime: fanout recovered from panic",
+				"session", f.SessionID(),
+				"frame_kind", string(f.Kind()),
+				"panic", rec)
+		}
+	}()
 	ctx := r.ctx
 	if ctx == nil {
+		// Defensive — NewRuntime sets r.ctx to Background; this
+		// guard handles a hypothetical caller constructing the
+		// Runtime via struct literal (skips NewRuntime).
 		ctx = context.Background()
 	}
 	// Fast path: avoid timer allocation when the buffer has room.

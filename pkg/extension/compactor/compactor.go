@@ -167,14 +167,31 @@ func (e *Extension) compactWithConfig(ctx context.Context, state extension.Sessi
 		refs = append(refs, prior.SubagentRefs...)
 	}
 	iteration++
-	summaryBlocks = append(summaryBlocks, SummaryBlock{
-		Iter: iteration,
-		From: priorCutoff + 1,
-		To:   newCutoff,
-		Text: summary,
-	})
+	// Pure-chat range (no tool calls, no inquiries) — KeptVerbatim
+	// already carries every high-signal turn. Skipping the
+	// SummaryBlock append avoids a bookkeeping-only "(no tool-call
+	// sequence...)" entry in Block C that the model would otherwise
+	// see. Subsequent compactions still find priorCutoff correctly
+	// via CutoffSeq.
+	pureChatRange := len(c.toolPairs) == 0 && len(c.inquiries) == 0
+	if !pureChatRange {
+		summaryBlocks = append(summaryBlocks, SummaryBlock{
+			Iter: iteration,
+			From: priorCutoff + 1,
+			To:   newCutoff,
+			Text: summary,
+		})
+	}
 	kept = append(kept, c.kept...)
 	refs = append(refs, c.refs...)
+
+	// Cap KeptVerbatim at the configured ceiling. The first
+	// user_message is pinned at index 0 so the model never loses
+	// the original task framing; oldest non-pinned entries drop
+	// FIFO. Spec §3.5 / §5.5.
+	if cfg.KeptVerbatimMax > 0 {
+		kept = pruneKept(kept, cfg.KeptVerbatimMax)
+	}
 
 	compactedAt := newCutoff
 	if n := len(selected); n > 0 {
@@ -184,14 +201,15 @@ func (e *Extension) compactWithConfig(ctx context.Context, state extension.Sessi
 	}
 
 	next := &DigestPayload{
-		Version:        CurrentPayloadVersion,
-		Iteration:      iteration,
-		CutoffSeq:      newCutoff,
-		CompactedAtSeq: compactedAt,
-		KeptVerbatim:   kept,
-		SummaryBlocks:  summaryBlocks,
-		SubagentRefs:   dedupRefs(refs),
-		BuiltAt:        time.Now().UTC(),
+		Version:         CurrentPayloadVersion,
+		Iteration:       iteration,
+		CutoffSeq:       newCutoff,
+		CompactedAtSeq:  compactedAt,
+		KeptVerbatim:    kept,
+		SummaryBlocks:   summaryBlocks,
+		SubagentRefs:    dedupRefs(refs),
+		BuiltAt:         time.Now().UTC(),
+		UIMarkerEnabled: cfg.UIMarkerEnabled,
 	}
 
 	// Cap check: collapse if the digest grew past
@@ -369,9 +387,20 @@ func classifyRows(rows []store.EventRow) classified {
 					delete(pendingInquiry, rid)
 				}
 			}
+			truncQuestion := truncate(question, inquiryQuestionMaxChars)
+			truncAnswer := truncate(ans, inquiryAnswerMaxChars)
 			c.inquiries = append(c.inquiries, inquirySegment{
-				Question: question,
-				Answer:   truncate(ans, inquiryAnswerMaxChars),
+				Question: truncQuestion,
+				Answer:   truncAnswer,
+			})
+			// Also surface as a KeptVerbatim entry — spec §11.2
+			// requires the user's clarification answer survives
+			// intact, not just as LLM-summarised input.
+			c.kept = append(c.kept, KeptSection{
+				Kind:   "inquiry_qa",
+				Author: r.Author,
+				Seq:    int64(r.Seq),
+				Text:   formatInquiryQA(truncQuestion, truncAnswer),
 			})
 		default:
 			// Drop reasoning / heartbeat / system_marker /
@@ -468,6 +497,58 @@ func estimateDigestTokens(d *DigestPayload) int {
 		total += (len(r.Reason) + len(r.SessionID) + 7) / 4
 	}
 	return total
+}
+
+// formatInquiryQA renders an inquiry Q/A pair as a single
+// verbatim entry for [KeptSection.Text]. Q on first line, A on
+// second; empty question (unmatched response — defensive) drops
+// the Q label so the answer still reads cleanly.
+func formatInquiryQA(question, answer string) string {
+	if question == "" {
+		return "A: " + answer
+	}
+	return "Q: " + question + "\nA: " + answer
+}
+
+// pruneKept caps the KeptVerbatim slice at maxEntries while
+// pinning the first user_message at index 0 — so the model
+// never loses the original task framing even as a long-running
+// session crosses many compaction iterations.
+//
+// Strategy: when the slice exceeds maxEntries, keep the first
+// user_message (or, if none was recorded, the head entry) plus
+// the most-recent `maxEntries-1` other entries. Order is
+// preserved across the kept entries.
+//
+// Spec §3.5 / §5.5.
+func pruneKept(kept []KeptSection, maxEntries int) []KeptSection {
+	if maxEntries <= 0 || len(kept) <= maxEntries {
+		return kept
+	}
+	// Find the first user_message — the pinned head. Falls back
+	// to index 0 if for some reason no user_message is present
+	// (defensive; the live path always opens a turn with one).
+	pinIdx := 0
+	for i, k := range kept {
+		if k.Kind == "user_message" {
+			pinIdx = i
+			break
+		}
+	}
+	tail := kept[len(kept)-(maxEntries-1):]
+	out := make([]KeptSection, 0, maxEntries)
+	out = append(out, kept[pinIdx])
+	// Tail may overlap with the pin only when pinIdx falls inside
+	// the tail window — in that case the dedup below drops the
+	// duplicate so we never emit the same KeptSection twice.
+	pinSeq := kept[pinIdx].Seq
+	for _, k := range tail {
+		if k.Seq == pinSeq {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
 }
 
 // dedupRefs collapses duplicate SubagentRef entries by SessionID,

@@ -78,6 +78,15 @@ type Config struct {
 	// via a second LLM call.
 	DigestMaxTokens int
 
+	// KeptVerbatimMax caps the number of entries the
+	// [DigestPayload.KeptVerbatim] slice carries across
+	// iterations. When the slice grows past this count after
+	// an append, the oldest entries are dropped (FIFO) — the
+	// first user_message is always pinned at index 0 so the
+	// model never loses the original task framing. 0 disables
+	// the cap. Spec §3.5 / §5.5.
+	KeptVerbatimMax int
+
 	// MinTurnGap is the anti-thrash gate — at least this many
 	// completed user-turns must elapse between successive
 	// compactions on the same session.
@@ -130,6 +139,7 @@ type TierOverride struct {
 	MaxTokens            *int
 	PreservedRecentTurns *int
 	DigestMaxTokens      *int
+	KeptVerbatimMax      *int
 	MinTurnGap           *int
 	LLMTimeout           *time.Duration
 	LLMIntent            *model.Intent
@@ -185,6 +195,7 @@ type OverrideSpec struct {
 	MaxTokens            *int
 	PreservedRecentTurns *int
 	DigestMaxTokens      *int
+	KeptVerbatimMax      *int
 	MinTurnGap           *int
 	LLMTimeoutMs         *int
 	LLMIntent            *string
@@ -209,6 +220,7 @@ func DefaultConfig() Config {
 		MaxTokens:            80_000,
 		PreservedRecentTurns: 10,
 		DigestMaxTokens:      4_000,
+		KeptVerbatimMax:      40,
 		MinTurnGap:           3,
 		LLMTimeout:           30 * time.Second,
 		LLMIntent:            model.IntentSummarize,

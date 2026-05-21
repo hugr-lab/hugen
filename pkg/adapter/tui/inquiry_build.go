@@ -1,7 +1,6 @@
-package console
+package tui
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -9,94 +8,25 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
-// PendingInquiry is the live HITL request the console is waiting
-// for the user to answer. Set when an *protocol.InquiryRequest
-// frame lands in render; consumed in runInput on the next user
-// line. Phase 5.1 § 2 — the adapter owns the user-facing leg of
-// the inquiry round trip.
+// PendingInquiry is the user-side state of an in-flight HITL
+// inquiry — the runtime emitted an [protocol.InquiryRequest], the
+// adapter rendered it, and now waits for the user to answer.
+// Phase 5.1 — adapters own the user-facing leg of the inquiry
+// round trip; the runtime stays UI-agnostic.
 type PendingInquiry struct {
 	RequestID       string
 	CallerSessionID string
 	Kind            string // protocol.InquiryType{Approval,Clarification}
 }
 
-// renderInquiryRequest draws the HITL prompt block for an
-// inbound inquiry and stashes it as the pending reply target.
-// Caller holds a.mu.
-func (a *Adapter) renderInquiryRequest(req *protocol.InquiryRequest) {
-	if a.currentSection != "" {
-		fmt.Fprintln(a.out)
-		a.currentSection = ""
-	}
-	p := req.Payload
-	fmt.Fprintf(a.out, "─── HITL: %s ───\n", p.Type)
-	if q := strings.TrimSpace(p.Question); q != "" {
-		fmt.Fprintf(a.out, "Q: %s\n", q)
-	}
-	if c := strings.TrimSpace(p.Context); c != "" {
-		fmt.Fprintf(a.out, "Context: %s\n", c)
-	}
-	if len(p.Options) > 0 {
-		fmt.Fprintln(a.out, "Options:")
-		for _, opt := range p.Options {
-			fmt.Fprintf(a.out, "  - %s\n", opt)
-		}
-	}
-	switch p.Type {
-	case protocol.InquiryTypeApproval:
-		fmt.Fprintln(a.out, "[reply: /approve [reason] | /deny [reason] | yes | no]")
-	default:
-		fmt.Fprintln(a.out, "[reply: any text — or /respond <text>]")
-	}
-	a.pending.Store(&PendingInquiry{
-		RequestID:       p.RequestID,
-		CallerSessionID: p.CallerSessionID,
-		Kind:            p.Type,
-	})
-	fmt.Fprint(a.out, "> ")
-}
-
-// maybeHandleInquiryReply attempts to interpret the line as an
-// answer to the pending inquiry. Returns true when the line was
-// fully consumed (either submitted or rejected with a hint);
-// returns false when the line should fall through to normal
-// slash-command / user-message handling (e.g. /end, /help).
-func (a *Adapter) maybeHandleInquiryReply(ctx context.Context, pend *PendingInquiry, line string) bool {
-	t := strings.TrimSpace(line)
-	if IsSlashCommand(t) {
-		pc := ParseSlashCommand(t)
-		switch pc.Name {
-		case "approve", "deny", "respond":
-			// fall through into reply build
-		default:
-			return false
-		}
-	}
-	resp, err := BuildInquiryReply(a.user, a.session.ID(), pend, t)
-	if err != nil {
-		fmt.Fprintf(a.err, "inquiry reply: %v\n", err)
-		fmt.Fprint(a.out, "> ")
-		return true
-	}
-	if subErr := a.host.Submit(ctx, resp); subErr != nil {
-		fmt.Fprintf(a.err, "submit inquiry: %v\n", subErr)
-		fmt.Fprint(a.out, "> ")
-		return true
-	}
-	a.pending.Store(nil)
-	return true
-}
-
 // BuildInquiryReply turns the raw input line into an
-// InquiryResponse Frame addressed at the root session id. The
-// CallerSessionID from the original request payload is preserved
+// [protocol.InquiryResponse] frame addressed at the root session id.
+// The CallerSessionID from the original request payload is preserved
 // so dispatchInquiryResponse cascades the answer back down the
 // parent chain to whichever tier actually called session:inquire.
-// Standalone (no *Adapter receiver) so unit tests can drive it
-// without bringing the session manager up.
-// BuildInquiryReply is exported so the TUI adapter (and any future
-// rich-client adapter) can reuse the same /approve|/deny|/respond
-// parser. Behaviour matches the console inline renderer.
+//
+// Standalone helper (no receiver) so unit tests + multiple adapters
+// can reuse it without bringing the session manager up.
 func BuildInquiryReply(user protocol.ParticipantInfo, rootSessionID string, pend *PendingInquiry, line string) (*protocol.InquiryResponse, error) {
 	payload := protocol.InquiryResponsePayload{
 		RequestID:       pend.RequestID,

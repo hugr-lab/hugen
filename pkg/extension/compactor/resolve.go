@@ -87,6 +87,9 @@ func applyTierOverride(cfg *Config, t TierOverride) {
 	if t.DigestMaxTokens != nil {
 		cfg.DigestMaxTokens = *t.DigestMaxTokens
 	}
+	if t.KeptVerbatimMax != nil {
+		cfg.KeptVerbatimMax = *t.KeptVerbatimMax
+	}
 	if t.MinTurnGap != nil {
 		cfg.MinTurnGap = *t.MinTurnGap
 	}
@@ -121,6 +124,9 @@ func applyOverrideSpec(cfg *Config, o OverrideSpec) {
 	}
 	if o.DigestMaxTokens != nil {
 		cfg.DigestMaxTokens = *o.DigestMaxTokens
+	}
+	if o.KeptVerbatimMax != nil {
+		cfg.KeptVerbatimMax = *o.KeptVerbatimMax
 	}
 	if o.MinTurnGap != nil {
 		cfg.MinTurnGap = *o.MinTurnGap

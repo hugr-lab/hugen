@@ -183,6 +183,12 @@ type CompactorConfig struct {
 	// 0 / absent ⇒ runtime default.
 	DigestMaxTokens int `mapstructure:"digest_max_tokens" yaml:"digest_max_tokens,omitempty"`
 
+	// KeptVerbatimMax caps the number of entries the digest's
+	// KeptVerbatim slice carries across iterations. Oldest entries
+	// drop FIFO past the cap (the first user_message is pinned).
+	// 0 / absent ⇒ runtime default.
+	KeptVerbatimMax int `mapstructure:"kept_verbatim_max" yaml:"kept_verbatim_max,omitempty"`
+
 	// MinTurnGap is the anti-thrash gate. 0 / absent ⇒ runtime
 	// default.
 	MinTurnGap int `mapstructure:"min_turn_gap" yaml:"min_turn_gap,omitempty"`
@@ -244,6 +250,7 @@ type CompactorTier struct {
 	MaxTokens            *int     `mapstructure:"max_tokens"            yaml:"max_tokens,omitempty"`
 	PreservedRecentTurns *int     `mapstructure:"preserved_recent_turns" yaml:"preserved_recent_turns,omitempty"`
 	DigestMaxTokens      *int     `mapstructure:"digest_max_tokens"     yaml:"digest_max_tokens,omitempty"`
+	KeptVerbatimMax      *int     `mapstructure:"kept_verbatim_max"     yaml:"kept_verbatim_max,omitempty"`
 	MinTurnGap           *int     `mapstructure:"min_turn_gap"          yaml:"min_turn_gap,omitempty"`
 	LLMTimeoutMs         *int     `mapstructure:"llm_timeout_ms"        yaml:"llm_timeout_ms,omitempty"`
 	LLMIntent            *string  `mapstructure:"llm_intent"            yaml:"llm_intent,omitempty"`

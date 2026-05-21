@@ -525,9 +525,11 @@ func TestCompactor_HardFallback(t *testing.T) {
 // TestCompactor_PureChat_NoLLMCall verifies the pure-chat
 // short-circuit: when the compactable range carries only
 // user_message + agent_message rows (no tool calls, no
-// inquiries), the summariser LLM call is skipped entirely
-// and the SummaryBlock carries an informational placeholder
-// pointing at the verbatim turns. Phase 5.2 δ dogfood follow-up.
+// inquiries), the summariser LLM call is skipped entirely AND
+// no SummaryBlock is appended (KeptVerbatim alone carries every
+// turn already). Phase 5.2 δ dogfood follow-up + ζ review-fix:
+// the parenthetical bookkeeping marker is dropped from Block C
+// so the model never sees a "(no tool-call sequence...)" note.
 func TestCompactor_PureChat_NoLLMCall(t *testing.T) {
 	const turns = 60
 	startSeq := 1
@@ -566,11 +568,8 @@ func TestCompactor_PureChat_NoLLMCall(t *testing.T) {
 		t.Fatalf("digest_set frames = %d, want 1 (digest still emits with placeholder)", got)
 	}
 	d := extractLatestDigest(t, st)
-	if len(d.SummaryBlocks) != 1 {
-		t.Fatalf("summary blocks = %d, want 1", len(d.SummaryBlocks))
-	}
-	if !strings.Contains(d.SummaryBlocks[0].Text, "no tool-call sequence") {
-		t.Fatalf("placeholder text = %q, want 'no tool-call sequence' marker", d.SummaryBlocks[0].Text)
+	if len(d.SummaryBlocks) != 0 {
+		t.Fatalf("summary blocks = %d, want 0 (pure-chat skips the SummaryBlock append)", len(d.SummaryBlocks))
 	}
 	if len(d.KeptVerbatim) == 0 {
 		t.Fatalf("KeptVerbatim empty; want populated from user/agent turns")

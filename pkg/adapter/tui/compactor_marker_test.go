@@ -12,11 +12,12 @@ import (
 // digestPayloadShape mirrors pkg/extension/compactor.DigestPayload
 // just enough to round-trip a digest_set body in TUI tests.
 type digestPayloadShape struct {
-	Version       int              `json:"version"`
-	Iteration     int              `json:"iteration"`
-	CutoffSeq     int64            `json:"cutoff_seq"`
-	KeptVerbatim  []map[string]any `json:"kept_verbatim,omitempty"`
-	SummaryBlocks []map[string]any `json:"summary_blocks,omitempty"`
+	Version         int              `json:"version"`
+	Iteration       int              `json:"iteration"`
+	CutoffSeq       int64            `json:"cutoff_seq"`
+	KeptVerbatim    []map[string]any `json:"kept_verbatim,omitempty"`
+	SummaryBlocks   []map[string]any `json:"summary_blocks,omitempty"`
+	UIMarkerEnabled *bool            `json:"ui_marker_enabled,omitempty"`
 }
 
 func mustMarshalDigest(t *testing.T, v any) json.RawMessage {
@@ -164,41 +165,28 @@ func TestTab_HandleDigestSetFrame_AppendsSystemSpan(t *testing.T) {
 	}
 }
 
-// TestTab_HandleDigestSetFrame_SuppressedAfterStatusOff verifies
-// the live-update path: an incoming liveview/status frame carrying
-// ui_marker_enabled=false flips the tab into suppression mode, so
-// subsequent digest_set frames append nothing.
-func TestTab_HandleDigestSetFrame_SuppressedAfterStatusOff(t *testing.T) {
+// TestTab_HandleDigestSetFrame_SuppressedByPayload verifies the
+// authoritative path: the digest_set payload itself carries
+// `ui_marker_enabled: false` (operator set
+// `compactor.ui_marker.enabled: false` in agent_config.yaml; the
+// compactor extension echoes the resolved flag into every
+// DigestPayload). The marker must NOT appear in the chat buffer,
+// independent of any liveview/status state — the payload is the
+// single source of truth so the very first compaction respects
+// the operator preference without a status round trip.
+func TestTab_HandleDigestSetFrame_SuppressedByPayload(t *testing.T) {
 	tb := newTab("ses-suppressed", protocol.ParticipantInfo{ID: "u"},
 		func(protocol.Frame) error { return nil }, slog.Default())
 	tb.applyGeometry(80, 20, 100)
 
-	// Status frame disabling the marker.
-	statusBody := map[string]any{
-		"session_id": "ses-suppressed",
-		"depth":      0,
-		"extensions": map[string]any{
-			"compactor": map[string]any{"ui_marker_enabled": false},
-		},
-	}
-	statusFrame := protocol.NewExtensionFrame(
-		"ses-suppressed", protocol.ParticipantInfo{},
-		"liveview", protocol.CategoryMarker, "status",
-		mustMarshalDigest(t, statusBody),
-	)
-	tb.handleFrame(statusFrame)
-
-	if tb.compactorMarkerEnabled {
-		t.Fatalf("status frame did not flip compactorMarkerEnabled to false")
-	}
-
-	// Now a digest_set lands — the marker must NOT appear in the chat buffer.
+	falseVal := false
 	payload := digestPayloadShape{
 		Version:   1,
 		Iteration: 1,
 		KeptVerbatim: []map[string]any{
 			{"kind": "user_message", "seq": 1, "text": "hi"},
 		},
+		UIMarkerEnabled: &falseVal,
 	}
 	digestFrame := protocol.NewExtensionFrame(
 		"ses-suppressed", protocol.ParticipantInfo{},

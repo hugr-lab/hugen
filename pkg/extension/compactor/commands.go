@@ -141,17 +141,47 @@ func (e *Extension) cmdCompactorReset(ctx context.Context, state extension.Sessi
 // debug. Returns a status-style system_message once the
 // pipeline returns (success or hard-fallback marker), so the
 // user sees that the request was honoured.
+//
+// When the pipeline short-circuits (e.g., not enough turns past
+// the preserved window yet) the iteration counter doesn't move;
+// we emit a dedicated system_message explaining why instead of
+// the regular status line so the user isn't left wondering why
+// nothing happened.
 func (e *Extension) cmdCompactorCompact(ctx context.Context, state extension.SessionState, env extension.CommandContext) ([]protocol.Frame, error) {
 	sessionID := state.SessionID()
+	s := FromState(state)
+	beforeIter := 0
+	if s != nil {
+		if d := s.Digest(); d != nil {
+			beforeIter = d.Iteration
+		}
+	}
 	if err := e.compact(ctx, state); err != nil {
 		return []protocol.Frame{
 			protocol.NewError(sessionID, env.AgentAuthor, "compactor_compact",
 				"compactor: force-compact failed: "+err.Error(), true),
 		}, nil
 	}
+	afterIter := 0
+	if s != nil {
+		if d := s.Digest(); d != nil {
+			afterIter = d.Iteration
+		}
+	}
+	if afterIter == beforeIter && s != nil {
+		cfg := e.resolveTierConfig(ctx, state)
+		boundary := s.BoundaryCount()
+		reason := "compactor: force-compact ran but produced no digest"
+		if boundary <= cfg.PreservedRecentTurns {
+			reason = fmt.Sprintf(
+				"compactor: force-compact no-op — %d boundaries observed; need more than preserved_recent_turns (%d)",
+				boundary, cfg.PreservedRecentTurns)
+		}
+		return []protocol.Frame{
+			protocol.NewSystemMessage(sessionID, env.AgentAuthor, "compactor_compact", reason),
+		}, nil
+	}
 	// Re-render status so the user immediately sees the new
-	// iteration / cutoff line. cmdCompactorStatus already
-	// covers the no-digest edge case if the pipeline short-
-	// circuited (e.g. nothing new to compact yet).
+	// iteration / cutoff line.
 	return e.cmdCompactorStatus(ctx, state, env)
 }

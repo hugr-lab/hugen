@@ -29,10 +29,14 @@ func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState,
 	case *protocol.UserMessage:
 		s.appendBoundary(seq, estimateTokens(f.Payload.Text))
 	case *protocol.AgentMessage:
-		// Only the consolidated final agent_message persists
-		// to session_events (streaming chunks are outbox-only).
-		// We track the consolidated text token cost.
-		if f.Payload.Final && f.Payload.Consolidated {
+		// Streaming chunks (Consolidated=false) are outbox-only and
+		// never persist — they don't contribute to the model's next
+		// prompt budget. EVERY consolidated agent_message persists:
+		// per-iteration consolidations (Final=false) ride into the
+		// next iteration's prompt as assistant context, and the
+		// final turn consolidation (Final=true) likewise. Both must
+		// be counted toward the budget limb.
+		if f.Payload.Consolidated {
 			s.addTokens(estimateTokens(f.Payload.Text))
 		}
 	case *protocol.ToolResult:

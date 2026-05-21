@@ -10,7 +10,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/hugr-lab/hugen/pkg/adapter/console"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -282,8 +281,8 @@ func (t *tab) historyNext() bool {
 // the modal-only intent is a bare `/mission`.
 func (t *tab) dispatchUserInput(text string) error {
 	var f protocol.Frame
-	if console.IsSlashCommand(text) {
-		pc := console.ParseSlashCommand(text)
+	if IsSlashCommand(text) {
+		pc := ParseSlashCommand(text)
 		if pc.Name == "end" {
 			t.statusLine = "closing…"
 			t.closing = true
@@ -436,16 +435,15 @@ func (t *tab) dispatchInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 	return false, nil
 }
 
-// submitInquiryReply builds the InquiryResponse via the shared
-// console helper and submits it through the host. Clears the modal
-// on success.
+// submitInquiryReply builds the InquiryResponse via BuildInquiryReply
+// and submits it through the host. Clears the modal on success.
 func (t *tab) submitInquiryReply(pend *inquiryState, line string) error {
-	pi := &console.PendingInquiry{
+	pi := &PendingInquiry{
 		RequestID:       pend.req.RequestID,
 		CallerSessionID: pend.req.CallerSessionID,
 		Kind:            pend.req.Type,
 	}
-	resp, err := console.BuildInquiryReply(t.user, t.sessionID, pi, line)
+	resp, err := BuildInquiryReply(t.user, t.sessionID, pi, line)
 	if err != nil {
 		return err
 	}

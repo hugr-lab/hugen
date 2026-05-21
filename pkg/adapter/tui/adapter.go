@@ -1,7 +1,7 @@
-// Package tui implements the Bubble Tea TUI adapter — a rich
-// reference client on top of the phase-5.1b liveview surface.
-// Slice 1 ships chat-only parity with pkg/adapter/console for a
-// single root session.
+// Package tui implements the Bubble Tea TUI adapter — the default
+// interactive renderer on top of the phase-5.1b liveview surface.
+// Owns the chat viewport, slash-command parsing, HITL inquiry
+// modal, and the per-root tab strip.
 package tui
 
 import (

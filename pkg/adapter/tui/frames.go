@@ -147,16 +147,15 @@ func (t *tab) handleFrame(f protocol.Frame) tea.Cmd {
 			// Phase 5.2 δ — inline transcript marker drawn at the
 			// digest cutoff boundary. The marker is informational
 			// only; the full transcript is still rendered. Spec
-			// §11.7. Honour the operator-resolved
-			// ui_marker_enabled flag (default true) so an
-			// operator who set ui_marker.enabled=false sees a
-			// clean transcript even though the digest still
-			// applies to the model prompt.
-			if t.compactorMarkerEnabled {
-				if line := formatCompactorMarker(v.Payload.Data); line != "" {
-					t.chat.appendSystem(line)
-					t.refreshChat()
-				}
+			// §11.7. The operator-resolved ui_marker_enabled flag
+			// rides the digest_set payload itself, so the very
+			// first compaction respects an `ui_marker.enabled:
+			// false` operator preference without waiting for a
+			// liveview/status round trip. formatCompactorMarker
+			// returns "" when the flag is false → marker dropped.
+			if line := formatCompactorMarker(v.Payload.Data); line != "" {
+				t.chat.appendSystem(line)
+				t.refreshChat()
 			}
 		}
 	case *protocol.InquiryRequest:
@@ -511,24 +510,34 @@ var (
 // formatCompactorMarker renders the inline transcript marker the
 // TUI inserts at the cutoff_seq boundary when a
 // `compactor/digest_set` ExtensionFrame lands. Returns "" on
-// decode failure so the caller skips appending. Phase 5.2 δ.
+// decode failure or when the payload explicitly disables the
+// marker (operator set `compactor.ui_marker.enabled: false` —
+// the flag rides the digest_set frame itself so the first
+// compaction respects the operator preference without waiting
+// for a liveview/status round trip).
 //
 // The data payload is the raw DigestPayload JSON (see
 // pkg/extension/compactor.DigestPayload). Field names: iteration,
-// kept_verbatim, summary_blocks. The kept-verbatim count is the
-// user-visible "msgs" number on the marker line; a digest with
-// only summary blocks (e.g. cap-driven collapse output) falls back
-// to the block count so the marker never shows "0 msgs".
+// kept_verbatim, summary_blocks, ui_marker_enabled. The
+// kept-verbatim count is the user-visible "msgs" number on the
+// marker line; a digest with only summary blocks (e.g. cap-driven
+// collapse output) falls back to the block count so the marker
+// never shows "0 msgs". A missing `ui_marker_enabled` field
+// (pre-this-change digest_set rows on resume) defaults to true.
 func formatCompactorMarker(data json.RawMessage) string {
 	if len(data) == 0 {
 		return ""
 	}
 	var p struct {
-		Iteration     int               `json:"iteration"`
-		KeptVerbatim  []json.RawMessage `json:"kept_verbatim"`
-		SummaryBlocks []json.RawMessage `json:"summary_blocks"`
+		Iteration       int               `json:"iteration"`
+		KeptVerbatim    []json.RawMessage `json:"kept_verbatim"`
+		SummaryBlocks   []json.RawMessage `json:"summary_blocks"`
+		UIMarkerEnabled *bool             `json:"ui_marker_enabled"`
 	}
 	if err := json.Unmarshal(data, &p); err != nil {
+		return ""
+	}
+	if p.UIMarkerEnabled != nil && !*p.UIMarkerEnabled {
 		return ""
 	}
 	count := len(p.KeptVerbatim)

@@ -94,9 +94,9 @@ func TestPrefixMultiline_KeepsNewlinesAndIndents(t *testing.T) {
 }
 
 func TestParseSlashFrame_DispatchPath(t *testing.T) {
-	// Sanity: console.IsSlashCommand + ParseSlashCommand contract
-	// powers model.dispatchUserInput. Direct call ensures the
-	// import + signatures remain wired.
+	// Sanity: IsSlashCommand + ParseSlashCommand contract powers
+	// model.dispatchUserInput. Direct call ensures the signatures
+	// remain wired.
 	m, submitted := newTestModel(t)
 	if err := m.currentTab().dispatchUserInput("/end now"); err != nil {
 		t.Fatalf("dispatchUserInput slash returned err: %v", err)

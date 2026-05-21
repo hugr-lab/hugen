@@ -15,7 +15,7 @@ internal note.
 
 {{if .SummaryBlocks -}}
 ### Intermediate work (chronological)
-{{range .SummaryBlocks}}
+{{range .SummaryBlocks -}}
 **[iter {{.Iter}} · seq {{.From}}–{{.To}}]**
 {{.Text}}
 {{end}}
@@ -24,6 +24,6 @@ internal note.
 {{if .SubagentRefs -}}
 ### Subagent results referenced earlier
 {{range .SubagentRefs -}}
-- session={{.SessionID}} reason={{.Reason}}{{if .Wave}} wave={{.Wave}}{{end}}{{if .Role}} role={{.Role}}{{end}}
+- session={{.SessionID}} reason={{.Reason}}
 {{end}}
 {{end -}}

@@ -41,6 +41,9 @@ func BuildConfig(in config.CompactorConfig, logger *slog.Logger) Config {
 	if in.DigestMaxTokens > 0 {
 		cfg.DigestMaxTokens = in.DigestMaxTokens
 	}
+	if in.KeptVerbatimMax > 0 {
+		cfg.KeptVerbatimMax = in.KeptVerbatimMax
+	}
 	if in.MinTurnGap > 0 {
 		cfg.MinTurnGap = in.MinTurnGap
 	}
@@ -96,6 +99,7 @@ func projectTierOverride(t config.CompactorTier, logger *slog.Logger) TierOverri
 		MaxTokens:            t.MaxTokens,
 		PreservedRecentTurns: t.PreservedRecentTurns,
 		DigestMaxTokens:      t.DigestMaxTokens,
+		KeptVerbatimMax:      t.KeptVerbatimMax,
 		MinTurnGap:           t.MinTurnGap,
 		TokenBudgetRatio:     t.TokenBudgetRatio,
 	}
@@ -164,6 +168,7 @@ func projectCompactorOverride(in *skillpkg.CompactorOverride) *OverrideSpec {
 		MaxTokens:            in.MaxTokens,
 		PreservedRecentTurns: in.PreservedRecentTurns,
 		DigestMaxTokens:      in.DigestMaxTokens,
+		KeptVerbatimMax:      in.KeptVerbatimMax,
 		MinTurnGap:           in.MinTurnGap,
 		LLMTimeoutMs:         in.LLMTimeoutMs,
 		LLMIntent:            in.LLMIntent,
