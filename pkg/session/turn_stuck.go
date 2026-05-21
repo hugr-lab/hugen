@@ -5,10 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"time"
 
-	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -305,21 +303,18 @@ func (s *Session) evaluateNoProgress(runCtx context.Context) {
 }
 
 // injectStuckNudge emits a system_message{kind:"stuck_nudge"} Frame
-// and folds the rendered line into s.history so the model sees the
-// nudge on its next prompt build. Mirrors maybeInjectSoftWarning's
-// semantics — local-only, never propagated to the parent (spec §11).
+// so the model sees the nudge on its next prompt build. Mirrors
+// maybeInjectSoftWarning's semantics — local-only, never
+// propagated to the parent (spec §11). η.3: the compactor's
+// FrameObserver folds the emitted frame into the owned history
+// cache.
 func (s *Session) injectStuckNudge(runCtx context.Context, content string) {
 	frame := protocol.NewSystemMessage(s.id, s.agent.Participant(),
 		protocol.SystemMessageStuckNudge, content)
 	if err := s.emit(runCtx, frame); err != nil {
 		s.logger.Warn("session: emit stuck_nudge",
 			"session", s.id, "err", err)
-		return
 	}
-	s.history = append(s.history, model.Message{
-		Role:    model.RoleUser,
-		Content: fmt.Sprintf("[system: %s] %s", protocol.SystemMessageStuckNudge, content),
-	})
 }
 
 // toolErrorCode extracts the `error.code` string from a tool_result

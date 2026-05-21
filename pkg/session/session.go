@@ -13,6 +13,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/extension/compactor"
 	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/prompts"
@@ -145,10 +146,11 @@ type Session struct {
 	childWG sync.WaitGroup
 
 	// pendingInbound buffers RouteBuffered Frames received mid-turn.
-	// Drained at every turn boundary into s.history. C5 buffers
-	// non-Cancel/non-SlashCommand frames received while a turn is in
-	// flight; C6 will replace the inline routing with a kindRoutes
-	// table.
+	// Drained at every turn boundary: each frame is emitted so the
+	// compactor's FrameObserver folds it into the owned history
+	// cache. C5 buffers non-Cancel/non-SlashCommand frames received
+	// while a turn is in flight; C6 will replace the inline routing
+	// with a kindRoutes table.
 	pendingInbound []protocol.Frame
 
 	// activeToolFeed is the slot a phase-4 blocking system tool (e.g.
@@ -171,7 +173,6 @@ type Session struct {
 	// Materialisation state for restart-resume (Phase 4 fills this in).
 	materialised atomic.Bool
 	matOnce      sync.Once
-	history      []model.Message
 
 	// stuck is the in-memory rising-edge state for the three stuck-
 	// detection heuristics (phase-4-spec §8.3). Owned by Run; mutated
@@ -258,8 +259,9 @@ type Session struct {
 
 	// pendingAsyncSummary is the auto-summary trigger flag. Set when
 	// a SubagentResult{AsyncNotify} arrives at this session (root)
-	// — either folded into s.history inline (idle path) or queued to
-	// pendingInbound (busy path). Checked at end-of-turn boundary and
+	// — either emitted directly (idle path; compactor folds into the
+	// owned history cache) or queued to pendingInbound (busy path).
+	// Checked at end-of-turn boundary and
 	// at the end of the idle-fold routeInbound branch; on swap-to-
 	// false the runtime kicks a system-initiated summary turn so the
 	// model presents the mission's result to the user without
@@ -1439,25 +1441,13 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 			s.pendingAsyncSummary.Store(true)
 		}
 		if s.turnState == nil {
-			// Phase 5.1c.cancel-ux follow-up — fold inter-turn
-			// frames that arrive while the session is idle into
-			// s.history the same way drainPendingInbound does at
-			// turn boundaries. Symmetric scope: any frame the
-			// visibility filter accepts (SubagentResult,
-			// SystemMessage, SubagentStarted, …) — NOT a
-			// SubagentResult-specific path. Without this an async
-			// mission's SubagentResult is persisted + visible in
-			// the TUI but the next prompt build (buildMessages →
-			// s.history) is missing the [system:subagent_result]
-			// inject, so the model has to fish for the result via
-			// notify_subagent — which fails with `not_a_child`
-			// because handleSubagentResult already deregistered
-			// the child.
-			if s.deps != nil {
-				if msg, ok := projectFrameToHistory(s.deps.Prompts, f); ok {
-					s.history = append(s.history, msg)
-				}
-			}
+			// Phase 5.1c.cancel-ux follow-up — inter-turn frames
+			// arriving while the session is idle still need to
+			// project into history so the next prompt build sees
+			// them. η.3: emit notifies the compactor's
+			// FrameObserver which folds allow-listed frames into
+			// the owned history cache automatically; no parallel
+			// append needed here.
 			if err := s.emit(ctx, f); err != nil {
 				return err
 			}
@@ -1646,30 +1636,17 @@ func (s *Session) stuckDetectionEnabled(ctx context.Context) bool {
 	return !s.gatherToolPolicy(ctx).DisableStuckNudges
 }
 
-// useHistoryOwner is the phase 5.2.η feature flag. η.2 flipped
-// this to true — Session.buildMessages now reads from the
-// HistoryOwner extension projection. The legacy [Session.history]
-// slice survives one more step (still written by turn loop +
-// drain paths) to keep rollbackTurn happy and to make any
-// regression revertable without a re-flip. η.3 deletes the
-// legacy slice + the flag together.
-const useHistoryOwner = true
-
 // buildMessages prepends the per-Turn system message (agent
 // constitution + concatenated skill instructions) to the chat
 // history. Rebuilt every Turn because skill bindings can change
 // between Turns (skill_load / skill_unload during a session). The
-// returned slice is a fresh copy — callers can mutate it freely
-// without touching s.history.
+// returned slice is a fresh copy — callers can mutate it freely.
 //
-// η.1 wires the HistoryOwner read path behind [useHistoryOwner].
-// Default behaviour is unchanged; the alternate path is exercised
-// only by tests until η.2 flips the constant.
+// η.3 read path: the model-visible history is owned by the
+// [extension.HistoryOwner] (compactor); runtime boot asserts
+// exactly one owner is registered.
 func (s *Session) buildMessages(ctx context.Context) []model.Message {
-	hist := s.history
-	if useHistoryOwner {
-		hist = s.ownedHistory(ctx)
-	}
+	hist := s.ownedHistory(ctx)
 	out := make([]model.Message, 0, len(hist)+1)
 	if sys := s.systemPrompt(ctx); sys != "" {
 		out = append(out, model.Message{Role: model.RoleSystem, Content: sys})
@@ -1682,7 +1659,8 @@ func (s *Session) buildMessages(ctx context.Context) []model.Message {
 // from the first [extension.HistoryOwner]. Boot-time uniqueness
 // is asserted in pkg/runtime/extensions.go so the "first" choice
 // is always the singular owner. Returns nil when no owner is
-// registered — callers fall back to the legacy s.history.
+// registered — fixture sessions without a compactor wired stay
+// correct.
 func (s *Session) ownedHistory(ctx context.Context) []model.Message {
 	if s.deps == nil {
 		return nil
@@ -1693,6 +1671,24 @@ func (s *Session) ownedHistory(ctx context.Context) []model.Message {
 			continue
 		}
 		return owner.ProvideHistory(ctx, s)
+	}
+	return nil
+}
+
+// compactorHistoryOwner returns the [*compactor.CompactorState]
+// handle attached to this session, or nil when the compactor
+// extension is not wired (fixture sessions). Used by
+// [Session.rollbackTurn] to trim cache entries past the turn's
+// seq baseline.
+func (s *Session) compactorHistoryOwner() *compactor.CompactorState {
+	if s.deps == nil {
+		return nil
+	}
+	for _, ext := range s.deps.Extensions {
+		if _, ok := ext.(extension.HistoryOwner); !ok {
+			continue
+		}
+		return compactor.FromState(s)
 	}
 	return nil
 }

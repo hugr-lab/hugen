@@ -108,21 +108,24 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		}
 	}
 
-	// Phase 5.2.η — at most one HistoryOwner per agent. Compactor
-	// is the canonical owner; a duplicate registration would race
-	// on the same per-session [Session.history] read path once η.2
-	// flips the switch. The check fires at boot (not on every
-	// session creation) because the extension slice is fixed for
-	// the runtime's lifetime. η.3 tightens this to "exactly one"
-	// — η.1 leaves room for ad-hoc fixtures that may omit the
-	// compactor.
+	// Phase 5.2.η — exactly one HistoryOwner per agent. Compactor
+	// is the canonical owner; missing or duplicated registration is
+	// a configuration error (Session.buildMessages reads through
+	// the singular owner each turn). η.3 tightens η.1's "at most
+	// one" to "exactly one" now that the legacy s.history slice is
+	// gone — there is no fallback.
 	var owners []string
 	for _, ext := range exts {
 		if _, ok := ext.(extension.HistoryOwner); ok {
 			owners = append(owners, ext.Name())
 		}
 	}
-	if len(owners) > 1 {
+	switch len(owners) {
+	case 0:
+		return fmt.Errorf("phase 5.2.η: no HistoryOwner extension registered; runtime cannot build model prompts")
+	case 1:
+		// expected
+	default:
 		return fmt.Errorf("phase 5.2.η: multiple HistoryOwner extensions registered: %v", owners)
 	}
 

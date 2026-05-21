@@ -325,6 +325,29 @@ func (s *CompactorState) pruneWindow(limit int) {
 	s.history = keep
 }
 
+// RollbackTo drops history entries with Seq > seq. Used by
+// [Session.rollbackTurn] (η.3) to undo cache appends that
+// happened after a /cancel or stream error during the
+// just-aborted turn. The user message itself (its Seq equals
+// the rollback baseline) is preserved by intent — see η spec
+// §6 for the cancel-semantics rationale.
+func (s *CompactorState) RollbackTo(seq int64) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if len(s.history) == 0 {
+		return
+	}
+	keep := s.history[:0]
+	for _, ent := range s.history {
+		if ent.Seq <= seq {
+			keep = append(keep, ent)
+		}
+	}
+	out := make([]HistoryEntry, len(keep))
+	copy(out, keep)
+	s.history = out
+}
+
 // pruneToCutoff drops entries with Seq <= cutoff. Used by
 // [StrategySummarize]; called from [Extension.compactWithConfig]
 // after a successful digest_set emit so the live history matches
