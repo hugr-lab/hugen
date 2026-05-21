@@ -84,12 +84,8 @@ func TestResolveHardCeiling_DefaultsToTwoTimesSoft(t *testing.T) {
 	}
 }
 
-// TestStuckDetectionEnabled_DefaultsTrue verifies a session with no
-// SkillManager (the no-skill deployment path) keeps stuck detection
-// active by default — operators opt out via skill manifest.
-func TestStuckDetectionEnabled_DefaultsTrue(t *testing.T) {
-	s := &Session{}
-	if !s.stuckDetectionEnabled(context.Background()) {
-		t.Errorf("stuckDetectionEnabled = false on no-skill session, want true")
-	}
-}
+// Phase 5.2.η.4 — stuck detection moved to
+// `pkg/extension/stuckdetector`; the session no longer exposes
+// `stuckDetectionEnabled`. The equivalent "default ON when no
+// ToolPolicyAdvisor opts out" check lives in the extension's
+// own test suite (see `disabledByPolicy`).

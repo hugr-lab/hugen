@@ -53,6 +53,8 @@ func (s *fakeState) Emit(_ context.Context, _ protocol.Frame) error           { 
 func (s *fakeState) IsClosed() bool                                           { return false }
 func (s *fakeState) Submit(_ context.Context, _ protocol.Frame) <-chan struct{} { return nil }
 func (s *fakeState) OutboxOnly(_ context.Context, _ protocol.Frame) error     { return nil }
+func (s *fakeState) ToolCatalogTokens(_ context.Context) int                  { return 0 }
+func (s *fakeState) SessionUsage() *protocol.TokenUsage                       { return nil }
 func (s *fakeState) Extensions() []extension.Extension                        { return nil }
 func (s *fakeState) RequestInquiry(_ context.Context, _ protocol.InquiryRequestPayload) (*protocol.InquiryResponse, error) {
 	return nil, nil

@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
@@ -14,11 +13,14 @@ import (
 // handleModelEvent / handleToolResult, retired in advanceOrFinish or
 // rollbackTurn. Single-goroutine ownership (Session.Run) — no locks.
 type turnState struct {
-	// historyBaseline marks len(s.history) at the moment startTurn ran,
-	// AFTER the user message was appended. Roll-back paths trim
-	// s.history back to baseline-1 (excluding the user message) so the
-	// next attempt doesn't see two consecutive user-role messages.
-	historyBaseline int
+	// seqBaseline is the per-session seq of the user message that
+	// started this turn (assigned by emit). Roll-back paths trim
+	// the compactor-owned history cache to entries with Seq ≤
+	// baseline so any consolidated assistant / tool_result rows
+	// the cancelled turn emitted disappear from the model's
+	// next view. The user message itself is preserved — η spec
+	// §6 captures the cancel-semantics rationale.
+	seqBaseline int64
 
 	// iter is the current model→tools→model iteration index (0-based).
 	// cap is the per-turn soft ceiling resolved once at startTurn
@@ -45,6 +47,14 @@ type turnState struct {
 	agentSeq         int
 	reasoningSeq     int
 
+	// turnUsage aggregates each iter's model.Usage over the turn.
+	// Stamped on the Final=true Consolidated AgentMessage so the
+	// outbox carries the turn's total cost. NOT reset between
+	// iters — it's per-turn, not per-iter. Folded into
+	// Session.cumulativeUsage at the same emit. Phase 5.2
+	// (context-budget observability).
+	turnUsage protocol.TokenUsage
+
 	// Tool-result tracking for the current iteration. Pending = call
 	// dispatched but result not yet seen on toolResults; len==0 means
 	// "all tool_results matched" and the loop can build the next prompt.
@@ -56,7 +66,7 @@ type turnState struct {
 	streamErr error
 
 	// assistantFolded marks "the assistant message for this iteration
-	// has been appended to s.history". advanceOrFinish runs at every
+	// has been appended to the owned history cache". advanceOrFinish runs at every
 	// turn boundary; without this flag a re-entry after the tool
 	// dispatcher exits would re-fold the same assistant message and
 	// re-dispatch the same tool calls in a tight loop. Reset to false
@@ -123,7 +133,7 @@ type ToolFeed struct {
 // drive everything else through s.modelChunks / s.toolResults.
 //
 //   - The user message is persisted via emit (transcript-visible).
-//   - Lazy materialise hydrates s.history if this is the first turn
+//   - Lazy materialise hydrates extension state if this is the first turn
 //     after a process restart.
 //   - A pending /model use marker is emitted before the first prompt.
 //   - The model is resolved; on failure an Error frame surfaces and
@@ -179,14 +189,9 @@ func (s *Session) startTurn(runCtx context.Context, f *protocol.UserMessage) {
 	s.turnCtx = turnCtx
 	s.turnCancel = turnCancel
 
-	historyBaseline := len(s.history)
-	s.history = append(s.history, model.Message{
-		Role:    model.RoleUser,
-		Content: f.Payload.Text,
-	})
 	softCap := s.resolveToolIterCap(runCtx)
 	s.turnState = &turnState{
-		historyBaseline:  historyBaseline,
+		seqBaseline:      int64(f.Seq()),
 		cap:              softCap,
 		capHard:          s.resolveHardCeiling(runCtx, softCap),
 		mdl:              mdl,
@@ -343,6 +348,28 @@ func (s *Session) applyChunk(runCtx context.Context, chunk model.Chunk) {
 		if chunk.ThoughtSignature != "" {
 			st.thoughtSignature = chunk.ThoughtSignature
 		}
+		// Phase 5.2 (context-budget observability) — fold the
+		// final chunk's Usage block (when the provider populates
+		// it) eagerly into BOTH the per-turn accumulator and
+		// the session-cumulative counter. Eager fold means a
+		// /cancel or stream error AFTER this iter completed
+		// still counts those tokens (the provider already
+		// billed for them); only iters whose stream was
+		// interrupted BEFORE the final chunk landed escape
+		// accounting — and there's no Usage record to fold
+		// for those anyway.
+		//
+		// dogfood 2026-05-21 ε.2 follow-up: previously the
+		// fold happened at Final=true Consolidated emit only,
+		// which dropped multi-iter turns' usage on cancel.
+		if chunk.Usage != nil {
+			st.turnUsage.PromptTokens += chunk.Usage.PromptTokens
+			st.turnUsage.CompletionTokens += chunk.Usage.CompletionTokens
+			s.foldSessionUsage(protocol.TokenUsage{
+				PromptTokens:     chunk.Usage.PromptTokens,
+				CompletionTokens: chunk.Usage.CompletionTokens,
+			})
+		}
 	}
 }
 
@@ -373,18 +400,19 @@ func (s *Session) runToolDispatcher(turnCtx, runCtx context.Context, calls []mod
 	}
 }
 
-// handleToolResult records one tool_result against turnState.pending,
-// appending the tool message to s.history so the next iteration can
-// feed it back to the model. When pending empties, the next iteration
-// kicks off automatically via advanceOrFinish.
+// handleToolResult records one tool_result against turnState.pending.
+// The dispatcher already emitted the tool_result frame and the
+// compactor's FrameObserver folded it into the owned history
+// cache — so the next iteration's prompt build sees it. When
+// pending empties, the next iteration kicks off automatically
+// via advanceOrFinish.
 func (s *Session) handleToolResult(runCtx context.Context, ev toolResultEvent) {
 	_ = runCtx
 	st := s.turnState
 	if st == nil {
 		return
 	}
-	tc, ok := st.pendingToolCalls[ev.callID]
-	if !ok {
+	if _, ok := st.pendingToolCalls[ev.callID]; !ok {
 		// Spurious result (cancelled tool, race). Best-effort drop.
 		return
 	}
@@ -396,12 +424,12 @@ func (s *Session) handleToolResult(runCtx context.Context, ev toolResultEvent) {
 	// from "spawn_wave hit one transient infrastructure error".
 	// Run-goroutine-only access; the dispatcher already exited the
 	// per-call critical section by the time this event arrives.
-	s.stuckObserveResult(toolErrorCode(ev.errored, ev.payload))
-	s.history = append(s.history, model.Message{
-		Role:       model.RoleTool,
-		Content:    ev.payload,
-		ToolCallID: tc.ID,
-	})
+	// η.3 — the tool_result frame was already emitted by the
+	// dispatcher (session.go:emitToolResult); the compactor's
+	// OnFrameEmit folded it into the owned history cache as a
+	// RoleTool entry. η.4 — the stuckdetector extension's
+	// OnFrameEmit observes the same emit and annotates its
+	// trailing window. Nothing further to do here.
 }
 
 // turnComplete answers the question the Run loop asks after every
@@ -423,26 +451,28 @@ func (s *Session) turnComplete() bool {
 // two stable points per iteration:
 //
 //   - Just after the model goroutine exited (st.assistantFolded ==
-//     false): fold the assistant message into s.history; if no tool
-//     calls, drain inbound + retire; otherwise dispatch tools and
-//     stay in-turn.
+//     false): emit the consolidated assistant message (FrameObserver
+//     folds it into the owned history cache); if no tool calls,
+//     drain inbound + retire; otherwise dispatch tools and stay
+//     in-turn.
 //   - Just after the tool dispatcher exited (st.assistantFolded ==
-//     true): all tool_results have landed in s.history via
-//     handleToolResult. Bump iter, drain inbound, kick off the next
+//     true): all tool_result frames were emitted by the dispatcher;
+//     the compactor's FrameObserver folded each into the owned
+//     history cache. Bump iter, drain inbound, kick off the next
 //     model iteration, or surface tool_iteration_limit if cap hit.
 //
 // Plus the failure shortcuts (any iteration):
 //
-//   - /cancel (turnCtx.Err): roll back history baseline, retire.
-//     handleCancel already wrote the Cancel frame to outbox.
+//   - /cancel (turnCtx.Err): roll back history past the seq
+//     baseline, retire. handleCancel already wrote the Cancel
+//     frame to outbox.
 //   - streamErr: roll back, surface stream_error Error frame, retire.
 //
 // pendingInbound drain order: handled at every turn boundary BEFORE
 // the next prompt is built so RouteBuffered frames reach the model's
-// next view of s.history. The drain runs each Frame through the §11
-// visibility filter (visibility.go::projectFrameToHistory) — default-
-// deny except the explicit allow-list (UserMessage, SubagentStarted,
-// SubagentResult, SystemMessage).
+// next view of the owned history cache. The drain emits each Frame —
+// the compactor's FrameObserver applies the visibility allow-list
+// (UserMessage, SubagentStarted, SubagentResult, SystemMessage).
 func (s *Session) advanceOrFinish(runCtx context.Context) {
 	st := s.turnState
 	if st == nil {
@@ -481,8 +511,9 @@ func (s *Session) advanceOrFinish(runCtx context.Context) {
 	}
 
 	// Re-entry after the tool dispatcher exited. handleToolResult has
-	// already trimmed pendingToolCalls and appended each tool message
-	// to s.history. Advance to the next iteration (or hit the ceiling).
+	// already trimmed pendingToolCalls; the compactor folded each
+	// emitted tool_result frame into the owned history cache.
+	// Advance to the next iteration (or hit the ceiling).
 	st.iter++
 
 	// Hard ceiling (phase-4-spec §8.2): terminate the session via the
@@ -507,42 +538,29 @@ func (s *Session) advanceOrFinish(runCtx context.Context) {
 
 	// Drain pendingInbound BEFORE injecting the soft warning / stuck
 	// nudges so any runtime-buffered Frames (subagent_result, …) land
-	// in s.history first; then layer the local nudges on top.
+	// in the owned history cache first; then layer the local nudges
+	// on top.
 	s.drainPendingInbound(runCtx)
 	// Soft warning (§8.1) — fired exactly once per session when the
 	// model crosses st.cap. Subsequent boundaries no-op via softWarningDone.
 	s.maybeInjectSoftWarning(runCtx)
-	// Stuck-detection rising-edge nudges (§8.3) — independent of the
-	// soft/hard caps, fire on inactive→active transitions of each
-	// pattern detector.
-	s.stuckEvaluate(runCtx)
+	// Stuck-detection rising-edge nudges (§8.3) — η.4 moved the
+	// detectors into `pkg/extension/stuckdetector`. The extension
+	// observes consolidated AgentMessage + ToolResult frames via
+	// FrameObserver and emits nudges synchronously on transition.
+	// Nothing to do here.
 
 	s.startModelIteration(runCtx)
 }
 
-// foldAssistantAndMaybeDispatch folds the model goroutine's outcome
-// into s.history and decides whether the turn ends here (no tool
-// calls) or hands off to the tool dispatcher. Sets st.assistantFolded
-// so re-entry after the dispatcher exits doesn't re-fold or
-// re-dispatch.
+// foldAssistantAndMaybeDispatch emits the consolidated assistant
+// message (FrameObserver routes it into the owned history cache)
+// and decides whether the turn ends here (no tool calls) or hands
+// off to the tool dispatcher. Sets st.assistantFolded so re-entry
+// after the dispatcher exits doesn't re-fold or re-dispatch.
 func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 	st := s.turnState
 	hasToolCalls := len(st.toolCalls) > 0
-	// Persist the assistant turn before tool results so the next
-	// model call sees well-formed history (assistant requested →
-	// tool responded). Skipping the assistant message — even when
-	// finalText is empty — confuses providers that key tool results
-	// by their tool_call antecedent (Gemma re-issues the call
-	// thinking it never happened).
-	if st.finalText != "" || hasToolCalls {
-		s.history = append(s.history, model.Message{
-			Role:             model.RoleAssistant,
-			Content:          st.finalText,
-			ToolCalls:        st.toolCalls,
-			Thinking:         st.thinking,
-			ThoughtSignature: st.thoughtSignature,
-		})
-	}
 	// Persist one consolidated AgentMessage per model iteration: full
 	// assembled text + tool calls + reasoning state. Streaming chunks
 	// stayed outbox-only — this row is the canonical assistant
@@ -556,6 +574,16 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 			st.finalText, st.agentSeq, !hasToolCalls,
 			toolCallPayloads(st.toolCalls),
 			st.thinking, st.thoughtSignature)
+		// Phase 5.2 (context-budget observability) — stamp turn
+		// usage on the Final=true Consolidated frame so the
+		// outbox carries the cost number. The cumulative
+		// session counter was already folded eagerly in
+		// applyChunk on every iter's Final chunk; this stamp is
+		// outbox-only.
+		if !hasToolCalls && (st.turnUsage.PromptTokens > 0 || st.turnUsage.CompletionTokens > 0) {
+			snap := st.turnUsage
+			consolidated.Payload.Usage = &snap
+		}
 		_ = s.emit(runCtx, consolidated)
 	}
 	st.assistantFolded = true
@@ -572,8 +600,9 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 		}
 		// Phase 5.1c.cancel-ux follow-up — if an async mission
 		// completed while this turn was in flight, drainPendingInbound
-		// above folded its [system:subagent_result] inject into
-		// s.history. Kick a fresh summary turn so the model presents
+		// above re-emitted its SubagentResult; the compactor folded
+		// the inject into the owned history cache. Kick a fresh
+		// summary turn so the model presents
 		// the result to the user without waiting for another typed
 		// message.
 		if !s.IsClosing() && s.pendingAsyncSummary.Swap(false) {
@@ -588,21 +617,16 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 	// foldAssistantAndMaybeDispatch.
 	s.mainToolCalls.Add(int64(len(st.toolCalls)))
 
-	// Observe each dispatched call for stuck-detection BEFORE the
-	// dispatcher fires (so the trailing window's last entry exists by
-	// the time handleToolResult flips its errored flag). We sample
-	// here, NOT inside dispatchToolCall, because a model emits its
-	// tool_calls as a batch — sampling per-batch keeps the timestamps
-	// honest and avoids a per-call timer write inside the dispatch hot
-	// path.
-	now := time.Now()
-	for _, tc := range st.toolCalls {
-		s.stuckObserveCall(tc.Name, tc.Args, tc.Hash, now)
-	}
+	// η.4 — stuck-detection sampling is now driven by the
+	// stuckdetector extension's OnFrameEmit, which observes the
+	// consolidated AgentMessage we just emitted above and folds
+	// each tool_call into its trailing window. The dispatcher's
+	// later tool_result emissions feed the errCode side.
 
 	// Dispatch the tool calls. Each lands a toolResultEvent on
-	// s.toolResults; handleToolResult drains pendingToolCalls + appends
-	// to s.history so the next iteration's prompt sees the results.
+	// s.toolResults; handleToolResult drains pendingToolCalls and
+	// the compactor folds the emitted tool_result frames so the
+	// next iteration's prompt sees the results.
 	for _, tc := range st.toolCalls {
 		st.pendingToolCalls[tc.ID] = tc
 	}
@@ -612,22 +636,23 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 	go s.runToolDispatcher(s.turnCtx, runCtx, st.toolCalls, ch)
 }
 
-// rollbackTurn trims s.history back to before the user message that
-// triggered this turn. Called on /cancel (no assistant counterpart) or
-// stream error (assistant turn never landed). The user message itself
-// is the entry at index baseline; baseline-1 is the tail before this
-// turn started — so s.history[:baseline-1+1] == s.history[:baseline].
+// rollbackTurn trims the compactor's owned history cache so any
+// consolidated assistant / tool_result entries the cancelled
+// turn produced disappear from the model's next view. Called on
+// /cancel (no assistant counterpart) or stream error (assistant
+// turn never landed).
 //
-// Wait — we appended the user message AT historyBaseline and bumped
-// the slice. So s.history[baseline] is the user msg. Trimming to
-// :baseline drops it, restoring pre-turn state.
+// η.3 semantics: the user message that triggered the turn is
+// PRESERVED (its Seq equals the rollback baseline and survives
+// the > comparison). The cancel means "abort processing", not
+// "rewrite history" — η spec §6 captures the rationale.
 func (s *Session) rollbackTurn() {
 	st := s.turnState
 	if st == nil {
 		return
 	}
-	if st.historyBaseline <= len(s.history) {
-		s.history = s.history[:st.historyBaseline]
+	if owner := s.historyOwner(); owner != nil {
+		owner.RollbackTo(context.Background(), s, st.seqBaseline)
 	}
 }
 
@@ -675,13 +700,10 @@ func (s *Session) drainPendingInbound(runCtx context.Context) {
 		return
 	}
 	for _, f := range s.pendingInbound {
-		if msg, ok := projectFrameToHistory(s.deps.Prompts, f); ok {
-			s.history = append(s.history, msg)
-		}
-		// Persist + push to outbox so the event log captures the
-		// arrival even when the visibility filter excluded the frame
-		// from s.history. emit short-circuits cleanly when the session
-		// is mid-shutdown.
+		// η.3 — emit persists + pushes to outbox + notifies the
+		// compactor's FrameObserver, which folds allow-listed
+		// frames into the owned history cache. emit short-
+		// circuits cleanly when the session is mid-shutdown.
 		_ = s.emit(runCtx, f)
 	}
 	s.pendingInbound = s.pendingInbound[:0]

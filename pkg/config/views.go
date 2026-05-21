@@ -162,8 +162,22 @@ type CompactorView interface {
 // owns interpretation; this struct exists purely to carry YAML
 // values through pkg/config without importing pkg/extension.
 type CompactorConfig struct {
+	// Strategy selects the η history-management mode: "off",
+	// "window", or "summarize". Empty / absent inherits the
+	// runtime default (summarize). Unknown values fall back to
+	// summarize with a warn log at boot time. Phase 5.2.η.
+	Strategy string `mapstructure:"strategy" yaml:"strategy,omitempty"`
+
+	// WindowSize bounds the FIFO history cache for the "window"
+	// strategy. Ignored when strategy ≠ "window". 0 / absent
+	// inherits the runtime default (50). Phase 5.2.η.
+	WindowSize int `mapstructure:"window_size" yaml:"window_size,omitempty"`
+
 	// Enabled is the global kill-switch. nil = inherit runtime
-	// default (true); &false explicitly disables.
+	// default (true); &false explicitly disables. Legacy: when
+	// Strategy is empty AND Enabled is &false, the runtime maps
+	// the pair to Strategy=off (back-compat for operators that
+	// haven't migrated to the strategy field). Phase 5.2.η.
 	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
 
 	// MaxTurns is the turn-count limb threshold. 0 / absent ⇒
@@ -245,6 +259,8 @@ type CompactorUIMarker struct {
 // Mirrors CompactorConfig but without the Tiers map (nesting is
 // flat at this layer).
 type CompactorTier struct {
+	Strategy             *string  `mapstructure:"strategy"              yaml:"strategy,omitempty"`
+	WindowSize           *int     `mapstructure:"window_size"           yaml:"window_size,omitempty"`
 	Enabled              *bool    `mapstructure:"enabled"               yaml:"enabled,omitempty"`
 	MaxTurns             *int     `mapstructure:"max_turns"             yaml:"max_turns,omitempty"`
 	MaxTokens            *int     `mapstructure:"max_tokens"            yaml:"max_tokens,omitempty"`

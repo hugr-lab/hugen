@@ -249,6 +249,13 @@ func (e *Extension) compactWithConfig(ctx context.Context, state extension.Sessi
 		return fmt.Errorf("emit digest_set: %w", err)
 	}
 	s.SetDigest(next)
+	// η.2 — strategy=summarize truncates the live history past
+	// the new cutoff. The summarized range now lives only in
+	// Block C (via Advertiser); the recent tail (Seq > cutoff)
+	// stays verbatim. Other strategies don't reach this code
+	// path (shouldCompact short-circuits on non-summarize), so
+	// the unconditional call is safe.
+	s.pruneToCutoff(next.CutoffSeq)
 	return nil
 }
 

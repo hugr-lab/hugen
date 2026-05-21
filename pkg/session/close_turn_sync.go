@@ -84,7 +84,11 @@ func (s *Session) runCloseTurnSync(ctx context.Context, block extension.CloseTur
 			"session", s.id, "err", err)
 	}
 
-	msgs := append([]model.Message(nil), s.history...)
+	// η.3 — history now lives in the compactor extension; pull
+	// the projection through the standard owner lookup so the
+	// close turn sees the same slice the regular prompt build
+	// would assemble.
+	msgs := append([]model.Message(nil), s.ownedHistory(ctx)...)
 	msgs = append(msgs, model.Message{
 		Role:    model.RoleUser,
 		Content: promptText,

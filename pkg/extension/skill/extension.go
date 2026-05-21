@@ -153,6 +153,43 @@ type SessionSkill struct {
 	mu     sync.RWMutex
 	loaded map[string]skillpkg.Skill // by manifest name
 	gen    int64                     // per-session generation; tracks manager.Gen() at last mutation
+
+	advertiseMu sync.Mutex
+	// loadedTokens caches the estimated size of the LOADED-side
+	// contributions to AdvertiseSystemPrompt: loaded-skills meta
+	// + bindings.Instructions + recommended-tags advice.
+	// catalogTokens caches the size of the AVAILABLE-skills
+	// catalogue block. Split so the context-budget UI can show
+	// "you've loaded N kB of skill bodies; the catalogue itself
+	// costs another M kB." Phase 5.2 (context-budget γ).
+	loadedTokens  int
+	catalogTokens int
+}
+
+// SetAdvertiseSplit records the cached estimates for the loaded
+// vs catalogue halves of the next ReportStatus emit. Called
+// from AdvertiseSystemPrompt at the end of each render.
+func (h *SessionSkill) SetAdvertiseSplit(loaded, catalog int) {
+	h.advertiseMu.Lock()
+	defer h.advertiseMu.Unlock()
+	h.loadedTokens = loaded
+	h.catalogTokens = catalog
+}
+
+// AdvertiseSplit returns the cached per-section estimates (both
+// zero until the first render).
+func (h *SessionSkill) AdvertiseSplit() (loaded, catalog int) {
+	h.advertiseMu.Lock()
+	defer h.advertiseMu.Unlock()
+	return h.loadedTokens, h.catalogTokens
+}
+
+// AdvertiseTokens returns the combined estimate (loaded +
+// catalog). Phase 5.2 β legacy callers continue to read a
+// single number through this accessor.
+func (h *SessionSkill) AdvertiseTokens() int {
+	loaded, catalog := h.AdvertiseSplit()
+	return loaded + catalog
 }
 
 // Compile-time assertion that *SessionSkill satisfies the manager's

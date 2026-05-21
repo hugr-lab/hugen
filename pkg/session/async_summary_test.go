@@ -2,9 +2,11 @@ package session
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 
+	"github.com/hugr-lab/hugen/pkg/extension/compactor"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -62,21 +64,29 @@ func TestRouteInbound_AsyncSubagentResult_NonAsyncMode_NoFlag(t *testing.T) {
 }
 
 // TestRouteInbound_IdleFold_PopulatesHistory — when an async
-// SubagentResult arrives at an idle session, the frame is folded
-// into s.history via projectFrameToHistory so the next turn's
-// prompt build (buildMessages → s.history) carries the
-// [system:subagent_result] inject. Without this fold the model
+// SubagentResult arrives at an idle session, the frame is
+// emitted; the compactor's FrameObserver folds it into the
+// owned history cache so the next turn's prompt build
+// (buildMessages → ownedHistory) carries the
+// [system:subagent_result] inject. Without the fold the model
 // loses the result between turns and resorts to notify_subagent
 // calls against the now-closed child. Phase 5.1c.cancel-ux
-// follow-up — operator dogfood fix.
+// follow-up — operator dogfood fix; η.3 routes the projection
+// through the HistoryOwner instead of the session's defunct
+// in-memory slice.
 func TestRouteInbound_IdleFold_PopulatesHistory(t *testing.T) {
-	parent, cleanup := newTestParent(t)
+	parent, cleanup := newTestParent(t,
+		withTestExtensions(compactor.NewExtensionWithConfig(
+			slog.Default(), compactor.DefaultConfig(), compactor.Deps{},
+		)),
+	)
 	defer cleanup()
 	// Suppress the auto-summary kick so we can isolate the history-
 	// fold step. The kick would synthesise a UserMessage and append
 	// it to history too, making the +1 assertion fail with +2.
 	parent.markClosing()
-	historyBefore := len(parent.history)
+	ctx := context.Background()
+	historyBefore := len(parent.ownedHistory(ctx))
 
 	sr := protocol.NewSubagentResult(parent.ID(), "child-abc", parent.agent.Participant(),
 		protocol.SubagentResultPayload{
@@ -86,19 +96,20 @@ func TestRouteInbound_IdleFold_PopulatesHistory(t *testing.T) {
 			Goal:       "list payment-related tables",
 			RenderMode: protocol.SubagentRenderAsyncNotify,
 		})
-	if err := parent.routeInbound(context.Background(), sr); err != nil {
+	if err := parent.routeInbound(ctx, sr); err != nil {
 		t.Fatalf("routeInbound: %v", err)
 	}
-	if got := len(parent.history); got != historyBefore+1 {
+	history := parent.ownedHistory(ctx)
+	if got := len(history); got != historyBefore+1 {
 		t.Fatalf("history grew by %d; want +1", got-historyBefore)
 	}
-	last := parent.history[len(parent.history)-1]
+	last := history[len(history)-1]
 	if last.Role == "" {
 		t.Errorf("folded history entry has empty role")
 	}
-	// projectFrameToHistory renders SubagentResult{AsyncNotify} as a
-	// RoleUser message carrying the `interrupts/async_mission_completed`
-	// template output; the goal + result must show through.
+	// The compactor renders SubagentResult{AsyncNotify} via the
+	// `interrupts/async_mission_completed` template; the goal +
+	// result must show through.
 	if !strings.Contains(last.Content, "list payment-related tables") {
 		t.Errorf("history inject missing goal text; got %q", last.Content)
 	}

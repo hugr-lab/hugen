@@ -7,6 +7,25 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
+// estimateToolCatalogTokens sums [extension.EstimateTokens]
+// across every Tool's Name + Description + ArgSchema bytes.
+// The wire shape the provider sends to the model is provider-
+// specific (Hugr / OpenAI / Anthropic each wrap the same data
+// slightly differently); the raw declaration bytes are the
+// stable common denominator for a UI indicator.
+func estimateToolCatalogTokens(tools []tool.Tool) int {
+	if len(tools) == 0 {
+		return 0
+	}
+	total := 0
+	for _, t := range tools {
+		total += extension.EstimateTokens(t.Name)
+		total += extension.EstimateTokens(t.Description)
+		total += extension.EstimateTokens(string(t.ArgSchema))
+	}
+	return total
+}
+
 // Per-session snapshot cache. Reads the unfiltered catalogue from
 // ToolManager once per (toolGen, policyGen, extGen) triple and
 // runs the registered ToolFilter chain over it. extGen is the sum
@@ -27,6 +46,14 @@ type snapshotCache struct {
 	extGen int64
 	snap   tool.Snapshot
 	valid  bool
+
+	// toolTokens is the [extension.EstimateTokens] sum over the
+	// post-filter catalogue (Name + Description + ArgSchema for
+	// every Tool the model will see this turn). Cached
+	// alongside the snapshot — same invalidation key, so a
+	// skill load that bumps extGen recomputes the size on next
+	// fetch. Phase 5.2 (context-budget δ).
+	toolTokens int
 }
 
 // fetchSnapshot returns the filtered Snapshot for the session.
@@ -68,12 +95,43 @@ func (s *Session) fetchSnapshot(ctx context.Context) (tool.Snapshot, error) {
 		}
 	}
 	out := tool.Snapshot{Generations: gens, Tools: filtered}
+	toolTokens := estimateToolCatalogTokens(filtered)
 
 	s.snapMu.Lock()
-	s.snapCache = snapshotCache{gens: gens, extGen: extGen, snap: out, valid: true}
+	s.snapCache = snapshotCache{
+		gens:       gens,
+		extGen:     extGen,
+		snap:       out,
+		valid:      true,
+		toolTokens: toolTokens,
+	}
 	s.snapMu.Unlock()
 
 	return out, nil
+}
+
+// ToolCatalogTokens returns the estimated token weight of the
+// session's currently-visible tool catalogue. Cached alongside
+// the snapshot — same (toolGen, policyGen, extGen) invalidation
+// key — so the size moves in lockstep with skill load /
+// unload events that mutate the filtered set. Returns 0 when
+// no ToolManager is wired. Phase 5.2 (context-budget δ).
+func (s *Session) ToolCatalogTokens(ctx context.Context) int {
+	if s.tools == nil {
+		return 0
+	}
+	// Trigger a (re)build when the cache key is stale; the
+	// result is discarded — we want the side-effect of
+	// populating snapCache.toolTokens.
+	if _, err := s.fetchSnapshot(ctx); err != nil {
+		return 0
+	}
+	s.snapMu.Lock()
+	defer s.snapMu.Unlock()
+	if !s.snapCache.valid {
+		return 0
+	}
+	return s.snapCache.toolTokens
 }
 
 // extensionGenerationSum returns the running sum of

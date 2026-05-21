@@ -49,7 +49,65 @@ type Extension struct {
 // at compaction time — the resolver applies overrides into a
 // fresh Config copy before each fire, never mutating the
 // Extension-owned baseline.
+// Strategy names the compactor's history-management mode.
+// Three values land in η:
+//
+//   - StrategyOff — no pruning, no LLM. ProvideHistory returns
+//     the full in-memory projection. Operator opt-out used for
+//     debugging and for fixtures that need raw history.
+//   - StrategyWindow — FIFO of the last `WindowSize` projected
+//     entries. No LLM. Replaces today's `defaultHistoryWindow=50`
+//     resume-only stop-gap.
+//   - StrategySummarize — the α-ε pipeline: LLM-summariser →
+//     digest → Block C → KeptVerbatim inline + post-cutoff tail.
+//
+// η.1 ships the type + parsing only; ProvideHistory always
+// returns the full projection (effectively `off`) until η.2
+// flips the read path.
+type Strategy string
+
+const (
+	StrategyOff       Strategy = "off"
+	StrategyWindow    Strategy = "window"
+	StrategySummarize Strategy = "summarize"
+)
+
+// ValidStrategy reports whether s is one of the known strategies.
+// Empty string is treated as "fall back to default" by callers,
+// not as a valid explicit choice.
+func ValidStrategy(s Strategy) bool {
+	switch s {
+	case StrategyOff, StrategyWindow, StrategySummarize:
+		return true
+	}
+	return false
+}
+
+// effectiveStrategy maps an arbitrary Strategy value onto a known
+// one, defaulting empty / unknown to [StrategySummarize]. Used by
+// hot-path consumers (OnFrameEmit, shouldCompact) so a Config
+// constructed without going through [DefaultConfig] still resolves
+// to a sane behaviour.
+func effectiveStrategy(s Strategy) Strategy {
+	if ValidStrategy(s) {
+		return s
+	}
+	return StrategySummarize
+}
+
 type Config struct {
+	// Strategy selects the history-management mode (see [Strategy]).
+	// Default is [StrategySummarize] (matches α-ε behaviour). η.1
+	// ships the field but ProvideHistory always returns the full
+	// projection until η.2 wires per-strategy pruning.
+	Strategy Strategy
+
+	// WindowSize is the entry cap for [StrategyWindow]. Ignored by
+	// other strategies. Zero falls back to the η default (50 for
+	// general use; the per-tier `worker` overlay raises this to 80
+	// per spec §8).
+	WindowSize int
+
 	// Enabled is the kill-switch. When false the trigger
 	// predicate short-circuits and no compaction ever fires.
 	Enabled bool
@@ -134,6 +192,8 @@ type Config struct {
 // distinct from "set to zero" — the resolver only overwrites the
 // fields the operator explicitly set.
 type TierOverride struct {
+	Strategy             *Strategy
+	WindowSize           *int
 	Enabled              *bool
 	MaxTurns             *int
 	MaxTokens            *int
@@ -190,6 +250,8 @@ type SkillCatalog interface {
 // here (not at pkg/skill) so pkg/extension/compactor stays
 // independent of the skill manifest's exact YAML tags.
 type OverrideSpec struct {
+	Strategy             *string
+	WindowSize           *int
 	Enabled              *bool
 	MaxTurns             *int
 	MaxTokens            *int
@@ -215,6 +277,8 @@ type StoreReader interface {
 // γ replaces this with a per-tier resolver.
 func DefaultConfig() Config {
 	return Config{
+		Strategy:             StrategySummarize,
+		WindowSize:           50,
 		Enabled:              true,
 		MaxTurns:             50,
 		MaxTokens:            80_000,
@@ -287,6 +351,7 @@ var (
 	_ extension.FrameObserver    = (*Extension)(nil)
 	_ extension.TurnBoundaryHook = (*Extension)(nil)
 	_ extension.StatusReporter   = (*Extension)(nil)
+	_ extension.HistoryOwner     = (*Extension)(nil)
 )
 
 // Name implements [extension.Extension].
@@ -344,6 +409,19 @@ type StatusPayload struct {
 	// payload. Defaults to true; operator sets
 	// `compactor.ui_marker.enabled: false` to suppress.
 	UIMarkerEnabled bool `json:"ui_marker_enabled"`
+
+	// AdvertiseTokens is the cached size of the last Block C
+	// render in EstimateTokens units. Liveview folds this into
+	// the per-extension breakdown of context_budget. Phase 5.2
+	// (context-budget β).
+	AdvertiseTokens int `json:"advertise_tokens,omitempty"`
+
+	// HistoryTokens is the running size of the owned history
+	// cache in EstimateTokens units — i.e. how many tokens the
+	// model will receive on its next prompt build (Block C
+	// excluded; that's AdvertiseTokens). Phase 5.2
+	// (context-budget β).
+	HistoryTokens int `json:"history_tokens,omitempty"`
 }
 
 // ReportStatus implements [extension.StatusReporter]. Returns the
@@ -366,9 +444,27 @@ func (e *Extension) ReportStatus(_ context.Context, state extension.SessionState
 	if s == nil {
 		return nil
 	}
+	advertiseTokens := s.AdvertiseTokens()
+	historyTokens := s.HistoryTokens()
 	d := s.Digest()
 	if d == nil {
-		return nil
+		// Phase 5.2 β — pre-first-compaction sessions still
+		// contribute history_tokens (the model's actual prompt
+		// size). Emit a minimal payload so the liveview
+		// aggregator wires them into context_budget.
+		if historyTokens == 0 && advertiseTokens == 0 {
+			return nil
+		}
+		payload := StatusPayload{
+			AdvertiseTokens: advertiseTokens,
+			HistoryTokens:   historyTokens,
+			UIMarkerEnabled: e.baseConfig().UIMarkerEnabled,
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return nil
+		}
+		return data
 	}
 	payload := StatusPayload{
 		Iteration:       d.Iteration,
@@ -377,6 +473,8 @@ func (e *Extension) ReportStatus(_ context.Context, state extension.SessionState
 		KeptCount:       len(d.KeptVerbatim),
 		BuiltAt:         d.BuiltAt,
 		UIMarkerEnabled: e.baseConfig().UIMarkerEnabled,
+		AdvertiseTokens: advertiseTokens,
+		HistoryTokens:   historyTokens,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

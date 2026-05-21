@@ -74,6 +74,22 @@ func (e *Extension) ReportStatus(ctx context.Context, state extension.SessionSta
 			body["tools"] = len(snap.Tools)
 		}
 	}
+	// Phase 5.2 γ — split advertise tokens into loaded vs
+	// catalogue so the UI can show "this is the cost of skills
+	// you actually loaded" separately from "this is what the
+	// model sees as the discovery menu".
+	loadedTokens, catalogTokens := h.AdvertiseSplit()
+	if loadedTokens > 0 {
+		body["loaded_skill_tokens"] = loadedTokens
+	}
+	if catalogTokens > 0 {
+		body["available_skill_tokens"] = catalogTokens
+	}
+	if total := loadedTokens + catalogTokens; total > 0 {
+		// β legacy field — kept for adapters that haven't
+		// learned the split shape yet.
+		body["advertise_tokens"] = total
+	}
 	data, err := json.Marshal(body)
 	if err != nil {
 		return nil
@@ -197,24 +213,36 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 		return ""
 	}
 	renderer := state.Prompts()
-	var parts []string
+	// Phase 5.2 γ — score each render contribution separately so
+	// the context-budget UI can split "skill bodies you loaded"
+	// from "catalogue advertising more skills available".
+	var (
+		parts          []string
+		loadedTokens   int
+		catalogTokens  int
+	)
 	// Available missions — moved to pkg/extension/mission's
 	// Advertiser. Mission-PDCA (design 003).
 	if meta := renderLoadedSkillsMeta(h); meta != "" {
 		parts = append(parts, meta)
+		loadedTokens += extension.EstimateTokens(meta)
 	}
 	if b, err := h.Bindings(ctx); err == nil && b.Instructions != "" {
 		parts = append(parts, b.Instructions)
+		loadedTokens += extension.EstimateTokens(b.Instructions)
 	}
 	if cat := renderCatalogue(ctx, renderer, h); cat != "" {
 		parts = append(parts, cat)
+		catalogTokens += extension.EstimateTokens(cat)
 	}
 	// Phase 4.2.3 Block A — recommended notepad tags advertised
 	// by the loaded mission dispatcher(s). Empty when no loaded
 	// skill is mission-enabled or carries a tag list.
 	if tags := renderNotepadTagAdvice(renderer, h); tags != "" {
 		parts = append(parts, tags)
+		loadedTokens += extension.EstimateTokens(tags)
 	}
+	h.SetAdvertiseSplit(loadedTokens, catalogTokens)
 	if len(parts) == 0 {
 		return ""
 	}

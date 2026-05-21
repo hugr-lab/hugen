@@ -20,6 +20,7 @@ package extension
 import (
 	"context"
 
+	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/tool"
@@ -432,4 +433,45 @@ type FrameRouter interface {
 // runtime.Build slice.
 type TurnBoundaryHook interface {
 	OnTurnBoundary(ctx context.Context, state SessionState) error
+}
+
+// HistoryOwner extensions materialise the model-visible
+// conversation history each turn. Phase 5.2.η refactors
+// `Session.history` from a Session-owned mutable slice into an
+// extension-owned cache; the [compactor] extension is the
+// canonical owner.
+//
+// The runtime invariant is exactly-one HistoryOwner per agent —
+// extensions phase wires a uniqueness assertion (see
+// `pkg/runtime/extensions.go`). The empty-history case is
+// reachable only via `compactor.strategy: off`.
+//
+// ProvideHistory returns a fresh slice; callers may append to it
+// without affecting owner-internal state. Called on the session's
+// Run goroutine from [Session.buildMessages] each turn.
+//
+// Concurrency: implementations mutate their cache from
+// [FrameObserver] (also Run-goroutine for direct emits; spawn-
+// pump goroutines for child frames). The owner is responsible
+// for its own mutex.
+//
+// η.1 ships the capability + projection plumbing; the
+// Session.buildMessages read path stays on `s.history` until
+// η.2 flips the switch.
+type HistoryOwner interface {
+	ProvideHistory(ctx context.Context, state SessionState) []model.Message
+
+	// RollbackTo drops history entries with Seq > seq. Called
+	// from the session's turn loop when a /cancel or stream
+	// error retires a turn — the cancelled iter's
+	// consolidated assistant + tool_result entries must
+	// disappear from the model's next prompt build so it
+	// doesn't see an orphaned tool_call → result chain. The
+	// user message that started the cancelled turn (Seq ==
+	// baseline) is preserved by intent (η spec §6).
+	//
+	// Phase 5.2.η.3 — exposed through the interface so
+	// pkg/session can call it without importing
+	// pkg/extension/compactor.
+	RollbackTo(ctx context.Context, state SessionState, seq int64)
 }

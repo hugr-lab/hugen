@@ -50,6 +50,13 @@ func (e *Extension) shouldCompact(state extension.SessionState, cfg Config) bool
 	if !cfg.Enabled {
 		return false
 	}
+	// η.2 — only the summarize strategy drives the LLM compactor.
+	// "window" prunes purely in OnFrameEmit, "off" leaves history
+	// untouched; both short-circuit the LLM trigger here so
+	// non-summarising sessions never spin up the model router.
+	if effectiveStrategy(cfg.Strategy) != StrategySummarize {
+		return false
+	}
 	// Trigger requires both a model router (to call the LLM)
 	// and a store reader (to fetch the compactable range). α-
 	// style boot with nil deps is treated as "disabled" so

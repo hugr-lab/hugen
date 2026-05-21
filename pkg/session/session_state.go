@@ -95,3 +95,14 @@ func (s *Session) Extensions() []extension.Extension {
 	}
 	return s.deps.Extensions
 }
+
+// SessionUsage implements [extension.SessionState]. Returns the
+// cumulative token-spend counter at the moment of the call, or
+// nil before any turn has reported usage. Phase 5.2
+// (context-budget ε) — liveview's context_budget aggregator
+// reads it through the SessionState interface so it works
+// against any session implementation, including future
+// non-Session ones.
+func (s *Session) SessionUsage() *protocol.TokenUsage {
+	return s.snapshotSessionUsage()
+}

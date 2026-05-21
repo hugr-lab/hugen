@@ -2,10 +2,8 @@ package session
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
-	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
@@ -104,10 +102,8 @@ func (s *Session) maybeInjectSoftWarning(runCtx context.Context) {
 		return
 	}
 	s.softWarningDone.Store(true)
-	s.history = append(s.history, model.Message{
-		Role:    model.RoleUser,
-		Content: fmt.Sprintf("[system: %s] %s", protocol.SystemMessageSoftWarning, text),
-	})
+	// η.3 — the compactor's FrameObserver folded the emitted
+	// system_message into the owned history cache.
 }
 
 // softWarningText renders the role-conditioned phrase from spec §8.1.

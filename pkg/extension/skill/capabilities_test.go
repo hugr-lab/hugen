@@ -2,6 +2,7 @@ package skill
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -367,6 +368,67 @@ func TestAdvertiseSystemPrompt_CatalogueOnly(t *testing.T) {
 	}
 	if strings.Contains(out, "`alpha` (loaded)") {
 		t.Errorf("nothing loaded yet, but alpha tagged loaded: %s", out)
+	}
+}
+
+// TestReportStatus_AdvertiseSplit_LoadedVsCatalogue verifies the
+// γ split: ReportStatus surfaces `loaded_skill_tokens` and
+// `available_skill_tokens` separately so the context-budget UI
+// can show "you've loaded N kB of skill bodies; the catalogue
+// itself costs another M kB". A catalogue-only session has zero
+// loaded tokens; loading a skill grows the loaded side.
+func TestReportStatus_AdvertiseSplit_LoadedVsCatalogue(t *testing.T) {
+	ctx := context.Background()
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"alpha": []byte(inlineAlphaManifest)}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a1")
+	state := fixture.NewTestSessionState("ses-split").WithDepth(2)
+	if err := ext.InitState(ctx, state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+
+	// First render — no skill loaded yet. Catalogue advertises
+	// alpha; loaded side stays empty.
+	_ = ext.AdvertiseSystemPrompt(ctx, state)
+	raw := ext.ReportStatus(ctx, state)
+	if raw == nil {
+		t.Fatalf("ReportStatus = nil after catalogue render")
+	}
+	var first map[string]any
+	if err := json.Unmarshal(raw, &first); err != nil {
+		t.Fatalf("payload unmarshal: %v", err)
+	}
+	if v, ok := first["loaded_skill_tokens"]; ok {
+		t.Errorf("loaded_skill_tokens = %v before any skill loaded, want absent", v)
+	}
+	catOnly, ok := first["available_skill_tokens"].(float64)
+	if !ok || catOnly <= 0 {
+		t.Fatalf("available_skill_tokens missing/zero on catalogue-only render: %v", first)
+	}
+
+	// Load alpha and re-render. Loaded side now carries the
+	// loaded-bundles meta + instructions + tag advice; catalogue
+	// still advertises alpha (with `(loaded)` tag).
+	if err := FromState(state).Load(ctx, "alpha"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	_ = ext.AdvertiseSystemPrompt(ctx, state)
+	raw = ext.ReportStatus(ctx, state)
+	var second map[string]any
+	if err := json.Unmarshal(raw, &second); err != nil {
+		t.Fatalf("post-load payload unmarshal: %v", err)
+	}
+	loadedAfter, ok := second["loaded_skill_tokens"].(float64)
+	if !ok || loadedAfter <= 0 {
+		t.Fatalf("loaded_skill_tokens missing/zero after Load: %v", second)
+	}
+	catAfter, ok := second["available_skill_tokens"].(float64)
+	if !ok || catAfter <= 0 {
+		t.Fatalf("available_skill_tokens missing/zero after Load: %v", second)
+	}
+	if total, ok := second["advertise_tokens"].(float64); !ok || total < loadedAfter+catAfter {
+		t.Errorf("advertise_tokens (%v) should be ≥ loaded+catalogue (%v + %v)",
+			total, loadedAfter, catAfter)
 	}
 }
 

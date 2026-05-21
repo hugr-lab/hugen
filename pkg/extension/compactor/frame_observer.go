@@ -19,7 +19,7 @@ import (
 //
 // Spec reference: §3.2 (FrameObserver capability) + §3.5
 // (boundary detection) + §4.2 (token-budget limb).
-func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState, frame protocol.Frame) {
+func (e *Extension) OnFrameEmit(ctx context.Context, state extension.SessionState, frame protocol.Frame) {
 	s := FromState(state)
 	if s == nil {
 		return
@@ -47,6 +47,24 @@ func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState,
 		// materially contribute to the model prompt budget.
 		// β refines this list once the per-Kind dispatch
 		// table lands in compactor.go.
+	}
+
+	// η — project allow-listed frames into the owned history
+	// cache. η.2 wired Session.buildMessages to read from this
+	// cache via [Extension.ProvideHistory]; the legacy
+	// Session.history slice is kept up-to-date in parallel until
+	// η.3 retires it.
+	if entry, ok := projectFrameToEntry(state.Prompts(), frame); ok {
+		s.appendHistory(entry)
+		// η.2 — window strategy prunes synchronously on overflow.
+		// Summarize prunes at digest_set emit time (see
+		// compactWithConfig); off never prunes. resolveTierConfig
+		// is cheap (map lookup + struct copies) but still on the
+		// emit hot path — short-circuit on the common case.
+		cfg := e.resolveTierConfig(ctx, state)
+		if effectiveStrategy(cfg.Strategy) == StrategyWindow {
+			s.pruneWindow(cfg.WindowSize)
+		}
 	}
 }
 

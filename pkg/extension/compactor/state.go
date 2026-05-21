@@ -20,6 +20,8 @@ package compactor
 import (
 	"sync"
 	"time"
+
+	"github.com/hugr-lab/hugen/pkg/model"
 )
 
 // StateKey is the [extension.SessionState] key the extension
@@ -144,13 +146,15 @@ type SubagentRef struct {
 
 // CompactorState is the per-session typed handle the compactor
 // stores in [extension.SessionState] under [StateKey]. Read by
-// Advertiser (Block C), trigger predicate, and adapter
-// SnapshotSession projection.
+// Advertiser (Block C), trigger predicate, adapter
+// SnapshotSession projection, and (η.1+) ProvideHistory.
 //
-// Concurrency: every method acquires mu; the only mutation
-// paths are SetDigest (called from compaction pipeline + Recovery
-// replay) and updates from FrameObserver (own mutex on the
-// boundary index — see [boundaryTracker]).
+// Concurrency: every method acquires its own mutex (mu for
+// digest, historyMu for the history projection, boundary owns
+// its own). The mutation paths are SetDigest (called from
+// compaction pipeline + Recovery replay), updates from
+// FrameObserver (boundary index + history projection), and full
+// rebuild from Recover.
 type CompactorState struct {
 	mu     sync.Mutex
 	digest *DigestPayload
@@ -160,6 +164,70 @@ type CompactorState struct {
 	// (FrameObserver capability) so the trigger predicate
 	// runs in O(1) at boundary time.
 	boundary boundaryTracker
+
+	// historyMu guards [history]. Held briefly during append +
+	// snapshot — never across LLM / I/O.
+	historyMu sync.Mutex
+
+	// history is the incrementally-maintained projection of the
+	// session's persisted events onto [model.Message] shape.
+	// η.1 ships the field + appender + ProvideHistory plumbing;
+	// the Session.buildMessages read path stays on the legacy
+	// s.history until η.2 flips the switch.
+	history []HistoryEntry
+
+	// advertiseMu guards [advertiseTokens]. Held briefly during
+	// Set / Get — never across LLM / I/O.
+	advertiseMu sync.Mutex
+
+	// advertiseTokens caches the estimated token weight of the
+	// last [Extension.AdvertiseSystemPrompt] render so
+	// [Extension.ReportStatus] can surface the number without
+	// re-running the renderer. Phase 5.2 (context-budget β).
+	advertiseTokens int
+}
+
+// SetAdvertiseTokens records the cached estimate. Called from
+// [Extension.AdvertiseSystemPrompt] after each render.
+func (s *CompactorState) SetAdvertiseTokens(n int) {
+	s.advertiseMu.Lock()
+	defer s.advertiseMu.Unlock()
+	s.advertiseTokens = n
+}
+
+// AdvertiseTokens returns the cached estimate from the last
+// AdvertiseSystemPrompt call. Zero until the first render.
+func (s *CompactorState) AdvertiseTokens() int {
+	s.advertiseMu.Lock()
+	defer s.advertiseMu.Unlock()
+	return s.advertiseTokens
+}
+
+// HistoryTokens sums [EstimateTokens] over the message content
+// of every entry currently in the owned history cache. Lives
+// on the hot read path of liveview's status emit — keeps the
+// locked section narrow by snapshotting first.
+func (s *CompactorState) HistoryTokens() int {
+	entries := s.historySnapshot()
+	if len(entries) == 0 {
+		return 0
+	}
+	total := 0
+	for _, ent := range entries {
+		total += estimateMessageTokens(ent.Message)
+	}
+	return total
+}
+
+// HistoryEntry is one row of the compactor's owned history
+// projection. Seq + Timestamp come from the source frame envelope;
+// Message is the projected model.Message ready to feed into the
+// LLM call. A future multi-contributor merge (see η spec §2.1)
+// would sort across owners by Timestamp.
+type HistoryEntry struct {
+	Seq       int64
+	Timestamp time.Time
+	Message   model.Message
 }
 
 // boundaryTracker is the FrameObserver-maintained running
@@ -250,3 +318,98 @@ func (s *CompactorState) addTokens(delta int) {
 	defer s.boundary.mu.Unlock()
 	s.boundary.estimatedTokens += delta
 }
+
+// appendHistory records one projected entry. Internal — called
+// only from [Extension.OnFrameEmit] (live path) and from
+// [Extension.Recover] (replay).
+func (s *CompactorState) appendHistory(entry HistoryEntry) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	s.history = append(s.history, entry)
+}
+
+// resetHistory replaces the projection wholesale. Internal —
+// called only from [Extension.Recover] after the second pass
+// builds a fresh slice.
+func (s *CompactorState) resetHistory(entries []HistoryEntry) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	s.history = entries
+}
+
+// historySnapshot returns a fresh copy of the projected entries.
+// Callers may mutate the returned slice freely.
+func (s *CompactorState) historySnapshot() []HistoryEntry {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if len(s.history) == 0 {
+		return nil
+	}
+	out := make([]HistoryEntry, len(s.history))
+	copy(out, s.history)
+	return out
+}
+
+// pruneWindow keeps the most-recent `limit` entries. Used by
+// [StrategyWindow]; called from [Extension.OnFrameEmit] after
+// every append.
+func (s *CompactorState) pruneWindow(limit int) {
+	if limit <= 0 {
+		return
+	}
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if len(s.history) <= limit {
+		return
+	}
+	keep := make([]HistoryEntry, limit)
+	copy(keep, s.history[len(s.history)-limit:])
+	s.history = keep
+}
+
+// RollbackTo drops history entries with Seq > seq. Used by
+// [Session.rollbackTurn] (η.3) to undo cache appends that
+// happened after a /cancel or stream error during the
+// just-aborted turn. The user message itself (its Seq equals
+// the rollback baseline) is preserved by intent — see η spec
+// §6 for the cancel-semantics rationale.
+func (s *CompactorState) RollbackTo(seq int64) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if len(s.history) == 0 {
+		return
+	}
+	keep := s.history[:0]
+	for _, ent := range s.history {
+		if ent.Seq <= seq {
+			keep = append(keep, ent)
+		}
+	}
+	out := make([]HistoryEntry, len(keep))
+	copy(out, keep)
+	s.history = out
+}
+
+// pruneToCutoff drops entries with Seq <= cutoff. Used by
+// [StrategySummarize]; called from [Extension.compactWithConfig]
+// after a successful digest_set emit so the live history matches
+// what Block C carries.
+func (s *CompactorState) pruneToCutoff(cutoff int64) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if len(s.history) == 0 {
+		return
+	}
+	keep := s.history[:0]
+	for _, ent := range s.history {
+		if ent.Seq > cutoff {
+			keep = append(keep, ent)
+		}
+	}
+	// Realloc so the backing array shrinks; otherwise a long-
+	// running session leaks the original capacity forever.
+	out := make([]HistoryEntry, len(keep))
+	copy(out, keep)
+	s.history = out
+}
+
