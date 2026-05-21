@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
@@ -395,11 +394,12 @@ func (s *Session) handleToolResult(runCtx context.Context, ev toolResultEvent) {
 	// from "spawn_wave hit one transient infrastructure error".
 	// Run-goroutine-only access; the dispatcher already exited the
 	// per-call critical section by the time this event arrives.
-	s.stuckObserveResult(toolErrorCode(ev.errored, ev.payload))
 	// η.3 — the tool_result frame was already emitted by the
 	// dispatcher (session.go:emitToolResult); the compactor's
 	// OnFrameEmit folded it into the owned history cache as a
-	// RoleTool entry. Nothing further to do here.
+	// RoleTool entry. η.4 — the stuckdetector extension's
+	// OnFrameEmit observes the same emit and annotates its
+	// trailing window. Nothing further to do here.
 }
 
 // turnComplete answers the question the Run loop asks after every
@@ -514,10 +514,11 @@ func (s *Session) advanceOrFinish(runCtx context.Context) {
 	// Soft warning (§8.1) — fired exactly once per session when the
 	// model crosses st.cap. Subsequent boundaries no-op via softWarningDone.
 	s.maybeInjectSoftWarning(runCtx)
-	// Stuck-detection rising-edge nudges (§8.3) — independent of the
-	// soft/hard caps, fire on inactive→active transitions of each
-	// pattern detector.
-	s.stuckEvaluate(runCtx)
+	// Stuck-detection rising-edge nudges (§8.3) — η.4 moved the
+	// detectors into `pkg/extension/stuckdetector`. The extension
+	// observes consolidated AgentMessage + ToolResult frames via
+	// FrameObserver and emits nudges synchronously on transition.
+	// Nothing to do here.
 
 	s.startModelIteration(runCtx)
 }
@@ -576,17 +577,11 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 	// foldAssistantAndMaybeDispatch.
 	s.mainToolCalls.Add(int64(len(st.toolCalls)))
 
-	// Observe each dispatched call for stuck-detection BEFORE the
-	// dispatcher fires (so the trailing window's last entry exists by
-	// the time handleToolResult flips its errored flag). We sample
-	// here, NOT inside dispatchToolCall, because a model emits its
-	// tool_calls as a batch — sampling per-batch keeps the timestamps
-	// honest and avoids a per-call timer write inside the dispatch hot
-	// path.
-	now := time.Now()
-	for _, tc := range st.toolCalls {
-		s.stuckObserveCall(tc.Name, tc.Args, tc.Hash, now)
-	}
+	// η.4 — stuck-detection sampling is now driven by the
+	// stuckdetector extension's OnFrameEmit, which observes the
+	// consolidated AgentMessage we just emitted above and folds
+	// each tool_call into its trailing window. The dispatcher's
+	// later tool_result emissions feed the errCode side.
 
 	// Dispatch the tool calls. Each lands a toolResultEvent on
 	// s.toolResults; handleToolResult drains pendingToolCalls and

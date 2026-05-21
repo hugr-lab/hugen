@@ -174,13 +174,6 @@ type Session struct {
 	materialised atomic.Bool
 	matOnce      sync.Once
 
-	// stuck is the in-memory rising-edge state for the three stuck-
-	// detection heuristics (phase-4-spec §8.3). Owned by Run; mutated
-	// only by handleToolResult / drainPendingInbound on the same
-	// goroutine. Restart resets the flags to zero — phase-4 keeps the
-	// detection state in-memory by design (spec §8.3 "in-memory only").
-	stuck stuckState
-
 	// softWarningDone caches "we already injected the soft-warning
 	// nudge for this session". Loaded once at materialise from the
 	// session's events (event-source as truth) and flipped at the
@@ -1627,13 +1620,6 @@ func (s *Session) resolveHardCeiling(ctx context.Context, softCap int) int {
 		return softCap * 2
 	}
 	return defaultMaxToolIterations * 2
-}
-
-// stuckDetectionEnabled reports whether the heuristic stuck-detection
-// nudges are active for this session. Disabled when any
-// ToolPolicyAdvisor sets DisableStuckNudges. Default ON.
-func (s *Session) stuckDetectionEnabled(ctx context.Context) bool {
-	return !s.gatherToolPolicy(ctx).DisableStuckNudges
 }
 
 // buildMessages prepends the per-Turn system message (agent

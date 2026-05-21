@@ -13,6 +13,7 @@ import (
 	notepadext "github.com/hugr-lab/hugen/pkg/extension/notepad"
 	planext "github.com/hugr-lab/hugen/pkg/extension/plan"
 	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
+	stuckdetectorext "github.com/hugr-lab/hugen/pkg/extension/stuckdetector"
 	wbext "github.com/hugr-lab/hugen/pkg/extension/whiteboard"
 	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -80,6 +81,16 @@ func phaseExtensions(_ context.Context, core *Core) error {
 			Logger:  core.Logger,
 			Catalog: newSkillManagerMissionCatalog(core.Skills),
 		}),
+		// stuckdetector observes tool_call / tool_result frames and
+		// emits the four §8.3 rising-edge nudges. Phase 5.2.η.4
+		// moved it out of `pkg/session/turn_stuck.go` so the session
+		// goroutine no longer carries detector state. Registered
+		// AFTER skillext so the latter's ToolPolicyAdvisor (the
+		// only DisableStuckNudges source today) is visible to the
+		// detector's per-evaluation policy gather. Placement before
+		// mission ext keeps it adjacent to the other observability
+		// extensions; ordering is otherwise free.
+		stuckdetectorext.NewExtension(core.Logger),
 		mcpext.NewExtension(core.Config.ToolProviders(), core.Logger),
 		// liveview lands last so its FrameObserver / ChildFrameObserver
 		// see frames AFTER siblings have processed them via their own
