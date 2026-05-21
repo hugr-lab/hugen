@@ -93,9 +93,12 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	}
 	notes, err := np.Read(ctx, ReadInput{Limit: maxReadLimit})
 	if err != nil || len(notes) == 0 {
+		np.SetAdvertiseTokens(0)
 		return ""
 	}
-	return renderSnapshot(state.Prompts(), notes, np.Window())
+	out := renderSnapshot(state.Prompts(), notes, np.Window())
+	np.SetAdvertiseTokens(extension.EstimateTokens(out))
+	return out
 }
 
 // ReportStatus implements [extension.StatusReporter]. Returns a
@@ -125,11 +128,13 @@ func (e *Extension) ReportStatus(ctx context.Context, state extension.SessionSta
 		return nil
 	}
 	payload := struct {
-		Recent []wireNote     `json:"recent"`
-		Counts map[string]int `json:"counts"`
+		Recent          []wireNote     `json:"recent"`
+		Counts          map[string]int `json:"counts"`
+		AdvertiseTokens int            `json:"advertise_tokens,omitempty"`
 	}{
-		Recent: notesToWire(notes),
-		Counts: counts,
+		Recent:          notesToWire(notes),
+		Counts:          counts,
+		AdvertiseTokens: np.AdvertiseTokens(),
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

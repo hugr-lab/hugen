@@ -74,6 +74,9 @@ func (e *Extension) ReportStatus(ctx context.Context, state extension.SessionSta
 			body["tools"] = len(snap.Tools)
 		}
 	}
+	if t := h.AdvertiseTokens(); t > 0 {
+		body["advertise_tokens"] = t
+	}
 	data, err := json.Marshal(body)
 	if err != nil {
 		return nil
@@ -216,9 +219,12 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 		parts = append(parts, tags)
 	}
 	if len(parts) == 0 {
+		h.SetAdvertiseTokens(0)
 		return ""
 	}
-	return strings.Join(parts, "\n\n")
+	out := strings.Join(parts, "\n\n")
+	h.SetAdvertiseTokens(extension.EstimateTokens(out))
+	return out
 }
 
 // renderLoadedSkillsMeta produces the per-loaded-skill metadata

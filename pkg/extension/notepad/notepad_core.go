@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
@@ -95,6 +96,32 @@ type Notepad struct {
 	rootID    string        // storage target (== sessionID for root sessions)
 	role      string        // tier label, set by skill.TierFromDepth
 	window    time.Duration // read/search cutoff
+
+	// advertiseMu guards advertiseTokens. Held briefly during
+	// Set / Get — never across I/O.
+	advertiseMu sync.Mutex
+
+	// advertiseTokens caches the estimated token weight of the
+	// last [Extension.AdvertiseSystemPrompt] render so
+	// [Extension.ReportStatus] surfaces the number without
+	// re-running the renderer. Phase 5.2 (context-budget β).
+	advertiseTokens int
+}
+
+// SetAdvertiseTokens records the cached estimate. Called from
+// the extension's AdvertiseSystemPrompt after each render.
+func (n *Notepad) SetAdvertiseTokens(t int) {
+	n.advertiseMu.Lock()
+	defer n.advertiseMu.Unlock()
+	n.advertiseTokens = t
+}
+
+// AdvertiseTokens returns the cached estimate (0 until the
+// first render).
+func (n *Notepad) AdvertiseTokens() int {
+	n.advertiseMu.Lock()
+	defer n.advertiseMu.Unlock()
+	return n.advertiseTokens
 }
 
 // New constructs a Notepad bound to one session. rootID empty

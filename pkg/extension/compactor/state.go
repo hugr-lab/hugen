@@ -175,6 +175,48 @@ type CompactorState struct {
 	// the Session.buildMessages read path stays on the legacy
 	// s.history until η.2 flips the switch.
 	history []HistoryEntry
+
+	// advertiseMu guards [advertiseTokens]. Held briefly during
+	// Set / Get — never across LLM / I/O.
+	advertiseMu sync.Mutex
+
+	// advertiseTokens caches the estimated token weight of the
+	// last [Extension.AdvertiseSystemPrompt] render so
+	// [Extension.ReportStatus] can surface the number without
+	// re-running the renderer. Phase 5.2 (context-budget β).
+	advertiseTokens int
+}
+
+// SetAdvertiseTokens records the cached estimate. Called from
+// [Extension.AdvertiseSystemPrompt] after each render.
+func (s *CompactorState) SetAdvertiseTokens(n int) {
+	s.advertiseMu.Lock()
+	defer s.advertiseMu.Unlock()
+	s.advertiseTokens = n
+}
+
+// AdvertiseTokens returns the cached estimate from the last
+// AdvertiseSystemPrompt call. Zero until the first render.
+func (s *CompactorState) AdvertiseTokens() int {
+	s.advertiseMu.Lock()
+	defer s.advertiseMu.Unlock()
+	return s.advertiseTokens
+}
+
+// HistoryTokens sums [EstimateTokens] over the message content
+// of every entry currently in the owned history cache. Lives
+// on the hot read path of liveview's status emit — keeps the
+// locked section narrow by snapshotting first.
+func (s *CompactorState) HistoryTokens() int {
+	entries := s.historySnapshot()
+	if len(entries) == 0 {
+		return 0
+	}
+	total := 0
+	for _, ent := range entries {
+		total += estimateMessageTokens(ent.Message)
+	}
+	return total
 }
 
 // HistoryEntry is one row of the compactor's owned history

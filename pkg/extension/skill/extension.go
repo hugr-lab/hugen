@@ -153,6 +153,24 @@ type SessionSkill struct {
 	mu     sync.RWMutex
 	loaded map[string]skillpkg.Skill // by manifest name
 	gen    int64                     // per-session generation; tracks manager.Gen() at last mutation
+
+	advertiseMu     sync.Mutex
+	advertiseTokens int // cached size of the last AdvertiseSystemPrompt render — Phase 5.2 (context-budget β)
+}
+
+// SetAdvertiseTokens records the cached estimate.
+func (h *SessionSkill) SetAdvertiseTokens(t int) {
+	h.advertiseMu.Lock()
+	defer h.advertiseMu.Unlock()
+	h.advertiseTokens = t
+}
+
+// AdvertiseTokens returns the cached estimate (0 until the
+// first render).
+func (h *SessionSkill) AdvertiseTokens() int {
+	h.advertiseMu.Lock()
+	defer h.advertiseMu.Unlock()
+	return h.advertiseTokens
 }
 
 // Compile-time assertion that *SessionSkill satisfies the manager's

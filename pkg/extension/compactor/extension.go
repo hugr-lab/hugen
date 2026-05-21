@@ -409,6 +409,19 @@ type StatusPayload struct {
 	// payload. Defaults to true; operator sets
 	// `compactor.ui_marker.enabled: false` to suppress.
 	UIMarkerEnabled bool `json:"ui_marker_enabled"`
+
+	// AdvertiseTokens is the cached size of the last Block C
+	// render in EstimateTokens units. Liveview folds this into
+	// the per-extension breakdown of context_budget. Phase 5.2
+	// (context-budget β).
+	AdvertiseTokens int `json:"advertise_tokens,omitempty"`
+
+	// HistoryTokens is the running size of the owned history
+	// cache in EstimateTokens units — i.e. how many tokens the
+	// model will receive on its next prompt build (Block C
+	// excluded; that's AdvertiseTokens). Phase 5.2
+	// (context-budget β).
+	HistoryTokens int `json:"history_tokens,omitempty"`
 }
 
 // ReportStatus implements [extension.StatusReporter]. Returns the
@@ -431,9 +444,27 @@ func (e *Extension) ReportStatus(_ context.Context, state extension.SessionState
 	if s == nil {
 		return nil
 	}
+	advertiseTokens := s.AdvertiseTokens()
+	historyTokens := s.HistoryTokens()
 	d := s.Digest()
 	if d == nil {
-		return nil
+		// Phase 5.2 β — pre-first-compaction sessions still
+		// contribute history_tokens (the model's actual prompt
+		// size). Emit a minimal payload so the liveview
+		// aggregator wires them into context_budget.
+		if historyTokens == 0 && advertiseTokens == 0 {
+			return nil
+		}
+		payload := StatusPayload{
+			AdvertiseTokens: advertiseTokens,
+			HistoryTokens:   historyTokens,
+			UIMarkerEnabled: e.baseConfig().UIMarkerEnabled,
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return nil
+		}
+		return data
 	}
 	payload := StatusPayload{
 		Iteration:       d.Iteration,
@@ -442,6 +473,8 @@ func (e *Extension) ReportStatus(_ context.Context, state extension.SessionState
 		KeptCount:       len(d.KeptVerbatim),
 		BuiltAt:         d.BuiltAt,
 		UIMarkerEnabled: e.baseConfig().UIMarkerEnabled,
+		AdvertiseTokens: advertiseTokens,
+		HistoryTokens:   historyTokens,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

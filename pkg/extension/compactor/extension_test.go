@@ -249,13 +249,29 @@ func TestExtension_ReportStatus_NilWhenNoDigest(t *testing.T) {
 	if err := e.InitState(context.Background(), st); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
-	// Boundary recorded but no compaction has fired yet — digest
-	// is nil, ReportStatus must return nil.
+	// Pristine state — no history entries, no digest. ReportStatus
+	// returns nil so the liveview aggregator omits an empty
+	// payload.
+	if got := e.ReportStatus(context.Background(), st); got != nil {
+		t.Fatalf("pristine ReportStatus = %s, want nil", got)
+	}
+
+	// Phase 5.2 β — once a frame projects into the owned history
+	// cache, ReportStatus emits a payload carrying the history
+	// tokens even before the first compaction fires.
 	user := protocol.NewUserMessage(st.id, protocol.ParticipantInfo{}, "hi")
 	user.SetSeq(1)
 	e.OnFrameEmit(context.Background(), st, user)
-	if got := e.ReportStatus(context.Background(), st); got != nil {
-		t.Fatalf("ReportStatus with no digest = %s, want nil", got)
+	got := e.ReportStatus(context.Background(), st)
+	if got == nil {
+		t.Fatalf("ReportStatus after first user frame returned nil; want history_tokens")
+	}
+	var payload StatusPayload
+	if err := json.Unmarshal(got, &payload); err != nil {
+		t.Fatalf("payload unmarshal: %v", err)
+	}
+	if payload.HistoryTokens == 0 {
+		t.Errorf("HistoryTokens = 0, want > 0 after one user frame")
 	}
 }
 

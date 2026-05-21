@@ -404,6 +404,20 @@ func decodeToolCallsFromMetadata(m map[string]any) []model.ChunkToolCall {
 	return out
 }
 
+// estimateMessageTokens sums [estimateTokens] over the visible
+// surface of one model.Message: Content + Thinking +
+// ToolCalls.Args (JSON-shape). Used by
+// [CompactorState.HistoryTokens] to size the owned cache for
+// the context-budget UI surface.
+func estimateMessageTokens(msg model.Message) int {
+	total := estimateTokens(msg.Content) + estimateTokens(msg.Thinking)
+	for _, tc := range msg.ToolCalls {
+		total += estimateTokens(tc.Name)
+		total += estimateToolResultTokens(tc.Args)
+	}
+	return total
+}
+
 // statusFromReason mirrors the helper of the same name in
 // `pkg/session/replay.go`. Kept local because pkg/session is
 // downstream of pkg/extension/compactor and we can't import it.

@@ -28,19 +28,24 @@ func (e *Extension) AdvertiseSystemPrompt(_ context.Context, state extension.Ses
 	}
 	d := s.Digest()
 	if d == nil {
+		s.SetAdvertiseTokens(0)
 		return ""
 	}
 	if len(d.SummaryBlocks) == 0 && len(d.KeptVerbatim) == 0 {
+		s.SetAdvertiseTokens(0)
 		return ""
 	}
 	if state.Prompts() == nil {
+		s.SetAdvertiseTokens(0)
 		return ""
 	}
 	out, err := state.Prompts().Render("compactor/block_c", d)
 	if err != nil {
 		e.logger.Warn("compactor: render block_c failed",
 			"session", state.SessionID(), "err", err)
+		s.SetAdvertiseTokens(0)
 		return ""
 	}
+	s.SetAdvertiseTokens(extension.EstimateTokens(out))
 	return out
 }

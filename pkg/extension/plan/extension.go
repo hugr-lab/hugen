@@ -113,6 +113,29 @@ type SessionPlan struct {
 
 	mu   sync.Mutex
 	plan Plan
+
+	// advertiseTokens caches the estimated token weight of the
+	// last [Extension.AdvertiseSystemPrompt] render so
+	// [Extension.ReportStatus] surfaces the number without
+	// re-running the renderer. Guarded by mu (same scope as
+	// `plan` since both move together on Apply / Render).
+	// Phase 5.2 (context-budget β).
+	advertiseTokens int
+}
+
+// SetAdvertiseTokens records the cached estimate.
+func (h *SessionPlan) SetAdvertiseTokens(t int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.advertiseTokens = t
+}
+
+// AdvertiseTokens returns the cached estimate (0 until the
+// first render).
+func (h *SessionPlan) AdvertiseTokens() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.advertiseTokens
 }
 
 // Snapshot returns a copy of the in-memory projection. Tests use
@@ -146,7 +169,14 @@ func (e *Extension) ReportStatus(_ context.Context, state extension.SessionState
 	if !p.Active {
 		return nil
 	}
-	data, err := json.Marshal(p)
+	payload := struct {
+		Plan
+		AdvertiseTokens int `json:"advertise_tokens,omitempty"`
+	}{
+		Plan:            p,
+		AdvertiseTokens: h.AdvertiseTokens(),
+	}
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil
 	}
@@ -160,7 +190,9 @@ func (e *Extension) AdvertiseSystemPrompt(_ context.Context, state extension.Ses
 	if h == nil {
 		return ""
 	}
-	return h.Render(state.Prompts())
+	out := h.Render(state.Prompts())
+	h.SetAdvertiseTokens(extension.EstimateTokens(out))
+	return out
 }
 
 // ---------- ToolProvider surface ----------
