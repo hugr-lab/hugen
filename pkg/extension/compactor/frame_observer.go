@@ -48,6 +48,14 @@ func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState,
 		// β refines this list once the per-Kind dispatch
 		// table lands in compactor.go.
 	}
+
+	// η.1 — project allow-listed frames into the owned history
+	// cache so a future flip of Session.buildMessages (η.2) reads
+	// from one source of truth. ProvideHistory exposes the slice;
+	// it stays dormant until the read-path swaps.
+	if entry, ok := projectFrameToEntry(state.Prompts(), frame); ok {
+		s.appendHistory(entry)
+	}
 }
 
 // estimateTokens is the cheap per-string heuristic the running

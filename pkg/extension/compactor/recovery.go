@@ -9,11 +9,10 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
-// Recover implements [extension.Recovery]. Replays
-// extension_frame rows tagged with extension="compactor" onto
-// the session's [*CompactorState], taking latest-wins on
-// `digest_set` and clearing on `digest_clear`. Single pass; the
-// most-recent `digest_set` after any `digest_clear` wins.
+// Recover implements [extension.Recovery]. Single pass over the
+// session event log: replays compactor-owned `digest_set` /
+// `digest_clear` ops (latest-wins) AND rebuilds the in-memory
+// history projection from every persisted frame (η.1).
 //
 // Rows with an unrecognised op are skipped with a debug log
 // (forward-compat). Rows with Version > [CurrentPayloadVersion]
@@ -28,40 +27,44 @@ func (e *Extension) Recover(_ context.Context, state extension.SessionState, eve
 	if s == nil {
 		return nil
 	}
-	var latest *DigestPayload
-	for _, r := range events {
-		if protocol.Kind(r.EventType) != protocol.KindExtensionFrame {
+	var (
+		latest  *DigestPayload
+		entries = make([]HistoryEntry, 0, len(events))
+	)
+	renderer := state.Prompts()
+	for i := range events {
+		r := events[i]
+		if protocol.Kind(r.EventType) == protocol.KindExtensionFrame {
+			ext, _ := r.Metadata["extension"].(string)
+			if ext == providerName {
+				op, _ := r.Metadata["op"].(string)
+				switch op {
+				case OpDigestSet:
+					d, err := decodeDigest(r.Metadata)
+					if err != nil {
+						e.logger.Warn("compactor recovery: malformed digest_set",
+							"session", state.SessionID(), "err", err)
+						continue
+					}
+					if d.Version > CurrentPayloadVersion {
+						e.logger.Debug("compactor recovery: future version skipped",
+							"session", state.SessionID(),
+							"version", d.Version,
+							"current", CurrentPayloadVersion)
+						continue
+					}
+					latest = d
+				case OpDigestClear:
+					latest = nil
+				default:
+					e.logger.Debug("compactor recovery: unknown op",
+						"session", state.SessionID(), "op", op)
+				}
+			}
 			continue
 		}
-		// Filter by metadata.extension == "compactor". The
-		// metadata column carries the serialised
-		// ExtensionFramePayload {extension, category, op, data}.
-		ext, _ := r.Metadata["extension"].(string)
-		if ext != providerName {
-			continue
-		}
-		op, _ := r.Metadata["op"].(string)
-		switch op {
-		case OpDigestSet:
-			d, err := decodeDigest(r.Metadata)
-			if err != nil {
-				e.logger.Warn("compactor recovery: malformed digest_set",
-					"session", state.SessionID(), "err", err)
-				continue
-			}
-			if d.Version > CurrentPayloadVersion {
-				e.logger.Debug("compactor recovery: future version skipped",
-					"session", state.SessionID(),
-					"version", d.Version,
-					"current", CurrentPayloadVersion)
-				continue
-			}
-			latest = d
-		case OpDigestClear:
-			latest = nil
-		default:
-			e.logger.Debug("compactor recovery: unknown op",
-				"session", state.SessionID(), "op", op)
+		if entry, ok := projectRowToEntry(renderer, &r); ok {
+			entries = append(entries, entry)
 		}
 	}
 	if latest != nil {
@@ -69,6 +72,7 @@ func (e *Extension) Recover(_ context.Context, state extension.SessionState, eve
 	} else {
 		s.ClearDigest()
 	}
+	s.resetHistory(entries)
 	return nil
 }
 

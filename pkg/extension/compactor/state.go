@@ -20,6 +20,8 @@ package compactor
 import (
 	"sync"
 	"time"
+
+	"github.com/hugr-lab/hugen/pkg/model"
 )
 
 // StateKey is the [extension.SessionState] key the extension
@@ -144,13 +146,15 @@ type SubagentRef struct {
 
 // CompactorState is the per-session typed handle the compactor
 // stores in [extension.SessionState] under [StateKey]. Read by
-// Advertiser (Block C), trigger predicate, and adapter
-// SnapshotSession projection.
+// Advertiser (Block C), trigger predicate, adapter
+// SnapshotSession projection, and (η.1+) ProvideHistory.
 //
-// Concurrency: every method acquires mu; the only mutation
-// paths are SetDigest (called from compaction pipeline + Recovery
-// replay) and updates from FrameObserver (own mutex on the
-// boundary index — see [boundaryTracker]).
+// Concurrency: every method acquires its own mutex (mu for
+// digest, historyMu for the history projection, boundary owns
+// its own). The mutation paths are SetDigest (called from
+// compaction pipeline + Recovery replay), updates from
+// FrameObserver (boundary index + history projection), and full
+// rebuild from Recover.
 type CompactorState struct {
 	mu     sync.Mutex
 	digest *DigestPayload
@@ -160,6 +164,28 @@ type CompactorState struct {
 	// (FrameObserver capability) so the trigger predicate
 	// runs in O(1) at boundary time.
 	boundary boundaryTracker
+
+	// historyMu guards [history]. Held briefly during append +
+	// snapshot — never across LLM / I/O.
+	historyMu sync.Mutex
+
+	// history is the incrementally-maintained projection of the
+	// session's persisted events onto [model.Message] shape.
+	// η.1 ships the field + appender + ProvideHistory plumbing;
+	// the Session.buildMessages read path stays on the legacy
+	// s.history until η.2 flips the switch.
+	history []HistoryEntry
+}
+
+// HistoryEntry is one row of the compactor's owned history
+// projection. Seq + Timestamp come from the source frame envelope;
+// Message is the projected model.Message ready to feed into the
+// LLM call. A future multi-contributor merge (see η spec §2.1)
+// would sort across owners by Timestamp.
+type HistoryEntry struct {
+	Seq       int64
+	Timestamp time.Time
+	Message   model.Message
 }
 
 // boundaryTracker is the FrameObserver-maintained running
@@ -250,3 +276,35 @@ func (s *CompactorState) addTokens(delta int) {
 	defer s.boundary.mu.Unlock()
 	s.boundary.estimatedTokens += delta
 }
+
+// appendHistory records one projected entry. Internal — called
+// only from [Extension.OnFrameEmit] (live path) and from
+// [Extension.Recover] (replay).
+func (s *CompactorState) appendHistory(entry HistoryEntry) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	s.history = append(s.history, entry)
+}
+
+// resetHistory replaces the projection wholesale. Internal —
+// called only from [Extension.Recover] after the second pass
+// builds a fresh slice.
+func (s *CompactorState) resetHistory(entries []HistoryEntry) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	s.history = entries
+}
+
+// historySnapshot returns a fresh copy of the projected entries.
+// Callers may mutate the returned slice freely.
+func (s *CompactorState) historySnapshot() []HistoryEntry {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if len(s.history) == 0 {
+		return nil
+	}
+	out := make([]HistoryEntry, len(s.history))
+	copy(out, s.history)
+	return out
+}
+

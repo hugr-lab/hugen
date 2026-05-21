@@ -26,8 +26,21 @@ import (
 func BuildConfig(in config.CompactorConfig, logger *slog.Logger) Config {
 	cfg := DefaultConfig()
 
+	if in.Strategy != "" {
+		cfg.Strategy = resolveStrategy(in.Strategy, logger)
+	}
+	if in.WindowSize > 0 {
+		cfg.WindowSize = in.WindowSize
+	}
 	if in.Enabled != nil {
 		cfg.Enabled = *in.Enabled
+		// Legacy shim: `enabled: false` maps to StrategyOff so
+		// operators that haven't migrated to the strategy field
+		// keep the same behaviour. Removed after one release per
+		// spec §8.
+		if !cfg.Enabled && in.Strategy == "" {
+			cfg.Strategy = StrategyOff
+		}
 	}
 	if in.MaxTurns > 0 {
 		cfg.MaxTurns = in.MaxTurns
@@ -70,6 +83,22 @@ func BuildConfig(in config.CompactorConfig, logger *slog.Logger) Config {
 	return cfg
 }
 
+// resolveStrategy maps a YAML strategy string onto the
+// extension-internal enum. Unknown values fall back to
+// [StrategySummarize] with a warn log — same discipline as
+// [resolveCompactorIntent]. Phase 5.2.η.
+func resolveStrategy(s string, logger *slog.Logger) Strategy {
+	st := Strategy(s)
+	if ValidStrategy(st) {
+		return st
+	}
+	if logger != nil {
+		logger.Warn("compactor: unknown strategy in agent_config.yaml; falling back to summarize",
+			"strategy", s)
+	}
+	return StrategySummarize
+}
+
 // resolveCompactorIntent maps an operator-supplied YAML intent
 // string to [model.Intent]. Unknown values fall back to
 // [model.IntentSummarize] and log a warn — operators see the
@@ -102,6 +131,11 @@ func projectTierOverride(t config.CompactorTier, logger *slog.Logger) TierOverri
 		KeptVerbatimMax:      t.KeptVerbatimMax,
 		MinTurnGap:           t.MinTurnGap,
 		TokenBudgetRatio:     t.TokenBudgetRatio,
+		WindowSize:           t.WindowSize,
+	}
+	if t.Strategy != nil {
+		s := resolveStrategy(*t.Strategy, logger)
+		out.Strategy = &s
 	}
 	if t.LLMTimeoutMs != nil {
 		d := time.Duration(*t.LLMTimeoutMs) * time.Millisecond
@@ -163,6 +197,8 @@ func projectCompactorOverride(in *skillpkg.CompactorOverride) *OverrideSpec {
 		return nil
 	}
 	return &OverrideSpec{
+		Strategy:             in.Strategy,
+		WindowSize:           in.WindowSize,
 		Enabled:              in.Enabled,
 		MaxTurns:             in.MaxTurns,
 		MaxTokens:            in.MaxTokens,

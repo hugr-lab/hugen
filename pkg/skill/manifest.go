@@ -485,6 +485,8 @@ type SubAgentRole struct {
 // explicit zero. The three-layer resolver only overwrites
 // explicitly-set fields.
 type CompactorOverride struct {
+	Strategy             *string  `json:"strategy,omitempty"               yaml:"strategy,omitempty"`
+	WindowSize           *int     `json:"window_size,omitempty"            yaml:"window_size,omitempty"`
 	Enabled              *bool    `json:"enabled,omitempty"                yaml:"enabled,omitempty"`
 	MaxTurns             *int     `json:"max_turns,omitempty"              yaml:"max_turns,omitempty"`
 	MaxTokens            *int     `json:"max_tokens,omitempty"             yaml:"max_tokens,omitempty"`

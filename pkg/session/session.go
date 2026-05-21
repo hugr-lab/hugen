@@ -1646,19 +1646,53 @@ func (s *Session) stuckDetectionEnabled(ctx context.Context) bool {
 	return !s.gatherToolPolicy(ctx).DisableStuckNudges
 }
 
+// useHistoryOwner is the phase 5.2.η feature flag. While false
+// (η.1) the runtime keeps reading from the legacy [Session.history]
+// slice — the HistoryOwner extension projection runs in parallel
+// for plumbing-validation only. η.2 flips this to true; η.3
+// deletes the legacy slice + the flag.
+const useHistoryOwner = false
+
 // buildMessages prepends the per-Turn system message (agent
 // constitution + concatenated skill instructions) to the chat
 // history. Rebuilt every Turn because skill bindings can change
 // between Turns (skill_load / skill_unload during a session). The
 // returned slice is a fresh copy — callers can mutate it freely
 // without touching s.history.
+//
+// η.1 wires the HistoryOwner read path behind [useHistoryOwner].
+// Default behaviour is unchanged; the alternate path is exercised
+// only by tests until η.2 flips the constant.
 func (s *Session) buildMessages(ctx context.Context) []model.Message {
-	out := make([]model.Message, 0, len(s.history)+1)
+	hist := s.history
+	if useHistoryOwner {
+		hist = s.ownedHistory(ctx)
+	}
+	out := make([]model.Message, 0, len(hist)+1)
 	if sys := s.systemPrompt(ctx); sys != "" {
 		out = append(out, model.Message{Role: model.RoleSystem, Content: sys})
 	}
-	out = append(out, s.history...)
+	out = append(out, hist...)
 	return out
+}
+
+// ownedHistory walks deps.Extensions and returns the projection
+// from the first [extension.HistoryOwner]. Boot-time uniqueness
+// is asserted in pkg/runtime/extensions.go so the "first" choice
+// is always the singular owner. Returns nil when no owner is
+// registered — callers fall back to the legacy s.history.
+func (s *Session) ownedHistory(ctx context.Context) []model.Message {
+	if s.deps == nil {
+		return nil
+	}
+	for _, ext := range s.deps.Extensions {
+		owner, ok := ext.(extension.HistoryOwner)
+		if !ok {
+			continue
+		}
+		return owner.ProvideHistory(ctx, s)
+	}
+	return nil
 }
 
 // systemPrompt assembles the system-prompt body for the next

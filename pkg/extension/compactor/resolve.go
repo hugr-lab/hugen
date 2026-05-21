@@ -72,6 +72,12 @@ func (e *Extension) resolveTierConfig(ctx context.Context, state extension.Sessi
 // Modifies cfg in place; caller passes a pointer into its own
 // stack-allocated value copy.
 func applyTierOverride(cfg *Config, t TierOverride) {
+	if t.Strategy != nil {
+		cfg.Strategy = *t.Strategy
+	}
+	if t.WindowSize != nil {
+		cfg.WindowSize = *t.WindowSize
+	}
 	if t.Enabled != nil {
 		cfg.Enabled = *t.Enabled
 	}
@@ -110,6 +116,17 @@ func applyTierOverride(cfg *Config, t TierOverride) {
 // which the spec carries pre-typed so pkg/skill stays
 // duration-agnostic.
 func applyOverrideSpec(cfg *Config, o OverrideSpec) {
+	if o.Strategy != nil {
+		// Unknown values silently inherit (parity with
+		// resolveIntent below). Operator-level validation lives in
+		// the runtime config adapter (BuildConfig).
+		if st := Strategy(*o.Strategy); ValidStrategy(st) {
+			cfg.Strategy = st
+		}
+	}
+	if o.WindowSize != nil {
+		cfg.WindowSize = *o.WindowSize
+	}
 	if o.Enabled != nil {
 		cfg.Enabled = *o.Enabled
 	}
