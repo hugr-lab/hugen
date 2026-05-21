@@ -137,6 +137,126 @@ type SubagentsView interface {
 	OnUpdate(fn func()) (cancel func())
 }
 
+// CompactorView is the operator-config surface for the phase-5.2
+// history compactor. Carries the top-level defaults and the
+// per-tier override map. The compactor extension's per-session
+// resolver stacks these with skill-manifest overrides at run time
+// — see pkg/extension/compactor/resolve.go.
+type CompactorView interface {
+	// CompactorConfig returns the parsed top-level + per-tier
+	// blocks. Pointer fields preserve "absent" so the resolver
+	// can distinguish unset from explicit-zero. Callers MUST treat
+	// the returned value as read-only.
+	CompactorConfig() CompactorConfig
+
+	OnUpdate(fn func()) (cancel func())
+}
+
+// CompactorConfig is the data shape NewStaticService receives via
+// StaticInput.Compactor. Absent or zero fields take the runtime
+// defaults declared in pkg/extension/compactor.DefaultConfig.
+// Fields mirror compactor.Config (top-level) plus a per-tier
+// override map keyed by tier name (root | mission | worker).
+//
+// Phase 5.2 γ — operator-config plumbing. The compactor extension
+// owns interpretation; this struct exists purely to carry YAML
+// values through pkg/config without importing pkg/extension.
+type CompactorConfig struct {
+	// Enabled is the global kill-switch. nil = inherit runtime
+	// default (true); &false explicitly disables.
+	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+
+	// MaxTurns is the turn-count limb threshold. 0 / absent ⇒
+	// inherit runtime default.
+	MaxTurns int `mapstructure:"max_turns" yaml:"max_turns,omitempty"`
+
+	// MaxTokens is the absolute estimated-prompt-token threshold.
+	// 0 / absent ⇒ inherit runtime default. Disabled when both
+	// MaxTokens and TokenBudgetRatio are 0.
+	MaxTokens int `mapstructure:"max_tokens" yaml:"max_tokens,omitempty"`
+
+	// PreservedRecentTurns is the live-tail size kept past the
+	// digest cutoff. 0 / absent ⇒ runtime default.
+	PreservedRecentTurns int `mapstructure:"preserved_recent_turns" yaml:"preserved_recent_turns,omitempty"`
+
+	// DigestMaxTokens is the cap that triggers cap-driven collapse.
+	// 0 / absent ⇒ runtime default.
+	DigestMaxTokens int `mapstructure:"digest_max_tokens" yaml:"digest_max_tokens,omitempty"`
+
+	// KeptVerbatimMax caps the number of entries the digest's
+	// KeptVerbatim slice carries across iterations. Oldest entries
+	// drop FIFO past the cap (the first user_message is pinned).
+	// 0 / absent ⇒ runtime default.
+	KeptVerbatimMax int `mapstructure:"kept_verbatim_max" yaml:"kept_verbatim_max,omitempty"`
+
+	// MinTurnGap is the anti-thrash gate. 0 / absent ⇒ runtime
+	// default.
+	MinTurnGap int `mapstructure:"min_turn_gap" yaml:"min_turn_gap,omitempty"`
+
+	// LLMTimeoutMs caps each summariser / collapse LLM call.
+	// 0 / absent ⇒ runtime default (30s).
+	LLMTimeoutMs int `mapstructure:"llm_timeout_ms" yaml:"llm_timeout_ms,omitempty"`
+
+	// LLMIntent selects the model-router intent string the
+	// compactor's LLM calls resolve through. Empty defaults to
+	// the runtime's IntentSummarize. Unknown values fall back to
+	// IntentSummarize with a warn log at boot time (resolution
+	// happens in the runtime adapter).
+	LLMIntent string `mapstructure:"llm_intent" yaml:"llm_intent,omitempty"`
+
+	// TokenBudgetRatio is the fraction of the resolved model's
+	// MaxPromptTokens above which the budget limb trips. Parsed
+	// for future use; until a MaxPromptTokens accessor lands on
+	// pkg/model, the compactor falls back to MaxTokens as the
+	// absolute floor. See pkg/extension/compactor/resolve.go.
+	TokenBudgetRatio float64 `mapstructure:"token_budget_ratio" yaml:"token_budget_ratio,omitempty"`
+
+	// UIMarker carries the adapter-side transcript marker
+	// configuration. Phase 5.2 δ. A sub-struct (rather than a
+	// flat bool) so future ui knobs (style, glyph, label format)
+	// land alongside without breaking the YAML schema.
+	UIMarker CompactorUIMarker `mapstructure:"ui_marker" yaml:"ui_marker,omitempty"`
+
+	// Tiers carries per-tier overrides (root | mission | worker).
+	// Each entry's non-zero fields override the corresponding
+	// top-level field for sessions in that tier; absent or empty
+	// entries inherit top-level verbatim. The compactor extension
+	// resolves the active tier from skill.TierFromDepth(state.Depth()).
+	Tiers map[string]CompactorTier `mapstructure:"tiers" yaml:"tiers,omitempty"`
+}
+
+// CompactorUIMarker carries the transcript-marker UI knobs the
+// adapters consume. Phase 5.2 δ — only Enabled today; future
+// stylistic knobs (label format, glyph, color) land alongside.
+//
+// Global (no per-tier override) in v1: most operators want either
+// marker-on or marker-off across the whole agent. Pointer for
+// Enabled so an absent YAML key reads as "inherit runtime default"
+// (true), explicit `false` disables.
+type CompactorUIMarker struct {
+	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+}
+
+// CompactorTier is the per-tier override shape. All fields are
+// pointers so an absent key reads differently from an explicit
+// zero — the resolver layers (top-level → tier → skill → role)
+// only overwrite fields that were explicitly set.
+//
+// Mirrors CompactorConfig but without the Tiers map (nesting is
+// flat at this layer).
+type CompactorTier struct {
+	Enabled              *bool    `mapstructure:"enabled"               yaml:"enabled,omitempty"`
+	MaxTurns             *int     `mapstructure:"max_turns"             yaml:"max_turns,omitempty"`
+	MaxTokens            *int     `mapstructure:"max_tokens"            yaml:"max_tokens,omitempty"`
+	PreservedRecentTurns *int     `mapstructure:"preserved_recent_turns" yaml:"preserved_recent_turns,omitempty"`
+	DigestMaxTokens      *int     `mapstructure:"digest_max_tokens"     yaml:"digest_max_tokens,omitempty"`
+	KeptVerbatimMax      *int     `mapstructure:"kept_verbatim_max"     yaml:"kept_verbatim_max,omitempty"`
+	MinTurnGap           *int     `mapstructure:"min_turn_gap"          yaml:"min_turn_gap,omitempty"`
+	LLMTimeoutMs         *int     `mapstructure:"llm_timeout_ms"        yaml:"llm_timeout_ms,omitempty"`
+	LLMIntent            *string  `mapstructure:"llm_intent"            yaml:"llm_intent,omitempty"`
+	TokenBudgetRatio     *float64 `mapstructure:"token_budget_ratio"    yaml:"token_budget_ratio,omitempty"`
+}
+
 // HitlView is the operator-config surface for the phase-5.1 HITL
 // primitives. Today it carries one knob — the per-call deadline
 // session:inquire uses when the model omits timeout_ms. Future

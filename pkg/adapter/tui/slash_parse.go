@@ -1,7 +1,4 @@
-// Package console wires stdin/stdout into the runtime as a chat
-// adapter. Lines starting with `/` become SlashCommand Frames;
-// everything else becomes UserMessage.
-package console
+package tui
 
 import (
 	"strings"

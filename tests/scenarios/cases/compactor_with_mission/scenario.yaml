@@ -1,0 +1,37 @@
+# compactor_with_mission — phase 5.2 δ tier-aware scenario.
+#
+# DEFERRED: same harness gap as `compactor_disabled` (no per-
+# scenario agent_config overrides). See
+# `compactor_token_trigger` for the rationale.
+#
+# Intent (once the gap is closed):
+#
+#   Root spawns a mission; both root and the mission accumulate
+#   turns past the (lowered) max_turns threshold. Assert:
+#     - root sees a `digest_set` frame (root tier is default-on),
+#     - the mission sees its OWN `digest_set` frame (mission
+#       tier is default-on per pkg/extension/compactor.DefaultConfig
+#       + skill manifest opt-out semantics),
+#     - workers (depth ≥ 2 — the analyst's sub-roles spawned by
+#       the mission) see NO digest_set frames UNLESS their skill
+#       manifest carries an explicit `compactor.enabled: true`
+#       override (none of the bundled skills do today).
+#
+# Why it cannot ship in δ:
+#
+#   Same as compactor_disabled — overrides aren't per-scenario.
+#   A topology-level threshold change would alter every scenario
+#   sharing that topology, breaking the gemma + gemini-pro suite
+#   that already runs under topology-external-hugr.
+#
+# Status: skeleton kept for the schema; runs.yaml does NOT
+# enrol this scenario.
+name: compactor_with_mission
+requires: []
+
+steps:
+  - tick: true
+    queries:
+      - name: placeholder
+        graphql: |
+          query { __typename }

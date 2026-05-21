@@ -1,6 +1,7 @@
 // Package adapter is the seam between external channels and the
-// runtime supervisor. Phase 1 ships pkg/adapter/console; later
-// phases add SSE (phase 2) and a2a (phase 10).
+// runtime supervisor. pkg/adapter/tui hosts the Bubble Tea
+// interactive renderer; pkg/adapter/webui + pkg/adapter/http host
+// the HTTP/SSE surface; pkg/adapter/a2a lands in phase 10.
 //
 // Adapter and AdapterHost live in pkg/session/manager (the
 // supervisor); OpenRequest stays in pkg/session because Session

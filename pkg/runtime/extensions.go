@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	compactorext "github.com/hugr-lab/hugen/pkg/extension/compactor"
 	liveviewext "github.com/hugr-lab/hugen/pkg/extension/liveview"
 	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
 	missionext "github.com/hugr-lab/hugen/pkg/extension/mission"
@@ -46,6 +47,23 @@ func phaseExtensions(_ context.Context, core *Core) error {
 	exts := []extension.Extension{
 		wsext.NewExtension(core.Cfg.Workspace.Dir, core.Logger),
 		notepadext.NewExtension(core.Store, core.Agent.ID(), notepadext.Config{}),
+		// Compactor lands AFTER notepad so its Advertiser
+		// Block C composes after notepad's Block B. γ wires
+		// the operator config as a CompactorView — the resolver
+		// re-reads each fire so a future hot-reload propagates
+		// without re-creating the extension. SkillCatalog gives
+		// the per-tier resolver mission + per-role manifest
+		// overrides. Phase 5.2.
+		compactorext.NewExtension(
+			core.Logger,
+			core.Config.Compactor(),
+			compactorext.Deps{
+				Router:       core.Models,
+				Store:        core.Store,
+				AgentID:      core.Agent.ID(),
+				SkillCatalog: compactorext.NewSkillManagerCatalog(core.Skills),
+			},
+		),
 		planext.NewExtension(core.Agent.ID()),
 		wbext.NewExtension(core.Agent.ID()),
 		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()),

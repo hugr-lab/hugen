@@ -793,3 +793,104 @@ metadata:
 		t.Errorf("TierCompatibility = %v, want 3 entries", m.Hugen.TierCompatibility)
 	}
 }
+
+// TestParse_CompactorOverride exercises the phase-5.2 γ
+// per-skill / per-role compactor override block. The parser
+// must populate the typed pointer fields verbatim so the
+// runtime resolver can layer them on top of operator config.
+func TestParse_CompactorOverride(t *testing.T) {
+	src := `---
+name: long-running-analyst-repl
+description: Mission skill that opts a single worker role into compaction.
+license: MIT
+metadata:
+  hugen:
+    tier_compatibility: [mission, worker]
+    compactor:
+      enabled: true
+      preserved_recent_turns: 8
+      token_budget_ratio: 0.75
+      llm_intent: cheap
+    sub_agents:
+      - name: repl-loop
+        description: Long-running REPL worker.
+        compactor:
+          enabled: true
+          preserved_recent_turns: 12
+          max_turns: 30
+          llm_timeout_ms: 15000
+---
+`
+	m, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	mc := m.Hugen.Compactor
+	if mc == nil {
+		t.Fatalf("Hugen.Compactor is nil; want populated override block")
+	}
+	if mc.Enabled == nil || !*mc.Enabled {
+		t.Errorf("mission Compactor.Enabled = %v, want &true", mc.Enabled)
+	}
+	if mc.PreservedRecentTurns == nil || *mc.PreservedRecentTurns != 8 {
+		t.Errorf("mission Compactor.PreservedRecentTurns = %v, want &8", mc.PreservedRecentTurns)
+	}
+	if mc.TokenBudgetRatio == nil || *mc.TokenBudgetRatio != 0.75 {
+		t.Errorf("mission Compactor.TokenBudgetRatio = %v, want &0.75", mc.TokenBudgetRatio)
+	}
+	if mc.LLMIntent == nil || *mc.LLMIntent != "cheap" {
+		t.Errorf("mission Compactor.LLMIntent = %v, want &cheap", mc.LLMIntent)
+	}
+
+	if len(m.Hugen.SubAgents) != 1 {
+		t.Fatalf("SubAgents len = %d, want 1", len(m.Hugen.SubAgents))
+	}
+	rc := m.Hugen.SubAgents[0].Compactor
+	if rc == nil {
+		t.Fatalf("role Compactor is nil; want populated override")
+	}
+	if rc.Enabled == nil || !*rc.Enabled {
+		t.Errorf("role Compactor.Enabled = %v, want &true", rc.Enabled)
+	}
+	if rc.PreservedRecentTurns == nil || *rc.PreservedRecentTurns != 12 {
+		t.Errorf("role Compactor.PreservedRecentTurns = %v, want &12", rc.PreservedRecentTurns)
+	}
+	if rc.MaxTurns == nil || *rc.MaxTurns != 30 {
+		t.Errorf("role Compactor.MaxTurns = %v, want &30", rc.MaxTurns)
+	}
+	if rc.LLMTimeoutMs == nil || *rc.LLMTimeoutMs != 15000 {
+		t.Errorf("role Compactor.LLMTimeoutMs = %v, want &15000", rc.LLMTimeoutMs)
+	}
+}
+
+// TestParse_CompactorOverride_AbsentRemainsNil verifies that
+// skills without a compactor block leave Hugen.Compactor + the
+// per-role Compactor pointers nil — the resolver relies on this
+// to short-circuit cleanly.
+func TestParse_CompactorOverride_AbsentRemainsNil(t *testing.T) {
+	src := `---
+name: vanilla
+description: No compactor overrides.
+license: MIT
+metadata:
+  hugen:
+    tier_compatibility: [worker]
+    sub_agents:
+      - name: do-worker
+        description: nothing special
+---
+`
+	m, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if m.Hugen.Compactor != nil {
+		t.Errorf("Hugen.Compactor = %+v, want nil (absent block)", m.Hugen.Compactor)
+	}
+	if len(m.Hugen.SubAgents) != 1 {
+		t.Fatalf("SubAgents len = %d, want 1", len(m.Hugen.SubAgents))
+	}
+	if m.Hugen.SubAgents[0].Compactor != nil {
+		t.Errorf("SubAgents[0].Compactor = %+v, want nil", m.Hugen.SubAgents[0].Compactor)
+	}
+}

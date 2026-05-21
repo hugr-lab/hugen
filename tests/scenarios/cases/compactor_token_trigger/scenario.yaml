@@ -1,0 +1,102 @@
+# compactor_token_trigger — phase 5.2 δ smoke test for the
+# compactor's end-to-end pipeline against a real LLM (Gemma
+# 4-26B via LM Studio) + real Hugr (event log queries below).
+#
+# Enrolled under the dedicated `gemma4-26b-compactor` run that
+# pulls the aggressive `llm-gemma4-26b-compactor.yaml` overlay
+# (compactor.max_turns=4, preserved_recent_turns=2, min_turn_gap=1).
+# After ~5 turns the turn-count limb trips and the compactor
+# fires once on root.
+#
+# By-eye assertions (queries below):
+#
+#   1. boundary_count ≥ 6 — every user_message persists; the
+#      compactor's FrameObserver records each one.
+#
+#   2. ≥ 1 ExtensionFrame{extension=compactor, op=digest_set}
+#      lands on root.outbox. The payload's CutoffSeq > 0 and
+#      Iteration ≥ 1; SummaryBlocks has at least one entry with
+#      non-empty Text.
+#
+#   3. Final agent_message lands cleanly — the compactor's LLM
+#      call doesn't crash root's main turn loop.
+#
+# requires: [local, hugr] — local LLM for both root's main
+# generation AND the compactor's summariser intent; Hugr for
+# the event log queries that verify the digest landed.
+name: compactor_token_trigger
+requires: [local, hugr]
+
+steps:
+  # Six sequential trivial turns. With max_turns=4 +
+  # min_turn_gap=1 + preserved_recent_turns=2, compaction
+  # arms after turn 5 and fires on turn 6's boundary
+  # (boundary_count=6 > max_turns=4, preserved window allows
+  # cutoff_seq alignment).
+  - say: "What's 2 + 2?"
+    budget: 300s
+  - say: "What's 3 + 3?"
+    budget: 300s
+  - say: "What's 4 + 4?"
+    budget: 300s
+  - say: "What's 5 + 5?"
+    budget: 300s
+  - say: "What's 6 + 6?"
+    budget: 300s
+  - say: "What's 7 + 7?"
+    budget: 300s
+    queries:
+      # Every persisted user_message contributes to the
+      # boundary tracker; six say-steps must persist six
+      # user_message rows. session_events is append-only —
+      # compaction never deletes rows, it only changes what
+      # the model prompt sees via Block C.
+      - name: user_messages_count
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "user_message"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq event_type }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Compactor digest_set ExtensionFrames on root. Expect ≥1
+      # under the aggressive overlay (max_turns=4). Each row's
+      # metadata.data carries the DigestPayload: cutoff_seq,
+      # iteration, summary_blocks list. By-eye check inspects
+      # the metadata blob to confirm the LLM summariser
+      # produced non-empty content.
+      - name: compactor_digest_frames
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {
+                  session_id: {eq: $sid},
+                  event_type: {eq: "extension_frame"}
+                }
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq event_type metadata }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
+      # Final agent_message — proves root's turn loop closed
+      # cleanly after the compactor fired. A summariser error
+      # would surface as either an empty content or a separate
+      # error frame.
+      - name: root_final_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 1
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }

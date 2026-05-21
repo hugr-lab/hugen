@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -134,6 +135,27 @@ func (t *tab) handleFrame(f protocol.Frame) tea.Cmd {
 				if t.pendingMissionModal != nil {
 					t.pendingMissionModal.rebuild(t.sidebarStatus)
 				}
+				// Phase 5.2 δ — mirror the operator-resolved
+				// `compactor.ui_marker.enabled` flag from the
+				// liveview-folded compactor status so subsequent
+				// compactor/digest_set frames either render or
+				// stay silent.
+				t.compactorMarkerEnabled = compactorMarkerEnabledFromStatus(st)
+			}
+		}
+		if v.Payload.Extension == "compactor" && v.Payload.Op == "digest_set" {
+			// Phase 5.2 δ — inline transcript marker drawn at the
+			// digest cutoff boundary. The marker is informational
+			// only; the full transcript is still rendered. Spec
+			// §11.7. The operator-resolved ui_marker_enabled flag
+			// rides the digest_set payload itself, so the very
+			// first compaction respects an `ui_marker.enabled:
+			// false` operator preference without waiting for a
+			// liveview/status round trip. formatCompactorMarker
+			// returns "" when the flag is false → marker dropped.
+			if line := formatCompactorMarker(v.Payload.Data); line != "" {
+				t.chat.appendSystem(line)
+				t.refreshChat()
 			}
 		}
 	case *protocol.InquiryRequest:
@@ -484,3 +506,70 @@ var (
 	styleReasoning = lipgloss.NewStyle().Faint(true).Italic(true)
 	styleSystem    = lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("8"))
 )
+
+// formatCompactorMarker renders the inline transcript marker the
+// TUI inserts at the cutoff_seq boundary when a
+// `compactor/digest_set` ExtensionFrame lands. Returns "" on
+// decode failure or when the payload explicitly disables the
+// marker (operator set `compactor.ui_marker.enabled: false` —
+// the flag rides the digest_set frame itself so the first
+// compaction respects the operator preference without waiting
+// for a liveview/status round trip).
+//
+// The data payload is the raw DigestPayload JSON (see
+// pkg/extension/compactor.DigestPayload). Field names: iteration,
+// kept_verbatim, summary_blocks, ui_marker_enabled. The
+// kept-verbatim count is the user-visible "msgs" number on the
+// marker line; a digest with only summary blocks (e.g. cap-driven
+// collapse output) falls back to the block count so the marker
+// never shows "0 msgs". A missing `ui_marker_enabled` field
+// (pre-this-change digest_set rows on resume) defaults to true.
+func formatCompactorMarker(data json.RawMessage) string {
+	if len(data) == 0 {
+		return ""
+	}
+	var p struct {
+		Iteration       int               `json:"iteration"`
+		KeptVerbatim    []json.RawMessage `json:"kept_verbatim"`
+		SummaryBlocks   []json.RawMessage `json:"summary_blocks"`
+		UIMarkerEnabled *bool             `json:"ui_marker_enabled"`
+	}
+	if err := json.Unmarshal(data, &p); err != nil {
+		return ""
+	}
+	if p.UIMarkerEnabled != nil && !*p.UIMarkerEnabled {
+		return ""
+	}
+	count := len(p.KeptVerbatim)
+	if count == 0 {
+		count = len(p.SummaryBlocks)
+	}
+	return fmt.Sprintf("─── history compacted (iter %d, %d msgs) ───",
+		p.Iteration, count)
+}
+
+// compactorMarkerEnabledFromStatus extracts the operator-resolved
+// `ui_marker_enabled` flag from a liveview/status payload's
+// `extensions.compactor` projection. Returns true (default) when:
+//   - status carries no compactor entry yet (no digest fired),
+//   - the entry's ui_marker_enabled field is missing, or
+//   - the entry is malformed.
+//
+// Phase 5.2 δ.
+func compactorMarkerEnabledFromStatus(s *liveviewStatus) bool {
+	if s == nil || len(s.Extensions) == 0 {
+		return true
+	}
+	raw, ok := s.Extensions["compactor"]
+	if !ok || len(raw) == 0 {
+		return true
+	}
+	var c struct {
+		UIMarkerEnabled bool `json:"ui_marker_enabled"`
+	}
+	c.UIMarkerEnabled = true // default-on when the field is absent
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return true
+	}
+	return c.UIMarkerEnabled
+}

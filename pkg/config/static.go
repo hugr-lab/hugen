@@ -16,6 +16,7 @@ var (
 	_ PermissionsView   = (*StaticService)(nil)
 	_ ToolProvidersView = (*StaticService)(nil)
 	_ SubagentsView     = (*StaticService)(nil)
+	_ CompactorView     = (*StaticService)(nil)
 )
 
 // Subagent runtime defaults — applied in NewStaticService when the
@@ -54,6 +55,7 @@ type StaticService struct {
 	toolProviders  []ToolProviderSpec
 	subagents      SubagentsConfig
 	hitl           HitlConfig
+	compactor      CompactorConfig
 }
 
 // StaticInput aggregates everything NewStaticService needs from
@@ -69,6 +71,7 @@ type StaticInput struct {
 	ToolProviders  []ToolProviderSpec
 	Subagents      SubagentsConfig
 	Hitl           HitlConfig
+	Compactor      CompactorConfig
 }
 
 // NewStaticService captures the input snapshot. The caller still
@@ -115,6 +118,7 @@ func NewStaticService(in StaticInput) *StaticService {
 		toolProviders:  append([]ToolProviderSpec(nil), in.ToolProviders...),
 		subagents:      subagents,
 		hitl:           hitl,
+		compactor:      in.Compactor,
 	}
 }
 
@@ -128,6 +132,7 @@ func (s *StaticService) Permissions() PermissionsView     { return s }
 func (s *StaticService) ToolProviders() ToolProvidersView { return s }
 func (s *StaticService) Subagents() SubagentsView         { return s }
 func (s *StaticService) Hitl() HitlView                   { return s }
+func (s *StaticService) Compactor() CompactorView         { return s }
 
 // Subscribe returns a never-firing, never-closed channel. Phase-3
 // callers can wire it without special-casing; phase-6+ live
@@ -188,8 +193,8 @@ func (s *StaticService) Providers() []ToolProviderSpec {
 
 // --- SubagentsView ---
 
-func (s *StaticService) DefaultMaxDepth() int           { return s.subagents.MaxDepth }
-func (s *StaticService) DefaultMaxTurns() int           { return s.subagents.MaxTurns }
+func (s *StaticService) DefaultMaxDepth() int { return s.subagents.MaxDepth }
+func (s *StaticService) DefaultMaxTurns() int { return s.subagents.MaxTurns }
 func (s *StaticService) DefaultStuckDetection() StuckPolicy {
 	return s.subagents.StuckDetection
 }
@@ -198,6 +203,14 @@ func (s *StaticService) MaxAsyncMissionsPerRoot() int { return s.subagents.MaxAs
 // --- HitlView ---
 
 func (s *StaticService) DefaultTimeoutMs() int { return s.hitl.DefaultTimeoutMs }
+
+// --- CompactorView ---
+
+// CompactorConfig returns the parsed top-level + per-tier blocks
+// verbatim — defaults application happens in pkg/extension/compactor.
+// Returning the value type (not pointer) preserves the read-only
+// contract on the View interface.
+func (s *StaticService) CompactorConfig() CompactorConfig { return s.compactor }
 
 // --- OnUpdate (shared no-op) ---
 

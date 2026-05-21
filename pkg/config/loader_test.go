@@ -98,3 +98,102 @@ func TestLoadStaticInput_ExpandsEnvAcrossAllSections(t *testing.T) {
 		t.Errorf("ToolProviders[0].Args[0]: %q", got)
 	}
 }
+
+// TestLoadStaticInput_CompactorBlock verifies the phase-5.2 γ
+// compactor schema decodes end-to-end through LoadStaticInput,
+// including the per-tier overlay map + the tri-state Enabled
+// pointer (absent vs. explicit zero).
+func TestLoadStaticInput_CompactorBlock(t *testing.T) {
+	raw := map[string]any{
+		"compactor": map[string]any{
+			"enabled":                true,
+			"max_turns":              50,
+			"max_tokens":             80000,
+			"preserved_recent_turns": 10,
+			"digest_max_tokens":      4000,
+			"min_turn_gap":           3,
+			"llm_timeout_ms":         30000,
+			"llm_intent":             "summarize",
+			"token_budget_ratio":     0.8,
+			"tiers": map[string]any{
+				"root": map[string]any{
+					"enabled":                true,
+					"preserved_recent_turns": 20,
+					"token_budget_ratio":     0.7,
+				},
+				"mission": map[string]any{
+					"enabled":                true,
+					"preserved_recent_turns": 5,
+					"max_turns":              40,
+				},
+				"worker": map[string]any{
+					"enabled": false,
+				},
+			},
+		},
+	}
+	in, err := LoadStaticInput(raw, true)
+	if err != nil {
+		t.Fatalf("LoadStaticInput: %v", err)
+	}
+	c := in.Compactor
+	if c.Enabled == nil || !*c.Enabled {
+		t.Errorf("top-level Enabled = %v, want &true", c.Enabled)
+	}
+	if c.MaxTurns != 50 {
+		t.Errorf("MaxTurns = %d, want 50", c.MaxTurns)
+	}
+	if c.MaxTokens != 80000 {
+		t.Errorf("MaxTokens = %d, want 80000", c.MaxTokens)
+	}
+	if c.TokenBudgetRatio != 0.8 {
+		t.Errorf("TokenBudgetRatio = %v, want 0.8", c.TokenBudgetRatio)
+	}
+	if c.LLMIntent != "summarize" {
+		t.Errorf("LLMIntent = %q, want summarize", c.LLMIntent)
+	}
+	if len(c.Tiers) != 3 {
+		t.Fatalf("Tiers len = %d, want 3", len(c.Tiers))
+	}
+
+	root := c.Tiers["root"]
+	if root.Enabled == nil || !*root.Enabled {
+		t.Errorf("tiers.root.Enabled = %v, want &true", root.Enabled)
+	}
+	if root.PreservedRecentTurns == nil || *root.PreservedRecentTurns != 20 {
+		t.Errorf("tiers.root.PreservedRecentTurns = %v, want &20", root.PreservedRecentTurns)
+	}
+	if root.TokenBudgetRatio == nil || *root.TokenBudgetRatio != 0.7 {
+		t.Errorf("tiers.root.TokenBudgetRatio = %v, want &0.7", root.TokenBudgetRatio)
+	}
+
+	worker := c.Tiers["worker"]
+	if worker.Enabled == nil || *worker.Enabled {
+		t.Errorf("tiers.worker.Enabled = %v, want &false", worker.Enabled)
+	}
+	// Field that was absent in YAML should still be nil — the
+	// tri-state pointer is the contract.
+	if worker.MaxTurns != nil {
+		t.Errorf("tiers.worker.MaxTurns = %v, want nil (absent)", worker.MaxTurns)
+	}
+}
+
+// TestLoadStaticInput_CompactorAbsentIsZeroValue verifies that
+// a config without a `compactor:` key leaves the loaded
+// CompactorConfig at its zero value — the runtime adapter
+// applies the extension's DefaultConfig defaults on top.
+func TestLoadStaticInput_CompactorAbsentIsZeroValue(t *testing.T) {
+	in, err := LoadStaticInput(map[string]any{}, true)
+	if err != nil {
+		t.Fatalf("LoadStaticInput: %v", err)
+	}
+	if in.Compactor.Enabled != nil {
+		t.Errorf("absent compactor block: Enabled = %v, want nil", in.Compactor.Enabled)
+	}
+	if in.Compactor.MaxTurns != 0 {
+		t.Errorf("absent compactor block: MaxTurns = %d, want 0", in.Compactor.MaxTurns)
+	}
+	if len(in.Compactor.Tiers) != 0 {
+		t.Errorf("absent compactor block: Tiers len = %d, want 0", len(in.Compactor.Tiers))
+	}
+}

@@ -165,6 +165,21 @@ runs:
       # carrying memory summaries into iteration 2's planner.
       - mission_pdca_checker
 
+  # Phase 5.2 δ — dedicated compactor dogfood run. The base
+  # gemma4-26b config carries prod defaults (max_turns=50); we
+  # use the dedicated `llm-gemma4-26b-compactor.yaml` overlay
+  # here to lower the threshold so a 6-turn smoke scenario
+  # reliably trips compaction without dragging the run out for
+  # dozens of trivial turns. Kept separate from the main
+  # gemma4-26b run so other scenarios in that bucket aren't
+  # affected by the aggressive threshold.
+  - name: gemma4-26b-compactor
+    llm: configs/llm-gemma4-26b-compactor.yaml
+    topology: configs/topology-external-hugr.yaml
+    requires: [local, hugr]
+    scenarios:
+      - compactor_token_trigger
+
   # Phase 5.2 η — root-as-chat mixed model gate. Root + mission
   # on Gemini Pro 3.1; workers on local gemma4-26b. Same
   # scenario subset as the gemma-only η bucket so results can

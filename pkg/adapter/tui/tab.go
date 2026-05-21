@@ -10,7 +10,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/hugr-lab/hugen/pkg/adapter/console"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -73,6 +72,16 @@ type tab struct {
 	// that case so the operator never sees a misleading "0
 	// events" before the first sample lands.
 	eventsCount int
+
+	// Phase 5.2 δ — operator-resolved compactor.ui_marker.enabled
+	// flag, mirrored from each liveview/status frame's
+	// `extensions.compactor.ui_marker_enabled` field. Default true:
+	// fresh tabs render markers until a status frame says
+	// otherwise. Setting `compactor.ui_marker.enabled: false` in
+	// agent_config.yaml flips this to false at first status
+	// arrival, suppressing subsequent compactor/digest_set
+	// markers in this tab's chat.
+	compactorMarkerEnabled bool
 }
 
 // newTab builds a fresh tab bound to sessionID. The terminal
@@ -95,16 +104,17 @@ func newTab(sessionID string, u protocol.ParticipantInfo, submit func(protocol.F
 	vp.KeyMap = viewport.KeyMap{}
 
 	return &tab{
-		sessionID:   sessionID,
-		user:        u,
-		logger:      logger,
-		submit:      submit,
-		viewport:    vp,
-		textarea:    ta,
-		chat:        newChatBuffer(),
-		statusLine:  "ready",
-		historyIdx:  -1,
-		eventsCount: -1,
+		sessionID:              sessionID,
+		user:                   u,
+		logger:                 logger,
+		submit:                 submit,
+		viewport:               vp,
+		textarea:               ta,
+		chat:                   newChatBuffer(),
+		statusLine:             "ready",
+		historyIdx:             -1,
+		eventsCount:            -1,
+		compactorMarkerEnabled: true, // default-on per spec §11.7
 	}
 }
 
@@ -271,8 +281,8 @@ func (t *tab) historyNext() bool {
 // the modal-only intent is a bare `/mission`.
 func (t *tab) dispatchUserInput(text string) error {
 	var f protocol.Frame
-	if console.IsSlashCommand(text) {
-		pc := console.ParseSlashCommand(text)
+	if IsSlashCommand(text) {
+		pc := ParseSlashCommand(text)
 		if pc.Name == "end" {
 			t.statusLine = "closing…"
 			t.closing = true
@@ -425,16 +435,15 @@ func (t *tab) dispatchInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 	return false, nil
 }
 
-// submitInquiryReply builds the InquiryResponse via the shared
-// console helper and submits it through the host. Clears the modal
-// on success.
+// submitInquiryReply builds the InquiryResponse via BuildInquiryReply
+// and submits it through the host. Clears the modal on success.
 func (t *tab) submitInquiryReply(pend *inquiryState, line string) error {
-	pi := &console.PendingInquiry{
+	pi := &PendingInquiry{
 		RequestID:       pend.req.RequestID,
 		CallerSessionID: pend.req.CallerSessionID,
 		Kind:            pend.req.Type,
 	}
-	resp, err := console.BuildInquiryReply(t.user, t.sessionID, pi, line)
+	resp, err := BuildInquiryReply(t.user, t.sessionID, pi, line)
 	if err != nil {
 		return err
 	}

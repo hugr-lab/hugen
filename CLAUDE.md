@@ -21,29 +21,37 @@ authoritative (see `.specify/memory/constitution.md` and
 
 We are mid-execution of **design 001 — Hugr Agent Runtime**.
 The canonical, up-to-date design lives in
-`design/002-runtime-canonical/` (rewrite as of 2026-05-10);
-`design/001-agent-runtime/` is preserved as the historical
-record of *why* each phase ended up the way it did.
+`design/004-runtime-post-phase-i/` (consolidated 2026-05-20
+after Phase I shipped). `design/002-runtime-canonical/` and
+`design/003-mission-pdca/` remain readable as historical
+baselines; `design/001-agent-runtime/` is preserved as the
+record of *why* each early phase ended up the way it did.
 
-**Read first** when touching session / extension / tool / skill
-internals:
+**Read first** when touching session / extension / tool / skill /
+mission internals:
 
-- `design/002-runtime-canonical/architecture.md` — state-of-the-tree
-  map; §11 is the extension recipe book.
-- `design/002-runtime-canonical/design.md` — vision + phase plan.
-- `design/002-runtime-canonical/backlog.md` — consolidated free
-  agenda (cross-phase items that don't yet warrant a phase).
+- `design/004-runtime-post-phase-i/architecture.md` — state-of-
+  the-tree map. §11 is the extension recipe book. §15 is the
+  mission-PDCA runtime.
+- `design/004-runtime-post-phase-i/design.md` — vision + phase
+  plan + current shipped state.
+- `design/004-runtime-post-phase-i/backlog.md` — consolidated
+  free agenda (B1–B14 + queued mini-phases).
 - Per-phase specs: `phase-4.2-*.md`, `phase-4.2.2-*.md`,
   `phase-4.2.3-*.md`, `phase-5.1-hitl-followups-async.md`,
-  `phase-5.1b-spec.md`.
+  `phase-5.1b-spec.md`, `phase-5.1c-tui-bubbletea.md`,
+  `phase-5.1c.async-root.md`, `phase-5.1c.cancel-ux.md`,
+  `phase-5.2-root-as-chat.md` (all under 002 until promoted to
+  004), and `003-mission-pdca/{design,spec}.md` for the
+  pre-implementation mission-PDCA canon.
 
-When 002 and a 001 phase doc disagree, 002 wins.
+When 004 and an earlier directory disagree, **004 wins**.
 
 Phase plan:
 
 | Phase | Status |
 | ----- | ------ |
-| 1. Native core + ModelRouter + console UI | shipped |
+| 1. Native core + ModelRouter + console UI (console deprecated 2026-05-21, TUI is the only interactive adapter from PR #23 review-fixes) | shipped |
 | 2. HTTP/SSE + webui + ADK eviction | shipped |
 | 3. Action layer (skills + tools + 3-tier permissions + bash/hugr-mcp) | shipped |
 | 3.5. Analyst toolkit (duckdb-mcp + python-mcp + analyst skills) | shipped |
@@ -61,80 +69,85 @@ Phase plan:
 | 5.1c. Bubble Tea TUI adapter — reference rich-client on top of 5.1b liveview surface; multi-root tabs, inquiry modal, sidebar driven by `ExtensionFrame{liveview/status}`, on-attach replay, dogfood polish | shipped (`410df3d`, 2026-05-15) |
 | 5.1c.async-root. Root defaults to `wait="async"` + three-bucket follow-up/new-mission/conversational classifier + mandatory announce-on-spawn user reply + TUI `✓ mission … completed` marker. Skill-prompt-driven; no new runtime primitives. Bundles two dogfood doc fixes (hugr-data `schema-type_fields` semantic-search params, `_skill_builder` slim + de-autoload). 5/5 PASS on Gemma 26B | shipped (`dc077ab`, 2026-05-15) |
 | 5.1c.cancel-ux. User-initiated mission cancel: `/mission` modal listing in-flight children with `j/k/c/Shift+C` keys; Esc-Esc double-press as panic-cancel-all. Fast-cancel discipline (Cancel{Cascade:true} → SessionClose with `user_cancel:` skip-close-turn prefix). Async result delivery (idle-fold + auto-summary turn on `SubagentResult{AsyncNotify}`). | shipped (`355ad48`, 2026-05-15) |
-| 5.x.skill-polish-1. `_root` Bucket D (clarify before route) + verify-mission-alive pre-check; analyst category enumeration via `discovery-search_module_data_objects` so workers don't bail on first matched table; TUI cancel-ux R-followups (modal live rebuild on liveview status, async-summary flag gated by route). | in-progress (branch `019-mini-5.x.skill-polish-1`) |
-| 5.2. Compactor — content-aware history summarisation; replaces phase-3 `defaultHistoryWindow=50` stop-gap; composes with 4.2.3 notepad (notepad = cross-mission, compactor = within-session) | open — not yet specced |
+| 5.x.skill-polish-1. `_root` Bucket D (clarify before route) + verify-mission-alive pre-check; analyst category enumeration via `discovery-search_module_data_objects` so workers don't bail on first matched table; TUI cancel-ux R-followups (modal live rebuild on liveview status, async-summary flag gated by route). | shipped (`9be1fdd`, 2026-05-16, PR #19) |
+| 5.2 root-as-chat. Bundled with 5.4.b workspace + 5.4.c.1-10 weak-model hardening + Stage 3 FromName + analyst SKILL review. 18 commits. | shipped (`1c0e0a7`, 2026-05-18, PR #21) |
+| A + I. Mission-PDCA runtime (`pkg/extension/mission`) — planner / checker / synthesizer executor; `mission:validate_and_approve` atomic validate+inquire+marker stamp (frame-only); skill-agnostic approval state with `invalidates_plan_approval` worker signal; `mission_goal` + `mission_acceptance_criteria` in plan with runtime AC-gated `finish` (synthetic amend coercion); 28 sub-phases (I.1-I.28). | shipped (`e83b003`, 2026-05-20, PR #22) |
+| 5.2. Compactor — content-aware history summarisation (`pkg/extension/compactor`). TurnBoundaryHook capability; FrameObserver-maintained boundary index; hybrid trigger (turn-count + abs token budget); per-Kind dispatch with incremental SummaryBlocks + cap-driven collapse; pure-chat short-circuit (no SummaryBlock emitted when range carries no tool calls / inquiries); inquiry Q/A preserved verbatim in KeptVerbatim; KeptVerbatim FIFO cap with first-user-message pin; three-layer config resolver (operator YAML view → tier overlay → skill manifest overrides); StatusReporter projection; TUI inline marker rendering with payload-driven `ui_marker_enabled` flag; `/compactor status|reset|compact` slash commands; lossless fanout (blocking subscriber send + ctx escape + 30s warn). Live Gemma 4-26B dogfood pass + PR #23 review-fixes (console adapter removed; S1-S6 + B2 closed; B19-B25 deferred to η). Known gap: `s.history` live truncation lands in η. | shipped on `025-phase-5.2-compactor` (PR #23 review fixes 2026-05-21) |
 | 6. Cron + scheduler | open |
 | 7. Memory pipeline + LLM Wiki — cross-conversation distilled knowledge. Reads 4.2.3 notepad as input; session-scoped working memory is owned by 4.2.3. | open |
 | 8. Artifacts | open |
 | 9. A2A adapter | open (defer until needed) |
 | 10. Multi-party Workspaces (human + agent) | open — lands after A2A |
-| Backlog | see `design/002-runtime-canonical/backlog.md` |
+| Backlog | see `design/004-runtime-post-phase-i/backlog.md` |
 
 Goal: finish design-001 cleanly, then move to **hub integration**
 (container packaging, deployment story, hub-spawned mode). Hub work is
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
 
-## Active focus — 5.x.skill-polish-1 in flight; 5.x.subagent-lifetime + 5.3.policy-ux queued
+## Active focus — Phase 5 closed; B13 + Phase 6 (cron) next
 
-Phase 5.1c.cancel-ux shipped to `main` at `355ad48` (PR #18,
-2026-05-15) — `/mission` modal + Esc-Esc panic-cancel + fast-
-cancel discipline + async-result idle-fold + auto-summary turn.
-Independent code review surfaced one race (Cancel-before-
-SessionClose ordering) and seven R-items; race fixed in-PR, 4
-of 7 R-items rolled into 5.x.skill-polish-1.
+Phase 5.2 (compactor) closed Phase 5. The five-commit branch
+`025-phase-5.2-compactor` lands α-ε in one PR: skeleton +
+TurnBoundaryHook capability (α), per-Kind dispatch + LLM
+summariser + incremental digest (β), per-tier config + skill
+manifest opt-in + slash commands (γ), SnapshotSession
+projection + UI markers + scenarios (δ), dogfood polish
+(pure-chat short-circuit) verified on Gemma 4-26B.
 
-- **5.x.skill-polish-1** *(in flight)* — skill prose + cancel-ux
-  R-followups. `_root` gets Bucket D (clarify before route) +
-  verify-mission-alive pre-check on Bucket A. `analyst` gets a
-  CATEGORY classifier shape that enumerates ALL matching tables
-  via `discovery-search_module_data_objects` before drilling in
-  (stops the "bail on first found table" pattern). TUI modal
-  rebuilds on each liveview status frame so cancelled rows
-  disappear naturally; async-summary flag now armed in
-  RouteBuffered (not first switch) so wait_subagents-consumed
-  AsyncNotify results don't fire redundant summary turns.
-- **5.x.subagent-lifetime** *(queued)* — don't auto-close
-  subagents on `SubagentResult`; let model dismiss or follow-up
-  the still-alive child. Phase-sized, needs deliberate design.
+Phase I (PR #22, `e83b003`, 2026-05-20) closed the mission-PDCA
+work earlier in the cycle. Phase 5.2 root-as-chat (PR #21,
+`1c0e0a7`, 2026-05-18) bundled weak-model hardening + analyst
+SKILL review. Phase 5.x.skill-polish-1 (PR #19, `9be1fdd`,
+2026-05-16) closed cancel-ux R-followups + Bucket-D clarify.
+
+- **B13 — planner-signalled re-approval** *(tactical fix, ~80
+  LOC)* — drop sha256 frame-hashing in favour of planner-
+  emitted `requires_reapproval: true` flag. Tracked in
+  `004/backlog.md`. May land independently before Phase 6.
+- **B11 — structured AC with identity** *(queued)* — long-term
+  replacement for freeform AC strings. Composes with B13. Spec
+  pending.
+- **B12 — mission visibility surface (TUI)** *(queued)* —
+  approval-modal AC diff + status bar tool count + persistent
+  mission status panel. Driven from already-on-the-wire
+  liveview frames.
 - **5.3.policy-ux** *(queued)* — HITL "always allow / always
   deny" keybinds + remote admin policies.
-- **5.4.workspace-tree** *(queued, escalation only)* — if Path 1
-  (SESSION_DIR ephemeral manifest warning, shipped 2026-05-15)
-  doesn't hold, restructure to root-rooted workspace tree with
-  per-subagent subdirs.
+- **Phase 6 cron + scheduler** *(queued after 5.2)* — first
+  periodic / wake-up primitive.
 
-One longer-horizon option remains parallel-mergeable:
+Phase plan beyond 5.2: 6 cron → 7 memory pipeline → 8 artifacts
+→ 9 A2A → 10 workspaces. See `design/004-runtime-post-phase-i/
+design.md §4.3` for the table.
 
-- **5.2** — compactor: content-aware history summarisation at
-  turn boundaries; preserves recent turns verbatim, summarises
-  older into a system-prompt digest. Composes with 4.2.3
-  notepad (cross-mission) vs compactor (within-session). Not
-  yet specced.
+Закрытые 5.x: **5.4.workspace-tree** дропнут — workspace
+закрылся на уровне 5.4.b в PR #21 (workspace-as-extension);
+Path 2 (root-rooted tree restructure) не понадобился.
+**5.x.subagent-lifetime** дропнут — остаток от заброшенного
+`023-wave-lifecycle-hooks` эксперимента; в пост-Phase-A
+архитектуре handoffs-by-ref + executor-driven flow закрыли use
+case полностью.
 
-5.2 unblocks long-running sessions on context-window-tight
-models.
-
-Free-agenda items (cross-phase, no scheduled phase): live in
-`backlog.md`. Includes B1–B7 (4.2.3 fast-follows), content-
-based `requires_approval`, task-complexity routing, PeerGroup
-mesh.
+Free-agenda items (cross-phase): see
+`design/004-runtime-post-phase-i/backlog.md`. B1-B14 +
+mini-phase tracker.
 
 ## Project structure
 
 ```text
 cmd/
-├── hugen/                # main binary — runtime bootstrap, console + webui adapters
+├── hugen/                # main binary — runtime bootstrap, tui + webui adapters
 └── hugen-skill-validate/ # CLI: validate a SKILL.md manifest
 mcp/
 ├── bash-mcp/             # in-tree shell + filesystem MCP (per_session)
 ├── hugr-query/           # in-tree Hugr GraphQL → file output (per_agent)
 └── python-mcp/           # in-tree Python execution + lazy per-session venv (per_agent)
 pkg/
-├── adapter/{console,http,webui}  # transport adapters (console has inline HITL renderer)
+├── adapter/{http,tui,webui}  # transport adapters (tui owns slash-parse + inquiry helpers)
 ├── auth/{perm,sources,template}  # 3-tier permission stack + auth.Service loopback
 ├── config/                       # YAML schema + StaticService views (incl. Hitl, Subagents)
-├── extension/{plan,whiteboard,notepad,skill,mcp,workspace}  # capability-bag extensions
+├── extension/{plan,whiteboard,notepad,skill,mcp,workspace,liveview,mission}  # capability-bag extensions
 ├── identity/{local,hub}          # who-am-I providers
 ├── model/, models/, protocol/    # LLM routing + Frame protocol (incl. InquiryRequest/Response)
 ├── prompts/                      # embed-only template renderer (phase 5.1)
@@ -151,8 +164,10 @@ assets/
 └── skills/                       # hub-tier bundled skills (analyst, hugr-data, duckdb-*, python-runner)
 vendor/
 └── mcp-server-motherduck/        # vendored MotherDuck DuckDB MCP (git submodule, MIT)
-design/001-agent-runtime/         # historical: per-phase specs, original design, original architecture (gitignored)
-design/002-runtime-canonical/     # canonical: design.md, architecture.md, backlog.md, phase-N-spec.md (gitignored)
+design/001-agent-runtime/         # historical: per-phase specs, original design (gitignored)
+design/002-runtime-canonical/     # historical: pre-mission-PDCA canon + phase specs (gitignored)
+design/003-mission-pdca/          # historical: mission-PDCA canon (gitignored)
+design/004-runtime-post-phase-i/  # canonical: design.md, architecture.md, backlog.md (gitignored)
 specs/<NNN-feature-name>/         # per-feature speckit artefacts (gitignored)
 .specify/memory/constitution.md   # Go code constitution (load-bearing rules)
 ```
