@@ -625,6 +625,211 @@ func driveBoundariesFromRows(t *testing.T, e *Extension, st *fakeIntegrationStat
 	}
 }
 
+// TestCompactor_LiveTruncation_Summarize verifies the η.2
+// behaviour flip: once a digest_set emits, the in-memory history
+// projection drops every entry with Seq ≤ CutoffSeq, so a future
+// ProvideHistory call carries only the preserved-recent tail.
+// Block C (rendered via Advertiser) covers the truncated range.
+//
+// Drives 60 boundaries → fires one compaction → asserts the
+// post-fire history holds at most PreservedRecentTurns × 2 + a
+// small tolerance entries.
+func TestCompactor_LiveTruncation_Summarize(t *testing.T) {
+	const turns = 60
+	startSeq := 1
+	st := newFakeIntegrationState(t, "ses-truncate")
+	mdl := &stubModel{summary: "- compaction summary"}
+	router := newStubRouter(t, mdl)
+	storeR := &fakeStoreReader{rows: fixtureRows(turns, startSeq)}
+
+	cfg := DefaultConfig()
+	cfg.MaxTurns = 50
+	cfg.PreservedRecentTurns = 10
+	cfg.MinTurnGap = 3
+	cfg.DigestMaxTokens = 0
+
+	e := NewExtensionWithConfig(slog.Default(), cfg, Deps{
+		Router:  router,
+		Store:   storeR,
+		AgentID: "a1",
+	})
+	ctx := context.Background()
+	if err := e.InitState(ctx, st); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	driveBoundaries(t, e, st, turns, startSeq)
+
+	before := len(e.ProvideHistory(ctx, st))
+	if before != turns*2 {
+		t.Fatalf("pre-compaction history len = %d, want %d", before, turns*2)
+	}
+	if err := e.OnTurnBoundary(ctx, st); err != nil {
+		t.Fatalf("OnTurnBoundary: %v", err)
+	}
+	d := FromState(st).Digest()
+	if d == nil {
+		t.Fatalf("expected a digest after one boundary fire")
+	}
+	owned := e.ProvideHistory(ctx, st)
+	// Every entry in the live projection must carry Seq > CutoffSeq.
+	// Block C (Advertiser) covers the truncated range.
+	entries := FromState(st).historySnapshot()
+	for _, ent := range entries {
+		if ent.Seq <= d.CutoffSeq {
+			t.Fatalf("entry seq=%d <= cutoff=%d survived truncation",
+				ent.Seq, d.CutoffSeq)
+		}
+	}
+	// Coarse sanity: post-truncation history fits inside the
+	// PreservedRecentTurns window (2 frames per turn here — user +
+	// agent — plus the tail that drove past CutoffSeq before
+	// compaction picked it up).
+	if got := len(owned); got > cfg.PreservedRecentTurns*2+4 {
+		t.Fatalf("post-truncation history len = %d, want ≤ %d",
+			got, cfg.PreservedRecentTurns*2+4)
+	}
+}
+
+// TestCompactor_WindowStrategy verifies the η.2 window strategy
+// prunes the in-memory history to WindowSize entries via
+// OnFrameEmit, without ever calling the LLM. shouldCompact
+// short-circuits for non-summarize strategies; emit-time prune
+// is the only mechanism.
+func TestCompactor_WindowStrategy(t *testing.T) {
+	st := newFakeIntegrationState(t, "ses-window")
+	mdl := &stubModel{summary: "should never run"}
+	router := newStubRouter(t, mdl)
+	storeR := &fakeStoreReader{rows: fixtureRows(80, 1)}
+
+	cfg := DefaultConfig()
+	cfg.Strategy = StrategyWindow
+	cfg.WindowSize = 20
+
+	e := NewExtensionWithConfig(slog.Default(), cfg, Deps{
+		Router:  router,
+		Store:   storeR,
+		AgentID: "a1",
+	})
+	ctx := context.Background()
+	if err := e.InitState(ctx, st); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	driveBoundaries(t, e, st, 80, 1)
+
+	owned := e.ProvideHistory(ctx, st)
+	if got := len(owned); got != cfg.WindowSize {
+		t.Fatalf("window strategy: history len = %d, want %d",
+			got, cfg.WindowSize)
+	}
+	if err := e.OnTurnBoundary(ctx, st); err != nil {
+		t.Fatalf("OnTurnBoundary: %v", err)
+	}
+	if got := countDigestSetFrames(st); got != 0 {
+		t.Fatalf("digest_set frames = %d, want 0 (window strategy must not LLM-compact)", got)
+	}
+	if mdl.callCount() != 0 {
+		t.Fatalf("model called %d times, want 0", mdl.callCount())
+	}
+}
+
+// TestCompactor_OffStrategy verifies the η.2 off strategy is a
+// pure no-op: history grows unbounded, no LLM, no truncation.
+func TestCompactor_OffStrategy(t *testing.T) {
+	st := newFakeIntegrationState(t, "ses-off")
+	mdl := &stubModel{summary: "should never run"}
+	router := newStubRouter(t, mdl)
+	storeR := &fakeStoreReader{rows: fixtureRows(80, 1)}
+
+	cfg := DefaultConfig()
+	cfg.Strategy = StrategyOff
+
+	e := NewExtensionWithConfig(slog.Default(), cfg, Deps{
+		Router:  router,
+		Store:   storeR,
+		AgentID: "a1",
+	})
+	ctx := context.Background()
+	if err := e.InitState(ctx, st); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	driveBoundaries(t, e, st, 80, 1)
+
+	owned := e.ProvideHistory(ctx, st)
+	if got := len(owned); got != 80*2 {
+		t.Fatalf("off strategy: history len = %d, want %d (no pruning)",
+			got, 80*2)
+	}
+	if err := e.OnTurnBoundary(ctx, st); err != nil {
+		t.Fatalf("OnTurnBoundary: %v", err)
+	}
+	if mdl.callCount() != 0 {
+		t.Fatalf("model called %d times, want 0 (off strategy)", mdl.callCount())
+	}
+}
+
+// TestCompactor_Reset_RebuildsHistoryFromStore verifies the η.2
+// `/compactor reset` semantics: clear digest, emit digest_clear,
+// then rebuild the in-memory history projection from the event
+// log so the model view recovers the post-cutoff entries that
+// the prior compaction truncated.
+func TestCompactor_Reset_RebuildsHistoryFromStore(t *testing.T) {
+	const turns = 60
+	startSeq := 1
+	st := newFakeIntegrationState(t, "ses-reset-rebuild")
+	mdl := &stubModel{summary: "- compaction summary"}
+	router := newStubRouter(t, mdl)
+	storeR := &fakeStoreReader{rows: fixtureRows(turns, startSeq)}
+
+	cfg := DefaultConfig()
+	cfg.MaxTurns = 50
+	cfg.PreservedRecentTurns = 10
+	cfg.MinTurnGap = 3
+	cfg.DigestMaxTokens = 0
+
+	e := NewExtensionWithConfig(slog.Default(), cfg, Deps{
+		Router:  router,
+		Store:   storeR,
+		AgentID: "a1",
+	})
+	ctx := context.Background()
+	if err := e.InitState(ctx, st); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	driveBoundaries(t, e, st, turns, startSeq)
+	if err := e.OnTurnBoundary(ctx, st); err != nil {
+		t.Fatalf("OnTurnBoundary: %v", err)
+	}
+	truncated := len(e.ProvideHistory(ctx, st))
+	if truncated >= turns*2 {
+		t.Fatalf("expected truncation; got post-compact history len=%d", truncated)
+	}
+
+	frames, err := e.cmdCompactor(ctx, st, envForCommands(), []string{"reset"})
+	if err != nil {
+		t.Fatalf("/compactor reset: %v", err)
+	}
+	if len(frames) == 0 {
+		t.Fatalf("reset returned no frames")
+	}
+	if got := FromState(st).Digest(); got != nil {
+		t.Fatalf("digest should be nil after reset; got %+v", got)
+	}
+	rebuilt := e.ProvideHistory(ctx, st)
+	// fixtureRows projection only includes user/agent/tool_result
+	// rows in the visibility allow-list (tool_call rows aren't
+	// projected — they live inside the consolidated AgentMessage).
+	// Concretely: every 3rd turn adds (call, result) = 1 extra
+	// projected row (the result). turns=60 → 60 user + 60 agent
+	// + 20 tool_result = 140 entries.
+	expected := turns*2 + (turns / 3)
+	if (turns%3) > 0 {
+		expected++
+	}
+	if got := len(rebuilt); got != expected {
+		t.Fatalf("post-reset history len = %d, want %d", got, expected)
+	}
+}
+
 // TestCompactor_MinTurnGap blocks the second compaction when not
 // enough completed turns have elapsed since the first fire.
 func TestCompactor_MinTurnGap(t *testing.T) {

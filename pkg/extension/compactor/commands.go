@@ -8,6 +8,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 // emptyJSONObject is the digest_clear payload — recovery only
@@ -131,6 +132,32 @@ func (e *Extension) cmdCompactorReset(ctx context.Context, state extension.Sessi
 		}, nil
 	}
 	s.ClearDigest()
+	// η.2 — rebuild history from the event log so the live
+	// model view sees the full transcript again. Without this
+	// the post-cutoff entries that pruneToCutoff dropped on the
+	// last fire would stay missing. The /compactor reset path
+	// is user-triggered and runs once per invocation — paying
+	// for a full ListEvents scan here is fine.
+	if e.deps.Store != nil {
+		events, err := e.deps.Store.ListEvents(ctx, sessionID, store.ListEventsOpts{Limit: 100_000})
+		if err != nil {
+			e.logger.Warn("compactor reset: list events for rebuild failed",
+				"session", sessionID, "err", err)
+		} else {
+			renderer := state.Prompts()
+			entries := make([]HistoryEntry, 0, len(events))
+			for i := range events {
+				r := events[i]
+				if protocol.Kind(r.EventType) == protocol.KindExtensionFrame {
+					continue
+				}
+				if entry, ok := projectRowToEntry(renderer, &r); ok {
+					entries = append(entries, entry)
+				}
+			}
+			s.resetHistory(entries)
+		}
+	}
 	return []protocol.Frame{
 		protocol.NewSystemMarker(sessionID, env.AgentAuthor, "compactor_reset", nil),
 	}, nil

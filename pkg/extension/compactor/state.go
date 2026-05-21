@@ -308,3 +308,43 @@ func (s *CompactorState) historySnapshot() []HistoryEntry {
 	return out
 }
 
+// pruneWindow keeps the most-recent `limit` entries. Used by
+// [StrategyWindow]; called from [Extension.OnFrameEmit] after
+// every append.
+func (s *CompactorState) pruneWindow(limit int) {
+	if limit <= 0 {
+		return
+	}
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if len(s.history) <= limit {
+		return
+	}
+	keep := make([]HistoryEntry, limit)
+	copy(keep, s.history[len(s.history)-limit:])
+	s.history = keep
+}
+
+// pruneToCutoff drops entries with Seq <= cutoff. Used by
+// [StrategySummarize]; called from [Extension.compactWithConfig]
+// after a successful digest_set emit so the live history matches
+// what Block C carries.
+func (s *CompactorState) pruneToCutoff(cutoff int64) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if len(s.history) == 0 {
+		return
+	}
+	keep := s.history[:0]
+	for _, ent := range s.history {
+		if ent.Seq > cutoff {
+			keep = append(keep, ent)
+		}
+	}
+	// Realloc so the backing array shrinks; otherwise a long-
+	// running session leaks the original capacity forever.
+	out := make([]HistoryEntry, len(keep))
+	copy(out, keep)
+	s.history = out
+}
+

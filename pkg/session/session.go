@@ -1646,12 +1646,14 @@ func (s *Session) stuckDetectionEnabled(ctx context.Context) bool {
 	return !s.gatherToolPolicy(ctx).DisableStuckNudges
 }
 
-// useHistoryOwner is the phase 5.2.η feature flag. While false
-// (η.1) the runtime keeps reading from the legacy [Session.history]
-// slice — the HistoryOwner extension projection runs in parallel
-// for plumbing-validation only. η.2 flips this to true; η.3
-// deletes the legacy slice + the flag.
-const useHistoryOwner = false
+// useHistoryOwner is the phase 5.2.η feature flag. η.2 flipped
+// this to true — Session.buildMessages now reads from the
+// HistoryOwner extension projection. The legacy [Session.history]
+// slice survives one more step (still written by turn loop +
+// drain paths) to keep rollbackTurn happy and to make any
+// regression revertable without a re-flip. η.3 deletes the
+// legacy slice + the flag together.
+const useHistoryOwner = true
 
 // buildMessages prepends the per-Turn system message (agent
 // constitution + concatenated skill instructions) to the chat

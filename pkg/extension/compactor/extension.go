@@ -83,6 +83,18 @@ func ValidStrategy(s Strategy) bool {
 	return false
 }
 
+// effectiveStrategy maps an arbitrary Strategy value onto a known
+// one, defaulting empty / unknown to [StrategySummarize]. Used by
+// hot-path consumers (OnFrameEmit, shouldCompact) so a Config
+// constructed without going through [DefaultConfig] still resolves
+// to a sane behaviour.
+func effectiveStrategy(s Strategy) Strategy {
+	if ValidStrategy(s) {
+		return s
+	}
+	return StrategySummarize
+}
+
 type Config struct {
 	// Strategy selects the history-management mode (see [Strategy]).
 	// Default is [StrategySummarize] (matches α-ε behaviour). η.1
