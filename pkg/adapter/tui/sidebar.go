@@ -185,15 +185,44 @@ func renderSidebar(s *liveviewStatus, width int) string {
 		}
 	}
 
-	// Context budget — last pane so it sits at the bottom of
-	// the sidebar where the operator can scan it without it
-	// pushing actionable signals (inquiry, subagents) off
-	// screen. Phase 5.2 ε.
+	// Context budget — current prompt-time footprint (history +
+	// tools + extension blocks). Bottom of the sidebar so the
+	// operator can scan it without it pushing actionable
+	// signals (inquiry, subagents) off screen. Phase 5.2 ε.
 	if cb := s.ContextBudget; cb != nil {
 		sb.WriteString("\n")
 		sb.WriteString(renderContextBudget(cb, width))
+		// Lifetime usage is a different beast — accumulates
+		// across every turn, so a long-running session sees it
+		// dwarf the current-prompt numbers above. Rendered in
+		// its own pane so the two don't read as comparable.
+		if cb.SessionUsage != nil {
+			sb.WriteString("\n")
+			sb.WriteString(renderSessionUsage(cb.SessionUsage, width))
+		}
 	}
 
+	return sb.String()
+}
+
+// renderSessionUsage prints the lifetime token spend pane.
+// Separate from the context-budget pane because cumulative
+// numbers (running total across every turn) are not directly
+// comparable to current-prompt estimates — putting them
+// alongside misleads the operator into thinking "session" is
+// the current cost rather than the running total.
+//
+// Phase 5.2 ε.1 follow-up — dogfood feedback 2026-05-21.
+func renderSessionUsage(u *protocol.TokenUsage, width int) string {
+	var sb strings.Builder
+	sb.WriteString(styleSidebarHeading.Render("Usage (lifetime)"))
+	sb.WriteString("\n")
+	sb.WriteString(styleSidebarFaint.Render(
+		truncate(fmt.Sprintf("  prompt     %s tok", formatTokens(u.PromptTokens)), width)))
+	sb.WriteString("\n")
+	sb.WriteString(styleSidebarFaint.Render(
+		truncate(fmt.Sprintf("  completion %s tok", formatTokens(u.CompletionTokens)), width)))
+	sb.WriteString("\n")
 	return sb.String()
 }
 
@@ -257,14 +286,9 @@ func renderContextBudget(b *contextBudget, width int) string {
 			sb.WriteString("\n")
 		}
 	}
-	if b.SessionUsage != nil {
-		sb.WriteString(styleSidebarFaint.Render(
-			truncate(fmt.Sprintf("  session    %s → %s tok",
-				formatTokens(b.SessionUsage.PromptTokens),
-				formatTokens(b.SessionUsage.CompletionTokens)),
-				width)))
-		sb.WriteString("\n")
-	}
+	// SessionUsage moved to its own renderSessionUsage pane —
+	// lifetime numbers don't belong next to per-prompt
+	// estimates. See sidebar.go renderSessionUsage call site.
 	return sb.String()
 }
 

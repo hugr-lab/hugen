@@ -39,11 +39,33 @@ func TestRenderContextBudget_FullPane(t *testing.T) {
 		"1.5k",
 		"skill (catalog)",
 		"600",
-		"session",
-		"45.0k → 8.0k",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("renderContextBudget missing %q:\n%s", want, out)
+		}
+	}
+	// SessionUsage is rendered by renderSessionUsage now —
+	// separate pane, separate test.
+	if strings.Contains(out, "session") || strings.Contains(out, "45.0k") {
+		t.Errorf("renderContextBudget should NOT include session usage; lives in its own pane:\n%s", out)
+	}
+}
+
+// TestRenderSessionUsage covers the new ε.1 lifetime-usage
+// pane. Cumulative numbers are surfaced separately so
+// per-prompt and lifetime metrics don't read as comparable.
+func TestRenderSessionUsage(t *testing.T) {
+	u := &protocol.TokenUsage{PromptTokens: 643_200, CompletionTokens: 4_800}
+	out := renderSessionUsage(u, 40)
+	for _, want := range []string{
+		"Usage (lifetime)",
+		"prompt",
+		"643.2k",
+		"completion",
+		"4.8k",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("renderSessionUsage missing %q:\n%s", want, out)
 		}
 	}
 }

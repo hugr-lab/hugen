@@ -88,8 +88,13 @@ func TestBuildContextBudget_AggregatesEveryDimension(t *testing.T) {
 	if got.Extensions["plan"] != 200 {
 		t.Errorf("Extensions[plan] = %d, want 200", got.Extensions["plan"])
 	}
-	if got.Extensions["skill"] != 2100 {
-		t.Errorf("Extensions[skill] = %d, want 2100", got.Extensions["skill"])
+	// When the skill split (loaded_skill_tokens +
+	// available_skill_tokens) is present, the legacy
+	// advertise_tokens total is suppressed in Extensions so the
+	// UI doesn't render the same number twice.
+	if _, dup := got.Extensions["skill"]; dup {
+		t.Errorf("Extensions[skill] = %d, want absent when split fields are set",
+			got.Extensions["skill"])
 	}
 	if got.Skills == nil {
 		t.Fatalf("Skills nil with split in skill payload")

@@ -98,13 +98,10 @@ func buildContextBudget(state extension.SessionState, exts map[string]json.RawMe
 				budget.HistoryTokens = v
 			}
 		}
-		if v, ok := intField(doc, "advertise_tokens"); ok && v > 0 {
-			if budget.Extensions == nil {
-				budget.Extensions = map[string]int{}
-			}
-			budget.Extensions[name] = v
-		}
-		// Skill extension's loaded / catalogue split.
+		// Skill extension's loaded / catalogue split. When the
+		// split is reported, it supersedes the legacy
+		// advertise_tokens total so the UI doesn't render the
+		// same number twice.
 		loaded, hasLoaded := intField(doc, "loaded_skill_tokens")
 		catalog, hasCatalog := intField(doc, "available_skill_tokens")
 		if hasLoaded || hasCatalog {
@@ -117,6 +114,11 @@ func buildContextBudget(state extension.SessionState, exts map[string]json.RawMe
 			if hasCatalog {
 				budget.Skills.AvailableTokens = catalog
 			}
+		} else if v, ok := intField(doc, "advertise_tokens"); ok && v > 0 {
+			if budget.Extensions == nil {
+				budget.Extensions = map[string]int{}
+			}
+			budget.Extensions[name] = v
 		}
 	}
 
