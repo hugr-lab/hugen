@@ -372,8 +372,9 @@ func (v *sessionView) emitStatus() {
 
 	// Collect sibling StatusReporter contributions.
 	exts := state.Extensions()
+	var extMap map[string]json.RawMessage
 	if len(exts) > 0 {
-		extMap := map[string]json.RawMessage{}
+		extMap = map[string]json.RawMessage{}
 		for _, ext := range exts {
 			if ext.Name() == providerName {
 				continue // skip self
@@ -391,6 +392,14 @@ func (v *sessionView) emitStatus() {
 		if len(extMap) > 0 {
 			payload["extensions"] = extMap
 		}
+	}
+
+	// Phase 5.2 ε — context_budget aggregator. Pulls together
+	// every dimension of the session's prompt cost into one
+	// payload so adapters render a single sidebar pane without
+	// hand-rolling cross-extension reads.
+	if budget := buildContextBudget(state, extMap); budget != nil {
+		payload["context_budget"] = budget
 	}
 
 	data, err := json.Marshal(payload)

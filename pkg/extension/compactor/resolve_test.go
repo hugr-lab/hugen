@@ -45,6 +45,7 @@ func (s *resolveStateFake) Submit(_ context.Context, _ protocol.Frame) <-chan st
 }
 func (s *resolveStateFake) OutboxOnly(_ context.Context, _ protocol.Frame) error { return nil }
 func (s *resolveStateFake) ToolCatalogTokens(_ context.Context) int               { return 0 }
+func (s *resolveStateFake) SessionUsage() *protocol.TokenUsage                    { return nil }
 func (s *resolveStateFake) Extensions() []extension.Extension                    { return nil }
 func (s *resolveStateFake) RequestInquiry(_ context.Context, _ protocol.InquiryRequestPayload) (*protocol.InquiryResponse, error) {
 	return nil, nil

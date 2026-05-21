@@ -28,6 +28,24 @@ type liveviewStatus struct {
 	ChildMeta      map[string]childMetaEntry   `json:"child_meta,omitempty"`
 	Extensions     map[string]json.RawMessage  `json:"extensions,omitempty"`
 	Children       map[string]*liveviewStatus  `json:"children,omitempty"`
+	ContextBudget  *contextBudget              `json:"context_budget,omitempty"`
+}
+
+// contextBudget mirrors pkg/extension/liveview.ContextBudget on
+// the TUI side. Phase 5.2 (context-budget ε) — adapter renders
+// a dedicated sidebar pane summarising the session's prompt
+// footprint.
+type contextBudget struct {
+	HistoryTokens int                  `json:"history_tokens,omitempty"`
+	SessionUsage  *protocol.TokenUsage `json:"session_usage,omitempty"`
+	ToolsTokens   int                  `json:"tools_tokens,omitempty"`
+	Extensions    map[string]int       `json:"extensions,omitempty"`
+	Skills        *skillsBudget        `json:"skills,omitempty"`
+}
+
+type skillsBudget struct {
+	LoadedTokens    int `json:"loaded_tokens,omitempty"`
+	AvailableTokens int `json:"available_tokens,omitempty"`
 }
 
 // childMetaEntry mirrors pkg/extension/liveview's childMetaEntry —
@@ -167,7 +185,105 @@ func renderSidebar(s *liveviewStatus, width int) string {
 		}
 	}
 
+	// Context budget — last pane so it sits at the bottom of
+	// the sidebar where the operator can scan it without it
+	// pushing actionable signals (inquiry, subagents) off
+	// screen. Phase 5.2 ε.
+	if cb := s.ContextBudget; cb != nil {
+		sb.WriteString("\n")
+		sb.WriteString(renderContextBudget(cb, width))
+	}
+
 	return sb.String()
+}
+
+// renderContextBudget produces the context-budget pane. Layout:
+//
+//	Context budget
+//	  history       1.2k tok
+//	  tools           240 tok
+//	  compactor       800 tok
+//	  notepad         400 tok
+//	  skill (loaded)  1.5k tok
+//	  skill (catalog)  600 tok
+//	  ─────────
+//	  session usage  45.0k → 8.0k tok
+//
+// Every line is omitempty — zero / nil dimensions are skipped so
+// fresh sessions show only what's actually populated.
+func renderContextBudget(b *contextBudget, width int) string {
+	var sb strings.Builder
+	sb.WriteString(styleSidebarHeading.Render("Context budget"))
+	sb.WriteString("\n")
+	if b.HistoryTokens > 0 {
+		sb.WriteString(styleSidebarFaint.Render(
+			truncate(fmt.Sprintf("  history    %s tok", formatTokens(b.HistoryTokens)), width)))
+		sb.WriteString("\n")
+	}
+	if b.ToolsTokens > 0 {
+		sb.WriteString(styleSidebarFaint.Render(
+			truncate(fmt.Sprintf("  tools      %s tok", formatTokens(b.ToolsTokens)), width)))
+		sb.WriteString("\n")
+	}
+	// Stable extension order — name-sorted so the pane doesn't
+	// reshuffle between status emits.
+	if len(b.Extensions) > 0 {
+		names := make([]string, 0, len(b.Extensions))
+		for n := range b.Extensions {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			v := b.Extensions[n]
+			if v == 0 {
+				continue
+			}
+			sb.WriteString(styleSidebarFaint.Render(
+				truncate(fmt.Sprintf("  %s   %s tok", n, formatTokens(v)), width)))
+			sb.WriteString("\n")
+		}
+	}
+	if b.Skills != nil {
+		if b.Skills.LoadedTokens > 0 {
+			sb.WriteString(styleSidebarFaint.Render(
+				truncate(fmt.Sprintf("  skill (loaded)  %s tok",
+					formatTokens(b.Skills.LoadedTokens)), width)))
+			sb.WriteString("\n")
+		}
+		if b.Skills.AvailableTokens > 0 {
+			sb.WriteString(styleSidebarFaint.Render(
+				truncate(fmt.Sprintf("  skill (catalog) %s tok",
+					formatTokens(b.Skills.AvailableTokens)), width)))
+			sb.WriteString("\n")
+		}
+	}
+	if b.SessionUsage != nil {
+		sb.WriteString(styleSidebarFaint.Render(
+			truncate(fmt.Sprintf("  session    %s → %s tok",
+				formatTokens(b.SessionUsage.PromptTokens),
+				formatTokens(b.SessionUsage.CompletionTokens)),
+				width)))
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// formatTokens renders an integer token count with k / M suffix
+// when large so the sidebar pane stays narrow. Rules:
+//
+//	    0 →     "0"
+//	  500 →   "500"
+//	 1500 →  "1.5k"
+//	45000 → "45.0k"
+//	2000000 → "2.0M"
+func formatTokens(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	if n < 1_000_000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
 }
 
 // renderSubagent prints one subagent node with `indent` levels of
