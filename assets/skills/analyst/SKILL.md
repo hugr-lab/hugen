@@ -391,18 +391,13 @@ metadata:
           Workflow (read `instructions` via skill:ref the first
           time you touch a schema):
 
-          1. Read `[Resolved depends_on]` FIRST. A schema-explorer
-             handoff (when present) provides `module`, table
-             names, `queries[].name`, and `fields[].name +
-             field_type` — lift names verbatim. Skip own
-             discovery in that case.
-             If the task brief MENTIONS scope set by a research
-             stage (specific tables, decided file path, narrow
-             scope) but doesn't restate the full context, call
-             `mission:get_research` to fetch the researcher's
-             `findings` + `resolved_user_inputs` BEFORE doing
-             your own discovery. The research stage already
-             paid the discovery cost — reuse it, don't redo it.
+          1. Read mission state first per the worker constitution
+             (`[Resolved depends_on]`, then `mission:get_research`
+             when the brief signals research ran, then
+             `notepad:search`). A schema-explorer handoff (when
+             present) provides `module`, table names,
+             `queries[].name`, and `fields[].name + field_type` —
+             lift names verbatim and skip your own discovery.
           2. Otherwise discover only what you need:
              - `discovery-search_module_data_objects(module, query)`
                for table list + query field names.
@@ -621,13 +616,10 @@ metadata:
           duplicate the same wide scan.
 
           Tool sequence (read `instructions` via skill:ref the
-          first time you touch a schema):
-            0. If your task brief mentions a research stage's
-               scope (specific tables, narrowed domain, decided
-               module), call `mission:get_research` FIRST. The
-               researcher may have already named the tables;
-               skip discovery-search if so and go straight to
-               `schema-type_fields`.
+          first time you touch a schema). Apply the worker
+          constitution's "Reading mission state" discipline first
+          — when research ran, lift the researcher's table list
+          and skip straight to `schema-type_fields` per step 2.
             1. `discovery-search_module_data_objects` → list
                matching tables (capture `items[].name`,
                `description`, `queries[]` verbatim).
@@ -726,12 +718,12 @@ metadata:
             `[Inputs from parent]`). Resolve to ABSOLUTE via
             `os.path.expanduser` + `os.path.abspath` before
             writing.
-          - When `inputs.file_path` is absent BUT the task brief
-            hints the user picked a destination during research
-            (or you can see references to it in `[Plan context]`
-            entries), call `mission:get_research` and lift
+          - When `inputs.file_path` is absent but the brief hints
+            the user picked a destination during research, follow
+            the worker constitution's "Reading mission state"
+            order — `mission:get_research` and lift
             `resolved_user_inputs.file_path` from there before
-            failing. The research stage owns that decision.
+            failing.
           - Empty / missing `inputs.file_path` → emit
             `status: "error"` with
             `reason: "missing inputs.file_path"`. Do NOT
