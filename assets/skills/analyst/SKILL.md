@@ -301,14 +301,42 @@ metadata:
 
           What you do — in this order:
 
+          0. **MANDATORY: file_path clarification when the goal
+             mentions a deliverable file.** Scan the goal text
+             for deliverable cues — `save`, `export`, `write to`,
+             `dump`, `file`, `report`, `dashboard`, `csv`,
+             `parquet`, `json`, `html`, `markdown`, `pdf`, or
+             their Russian / non-English equivalents (`сохрани`,
+             `экспорт`, `отчёт`, `выгрузи`, `файл`, ...). If you
+             find such a cue:
+
+             - Check `[Inputs from parent]` for an explicit path
+               key (`file_path`, `output`, `destination`,
+               `output_path`). If present, capture it for
+               findings — no clarification needed.
+             - Otherwise the FIRST clarification in your batch
+               MUST ask `id: "file_path", question: "Where
+               should the <kind> output be saved?", kind:
+               "required"` with sensible `options` including at
+               least `["~/Downloads/<name>.<ext>",
+               "<workspace>/<name>.<ext>", "let me type a path"]`.
+               Silently picking a default breaks user trust —
+               always ask.
+
+             This rule overrides "skip clarifications when you
+             have enough info" — file destination is something
+             only the user knows, no discovery resolves it.
+
           1. **Batch your clarifications.** Scan the goal for
-             ambiguity AND deliverable cues. Bundle every
-             question the user must answer into ONE handoff
-             with `done: false` + `clarifications: [...]`.
-             Bundle, don't iterate — one modal per mission is
-             the target. Reserve re-fires for cases where the
-             second turn DEPENDS on the user's first answers
-             (e.g. "now that I know it's HTML, where exactly?").
+             other ambiguity (scope, sources, metrics). Bundle
+             every question the user must answer into ONE
+             handoff with `done: false` + `clarifications:
+             [...]`. The file_path entry from step 0 (if needed)
+             is the first entry. Bundle, don't iterate — one
+             modal per mission is the target. Reserve re-fires
+             for cases where the second turn DEPENDS on the
+             user's first answers (e.g. "now that I know it's
+             HTML, where exactly?").
 
              Examples of `clarifications` entries:
 
