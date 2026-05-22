@@ -209,8 +209,7 @@ metadata:
              for deliverable cues — `save`, `export`, `write to`,
              `dump`, `file`, `report`, `dashboard`, `csv`,
              `parquet`, `json`, `html`, `markdown`, `pdf`, or
-             their Russian / non-English equivalents (`сохрани`,
-             `экспорт`, `отчёт`, `выгрузи`, `файл`, ...). If you
+             their equivalents in the user's language. If you
              find such a cue:
 
              - Check `[Inputs from parent]` for an explicit path
@@ -650,7 +649,7 @@ metadata:
           `items[].queries[].name`, one per query flavour:
           select / aggregate / bucket_agg). Both go in the
           handoff.
-        intent: reasoning
+        # intent: reasoning
         can_spawn: false
         autoload_skills: [hugr-data]
         compactor:
@@ -758,7 +757,7 @@ metadata:
           HTML / JS-chart pipeline prose + its own tool
           surface) is on the backlog —
           `design/002-runtime-canonical/backlog.md`.
-        intent: reasoning
+        # intent: reasoning
         can_spawn: false
         autoload_skills: [python-runner]
         compactor:
@@ -805,7 +804,7 @@ metadata:
 
           Be terse. `reason` one line; `memory_summary` one
           line. No narration outside the fence.
-        intent: reasoning
+        # intent: reasoning
         can_spawn: false
         capabilities:
           plan_context: read
@@ -844,7 +843,7 @@ metadata:
 
           Emit ONE fenced `handoff` block with kind=synthesis;
           body carries the final message.
-        intent: reasoning
+        # intent: reasoning
         can_spawn: false
         capabilities:
           plan_context: read
