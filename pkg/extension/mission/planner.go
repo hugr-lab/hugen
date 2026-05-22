@@ -25,6 +25,18 @@ const plannerWaveLabelPrefix = "_plan-"
 // verdict phase. Full label: "_check-<iteration>".
 const checkerWaveLabelPrefix = "_check-"
 
+// maxConsecutiveErrors caps how many wave failures or planner
+// parse failures the runtime tolerates in a row before bailing
+// out of the planner loop and routing to synthesis. Distinct from
+// max_waves — that's the overall iteration budget, this is a
+// tighter "retry budget" so a single broken wave can't burn the
+// whole budget on amend cycles. Resets on the first successful
+// wave. 3 is the dogfood-validated value: enough for a weak model
+// to recover (planner-amend-on-invalid-handoff usually clears on
+// retry-1 or retry-2) without letting a genuinely-stuck wave
+// monopolise the rest of the budget.
+const maxConsecutiveErrors = 3
+
 // PlannerError flags a non-recoverable failure inside the planner
 // loop — a planner wave that never produced a handoff, an output
 // that failed validation past the retry cap, or an approval
@@ -134,6 +146,12 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 	// a control role is declared. Phase C.
 	var recentVerdict *Verdict
 
+	// consecutiveErrors tracks back-to-back planner-parse failures
+	// and wave-execution failures. Reset on any successful wave.
+	// Caps at [maxConsecutiveErrors] — a single stuck wave can't
+	// monopolise the entire max_waves budget on amend cycles.
+	consecutiveErrors := 0
+
 	for iteration := 1; iteration <= maxIter; iteration++ {
 		// Stamp the iteration on MissionState so ingestHandoff
 		// tags plan_context entries with the right number even
@@ -148,17 +166,29 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 		// 1. Spawn the planner subagent.
 		plan, plannerErr := e.spawnAndAwaitPlanner(ctx, executor, mission, manifest, missionSkill, goal, iteration, recentVerdict)
 		if plannerErr != nil {
+			consecutiveErrors++
 			e.logger.Warn("mission: planner loop: planner closed with an invalid plan — handing back to planner for amend",
 				"mission_session", mission.SessionID(),
-				"iteration", iteration, "err", plannerErr)
+				"iteration", iteration,
+				"consecutive_errors", consecutiveErrors,
+				"err", plannerErr)
+			if consecutiveErrors >= maxConsecutiveErrors {
+				e.logger.Warn("mission: planner loop: aborting — consecutive error cap reached",
+					"mission_session", mission.SessionID(),
+					"iteration", iteration,
+					"consecutive_errors", consecutiveErrors,
+					"cap", maxConsecutiveErrors)
+				return true, nil
+			}
 			// A *PlannerError indicates the planner closed with a
 			// malformed handoff (parse / decode / role / output-
 			// contract failure). The handoff is NOT actionable, but
 			// the loop is — surface the parser's reason to the next
 			// planner spawn as a synthetic amend verdict so it can
 			// re-emit a valid plan. max_waves caps the retry budget;
-			// genuinely broken planners hit the cap and synthesis
-			// recaps the partial state.
+			// consecutiveErrors caps the retry budget per stuck
+			// wave so an unrecoverable error doesn't burn the full
+			// iteration cap on amend cycles.
 			recentVerdict = &Verdict{
 				Decision: VerdictAmend,
 				Reason:   "previous planner handoff was invalid — re-emit a clean plan",
@@ -197,18 +227,28 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 		status, _, runErr := executor.RunWave(ctx, mission, decorated, RunWaveOptions{})
 		e.emitWaveComplete(mission, plan.NextWave.Label, status, runErr)
 		if runErr != nil || status == WaveStatusFailed {
+			consecutiveErrors++
 			e.logger.Warn("mission: planner loop: executed wave failed — handing to planner for amend",
 				"mission_session", mission.SessionID(),
 				"iteration", iteration,
 				"wave", plan.NextWave.Label,
 				"status", status,
+				"consecutive_errors", consecutiveErrors,
 				"err", runErr)
+			if consecutiveErrors >= maxConsecutiveErrors {
+				e.logger.Warn("mission: planner loop: aborting — consecutive error cap reached",
+					"mission_session", mission.SessionID(),
+					"iteration", iteration,
+					"consecutive_errors", consecutiveErrors,
+					"cap", maxConsecutiveErrors)
+				return true, nil
+			}
 			// Fold wave failure into a synthetic verdict so the next
 			// planner spawn sees the failure under [Recent verdict]
 			// and replans rather than aborting the mission. Caps at
-			// max_waves cleanly; consecutive identical failures get
-			// flushed when the iteration counter hits the cap and
-			// synthesis recaps whatever partial state was produced.
+			// max_waves cleanly; consecutiveErrors caps the retry
+			// budget per stuck wave so an unrecoverable failure
+			// doesn't burn the full iteration cap on amend cycles.
 			recentVerdict = &Verdict{
 				Decision: VerdictAmend,
 				Reason:   fmt.Sprintf("wave %q failed", plan.NextWave.Label),
@@ -216,6 +256,10 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 			}
 			continue
 		}
+		// Wave succeeded — reset the consecutive-error counter so
+		// the next stuck wave gets a fresh retry budget independent
+		// of any prior failures earlier in the mission.
+		consecutiveErrors = 0
 
 		// 4. Phase C — verdict phase. Spawn checker if declared,
 		// route on its decision. Absent control collapses to the

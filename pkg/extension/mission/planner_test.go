@@ -377,12 +377,16 @@ func TestPlannerLoop_MaxWavesCap(t *testing.T) {
 func TestPlannerLoop_RetriesOnDecodeFailureUntilCap(t *testing.T) {
 	// Phase I — a planner that consistently emits an invalid
 	// handoff (wrong kind, malformed JSON, missing required
-	// field) no longer aborts the mission. Each parse failure
-	// folds into a synthetic verdict-amend so the NEXT planner
-	// spawn sees the error under [Recent verdict] and can
-	// re-emit. The loop ends cleanly at max_waves cap without an
-	// error — synthesis then recaps whatever (possibly empty)
-	// state was produced.
+	// field) no longer aborts the mission on the first failure.
+	// Each parse failure folds into a synthetic verdict-amend so
+	// the NEXT planner spawn sees the error under [Recent
+	// verdict] and can re-emit.
+	//
+	// Phase 5.x — consecutive-error cap. After
+	// [maxConsecutiveErrors] back-to-back failures the loop
+	// aborts (aborted=true, nil error) so a stuck wave can't
+	// monopolise the iteration budget. Synthesis then recaps
+	// whatever partial state was produced.
 	state := newRenderedFakeState("mis-planner-4", productionRenderer(t))
 	installMissionState(&state.fakeState)
 
@@ -414,22 +418,22 @@ func TestPlannerLoop_RetriesOnDecodeFailureUntilCap(t *testing.T) {
 
 	aborted, err := ext.runPlannerLoop(ctx, executor, state, manifest, manifest.Name, "bad")
 	if err != nil {
-		t.Fatalf("runPlannerLoop: want nil error at cap, got %v", err)
+		t.Fatalf("runPlannerLoop: want nil error at consecutive-error cap, got %v", err)
 	}
-	if aborted {
-		t.Fatal("aborted = true, want false (retry loop hit cap, not aborted)")
+	if !aborted {
+		t.Fatal("aborted = false, want true (consecutive-error cap should abort the loop)")
 	}
-	// 3 iterations × 1 planner spawn each = 3 planner spawns (no
-	// worker / checker spawns because the planner never produces
-	// a valid plan).
+	// After maxConsecutiveErrors back-to-back failures the loop
+	// returns — so the planner spawns exactly that many times,
+	// not the full max_waves budget.
 	plannerSpawns := 0
 	for _, r := range spawner.requests {
 		if r.Name == "planner" {
 			plannerSpawns++
 		}
 	}
-	if plannerSpawns != manifest.Plan.MaxWaves {
-		t.Errorf("planner spawn count = %d, want %d", plannerSpawns, manifest.Plan.MaxWaves)
+	if plannerSpawns != maxConsecutiveErrors {
+		t.Errorf("planner spawn count = %d, want %d (consecutive-error cap)", plannerSpawns, maxConsecutiveErrors)
 	}
 }
 
@@ -691,8 +695,15 @@ func TestPlannerLoop_ApprovalGate_RejectsSkippedTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runPlannerLoop: %v", err)
 	}
-	if aborted {
-		t.Fatal("aborted = true, want false (replan should recover)")
+	// Phase 5.x — every iteration in this test fails the approval
+	// gate (no MarkApprovalAttempt). With the consecutive-error
+	// cap at [maxConsecutiveErrors] the loop aborts cleanly after
+	// that many back-to-back rejections — synthesis still runs on
+	// whatever partial state exists. The recovery-on-iter-2 test
+	// covers the happy path where a later iteration calls
+	// validate_and_approve.
+	if !aborted {
+		t.Fatal("aborted = false, want true (consecutive-error cap should fire after every iter fails approval)")
 	}
 }
 
