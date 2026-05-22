@@ -222,6 +222,7 @@ first.
    - Small inline reply? → `hugr-main:data-inline_graphql_result` (use jq to reshape; increase `max_result_size` up to 5000 if truncated)
    - Big result, file output? → `hugr-query:query` (engine response decides Parquet vs JSON per leaf)
    - JQ post-process to one JSON value? → `hugr-query:query_jq` — JQ input is the full `{data, errors}` envelope; results live under `.data.<field>`
+   - If the inline result is `is_truncated: true` AND preview doesn't cover what you need — read `tips` ref for the file-output escape hatch instead of re-bumping `max_result_size` blindly.
 9. **Present** — tight structured finding. Write it to the
    whiteboard (mission reads between waves) and return your
    final assistant message with verbatim numbers from the
@@ -252,33 +253,11 @@ shape. Read the error, then escalate to the right tool:
   not standard GraphQL.
 - **Repeated identical error after one retry** — you're guessing. Stop
   the loop, switch to discovery / schema tools, and re-plan.
-- **Query succeeds but returns null / empty (`{"data":null}`,
-  `{"data":{...":null}}`, `categories: []`, `summary: null`,
-  `_rows_count: 0`)** — the data **IS** empty for that query shape;
-  re-running the same query will return the same emptiness. Do NOT
-  loop on minor jq tweaks (`[]?` vs `[]`, `select(... != null)` vs
-  no filter). Diagnose:
-
-  - **Bucket aggregation `key` returns null** → the column you
-    chose for `key { <field> }` is sparsely populated / mostly
-    null. Use a **different grouping field**. Call
-    `discovery-field_values(type_name, field_name)` to see which
-    fields have meaningful distributions BEFORE picking a key.
-  - **`<aggregation>.sum: null`** → the field is null for every
-    row matching your filter, OR the field is non-numeric, OR
-    your filter eliminated all rows. Inspect with
-    `schema-type_fields` + small sample query.
-  - **Filter eliminates everything** → drop the filter and re-run;
-    if data comes back, the filter is the culprit. Loosen, don't
-    retry identical.
-  - **jq `cannot iterate over: null`** → the GraphQL result has
-    `null` where jq expects an array. The query itself returned
-    nothing — fix the QUERY, not the jq transform. Use `?` ONLY
-    as a last-resort guard once you've confirmed the shape via
-    schema introspection.
-
-  Empty result is a signal to **change the query**, not a transient
-  hiccup. Two identical empty replies in a row = stop and re-plan.
+- **Query succeeds but returns null / empty / `is_truncated`** —
+  the data IS empty (or the cap clipped your preview); re-running
+  identical queries with minor jq tweaks won't change that. Read
+  the `tips` reference for diagnoses + the file-output escape
+  hatch.
 
 The same applies before the first query on a schema: if you've never
 seen `instructions` in this session and the user asks for non-trivial
@@ -307,6 +286,7 @@ keep the body in working context for the rest of your task.
 | `dashboard` | Multi-panel KPI / chart query shapes. | Building a visual dashboard. |
 | `queries-deep-dive` | JQ functions, geometry / JSON filter operators, parameterised view internals. | Hit a JQ / geometry / JSON / view edge case. |
 | `hugr-query` | Output-to-file mechanics: Parquet vs JSON per leaf, path layout, preview. | First time using `hugr-query:query` / `hugr-query:query_jq`. |
+| `tips` | Stuck-investigation companion: diagnoses for null/empty results, jq path slips, `is_truncated` escape hatch (when to switch from inline to `hugr-query`). | Query returned `null`, `[]`, `summary: null`, or `is_truncated: true` and the preview isn't enough. |
 
 Reading order on a new task:
 1. **`instructions`** if you haven't read it this session.
