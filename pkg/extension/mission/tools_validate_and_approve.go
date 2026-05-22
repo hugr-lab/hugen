@@ -2,8 +2,6 @@ package mission
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -21,31 +19,35 @@ import (
 //     the runtime would run post-close. Failure surfaces as
 //     `{ valid: false, errors: [...] }` — the planner fixes the
 //     listed issues and re-calls.
-//  2. When the iteration's policy requires approval AND the plan
-//     is NOT research-only, runs a session:inquire(type=approval)
-//     on the MISSION session so the user sees the typed plan,
-//     rationale, and roadmap. The user's response is folded into
-//     the result envelope:
+//  2. When the gate decides this iteration needs user sign-off
+//     (first plan ever in the mission, OR a worker handoff
+//     requested reapproval, OR the planner itself set
+//     `requires_reapproval: true` in the body), runs a
+//     session:inquire(type=approval) on the MISSION session so the
+//     user sees the typed plan, rationale, and roadmap. The user's
+//     response is folded into the result envelope:
 //       - approve     → `approved: true`
 //       - refine TEXT → `approved: false, refine_text: TEXT`
 //       - abort       → `approved: false, aborted: true`
-//  3. On `approved=true` (explicit or implicit), computes the
-//     canonical marker (sha256-hex of the typed Plan re-marshalled
-//     as deterministic JSON) and stamps it on MissionState under
-//     the current iteration. The runtime then verifies the
-//     planner's handoff body produces the same marker in
-//     spawnAndAwaitPlanner; mismatch rejects the handoff so a
-//     planner cannot show plan A to the user and ship plan B.
+//  3. On `approved=true` (explicit or implicit), flips the
+//     mission's firstPlanApproved bit on and clears any pending
+//     reapproval flag so subsequent iterations pass silently — as
+//     long as the planner doesn't set `requires_reapproval: true`
+//     and no worker waves `invalidates_plan_approval: true` again.
 //
-// Research-only iterations (Phase I.15) skip the inquire — the
-// tool still validates + stamps the marker so the verification
-// path is uniform. When the iteration's policy doesn't require
-// approval at all, same uniform path applies.
+// Plan_complete iterations (next_wave=null) bypass the modal — the
+// mission contract was approved earlier; the final
+// `finish` decision is gated by AC satisfaction, not by a fresh
+// user approval. When the iteration's policy doesn't require
+// approval at all (Initial=skip), the same uniform path applies.
 //
-// Refuses a re-approval attempt for an already-dispatched
-// iteration: `{ valid: true, errors: ["iteration N already
-// dispatched..."] }` — the planner's recourse is to wait for the
-// next iteration spawn.
+// Phase 5.x — B13 superseded the prior sha256 frame-hashing gate.
+// Weak models routinely rewrote `mission_goal` / `acceptance_criteria`
+// strings cosmetically between iterations, which re-opened the
+// modal on every iteration even when the strategic contract was
+// unchanged. The new gate is explicit: the planner SIGNALS when
+// reapproval is needed, the runtime takes that signal at face
+// value, and workers can force-reopen via the handoff body flag.
 func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	state, ok := extension.SessionStateFromContext(ctx)
 	if !ok || state == nil {
@@ -87,9 +89,9 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 		return emitValidateResult(validateResult{Errors: errs})
 	}
 	// Note: plan == nil is legitimate — it's the plan_complete shape
-	// (next_wave=null). We still hash the body so the runtime
-	// verifies the planner ships the same completion handoff it
-	// asked approval for.
+	// (next_wave=null). plan_complete bypasses the modal entirely
+	// (the mission contract was approved on an earlier iteration;
+	// the `finish` decision is AC-gated, not approval-gated).
 
 	// Resolve mission state via parent session — the planner runs
 	// as a worker under the mission, and mission state lives on
@@ -103,61 +105,41 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 		return toolErr("unavailable", "mission state not initialised on the planner's parent")
 	}
 
-	// Compute the canonical marker over the decoded body. Go's
-	// encoding/json emits map keys in sorted order and struct
-	// fields in source order — both deterministic — so cosmetic
-	// differences (whitespace, key ordering inside inputs maps)
-	// collapse to the same digest. We hash the body, not the
-	// typed Plan, so plan_complete (next_wave=null → nil Plan)
-	// still produces a stable marker for the runtime to verify.
-	marker, markerErr := canonicalPlanMarker(raw)
-	if markerErr != nil {
-		return toolErr("internal", "canonical plan marker: "+markerErr.Error())
-	}
-
-	// Mission-level escape hatch — when the policy explicitly
-	// opts out of approvals (Initial=skip), stamp the marker
-	// without inquiring. Used by automation / test missions.
+	// Mission-level escape hatch — when the policy explicitly opts
+	// out of approvals (Initial=skip), flip the approved bit and
+	// return without inquiring. Used by automation / test missions.
 	policy := mState.PlannerApproval()
 	if !approvalRequiredForIteration(policy, 0, mState) {
-		mState.SetApprovedPlanMarker(marker)
-		return emitValidateResult(validateResult{
-			Approved:   true,
-			PlanMarker: marker,
-		})
+		mState.MarkPlanApproved()
+		return emitValidateResult(validateResult{Approved: true})
 	}
 
-	// Idempotent re-validate — when the planner submits a body
-	// whose canonical marker EXACTLY matches the mission's
-	// currently-approved marker, the user already approved this
-	// exact plan. Return approved=true without re-prompting. This
-	// lets the planner re-run validate_and_approve on a
-	// previously-approved body (e.g. a refine loop that
-	// converged back to the original) without hammering the
-	// user with redundant modals.
-	if existing := mState.ApprovedPlanMarker(); existing != "" && existing == marker {
-		return emitValidateResult(validateResult{
-			Approved:   true,
-			PlanMarker: marker,
-		})
+	// plan_complete bypasses the modal — finish is AC-gated
+	// downstream, not approval-gated here. The mission's prior
+	// approval still stands.
+	if plan == nil {
+		return emitValidateResult(validateResult{Approved: true})
 	}
 
-	// New / changed plan — run the inquire. plan_complete (nil
-	// plan) substitutes a stand-in so the rendered modal carries
-	// a sensible "mission complete" cue rather than a blank
-	// roadmap.
-	approvalPlan := plan
-	if approvalPlan == nil {
-		approvalPlan = &Plan{Rationale: "Mission complete — no further waves."}
+	if !shouldOpenApprovalModal(mState, plan) {
+		return emitValidateResult(validateResult{Approved: true})
 	}
-	question, qErr := renderApprovalQuestion(parent, *approvalPlan)
+
+	// Open the modal. Build the inquiry payload from the typed plan
+	// body so the user reads the same contract the runtime will
+	// commit to.
+	pendingReason := ""
+	if pending, reason := mState.PendingReapproval(); pending {
+		pendingReason = reason
+	}
+	question, qErr := renderApprovalQuestion(parent, *plan)
 	if qErr != nil {
 		return toolErr("internal", "render approval question: "+qErr.Error())
 	}
 	resp, inqErr := parent.RequestInquiry(ctx, protocol.InquiryRequestPayload{
 		Type:     protocol.InquiryTypeApproval,
 		Question: question,
-		Context:  strings.TrimSpace(approvalPlan.Rationale),
+		Context:  approvalContextFor(*plan, pendingReason),
 	})
 	if inqErr != nil {
 		return toolErr("inquire_failed", inqErr.Error())
@@ -167,11 +149,10 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 	}
 	approved, refine, aborted, reason := interpretValidateApprovalResponse(resp)
 	if approved {
-		mState.SetApprovedPlanMarker(marker)
+		mState.MarkPlanApproved()
 		return emitValidateResult(validateResult{
-			Approved:   true,
-			PlanMarker: marker,
-			Reason:     reason,
+			Approved: true,
+			Reason:   reason,
 		})
 	}
 	return emitValidateResult(validateResult{
@@ -182,72 +163,58 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 	})
 }
 
-// canonicalPlanMarker hashes the MISSION FRAME extracted from a
-// plan body — `mission_goal` + `mission_acceptance_criteria` —
-// not the full body. Returns the lowercase sha256-hex digest.
+// shouldOpenApprovalModal applies the B13 gate. Returns true when
+// the modal must run for this iteration. Inputs are the mission's
+// current approval state + the planner's typed plan body.
 //
-// Phase I.27 motivation: hashing the full body re-triggered the
-// approval modal on every iteration because next_wave / roadmap
-// naturally change as the mission progresses, even when the
-// strategic contract (goal + AC) is identical. Hashing only the
-// frame means:
+// Order of checks matches the spec §4.3 invariant:
 //
-//   - Planner edits mission_goal or mission_acceptance_criteria →
-//     marker mismatch → re-validate_and_approve → user sees the
-//     new modal. (Planner explicitly signalling "the contract
-//     changed" by editing the frame.)
-//   - Planner only changes next_wave / roadmap → marker matches →
-//     idempotent → no modal. (Routine execution of the approved
-//     mission.)
-//   - Worker emits `invalidates_plan_approval: true` → runtime
-//     clears the stored marker → next planner re-validate → new
-//     modal regardless of frame text.
+//  1. First plan ever in the mission → always modal. The user has
+//     not signed off on anything yet, so the contract must surface.
+//  2. A worker handoff requested reapproval since the last modal
+//     closed → modal regardless of the planner's own flag. The
+//     runtime trusts the worker's signal that something material
+//     changed.
+//  3. The planner itself set `requires_reapproval: true` in this
+//     body → modal. Weak-model guidance: planner sets it ONLY when
+//     `mission_goal` or `mission_acceptance_criteria` materially
+//     changed vs the previously approved iteration.
 //
-// Plan_complete (nil plan) is supported: when both fields are
-// empty / absent the marker collapses to the hash of an empty
-// frame — fine for the no-frame-change case (the existing
-// approval stands).
-//
-// Used by the tool (over the args body) and by
-// spawnAndAwaitPlanner (over h.Body) — symmetric callers produce
-// the same digest when both see the same frame text.
-func canonicalPlanMarker(body any) (string, error) {
-	if body == nil {
-		return "", fmt.Errorf("nil plan body")
+// Otherwise the call passes silently — the prior approval stands.
+func shouldOpenApprovalModal(m *MissionState, plan *Plan) bool {
+	if !m.IsPlanApproved() {
+		return true
 	}
-	m, ok := body.(map[string]any)
-	if !ok {
-		// Non-map body (string handoffs, scalar test fixtures) —
-		// fall through to hashing whatever was passed; preserves
-		// the previous behaviour for callers that hand in a non-
-		// plan body.
-		buf, err := json.Marshal(body)
-		if err != nil {
-			return "", fmt.Errorf("marshal plan body: %w", err)
-		}
-		sum := sha256.Sum256(buf)
-		return hex.EncodeToString(sum[:]), nil
+	if pending, _ := m.PendingReapproval(); pending {
+		return true
 	}
-	frame := struct {
-		Goal               string   `json:"mission_goal,omitempty"`
-		AcceptanceCriteria []string `json:"mission_acceptance_criteria,omitempty"`
-	}{}
-	if g, ok := m["mission_goal"].(string); ok {
-		frame.Goal = strings.TrimSpace(g)
+	if plan != nil && plan.RequiresReapproval {
+		return true
 	}
-	if rawAC, ok := m["mission_acceptance_criteria"].([]any); ok {
-		for _, e := range rawAC {
-			if s, ok := e.(string); ok {
-				frame.AcceptanceCriteria = append(frame.AcceptanceCriteria, strings.TrimSpace(s))
-			}
-		}
+	return false
+}
+
+// approvalContextFor builds the InquiryRequestPayload.Context
+// string for the approval modal. Carries the plan's rationale +
+// (when reapproval was triggered by something other than first-
+// iteration) a one-line explanation so the user knows why they're
+// seeing the modal a second time. Order: planner-set
+// ReapprovalReason wins over the worker-supplied pending reason —
+// the planner is the authority on what changed strategically;
+// the worker only signalled "something needs re-look".
+func approvalContextFor(plan Plan, pendingReason string) string {
+	rationale := strings.TrimSpace(plan.Rationale)
+	reason := strings.TrimSpace(plan.ReapprovalReason)
+	if reason == "" {
+		reason = strings.TrimSpace(pendingReason)
 	}
-	buf, err := json.Marshal(frame)
-	if err != nil {
-		return "", fmt.Errorf("marshal mission frame: %w", err)
+	if reason == "" {
+		return rationale
 	}
-	sum := sha256.Sum256(buf)
-	return hex.EncodeToString(sum[:]), nil
+	if rationale == "" {
+		return "Re-approval requested: " + reason
+	}
+	return rationale + "\n\nRe-approval requested: " + reason
 }
 
 // interpretValidateApprovalResponse normalises an InquiryResponse
@@ -293,7 +260,9 @@ func interpretValidateApprovalResponse(resp *protocol.InquiryResponse) (approved
 // validateResult is the envelope mission:validate_and_approve emits.
 // Field omitempty discipline: only the fields populated for the
 // given branch surface to the model — keeps the JSON narrow so
-// weak models latch onto the right key.
+// weak models latch onto the right key. Phase 5.x — B13 dropped
+// the `plan_marker` field; the runtime no longer hashes plan
+// bodies.
 type validateResult struct {
 	Valid      bool     `json:"valid"`
 	Errors     []string `json:"errors,omitempty"`
@@ -301,7 +270,6 @@ type validateResult struct {
 	Aborted    bool     `json:"aborted,omitempty"`
 	RefineText string   `json:"refine_text,omitempty"`
 	Reason     string   `json:"reason,omitempty"`
-	PlanMarker string   `json:"plan_marker,omitempty"`
 }
 
 func emitValidateResult(r validateResult) (json.RawMessage, error) {

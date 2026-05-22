@@ -64,30 +64,24 @@ type MissionState struct {
 	// session is still attributable.
 	inquired map[string]bool
 
-	// currentApprovedMarker is the canonical sha256-hex of the plan
-	// body the user most recently approved (Phase I.23). Empty when
-	// no plan is currently approved — either because no inquire has
-	// landed yet, or because a downstream worker invalidated the
-	// approval via its handoff body's `invalidates_plan_approval`
-	// flag. mission:validate_and_approve checks against this:
-	//
-	//   - marker(body) == currentApprovedMarker → already approved,
-	//     return idempotently without re-inquiring (the planner
-	//     re-emitted the SAME body — a refine loop converging).
-	//   - mismatch / empty → run the inquire; on approve overwrite
-	//     with the new marker.
-	//
-	// spawnAndAwaitPlanner's gate uses the same value to verify the
-	// planner emits the SAME body it had approved.
-	//
-	// Skill-agnostic by design: the runtime knows nothing about
-	// role names; it only knows "approved-or-not". Skills express
-	// their own per-role invalidation policy via the
-	// `invalidates_plan_approval` handoff field — clarification /
-	// scoping roles typically set it true because their findings
-	// reshape what the next planner should propose, while execution
-	// roles leave it false so the approved plan flows through.
-	currentApprovedMarker string
+	// firstPlanApproved flips to true the first time the user closes
+	// the approval modal with approve=true (or when the policy opts
+	// out via Initial=skip — the implicit-approve path also flips
+	// it). Phase 5.x — B13. The gate uses this bit + pendingReapproval
+	// + the planner's RequiresReapproval flag to decide whether to
+	// (re-)open the modal. Never reset within a mission.
+	firstPlanApproved bool
+
+	// pendingReapproval is set when a worker handoff carried
+	// `invalidates_plan_approval: true` since the last modal closed
+	// approve. The next planner iteration's validate_and_approve
+	// call re-opens the modal regardless of the planner's own
+	// RequiresReapproval flag. Cleared once the modal closes
+	// approve. pendingReapprovalReason carries the worker's
+	// `invalidates_reason` (when present) so the planner / modal
+	// can surface why approval was invalidated.
+	pendingReapproval       bool
+	pendingReapprovalReason string
 
 	// plannerApproval mirrors MissionManifest.Plan.Approval so the
 	// validate_and_approve tool handler (which doesn't see the full
@@ -229,37 +223,53 @@ func (m *MissionState) PlannerApproval() PlanApproval {
 	return m.plannerApproval
 }
 
-// SetApprovedPlanMarker overwrites the mission's current approved
-// plan marker. Empty input is treated as "clear approval". Called
-// by the validate_and_approve tool after the user's approve reply.
-func (m *MissionState) SetApprovedPlanMarker(marker string) {
+// MarkPlanApproved flips firstPlanApproved on and clears any
+// pending reapproval request. Called by validate_and_approve after
+// the user's approve reply (and by the implicit-approve path when
+// the mission's policy opts out of approvals entirely). Idempotent.
+// Phase 5.x — B13.
+func (m *MissionState) MarkPlanApproved() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.currentApprovedMarker = marker
+	m.firstPlanApproved = true
+	m.pendingReapproval = false
+	m.pendingReapprovalReason = ""
 }
 
-// ApprovedPlanMarker returns the mission's currently approved plan
-// marker, or "" when no plan is approved (either no inquire has
-// landed yet, or a worker invalidated the prior approval).
-func (m *MissionState) ApprovedPlanMarker() string {
+// IsPlanApproved reports whether the user has ever approved a plan
+// in this mission. Used by validate_and_approve to skip the modal
+// on subsequent iterations when nothing has invalidated the prior
+// approval, and by spawnAndAwaitPlanner to require approval before
+// accepting a plan handoff. Phase 5.x — B13.
+func (m *MissionState) IsPlanApproved() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.currentApprovedMarker
+	return m.firstPlanApproved
 }
 
-// InvalidatePlanApproval clears the mission's currently approved
-// plan marker. Called by ingestHandoff when a worker emits a
-// handoff body carrying `invalidates_plan_approval: true` — the
-// worker's discovery (e.g. user-clarified inputs) means the next
-// planner spawn cannot rely on the prior approval and must
-// re-validate from scratch.
-//
-// Skill-agnostic: the runtime decides "the next plan needs fresh
-// approval"; per-skill prose decides which roles set the flag.
-func (m *MissionState) InvalidatePlanApproval() {
+// RequestReapproval marks the mission as needing a fresh approval
+// modal on the next planner iteration. Called by ingestHandoff
+// when a worker emits a handoff body carrying
+// `invalidates_plan_approval: true`. The reason (free-form short
+// string from the worker, optional) surfaces in the modal so the
+// user sees what changed. Skill-agnostic: the runtime decides "the
+// next plan needs fresh approval"; per-skill prose decides which
+// roles set the flag. Phase 5.x — B13.
+func (m *MissionState) RequestReapproval(reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.currentApprovedMarker = ""
+	m.pendingReapproval = true
+	m.pendingReapprovalReason = strings.TrimSpace(reason)
+}
+
+// PendingReapproval returns (true, reason) when a worker handoff
+// has invalidated the prior approval since the last modal closed
+// approve. The next planner iteration's validate_and_approve call
+// must re-open the modal. Phase 5.x — B13.
+func (m *MissionState) PendingReapproval() (bool, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pendingReapproval, m.pendingReapprovalReason
 }
 
 // SetMissionFrame stamps the planner's current understanding of

@@ -148,22 +148,32 @@ metadata:
           `[approval_required]`). Call
           `mission:validate_and_approve` with your final plan
           body BEFORE emitting the fenced block. It atomically
-          validates + (when the mission frame changed) asks the
-          user, returning
+          validates + (when needed) asks the user, returning
           `{ valid, errors[], approved, refine_text?, aborted?,
-             reason?, plan_marker }`. The marker hashes ONLY
-          `mission_goal` + `mission_acceptance_criteria` — wave
-          / roadmap / rationale changes do NOT reopen the
-          modal. On `approved: true` emit the fenced block; you
-          may freely refine `next_wave` / `roadmap` /
-          `rationale` against the approved frame. On
+             reason? }`. The runtime opens the modal ONLY
+          when one is needed: first plan ever in the mission,
+          a worker handoff requested reapproval, or YOUR body
+          set `requires_reapproval: true`. Otherwise the call
+          returns approved silently — subsequent iterations
+          flow through without re-prompting on cosmetic
+          wording drift. On `approved: true` emit the fenced
+          block; you may freely refine `next_wave` / `roadmap`
+          / `rationale` against the approved contract. On
           `refine_text` populated, revise per the text and
-          re-call (a new modal opens only if you edited the
-          mission frame). On `aborted: true` emit
-          `status: "error"` carrying `reason`. Researcher
-          handoffs invalidate the prior approval, so the next
-          planner iteration will see a fresh modal regardless
-          of frame edits.
+          re-call. On `aborted: true` emit `status: "error"`
+          carrying `reason`. Researcher handoffs that surface
+          scope-changing findings should set
+          `invalidates_plan_approval: true` (with an optional
+          `invalidates_reason`) so the next planner iteration
+          re-runs the modal regardless of your own flag.
+
+          Set `requires_reapproval: true` (with a short
+          `reapproval_reason`) ONLY when the strategic
+          contract changed since the last approved plan —
+          goal reframed, AC added/dropped/rewritten, or new
+          constraint surfaced. Cosmetic re-wording of the
+          same goal does NOT warrant re-approval; keep the
+          user's signed-off contract intact.
 
           Task-complexity → wave shape (pick the SMALLEST plan
           that hits the goal):
@@ -383,12 +393,14 @@ metadata:
           every researcher handoff.** Your job is to surface
           new information (clarified inputs, schema findings,
           scope choices) that REshape the next planner's plan.
-          The runtime reads this flag and clears the mission's
-          currently-approved plan marker — guaranteeing the
-          next planner spawn must re-call
+          The runtime reads this flag and flips the mission's
+          pending-reapproval bit on — guaranteeing the next
+          planner spawn must re-call
           `mission:validate_and_approve` so the user sees the
           plan post-research and re-approves it knowing what
-          you found. Without this flag the runtime would happily
+          you found. Pair it with a one-line
+          `invalidates_reason` so the modal surfaces what
+          changed. Without this flag the runtime would happily
           ship a plan the user approved BEFORE seeing your
           findings — defeating the point of researcher's intake.
 
@@ -876,8 +888,9 @@ each role's manifest entry above documents the domain contract.
    only — sources / modules / table names), then calls
    `mission:validate_and_approve` (mandatory when the iteration
    carries `[approval_required]` — atomic validate + user
-   approval whenever the mission frame changed; tool stamps a
-   marker the runtime verifies against the emitted handoff).
+   approval when needed; modal opens on first plan, after a
+   worker requested reapproval, or when the body sets
+   `requires_reapproval: true`).
 3. Runtime executes the planner's wave (Do workers in parallel).
 4. Unless `next_wave.skip_check` was set, runtime spawns
    `checker` with the wave's handoffs; checker emits

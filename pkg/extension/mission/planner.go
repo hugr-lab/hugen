@@ -339,40 +339,28 @@ func (e *Extension) spawnAndAwaitPlanner(ctx context.Context, executor *Executor
 		return nil, &PlannerError{Iteration: iteration, Reason: "decode plan", Err: decodeErr}
 	}
 
-	// Phase I.23 — skill-agnostic approval gate. Mission state
-	// carries ONE marker: the body the user most recently
-	// approved (or empty when no plan is currently approved).
-	// The planner MUST have called `mission:validate_and_approve`
-	// with the same body it now emits in the handoff fence,
-	// AND that body must produce the same canonical marker the
-	// tool stamped. Mismatch → reject the handoff. Worker
-	// invalidation (handoff body `invalidates_plan_approval:
-	// true`) clears the marker between iterations, forcing the
-	// next planner to re-validate from scratch.
-	//
-	// Missions whose policy opts out (Initial=skip) skip the
-	// gate entirely — automation / test missions take the
-	// approved-by-default branch.
+	// Phase 5.x — B13. Skill-agnostic approval gate. The mission
+	// carries a single bit: has the user ever approved a plan in
+	// this mission? When approval is required by policy AND the
+	// planner emitted a plan handoff without that bit being set
+	// (or after a worker re-invalidated it without the planner
+	// re-running the modal), reject the handoff so the synthetic
+	// verdict-amend path re-spawns the planner with the gap surfaced
+	// under [Recent verdict]. Missions whose policy opts out
+	// (Initial=skip) skip the gate entirely.
 	if approvalRequiredForIteration(manifest.Plan.Approval, iteration, m) {
-		emittedMarker, markerErr := canonicalPlanMarker(h.Body)
-		if markerErr != nil {
-			return nil, &PlannerError{Iteration: iteration, Reason: "compute emitted plan marker", Err: markerErr}
+		if !m.IsPlanApproved() {
+			return nil, &PlannerError{
+				Iteration: iteration,
+				Reason:    "planner emitted a plan handoff without a recorded approval; call mission:validate_and_approve with the body you intend to emit before shipping the fence",
+			}
 		}
-		stored := m.ApprovedPlanMarker()
-		switch {
-		case stored == "":
-			return nil, &PlannerError{
-				Iteration: iteration,
-				Reason:    "planner emitted a plan handoff without a recorded approval; call mission:validate_and_approve with the body you intend to emit, then ship the fence verbatim",
+		if pending, reason := m.PendingReapproval(); pending {
+			msg := "a worker handoff invalidated the prior plan approval; call mission:validate_and_approve again (this iteration MUST re-open the modal)"
+			if reason != "" {
+				msg = msg + " — worker reason: " + reason
 			}
-		case stored != emittedMarker:
-			return nil, &PlannerError{
-				Iteration: iteration,
-				Reason: fmt.Sprintf(
-					"plan body marker mismatch: approved=%s emitted=%s — the body you shipped in the handoff is not the body the user approved. Re-call mission:validate_and_approve with the body you intend to commit, or emit the previously-approved body verbatim.",
-					stored, emittedMarker,
-				),
-			}
+			return nil, &PlannerError{Iteration: iteration, Reason: msg}
 		}
 	}
 	// Phase I.26 — snapshot the planner's current mission frame
@@ -572,6 +560,13 @@ type plannerTaskView struct {
 	Iteration        int
 	MaxWaves         int
 	ApprovalRequired bool
+	// PendingReapproval signals that a worker handoff invalidated
+	// the prior plan approval since the last modal closed. Renders
+	// the [pending_reapproval] section so the planner restates the
+	// goal/AC honestly given the new findings, then calls
+	// validate_and_approve to re-open the modal. Phase 5.x — B13.
+	PendingReapproval       bool
+	PendingReapprovalReason string
 	// PlanContext is a placeholder for Phase D; rendered empty in
 	// Phase C so the template's section header is stable.
 	PlanContext []plannerContextEntry
@@ -656,6 +651,12 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		DoRoles:          doRoles,
 		Recent:           collectRecentWaves(mission),
 		PlanContext:      collectPlanContext(mission),
+	}
+	if m := FromState(mission); m != nil {
+		if pending, reason := m.PendingReapproval(); pending {
+			view.PendingReapproval = true
+			view.PendingReapprovalReason = reason
+		}
 	}
 	if recentVerdict != nil {
 		view.RecentVerdict = &plannerVerdictView{

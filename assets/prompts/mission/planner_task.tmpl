@@ -61,48 +61,59 @@ This iteration requires user sign-off on the mission
 contract — `mission_goal` + `mission_acceptance_criteria`.
 You MUST call `mission:validate_and_approve` with your final
 plan body BEFORE emitting your fenced ```plan``` block. The
-runtime rejects any planner handoff whose mission frame
-(goal + AC) does not match what the user most recently
-approved.
+runtime rejects any planner handoff that did not pass through
+that tool.
 
 The tool atomically: (a) validates the plan shape — invalid
 returns `{ valid: false, errors: [...] }` and you fix +
-re-call; (b) when the mission frame has changed (or no plan
-has ever been approved), renders the plan to the user as an
-approval modal; (c) returns
+re-call; (b) decides whether the user needs to see a modal
+this iteration (see rules below); (c) returns
 `{ valid: true, approved: bool, refine_text?: string,
-   aborted?: bool, reason?: string, plan_marker: "<sha256>" }`.
+   aborted?: bool, reason?: string }`.
 
-The `plan_marker` is the canonical sha256 of just the
-mission frame (`mission_goal` + `mission_acceptance_criteria`).
-Wave / roadmap / rationale changes do NOT affect the marker
-— iterations that keep the same contract pass through
-silently. The runtime stores the marker the user approved
-and re-verifies it on every planner handoff:
+The runtime opens the approval modal ONLY when one of these
+is true; otherwise the call returns `approved: true`
+silently and the prior approval stands:
 
-- Same mission frame (goal + AC unchanged) → marker matches
-  → no modal, even if `next_wave` / `roadmap` / `rationale`
-  evolved. This is the routine case as the mission executes.
-- Edited mission frame (you reworded the goal or added /
-  dropped an AC) → marker mismatch → new modal opens. Edit
-  the frame ONLY when discovery / refine-loop / follow-ups
-  actually reshape what "done" means.
-- Worker downstream emits `invalidates_plan_approval: true`
-  → runtime clears the marker → next planner iteration
-  re-runs the modal regardless of frame edits.
+- First plan in this mission — no approval on file yet, so
+  the user MUST see the first plan.
+- A worker downstream emitted `invalidates_plan_approval:
+  true` (and optionally `invalidates_reason: "<short
+  text>"`) — the runtime carries that signal until the next
+  modal closes approve.
+- THIS body sets `requires_reapproval: true` — you, the
+  planner, are signalling that something material changed
+  since the last approved iteration.
+
+Set `body.requires_reapproval: true` ONLY when the strategic
+contract changed since the user's last approval:
+
+- `mission_goal` reworded with a different intent (not
+  cosmetic phrasing — actual scope shift).
+- An acceptance criterion ADDED, DROPPED, or rewritten so
+  the satisfaction test materially changes.
+- A new constraint surfaced from refine-loop or worker
+  findings that the user did not see in the prior modal.
+
+Pair it with `body.reapproval_reason: "<one short
+sentence>"` so the user understands what changed (renders
+in the modal's context line). Leave `requires_reapproval:
+false` (or omit it) when only `next_wave` / `roadmap` /
+`rationale` evolved with the same goal + AC. Cosmetic
+re-wording of the goal text does NOT warrant re-approval —
+keep the user's signed-off contract intact.
 
 Response branches:
 
 - `approved: true` → emit the fenced ```plan``` block. You
   may freely refine `next_wave` / `roadmap` / `rationale`
-  against the approved frame; the runtime hashes only the
-  frame.
+  against the approved contract.
 - `refine_text` populated (or any free-form non-approve
   reply) → the user wants edits. Revise per the text, then
   re-call `mission:validate_and_approve` with the revised
-  body. If your revision changed the frame a new modal
-  opens; if you only refined wave/roadmap/rationale the
-  call returns approved=true idempotently.
+  body. Don't loop forever — three revise cycles is a sign
+  to step back and ask the user a clarifying inquiry
+  instead.
 - `aborted: true` → the user wants out. Emit
   `status: "error"` with `reason` carrying the user's
   feedback; the mission gracefully terminates.
@@ -120,6 +131,15 @@ sees them in the modal):
 - Every roadmap entry must carry a short `description` so
   the inquire lists the bigger picture, not just the next
   wave.
+{{end}}{{if .PendingReapproval}}
+[pending_reapproval]
+A worker downstream invalidated the prior plan approval since
+the last modal closed. The next call to
+`mission:validate_and_approve` will re-open the modal
+regardless of your `requires_reapproval` flag.{{if .PendingReapprovalReason}} Worker reason: {{.PendingReapprovalReason}}.{{end}} Treat this as the user requesting a
+fresh look — restate the goal + AC honestly given what was
+discovered (don't re-emit the old contract verbatim if the
+worker's findings reshape it).
 {{end}}
 [Worker contract — runtime-injected]
 The runtime AUTOMATICALLY appends a `[Handoff contract]` section
@@ -197,4 +217,8 @@ handoff refs from earlier waves in the form
 `<subagent_name>@<wave_label>` — copy the values verbatim from
 the `refs:` line under [Recent waves]; bare wave labels do NOT
 resolve), `body.next_wave.subagents[*].inputs` (structured JSON
-the worker receives alongside its task).
+the worker receives alongside its task), `body.requires_reapproval`
+(boolean — set true ONLY when the strategic contract changed; see
+the approval section above for the rules), `body.reapproval_reason`
+(one short sentence explaining what changed; rendered in the modal
+context when `requires_reapproval` is true).
