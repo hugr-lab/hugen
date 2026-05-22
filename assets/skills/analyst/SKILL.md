@@ -526,7 +526,7 @@ metadata:
           Emit `status: "error"` with a sentence describing the
           blocker if validation cannot pass or required fields
           are missing — the planner amends.
-        intent: reasoning
+        intent: default # reasoning
         can_spawn: false
         autoload_skills: [hugr-data]
         compactor:
@@ -649,7 +649,7 @@ metadata:
           `items[].queries[].name`, one per query flavour:
           select / aggregate / bucket_agg). Both go in the
           handoff.
-        # intent: reasoning
+        intent: default # reasoning
         can_spawn: false
         autoload_skills: [hugr-data]
         compactor:
@@ -757,7 +757,7 @@ metadata:
           HTML / JS-chart pipeline prose + its own tool
           surface) is on the backlog —
           `design/002-runtime-canonical/backlog.md`.
-        # intent: reasoning
+        intent: default # reasoning
         can_spawn: false
         autoload_skills: [python-runner]
         compactor:
@@ -804,7 +804,7 @@ metadata:
 
           Be terse. `reason` one line; `memory_summary` one
           line. No narration outside the fence.
-        # intent: reasoning
+        intent: default # reasoning
         can_spawn: false
         capabilities:
           plan_context: read
@@ -843,7 +843,7 @@ metadata:
 
           Emit ONE fenced `handoff` block with kind=synthesis;
           body carries the final message.
-        # intent: reasoning
+        intent: default # reasoning
         can_spawn: false
         capabilities:
           plan_context: read
