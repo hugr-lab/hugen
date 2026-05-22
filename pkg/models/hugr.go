@@ -13,12 +13,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"time"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/hugr-lab/query-engine/types"
@@ -55,20 +56,29 @@ const chatCompletionSubscription = `subscription($model: String!, $messages: [St
 	}
 }`
 
+// ErrFirstBatchDeadline is returned by the subscription pump when
+// the configured first-batch deadline elapses without any batch
+// from the backend. It is treated as retryable by the runWithRetry
+// loop — a hung llama.cpp / vLLM / network half-close that
+// accepted the subscribe but never produced a token gets a fresh
+// attempt instead of stalling the session forever.
+var ErrFirstBatchDeadline = errors.New("hugrmodel: first batch deadline exceeded")
+
 // HugrModel implements pkg/model.Model against Hugr's GraphQL
 // chat_completion subscription. Each Generate opens its own
 // subscription; Stream.Close cancels the subscription's context,
 // which propagates through the WebSocket so the upstream provider
 // observes the cancellation within one network round-trip.
 type HugrModel struct {
-	name           string
-	hugrModel      string
-	querier        types.Querier
-	logger         *slog.Logger
-	maxTokens      int
-	temperature    *float32
-	toolChoiceFunc func() string
-	retry          retryPolicy
+	name               string
+	hugrModel          string
+	querier            types.Querier
+	logger             *slog.Logger
+	maxTokens          int
+	temperature        *float32
+	toolChoiceFunc     func() string
+	retry              retryPolicy
+	firstBatchDeadline time.Duration
 }
 
 // Option configures a HugrModel.
@@ -107,6 +117,24 @@ func WithToolChoiceFunc(f func() string) Option {
 // error propagates to session as today.
 func WithRetry(maxAttempts int, initialBackoff time.Duration) Option {
 	return func(m *HugrModel) { m.retry = newRetryPolicy(maxAttempts, initialBackoff) }
+}
+
+// WithFirstBatchDeadline caps how long the subscription pump waits
+// for the FIRST batch of tokens before cancelling the subscription
+// and feeding the cancel back into the retry loop as a transient
+// error. Zero leaves the deadline disabled — the original
+// stall-forever behaviour. A negative value also disables.
+//
+// Mid-stream stalls (first batch landed, then silence) are NOT
+// covered today — they require separate inter-batch deadline
+// handling (deferred until production data shows that's needed
+// too).
+func WithFirstBatchDeadline(d time.Duration) Option {
+	return func(m *HugrModel) {
+		if d > 0 {
+			m.firstBatchDeadline = d
+		}
+	}
 }
 
 // NewHugr builds a HugrModel pinned to a specific Hugr LLM data
@@ -297,6 +325,31 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 	var firstBatchAt time.Time
 	var committed bool
 
+	// First-batch deadline. When >0, a time.AfterFunc cancels the
+	// pump's ctx if no batch arrives within m.firstBatchDeadline —
+	// the backend has accepted the subscription but produced
+	// nothing (hung llama.cpp / vLLM / network half-close without
+	// finish event). Without this the session would wait forever.
+	// The atomic flag distinguishes a deadline-triggered cancel
+	// from an upstream-driven cancel so the caller can mark the
+	// error as transient and retry.
+	pumpCtx := ctx
+	var firstBatchSeen atomic.Bool
+	var deadlineHit atomic.Bool
+	if m.firstBatchDeadline > 0 {
+		var cancelPump context.CancelFunc
+		pumpCtx, cancelPump = context.WithCancel(ctx)
+		defer cancelPump()
+		timer := time.AfterFunc(m.firstBatchDeadline, func() {
+			if firstBatchSeen.Load() {
+				return
+			}
+			deadlineHit.Store(true)
+			cancelPump()
+		})
+		defer timer.Stop()
+	}
+
 	// Watchdog: if no batch arrives within 30s, log a heartbeat
 	// every 30s so a stuck upstream LLM is observable in real time
 	// instead of silent until budget elapsed. Stopped on every exit.
@@ -304,10 +357,11 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 	defer close(heartbeatStop)
 	go m.subscriptionHeartbeat(heartbeatStop, &batchCount, &rowCount, subscribeStart, &firstBatchAt)
 
-	err := ReadSubscription(ctx, sub, map[string]BatchHandler{
+	err := ReadSubscription(pumpCtx, sub, map[string]BatchHandler{
 		completionPath: func(ctx context.Context, batch arrow.RecordBatch) error {
 			if firstBatchAt.IsZero() {
 				firstBatchAt = time.Now()
+				firstBatchSeen.Store(true)
 				m.logger.Debug("hugr chat_completion first batch",
 					"model", m.hugrModel,
 					"elapsed_ms", time.Since(subscribeStart).Milliseconds(),
@@ -341,6 +395,13 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 			return nil
 		},
 	})
+	if deadlineHit.Load() {
+		// AfterFunc cancelled pumpCtx because no first batch
+		// arrived inside the deadline. Surface as a retryable
+		// error so runWithRetry can re-issue the subscription
+		// instead of treating it as drained-success.
+		return committed, fmt.Errorf("%w (no batch in %s)", ErrFirstBatchDeadline, m.firstBatchDeadline)
+	}
 	if err != nil && !isCanceled(err) {
 		return committed, err
 	}

@@ -119,6 +119,20 @@ func buildOptsFor(cfg config.ModelsConfig) []Option {
 		initialBackoff = config.DefaultRetryInitialBackoff
 	}
 	out = append(out, WithRetry(maxAttempts, initialBackoff))
+
+	// First-batch deadline: zero → default (5 min); negative →
+	// disabled (legacy stall-forever behaviour kept available for
+	// migration). Routes inherit a top-level default if they don't
+	// override — handled by the resolver layer that materialises
+	// per-intent ModelsConfig before this is called.
+	switch {
+	case cfg.FirstBatchDeadline < 0:
+		// explicit disable — skip the option
+	case cfg.FirstBatchDeadline == 0:
+		out = append(out, WithFirstBatchDeadline(config.DefaultFirstBatchDeadline))
+	default:
+		out = append(out, WithFirstBatchDeadline(cfg.FirstBatchDeadline))
+	}
 	return out
 }
 

@@ -30,7 +30,22 @@ type ModelsConfig struct {
 	Mode                string                  `mapstructure:"mode"`
 	RetryMaxAttempts    int                     `mapstructure:"retry_max_attempts"`
 	RetryInitialBackoff time.Duration           `mapstructure:"retry_initial_backoff"`
-	Routes              map[string]ModelsConfig `mapstructure:"routes"`
+
+	// FirstBatchDeadline caps how long the subscription pump waits
+	// for the FIRST batch of tokens from the model server before
+	// auto-cancelling and feeding the cancel back into the retry
+	// loop as a transient error. Zero falls back to the package
+	// default (DefaultFirstBatchDeadline = 5 minutes). Set to a
+	// negative value to disable (no deadline; pre-Phase-5 behaviour
+	// where a hung backend stalls the session forever).
+	//
+	// Configurable per-route — set inside `routes.<intent>:` to
+	// tune individual routes (e.g. checker on a small / flaky model
+	// may want a shorter deadline). The deadline tracks first batch
+	// only; inter-batch stalls / mid-stream hangs are not covered.
+	FirstBatchDeadline time.Duration `mapstructure:"first_batch_deadline"`
+
+	Routes map[string]ModelsConfig `mapstructure:"routes"`
 
 	// TierIntents maps a session tier (root/mission/worker) to the
 	// model-router intent the runtime applies as the spawned child's
@@ -57,4 +72,13 @@ const (
 	// the total budget is roughly 500ms + 1s + 2s + 4s + 8s + 16s +
 	// 30s × 4 = ~150s.
 	DefaultRetryInitialBackoff = 500 * time.Millisecond
+
+	// DefaultFirstBatchDeadline is the package-wide default for the
+	// pre-first-batch hang detector. Local model servers (llama.cpp,
+	// vLLM) occasionally accept a chat-completion subscribe and then
+	// produce nothing — without this deadline the session waits
+	// forever. Five minutes covers cold-start warmup on large
+	// quantised models but surfaces a truly stuck backend in finite
+	// time.
+	DefaultFirstBatchDeadline = 5 * time.Minute
 )

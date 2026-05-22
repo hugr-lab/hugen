@@ -100,6 +100,13 @@ func isRetryableSubscribeErr(err error) bool {
 	if err == nil {
 		return false
 	}
+	// First-batch deadline (our own sentinel) is ALWAYS retryable —
+	// the backend never produced a token, so re-issuing the same
+	// request against a freshly-opened subscription is exactly the
+	// recovery path.
+	if errors.Is(err, ErrFirstBatchDeadline) {
+		return true
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
