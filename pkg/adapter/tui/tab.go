@@ -443,10 +443,23 @@ func (t *tab) dispatchInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 }
 
 // dispatchBatchedInquiryKey routes keypresses for the tab-style
-// research_batch modal. Enter advances to the next question (or
-// submits on the last); Tab toggles value↔comment phase; digit
-// keys pick numbered options; Esc aborts the batch (still pending
-// server-side). Phase 5.x — B15.
+// research_batch modal. Phase 5.x — B15.
+//
+// Bindings:
+//
+//   - Enter      — commit current input, advance to next question
+//                  (or submit batch on the last one).
+//   - Tab        — toggle between value and comment phase for the
+//                  current question. Switching phases preserves
+//                  the partial answer.
+//   - Shift+Tab  — go back to the previous question for editing.
+//                  Textarea is pre-filled with the prior committed
+//                  value so the operator can amend in place. No-op
+//                  on the first question.
+//   - digit 1-N  — when on a question with numbered options, the
+//                  digit pre-selects the option; Enter commits it.
+//   - Esc        — abort the batch (modal closes; request stays
+//                  pending server-side).
 func (t *tab) dispatchBatchedInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 	pend := t.pendingInquiry
 	key := k.String()
@@ -465,50 +478,38 @@ func (t *tab) dispatchBatchedInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd
 			text = picked
 		}
 		_, ready := pend.commitBatchedValue(text)
-		t.textarea.Reset()
 		if ready {
+			t.textarea.Reset()
 			if err := t.submitBatchedAnswers(pend); err != nil {
 				t.bannerError = err.Error()
 			}
+			return true, nil
 		}
+		// Pre-fill the textarea with the next question's prior
+		// committed value, if any, so re-entering via back-nav +
+		// forward-walk shows the operator what's already there.
+		t.prefillBatchedTextarea(pend)
 		return true, nil
-	case "tab", "shift+tab":
+	case "tab":
 		// Tab toggles between value and comment phases for the
 		// current question. Has no effect on comment-kind
 		// clarifications (the question IS the comment).
 		if cur.Kind == protocol.ClarificationKindComment {
 			return true, nil
 		}
-		// Persist whatever the operator already typed before
-		// switching phases so the partial answer isn't lost.
-		text := strings.TrimSpace(t.textarea.Value())
-		if text != "" {
-			if pend.answers == nil {
-				pend.answers = make(map[string]protocol.AnswerEntry)
-			}
-			entry := pend.answers[cur.ID]
-			if pend.inCommentPhase {
-				entry.Comment = text
-			} else {
-				if picked, ok := pend.resolveOptionPick(text); ok {
-					entry.Value = picked
-				} else {
-					entry.Value = text
-				}
-			}
-			pend.answers[cur.ID] = entry
-		}
+		t.persistBatchedTextareaForPhase(pend)
 		pend.inCommentPhase = !pend.inCommentPhase
-		t.textarea.Reset()
-		// Pre-fill the comment phase with the prior comment, if
-		// any, so the operator can amend rather than re-type.
-		if entry, ok := pend.answers[cur.ID]; ok {
-			if pend.inCommentPhase && entry.Comment != "" {
-				t.textarea.SetValue(entry.Comment)
-			} else if !pend.inCommentPhase && entry.Value != "" {
-				t.textarea.SetValue(entry.Value)
-			}
+		t.prefillBatchedTextarea(pend)
+		return true, nil
+	case "shift+tab":
+		// Step back to the previous question. No-op on Q1.
+		if pend.currentIdx <= 0 {
+			return true, nil
 		}
+		t.persistBatchedTextareaForPhase(pend)
+		pend.currentIdx--
+		pend.inCommentPhase = false
+		t.prefillBatchedTextarea(pend)
 		return true, nil
 	case "esc":
 		t.pendingInquiry = nil
@@ -517,6 +518,55 @@ func (t *tab) dispatchBatchedInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd
 		return true, nil
 	}
 	return false, nil
+}
+
+// persistBatchedTextareaForPhase captures whatever the operator has
+// typed in the textarea into the current question's accumulated
+// entry — into Value or Comment depending on which phase is
+// active. Called before navigation (Tab phase toggle, Shift+Tab
+// back-nav) so the partial answer isn't lost. Empty textarea is a
+// no-op (the operator may be deliberately clearing).
+func (t *tab) persistBatchedTextareaForPhase(pend *inquiryState) {
+	text := strings.TrimSpace(t.textarea.Value())
+	if text == "" {
+		return
+	}
+	cur := pend.currentClarification()
+	if pend.answers == nil {
+		pend.answers = make(map[string]protocol.AnswerEntry)
+	}
+	entry := pend.answers[cur.ID]
+	if pend.inCommentPhase || cur.Kind == protocol.ClarificationKindComment {
+		entry.Comment = text
+	} else {
+		if picked, ok := pend.resolveOptionPick(text); ok {
+			entry.Value = picked
+		} else {
+			entry.Value = text
+		}
+	}
+	pend.answers[cur.ID] = entry
+}
+
+// prefillBatchedTextarea resets the textarea then loads it with the
+// current question + phase's previously-captured text, if any. Lets
+// the operator amend a prior answer in place rather than re-typing.
+func (t *tab) prefillBatchedTextarea(pend *inquiryState) {
+	t.textarea.Reset()
+	cur := pend.currentClarification()
+	entry, ok := pend.answers[cur.ID]
+	if !ok {
+		return
+	}
+	if pend.inCommentPhase || cur.Kind == protocol.ClarificationKindComment {
+		if entry.Comment != "" {
+			t.textarea.SetValue(entry.Comment)
+		}
+		return
+	}
+	if entry.Value != "" {
+		t.textarea.SetValue(entry.Value)
+	}
 }
 
 // submitBatchedAnswers builds an InquiryResponse with the typed

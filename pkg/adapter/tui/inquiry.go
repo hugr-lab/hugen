@@ -294,16 +294,20 @@ func batchedHint(state *inquiryState) string {
 	if last {
 		enterAction = "submit"
 	}
+	backHint := ""
+	if state.currentIdx > 0 {
+		backHint = " | Shift+Tab prev"
+	}
 	if state.inCommentPhase {
-		return fmt.Sprintf("[type comment, Enter to %s | Tab back to value | Esc abort]", enterAction)
+		return fmt.Sprintf("[type comment, Enter %s | Tab back to value%s | Esc abort]", enterAction, backHint)
 	}
 	if cur.Kind == protocol.ClarificationKindComment {
-		return fmt.Sprintf("[type free-form, Enter to %s | Esc abort]", enterAction)
+		return fmt.Sprintf("[type free-form, Enter %s%s | Esc abort]", enterAction, backHint)
 	}
 	if len(cur.Options) > 0 {
-		return fmt.Sprintf("[type 1-%d to pick OR free text, Enter to %s | Tab add comment | Esc abort]", len(cur.Options), enterAction)
+		return fmt.Sprintf("[type 1-%d to pick OR free text, Enter %s | Tab add comment%s | Esc abort]", len(cur.Options), enterAction, backHint)
 	}
-	return fmt.Sprintf("[type answer, Enter to %s | Tab add comment | Esc abort]", enterAction)
+	return fmt.Sprintf("[type answer, Enter %s | Tab add comment%s | Esc abort]", enterAction, backHint)
 }
 
 // kindOrDefault returns kind, defaulting to "required" so a
