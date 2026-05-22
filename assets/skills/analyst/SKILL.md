@@ -328,6 +328,18 @@ metadata:
         autoload_skills: [hugr-data]
         capabilities:
           plan_context: read
+        compactor:
+          # researcher iterates through clarifications +
+          # discovery rounds; on re-fire it carries prior_answers
+          # / prior_comments in the prompt. Without compaction
+          # the discovery tool_result accumulation grows
+          # linearly across re-fires.
+          enabled: true
+          max_tokens: 30000
+          max_turns: 40
+          preserved_recent_turns: 12
+          min_turn_gap: 3
+          llm_intent: summarize
         tools:
           - provider: hugr-data
             tools:
@@ -636,6 +648,18 @@ metadata:
         intent: tool_calling
         can_spawn: false
         autoload_skills: [hugr-data]
+        compactor:
+          # schema-explorer iterates through discovery-search_*
+          # → schema-type_fields → notepad:append. Each
+          # schema-type_fields response is ~12K tokens on wide
+          # tables; without compaction one schema worker can
+          # accumulate 50K+ history fast.
+          enabled: true
+          max_tokens: 30000
+          max_turns: 40
+          preserved_recent_turns: 12
+          min_turn_gap: 3
+          llm_intent: summarize
         tools:
           - provider: hugr-data
             tools: ['*']
