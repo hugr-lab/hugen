@@ -114,6 +114,14 @@ Quality checks the user will judge you by:
 - Use options when the user is picking from a small set ("yes /
   no", "html / markdown / pdf") — free-form text is for genuine
   open-ended inputs.
+- Set `multi: true` when the question is GENUINELY multi-pick —
+  "which areas to focus on", "which sources to include in the
+  report", "which metrics to highlight", "which time windows to
+  compare". The user sees checkboxes and can pick any subset
+  (zero included). Don't set `multi: true` on single-choice
+  questions where one answer is the natural shape — that
+  confuses the modal. Use it WHEN AND ONLY WHEN multiple picks
+  carry independent meaning.
 - Don't ask questions you can answer from the goal text + your
   read-only tool surface. Discovery comes first; inquire after.
 - On done=true, your `findings` paragraph is what the planner
