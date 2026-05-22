@@ -30,30 +30,39 @@ type inquiryState struct {
 	// stitched onto: "approve" or "deny". Empty for clarifications.
 	replyVerb string
 
-	// Phase 5.x — B15. Tab-style batched-research state. Modal
-	// walks the operator through clarifications one at a time:
+	// Phase 5.x — B15. Tab-style batched-research state. The
+	// modal walks the operator through clarifications one at a
+	// time, with three panels per question (value / comment /
+	// review). State:
 	//   - `currentIdx` names the clarification being asked.
-	//   - `focus` selects which input field has the textarea: 0
-	//     for value, 1 for comment. Tab toggles. (For comment-
-	//     kind clarifications focus is locked at 1 because there
-	//     IS no value field.)
-	//   - `optionHighlights` caches each option-bearing question's
-	//     cursor index — what ↑/↓ moved to. Persists across
-	//     navigation so a back-walk doesn't lose the prior pick.
-	//     `-1` means "no option highlighted yet" (default before
-	//     the operator presses ↑/↓).
+	//     `len(req.Clarifications)` is a special "review" slot
+	//     where the operator audits all answers before
+	//     submitting.
+	//   - `panel` selects the per-question panel: 0=value,
+	//     1=comment, 2=review (review-of-current-question).
+	//     For comment-kind clarifications panel is forced to 1
+	//     (no value field rendered).
+	//   - `optionHighlights` caches each option-bearing
+	//     question's cursor index — what ↑/↓ moved to. Persists
+	//     across navigation so a back-walk doesn't lose the
+	//     prior pick. `-1` means "no option highlighted yet".
+	//   - `optionPicks` caches the multi-select set per
+	//     question id (sorted index list). `nil` means
+	//     single-select.
 	//   - `answers` accumulates per-id entries as the operator
-	//     advances. Built into payload.Answers on the last submit.
+	//     advances. Built into payload.Answers on submit.
 	currentIdx       int
-	focus            int
+	panel            int
 	optionHighlights map[string]int
+	optionPicks      map[string]map[int]struct{}
 	answers          map[string]protocol.AnswerEntry
 }
 
-// Field focus identifiers for the batched modal.
+// Per-question panel identifiers.
 const (
-	batchedFocusValue   = 0
-	batchedFocusComment = 1
+	batchedPanelValue   = 0
+	batchedPanelComment = 1
+	batchedPanelReview  = 2
 )
 
 // isBatched reports whether this state is rendering a research_batch
@@ -71,6 +80,92 @@ func (s *inquiryState) currentClarification() protocol.Clarification {
 		return protocol.Clarification{}
 	}
 	return s.req.Clarifications[s.currentIdx]
+}
+
+// onReview reports whether the modal cursor sits on the final
+// review-and-submit screen rather than a per-question screen.
+// currentIdx == len(req.Clarifications) is the canonical "review"
+// position the operator reaches after Enter on the last question
+// (or via right-arrow nav).
+func (s *inquiryState) onReview() bool {
+	return s.isBatched() && s.currentIdx >= len(s.req.Clarifications)
+}
+
+// togglePickedOption flips the membership of the highlighted option
+// in the current question's multi-select set. No-op when the
+// question doesn't declare multi=true or no option is highlighted.
+func (s *inquiryState) togglePickedOption() {
+	if !s.isBatched() {
+		return
+	}
+	cur := s.currentClarification()
+	if !cur.Multi || len(cur.Options) == 0 {
+		return
+	}
+	hi := s.optionHighlight()
+	if hi < 0 || hi >= len(cur.Options) {
+		return
+	}
+	if s.optionPicks == nil {
+		s.optionPicks = make(map[string]map[int]struct{})
+	}
+	set, ok := s.optionPicks[cur.ID]
+	if !ok {
+		set = make(map[int]struct{})
+		s.optionPicks[cur.ID] = set
+	}
+	if _, present := set[hi]; present {
+		delete(set, hi)
+	} else {
+		set[hi] = struct{}{}
+	}
+}
+
+// pickedOptionsValue returns the comma-joined option texts for the
+// current question's multi-select picks (sorted by index). Empty
+// string when no picks. Used as the Value when committing a
+// multi-select question.
+func (s *inquiryState) pickedOptionsValue() string {
+	if s.optionPicks == nil {
+		return ""
+	}
+	cur := s.currentClarification()
+	set, ok := s.optionPicks[cur.ID]
+	if !ok || len(set) == 0 {
+		return ""
+	}
+	indices := make([]int, 0, len(set))
+	for i := range set {
+		indices = append(indices, i)
+	}
+	for i := 1; i < len(indices); i++ {
+		for j := i; j > 0 && indices[j] < indices[j-1]; j-- {
+			indices[j], indices[j-1] = indices[j-1], indices[j]
+		}
+	}
+	parts := make([]string, 0, len(indices))
+	for _, i := range indices {
+		if i >= 0 && i < len(cur.Options) {
+			parts = append(parts, cur.Options[i])
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// optionIsPicked reports whether the option at idx is in the
+// current question's multi-select set. Used by the renderer to
+// draw the [x] marker.
+func (s *inquiryState) optionIsPicked(idx int) bool {
+	if s.optionPicks == nil {
+		return false
+	}
+	cur := s.currentClarification()
+	set, ok := s.optionPicks[cur.ID]
+	if !ok {
+		return false
+	}
+	_, present := set[idx]
+	return present
 }
 
 // optionHighlight returns the cached option index for the current
@@ -122,31 +217,13 @@ func (s *inquiryState) cycleOptionHighlight(delta int) {
 	s.setOptionHighlight(idx)
 }
 
-// advanceBatched moves the cursor to the next question. Returns
-// true when the modal is ready to submit (last question committed).
-func (s *inquiryState) advanceBatched() bool {
-	if s.currentIdx+1 >= len(s.req.Clarifications) {
-		return true
-	}
-	s.currentIdx++
-	// Reset focus: comment-kind questions force focus to the
-	// comment field (the only one rendered); everyone else
-	// defaults to value.
-	if s.currentClarification().Kind == protocol.ClarificationKindComment {
-		s.focus = batchedFocusComment
-	} else {
-		s.focus = batchedFocusValue
-	}
-	return false
-}
-
 // resolveOptionPick returns (matched-option-text, true) when `text`
 // is a digit selecting one of the current clarification's options
 // (`1` → options[0], etc.). Returns ("", false) otherwise so the
 // caller treats the raw text as the answer. Kept as a power-user
 // shortcut alongside the ↑/↓ + Enter flow.
 func (s *inquiryState) resolveOptionPick(text string) (string, bool) {
-	if !s.isBatched() || s.focus == batchedFocusComment {
+	if !s.isBatched() || s.panel == batchedPanelComment {
 		return "", false
 	}
 	cur := s.currentClarification()
@@ -188,9 +265,9 @@ func newInquiryState(req *protocol.InquiryRequest) *inquiryState {
 	// field; everyone else starts on the value field.
 	if s.isBatched() {
 		if s.currentClarification().Kind == protocol.ClarificationKindComment {
-			s.focus = batchedFocusComment
+			s.panel = batchedPanelComment
 		} else {
-			s.focus = batchedFocusValue
+			s.panel = batchedPanelValue
 		}
 	}
 	return s
@@ -267,43 +344,106 @@ func renderInquiryModal(state *inquiryState, width int) string {
 	return inquiryBoxStyle.Width(width - 2).Render(sb.String())
 }
 
-// renderBatchedInquiryModal renders the tab-style one-at-a-time
-// modal for research_batch inquiries. Per question: progress bar,
-// question header, option list (with ↑↓-driven highlight marker),
-// always-visible `value` and `comment` rows (focused one carries
-// the cursor textarea content), and a keystroke hint footer.
+// renderBatchedInquiryModal renders the modal for research_batch
+// inquiries. Phase 5.x — B15 + follow-up UX. Each question is its
+// own screen with two panels (value + comment); a final "review"
+// screen at currentIdx == N renders the accumulated answers + a
+// Submit hint. The top of the modal carries a panel tab-bar
+// showing which panel has focus.
 func renderBatchedInquiryModal(state *inquiryState, width, contentW int) string {
 	total := len(state.req.Clarifications)
-	cur := state.currentClarification()
-	commentKind := cur.Kind == protocol.ClarificationKindComment
 
 	var sb strings.Builder
-	title := fmt.Sprintf("Research clarifications [%d/%d]", state.currentIdx+1, total)
-	if state.callerLabel != "" {
-		title += " (from " + state.callerLabel + ")"
-	}
+	title := batchedTitle(state, total)
 	sb.WriteString(inquiryTitleStyle.Render(title))
+	sb.WriteString("\n")
+	sb.WriteString(renderBatchedTabBar(state))
 	sb.WriteString("\n\n")
 
-	// Optional rationale / context line that the request payload
-	// carried.
 	if c := strings.TrimSpace(state.req.Context); c != "" {
 		sb.WriteString(inquiryFaintStyle.Render(wrap("Context: "+c, contentW)))
 		sb.WriteString("\n\n")
 	}
 
-	// Header for the current question.
+	if state.onReview() {
+		renderBatchedReviewBody(&sb, state, contentW)
+	} else {
+		renderBatchedQuestionBody(&sb, state, contentW)
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(inquiryHintStyle.Render(batchedHint(state)))
+	return inquiryBoxStyle.Width(width - 2).Render(sb.String())
+}
+
+// batchedTitle produces the modal header line. On per-question
+// screens shows "[N/total]"; on the review screen shows "[review]".
+func batchedTitle(state *inquiryState, total int) string {
+	prefix := "Research clarifications"
+	tail := ""
+	if state.callerLabel != "" {
+		tail = " (from " + state.callerLabel + ")"
+	}
+	if state.onReview() {
+		return prefix + " [review]" + tail
+	}
+	return fmt.Sprintf("%s [%d/%d]%s", prefix, state.currentIdx+1, total, tail)
+}
+
+// renderBatchedTabBar draws the panel selector at the top of the
+// modal: "[●value] [comment] [review]" where the active panel has
+// the filled bullet. On the global review screen the "review" tab
+// is the only one that highlights; per-question screens highlight
+// value or comment based on state.panel.
+func renderBatchedTabBar(state *inquiryState) string {
+	labels := []struct {
+		name   string
+		active bool
+	}{
+		{"value", !state.onReview() && state.panel == batchedPanelValue},
+		{"comment", !state.onReview() && state.panel == batchedPanelComment},
+		{"review", state.onReview()},
+	}
+	var sb strings.Builder
+	for i, l := range labels {
+		if i > 0 {
+			sb.WriteString(" ")
+		}
+		marker := "○"
+		styled := inquiryFaintStyle
+		if l.active {
+			marker = "●"
+			styled = inquiryHintStyle
+		}
+		sb.WriteString(styled.Render(fmt.Sprintf("[%s %s]", marker, l.name)))
+	}
+	return sb.String()
+}
+
+// renderBatchedQuestionBody is the per-question content panel.
+// Layout: kind label + question text + option list (with ↑↓
+// highlight + multi-select checkboxes when applicable) + the
+// inline value/comment summary rows.
+func renderBatchedQuestionBody(sb *strings.Builder, state *inquiryState, contentW int) {
+	cur := state.currentClarification()
+	commentKind := cur.Kind == protocol.ClarificationKindComment
+
 	label := fmt.Sprintf("%s (%s)", cur.ID, kindOrDefault(cur.Kind))
+	if cur.Multi && len(cur.Options) > 0 {
+		label += " · multi-select"
+	}
 	sb.WriteString(inquiryFaintStyle.Render(label))
 	sb.WriteString("\n")
 	sb.WriteString(wrap(cur.Question, contentW))
 	sb.WriteString("\n")
 
-	// Option list with ▸ on the currently-highlighted row. Numbered
-	// (1., 2., ...) so digit-select still works as a shortcut.
 	if len(cur.Options) > 0 {
 		sb.WriteString("\n")
-		sb.WriteString(inquiryFaintStyle.Render("options (↑↓ to pick, Enter on value field to commit):"))
+		hint := "options (↑↓ to pick, Enter on value to commit)"
+		if cur.Multi {
+			hint = "options (↑↓ to navigate, Space to toggle, Enter on value to commit)"
+		}
+		sb.WriteString(inquiryFaintStyle.Render(hint + ":"))
 		sb.WriteString("\n")
 		hi := state.optionHighlight()
 		for i, opt := range cur.Options {
@@ -311,7 +451,15 @@ func renderBatchedInquiryModal(state *inquiryState, width, contentW int) string 
 			if i == hi {
 				marker = "▸ "
 			}
-			line := fmt.Sprintf("%s%d. %s", marker, i+1, truncate(opt, contentW-6))
+			box := ""
+			if cur.Multi {
+				if state.optionIsPicked(i) {
+					box = "[x] "
+				} else {
+					box = "[ ] "
+				}
+			}
+			line := fmt.Sprintf("%s%d. %s%s", marker, i+1, box, truncate(opt, contentW-10))
 			if i == hi {
 				sb.WriteString(inquiryHintStyle.Render(line))
 			} else {
@@ -325,17 +473,12 @@ func renderBatchedInquiryModal(state *inquiryState, width, contentW int) string 
 		sb.WriteString("\n")
 	}
 
-	// Value + Comment rows. The currently-focused one is marked
-	// with `>`; its textarea content is shown inline (the real
-	// textarea component below the modal mirrors this — keeping
-	// the modal preview honest). Comment-kind questions hide the
-	// value row entirely (the question IS the comment).
 	sb.WriteString("\n")
 	entry := state.answers[cur.ID]
 	if !commentKind {
 		sb.WriteString(renderBatchedField(
 			"value",
-			state.focus == batchedFocusValue,
+			state.panel == batchedPanelValue,
 			fieldValuePreview(state, cur, entry),
 			contentW,
 		))
@@ -343,14 +486,45 @@ func renderBatchedInquiryModal(state *inquiryState, width, contentW int) string 
 	}
 	sb.WriteString(renderBatchedField(
 		"comment",
-		state.focus == batchedFocusComment,
+		state.panel == batchedPanelComment,
 		fieldCommentPreview(state, cur, entry),
 		contentW,
 	))
-	sb.WriteString("\n\n")
+	sb.WriteString("\n")
+}
 
-	sb.WriteString(inquiryHintStyle.Render(batchedHint(state)))
-	return inquiryBoxStyle.Width(width - 2).Render(sb.String())
+// renderBatchedReviewBody is the global pre-submit summary screen.
+// Lists every clarification with its captured value + comment so
+// the operator can audit before Enter. Renders "(no answer)" /
+// "(no comment)" placeholders so missing entries are obvious.
+func renderBatchedReviewBody(sb *strings.Builder, state *inquiryState, contentW int) {
+	sb.WriteString(inquiryFaintStyle.Render("Review your answers — Enter submits, ← back to edit any question."))
+	sb.WriteString("\n\n")
+	for i, c := range state.req.Clarifications {
+		entry := state.answers[c.ID]
+		header := fmt.Sprintf("q%d · %s (%s)", i+1, c.ID, kindOrDefault(c.Kind))
+		if c.Multi && len(c.Options) > 0 {
+			header += " · multi-select"
+		}
+		sb.WriteString(inquiryHintStyle.Render(header))
+		sb.WriteString("\n")
+		sb.WriteString(inquiryFaintStyle.Render(wrap("  "+c.Question, contentW)))
+		sb.WriteString("\n")
+		if c.Kind != protocol.ClarificationKindComment {
+			val := entry.Value
+			if val == "" {
+				val = inquiryFaintStyle.Render("(no answer)")
+			}
+			sb.WriteString(wrap("  value:   "+val, contentW))
+			sb.WriteString("\n")
+		}
+		cmt := entry.Comment
+		if cmt == "" {
+			cmt = inquiryFaintStyle.Render("(no comment)")
+		}
+		sb.WriteString(wrap("  comment: "+cmt, contentW))
+		sb.WriteString("\n\n")
+	}
 }
 
 // renderBatchedField renders one labelled field row. The focused
@@ -384,7 +558,7 @@ func fieldValuePreview(state *inquiryState, cur protocol.Clarification, entry pr
 	if hi := state.optionHighlight(); hi >= 0 && hi < len(cur.Options) {
 		return inquiryFaintStyle.Render("(↑↓ highlighted: " + cur.Options[hi] + ")")
 	}
-	if state.focus == batchedFocusValue {
+	if state.panel == batchedPanelValue {
 		return inquiryFaintStyle.Render("(type to fill)")
 	}
 	return inquiryFaintStyle.Render("—")
@@ -395,37 +569,46 @@ func fieldCommentPreview(state *inquiryState, _ protocol.Clarification, entry pr
 	if entry.Comment != "" {
 		return entry.Comment
 	}
-	if state.focus == batchedFocusComment {
+	if state.panel == batchedPanelComment {
 		return inquiryFaintStyle.Render("(type to fill)")
 	}
 	return inquiryFaintStyle.Render("—")
 }
 
 // batchedHint is the one-line keystroke summary at the bottom of
-// the batched modal.
+// the batched modal. Renders different hints based on the current
+// panel + screen (per-question vs review).
 func batchedHint(state *inquiryState) string {
+	if state.onReview() {
+		return "[← prev question | Enter submit batch | Esc abort]"
+	}
 	cur := state.currentClarification()
-	last := state.currentIdx+1 == len(state.req.Clarifications)
-	enterAction := "next"
-	if last {
-		enterAction = "submit"
-	}
-	backHint := ""
-	if state.currentIdx > 0 {
-		backHint = " | Shift+Tab prev"
-	}
-	if cur.Kind == protocol.ClarificationKindComment {
-		return fmt.Sprintf("[type comment, Enter %s%s | Esc abort]", enterAction, backHint)
-	}
 	parts := []string{}
-	if len(cur.Options) > 0 {
-		parts = append(parts, "↑↓ pick option")
+	// Per-panel cues
+	if state.panel == batchedPanelValue && !state.onReview() && cur.Kind != protocol.ClarificationKindComment {
+		if len(cur.Options) > 0 {
+			if cur.Multi {
+				parts = append(parts, "↑↓ navigate option", "Space toggle pick")
+			} else {
+				parts = append(parts, "↑↓ pick option")
+			}
+		}
 	}
-	parts = append(parts, "Tab switch value↔comment")
-	parts = append(parts, fmt.Sprintf("Enter %s", enterAction))
-	if backHint != "" {
-		parts = append(parts, strings.TrimSpace(strings.TrimPrefix(backHint, " | ")))
+	// Panel switch
+	parts = append(parts, "Tab next panel")
+	// Question nav
+	if state.currentIdx > 0 {
+		parts = append(parts, "← prev q")
 	}
+	if state.currentIdx < len(state.req.Clarifications) {
+		parts = append(parts, "→ next q")
+	}
+	// Enter action depends on panel + position
+	enter := "next"
+	if state.currentIdx+1 == len(state.req.Clarifications) {
+		enter = "go to review"
+	}
+	parts = append(parts, "Enter "+enter)
 	parts = append(parts, "Esc abort")
 	return "[" + strings.Join(parts, " | ") + "]"
 }

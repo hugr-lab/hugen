@@ -69,7 +69,11 @@ Required keys when `done: false`:
   empty for free-form text; ignored when `kind=comment`),
   `default` (pre-fill value), `allow_comment` (boolean — exposes
   a per-question comment textarea; defaults to true for
-  required/optional, ignored for comment).
+  required/optional, ignored for comment), `multi` (boolean —
+  when true on an options-bearing question, the user picks
+  ZERO-or-MORE entries via checkboxes; the answer is the
+  comma-joined set of picked option strings; ignored when
+  `options` is empty).
 
 Required keys when `done: true`:
 

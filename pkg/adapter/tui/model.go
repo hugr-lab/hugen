@@ -331,6 +331,16 @@ func (m model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// without remapping; Ctrl/Alt-based bindings are flaky on
 		// macOS (Option needs Meta-as-Esc, Ctrl+N collides with
 		// VS Code, etc.).
+		//
+		// Phase 5.x — B15. Batched research_batch modal owns Tab
+		// for its own panel switching (value↔comment↔review). When
+		// the active tab carries a batched inquiry, defer Tab to
+		// the tab's dispatcher instead of cycling sessions —
+		// otherwise the operator can't reach the comment / review
+		// panels.
+		if cur := m.currentTab(); cur != nil && cur.pendingInquiry.isBatched() {
+			break
+		}
 		if cur := m.currentTab(); cur != nil && cur.textarea.Value() == "" && len(m.tabs) > 1 {
 			m.active = (m.active + 1) % len(m.tabs)
 			if cur := m.currentTab(); cur != nil {
@@ -339,6 +349,9 @@ func (m model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "shift+tab":
+		if cur := m.currentTab(); cur != nil && cur.pendingInquiry.isBatched() {
+			break
+		}
 		if cur := m.currentTab(); cur != nil && cur.textarea.Value() == "" && len(m.tabs) > 1 {
 			m.active = (m.active - 1 + len(m.tabs)) % len(m.tabs)
 			if cur := m.currentTab(); cur != nil {

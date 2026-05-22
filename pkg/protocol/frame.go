@@ -731,6 +731,15 @@ type Clarification struct {
 	// so a deliberate `false` reads differently from "field
 	// absent" (in which case the runtime applies the default).
 	AllowComment *bool `json:"allow_comment,omitempty"`
+
+	// Multi, when true on a question with non-empty Options,
+	// flips the UI into multi-select mode: each option renders
+	// with a [ ] / [x] checkbox, Space toggles the
+	// currently-highlighted entry in/out of the selection set,
+	// Enter commits the joined set as the Value (comma-separated
+	// option text). Ignored when Options is empty (free-text
+	// answers stay single-string). Phase 5.x — B15 follow-up.
+	Multi bool `json:"multi,omitempty"`
 }
 
 // InquiryResponsePayload is the cascade-down answer. The adapter
