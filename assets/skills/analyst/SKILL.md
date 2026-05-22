@@ -803,7 +803,7 @@ metadata:
 
           Be terse. `reason` one line; `memory_summary` one
           line. No narration outside the fence.
-        intent: cheap
+        intent: default
         can_spawn: false
         capabilities:
           plan_context: read
