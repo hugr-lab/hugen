@@ -14,10 +14,11 @@ import (
 // shipped :finish + :get_handoff; Phase E adds :notify so root
 // can deliver mid-mission followups without re-spawning.
 const (
-	PermFinish            = "hugen:mission:finish"
-	PermGetHandoff        = "hugen:mission:get_handoff"
-	PermNotify            = "hugen:mission:notify"
+	PermFinish             = "hugen:mission:finish"
+	PermGetHandoff         = "hugen:mission:get_handoff"
+	PermNotify             = "hugen:mission:notify"
 	PermValidateAndApprove = "hugen:mission:validate_and_approve"
+	PermGetResearch        = "hugen:mission:get_research"
 )
 
 const (
@@ -71,6 +72,12 @@ const (
     }
   },
   "required": ["name", "text"]
+}`
+
+	missionGetResearchSchema = `{
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
 }`
 )
 
@@ -136,6 +143,13 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 			PermissionObject: PermValidateAndApprove,
 			ArgSchema:        json.RawMessage(missionValidateAndApproveSchema),
 		},
+		{
+			Name:             providerName + ":get_research",
+			Description:      "Fetch the mission's research-stage output: the findings paragraph the researcher emitted on done=true, plus any structured resolved_user_inputs (file_path, output_format, scope choices the user picked) and ac_proposals. Returns `{ available: bool, findings: string, resolved_user_inputs: {...}, ac_proposals: [...] }`. Call when your task brief references scope set by the research stage and you need the full context — schema names, decided file paths, resolved scope choices — rather than re-discovering them. `available: false` means the mission didn't run a research stage; treat your task brief as the canonical source.",
+			Provider:         providerName,
+			PermissionObject: PermGetResearch,
+			ArgSchema:        json.RawMessage(missionGetResearchSchema),
+		},
 	}, nil
 }
 
@@ -151,6 +165,8 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 		return e.callNotify(ctx, args)
 	case "validate_and_approve":
 		return e.callValidateAndApprove(ctx, args)
+	case "get_research":
+		return e.callGetResearch(ctx, args)
 	default:
 		return nil, fmt.Errorf("%w: mission:%s", tool.ErrUnknownTool, short)
 	}
@@ -288,6 +304,51 @@ func readIterationCounter(m *MissionState) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.IterationCounter
+}
+
+// getResearchResponse is the JSON shape callGetResearch emits.
+// available=false signals the mission ran without a research stage
+// (or the research role exited via abort); workers fall back to
+// their task brief as the canonical source. When available=true,
+// findings is the paragraph the researcher emitted on done=true,
+// and resolved_user_inputs / ac_proposals carry the structured
+// extras when the researcher populated them.
+type getResearchResponse struct {
+	Available          bool                  `json:"available"`
+	Findings           string                `json:"findings,omitempty"`
+	ResolvedUserInputs map[string]any        `json:"resolved_user_inputs,omitempty"`
+	ACProposals        []ResearchACProposal  `json:"ac_proposals,omitempty"`
+}
+
+// callGetResearch projects MissionState.ResearchOutput() onto the
+// JSON envelope workers see. The mission state is resolved via
+// FromState which walks the parent chain — so a worker calling
+// this tool from within its own session lands on the parent
+// mission's state without any explicit handle plumbing.
+//
+// Same dispatch context handling as callGetHandoff: returns
+// session_gone when no session attached, unavailable when the
+// MissionState extension wasn't initialised on the resolved
+// session.
+func (e *Extension) callGetResearch(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+	state, ok := extension.SessionStateFromContext(ctx)
+	if !ok || state == nil {
+		return toolErr("session_gone", "no session attached to dispatch ctx")
+	}
+	m := FromState(state)
+	if m == nil {
+		return toolErr("unavailable", "mission state not initialised on this session")
+	}
+	findings, resolved, acProposals := m.ResearchOutput()
+	if strings.TrimSpace(findings) == "" && len(resolved) == 0 && len(acProposals) == 0 {
+		return json.Marshal(getResearchResponse{Available: false})
+	}
+	return json.Marshal(getResearchResponse{
+		Available:          true,
+		Findings:           findings,
+		ResolvedUserInputs: resolved,
+		ACProposals:        acProposals,
+	})
 }
 
 // callGetHandoff reads a handoff from the per-mission store. Any

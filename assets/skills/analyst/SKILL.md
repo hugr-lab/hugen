@@ -396,6 +396,13 @@ metadata:
              names, `queries[].name`, and `fields[].name +
              field_type` — lift names verbatim. Skip own
              discovery in that case.
+             If the task brief MENTIONS scope set by a research
+             stage (specific tables, decided file path, narrow
+             scope) but doesn't restate the full context, call
+             `mission:get_research` to fetch the researcher's
+             `findings` + `resolved_user_inputs` BEFORE doing
+             your own discovery. The research stage already
+             paid the discovery cost — reuse it, don't redo it.
           2. Otherwise discover only what you need:
              - `discovery-search_module_data_objects(module, query)`
                for table list + query field names.
@@ -525,7 +532,7 @@ metadata:
           Emit `status: "error"` with a sentence describing the
           blocker if validation cannot pass or required fields
           are missing — the planner amends.
-        intent: tool_calling
+        intent: reasoning
         can_spawn: false
         autoload_skills: [hugr-data]
         compactor:
@@ -561,7 +568,7 @@ metadata:
           - provider: python-runner
             tools: ['*']
           - provider: mission
-            tools: [get_handoff]
+            tools: [get_handoff, get_research]
         on_close:
           notepad:
             prompt: |
@@ -615,6 +622,12 @@ metadata:
 
           Tool sequence (read `instructions` via skill:ref the
           first time you touch a schema):
+            0. If your task brief mentions a research stage's
+               scope (specific tables, narrowed domain, decided
+               module), call `mission:get_research` FIRST. The
+               researcher may have already named the tables;
+               skip discovery-search if so and go straight to
+               `schema-type_fields`.
             1. `discovery-search_module_data_objects` → list
                matching tables (capture `items[].name`,
                `description`, `queries[]` verbatim).
@@ -645,7 +658,7 @@ metadata:
           `items[].queries[].name`, one per query flavour:
           select / aggregate / bucket_agg). Both go in the
           handoff.
-        intent: tool_calling
+        intent: reasoning
         can_spawn: false
         autoload_skills: [hugr-data]
         compactor:
@@ -664,7 +677,7 @@ metadata:
           - provider: hugr-data
             tools: ['*']
           - provider: mission
-            tools: [get_handoff]
+            tools: [get_handoff, get_research]
         on_close:
           notepad:
             prompt: |
@@ -713,6 +726,12 @@ metadata:
             `[Inputs from parent]`). Resolve to ABSOLUTE via
             `os.path.expanduser` + `os.path.abspath` before
             writing.
+          - When `inputs.file_path` is absent BUT the task brief
+            hints the user picked a destination during research
+            (or you can see references to it in `[Plan context]`
+            entries), call `mission:get_research` and lift
+            `resolved_user_inputs.file_path` from there before
+            failing. The research stage owns that decision.
           - Empty / missing `inputs.file_path` → emit
             `status: "error"` with
             `reason: "missing inputs.file_path"`. Do NOT
@@ -747,7 +766,7 @@ metadata:
           HTML / JS-chart pipeline prose + its own tool
           surface) is on the backlog —
           `design/002-runtime-canonical/backlog.md`.
-        intent: default
+        intent: reasoning
         can_spawn: false
         autoload_skills: [python-runner]
         compactor:
@@ -765,7 +784,7 @@ metadata:
           - provider: python-runner
             tools: ['*']
           - provider: mission
-            tools: [get_handoff]
+            tools: [get_handoff, get_research]
 
       - name: checker
         description: >
@@ -794,13 +813,13 @@ metadata:
 
           Be terse. `reason` one line; `memory_summary` one
           line. No narration outside the fence.
-        intent: default
+        intent: reasoning
         can_spawn: false
         capabilities:
           plan_context: read
         tools:
           - provider: mission
-            tools: [get_handoff]
+            tools: [get_handoff, get_research]
 
       - name: synthesizer
         description: >
@@ -833,13 +852,13 @@ metadata:
 
           Emit ONE fenced `handoff` block with kind=synthesis;
           body carries the final message.
-        intent: default
+        intent: reasoning
         can_spawn: false
         capabilities:
           plan_context: read
         tools:
           - provider: mission
-            tools: [get_handoff]
+            tools: [get_handoff, get_research]
 
 compatibility:
   model: any
