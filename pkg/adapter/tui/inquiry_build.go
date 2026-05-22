@@ -13,16 +13,15 @@ import (
 // adapter rendered it, and now waits for the user to answer.
 // Phase 5.1 — adapters own the user-facing leg of the inquiry
 // round trip; the runtime stays UI-agnostic.
+//
+// Research-batch shape (Phase 5.x — B15) does NOT route through
+// BuildInquiryReply; the TUI's tab-style modal builds the typed
+// Answers map directly via tab.submitBatchedAnswers. Only Approval
+// + Clarification kinds reach this struct.
 type PendingInquiry struct {
 	RequestID       string
 	CallerSessionID string
-	Kind            string // protocol.InquiryType{Approval,Clarification,ResearchBatch}
-	// ClarificationIDs preserves the ordered set of clarification
-	// IDs from the inbound request payload so the reply parser
-	// (research_batch shape) can validate the user typed an id
-	// the role asked about. Empty for legacy single-question
-	// shapes. Phase 5.x — B15.
-	ClarificationIDs []string
+	Kind            string // protocol.InquiryType{Approval,Clarification}
 }
 
 // BuildInquiryReply turns the raw input line into an
@@ -53,69 +52,14 @@ func BuildInquiryReply(user protocol.ParticipantInfo, rootSessionID string, pend
 			return nil, err
 		}
 		payload.Response = text
-	case protocol.InquiryTypeResearchBatch:
-		answers, err := parseResearchBatchReply(line, pend.ClarificationIDs)
-		if err != nil {
-			return nil, err
-		}
-		payload.Answers = answers
+	// Phase 5.x — B15. ResearchBatch replies are constructed
+	// directly by the TUI's tab-style modal via
+	// tab.submitBatchedAnswers — BuildInquiryReply does NOT cover
+	// this kind. Routing it here is a bug; surface loud.
 	default:
 		return nil, fmt.Errorf("unknown inquiry type %q", pend.Kind)
 	}
 	return protocol.NewInquiryResponse(rootSessionID, user, payload), nil
-}
-
-// parseResearchBatchReply parses the operator's batched reply
-// into the typed answers map. Each line is `<id>: <value>` or
-// `<id>: <value> | <comment>` or `<id>: | <comment>` (comment-
-// only). Empty lines and lines starting with `#` are skipped so
-// the user can paste structured text with comments.
-//
-// Validation: every id MUST be in knownIDs (passed in from the
-// pending state) — typos surface as errors so the user can fix
-// without the runtime silently dropping an answer.
-func parseResearchBatchReply(line string, knownIDs []string) (map[string]protocol.AnswerEntry, error) {
-	if strings.TrimSpace(line) == "" {
-		return nil, fmt.Errorf("research_batch needs at least one `<id>: <value>` line")
-	}
-	known := make(map[string]struct{}, len(knownIDs))
-	for _, id := range knownIDs {
-		known[id] = struct{}{}
-	}
-	out := make(map[string]protocol.AnswerEntry, len(knownIDs))
-	for _, raw := range strings.Split(line, "\n") {
-		l := strings.TrimSpace(raw)
-		if l == "" || strings.HasPrefix(l, "#") {
-			continue
-		}
-		idPart, body, ok := strings.Cut(l, ":")
-		if !ok {
-			return nil, fmt.Errorf("line %q: expected `<id>: <value>` shape", l)
-		}
-		id := strings.TrimSpace(idPart)
-		if id == "" {
-			return nil, fmt.Errorf("line %q: empty id", l)
-		}
-		if len(known) > 0 {
-			if _, present := known[id]; !present {
-				return nil, fmt.Errorf("line %q: id %q was not in the asked clarifications", l, id)
-			}
-		}
-		body = strings.TrimSpace(body)
-		value, comment, _ := strings.Cut(body, "|")
-		entry := protocol.AnswerEntry{
-			Value:   strings.TrimSpace(value),
-			Comment: strings.TrimSpace(comment),
-		}
-		if entry.Value == "" && entry.Comment == "" {
-			return nil, fmt.Errorf("line %q: provide a value, a `| comment`, or both", l)
-		}
-		out[id] = entry
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("research_batch reply parsed to zero answers — at least one is required")
-	}
-	return out, nil
 }
 
 // parseApprovalReply recognises /approve, /deny, and the bare

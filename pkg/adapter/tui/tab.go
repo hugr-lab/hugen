@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -385,6 +386,12 @@ func (t *tab) firePanicCancel() {
 // handling. Slice 3 — phase 5.1c §7.
 func (t *tab) dispatchInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 	pend := t.pendingInquiry
+	// Phase 5.x — B15. Tab-style batched flow handles its own
+	// keystrokes (Enter advances, Tab toggles value/comment phase,
+	// digits pick options).
+	if pend.isBatched() {
+		return t.dispatchBatchedInquiryKey(k)
+	}
 	if pend.replyMode {
 		switch k.String() {
 		case "enter":
@@ -435,6 +442,111 @@ func (t *tab) dispatchInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 	return false, nil
 }
 
+// dispatchBatchedInquiryKey routes keypresses for the tab-style
+// research_batch modal. Enter advances to the next question (or
+// submits on the last); Tab toggles value↔comment phase; digit
+// keys pick numbered options; Esc aborts the batch (still pending
+// server-side). Phase 5.x — B15.
+func (t *tab) dispatchBatchedInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
+	pend := t.pendingInquiry
+	key := k.String()
+	cur := pend.currentClarification()
+	switch key {
+	case "enter":
+		text := strings.TrimSpace(t.textarea.Value())
+		// Required-kind value must be non-empty; comment phase and
+		// optional/comment kinds accept empty (treated as skip).
+		if !pend.inCommentPhase && cur.Kind == protocol.ClarificationKindRequired && text == "" {
+			t.bannerError = fmt.Sprintf("%q is required", cur.ID)
+			return true, nil
+		}
+		// Option pick: digit + Enter chooses options[N-1] verbatim.
+		if picked, ok := pend.resolveOptionPick(text); ok {
+			text = picked
+		}
+		_, ready := pend.commitBatchedValue(text)
+		t.textarea.Reset()
+		if ready {
+			if err := t.submitBatchedAnswers(pend); err != nil {
+				t.bannerError = err.Error()
+			}
+		}
+		return true, nil
+	case "tab", "shift+tab":
+		// Tab toggles between value and comment phases for the
+		// current question. Has no effect on comment-kind
+		// clarifications (the question IS the comment).
+		if cur.Kind == protocol.ClarificationKindComment {
+			return true, nil
+		}
+		// Persist whatever the operator already typed before
+		// switching phases so the partial answer isn't lost.
+		text := strings.TrimSpace(t.textarea.Value())
+		if text != "" {
+			if pend.answers == nil {
+				pend.answers = make(map[string]protocol.AnswerEntry)
+			}
+			entry := pend.answers[cur.ID]
+			if pend.inCommentPhase {
+				entry.Comment = text
+			} else {
+				if picked, ok := pend.resolveOptionPick(text); ok {
+					entry.Value = picked
+				} else {
+					entry.Value = text
+				}
+			}
+			pend.answers[cur.ID] = entry
+		}
+		pend.inCommentPhase = !pend.inCommentPhase
+		t.textarea.Reset()
+		// Pre-fill the comment phase with the prior comment, if
+		// any, so the operator can amend rather than re-type.
+		if entry, ok := pend.answers[cur.ID]; ok {
+			if pend.inCommentPhase && entry.Comment != "" {
+				t.textarea.SetValue(entry.Comment)
+			} else if !pend.inCommentPhase && entry.Value != "" {
+				t.textarea.SetValue(entry.Value)
+			}
+		}
+		return true, nil
+	case "esc":
+		t.pendingInquiry = nil
+		t.textarea.Reset()
+		t.bannerError = "inquiry dismissed (still pending server-side)"
+		return true, nil
+	}
+	return false, nil
+}
+
+// submitBatchedAnswers builds an InquiryResponse with the typed
+// Answers map collected by the tab-style modal walk and submits it.
+// Skipped (no-value) entries for optional + comment kinds drop out
+// so the runtime sees only the ids the operator actually touched.
+// Phase 5.x — B15.
+func (t *tab) submitBatchedAnswers(pend *inquiryState) error {
+	answers := make(map[string]protocol.AnswerEntry, len(pend.answers))
+	for id, e := range pend.answers {
+		if e.Value == "" && e.Comment == "" {
+			continue
+		}
+		answers[id] = e
+	}
+	payload := protocol.InquiryResponsePayload{
+		RequestID:       pend.req.RequestID,
+		CallerSessionID: pend.req.CallerSessionID,
+		Answers:         answers,
+		RespondedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	resp := protocol.NewInquiryResponse(t.sessionID, t.user, payload)
+	if err := t.submit(resp); err != nil {
+		return err
+	}
+	t.pendingInquiry = nil
+	t.textarea.Reset()
+	return nil
+}
+
 // submitInquiryReply builds the InquiryResponse via BuildInquiryReply
 // and submits it through the host. Clears the modal on success.
 func (t *tab) submitInquiryReply(pend *inquiryState, line string) error {
@@ -442,16 +554,6 @@ func (t *tab) submitInquiryReply(pend *inquiryState, line string) error {
 		RequestID:       pend.req.RequestID,
 		CallerSessionID: pend.req.CallerSessionID,
 		Kind:            pend.req.Type,
-	}
-	// Phase 5.x — B15. Research-batch replies validate against the
-	// ordered set of asked clarification ids so the parser can
-	// reject typos.
-	if len(pend.req.Clarifications) > 0 {
-		ids := make([]string, 0, len(pend.req.Clarifications))
-		for _, c := range pend.req.Clarifications {
-			ids = append(ids, c.ID)
-		}
-		pi.ClarificationIDs = ids
 	}
 	resp, err := BuildInquiryReply(t.user, t.sessionID, pi, line)
 	if err != nil {

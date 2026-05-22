@@ -29,6 +29,99 @@ type inquiryState struct {
 	// replyVerb is the approval verdict the typed reason will be
 	// stitched onto: "approve" or "deny". Empty for clarifications.
 	replyVerb string
+
+	// Phase 5.x — B15. Tab-style batched-research state. Modal
+	// walks the operator through clarifications one at a time:
+	//   - `currentIdx` names the clarification being asked.
+	//   - `inCommentPhase` flips on Tab; the textarea then
+	//     captures the per-question comment instead of the value.
+	//   - `answers` accumulates per-id entries as the operator
+	//     advances. Built into payload.Answers on the last submit.
+	currentIdx     int
+	inCommentPhase bool
+	answers        map[string]protocol.AnswerEntry
+}
+
+// isBatched reports whether this state is rendering a research_batch
+// modal. Used to switch the modal renderer + key dispatch into the
+// one-question-at-a-time tab walk.
+func (s *inquiryState) isBatched() bool {
+	return s != nil && s.req.Type == protocol.InquiryTypeResearchBatch && len(s.req.Clarifications) > 0
+}
+
+// currentClarification returns the clarification the operator is
+// currently answering. Safe to call only when isBatched() returns
+// true.
+func (s *inquiryState) currentClarification() protocol.Clarification {
+	if s.currentIdx < 0 || s.currentIdx >= len(s.req.Clarifications) {
+		return protocol.Clarification{}
+	}
+	return s.req.Clarifications[s.currentIdx]
+}
+
+// commitBatchedValue stores value (or comment) for the current
+// clarification, advances the cursor / phase, and returns true when
+// the modal is ready to submit (last question answered).
+func (s *inquiryState) commitBatchedValue(text string) (advanced bool, ready bool) {
+	if !s.isBatched() {
+		return false, false
+	}
+	if s.answers == nil {
+		s.answers = make(map[string]protocol.AnswerEntry, len(s.req.Clarifications))
+	}
+	cur := s.currentClarification()
+	entry := s.answers[cur.ID]
+	if s.inCommentPhase {
+		entry.Comment = text
+	} else {
+		// For comment-kind clarifications, treat any text as the
+		// comment so the operator doesn't have to press Tab first.
+		if cur.Kind == protocol.ClarificationKindComment {
+			entry.Comment = text
+		} else {
+			entry.Value = text
+		}
+	}
+	s.answers[cur.ID] = entry
+	s.inCommentPhase = false
+	if s.currentIdx+1 >= len(s.req.Clarifications) {
+		return true, true
+	}
+	s.currentIdx++
+	return true, false
+}
+
+// resolveOptionPick returns (matched-option-text, true) when `text`
+// is a digit selecting one of the current clarification's options
+// (`1` → options[0], etc.). Returns ("", false) otherwise so the
+// caller treats the raw text as the answer.
+func (s *inquiryState) resolveOptionPick(text string) (string, bool) {
+	if !s.isBatched() || s.inCommentPhase {
+		return "", false
+	}
+	cur := s.currentClarification()
+	if len(cur.Options) == 0 {
+		return "", false
+	}
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return "", false
+	}
+	if t[0] < '1' || t[0] > '9' {
+		return "", false
+	}
+	idx := int(t[0]-'0') - 1
+	if idx < 0 || idx >= len(cur.Options) {
+		return "", false
+	}
+	// Only treat as a pick when the whole input was the number
+	// (or "1." style). Free-text answers that happen to start with
+	// a digit (e.g. "30 days") still pass through verbatim.
+	rest := strings.TrimSpace(t[1:])
+	if rest != "" && rest != "." {
+		return "", false
+	}
+	return cur.Options[idx], true
 }
 
 // newInquiryState builds the modal handle from an inbound request
@@ -81,6 +174,14 @@ func renderInquiryModal(state *inquiryState, width int) string {
 		contentW = 10
 	}
 
+	// Tab-style batched flow: one clarification at a time, with
+	// per-question progress indicator + numbered options pick-list
+	// + per-question comment phase (toggled via Tab). Phase 5.x
+	// — B15.
+	if state.isBatched() {
+		return renderBatchedInquiryModal(state, width, contentW)
+	}
+
 	var sb strings.Builder
 	sb.WriteString(inquiryTitleStyle.Render(state.title()))
 	sb.WriteString("\n\n")
@@ -103,39 +204,106 @@ func renderInquiryModal(state *inquiryState, width int) string {
 			sb.WriteString("\n")
 		}
 	}
-	// Phase 5.x — B15. Research-batch shape renders each
-	// clarification as its own block with id, kind, question, and
-	// optional pick-list.
-	if len(state.req.Clarifications) > 0 {
-		for _, c := range state.req.Clarifications {
-			sb.WriteString("\n")
-			label := fmt.Sprintf("[%s (%s)]", c.ID, kindOrDefault(c.Kind))
-			sb.WriteString(inquiryFaintStyle.Render(label))
-			sb.WriteString("\n")
-			sb.WriteString(wrap(c.Question, contentW))
-			sb.WriteString("\n")
-			if len(c.Options) > 0 {
-				sb.WriteString(inquiryFaintStyle.Render("  options:"))
-				sb.WriteString("\n")
-				for _, opt := range c.Options {
-					sb.WriteString("    - ")
-					sb.WriteString(truncate(opt, contentW-6))
-					sb.WriteString("\n")
-				}
-			}
-			if c.Default != "" {
-				sb.WriteString(inquiryFaintStyle.Render(wrap("  default: "+c.Default, contentW)))
-				sb.WriteString("\n")
-			}
-		}
-		sb.WriteString("\n")
-		sb.WriteString(inquiryFaintStyle.Render(wrap("Reply format: one line per question — `<id>: <value>` or `<id>: <value> | <comment>` (use `<id>: | <comment>` for comment-only answers).", contentW)))
-		sb.WriteString("\n")
-	}
 	sb.WriteString("\n")
 	sb.WriteString(inquiryHintStyle.Render(actionHint(state)))
 
 	return inquiryBoxStyle.Width(width - 2).Render(sb.String())
+}
+
+// renderBatchedInquiryModal renders the tab-style one-at-a-time
+// modal for research_batch inquiries. Shows progress + current
+// question + numbered options + accumulated previous answers as
+// a faint summary.
+func renderBatchedInquiryModal(state *inquiryState, width, contentW int) string {
+	total := len(state.req.Clarifications)
+	cur := state.currentClarification()
+
+	var sb strings.Builder
+	title := fmt.Sprintf("Research clarifications [%d/%d]", state.currentIdx+1, total)
+	if state.callerLabel != "" {
+		title += " (from " + state.callerLabel + ")"
+	}
+	sb.WriteString(inquiryTitleStyle.Render(title))
+	sb.WriteString("\n\n")
+
+	// Optional rationale / context line that the request payload
+	// carried (e.g. "Re-approval requested: ..." for approval but
+	// also surfaces research-stage notes when set).
+	if c := strings.TrimSpace(state.req.Context); c != "" {
+		sb.WriteString(inquiryFaintStyle.Render(wrap("Context: "+c, contentW)))
+		sb.WriteString("\n\n")
+	}
+
+	// Header for the current question.
+	label := fmt.Sprintf("%s (%s)", cur.ID, kindOrDefault(cur.Kind))
+	sb.WriteString(inquiryFaintStyle.Render(label))
+	sb.WriteString("\n")
+	sb.WriteString(wrap(cur.Question, contentW))
+	sb.WriteString("\n")
+
+	// Numbered option list when the role provided picks.
+	if len(cur.Options) > 0 {
+		sb.WriteString("\n")
+		sb.WriteString(inquiryFaintStyle.Render("options:"))
+		sb.WriteString("\n")
+		for i, opt := range cur.Options {
+			sb.WriteString(fmt.Sprintf("  %d. ", i+1))
+			sb.WriteString(truncate(opt, contentW-6))
+			sb.WriteString("\n")
+		}
+	}
+	if cur.Default != "" {
+		sb.WriteString(inquiryFaintStyle.Render(wrap("  default: "+cur.Default, contentW)))
+		sb.WriteString("\n")
+	}
+
+	// Phase indicator + previously-captured value/comment for this
+	// question if the operator has already touched it (e.g. typed
+	// a value, then pressed Tab to add a comment).
+	if entry, ok := state.answers[cur.ID]; ok {
+		sb.WriteString("\n")
+		if entry.Value != "" {
+			sb.WriteString(inquiryFaintStyle.Render(wrap("  value: "+entry.Value, contentW)))
+			sb.WriteString("\n")
+		}
+		if entry.Comment != "" {
+			sb.WriteString(inquiryFaintStyle.Render(wrap("  comment: "+entry.Comment, contentW)))
+			sb.WriteString("\n")
+		}
+	}
+
+	// Phase + hint line.
+	phase := "value"
+	if state.inCommentPhase || cur.Kind == protocol.ClarificationKindComment {
+		phase = "comment"
+	}
+	sb.WriteString("\n")
+	sb.WriteString(inquiryFaintStyle.Render(fmt.Sprintf("Now editing: %s", phase)))
+	sb.WriteString("\n")
+	sb.WriteString(inquiryHintStyle.Render(batchedHint(state)))
+
+	return inquiryBoxStyle.Width(width - 2).Render(sb.String())
+}
+
+// batchedHint is the one-line keystroke summary at the bottom of
+// the batched modal.
+func batchedHint(state *inquiryState) string {
+	cur := state.currentClarification()
+	last := state.currentIdx+1 == len(state.req.Clarifications)
+	enterAction := "next"
+	if last {
+		enterAction = "submit"
+	}
+	if state.inCommentPhase {
+		return fmt.Sprintf("[type comment, Enter to %s | Tab back to value | Esc abort]", enterAction)
+	}
+	if cur.Kind == protocol.ClarificationKindComment {
+		return fmt.Sprintf("[type free-form, Enter to %s | Esc abort]", enterAction)
+	}
+	if len(cur.Options) > 0 {
+		return fmt.Sprintf("[type 1-%d to pick OR free text, Enter to %s | Tab add comment | Esc abort]", len(cur.Options), enterAction)
+	}
+	return fmt.Sprintf("[type answer, Enter to %s | Tab add comment | Esc abort]", enterAction)
 }
 
 // kindOrDefault returns kind, defaulting to "required" so a
