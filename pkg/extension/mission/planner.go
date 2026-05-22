@@ -576,6 +576,15 @@ type plannerTaskView struct {
 	Iteration        int
 	MaxWaves         int
 	ApprovalRequired bool
+	// FirstPlanGate signals "no plan has been approved yet on this
+	// mission". Drives the long-form [STOP — pre-flight checklist]
+	// rendering on the planner's first gate-bearing turn so the
+	// model learns the validate_and_approve discipline; subsequent
+	// iterations see a short one-line reminder instead, saving
+	// ~1.5K chars of prompt context. Sourced from
+	// MissionState.IsPlanApproved() — false = first gate-bearing
+	// iteration. Phase 5.x — B15 follow-up.
+	FirstPlanGate bool
 	// PendingReapproval signals that a worker handoff invalidated
 	// the prior plan approval since the last modal closed. Renders
 	// the [pending_reapproval] section so the planner restates the
@@ -692,6 +701,12 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		PlanContext:      collectPlanContext(mission),
 	}
 	if m := FromState(mission); m != nil {
+		// FirstPlanGate: planner has never gotten an approve yet.
+		// Drives the long-form STOP-checklist on the very first
+		// gate-bearing iteration so weak models learn the
+		// validate_and_approve discipline; subsequent iterations
+		// get a short one-line reminder. Phase 5.x — B15 follow-up.
+		view.FirstPlanGate = !m.IsPlanApproved()
 		if pending, reason := m.PendingReapproval(); pending {
 			view.PendingReapproval = true
 			view.PendingReapprovalReason = reason

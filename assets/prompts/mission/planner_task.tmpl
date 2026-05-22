@@ -175,7 +175,7 @@ need to repeat those instructions inside the `task` field — just
 describe WHAT each worker should accomplish, in plain prose.
 Workers will not execute tools unless their task explicitly tells
 them to; the default is to think + emit a handoff fence.
-{{if .ApprovalRequired}}
+{{if .ApprovalRequired}}{{if .FirstPlanGate}}
 [STOP — pre-flight checklist BEFORE emitting your fenced ```plan```]
 
 You are about to emit a `kind=plan` handoff. The runtime
@@ -208,7 +208,14 @@ If you skip step 1 the runtime WILL reject your handoff
 approval") and force a synthetic amend that wastes a wave
 budget. This is the most common weak-model mistake — make
 the tool call. Always.
-{{end}}
+{{else}}
+[Approval reminder] Call `mission:validate_and_approve(body={...})`
+BEFORE the fenced ```plan``` block. The tool returns silently with
+`approved: true` when nothing material changed; opens a modal
+only when you set `requires_reapproval: true` or a worker
+invalidated the prior approval. Skipping the call = handoff
+rejected.
+{{end}}{{end}}
 Reply with a single fenced block — nothing else, no narration.
 
 To request the next wave:
