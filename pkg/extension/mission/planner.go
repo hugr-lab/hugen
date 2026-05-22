@@ -70,6 +70,22 @@ func (e *Extension) driveMissionPlanner(mission extension.SessionState, spawner 
 	ctx := context.Background()
 	_ = inputs
 
+	// Phase 5.x — B15. Optional pre-planner research stage.
+	// Surfaces user clarifications + scope findings into mission
+	// state before the planner spawn so iter-1 plans see
+	// resolved inputs (not "is it markdown or html?" left for the
+	// planner to ask later via a researcher wave).
+	if researchAborted, researchErr := e.runResearchStage(ctx, executor, mission, manifest, missionSkill, goal); researchErr != nil {
+		e.logger.Warn("mission: driveMissionPlanner: research stage failed",
+			"mission_session", mission.SessionID(),
+			"err", researchErr, "aborted", researchAborted)
+		if researchAborted {
+			final := buildFinalText(mission, "", true)
+			e.finishMission(ctx, mission, final)
+			return
+		}
+	}
+
 	aborted, err := e.runPlannerLoop(ctx, executor, mission, manifest, missionSkill, goal)
 	if err != nil {
 		e.logger.Warn("mission: driveMissionPlanner: planner loop failed",
@@ -583,6 +599,29 @@ type plannerTaskView struct {
 	// of guessing `worker` and falling through to the generic
 	// _worker autoload (which has no domain tools).
 	DoRoles []plannerDoRoleView
+	// ResearchFindings is the research role's done=true narrative.
+	// Rendered under [Plan context] so the planner sees what the
+	// research stage discovered before drafting iter-1. Empty when
+	// the skill declares no mission.research block or when the
+	// stage was skipped by trigger predicate. Phase 5.x — B15.
+	ResearchFindings string
+	// ResolvedUserInputs lists the user-confirmed key/value pairs
+	// the research stage pulled out via clarifications. Planner
+	// reads it to lift `file_path` / `output_format` / etc. into
+	// workers' `inputs` without re-asking the user. Phase 5.x — B15.
+	ResolvedUserInputs []researchKV
+	// ResearchACProposals lists the proposed acceptance criteria
+	// research recommends for planner consideration. Planner is
+	// the authority — proposals are input only (§3.2.1). Phase
+	// 5.x — B15.
+	ResearchACProposals []researchACProposalView
+}
+
+// researchACProposalView is one row in the [Research AC proposals]
+// section of the planner's first message.
+type researchACProposalView struct {
+	Statement string
+	Rationale string
 }
 
 // plannerDoRoleView is one row in the planner's
@@ -657,6 +696,10 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 			view.PendingReapproval = true
 			view.PendingReapprovalReason = reason
 		}
+		findings, resolvedInputs, acProposals := m.ResearchOutput()
+		view.ResearchFindings = findings
+		view.ResolvedUserInputs = projectResolvedInputsForTemplate(resolvedInputs)
+		view.ResearchACProposals = projectACProposalsForTemplate(acProposals)
 	}
 	if recentVerdict != nil {
 		view.RecentVerdict = &plannerVerdictView{

@@ -113,6 +113,25 @@ type MissionState struct {
 	// per the plan shape — empty when the planner didn't narrow.
 	// Phase I.26.
 	currentWaveAC []string
+
+	// researchFindings is the free-form summary the research role
+	// emitted on its done=true handoff. Surfaced to the planner via
+	// plan_context.research_findings so iter-1 plans see what the
+	// research stage discovered. Phase 5.x — B15.
+	researchFindings string
+
+	// resolvedUserInputs is the structured key/value map the
+	// research role surfaced via its done=true handoff. Planner
+	// reads it under plan_context.resolved_user_inputs (treats
+	// each entry as a user-confirmed input for the downstream
+	// workers). Phase 5.x — B15.
+	resolvedUserInputs map[string]any
+
+	// researchACProposals is the per-criterion list the research
+	// role recommended for the planner to consider. Planner is
+	// the authority on what becomes mission_acceptance_criteria;
+	// proposals are input only (§3.2.1). Phase 5.x — B15.
+	researchACProposals []ResearchACProposal
 }
 
 // workerCursor names a spawned worker so ChildFrameObserver can
@@ -293,6 +312,48 @@ func (m *MissionState) MissionFrame() (goal string, mission []string, wave []str
 	mission = append([]string(nil), m.currentMissionAC...)
 	wave = append([]string(nil), m.currentWaveAC...)
 	return m.currentMissionGoal, mission, wave
+}
+
+// SetResearchOutput stashes the research role's done=true result
+// on mission state so the subsequent planner spawn reads it from
+// plan_context. Idempotent (subsequent calls overwrite). Phase
+// 5.x — B15.
+func (m *MissionState) SetResearchOutput(findings string, resolvedUserInputs map[string]any, acProposals []ResearchACProposal) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.researchFindings = strings.TrimSpace(findings)
+	if len(resolvedUserInputs) == 0 {
+		m.resolvedUserInputs = nil
+	} else {
+		m.resolvedUserInputs = make(map[string]any, len(resolvedUserInputs))
+		for k, v := range resolvedUserInputs {
+			m.resolvedUserInputs[k] = v
+		}
+	}
+	if len(acProposals) == 0 {
+		m.researchACProposals = nil
+	} else {
+		m.researchACProposals = append(m.researchACProposals[:0:0], acProposals...)
+	}
+}
+
+// ResearchOutput returns the stashed research output (findings +
+// resolved user inputs + ac proposals). Empty / nil when the
+// mission has no research stage or it hasn't yet emitted done=true.
+// Phase 5.x — B15.
+func (m *MissionState) ResearchOutput() (findings string, resolvedUserInputs map[string]any, acProposals []ResearchACProposal) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.resolvedUserInputs) > 0 {
+		resolvedUserInputs = make(map[string]any, len(m.resolvedUserInputs))
+		for k, v := range m.resolvedUserInputs {
+			resolvedUserInputs[k] = v
+		}
+	}
+	if len(m.researchACProposals) > 0 {
+		acProposals = append(acProposals, m.researchACProposals...)
+	}
+	return m.researchFindings, resolvedUserInputs, acProposals
 }
 
 // FromState resolves the [*MissionState] handle attached to state,

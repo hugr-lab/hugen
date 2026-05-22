@@ -32,14 +32,15 @@ type inquiryState struct {
 }
 
 // newInquiryState builds the modal handle from an inbound request
-// frame. Auto-enters reply mode for clarifications since they have
-// no keystroke shortcuts.
+// frame. Auto-enters reply mode for clarifications + research_batch
+// since they have no keystroke shortcuts.
 func newInquiryState(req *protocol.InquiryRequest) *inquiryState {
 	s := &inquiryState{
 		req:         req.Payload,
 		callerLabel: shortID(req.Payload.CallerSessionID),
 	}
-	if req.Payload.Type == protocol.InquiryTypeClarification {
+	switch req.Payload.Type {
+	case protocol.InquiryTypeClarification, protocol.InquiryTypeResearchBatch:
 		s.replyMode = true
 	}
 	return s
@@ -58,6 +59,11 @@ func (s *inquiryState) title() string {
 			return "Clarification needed (from " + s.callerLabel + ")"
 		}
 		return "Clarification needed"
+	case protocol.InquiryTypeResearchBatch:
+		if s.callerLabel != "" {
+			return "Research clarifications (from " + s.callerLabel + ")"
+		}
+		return "Research clarifications"
 	default:
 		return "Inquiry: " + s.req.Type
 	}
@@ -97,10 +103,48 @@ func renderInquiryModal(state *inquiryState, width int) string {
 			sb.WriteString("\n")
 		}
 	}
+	// Phase 5.x — B15. Research-batch shape renders each
+	// clarification as its own block with id, kind, question, and
+	// optional pick-list.
+	if len(state.req.Clarifications) > 0 {
+		for _, c := range state.req.Clarifications {
+			sb.WriteString("\n")
+			label := fmt.Sprintf("[%s (%s)]", c.ID, kindOrDefault(c.Kind))
+			sb.WriteString(inquiryFaintStyle.Render(label))
+			sb.WriteString("\n")
+			sb.WriteString(wrap(c.Question, contentW))
+			sb.WriteString("\n")
+			if len(c.Options) > 0 {
+				sb.WriteString(inquiryFaintStyle.Render("  options:"))
+				sb.WriteString("\n")
+				for _, opt := range c.Options {
+					sb.WriteString("    - ")
+					sb.WriteString(truncate(opt, contentW-6))
+					sb.WriteString("\n")
+				}
+			}
+			if c.Default != "" {
+				sb.WriteString(inquiryFaintStyle.Render(wrap("  default: "+c.Default, contentW)))
+				sb.WriteString("\n")
+			}
+		}
+		sb.WriteString("\n")
+		sb.WriteString(inquiryFaintStyle.Render(wrap("Reply format: one line per question — `<id>: <value>` or `<id>: <value> | <comment>` (use `<id>: | <comment>` for comment-only answers).", contentW)))
+		sb.WriteString("\n")
+	}
 	sb.WriteString("\n")
 	sb.WriteString(inquiryHintStyle.Render(actionHint(state)))
 
 	return inquiryBoxStyle.Width(width - 2).Render(sb.String())
+}
+
+// kindOrDefault returns kind, defaulting to "required" so a
+// missing/empty Kind doesn't render as the empty string.
+func kindOrDefault(k string) string {
+	if k == "" {
+		return protocol.ClarificationKindRequired
+	}
+	return k
 }
 
 // actionHint is the bottom action line — kept tight (single line)
@@ -118,6 +162,8 @@ func actionHint(s *inquiryState) string {
 		return "[y] approve  [n] deny  [r] reply with reason  [esc] dismiss"
 	case protocol.InquiryTypeClarification:
 		return "[type answer, Enter to submit | esc to dismiss]"
+	case protocol.InquiryTypeResearchBatch:
+		return "[type one line per question, Enter to submit | esc to dismiss]"
 	}
 	return "[esc to dismiss]"
 }

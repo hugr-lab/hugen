@@ -443,6 +443,16 @@ func (t *tab) submitInquiryReply(pend *inquiryState, line string) error {
 		CallerSessionID: pend.req.CallerSessionID,
 		Kind:            pend.req.Type,
 	}
+	// Phase 5.x — B15. Research-batch replies validate against the
+	// ordered set of asked clarification ids so the parser can
+	// reject typos.
+	if len(pend.req.Clarifications) > 0 {
+		ids := make([]string, 0, len(pend.req.Clarifications))
+		for _, c := range pend.req.Clarifications {
+			ids = append(ids, c.ID)
+		}
+		pi.ClarificationIDs = ids
+	}
 	resp, err := BuildInquiryReply(t.user, t.sessionID, pi, line)
 	if err != nil {
 		return err

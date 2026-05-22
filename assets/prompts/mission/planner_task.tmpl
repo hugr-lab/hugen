@@ -25,7 +25,33 @@ wave ask: did the prior wave satisfy the mission goal? If yes,
 signal plan_complete (next_wave: null) on the very next iteration.
 Do NOT add verification, cleanup, or follow-up waves unless the
 goal explicitly demands them.
-{{if .PlanContext}}
+{{if .ResearchFindings}}
+[Research findings]
+{{.ResearchFindings}}
+
+These are the research role's done-state notes. Read them BEFORE
+drafting your plan — your `mission_goal` + `mission_acceptance_criteria`
+MUST reflect what was discovered. If the findings resolved an
+ambiguity the user originally had, surface that explicitly in
+your AC.
+{{end}}{{if .ResolvedUserInputs}}
+[Resolved user inputs]
+{{range .ResolvedUserInputs}}- {{.Key}}: {{.Value}}
+{{end}}
+These key/value pairs were resolved with the user during the
+research stage. You MUST lift the relevant ones into the
+producing worker's `inputs.<key>` for each wave — skipping this
+ships the wave with stale defaults and the user's answer
+silently lost.
+{{end}}{{if .ResearchACProposals}}
+[Research AC proposals]
+{{range .ResearchACProposals}}- {{.Statement}}{{if .Rationale}} ({{.Rationale}}){{end}}
+{{end}}
+The research role proposed these acceptance criteria based on
+the user's answers. YOU are the authority on what becomes
+`mission_acceptance_criteria` — accept, drop, or rewrite as you
+see fit. Document non-trivial decisions in `rationale`.
+{{end}}{{if .PlanContext}}
 [Plan context]
 {{range .PlanContext}}- iteration {{.Iteration}} ({{.Phase}}): {{.Summary}}
 {{end}}{{end}}{{if .DoRoles}}

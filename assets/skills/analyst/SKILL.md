@@ -37,6 +37,11 @@ metadata:
         notepad: true
         plan_context: true
 
+      research:
+        role: researcher
+        when: auto
+        max_iterations: 3
+
       plan:
         role: planner
         max_waves: 6
@@ -178,62 +183,31 @@ metadata:
           Task-complexity → wave shape (pick the SMALLEST plan
           that hits the goal):
 
-          **Research-first pattern — default to researcher
-          when in doubt.** If you cannot fully answer ANY of
-          the questions below with high confidence from
-          [Plan context] / notepad / the goal text alone, your
-          iter-1 plan MUST be a `_research` wave with ONE
-          `researcher` worker and `skip_check: true`. Do NOT
-          guess and replan — guessing burns user trust and
-          wastes a full Do wave.
+          **Research stage is RUNTIME-OWNED.** When the goal
+          tripped the `mission.research: when: auto` heuristic
+          (deliverable keywords, short goal, pronoun
+          references), the runtime spawned the `researcher`
+          role BEFORE you. Its findings are already in your
+          [Research findings] section and any resolved user
+          inputs are in [Resolved user inputs] — propagate them
+          into the producing worker's `inputs.<key>`. Do NOT
+          plan a separate `researcher-discovery` wave; research
+          either ran already (you'll see its sections above) or
+          the heuristic decided the goal was simple enough to
+          skip.
 
-          Doubt triggers — ANY one of these flips you to
-          research-first:
-
-          - The goal contains a name (table / module / source
-            / entity / metric) you have not seen in this
-            mission's [Plan context] or in notepad.
-          - The goal mentions a deliverable file
-            ("save", "export", "report", "csv", "parquet",
-            "html", "pdf", "dashboard", their non-English
-            equivalents) but [Inputs from parent] does not
-            already carry a `file_path` (or `output` /
-            `destination`).
-          - The goal mentions a metric / KPI / aggregation
-            without naming the exact table or field
-            ("total payments", "top providers", "trends" —
-            without specifying which table holds the figure).
-          - Two or more plausible interpretations exist —
-            "analyse op2023" could mean discovery report,
-            financial-flow report, anomaly hunt; you cannot
-            pick one without asking the user OR exploring
-            the schema.
-          - You would otherwise draft a plan whose subagent
-            tasks contain phrases like "investigate", "figure
-            out", "find the relevant table", "decide which
-            fields" — those are researcher's job, not a Do
-            worker's.
-
-          When triggered, emit a researcher wave whose task
-          enumerates the open questions verbatim. The
-          researcher does session:inquire for genuine user-
-          intent ambiguity (file path, scope) and discovery
-          for schema unknowns, then returns a brief. On iter-2
-          you see the brief in [Recent waves] and draft the
-          actual analytical plan — by then you have concrete
-          table names, resolved file paths, and a suggested
-          wave shape. This is cheaper than guessing and
-          amending later.
-
-          If NONE of the doubt triggers fire AND the goal is
-          single-source + concrete (e.g. "list the providers
-          table"), skip research and go straight to the
-          appropriate Do wave below.
+          If [Research findings] is empty AND the goal is still
+          ambiguous (you can't pick a real role / file path /
+          scope without guessing), prefer ONE clarification
+          inquire from a Do worker over re-spawning research:
+          the runtime has the research stage in front of the
+          planner, not behind it.
 
           - Trivial single-source ask (one named entity, one
-            metric, no deliverable file) — SKIP research.
-            ONE wave with ONE `data-analyst` worker,
-            `skip_check: true`, plan_complete on next iter.
+            metric, no deliverable file) — research stage
+            skipped by heuristic. ONE wave with ONE
+            `data-analyst` worker, `skip_check: true`,
+            plan_complete on next iter.
           - Cross-table or cross-source analysis (joins,
             grouped comparisons across modules) → **ONE** wave
             with parallel `data-analyst` workers (one per
@@ -286,66 +260,98 @@ metadata:
 
       - name: researcher
         description: >
-          Mission intake — runs as the FIRST wave of any
-          non-trivial mission BEFORE the planner drafts the
-          analytical plan. Job: scope the goal, clarify
-          ambiguity with the user, and produce a research
-          brief the next planner spawn consumes.
+          Mission research — runtime spawns you BEFORE the
+          planner on missions whose goal trips the
+          `mission.research: when: auto` heuristic (deliverable
+          keywords, short goals, pronoun references). Your job:
+          batch all the clarifying questions the user needs to
+          answer in ONE modal pass, plus do lightweight schema
+          discovery so the planner sees concrete table/field
+          names. Emit a kind=research handoff with `done: false`
+          to ask the user, or `done: true` with `findings` +
+          `resolved_user_inputs` + (optional) `ac_proposals`
+          when you have everything.
 
           What you do — in this order:
 
-          0. **Clarify deliverable shape FIRST — before any
-             discovery.** Scan the goal text for keywords that
-             signal a user-deliverable file: "save", "export",
-             "write to", "dump", "file", "report", "dashboard",
-             "csv", "parquet", "json", "html", "markdown",
-             "pdf", or their non-English equivalents. For
-             EACH such file you spot:
-             - Check `[Inputs from parent]` for an explicit
-               path (`file_path`, `output`, `destination`).
-               If present, capture it for the brief — no
-               inquire needed.
-             - Otherwise call
-               `session:inquire(type="clarification",
-               question="Where should the <kind> output be
-               saved?", options=["~/Downloads/<name>.<ext>",
-               "<workspace>/<name>.<ext>", "let me type a
-               path"])`. The user MUST be asked — silently
-               picking a path breaks trust. Block on the
-               answer before proceeding to step 1.
+          1. **Batch your clarifications.** Scan the goal for
+             ambiguity AND deliverable cues. Bundle every
+             question the user must answer into ONE handoff
+             with `done: false` + `clarifications: [...]`.
+             Bundle, don't iterate — one modal per mission is
+             the target. Reserve re-fires for cases where the
+             second turn DEPENDS on the user's first answers
+             (e.g. "now that I know it's HTML, where exactly?").
 
-             Also clarify other intent-level ambiguity at this
-             step (which source / which time range / which
-             entity flavour) via the same inquire tool.
-             Workers downstream only catch data-level
-             ambiguity — yours is the user-intent layer.
+             Examples of `clarifications` entries:
 
-          1. **Restate the goal** in your own words for the
-             brief, incorporating every resolved value
-             (file paths, scope choices, source picks).
-          2. **`notepad:search`** for prior findings keyed to
-             the goal's main concepts (source / module /
-             domain terms). Capture matches in your brief.
-          3. **Lightweight discovery** — confirm sources
+             - `{id: "file_path", question: "Where should the
+                HTML report be saved?", kind: "required",
+                options: ["~/Downloads/op2023-overview.html",
+                "<workspace>/op2023-overview.html",
+                "I'll type a path"]}`
+             - `{id: "scope_window", question: "Which time
+                range should the analysis cover?", kind:
+                "optional", default: "full available history"}`
+             - `{id: "metrics_focus", question: "Are there
+                specific metrics or KPIs you want
+                highlighted?", kind: "comment"}`
+
+             Use `kind: "comment"` at the end of the batch for
+             an open-ended "anything else I should know?"
+             prompt. The user can attach a comment to ANY
+             clarification (the runtime exposes a per-question
+             comment textarea) — use it for context that
+             doesn't fit a clean value.
+
+          2. **Lightweight schema discovery** while waiting for
+             user answers makes no sense (the modal is
+             synchronous) — do discovery on the SAME turn you
+             emit `done: false` so the resulting findings line
+             up with the user's answers. Confirm sources
              (`discovery-search_data_sources`), modules
              (`discovery-search_modules`), and relevant tables
              (`discovery-search_module_data_objects`). For
              tables already covered by `schema-finding` notes
              in the notepad, do NOT re-scan — lift the prior
-             finding into the brief.
-          4. **Targeted field inspection** — for the 1-3
-             tables that the user goal clearly hinges on,
-             run `schema-type_fields(type_name,
+             finding into your findings prose.
+
+          3. **Targeted field inspection** — for the 1-3
+             tables the user goal clearly hinges on, run
+             `schema-type_fields(type_name,
              include_description: true)` and capture the
              relevant columns. Skip wide tables that aren't
              pivotal; the data-analyst will paginate them
              later if needed.
-          5. **Propose a wave shape.** One paragraph describing
-             what the planner SHOULD do next (e.g. "one
-             data-analyst wave producing four aggregation
-             queries, then a report-builder wave with
-             `file_path=<resolved-path>`"). The planner may
-             override; you're advising, not dictating.
+
+          4. **On the next iteration** (when the user
+             answered), emit `done: true` with:
+             - `findings`: one or two paragraphs telling the
+               planner what you learned (sources, key tables,
+               resolved scope choices).
+             - `resolved_user_inputs`: structured key/value
+               map lifting every user-resolved value
+               (file_path, output_format, scope window,
+               metric picks) into stable keys the planner can
+               propagate into workers' `inputs`.
+             - `ac_proposals` (optional): proposed acceptance
+               criteria sourced from user answers — e.g. the
+               user said "save as HTML" → propose
+               `"HTML file saved at <resolved-path>"`. The
+               planner is the AUTHORITY (proposals are input
+               only), but well-grounded proposals save it the
+               work.
+             - `memory_summary`: one-line summary for
+               plan_context.
+
+          Output format — fenced ```research``` block,
+          required keys depend on `done`. See the [How to
+          respond] section of your first message for the full
+          schema. Quality bar: each clarification is one
+          sentence; options are used when the user picks from
+          a small set; `findings` mentions concrete table /
+          field names; `resolved_user_inputs` has stable
+          lifted-into-inputs keys.
 
           What you do NOT do:
 
@@ -355,61 +361,10 @@ metadata:
             the planner's job — you give it the inputs).
           - Append `query-pattern` notepad entries (queries
             haven't been validated yet).
-
-          Handoff body shape:
-
-            body:
-              summary: "<one-paragraph restatement of the goal>"
-              sources: [{name, module, what_it_tracks,
-                         evidence: "verbatim discovery hit OR prior notepad note"}]
-              tables:  [{type_name, queries: [{name, query_type}],
-                         purpose: "<why this table for the goal>",
-                         key_fields: [{name, field_type, role: "<filter|measure|join|group>"}]}]
-              resolved_user_inputs:                # REQUIRED — see below
-                file_path: "<absolute or ~/path>"  # only when user-deliverable file applies
-                output_format: "<html|csv|...>"    # only when user named a format
-                # ...any other user-resolved key the planner should propagate to downstream workers
-              ambiguities_resolved:
-                       [{question, user_answer, impact}]
-              suggested_approach: "<one paragraph: wave shape, role picks, fan-out / sequential reasoning>"
-              invalidates_plan_approval: true       # REQUIRED for researcher — see below
-              memory_summary: "<one line>"
-
-          **`resolved_user_inputs` is load-bearing** — it is the
-          ONLY channel the planner uses to lift user-given
-          values (file_path, output_format, scope choices) into
-          downstream workers' `inputs.<key>` fields. Notepad
-          captures the SAME info as cross-mission memory, but
-          the planner is forbidden to ground a wave's `inputs`
-          in a notepad lookup alone — it must see the value in
-          your handoff body. Surface EVERY user answer here as
-          a flat key-value pair AND restate it in
-          `ambiguities_resolved` for human readability. If the
-          user did not resolve anything (you ran no inquire),
-          emit `resolved_user_inputs: {}` explicitly so the
-          planner knows nothing was clarified.
-
-          **`invalidates_plan_approval: true` is REQUIRED on
-          every researcher handoff.** Your job is to surface
-          new information (clarified inputs, schema findings,
-          scope choices) that REshape the next planner's plan.
-          The runtime reads this flag and flips the mission's
-          pending-reapproval bit on — guaranteeing the next
-          planner spawn must re-call
-          `mission:validate_and_approve` so the user sees the
-          plan post-research and re-approves it knowing what
-          you found. Pair it with a one-line
-          `invalidates_reason` so the modal surfaces what
-          changed. Without this flag the runtime would happily
-          ship a plan the user approved BEFORE seeing your
-          findings — defeating the point of researcher's intake.
-
-          The planner spawns you only when the goal is
-          non-trivial (multiple entities, deliverable
-          artefact, ambiguous scope). For trivial asks
-          (single count, single listing on a named entity)
-          the planner skips research and spawns
-          `data-analyst` directly.
+          - Call `session:inquire` directly — the runtime
+            handles the modal from your `clarifications`
+            array; the legacy tool path is for workers
+            mid-execution, not research.
         intent: tool_calling
         can_spawn: false
         autoload_skills: [hugr-data]
@@ -882,22 +837,31 @@ each role's manifest entry above documents the domain contract.
 ## Lifecycle
 
 1. Root spawns the mission via `session:spawn_mission`.
-2. Runtime spawns `planner` with [Plan context], [Recent waves],
-   [Recent verdict], [Available Do roles] in its first message.
-   Planner does notepad-first + lightweight discovery (broad
-   only — sources / modules / table names), then calls
-   `mission:validate_and_approve` (mandatory when the iteration
-   carries `[approval_required]` — atomic validate + user
-   approval when needed; modal opens on first plan, after a
-   worker requested reapproval, or when the body sets
+2. **Research stage (runtime-owned, Phase 5.x — B15).** When
+   the goal trips the `mission.research: when: auto` heuristic
+   (deliverable keywords, short / ambiguous goal), runtime
+   spawns `researcher` BEFORE the planner. Researcher batches
+   all user clarifications into ONE modal (file_path,
+   scope_window, format choices, "anything else?" comment),
+   does lightweight schema discovery, and emits `done: true`
+   with `findings` + `resolved_user_inputs` + optional
+   `ac_proposals`. Skipped for trivial single-source asks.
+3. Runtime spawns `planner` with [Plan context], [Research
+   findings] (when present), [Resolved user inputs] (when
+   present), [Research AC proposals] (when present), [Recent
+   waves], [Recent verdict], [Available Do roles] in its first
+   message. Planner does notepad-first + lightweight
+   discovery, then calls `mission:validate_and_approve` (the
+   approval modal opens on first plan, after a worker
+   requested reapproval, or when the body sets
    `requires_reapproval: true`).
-3. Runtime executes the planner's wave (Do workers in parallel).
-4. Unless `next_wave.skip_check` was set, runtime spawns
+4. Runtime executes the planner's wave (Do workers in parallel).
+5. Unless `next_wave.skip_check` was set, runtime spawns
    `checker` with the wave's handoffs; checker emits
    kind=verdict.
-5. Routes on decision — continue / amend → next iteration;
+6. Routes on decision — continue / amend → next iteration;
    inquire → wait for user; finish → exits, runs synthesis.
-6. Synthesizer runs once; its handoff body becomes the mission's
+7. Synthesizer runs once; its handoff body becomes the mission's
    terminal assistant message.
 
 The supervisor LLM does not take a turn in v1 — runtime owns

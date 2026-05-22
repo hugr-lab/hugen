@@ -672,15 +672,65 @@ type SessionStatus struct {
 // the embedding BaseFrame is rewritten on each hop by the pump
 // so Runtime.fanout keys correctly when the frame reaches root.
 // Phase 5.1 § 2.2.
+//
+// Phase 5.x — B15. The payload grew an optional Clarifications
+// array so research-stage roles (and any future caller) can batch
+// multiple questions into one user-facing modal. The legacy
+// single-question shape (Question / Options) stays for
+// `Type=approval` (which is a different surface entirely) and for
+// backwards-compatible single-question clarifications — code that
+// emitted the old shape keeps working unchanged. New callers
+// should prefer Clarifications. When BOTH the legacy fields AND
+// Clarifications are populated the runtime treats it as a typed
+// batch (Clarifications wins).
 type InquiryRequestPayload struct {
-	RequestID       string   `json:"request_id"`
-	CallerSessionID string   `json:"caller_session_id"`
-	Type            string   `json:"type"` // approval | clarification
-	Question        string   `json:"question"`
-	Context         string   `json:"context,omitempty"`
-	Options         []string `json:"options,omitempty"`
-	TimeoutMs       int      `json:"timeout_ms,omitempty"`
-	CreatedAt       string   `json:"created_at,omitempty"`
+	RequestID       string          `json:"request_id"`
+	CallerSessionID string          `json:"caller_session_id"`
+	Type            string          `json:"type"` // approval | clarification | research_batch
+	Question        string          `json:"question,omitempty"`
+	Context         string          `json:"context,omitempty"`
+	Options         []string        `json:"options,omitempty"`
+	Clarifications  []Clarification `json:"clarifications,omitempty"`
+	TimeoutMs       int             `json:"timeout_ms,omitempty"`
+	CreatedAt       string          `json:"created_at,omitempty"`
+}
+
+// Clarification is one question inside a batched inquiry. Used by
+// research-stage roles to ask the user multiple questions in one
+// modal pass. Phase 5.x — B15 §2.3.
+type Clarification struct {
+	// ID is the stable identifier the runtime keys answers by.
+	// Required; must be unique within a batch. The research role
+	// references the same id when reading its answers back in the
+	// next iteration.
+	ID string `json:"id"`
+
+	// Question is the prompt the user reads. Required.
+	Question string `json:"question"`
+
+	// Kind selects the answer shape:
+	//   - "required" — user MUST provide a value.
+	//   - "optional" — user may skip; comment alone is fine.
+	//   - "comment"  — text-only field (no structured value); for
+	//                  "anything else?" prompts. Ignores Options +
+	//                  AllowComment.
+	// Empty defaults to "required" at projection time.
+	Kind string `json:"kind,omitempty"`
+
+	// Options enumerates discrete choices for the value field.
+	// Empty means free-form text. Ignored for Kind=comment.
+	Options []string `json:"options,omitempty"`
+
+	// Default is the pre-filled value shown to the user. Empty
+	// means no default.
+	Default string `json:"default,omitempty"`
+
+	// AllowComment, when true, exposes a per-question comment
+	// textarea alongside the value field. Defaults to true for
+	// required/optional kinds; ignored for comment kind. Pointer
+	// so a deliberate `false` reads differently from "field
+	// absent" (in which case the runtime applies the default).
+	AllowComment *bool `json:"allow_comment,omitempty"`
 }
 
 // InquiryResponsePayload is the cascade-down answer. The adapter
@@ -688,22 +738,45 @@ type InquiryRequestPayload struct {
 // request); root's internal handler forwards it down the parent
 // chain via responseRouting until CallerSessionID == s.id at the
 // caller's hop. Approved/Reason for approval; Response/RespondedAt
-// for clarification; Timeout for runtime-synthesised expiries.
-// Phase 5.1 § 2.2.
+// for clarification; Answers for batched clarifications (Phase
+// 5.x — B15); Timeout for runtime-synthesised expiries. Phase 5.1
+// § 2.2.
 type InquiryResponsePayload struct {
-	RequestID       string `json:"request_id"`
-	CallerSessionID string `json:"caller_session_id"`
-	Approved        *bool  `json:"approved,omitempty"`
-	Reason          string `json:"reason,omitempty"`
-	Response        string `json:"response,omitempty"`
-	RespondedAt     string `json:"responded_at,omitempty"`
-	Timeout         bool   `json:"timeout,omitempty"`
+	RequestID       string                  `json:"request_id"`
+	CallerSessionID string                  `json:"caller_session_id"`
+	Approved        *bool                   `json:"approved,omitempty"`
+	Reason          string                  `json:"reason,omitempty"`
+	Response        string                  `json:"response,omitempty"`
+	Answers         map[string]AnswerEntry  `json:"answers,omitempty"`
+	RespondedAt     string                  `json:"responded_at,omitempty"`
+	Timeout         bool                    `json:"timeout,omitempty"`
 }
 
-// Phase-5.1 inquiry types — values for InquiryRequestPayload.Type.
+// AnswerEntry pairs a structured answer value with an optional
+// free-form comment. Phase 5.x — B15. For Clarification.Kind=
+// `required` the value is mandatory and the comment is optional;
+// for `optional` either field may be empty; for `comment` only
+// Comment carries text and Value is absent.
+type AnswerEntry struct {
+	Value   string `json:"value,omitempty"`
+	Comment string `json:"comment,omitempty"`
+}
+
+// Inquiry types — values for InquiryRequestPayload.Type. Phase
+// 5.1 introduced approval/clarification; Phase 5.x — B15 added
+// research_batch for the runtime-driven research-stage modal.
 const (
-	InquiryTypeApproval      = "approval"
-	InquiryTypeClarification = "clarification"
+	InquiryTypeApproval       = "approval"
+	InquiryTypeClarification  = "clarification"
+	InquiryTypeResearchBatch  = "research_batch"
+)
+
+// Clarification kinds — values for Clarification.Kind. Phase
+// 5.x — B15.
+const (
+	ClarificationKindRequired = "required"
+	ClarificationKindOptional = "optional"
+	ClarificationKindComment  = "comment"
 )
 
 // InquiryRequest is the frame that bubbles a [session:inquire]

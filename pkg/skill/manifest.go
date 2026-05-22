@@ -559,6 +559,17 @@ type MissionBlock struct {
 	// whose role doesn't override).
 	OnClose MissionOnClose `json:"on_close,omitempty" yaml:"on_close,omitempty"`
 
+	// Research declares an optional pre-planner stage where a
+	// dedicated role gathers user clarifications + scopes the goal
+	// before the planner sees the mission. Phase 5.x — B15.
+	// Absent block means "no research stage" → runtime spawns the
+	// planner directly (backwards-compatible default). When the
+	// block names a role, the runtime spawns it before
+	// runPlannerLoop, surfaces its findings into the planner's
+	// plan_context.research_findings + plan_context.resolved_user_inputs,
+	// and gates planner spawn on `done: true`.
+	Research *MissionResearchBlock `json:"research,omitempty" yaml:"research,omitempty"`
+
 	// Plan declares the mission's planning configuration —
 	// mission-PDCA (design 003) shape. When present, the mission ext
 	// treats this skill as a PDCA mission. v1 supports the
@@ -620,6 +631,38 @@ type MissionCapabilities struct {
 type MissionControlBlock struct {
 	Role string `json:"role,omitempty" yaml:"role,omitempty"`
 }
+
+// MissionResearchBlock declares the pre-planner research stage.
+// Phase 5.x — B15. When present, the runtime spawns Role before
+// the planner loop, lets it ask the user clarifications via
+// `session:inquire`, and surfaces its findings into the planner's
+// plan_context so iter-1 plans see scope-resolved inputs.
+//
+// Trigger semantics (When):
+//   - `always`           — research runs every mission.
+//   - `auto`             — runtime heuristic (pronoun-only goals,
+//                          short goals, mission_inputs gaps). Spec §2.5.
+//   - `if_goal_matches`  — Predicate regex tested against the goal
+//                          string; fires when it matches.
+//
+// MaxIterations caps re-fire cycles (when research emits `done:
+// false` it gets re-spawned, with prior_answers / prior_comments
+// folded into its context). Default 3.
+type MissionResearchBlock struct {
+	Role          string `json:"role,omitempty" yaml:"role,omitempty"`
+	When          string `json:"when,omitempty" yaml:"when,omitempty"`
+	Predicate     string `json:"predicate,omitempty" yaml:"predicate,omitempty"`
+	MaxIterations int    `json:"max_iterations,omitempty" yaml:"max_iterations,omitempty"`
+}
+
+// Recognised values for MissionResearchBlock.When. Validated at
+// projection time; unknown values are rejected so a typo
+// (`"if_goal_match"`) doesn't silently disable research.
+const (
+	ResearchWhenAlways        = "always"
+	ResearchWhenAuto          = "auto"
+	ResearchWhenIfGoalMatches = "if_goal_matches"
+)
 
 // MissionPlanBlock is the mission-PDCA `plan:` section. Phase B
 // adds `Role` (LLM-driven planner) + `Approval` policy + `MaxWaves`
@@ -945,6 +988,27 @@ func (m *Manifest) validateHugen() error {
 		default:
 			return fmt.Errorf("metadata.hugen.sub_agents[%d].capabilities.plan_context = %q: must be one of [\"\", \"off\", \"read\"]",
 				i, r.Capabilities.PlanContext)
+		}
+	}
+
+	// Phase 5.x — B15 — mission.research block validation. Fail
+	// loud on typos so a misconfigured block doesn't silently
+	// disable research stage.
+	if r := m.Hugen.Mission.Research; r != nil {
+		if strings.TrimSpace(r.Role) == "" {
+			return fmt.Errorf("metadata.hugen.mission.research.role is required when the block is present")
+		}
+		switch r.When {
+		case "", ResearchWhenAlways, ResearchWhenAuto, ResearchWhenIfGoalMatches:
+		default:
+			return fmt.Errorf("metadata.hugen.mission.research.when = %q: must be one of [%q, %q, %q]",
+				r.When, ResearchWhenAlways, ResearchWhenAuto, ResearchWhenIfGoalMatches)
+		}
+		if r.When == ResearchWhenIfGoalMatches && strings.TrimSpace(r.Predicate) == "" {
+			return fmt.Errorf("metadata.hugen.mission.research.predicate is required when when=%q", ResearchWhenIfGoalMatches)
+		}
+		if r.MaxIterations < 0 {
+			return fmt.Errorf("metadata.hugen.mission.research.max_iterations = %d: must be >= 0", r.MaxIterations)
 		}
 	}
 	return nil
