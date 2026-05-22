@@ -447,17 +447,24 @@ func (t *tab) dispatchInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 //
 // Bindings:
 //
-//   - Enter      — commit current input, advance to next question
-//                  (or submit batch on the last one).
-//   - Tab        — toggle between value and comment phase for the
-//                  current question. Switching phases preserves
-//                  the partial answer.
-//   - Shift+Tab  — go back to the previous question for editing.
-//                  Textarea is pre-filled with the prior committed
-//                  value so the operator can amend in place. No-op
-//                  on the first question.
-//   - digit 1-N  — when on a question with numbered options, the
-//                  digit pre-selects the option; Enter commits it.
+//   - ↑ / ↓      — cycle the option highlight on questions with
+//                  numbered options (wraps at bounds). No-op when
+//                  no options or focus is on the comment field.
+//   - Enter      — commit value + comment for the current question
+//                  and advance (or submit batch on the last one).
+//                  Value priority: typed text in the focused field
+//                  > highlighted option > empty. Comment: typed
+//                  text in the comment field if focused, else
+//                  preserved.
+//   - Tab        — switch focus between the value and comment
+//                  fields. Switching persists the textarea content
+//                  into whichever field was active.
+//   - Shift+Tab  — step back to the previous question. The prior
+//                  value (or comment, if focus was on comment)
+//                  pre-fills the textarea so the operator can
+//                  amend in place. No-op on Q1.
+//   - digit 1-N  — keep as a shortcut: typed `2` + Enter commits
+//                  options[1] as the value.
 //   - Esc        — abort the batch (modal closes; request stays
 //                  pending server-side).
 func (t *tab) dispatchBatchedInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
@@ -465,50 +472,80 @@ func (t *tab) dispatchBatchedInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd
 	key := k.String()
 	cur := pend.currentClarification()
 	switch key {
+	case "up":
+		// Arrow-up cycles option highlight (last → previous → first).
+		// Only meaningful on questions with options.
+		if len(cur.Options) > 0 && pend.focus != batchedFocusComment {
+			pend.cycleOptionHighlight(-1)
+		}
+		return true, nil
+	case "down":
+		if len(cur.Options) > 0 && pend.focus != batchedFocusComment {
+			pend.cycleOptionHighlight(+1)
+		}
+		return true, nil
 	case "enter":
+		// Persist whatever's in the textarea into the focused
+		// field, THEN commit + advance. Value resolution order:
+		// (1) operator typed text in value field; (2) digit pick
+		// shortcut; (3) ↑↓ highlighted option. Comment-only
+		// (kind=comment) questions skip the value path entirely.
 		text := strings.TrimSpace(t.textarea.Value())
-		// Required-kind value must be non-empty; comment phase and
-		// optional/comment kinds accept empty (treated as skip).
-		if !pend.inCommentPhase && cur.Kind == protocol.ClarificationKindRequired && text == "" {
+		t.persistBatchedTextareaForFocus(pend, text)
+		entry := pend.answers[cur.ID]
+		// Required-kind value must be non-empty AFTER persist +
+		// optional highlight fallback.
+		if cur.Kind == protocol.ClarificationKindRequired && entry.Value == "" {
+			if hi := pend.optionHighlight(); hi >= 0 && hi < len(cur.Options) {
+				entry.Value = cur.Options[hi]
+				if pend.answers == nil {
+					pend.answers = make(map[string]protocol.AnswerEntry)
+				}
+				pend.answers[cur.ID] = entry
+			}
+		}
+		if cur.Kind == protocol.ClarificationKindRequired && entry.Value == "" {
 			t.bannerError = fmt.Sprintf("%q is required", cur.ID)
 			return true, nil
 		}
-		// Option pick: digit + Enter chooses options[N-1] verbatim.
-		if picked, ok := pend.resolveOptionPick(text); ok {
-			text = picked
-		}
-		_, ready := pend.commitBatchedValue(text)
+		ready := pend.advanceBatched()
+		t.textarea.Reset()
 		if ready {
-			t.textarea.Reset()
 			if err := t.submitBatchedAnswers(pend); err != nil {
 				t.bannerError = err.Error()
 			}
 			return true, nil
 		}
-		// Pre-fill the textarea with the next question's prior
-		// committed value, if any, so re-entering via back-nav +
-		// forward-walk shows the operator what's already there.
 		t.prefillBatchedTextarea(pend)
 		return true, nil
 	case "tab":
-		// Tab toggles between value and comment phases for the
-		// current question. Has no effect on comment-kind
-		// clarifications (the question IS the comment).
+		// Tab toggles focus between value and comment field on the
+		// current question. Comment-kind questions stay locked on
+		// the comment field (no value to focus).
 		if cur.Kind == protocol.ClarificationKindComment {
 			return true, nil
 		}
-		t.persistBatchedTextareaForPhase(pend)
-		pend.inCommentPhase = !pend.inCommentPhase
+		text := strings.TrimSpace(t.textarea.Value())
+		t.persistBatchedTextareaForFocus(pend, text)
+		if pend.focus == batchedFocusValue {
+			pend.focus = batchedFocusComment
+		} else {
+			pend.focus = batchedFocusValue
+		}
 		t.prefillBatchedTextarea(pend)
 		return true, nil
 	case "shift+tab":
-		// Step back to the previous question. No-op on Q1.
 		if pend.currentIdx <= 0 {
 			return true, nil
 		}
-		t.persistBatchedTextareaForPhase(pend)
+		text := strings.TrimSpace(t.textarea.Value())
+		t.persistBatchedTextareaForFocus(pend, text)
 		pend.currentIdx--
-		pend.inCommentPhase = false
+		if pend.currentClarification().Kind == protocol.ClarificationKindComment {
+			pend.focus = batchedFocusComment
+		} else {
+			pend.focus = batchedFocusValue
+		}
 		t.prefillBatchedTextarea(pend)
 		return true, nil
 	case "esc":
@@ -520,14 +557,13 @@ func (t *tab) dispatchBatchedInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd
 	return false, nil
 }
 
-// persistBatchedTextareaForPhase captures whatever the operator has
-// typed in the textarea into the current question's accumulated
-// entry — into Value or Comment depending on which phase is
-// active. Called before navigation (Tab phase toggle, Shift+Tab
-// back-nav) so the partial answer isn't lost. Empty textarea is a
-// no-op (the operator may be deliberately clearing).
-func (t *tab) persistBatchedTextareaForPhase(pend *inquiryState) {
-	text := strings.TrimSpace(t.textarea.Value())
+// persistBatchedTextareaForFocus captures whatever the operator has
+// typed in the textarea into the field the focus currently points
+// at (value OR comment) for the current clarification. Empty input
+// is a no-op so the persisted entry stays whatever it already was
+// (lets the operator clear the textarea to switch context without
+// erasing a prior commit).
+func (t *tab) persistBatchedTextareaForFocus(pend *inquiryState, text string) {
 	if text == "" {
 		return
 	}
@@ -536,9 +572,11 @@ func (t *tab) persistBatchedTextareaForPhase(pend *inquiryState) {
 		pend.answers = make(map[string]protocol.AnswerEntry)
 	}
 	entry := pend.answers[cur.ID]
-	if pend.inCommentPhase || cur.Kind == protocol.ClarificationKindComment {
+	if pend.focus == batchedFocusComment || cur.Kind == protocol.ClarificationKindComment {
 		entry.Comment = text
 	} else {
+		// Power-user digit shortcut: `2` + Enter still picks
+		// options[1] verbatim.
 		if picked, ok := pend.resolveOptionPick(text); ok {
 			entry.Value = picked
 		} else {
@@ -549,7 +587,7 @@ func (t *tab) persistBatchedTextareaForPhase(pend *inquiryState) {
 }
 
 // prefillBatchedTextarea resets the textarea then loads it with the
-// current question + phase's previously-captured text, if any. Lets
+// current question + focus's previously-captured text, if any. Lets
 // the operator amend a prior answer in place rather than re-typing.
 func (t *tab) prefillBatchedTextarea(pend *inquiryState) {
 	t.textarea.Reset()
@@ -558,7 +596,7 @@ func (t *tab) prefillBatchedTextarea(pend *inquiryState) {
 	if !ok {
 		return
 	}
-	if pend.inCommentPhase || cur.Kind == protocol.ClarificationKindComment {
+	if pend.focus == batchedFocusComment || cur.Kind == protocol.ClarificationKindComment {
 		if entry.Comment != "" {
 			t.textarea.SetValue(entry.Comment)
 		}

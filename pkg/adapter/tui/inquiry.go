@@ -33,14 +33,28 @@ type inquiryState struct {
 	// Phase 5.x — B15. Tab-style batched-research state. Modal
 	// walks the operator through clarifications one at a time:
 	//   - `currentIdx` names the clarification being asked.
-	//   - `inCommentPhase` flips on Tab; the textarea then
-	//     captures the per-question comment instead of the value.
+	//   - `focus` selects which input field has the textarea: 0
+	//     for value, 1 for comment. Tab toggles. (For comment-
+	//     kind clarifications focus is locked at 1 because there
+	//     IS no value field.)
+	//   - `optionHighlights` caches each option-bearing question's
+	//     cursor index — what ↑/↓ moved to. Persists across
+	//     navigation so a back-walk doesn't lose the prior pick.
+	//     `-1` means "no option highlighted yet" (default before
+	//     the operator presses ↑/↓).
 	//   - `answers` accumulates per-id entries as the operator
 	//     advances. Built into payload.Answers on the last submit.
-	currentIdx     int
-	inCommentPhase bool
-	answers        map[string]protocol.AnswerEntry
+	currentIdx       int
+	focus            int
+	optionHighlights map[string]int
+	answers          map[string]protocol.AnswerEntry
 }
+
+// Field focus identifiers for the batched modal.
+const (
+	batchedFocusValue   = 0
+	batchedFocusComment = 1
+)
 
 // isBatched reports whether this state is rendering a research_batch
 // modal. Used to switch the modal renderer + key dispatch into the
@@ -59,44 +73,80 @@ func (s *inquiryState) currentClarification() protocol.Clarification {
 	return s.req.Clarifications[s.currentIdx]
 }
 
-// commitBatchedValue stores value (or comment) for the current
-// clarification, advances the cursor / phase, and returns true when
-// the modal is ready to submit (last question answered).
-func (s *inquiryState) commitBatchedValue(text string) (advanced bool, ready bool) {
-	if !s.isBatched() {
-		return false, false
+// optionHighlight returns the cached option index for the current
+// clarification (-1 when the operator hasn't pressed ↑/↓ on this
+// question yet). Used by the renderer to mark the highlighted row
+// and by the commit path to use the highlight as the value when
+// the operator left the value textarea empty.
+func (s *inquiryState) optionHighlight() int {
+	if s.optionHighlights == nil {
+		return -1
 	}
-	if s.answers == nil {
-		s.answers = make(map[string]protocol.AnswerEntry, len(s.req.Clarifications))
+	idx, ok := s.optionHighlights[s.currentClarification().ID]
+	if !ok {
+		return -1
 	}
+	return idx
+}
+
+// setOptionHighlight caches the cursor index for the current
+// clarification.
+func (s *inquiryState) setOptionHighlight(idx int) {
+	if s.optionHighlights == nil {
+		s.optionHighlights = make(map[string]int)
+	}
+	s.optionHighlights[s.currentClarification().ID] = idx
+}
+
+// cycleOptionHighlight advances (delta=+1) or rolls back (delta=-1)
+// the current question's option highlight, wrapping at the bounds.
+// No-op when the question has no options.
+func (s *inquiryState) cycleOptionHighlight(delta int) {
 	cur := s.currentClarification()
-	entry := s.answers[cur.ID]
-	if s.inCommentPhase {
-		entry.Comment = text
-	} else {
-		// For comment-kind clarifications, treat any text as the
-		// comment so the operator doesn't have to press Tab first.
-		if cur.Kind == protocol.ClarificationKindComment {
-			entry.Comment = text
-		} else {
-			entry.Value = text
-		}
+	if len(cur.Options) == 0 {
+		return
 	}
-	s.answers[cur.ID] = entry
-	s.inCommentPhase = false
+	idx := s.optionHighlight()
+	if idx < 0 {
+		// First ↑/↓ press selects the first option for ↓, last for
+		// ↑ — matches list-widget conventions.
+		if delta > 0 {
+			idx = 0
+		} else {
+			idx = len(cur.Options) - 1
+		}
+		s.setOptionHighlight(idx)
+		return
+	}
+	idx = (idx + delta + len(cur.Options)) % len(cur.Options)
+	s.setOptionHighlight(idx)
+}
+
+// advanceBatched moves the cursor to the next question. Returns
+// true when the modal is ready to submit (last question committed).
+func (s *inquiryState) advanceBatched() bool {
 	if s.currentIdx+1 >= len(s.req.Clarifications) {
-		return true, true
+		return true
 	}
 	s.currentIdx++
-	return true, false
+	// Reset focus: comment-kind questions force focus to the
+	// comment field (the only one rendered); everyone else
+	// defaults to value.
+	if s.currentClarification().Kind == protocol.ClarificationKindComment {
+		s.focus = batchedFocusComment
+	} else {
+		s.focus = batchedFocusValue
+	}
+	return false
 }
 
 // resolveOptionPick returns (matched-option-text, true) when `text`
 // is a digit selecting one of the current clarification's options
 // (`1` → options[0], etc.). Returns ("", false) otherwise so the
-// caller treats the raw text as the answer.
+// caller treats the raw text as the answer. Kept as a power-user
+// shortcut alongside the ↑/↓ + Enter flow.
 func (s *inquiryState) resolveOptionPick(text string) (string, bool) {
-	if !s.isBatched() || s.inCommentPhase {
+	if !s.isBatched() || s.focus == batchedFocusComment {
 		return "", false
 	}
 	cur := s.currentClarification()
@@ -114,9 +164,6 @@ func (s *inquiryState) resolveOptionPick(text string) (string, bool) {
 	if idx < 0 || idx >= len(cur.Options) {
 		return "", false
 	}
-	// Only treat as a pick when the whole input was the number
-	// (or "1." style). Free-text answers that happen to start with
-	// a digit (e.g. "30 days") still pass through verbatim.
 	rest := strings.TrimSpace(t[1:])
 	if rest != "" && rest != "." {
 		return "", false
@@ -135,6 +182,16 @@ func newInquiryState(req *protocol.InquiryRequest) *inquiryState {
 	switch req.Payload.Type {
 	case protocol.InquiryTypeClarification, protocol.InquiryTypeResearchBatch:
 		s.replyMode = true
+	}
+	// Phase 5.x — B15. Initialise focus for the batched walk:
+	// comment-kind first question locks focus on the comment
+	// field; everyone else starts on the value field.
+	if s.isBatched() {
+		if s.currentClarification().Kind == protocol.ClarificationKindComment {
+			s.focus = batchedFocusComment
+		} else {
+			s.focus = batchedFocusValue
+		}
 	}
 	return s
 }
@@ -211,12 +268,14 @@ func renderInquiryModal(state *inquiryState, width int) string {
 }
 
 // renderBatchedInquiryModal renders the tab-style one-at-a-time
-// modal for research_batch inquiries. Shows progress + current
-// question + numbered options + accumulated previous answers as
-// a faint summary.
+// modal for research_batch inquiries. Per question: progress bar,
+// question header, option list (with ↑↓-driven highlight marker),
+// always-visible `value` and `comment` rows (focused one carries
+// the cursor textarea content), and a keystroke hint footer.
 func renderBatchedInquiryModal(state *inquiryState, width, contentW int) string {
 	total := len(state.req.Clarifications)
 	cur := state.currentClarification()
+	commentKind := cur.Kind == protocol.ClarificationKindComment
 
 	var sb strings.Builder
 	title := fmt.Sprintf("Research clarifications [%d/%d]", state.currentIdx+1, total)
@@ -227,8 +286,7 @@ func renderBatchedInquiryModal(state *inquiryState, width, contentW int) string 
 	sb.WriteString("\n\n")
 
 	// Optional rationale / context line that the request payload
-	// carried (e.g. "Re-approval requested: ..." for approval but
-	// also surfaces research-stage notes when set).
+	// carried.
 	if c := strings.TrimSpace(state.req.Context); c != "" {
 		sb.WriteString(inquiryFaintStyle.Render(wrap("Context: "+c, contentW)))
 		sb.WriteString("\n\n")
@@ -241,14 +299,24 @@ func renderBatchedInquiryModal(state *inquiryState, width, contentW int) string 
 	sb.WriteString(wrap(cur.Question, contentW))
 	sb.WriteString("\n")
 
-	// Numbered option list when the role provided picks.
+	// Option list with ▸ on the currently-highlighted row. Numbered
+	// (1., 2., ...) so digit-select still works as a shortcut.
 	if len(cur.Options) > 0 {
 		sb.WriteString("\n")
-		sb.WriteString(inquiryFaintStyle.Render("options:"))
+		sb.WriteString(inquiryFaintStyle.Render("options (↑↓ to pick, Enter on value field to commit):"))
 		sb.WriteString("\n")
+		hi := state.optionHighlight()
 		for i, opt := range cur.Options {
-			sb.WriteString(fmt.Sprintf("  %d. ", i+1))
-			sb.WriteString(truncate(opt, contentW-6))
+			marker := "  "
+			if i == hi {
+				marker = "▸ "
+			}
+			line := fmt.Sprintf("%s%d. %s", marker, i+1, truncate(opt, contentW-6))
+			if i == hi {
+				sb.WriteString(inquiryHintStyle.Render(line))
+			} else {
+				sb.WriteString(line)
+			}
 			sb.WriteString("\n")
 		}
 	}
@@ -257,32 +325,80 @@ func renderBatchedInquiryModal(state *inquiryState, width, contentW int) string 
 		sb.WriteString("\n")
 	}
 
-	// Phase indicator + previously-captured value/comment for this
-	// question if the operator has already touched it (e.g. typed
-	// a value, then pressed Tab to add a comment).
-	if entry, ok := state.answers[cur.ID]; ok {
+	// Value + Comment rows. The currently-focused one is marked
+	// with `>`; its textarea content is shown inline (the real
+	// textarea component below the modal mirrors this — keeping
+	// the modal preview honest). Comment-kind questions hide the
+	// value row entirely (the question IS the comment).
+	sb.WriteString("\n")
+	entry := state.answers[cur.ID]
+	if !commentKind {
+		sb.WriteString(renderBatchedField(
+			"value",
+			state.focus == batchedFocusValue,
+			fieldValuePreview(state, cur, entry),
+			contentW,
+		))
 		sb.WriteString("\n")
-		if entry.Value != "" {
-			sb.WriteString(inquiryFaintStyle.Render(wrap("  value: "+entry.Value, contentW)))
-			sb.WriteString("\n")
-		}
-		if entry.Comment != "" {
-			sb.WriteString(inquiryFaintStyle.Render(wrap("  comment: "+entry.Comment, contentW)))
-			sb.WriteString("\n")
-		}
 	}
+	sb.WriteString(renderBatchedField(
+		"comment",
+		state.focus == batchedFocusComment,
+		fieldCommentPreview(state, cur, entry),
+		contentW,
+	))
+	sb.WriteString("\n\n")
 
-	// Phase + hint line.
-	phase := "value"
-	if state.inCommentPhase || cur.Kind == protocol.ClarificationKindComment {
-		phase = "comment"
-	}
-	sb.WriteString("\n")
-	sb.WriteString(inquiryFaintStyle.Render(fmt.Sprintf("Now editing: %s", phase)))
-	sb.WriteString("\n")
 	sb.WriteString(inquiryHintStyle.Render(batchedHint(state)))
-
 	return inquiryBoxStyle.Width(width - 2).Render(sb.String())
+}
+
+// renderBatchedField renders one labelled field row. The focused
+// row gets a `>` marker + bright color; unfocused rows render
+// faint to keep the eye on the active input.
+func renderBatchedField(label string, focused bool, preview string, contentW int) string {
+	marker := "  "
+	style := inquiryFaintStyle
+	if focused {
+		marker = "> "
+		style = inquiryHintStyle
+	}
+	line := fmt.Sprintf("%s%s: %s", marker, label, truncate(preview, contentW-len(label)-4))
+	return style.Render(line)
+}
+
+// fieldValuePreview returns the inline preview text for the value
+// row. When the value field has focus, show what the operator is
+// currently typing (mirrored from the real textarea by the caller —
+// we receive it through the state's last-known content). Otherwise
+// show the committed value, the highlighted option, or "—".
+//
+// Today we don't mirror the live textarea content into state on
+// every keystroke (the textarea owns its own buffer); the preview
+// falls back to the persisted entry. The hint footer still makes
+// it clear which field is active.
+func fieldValuePreview(state *inquiryState, cur protocol.Clarification, entry protocol.AnswerEntry) string {
+	if entry.Value != "" {
+		return entry.Value
+	}
+	if hi := state.optionHighlight(); hi >= 0 && hi < len(cur.Options) {
+		return inquiryFaintStyle.Render("(↑↓ highlighted: " + cur.Options[hi] + ")")
+	}
+	if state.focus == batchedFocusValue {
+		return inquiryFaintStyle.Render("(type to fill)")
+	}
+	return inquiryFaintStyle.Render("—")
+}
+
+// fieldCommentPreview mirrors fieldValuePreview for the comment row.
+func fieldCommentPreview(state *inquiryState, _ protocol.Clarification, entry protocol.AnswerEntry) string {
+	if entry.Comment != "" {
+		return entry.Comment
+	}
+	if state.focus == batchedFocusComment {
+		return inquiryFaintStyle.Render("(type to fill)")
+	}
+	return inquiryFaintStyle.Render("—")
 }
 
 // batchedHint is the one-line keystroke summary at the bottom of
@@ -298,16 +414,20 @@ func batchedHint(state *inquiryState) string {
 	if state.currentIdx > 0 {
 		backHint = " | Shift+Tab prev"
 	}
-	if state.inCommentPhase {
-		return fmt.Sprintf("[type comment, Enter %s | Tab back to value%s | Esc abort]", enterAction, backHint)
-	}
 	if cur.Kind == protocol.ClarificationKindComment {
-		return fmt.Sprintf("[type free-form, Enter %s%s | Esc abort]", enterAction, backHint)
+		return fmt.Sprintf("[type comment, Enter %s%s | Esc abort]", enterAction, backHint)
 	}
+	parts := []string{}
 	if len(cur.Options) > 0 {
-		return fmt.Sprintf("[type 1-%d to pick OR free text, Enter %s | Tab add comment%s | Esc abort]", len(cur.Options), enterAction, backHint)
+		parts = append(parts, "↑↓ pick option")
 	}
-	return fmt.Sprintf("[type answer, Enter %s | Tab add comment%s | Esc abort]", enterAction, backHint)
+	parts = append(parts, "Tab switch value↔comment")
+	parts = append(parts, fmt.Sprintf("Enter %s", enterAction))
+	if backHint != "" {
+		parts = append(parts, strings.TrimSpace(strings.TrimPrefix(backHint, " | ")))
+	}
+	parts = append(parts, "Esc abort")
+	return "[" + strings.Join(parts, " | ") + "]"
 }
 
 // kindOrDefault returns kind, defaulting to "required" so a
