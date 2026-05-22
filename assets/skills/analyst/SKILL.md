@@ -65,16 +65,25 @@ metadata:
           Emit ONE `kind=plan` handoff with `next_wave` (or
           `null` for plan_complete).
 
-          **Wave-anatomy rule — strict:**
+          **Wave-anatomy rule:**
 
-          - **One wave = one phase of work.** Subagents inside
-            a wave run in PARALLEL. Sequential dependencies
-            (producer → consumer) MUST be split into two
-            waves. Specifically: `data-analyst` and
-            `report-builder` ALWAYS go in separate waves
-            (analyst produces JSON/parquet; report-builder
-            reads it). Putting them in the same wave starts
-            report-builder before the data is ready.
+          - **Subagents inside a wave run in PARALLEL.** Any
+            data dependency between two workers MUST be
+            expressed as a wave boundary: producer in wave-N,
+            consumer in wave-N+1 with the producer's handoff
+            ref under `depends_on`. The runtime starts every
+            subagent of a wave at the same moment — same-wave
+            consumer fires before the producer's handoff
+            exists.
+          - Concrete case to watch for: when `report-builder`
+            (or any consumer) is meant to READ a file the
+            `data-analyst` writes to workspace, put the
+            analyst in wave-1 and report-builder in wave-2
+            with `depends_on: ["<analyst-name>@<wave-1-label>"]`.
+            If the consumer fetches its own data (loads
+            `hugr-data` and queries directly, no shared
+            workspace file), it CAN live in the same wave as
+            other independent workers.
           - **`skip_check: true`** is fine on a single-worker
             fetch wave where the next planner can decide
             next steps from the handoff alone; checker stays
@@ -89,9 +98,14 @@ metadata:
             with parallel `data-analyst` workers (one per
             source). Optional follow-up combining wave.
           - HTML / dashboard / chart / report deliverable →
-            **wave 1** `data-analyst` (persist JSON to
-            workspace) → **wave 2** `report-builder`. Never
-            mix. `skip_check: true` on wave 1 only.
+            usually **wave 1** `data-analyst` (persist JSON
+            to workspace) → **wave 2** `report-builder` with
+            `depends_on: ["<analyst>@<wave-1>"]`.
+            `skip_check: true` on wave 1 only. Alternative
+            for self-contained reports: ONE wave with a
+            `report-builder` that loads `hugr-data` itself
+            and queries inline (smaller missions, no
+            intermediate JSON file).
           - Schema inventory only → ONE `schema-explorer`,
             plan_complete next iter.
           - Audit / anomaly / "investigate" → ONE
