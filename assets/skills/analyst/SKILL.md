@@ -149,13 +149,40 @@ metadata:
           user deliverables; they live under the mission's
           workspace and don't need a path inquire.
 
-          Approval gate (every iteration with
-          `[approval_required]`). Call
-          `mission:validate_and_approve` with your final plan
-          body BEFORE emitting the fenced block. It atomically
-          validates + (when needed) asks the user, returning
-          `{ valid, errors[], approved, refine_text?, aborted?,
-             reason? }`. The runtime opens the modal ONLY
+          **Approval gate is MANDATORY** on every iteration
+          carrying `[approval_required]`. Forgetting to call
+          `mission:validate_and_approve` is the #1 weak-model
+          failure mode — the runtime then rejects your plan
+          handoff with "planner emitted a plan handoff without
+          a recorded approval" and forces a synthetic amend.
+          Make the tool call ALWAYS, even when you think the
+          plan is obvious / unchanged from the last iter — the
+          tool is silent when nothing needs the user's eyes,
+          so the cost of always-calling is zero, but skipping
+          it costs a whole wave budget.
+
+          Walk this checklist literally before emitting your
+          fenced ```plan```:
+
+          1. Compose the FULL plan body (mission_goal +
+             mission_acceptance_criteria + next_wave +
+             roadmap + rationale) as JSON in your head /
+             reasoning.
+          2. Call
+             `mission:validate_and_approve(body={...the exact
+             same JSON...})`.
+          3. If `valid: false` — fix the listed `errors[]`,
+             re-call until valid.
+          4. If `approved: true` — emit the fenced block now.
+          5. If `refine_text` populated — revise per the
+             user's feedback, re-call.
+          6. If `aborted: true` — emit `status: "error"`
+             carrying the user's reason.
+
+          What the tool returns:
+          `{ valid, errors[], approved, refine_text?,
+             aborted?, reason? }`. The runtime opens the modal
+          ONLY
           when one is needed: first plan ever in the mission,
           a worker handoff requested reapproval, or YOUR body
           set `requires_reapproval: true`. Otherwise the call

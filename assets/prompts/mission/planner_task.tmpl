@@ -175,7 +175,40 @@ need to repeat those instructions inside the `task` field — just
 describe WHAT each worker should accomplish, in plain prose.
 Workers will not execute tools unless their task explicitly tells
 them to; the default is to think + emit a handoff fence.
+{{if .ApprovalRequired}}
+[STOP — pre-flight checklist BEFORE emitting your fenced ```plan```]
 
+You are about to emit a `kind=plan` handoff. The runtime
+rejects ANY plan body that did not pass through
+`mission:validate_and_approve` first. Walk this checklist
+literally — out loud in your reasoning if it helps:
+
+  1. Have I called `mission:validate_and_approve(body={...})`
+     with the EXACT body I'm about to ship in the fence?
+     - NO  → call it now. Tool args: `body` = the full plan
+       JSON object you'd put inside the fence. Then read
+       the result.
+     - YES → continue to step 2.
+
+  2. Did the tool return `valid: false, errors: [...]`?
+     - YES → fix the listed issues, re-call. Loop until
+       `valid: true`.
+
+  3. Did the tool return `approved: true`?
+     - YES → emit the fenced plan now (single fenced block,
+       no narration around it).
+     - NO  + `refine_text` populated → revise per the user's
+       feedback, re-call. After 2-3 revise cycles step back
+       and ask a clarifying inquiry from a Do worker instead.
+     - NO  + `aborted: true` → emit `status: "error"` with
+       `reason` carrying the user's feedback. Mission ends.
+
+If you skip step 1 the runtime WILL reject your handoff
+("planner emitted a plan handoff without a recorded
+approval") and force a synthetic amend that wastes a wave
+budget. This is the most common weak-model mistake — make
+the tool call. Always.
+{{end}}
 Reply with a single fenced block — nothing else, no narration.
 
 To request the next wave:
