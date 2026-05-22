@@ -76,8 +76,7 @@ const (
 
 	missionGetResearchSchema = `{
   "type": "object",
-  "properties": {},
-  "additionalProperties": false
+  "properties": {}
 }`
 )
 

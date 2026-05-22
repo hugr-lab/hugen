@@ -8,7 +8,32 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
+
+// TestExtension_List_AllSchemasValidate guards against shipping a
+// JSON-Schema field the cross-provider chat-completion subset
+// rejects. Gemini in particular returns 400 INVALID_ARGUMENT when
+// `additionalProperties` / `$ref` / `oneOf` / `anyOf` / `allOf`
+// appear in tools[*].function_declarations[*].parameters — that
+// kind of failure surfaces only on a live mission, so we validate
+// statically here. Mirrors the same check in
+// pkg/extension/skill/handlers_test.go.
+func TestExtension_List_AllSchemasValidate(t *testing.T) {
+	ext := NewExtension(Config{})
+	tools, err := ext.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(tools) == 0 {
+		t.Fatalf("List returned no tools — extension surface regressed")
+	}
+	for _, tl := range tools {
+		if err := tool.ValidateLLMSchema(tl.ArgSchema); err != nil {
+			t.Errorf("%s schema invalid: %v", tl.Name, err)
+		}
+	}
+}
 
 // TestInvalidatesPlanApproval is a table-driven check for the
 // Phase 5.x — B13 skill-agnostic invalidation hook. The runtime
