@@ -60,38 +60,76 @@ Bumping the cap to 5000 helps when the FULL result is small
 - Large bucket / top-N lists are routinely 10–100KB once
   expanded — they will NEVER fit in inline.
 
-### File-output escape hatch
+### Three escape hatches — pick by intent
 
-When the preview doesn't cover what you need (cut at item 12 of 50,
-report needs the full series, downstream worker wants the data),
-**switch tools:**
+1. **Narrow the query at the source** (pagination or jq slicing):
 
-- `hugr-query:query` — Execute the same GraphQL, but Hugr writes
-  the result to a Parquet (tabular leaves) or JSON (object leaves)
-  file under the session workspace. Returns `path` + preview.
-- `hugr-query:query_jq` — Same, but with a JQ transform applied
-  server-side. Returns ONE JSON value at the given path.
+   - **`limit` / `offset`** on the root list field — fetches a
+     bounded chunk of rows. Use for "first 20 by amount", "top
+     50 categories"; combine with `order_by` to make the chunk
+     meaningful. Pre-join global cap — applies BEFORE relations
+     resolve.
+   - **`nested_limit` / `nested_offset`** on a nested relation
+     — per-parent pagination. Use for "give me 5 latest payments
+     per provider"; plain `limit` on a nested relation applies
+     globally and silently null-outs per-parent rows.
+   - **jq slicing `[:N]` / `[N:M]`** on a bucket / list once the
+     GraphQL returned everything — useful when you only need
+     the top-N from a list the engine already produced. Cheap
+     post-processing; doesn't help when the GraphQL response
+     itself is too large to fetch inline.
+   - **`_aggregation` instead of row-level fetch** — server-side
+     count / sum / avg / top-N. One value comes back, no
+     truncation. The right answer when the user wants a metric,
+     not the rows.
 
-The downstream consumer reads back via:
+   This is the FIRST option to consider — keeping the result
+   small at the engine side beats moving it to a file and
+   reading it back.
 
-- `bash-mcp:bash.read_file(path)` — small files (< 100KB) loaded
-  inline into the worker's reasoning.
-- For larger artefacts: hand the `path` to the next worker via
-  `inputs.<key>` (planner sets it on `next_wave.subagents[*].inputs`).
-  The consumer reads / opens / parses the file directly.
+2. **File output via `hugr-query`** — when you genuinely need the
+   FULL result (downstream worker building a chart, full bucket
+   list for a dashboard, top-N across many categories where
+   per-category drilldown matters):
 
-### When to pick which tool
+   - `hugr-query:query` — Execute the same GraphQL, but Hugr
+     writes the result to a Parquet (tabular leaves) or JSON
+     (object leaves) file under the session workspace. Returns
+     `path` + preview.
+   - `hugr-query:query_jq` — Same, but with a JQ transform
+     applied server-side. Returns ONE JSON value at the given
+     path.
+
+   Downstream consumer reads back via:
+
+   - `bash-mcp:bash.read_file(path)` — small files (< 100KB)
+     loaded inline into the worker's reasoning.
+   - Hand the `path` to the next worker via `inputs.<key>`
+     (planner sets it on `next_wave.subagents[*].inputs`). The
+     consumer reads / opens / parses the file directly.
+
+3. **Inline with bigger cap** (`max_result_size: 5000`) — last
+   resort for genuine one-shots: the full result clearly fits
+   under 5KB and you'll act on it in this turn. Don't iterate
+   on this path — if 5KB clipped again, you're in category (1)
+   or (2).
+
+### Decision table
 
 | Need | Tool |
 |---|---|
-| One-shot lookup; result clearly fits in 2-5KB; you'll act on it in this turn | `data-inline_graphql_result`, bump `max_result_size` to 5000 if needed |
-| Building a report / chart / dashboard — need the full data, not a preview | `hugr-query:query` (Parquet/JSON to workspace, downstream worker reads back) |
+| Single metric / aggregation — one value or a handful of buckets | Add `_aggregation` to the query; result is tiny by construction |
+| Top-N of something — first 20 categories, latest 10 events | `limit` + `order_by` on the root, OR jq `[:20]` if engine already returned everything |
+| Per-parent top-N — 5 latest payments per provider | `nested_limit` + `nested_order_by` on the nested relation |
+| Building a report / chart / dashboard — need the full series | `hugr-query:query` (Parquet/JSON to workspace; downstream worker reads back) |
 | Want ONE structured JSON value (a single metric, a single nested object) and the GraphQL result is large | `hugr-query:query_jq` (server-side JQ, persisted) |
-| Top-N over a wide table, complete bucket list, distribution by category for visualization | `hugr-query:query` (Parquet) |
+| One-shot lookup; result clearly fits in 2-5KB; you'll act on it in this turn | `data-inline_graphql_result`, bump `max_result_size` to 5000 if needed |
 
 For **report-building work** the default is `hugr-query:query` — the
-report needs the full data, a 2KB preview is not enough. Reserve
-inline for quick checks where the answer is one number.
+report needs the full data, a 2KB preview is not enough. For
+**analytical drilldown** (top-N by some dimension) prefer the
+pagination-at-source approach. Reserve inline for quick checks
+where the answer is one number.
 
 ---
 
