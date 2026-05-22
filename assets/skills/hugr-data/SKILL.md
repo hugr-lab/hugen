@@ -252,6 +252,33 @@ shape. Read the error, then escalate to the right tool:
   not standard GraphQL.
 - **Repeated identical error after one retry** — you're guessing. Stop
   the loop, switch to discovery / schema tools, and re-plan.
+- **Query succeeds but returns null / empty (`{"data":null}`,
+  `{"data":{...":null}}`, `categories: []`, `summary: null`,
+  `_rows_count: 0`)** — the data **IS** empty for that query shape;
+  re-running the same query will return the same emptiness. Do NOT
+  loop on minor jq tweaks (`[]?` vs `[]`, `select(... != null)` vs
+  no filter). Diagnose:
+
+  - **Bucket aggregation `key` returns null** → the column you
+    chose for `key { <field> }` is sparsely populated / mostly
+    null. Use a **different grouping field**. Call
+    `discovery-field_values(type_name, field_name)` to see which
+    fields have meaningful distributions BEFORE picking a key.
+  - **`<aggregation>.sum: null`** → the field is null for every
+    row matching your filter, OR the field is non-numeric, OR
+    your filter eliminated all rows. Inspect with
+    `schema-type_fields` + small sample query.
+  - **Filter eliminates everything** → drop the filter and re-run;
+    if data comes back, the filter is the culprit. Loosen, don't
+    retry identical.
+  - **jq `cannot iterate over: null`** → the GraphQL result has
+    `null` where jq expects an array. The query itself returned
+    nothing — fix the QUERY, not the jq transform. Use `?` ONLY
+    as a last-resort guard once you've confirmed the shape via
+    schema introspection.
+
+  Empty result is a signal to **change the query**, not a transient
+  hiccup. Two identical empty replies in a row = stop and re-plan.
 
 The same applies before the first query on a schema: if you've never
 seen `instructions` in this session and the user asks for non-trivial
