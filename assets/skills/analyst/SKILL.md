@@ -154,7 +154,7 @@ metadata:
           You're a coordinator, not an analyst. Pre-resolve
           source / module / table names from research findings
           + notepad so workers act on concrete identifiers.
-        intent: tool_calling
+        intent: reasoning
         can_spawn: false
         autoload_skills: []
         capabilities:
@@ -162,19 +162,24 @@ metadata:
         compactor:
           # Planner sessions amend across iterations and accumulate
           # tool_call → tool_result pairs from each validate_and_
-          # approve cycle. Tighten the compactor to keep the
-          # rolling context bounded — worker-tier default disables
-          # the compactor, so without this override planner runs
-          # uncompacted and blows past max_tokens on weak models.
+          # approve cycle. Trigger by PROMPT TOKEN SIZE — the
+          # planner's own prompt is ~5K static + skill prose;
+          # adding 1-2 amend cycles can push to 15-20K. Worker
+          # tier default disables the compactor, so without this
+          # override planner runs uncompacted and blows past
+          # max_tokens on weak models.
           enabled: true
-          # Trip compaction every 10 turns inside the planner
-          # session (B13/B15 typical: 3-5 tool calls + handoff per
-          # iter; 10 turns ≈ 2-3 iters of working memory before a
-          # digest).
-          max_turns: 10
-          # Keep the last 4 turns verbatim past the cutoff so the
-          # current iteration's reasoning stays intact.
-          preserved_recent_turns: 4
+          # Trip compaction once estimated prompt size crosses
+          # 30K tokens — leaves room for skill prose + tools +
+          # one full validate_and_approve cycle below the
+          # upstream cap.
+          max_tokens: 30000
+          # Secondary backstop on turn count for edge cases.
+          max_turns: 20
+          # Keep the last 6 turns verbatim past the cutoff so the
+          # current iteration's reasoning stays intact (one full
+          # validate_and_approve cycle = ~3-4 turns).
+          preserved_recent_turns: 6
           min_turn_gap: 2
           llm_intent: summarize
         tools:
@@ -318,7 +323,7 @@ metadata:
             handles the modal from your `clarifications`
             array; the legacy tool path is for workers
             mid-execution, not research.
-        intent: tool_calling
+        intent: reasoning
         can_spawn: false
         autoload_skills: [hugr-data]
         capabilities:
@@ -511,6 +516,31 @@ metadata:
         intent: tool_calling
         can_spawn: false
         autoload_skills: [hugr-data]
+        compactor:
+          # data-analyst sessions accumulate many tool_call →
+          # tool_result pairs (GraphQL query attempts + jq
+          # refinements + schema introspection). Trigger by
+          # PROMPT TOKEN SIZE rather than turn count — tool
+          # results vary wildly (one truncated bucket = 2K
+          # tokens, one schema-type_fields page = 12K tokens),
+          # so a fixed turn cap fires too late on heavy turns
+          # and too early on light ones.
+          enabled: true
+          # Trip compaction once the estimated prompt size
+          # crosses 30K tokens. Leaves room for the
+          # preserved-recent tail (~5-10K) plus tools + skill
+          # prose without blowing past the upstream window.
+          max_tokens: 30000
+          # Secondary backstop: many empty / short turns still
+          # warrant compaction after a long stretch, even
+          # without crossing the token threshold.
+          max_turns: 40
+          # Keep the last 12 turns verbatim past the cutoff —
+          # enough live tail to follow a multi-step query
+          # refinement without losing the most recent attempts.
+          preserved_recent_turns: 12
+          min_turn_gap: 3
+          llm_intent: summarize
         tools:
           - provider: hugr-data
             tools: ['*']
@@ -696,6 +726,17 @@ metadata:
         intent: default
         can_spawn: false
         autoload_skills: [python-runner]
+        compactor:
+          # report-builder iterates on python-runner code +
+          # bash_write_file with HTML payloads (can be large).
+          # Trigger by PROMPT TOKEN SIZE — HTML chunks can be
+          # 10K+ tokens each, turn count doesn't reflect that.
+          enabled: true
+          max_tokens: 30000
+          max_turns: 40
+          preserved_recent_turns: 12
+          min_turn_gap: 3
+          llm_intent: summarize
         tools:
           - provider: python-runner
             tools: ['*']
