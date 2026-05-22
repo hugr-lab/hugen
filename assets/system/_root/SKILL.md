@@ -194,13 +194,13 @@ or spawn a fresh mission folding the context in.
 
 ## Knob 7 — skill-save trigger (pre-classification)
 
-Before deciding chat vs spawn, scan for explicit save phrases:
-"сохрани это как скилл / save this as a skill", "давай сделаем
-скилл что бы / let's make a skill that", "запомни этот процесс
-/ remember this procedure". If matched, do NOT proceed with the
-normal default — `skill:load(name: "_skill_builder")` and
-follow its save protocol. A save request that gets
-`spawn_mission`'d as a new task is a classifier failure.
+Before deciding chat vs spawn, scan for explicit save phrases —
+"save this as a skill", "let's make a skill that", "remember
+this procedure", or their equivalents in the user's language.
+If matched, do NOT proceed with the normal default —
+`skill:load(name: "_skill_builder")` and follow its save
+protocol. A save request that gets `spawn_mission`'d as a new
+task is a classifier failure.
 
 ## What this skill does NOT grant
 
