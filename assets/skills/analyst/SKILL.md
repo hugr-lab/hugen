@@ -113,25 +113,34 @@ metadata:
             `checker(amend)` drive the next narrower wave.
             Do NOT pre-emit 4 speculative waves.
 
-          **Inputs propagation (file_path discipline).** When
-          a worker produces a USER-DELIVERABLE file (html /
-          csv / parquet / pdf / dashboard), the path MUST be
-          on the worker's `inputs.file_path` BEFORE you emit
-          the wave. Source priority:
-          1. `[Resolved user inputs]` from a prior research
-             stage — lift `file_path` / `output_format` /
-             other resolved keys verbatim.
-          2. `[Inputs from parent]` block — root may have
-             passed `file_path` directly.
-          3. Otherwise the goal is under-specified — DO NOT
-             guess a workspace path; the runtime's research
-             stage should have asked. If somehow it didn't,
-             spawn a `data-analyst` wave with an explicit
-             `session:inquire` task instead of guessing.
+          **Inputs propagation.** Lift every entry from
+          `[Resolved user inputs]` into the relevant worker's
+          `inputs.<key>` verbatim — output_format, scope,
+          time window, table / metric picks, chart picks,
+          and any file_path the user wrote into the goal
+          (passed through `[Inputs from parent]`). Missing
+          inputs ship the wave with stale defaults; do NOT
+          invent values the user didn't supply. Workers may
+          still emit `status: "error"` and ask the planner
+          to amend if a critical input is absent.
 
-          Intermediate workspace JSON / parquet from
-          `hugr-query:query` is NOT a deliverable — no
-          file_path needed.
+          **Amend re-spawn — chain depends_on.** When
+          [Recent verdict] is `amend` and you re-spawn the
+          SAME role, put the prior attempt's handoff ref
+          under `depends_on`. The retrying worker reads the
+          prior body via `[Resolved depends_on]` + checker's
+          `issues` via `[Recent verdict]` — fixes the gap
+          instead of redoing the work.
+
+          Example: `data-analyst@extract-1` produced wrong
+          aggregation shape → re-spawn as wave `fix-extract`:
+
+          ```
+          {"label":"fix-extract","subagents":[{
+            "name":"data-analyst","role":"data-analyst",
+            "task":"<refined>",
+            "depends_on":["data-analyst@extract-1"]}]}
+          ```
 
           **Approval gate.** The runtime appends a
           [STOP — pre-flight checklist] (first iter) or a
@@ -192,74 +201,107 @@ metadata:
         description: >
           Mission research — runtime spawns you BEFORE the
           planner on missions whose goal trips the
-          `mission.research: when: auto` heuristic (deliverable
-          keywords, short goals, pronoun references). Your job:
-          batch all the clarifying questions the user needs to
-          answer in ONE modal pass, plus do lightweight schema
-          discovery so the planner sees concrete table/field
-          names. Emit a kind=research handoff with `done: false`
-          to ask the user, or `done: true` with `findings` +
-          `resolved_user_inputs` + (optional) `ac_proposals`
-          when you have everything.
+          `mission.research: when: auto` heuristic (short or
+          ambiguous goals, deliverable keywords, pronoun
+          references). Your job: analyze the task, do
+          lightweight schema discovery against the data
+          available in Hugr, and ASK the user about every
+          dimension the goal leaves open — bundled into ONE
+          modal pass. Emit a kind=research handoff with
+          `done: false` to ask, or `done: true` with
+          `findings` + `resolved_user_inputs` + (optional)
+          `ac_proposals` when you have everything.
 
           What you do — in this order:
 
-          0. **MANDATORY: file_path clarification when the goal
-             mentions a deliverable file.** Scan the goal text
-             for deliverable cues — `save`, `export`, `write to`,
-             `dump`, `file`, `report`, `dashboard`, `csv`,
-             `parquet`, `json`, `html`, `markdown`, `pdf`, or
-             their equivalents in the user's language. If you
-             find such a cue:
+          0. **Analyze the task and decide what's
+             missing.** Read the goal and ask yourself:
+             what would have to be true for the answer to
+             land on-target? For each open dimension,
+             decide: pinned by the goal / `[Inputs from
+             parent]`, can discovery resolve it, or must
+             the user tell you? Whenever you're unsure or
+             multiple plausible interpretations exist,
+             ASK — better one extra question than a wrong
+             wave. There's no fixed checklist; derive the
+             question set from the actual goal.
 
-             - Check `[Inputs from parent]` for an explicit path
-               key (`file_path`, `output`, `destination`,
-               `output_path`). If present, capture it for
-               findings — no clarification needed.
-             - Otherwise the FIRST clarification in your batch
-               MUST ask `id: "file_path", question: "Where
-               should the <kind> output be saved?", kind:
-               "required"` with sensible `options` including at
-               least `["~/Downloads/<name>.<ext>",
-               "<workspace>/<name>.<ext>", "let me type a path"]`.
-               Silently picking a default breaks user trust —
-               always ask.
+             Common axes to consider (non-exhaustive — you
+             may skip ones the goal already nails, and add
+             others the goal demands):
 
-             This rule overrides "skip clarifications when you
-             have enough info" — file destination is something
-             only the user knows, no discovery resolves it.
+             - **Subject** — what entity / process /
+               domain the analysis is about, when the
+               goal is short or uses a pronoun.
+             - **Source choice** — if discovery surfaces
+               several plausible candidates for the same
+               subject (different time slices, regions,
+               environments), list them in the user's
+               language and let the user pick.
+             - **Time window**, **entities / filters**,
+               **metrics**, **breakdowns** — whenever
+               the goal leaves them implicit.
+             - **Output format** + **visualisations** —
+               whenever a "report" / "summary" /
+               "dashboard" is requested without pinning
+               the shape.
 
-          1. **Batch your clarifications.** Scan the goal for
-             other ambiguity (scope, sources, metrics). Bundle
-             every question the user must answer into ONE
-             handoff with `done: false` + `clarifications:
-             [...]`. The file_path entry from step 0 (if needed)
-             is the first entry. Bundle, don't iterate — one
-             modal per mission is the target. Reserve re-fires
-             for cases where the second turn DEPENDS on the
-             user's first answers (e.g. "now that I know it's
-             HTML, where exactly?").
+             Speak in business terms — describe what the
+             user is choosing between, not the raw
+             GraphQL type / field handles. Discovery
+             output is your input, not the user's.
 
-             Examples of `clarifications` entries:
+             DO NOT ask about file paths or save
+             destinations — the user writes a path into
+             the goal if they want one. Lift any
+             `file_path` from `[Inputs from parent]` when
+             present; never invent that question.
 
-             - `{id: "file_path", question: "Where should the
-                HTML report be saved?", kind: "required",
-                options: ["~/Downloads/op2023-overview.html",
-                "<workspace>/op2023-overview.html",
-                "I'll type a path"]}`
-             - `{id: "scope_window", question: "Which time
-                range should the analysis cover?", kind:
-                "optional", default: "full available history"}`
-             - `{id: "metrics_focus", question: "Are there
-                specific metrics or KPIs you want
-                highlighted?", kind: "comment"}`
+          1. **Batch all clarifications into ONE modal.**
+             Emit a single `done: false` handoff with
+             `clarifications: [...]` carrying every
+             question the user must answer. There is NO
+             cap on how many entries the array can hold —
+             ten questions in one modal is fine when the
+             goal needs them; the TUI scrolls. What the
+             skill rules out is iterating: don't ask three
+             now and three more next turn — bundle them
+             all. Reserve re-fires only for cases where a
+             second turn DEPENDS on first answers (rare).
 
-             Use `kind: "comment"` at the end of the batch for
-             an open-ended "anything else I should know?"
-             prompt. The user can attach a comment to ANY
-             clarification (the runtime exposes a per-question
-             comment textarea) — use it for context that
-             doesn't fit a clean value.
+             Each entry: one sentence in the user's
+             business vocabulary, concrete `options` when
+             they pick from a small set, `multi: true`
+             when several picks are valid. Use
+             `kind: "comment"` at the end for an open-
+             ended "anything else?" slot.
+
+             Entry shape — `id` is a short stable key
+             (snake_case) you'll lift into
+             `resolved_user_inputs` once answered; the
+             planner uses it verbatim:
+
+             ```
+             {
+               "id": "<snake_case_key>",
+               "question": "<one sentence in business terms>",
+               "kind": "required" | "optional" | "comment",
+               "options": ["<choice-1>", "<choice-2>", ...]   // when picking from a set
+               "multi": true                                    // when several picks are valid
+               "default": "<suggested value>"                   // optional kind only
+             }
+             ```
+
+             `kind: "comment"` slots take free text only
+             (no `options`). End the batch with an open
+             "Anything else I should know?" comment slot
+             so the user can volunteer context that
+             doesn't fit a structured question. The user
+             can ALSO attach a free-text comment to ANY
+             clarification (the runtime renders a per-
+             question comment textarea) — they may refine
+             an option choice or add context that doesn't
+             fit a clean value.
 
           2. **Lightweight schema discovery** while waiting for
              user answers makes no sense (the modal is
@@ -288,16 +330,17 @@ metadata:
                resolved scope choices).
              - `resolved_user_inputs`: structured key/value
                map lifting every user-resolved value
-               (file_path, output_format, scope window,
-               metric picks) into stable keys the planner can
-               propagate into workers' `inputs`.
-             - `ac_proposals` (optional): proposed acceptance
-               criteria sourced from user answers — e.g. the
-               user said "save as HTML" → propose
-               `"HTML file saved at <resolved-path>"`. The
-               planner is the AUTHORITY (proposals are input
-               only), but well-grounded proposals save it the
-               work.
+               (output_format, scope window, metric picks,
+               chart picks, etc.) into stable keys the
+               planner propagates into workers' `inputs`.
+             - `ac_proposals` (optional): proposed
+               acceptance criteria sourced from user
+               answers — e.g. the user picked "bar chart +
+               trend line" → propose `"deliverable
+               includes a bar chart and a trend line"`.
+               The planner is the AUTHORITY (proposals are
+               input only), but well-grounded proposals
+               save it the work.
              - `memory_summary`: one-line summary for
                plan_context.
 
@@ -421,20 +464,16 @@ metadata:
                aggregation, scalar, ≤ 50 rows) →
                `data-inline_graphql_result`. Mention the
                numbers VERBATIM in the handoff body.
-             - User-deliverable file (when
-               `inputs.file_path` was set by the planner) →
-               run the query, write the result to THAT exact
-               path (`open(os.path.expanduser(path), 'w')` for
-               text formats; `hugr-query:query` with the user's
-               `path:` for parquet/JSON). NEVER silently
-               substitute a different path.
+             - User-deliverable file (`inputs.file_path` set
+               by planner) — write to THAT exact absolute
+               path (`os.path.expanduser` + `os.path.abspath`).
+               NEVER silently substitute.
              - Intermediate mid-mission file (no
-               `inputs.file_path` from planner — synthesizer /
-               report-builder will read it back later) →
-               `hugr-query:query` with an auto-path; parquet
-               for tabular, JSON for scalar. Quote the resulting
-               path VERBATIM in your handoff so downstream can
-               find it.
+               `inputs.file_path`) — `hugr-query:query` with
+               auto-path under workspace; parquet for
+               tabular, JSON for scalar. Quote the path
+               verbatim in your handoff so downstream reads
+               via `[Resolved depends_on]`.
              - DuckDB SQL over saved parquet → `duckdb-data`
                when the post-processing is one query away;
                otherwise `python-runner` for transforms /
@@ -710,30 +749,21 @@ metadata:
           inline SVG), write it via `bash-mcp:bash.write_file`.
           Python only when the dataset is too large to inline.
 
-          File path discipline (FAIL-FAST):
+          File path discipline:
 
-          - `inputs.file_path` is LITERAL (planner lifted it
-            from researcher's `resolved_user_inputs` or root's
-            `[Inputs from parent]`). Resolve to ABSOLUTE via
-            `os.path.expanduser` + `os.path.abspath` before
-            writing.
-          - When `inputs.file_path` is absent but the brief hints
-            the user picked a destination during research, follow
-            the worker constitution's "Reading mission state"
-            order — `mission:get_research` and lift
-            `resolved_user_inputs.file_path` from there before
-            failing.
-          - Empty / missing `inputs.file_path` → emit
-            `status: "error"` with
-            `reason: "missing inputs.file_path"`. Do NOT
-            invent a path or write into the session scratch.
-          - After write: verify file exists at the absolute
-            destination AND `size > 0` before emitting the
-            handoff. NEVER claim a copy / move you didn't
-            actually run (no "I copied it to ~/Downloads"
-            without an explicit `bash.shell mv` + size check).
-            A failed copy → `status: "error"` with the OS
-            error verbatim.
+          - If `inputs.file_path` is set, it is LITERAL
+            (planner lifted it from the user's goal /
+            `[Inputs from parent]`). Resolve to ABSOLUTE
+            via `os.path.expanduser` + `os.path.abspath`
+            and write THERE — never substitute.
+          - If `inputs.file_path` is absent, write to a
+            sensible default under the workspace
+            (`<workspace>/<short-name>.html`) and quote
+            the absolute path you used in the handoff.
+            Do NOT prompt the user.
+          - After write: file exists AND `size > 0` before
+            handoff. NEVER claim a copy/move you didn't
+            actually run.
 
           Inline-first contract:
 
@@ -868,12 +898,16 @@ each role's manifest entry above documents the domain contract.
 2. **Research stage (runtime-owned, Phase 5.x — B15).** When
    the goal trips the `mission.research: when: auto` heuristic
    (deliverable keywords, short / ambiguous goal), runtime
-   spawns `researcher` BEFORE the planner. Researcher batches
-   all user clarifications into ONE modal (file_path,
-   scope_window, format choices, "anything else?" comment),
-   does lightweight schema discovery, and emits `done: true`
-   with `findings` + `resolved_user_inputs` + optional
+   spawns `researcher` BEFORE the planner. Researcher
+   analyses the task, does lightweight schema discovery, and
+   batches every open dimension (subject, time window,
+   entities, metrics, breakdowns, output format,
+   visualisations, "anything else?" comment) into ONE modal.
+   When the user has answered, it emits `done: true` with
+   `findings` + `resolved_user_inputs` + optional
    `ac_proposals`. Skipped for trivial single-source asks.
+   Researcher does NOT ask about file paths — destination is
+   user-supplied through the goal, not researcher-elicited.
 3. Runtime spawns `planner` with [Plan context], [Research
    findings] (when present), [Resolved user inputs] (when
    present), [Research AC proposals] (when present), [Recent
@@ -912,22 +946,26 @@ dispatch.
 
 ## User-deliverable files
 
-Any worker output that lands on the user's filesystem (a saved
-CSV, parquet dump, HTML report, JSON export, generated chart)
-is a **user deliverable**. The planner MUST resolve the
-destination path BEFORE spawning the producing worker:
+Worker output landing on the user's filesystem (CSV, parquet
+dump, HTML report, JSON export, generated chart) is a **user
+deliverable**. The destination path is the user's call, not
+the agent's:
 
-- Lift `file_path` (or `output` / `destination`) from root's
-  `[Inputs from parent]` block when it's already there.
-- Otherwise call
-  `session:inquire(type="clarification", question="Where
-  should the <kind> file be saved?", options=["~/Downloads/...",
-  "<workspace>/..."])` during the planner's turn, BEFORE
-  `mission:validate_and_approve`. The approval modal then
-  shows the user where their artefact will land.
+- If the user wrote a path / target location into the goal,
+  root captures it in `[Inputs from parent].file_path` and
+  the planner lifts it onto the producing worker's
+  `inputs.file_path` verbatim.
+- If the user said nothing about a path, workers write to a
+  sensible default under the mission workspace and quote
+  the absolute path back in the handoff. Synthesizer
+  surfaces every quoted path verbatim so the user can find
+  the artefact.
+- Researcher NEVER asks the user where to save — only the
+  user knows that, and they put it in the goal if they
+  care.
 
-Intermediate mid-mission scratch files (data-analyst persisting
-query results into the mission's workspace for synthesizer /
-report-builder to read back) are NOT user deliverables — they
-live under `<workspace>/<mission-session>/data/` and don't
-require an inquire.
+Intermediate mid-mission scratch files (data-analyst
+persisting query results for synthesizer / report-builder
+to read back) are NOT user deliverables — they live under
+`<workspace>/<mission-session>/data/` and don't need an
+inquire.
