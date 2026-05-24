@@ -103,7 +103,37 @@ type MissionState struct {
 	// accepts a planner handoff. Surfaced in the checker's task as
 	// `[Mission acceptance criteria]`; the checker emits per-
 	// criterion satisfied flags in its verdict body. Phase I.26.
+	//
+	// DEPRECATED: superseded by `ac []AcceptanceCriterion` below
+	// (B11 § 3, structured AC with identity). Retained for the α
+	// data-only slice; β removes the legacy path and rewires every
+	// SetMissionFrame call site onto the new model.
 	currentMissionAC []string
+
+	// ac is the identity-bearing list of acceptance criteria — the
+	// single source of truth for what the mission must deliver. Each
+	// row carries id / statement / origin / status / evidence + iter
+	// stamps. Mutated only via the helpers in state_ac.go (SeedAC,
+	// CommitStagedDiff, ApplyStatusOnly, ApplyWorkerSatisfies); never
+	// touch the slice directly outside that file.
+	//
+	// Phase 5.x — B11.
+	ac []AcceptanceCriterion
+
+	// nextACID is the monotonically-increasing id counter for new
+	// rows. Runtime stamps "ac-<nextACID>" on every ac_add then
+	// increments. IDs are never reused inside a mission — even
+	// dropped rows keep theirs for audit.
+	nextACID int
+
+	// pendingDiff is the staged planner diff awaiting approval. Set
+	// by StagePlannerDiff when the planner emits a contract-changing
+	// or requires_reapproval iter; cleared by CommitStagedDiff
+	// (modal-approve / refine) or DiscardStagedDiff (modal-reject).
+	// Nil between approval gates.
+	//
+	// Phase 5.x — B11 §3.2.1.
+	pendingDiff *stagedDiff
 
 	// currentWaveAC tracks the acceptance criteria of the wave
 	// currently in flight (or just completed). Set by
