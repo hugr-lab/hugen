@@ -451,13 +451,18 @@ func (e *Extension) spawnAndAwaitPlanner(ctx context.Context, executor *Executor
 			return nil, &PlannerError{Iteration: iteration, Reason: msg}
 		}
 	}
-	// Phase I.26 — snapshot the planner's current mission frame
-	// (goal restatement + mission AC + wave AC) so the checker sees
-	// the latest definition of done. plan_complete (nil plan) skips
-	// the snapshot — the existing frame remains as the synthesizer's
-	// reference.
+	// Phase 5.x — B11 §3.2: every AC mutation funnels through
+	// callValidateAndApprove (stage / commit / apply-status-only) at
+	// modal time. The planner's fence carries the same diff as the
+	// validated body, so by the time we get here the AC state has
+	// already been reconciled. We only stamp the goal restatement +
+	// per-wave AC slot — both are non-load-bearing across approval
+	// gates (the contract part of `[Mission acceptance criteria]` is
+	// the structured state.AC, which validate_and_approve committed).
+	// plan_complete (nil plan) preserves the existing frame as the
+	// synthesizer's reference.
 	if plan != nil && plan.NextWave.Label != "" {
-		m.SetMissionFrame(plan.MissionGoal, plan.MissionAcceptanceCriteria, plan.NextWave.AcceptanceCriteria)
+		m.SetGoalAndWaveAC(plan.MissionGoal, plan.NextWave.AcceptanceCriteria)
 	}
 	return plan, nil
 }
@@ -704,6 +709,32 @@ type plannerTaskView struct {
 	// the authority — proposals are input only (§3.2.1). Phase
 	// 5.x — B15.
 	ResearchACProposals []researchACProposalView
+	// MissionAC is the current acceptance-criteria roster (with
+	// identity) rendered into [Mission acceptance criteria]. Rows
+	// stay visible across the lifecycle — dropped entries surface
+	// so the planner knows not to re-propose them; satisfied rows
+	// remain so the planner sees what's already covered. Empty on
+	// iter 1 before any manifest / research seeding. Phase 5.x —
+	// B11 §3.4.
+	MissionAC []plannerACView
+}
+
+// plannerACView is one row of the [Mission acceptance criteria]
+// table the planner reads at every iteration. Carries enough
+// context for the planner to:
+//   - reference rows by `id` in `ac_update`,
+//   - skip status-only re-emits (status already tracked),
+//   - avoid re-proposing dropped rows by accident.
+type plannerACView struct {
+	ID            string
+	Statement     string
+	Origin        string
+	Status        string
+	LastEvidence  string
+	AddedAtIter   int
+	SatisfiedIter int
+	Dropped       bool
+	DropReason    string
 }
 
 // researchACProposalView is one row in the [Research AC proposals]
@@ -795,6 +826,7 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		view.ResearchFindings = findings
 		view.ResolvedUserInputs = projectResolvedInputsForTemplate(resolvedInputs)
 		view.ResearchACProposals = projectACProposalsForTemplate(acProposals)
+		view.MissionAC = projectMissionACForTemplate(m.ACSnapshot())
 	}
 	if recentVerdict != nil {
 		view.RecentVerdict = &plannerVerdictView{
@@ -808,6 +840,33 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		return "", fmt.Errorf("mission: planner task: no prompts renderer on session")
 	}
 	return renderer.Render("mission/planner_task", view)
+}
+
+// projectMissionACForTemplate copies state.AC rows into the
+// flat plannerACView shape the planner_task template renders.
+// Dropped rows still surface so the planner sees not to
+// re-propose them (with the "dropped" flag + reason); satisfied
+// rows surface so the planner can see what's already covered
+// without re-emitting status. Phase 5.x — B11 §3.4.
+func projectMissionACForTemplate(rows []AcceptanceCriterion) []plannerACView {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]plannerACView, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, plannerACView{
+			ID:            r.ID,
+			Statement:     r.Statement,
+			Origin:        r.Origin,
+			Status:        string(r.Status),
+			LastEvidence:  r.LastEvidence,
+			AddedAtIter:   r.AddedAtIter,
+			SatisfiedIter: r.SatisfiedAtIter,
+			Dropped:       r.Status == ACDropped,
+			DropReason:    r.DropReason,
+		})
+	}
+	return out
 }
 
 // collectPlanContext projects PlanContext.List() into the

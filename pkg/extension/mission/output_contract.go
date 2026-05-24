@@ -225,29 +225,21 @@ func validateRequired(kind OutputContractKind, h Handoff, raw map[string]any) er
 			if len(subs) == 0 {
 				return &ParseError{Reason: "kind=plan: body.next_wave.subagents must list at least one worker"}
 			}
-			// Phase I.26 — mission_goal + mission_acceptance_criteria
-			// are REQUIRED on every non-complete plan. They drive the
-			// checker's exit gate (and surface in the approval modal
-			// so the user can refine if the planner misread the goal).
+			// Phase I.26 → Phase 5.x B11 §3.2: mission_goal stays
+			// required (planner's current restatement of intent).
+			// Acceptance criteria now flow as diffs — ac_add / ac_update
+			// — instead of a re-emitted full list. Either, both, or
+			// neither may be present on a given iteration; the runtime
+			// applies the diff over `state.AC` and enforces the
+			// "first-iter must populate AC" gate at the planner-loop
+			// level (where it sees both the manifest seed and the
+			// planner's diff together).
 			goal, _ := body["mission_goal"].(string)
 			if strings.TrimSpace(goal) == "" {
 				return &ParseError{Reason: "kind=plan: body.mission_goal is required (planner's current restatement of what the mission delivers)"}
 			}
-			acRaw, present := body["mission_acceptance_criteria"]
-			if !present {
-				return &ParseError{Reason: "kind=plan: body.mission_acceptance_criteria is required (array of strings — what makes the mission `finish`-able)"}
-			}
-			acList, ok := acRaw.([]any)
-			if !ok {
-				return &ParseError{Reason: "kind=plan: body.mission_acceptance_criteria must be an array of strings"}
-			}
-			if len(acList) == 0 {
-				return &ParseError{Reason: "kind=plan: body.mission_acceptance_criteria must contain at least one criterion"}
-			}
-			for i, e := range acList {
-				if s, ok := e.(string); !ok || strings.TrimSpace(s) == "" {
-					return &ParseError{Reason: fmt.Sprintf("kind=plan: body.mission_acceptance_criteria[%d] must be a non-empty string", i)}
-				}
+			if err := validatePlanACDiffWire(body); err != nil {
+				return err
 			}
 		}
 	case KindVerdict:
@@ -434,6 +426,71 @@ func DecodePlan(h Handoff) (*Plan, error) {
 		return nil, fmt.Errorf("mission: DecodePlan: next_wave.subagents is empty after decode")
 	}
 	return &p, nil
+}
+
+// validatePlanACDiffWire shape-checks body.ac_add / body.ac_update
+// against the §3.2 wire schema. Both fields are optional at this
+// layer — the planner loop enforces "≥1 AC must exist after iter 1
+// applies its diff" because that check needs state context. Here we
+// only verify what's present is well-formed.
+func validatePlanACDiffWire(body map[string]any) error {
+	if addRaw, ok := body["ac_add"]; ok && addRaw != nil {
+		addList, ok := addRaw.([]any)
+		if !ok {
+			return &ParseError{Reason: "kind=plan: body.ac_add must be an array (omit when empty)"}
+		}
+		for i, e := range addList {
+			entry, ok := e.(map[string]any)
+			if !ok {
+				return &ParseError{Reason: fmt.Sprintf("kind=plan: body.ac_add[%d] must be an object {statement, origin?}", i)}
+			}
+			stmt, _ := entry["statement"].(string)
+			if strings.TrimSpace(stmt) == "" {
+				return &ParseError{Reason: fmt.Sprintf("kind=plan: body.ac_add[%d].statement is required (non-empty string)", i)}
+			}
+		}
+	}
+	if updRaw, ok := body["ac_update"]; ok && updRaw != nil {
+		updList, ok := updRaw.([]any)
+		if !ok {
+			return &ParseError{Reason: "kind=plan: body.ac_update must be an array (omit when empty)"}
+		}
+		for i, e := range updList {
+			entry, ok := e.(map[string]any)
+			if !ok {
+				return &ParseError{Reason: fmt.Sprintf("kind=plan: body.ac_update[%d] must be an object {id, statement?, drop?, status?, evidence?}", i)}
+			}
+			id, _ := entry["id"].(string)
+			if strings.TrimSpace(id) == "" {
+				return &ParseError{Reason: fmt.Sprintf("kind=plan: body.ac_update[%d].id is required (e.g. \"ac-1\")", i)}
+			}
+			stmt, hasStmt := entry["statement"].(string)
+			hasStmtField := hasStmt && strings.TrimSpace(stmt) != ""
+			drop, _ := entry["drop"].(bool)
+			status, hasStatus := entry["status"].(string)
+			hasStatusField := hasStatus && strings.TrimSpace(status) != ""
+			if !hasStmtField && !drop && !hasStatusField {
+				return &ParseError{Reason: fmt.Sprintf("kind=plan: body.ac_update[%d] must carry at least one of statement / drop / status", i)}
+			}
+			if drop {
+				reason, _ := entry["drop_reason"].(string)
+				if strings.TrimSpace(reason) == "" {
+					return &ParseError{Reason: fmt.Sprintf("kind=plan: body.ac_update[%d].drop=true requires drop_reason (one short sentence)", i)}
+				}
+			}
+			if hasStatusField {
+				switch ACStatus(strings.TrimSpace(status)) {
+				case ACUnsatisfied, ACSatisfied:
+					// ok
+				case ACDropped:
+					return &ParseError{Reason: fmt.Sprintf("kind=plan: body.ac_update[%d].status=\"dropped\" is not a wire value — set drop=true with drop_reason instead", i)}
+				default:
+					return &ParseError{Reason: fmt.Sprintf("kind=plan: body.ac_update[%d].status=%q is not one of unsatisfied|satisfied", i, status)}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func truncateBody(s string, n int) string {

@@ -107,9 +107,15 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 
 	// Mission-level escape hatch — when the policy explicitly opts
 	// out of approvals (Initial=skip), flip the approved bit and
-	// return without inquiring. Used by automation / test missions.
+	// return without inquiring. AC diff still applies (no modal, so
+	// status-only and contract-add land in one immediate commit).
 	policy := mState.PlannerApproval()
 	if !approvalRequiredForIteration(policy, 0, mState) {
+		if plan != nil {
+			if err := applyPlanACForPolicySkip(mState, *plan); err != nil {
+				return toolErr("internal", "apply ac diff (policy_skip): "+err.Error())
+			}
+		}
 		mState.MarkPlanApproved()
 		e.emitPlanApproved(parent, planApprovedPayload{Trigger: "policy_skip"})
 		return emitValidateResult(validateResult{Approved: true})
@@ -122,19 +128,42 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 		return emitValidateResult(validateResult{Approved: true})
 	}
 
-	if !shouldOpenApprovalModal(mState, plan) {
+	// Decide modal up front so the diff merge knows which path to
+	// take. Status-only diffs that pass through the no-modal branch
+	// still apply immediately — they're not contract changes.
+	wantModal := shouldOpenApprovalModal(mState, plan)
+	if !wantModal {
+		if err := applyPlanACSilent(mState, *plan); err != nil {
+			return toolErr("internal", "apply ac diff (silent): "+err.Error())
+		}
 		return emitValidateResult(validateResult{Approved: true})
 	}
 
-	// Open the modal. Build the inquiry payload from the typed plan
-	// body so the user reads the same contract the runtime will
-	// commit to.
+	// Modal needed. Stage the diff so the renderer can overlay the
+	// proposed changes; the user sees the contract they're signing.
+	// On approve, CommitStagedDiff folds the staged set into state.AC;
+	// on refine/abort, DiscardStagedDiff drops it without mutating.
+	stagedReason := strings.TrimSpace(plan.ReapprovalReason)
+	if stagedReason == "" {
+		diff := ACDiff{Add: plan.ACAdd, Update: plan.ACUpdate}
+		if diff.HasContractChange() && !plan.RequiresReapproval {
+			stagedReason = "planner emitted contract diff (auto-promoted to re-approval)"
+		}
+	}
+	stageDiff := ACDiff{Add: plan.ACAdd, Update: plan.ACUpdate}
+	if !stageDiff.IsEmpty() {
+		if err := mState.StagePlannerDiff(stageDiff, mState.IterationCounter, PlannerOriginAt(mState.IterationCounter), stagedReason); err != nil {
+			return toolErr("internal", "stage planner ac diff: "+err.Error())
+		}
+	}
+
 	pendingReason := ""
 	if pending, reason := mState.PendingReapproval(); pending {
 		pendingReason = reason
 	}
 	question, qErr := renderApprovalQuestion(parent, *plan)
 	if qErr != nil {
+		mState.DiscardStagedDiff()
 		return toolErr("internal", "render approval question: "+qErr.Error())
 	}
 	resp, inqErr := parent.RequestInquiry(ctx, protocol.InquiryRequestPayload{
@@ -143,13 +172,18 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 		Context:  approvalContextFor(*plan, pendingReason),
 	})
 	if inqErr != nil {
+		mState.DiscardStagedDiff()
 		return toolErr("inquire_failed", inqErr.Error())
 	}
 	if resp == nil {
+		mState.DiscardStagedDiff()
 		return toolErr("inquire_failed", "nil response from inquire")
 	}
 	approved, refine, aborted, reason := interpretValidateApprovalResponse(resp)
 	if approved {
+		if _, err := mState.CommitStagedDiff(ACDiff{}); err != nil {
+			return toolErr("internal", "commit staged ac diff: "+err.Error())
+		}
 		mState.MarkPlanApproved()
 		e.emitPlanApproved(parent, planApprovedPayload{Trigger: "user_modal", Reason: reason})
 		return emitValidateResult(validateResult{
@@ -157,12 +191,47 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 			Reason:   reason,
 		})
 	}
+	mState.DiscardStagedDiff()
 	return emitValidateResult(validateResult{
 		Approved:   false,
 		Aborted:    aborted,
 		RefineText: refine,
 		Reason:     reason,
 	})
+}
+
+// applyPlanACSilent applies the planner's diff immediately when the
+// approval modal is not opening. Status-only ac_update entries pass
+// through ApplyStatusOnly; ac_add entries (which always trigger
+// contract change) should not reach this branch — shouldOpenApprovalModal
+// auto-promotes contract diffs to modal. Defensive: error out if any
+// contract change leaked here, so we never silently bypass approval
+// on a contract change.
+func applyPlanACSilent(m *MissionState, plan Plan) error {
+	diff := ACDiff{Add: plan.ACAdd, Update: plan.ACUpdate}
+	if diff.HasContractChange() {
+		return fmt.Errorf("applyPlanACSilent invoked with contract change diff — shouldOpenApprovalModal must auto-promote")
+	}
+	if len(plan.ACUpdate) == 0 {
+		return nil
+	}
+	return m.ApplyStatusOnly(plan.ACUpdate, m.IterationCounter, PlannerOriginAt(m.IterationCounter))
+}
+
+// applyPlanACForPolicySkip stages then immediately commits the
+// planner's diff for missions whose approval policy is `skip`. No
+// modal opens, so we honour the planner's diff verbatim — adds + all
+// updates apply with the planner-iter origin.
+func applyPlanACForPolicySkip(m *MissionState, plan Plan) error {
+	diff := ACDiff{Add: plan.ACAdd, Update: plan.ACUpdate}
+	if diff.IsEmpty() {
+		return nil
+	}
+	if err := m.StagePlannerDiff(diff, m.IterationCounter, PlannerOriginAt(m.IterationCounter), "policy_skip — applied without modal"); err != nil {
+		return err
+	}
+	_, err := m.CommitStagedDiff(ACDiff{})
+	return err
 }
 
 // shouldOpenApprovalModal applies the B13 gate. Returns true when
@@ -192,6 +261,14 @@ func shouldOpenApprovalModal(m *MissionState, plan *Plan) bool {
 	}
 	if plan != nil && plan.RequiresReapproval {
 		return true
+	}
+	// B11 §3.2.1 auto-promote: contract diffs always open the modal,
+	// even when the planner forgot the flag.
+	if plan != nil {
+		diff := ACDiff{Add: plan.ACAdd, Update: plan.ACUpdate}
+		if diff.HasContractChange() {
+			return true
+		}
 	}
 	return false
 }

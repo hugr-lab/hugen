@@ -97,19 +97,6 @@ type MissionState struct {
 	// Phase I.26.
 	currentMissionGoal string
 
-	// currentMissionAC is the latest planner's list of mission
-	// acceptance criteria. Snapshotted from
-	// Plan.MissionAcceptanceCriteria after spawnAndAwaitPlanner
-	// accepts a planner handoff. Surfaced in the checker's task as
-	// `[Mission acceptance criteria]`; the checker emits per-
-	// criterion satisfied flags in its verdict body. Phase I.26.
-	//
-	// DEPRECATED: superseded by `ac []AcceptanceCriterion` below
-	// (B11 § 3, structured AC with identity). Retained for the α
-	// data-only slice; β removes the legacy path and rewires every
-	// SetMissionFrame call site onto the new model.
-	currentMissionAC []string
-
 	// ac is the identity-bearing list of acceptance criteria — the
 	// single source of truth for what the mission must deliver. Each
 	// row carries id / statement / origin / status / evidence + iter
@@ -335,26 +322,43 @@ func (m *MissionState) PendingReapproval() (bool, string) {
 	return m.pendingReapproval, m.pendingReapprovalReason
 }
 
-// SetMissionFrame stamps the planner's current understanding of
-// what the mission delivers + the exit criteria the checker reads.
-// Called by spawnAndAwaitPlanner when accepting a non-complete
-// plan; latest wins (each iteration's planner re-emits the full
-// list, runtime keeps the snapshot). Phase I.26.
-func (m *MissionState) SetMissionFrame(goal string, mission []string, wave []string) {
+// SetGoalAndWaveAC stamps the planner's restated mission_goal and
+// the per-wave acceptance criteria. The MISSION-level AC list is no
+// longer carried as a flat string slice — it now lives on state.AC
+// (the structured B11 model) and is mutated through StagePlannerDiff
+// / CommitStagedDiff / ApplyStatusOnly / ApplyWorkerSatisfies.
+//
+// Empty mission goal is accepted (matches the prior SetMissionFrame
+// behaviour, which trimmed whitespace and stored regardless). Wave
+// AC may be empty when the planner didn't narrow.
+//
+// Phase 5.x — B11 §3.2.
+func (m *MissionState) SetGoalAndWaveAC(goal string, wave []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.currentMissionGoal = strings.TrimSpace(goal)
-	m.currentMissionAC = append(m.currentMissionAC[:0:0], mission...)
 	m.currentWaveAC = append(m.currentWaveAC[:0:0], wave...)
 }
 
-// MissionFrame reads the latest planner-set frame. Returns empty
-// values when no plan has been accepted yet. Phase I.26.
+// MissionFrame returns (goal, mission-AC statements, wave-AC). The
+// mission-AC slice is a fresh projection of state.AC: rows whose
+// status != dropped, in insertion order, with statement-only
+// rendering. Empty list when no AC seeded yet. Used by the checker
+// task template + approval modal renderer for the legacy
+// string-bullet view while the structured ac_view (ζ) lands.
+//
+// Phase 5.x — B11 §3.2 (was Phase I.26's SetMissionFrame snapshot).
 func (m *MissionState) MissionFrame() (goal string, mission []string, wave []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	mission = append([]string(nil), m.currentMissionAC...)
 	wave = append([]string(nil), m.currentWaveAC...)
+	mission = make([]string, 0, len(m.ac))
+	for _, row := range m.ac {
+		if row.Status == ACDropped {
+			continue
+		}
+		mission = append(mission, row.Statement)
+	}
 	return m.currentMissionGoal, mission, wave
 }
 

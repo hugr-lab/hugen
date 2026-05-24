@@ -42,13 +42,27 @@ type Plan struct {
 	// plan_complete state). Phase I.26.
 	MissionGoal string `json:"mission_goal,omitempty" yaml:"mission_goal,omitempty"`
 
-	// MissionAcceptanceCriteria is the planner's CURRENT list of
-	// exit conditions — the statements that must be true for the
-	// mission to be `finish`-able. Plain strings, evaluated
-	// semantically by the checker. Required when `next_wave` is
-	// non-null. Each iteration's planner re-emits the full list
-	// (latest replaces previous on MissionState). Phase I.26.
-	MissionAcceptanceCriteria []string `json:"mission_acceptance_criteria,omitempty" yaml:"mission_acceptance_criteria,omitempty"`
+	// ACAdd is the planner's per-iter ac_add diff: new acceptance
+	// criteria the planner proposes for this iteration. Runtime mints
+	// an `ac-N` id on apply, stamps origin `planner_iter_N` (unless
+	// the entry carries its own — e.g. `research_proposal` for AC
+	// promoted from the research findings). Phase 5.x — B11 §3.2.
+	//
+	// Empty on iters where the planner doesn't introduce new
+	// criteria. On iteration 1 the planner SHOULD emit ≥1 ac_add
+	// entry OR the mission must have manifest-seeded AC; an empty
+	// AC set on iter 1 fails the runtime's pre-execution check.
+	//
+	// Every ac_add triggers approval-modal reopen (contract change
+	// per §3.2.1).
+	ACAdd []ACAddSpec `json:"ac_add,omitempty" yaml:"ac_add,omitempty"`
+
+	// ACUpdate is the planner's per-iter ac_update diff: changes to
+	// existing rows (statement rewrite, drop, status). Status-only
+	// entries apply immediately; statement / drop entries are staged
+	// and applied only after the user closes the approval modal.
+	// Phase 5.x — B11 §3.2.
+	ACUpdate []ACUpdateSpec `json:"ac_update,omitempty" yaml:"ac_update,omitempty"`
 
 	// NextWave is the wave the executor will run immediately. Phase
 	// A only ever has exactly one wave (hardcoded); phase B onwards

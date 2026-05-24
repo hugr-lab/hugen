@@ -7,6 +7,15 @@ handoff, signal that the mission is complete.
 
 [Iteration]
 {{.Iteration}}{{if .MaxWaves}} of {{.MaxWaves}}{{end}}
+{{if .MissionAC}}
+[Mission acceptance criteria]
+{{range .MissionAC}}- `{{.ID}}` [{{.Status}}{{if .Dropped}}: {{.DropReason}}{{end}}] {{.Statement}}{{if .LastEvidence}} — evidence: {{.LastEvidence}}{{end}}
+{{end}}
+Each row has a stable id (`ac-N`). Reference rows by id in your
+`ac_update` entries — NEVER invent ids. Rows already satisfied
+or dropped stay visible so you know what's covered; do not
+re-emit them as `ac_add` (they're already in the contract).
+{{end}}
 
 {{if eq .Iteration 1}}[First iteration]
 This is the FIRST planner spawn for the mission. No waves have run
@@ -48,9 +57,10 @@ silently lost.
 {{range .ResearchACProposals}}- {{.Statement}}{{if .Rationale}} ({{.Rationale}}){{end}}
 {{end}}
 The research role proposed these acceptance criteria based on
-the user's answers. YOU are the authority on what becomes
-`mission_acceptance_criteria` — accept, drop, or rewrite as you
-see fit. Document non-trivial decisions in `rationale`.
+the user's answers. YOU are the authority on what lands in the
+mission's acceptance criteria — accept by emitting an `ac_add`
+entry, drop silently (do not emit), or rewrite the statement
+before adding. Document non-trivial decisions in `rationale`.
 {{end}}{{if .PlanContext}}
 [Plan context]
 {{range .PlanContext}}- iteration {{.Iteration}} ({{.Phase}}): {{.Summary}}
@@ -84,11 +94,11 @@ decision: {{.Decision}}
 {{end}}{{end}}{{if .ApprovalRequired}}
 [approval_required]
 This iteration requires user sign-off on the mission
-contract — `mission_goal` + `mission_acceptance_criteria`.
-You MUST call `mission:validate_and_approve` with your final
-plan body BEFORE emitting your fenced ```plan``` block. The
-runtime rejects any planner handoff that did not pass through
-that tool.
+contract — `mission_goal` + the structured acceptance
+criteria list. You MUST call `mission:validate_and_approve`
+with your final plan body BEFORE emitting your fenced
+```plan``` block. The runtime rejects any planner handoff
+that did not pass through that tool.
 
 The tool atomically: (a) validates the plan shape — invalid
 returns `{ valid: false, errors: [...] }` and you fix +
@@ -97,9 +107,9 @@ this iteration (see rules below); (c) returns
 `{ valid: true, approved: bool, refine_text?: string,
    aborted?: bool, reason?: string }`.
 
-The runtime opens the approval modal ONLY when one of these
-is true; otherwise the call returns `approved: true`
-silently and the prior approval stands:
+The runtime opens the approval modal when one of these is
+true; otherwise the call returns `approved: true` silently
+and the prior approval stands:
 
 - First plan in this mission — no approval on file yet, so
   the user MUST see the first plan.
@@ -107,27 +117,24 @@ silently and the prior approval stands:
   true` (and optionally `invalidates_reason: "<short
   text>"`) — the runtime carries that signal until the next
   modal closes approve.
-- THIS body sets `requires_reapproval: true` — you, the
+- This body sets `requires_reapproval: true` — you, the
   planner, are signalling that something material changed
   since the last approved iteration.
+- Auto-promote: this body carries ANY contract-change
+  diff — `ac_add` entries OR `ac_update` entries with
+  `statement` or `drop` set. The runtime opens the modal
+  even when you forgot the flag (contract changes always
+  need user sign-off).
 
 Set `body.requires_reapproval: true` ONLY when the strategic
-contract changed since the user's last approval:
-
-- `mission_goal` reworded with a different intent (not
-  cosmetic phrasing — actual scope shift).
-- An acceptance criterion ADDED, DROPPED, or rewritten so
-  the satisfaction test materially changes.
-- A new constraint surfaced from refine-loop or worker
-  findings that the user did not see in the prior modal.
-
-Pair it with `body.reapproval_reason: "<one short
-sentence>"` so the user understands what changed (renders
-in the modal's context line). Leave `requires_reapproval:
-false` (or omit it) when only `next_wave` / `roadmap` /
-`rationale` evolved with the same goal + AC. Cosmetic
-re-wording of the goal text does NOT warrant re-approval —
-keep the user's signed-off contract intact.
+contract changed since the user's last approval — and pair
+it with `body.reapproval_reason: "<one short sentence>"` so
+the user understands what changed. Cosmetic re-wording of
+`mission_goal` does NOT warrant re-approval; keep the user's
+signed-off contract intact. Status-only `ac_update` entries
+(marking ids satisfied / unsatisfied without rewriting the
+statement) also pass silently — they're status tracking,
+not contract changes.
 
 Response branches:
 
@@ -149,9 +156,9 @@ sees them in the modal):
 
 - `body.mission_goal` must be a single concise sentence —
   the user reads it as the headline of the modal.
-- `body.mission_acceptance_criteria` entries must each be a
-  short, singularly-satisfiable statement — the user scans
-  them to decide whether to approve.
+- Every `ac_add[i].statement` must be a short, singularly-
+  satisfiable statement — the user scans them to decide
+  whether to approve.
 - `body.rationale` must be one or two clear sentences — the
   user reads them as the inquire's Context.
 - Every roadmap entry must carry a short `description` so
@@ -221,7 +228,7 @@ Reply with a single fenced block — nothing else, no narration.
 To request the next wave:
 
 ```plan
-{"status":"ok","body":{"mission_goal":"<your current restatement of what the mission delivers>","mission_acceptance_criteria":["<criterion 1>","<criterion 2>"],"next_wave":{"label":"<kebab-case-label>","subagents":[{"name":"<short-name>","role":"<role-from-sub_agents>","task":"<one-paragraph plain-prose brief>"}],"skip_check":false,"acceptance_criteria":["<wave criterion>"]},"roadmap":[{"label":"<later-wave-label>","description":"<one-line what this wave will accomplish>"}],"rationale":"<why this wave next>"}}
+{"status":"ok","body":{"mission_goal":"<your current restatement of what the mission delivers>","ac_add":[{"statement":"<new criterion 1>"},{"statement":"<new criterion 2>"}],"ac_update":[{"id":"ac-1","status":"satisfied","evidence":"wave-1 handoff confirms"}],"next_wave":{"label":"<kebab-case-label>","subagents":[{"name":"<short-name>","role":"<role-from-sub_agents>","task":"<one-paragraph plain-prose brief>"}],"skip_check":false,"acceptance_criteria":["<wave criterion>"]},"roadmap":[{"label":"<later-wave-label>","description":"<one-line what this wave will accomplish>"}],"rationale":"<why this wave next>"}}
 ```
 
 Optional `next_wave.skip_check: true` lets the runtime SKIP
@@ -247,15 +254,6 @@ inside must parse. Required keys when `next_wave` is non-null:
   arrives (worker findings, refine-loop feedback,
   mission:notify follow-ups). The checker compares it against
   the raw user goal to detect drift.
-- `body.mission_acceptance_criteria` — array of plain-string
-  exit conditions. Each entry is a statement that MUST be true
-  for the mission to be `finish`-able. Phrase them so a
-  satisfied/unsatisfied judgement is straightforward —
-  "HTML file saved at <path>", "Aggregations cover all 4
-  tables", "Charts render client-side". One or more required.
-  Re-emit the FULL list every iteration (overwrites the prior
-  snapshot — drop satisfied items at your discretion, ADD new
-  ones the research surfaced).
 - `body.next_wave` — the wave to run next. Carries `label`
   (kebab-case, unique per mission) and one or more `subagents`
   (each with `name`, `role`, `task`).
@@ -274,8 +272,34 @@ inside must parse. Required keys when `next_wave` is non-null:
   wave.
 
 For `next_wave: null` (mission complete) — only `roadmap` and
-`rationale` are required; mission_goal / mission_acceptance_criteria
-are ignored on this branch (the existing mission frame stands).
+`rationale` are required; mission_goal / AC diff fields are
+ignored on this branch (the existing mission frame stands).
+
+Acceptance criteria — diff channels (B11):
+
+- `body.ac_add` — array of `{statement, origin?}` entries. Each
+  becomes a new `ac-<N>` row the runtime mints. Required on
+  iteration 1 unless the skill manifest seeded AC for you. On
+  later iterations emit only when the user's input or worker
+  findings reveal a NEW exit condition the prior contract
+  missed. Every `ac_add` is a contract change and reopens the
+  approval modal.
+- `body.ac_update` — array of `{id, statement?, drop?, drop_reason?,
+  status?, evidence?}` entries. Reference rows by the stable id
+  (e.g. `"ac-1"`, surfaced in `[Mission acceptance criteria]`
+  below — never invent ids). Three channels:
+    - `statement: "<new text>"` rewrites the row's wording.
+      Contract change → modal reopens.
+    - `drop: true` + `drop_reason: "<one short sentence>"` marks
+      the row dropped (excluded from finish-gate). Contract
+      change → modal reopens.
+    - `status: "satisfied" | "unsatisfied"` updates status
+      tracking with optional `evidence` text. Status-only
+      updates DO NOT trigger reapproval — they're tracking
+      observations, not contract changes.
+  Do NOT emit rows the executing waves haven't materially
+  affected; the runtime carries forward unchanged rows
+  automatically.
 
 Optional keys: `memory_summary` (carried into the next planner's
 plan_context), `body.next_wave.subagents[*].depends_on` (array of

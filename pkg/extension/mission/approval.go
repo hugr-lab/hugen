@@ -97,10 +97,19 @@ type approvalSubagentView struct {
 // view shape and renders the bundled template. Long worker tasks
 // are truncated to keep the inquire modal readable — the user
 // reads a high-level pitch, not the full per-worker brief.
+//
+// The mission-AC bullet list is the projection-after-diff: state.AC
+// statements (excluding dropped rows) WITH the planner's staged
+// diff (ac_add / ac_update) overlaid as if the user clicked Approve.
+// That way the user reads the contract they're about to sign, not
+// the pre-diff list. Structured diff rendering (status icons + per-
+// row [NEW] / [EDITED] / [DROPPED] markers) lands separately in ζ.
+//
+// Phase 5.x — B11 §3.6.
 func renderApprovalQuestion(mission extension.SessionState, plan Plan) (string, error) {
 	view := approvalQuestionView{
 		MissionGoal:               strings.TrimSpace(plan.MissionGoal),
-		MissionAcceptanceCriteria: trimStrings(plan.MissionAcceptanceCriteria),
+		MissionAcceptanceCriteria: projectACForApproval(mission, plan),
 		NextWave: approvalWaveView{
 			Label:     plan.NextWave.Label,
 			Subagents: make([]approvalSubagentView, 0, len(plan.NextWave.Subagents)),
@@ -121,6 +130,73 @@ func renderApprovalQuestion(mission extension.SessionState, plan Plan) (string, 
 		return "", fmt.Errorf("mission: approval: no prompts renderer on session")
 	}
 	return renderer.Render("mission/approval_question", view)
+}
+
+// projectACForApproval renders the bullet list shown in the
+// approval modal: the result of applying plan.ACAdd + plan.ACUpdate
+// over state.AC, in insertion order, dropping rows the diff would
+// drop. The diff is applied virtually — neither state.AC nor the
+// staging slot is mutated by this call (the actual commit happens
+// in CommitStagedDiff once the user clicks Approve).
+//
+// State pulled via FromState(mission). Returns an empty slice when
+// no state handle is reachable (defensive — should not happen for a
+// mission session that reached the validate_and_approve tool).
+func projectACForApproval(mission extension.SessionState, plan Plan) []string {
+	m := FromState(mission)
+	if m == nil {
+		// Defensive: surface the planner's staged ac_add bullets so
+		// the modal at least shows what's being added. Existing AC
+		// is unreachable from this branch.
+		out := make([]string, 0, len(plan.ACAdd))
+		for _, a := range plan.ACAdd {
+			if s := strings.TrimSpace(a.Statement); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	current := m.ACSnapshot()
+	// Apply ac_update overlay first so the rendered bullets reflect
+	// the proposed contract. Index by id for lookup.
+	byID := make(map[string]int, len(current))
+	for i, row := range current {
+		byID[row.ID] = i
+	}
+	for _, u := range plan.ACUpdate {
+		idx, ok := byID[strings.TrimSpace(u.ID)]
+		if !ok {
+			continue // stage validator already rejected; defensive skip here
+		}
+		row := current[idx]
+		if u.Statement != "" {
+			row.Statement = strings.TrimSpace(u.Statement)
+		}
+		if u.Drop {
+			row.Status = ACDropped
+			if u.DropReason != "" {
+				row.DropReason = strings.TrimSpace(u.DropReason)
+			}
+		} else if u.Status != "" {
+			row.Status = u.Status
+		}
+		current[idx] = row
+	}
+	out := make([]string, 0, len(current)+len(plan.ACAdd))
+	for _, row := range current {
+		if row.Status == ACDropped {
+			continue
+		}
+		if stmt := strings.TrimSpace(row.Statement); stmt != "" {
+			out = append(out, stmt)
+		}
+	}
+	for _, a := range plan.ACAdd {
+		if s := strings.TrimSpace(a.Statement); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // trimStrings returns a copy with each entry TrimSpaced and empty
