@@ -59,6 +59,16 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 	// manifest.
 	if mState := FromState(mission); mState != nil {
 		mState.SetPlannerApproval(manifest.Plan.Approval)
+		// Phase 5.x — B11 §3.2.2 — seed manifest acceptance criteria
+		// at iter 0 with origin=manifest. Each statement is a Go
+		// template rendered against `.Inputs` so authors can write
+		// "Schedule expression parses for {{.Inputs.Kind}}" and the
+		// resulting AC carries the resolved kind. Render failures
+		// surface as a hard error — the mission can't start with a
+		// broken contract.
+		if seedErr := seedManifestAC(mState, *manifest, inputs); seedErr != nil {
+			return fmt.Errorf("mission: RunMission: seed AC: %w", seedErr)
+		}
 	}
 	if !hasInline && !hasPlanner {
 		return fmt.Errorf("mission: RunMission: skill %q has no executable plan (need plan.experimental_inline or plan.role)", skill)
