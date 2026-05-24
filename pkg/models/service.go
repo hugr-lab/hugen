@@ -120,17 +120,14 @@ func buildOptsFor(cfg config.ModelsConfig) []Option {
 	}
 	out = append(out, WithRetry(maxAttempts, initialBackoff))
 
-	// First-batch deadline: zero → default (5 min); negative →
-	// disabled (legacy stall-forever behaviour kept available for
-	// migration). Routes inherit a top-level default if they don't
-	// override — handled by the resolver layer that materialises
-	// per-intent ModelsConfig before this is called.
-	switch {
-	case cfg.FirstBatchDeadline < 0:
-		// explicit disable — skip the option
-	case cfg.FirstBatchDeadline == 0:
+	// First-batch deadline. Zero in cfg → apply the package
+	// default. Non-zero → pass through verbatim (WithFirstBatchDeadline
+	// treats non-positive values as "disabled" internally, so an
+	// explicit negative cfg.FirstBatchDeadline routes to the same
+	// disabled branch without a separate switch arm here).
+	if cfg.FirstBatchDeadline == 0 {
 		out = append(out, WithFirstBatchDeadline(config.DefaultFirstBatchDeadline))
-	default:
+	} else {
 		out = append(out, WithFirstBatchDeadline(cfg.FirstBatchDeadline))
 	}
 	return out

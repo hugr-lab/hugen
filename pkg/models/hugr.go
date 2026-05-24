@@ -330,9 +330,17 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 	// the backend has accepted the subscription but produced
 	// nothing (hung llama.cpp / vLLM / network half-close without
 	// finish event). Without this the session would wait forever.
-	// The atomic flag distinguishes a deadline-triggered cancel
-	// from an upstream-driven cancel so the caller can mark the
-	// error as transient and retry.
+	//
+	// Race-safety: timer callback and the first-batch handler race
+	// on `firstBatchSeen`. We use CompareAndSwap so EXACTLY ONE
+	// path wins:
+	//   - Timer's CAS succeeds  → no batch arrived before deadline.
+	//     Set deadlineHit, cancel ctx, surface ErrFirstBatchDeadline.
+	//   - Handler's CAS succeeds → a batch arrived; timer bails
+	//     out on its own CAS attempt.
+	// Without CAS, the timer could read `false` then cancel ctx
+	// while the handler had already started rendering — that path
+	// dropped the inflight batch without retry.
 	pumpCtx := ctx
 	var firstBatchSeen atomic.Bool
 	var deadlineHit atomic.Bool
@@ -341,7 +349,10 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 		pumpCtx, cancelPump = context.WithCancel(ctx)
 		defer cancelPump()
 		timer := time.AfterFunc(m.firstBatchDeadline, func() {
-			if firstBatchSeen.Load() {
+			// CAS claims the "first batch not seen" state. If the
+			// handler already flipped the flag we lost the race —
+			// bail; the handler is mid-rendering and will complete.
+			if !firstBatchSeen.CompareAndSwap(false, true) {
 				return
 			}
 			deadlineHit.Store(true)
@@ -359,9 +370,12 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 
 	err := ReadSubscription(pumpCtx, sub, map[string]BatchHandler{
 		completionPath: func(ctx context.Context, batch arrow.RecordBatch) error {
-			if firstBatchAt.IsZero() {
+			// CAS races the deadline timer for the "first batch"
+			// state. If we win the swap, the timer's own CAS will
+			// fail when it fires — safe to proceed even if the timer
+			// is sleeping right at the deadline edge.
+			if firstBatchAt.IsZero() && firstBatchSeen.CompareAndSwap(false, true) {
 				firstBatchAt = time.Now()
-				firstBatchSeen.Store(true)
 				m.logger.Debug("hugr chat_completion first batch",
 					"model", m.hugrModel,
 					"elapsed_ms", time.Since(subscribeStart).Milliseconds(),
