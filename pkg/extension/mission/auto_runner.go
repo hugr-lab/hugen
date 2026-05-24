@@ -218,8 +218,9 @@ type synthesisHandoffView struct {
 // by design ([[feedback-prompts-in-assets]]).
 func buildSynthesisTask(mission extension.SessionState, goal string) (string, error) {
 	data := struct {
-		Goal     string
-		Handoffs []synthesisHandoffView
+		Goal      string
+		Handoffs  []synthesisHandoffView
+		MissionAC []plannerACView
 	}{Goal: goal}
 	if m := FromState(mission); m != nil {
 		for _, h := range m.Handoffs.List() {
@@ -232,6 +233,7 @@ func buildSynthesisTask(mission extension.SessionState, goal string) (string, er
 				Body:          synthesisHandoffBody(h.Body),
 			})
 		}
+		data.MissionAC = projectMissionACForTemplate(m.ACSnapshot())
 	}
 	renderer := mission.Prompts()
 	if renderer == nil {

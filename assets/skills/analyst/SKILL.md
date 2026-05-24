@@ -149,8 +149,43 @@ metadata:
           Follow it: call `mission:validate_and_approve` with
           your full body, then emit the fenced ```plan```
           block. Set `requires_reapproval: true` ONLY when
-          `mission_goal` / `mission_acceptance_criteria`
-          materially changed since the last approved plan.
+          `mission_goal` reworded with a different intent
+          materially changed since the last approved plan
+          (the runtime auto-promotes ANY contract diff in
+          `ac_add` / `ac_update` with statement-or-drop, so
+          you don't need to set the flag yourself for
+          those).
+
+          **Acceptance criteria — diff schema.** The mission
+          owns the AC list with stable `ac-N` ids. You read
+          the current roster under [Mission acceptance
+          criteria] in your task and emit DELTAS — never the
+          full list.
+
+          - **Iteration 1** — seed AC via `ac_add`. Each
+            entry is a singularly-satisfiable statement:
+            "HTML file saved at <path>", "Comparison wave
+            ran across the prior week", "Anomalies
+            highlighted in red". One or more required on
+            iter 1 UNLESS the manifest pre-seeded them.
+            Promote relevant `[Research AC proposals]` via
+            `ac_add` here (drop the ones that don't fit;
+            rewrite if needed).
+          - **Later iterations** — emit `ac_update[]` by
+            id when:
+            - a worker handoff revealed a NEW requirement
+              the original AC missed → `ac_add` it (this
+              auto-reopens the modal),
+            - the user refined scope so a previous row no
+              longer applies → `ac_update: [{id:"ac-N",
+              drop:true, drop_reason:"…"}]`,
+            - mid-run satisfaction needs recording → emit
+              `ac_update: [{id:"ac-N", status:"satisfied",
+              evidence:"<handoff ref>"}]` (status-only;
+              does NOT reopen the modal).
+          - Do NOT re-emit rows whose status checker /
+            worker already updated — the runtime carries
+            them forward.
 
           **Boot discipline.** Before drafting any plan:
           `notepad:search` for the goal's main keywords —
