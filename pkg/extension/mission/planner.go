@@ -256,10 +256,12 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 			}
 			continue
 		}
-		// Wave succeeded — reset the consecutive-error counter so
-		// the next stuck wave gets a fresh retry budget independent
-		// of any prior failures earlier in the mission.
-		consecutiveErrors = 0
+		// Wave succeeded — do NOT reset consecutiveErrors yet.
+		// The checker still runs below; resetting here would mask a
+		// chronically-broken checker (every wave succeeds, every
+		// checker fails — counter would bounce back to 0 every iter
+		// and the cap would never trip). Reset happens at the END
+		// of the iteration after BOTH wave + checker succeed.
 
 		// 4. Phase C — verdict phase. Spawn checker if declared,
 		// route on its decision. Absent control collapses to the
@@ -277,10 +279,30 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 		} else if manifest.Control.Role != "" {
 			verdict, checkErr := e.spawnAndAwaitChecker(ctx, executor, mission, manifest, missionSkill, goal, iteration)
 			if checkErr != nil {
-				e.logger.Warn("mission: planner loop: checker failed",
+				consecutiveErrors++
+				e.logger.Warn("mission: planner loop: checker failed — folding into amend verdict for next iter",
 					"mission_session", mission.SessionID(),
-					"iteration", iteration, "err", checkErr)
-				return true, checkErr
+					"iteration", iteration,
+					"consecutive_errors", consecutiveErrors,
+					"err", checkErr)
+				if consecutiveErrors >= maxConsecutiveErrors {
+					e.logger.Warn("mission: planner loop: aborting — consecutive error cap reached on checker fail",
+						"mission_session", mission.SessionID(),
+						"iteration", iteration,
+						"consecutive_errors", consecutiveErrors,
+						"cap", maxConsecutiveErrors)
+					return true, checkErr
+				}
+				// Synthetic amend so the next planner sees the
+				// checker failure under [Recent verdict] and can
+				// keep the mission moving instead of dying on a
+				// transient parse glitch in the checker role.
+				recentVerdict = &Verdict{
+					Decision: VerdictAmend,
+					Reason:   "previous checker handoff failed to parse — re-emit a clean wave; the prior wave's outputs are intact",
+					Issues:   []string{checkErr.Error()},
+				}
+				continue
 			}
 			e.emitVerdictReady(mission, iteration, verdict)
 			vCopy := verdict
@@ -321,6 +343,12 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 				return false, nil
 			}
 		}
+		// End-of-iteration success path — wave AND checker (when
+		// declared) both succeeded. Reset the consecutive-error
+		// budget so the next stuck wave / checker gets a fresh
+		// retry budget independent of prior failures earlier in
+		// the mission.
+		consecutiveErrors = 0
 	}
 
 	// Max-iterations cap hit without plan_complete. Treated as a

@@ -111,6 +111,7 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 	policy := mState.PlannerApproval()
 	if !approvalRequiredForIteration(policy, 0, mState) {
 		mState.MarkPlanApproved()
+		e.emitPlanApproved(parent, planApprovedPayload{Trigger: "policy_skip"})
 		return emitValidateResult(validateResult{Approved: true})
 	}
 
@@ -150,6 +151,7 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 	approved, refine, aborted, reason := interpretValidateApprovalResponse(resp)
 	if approved {
 		mState.MarkPlanApproved()
+		e.emitPlanApproved(parent, planApprovedPayload{Trigger: "user_modal", Reason: reason})
 		return emitValidateResult(validateResult{
 			Approved: true,
 			Reason:   reason,
@@ -215,6 +217,30 @@ func approvalContextFor(plan Plan, pendingReason string) string {
 		return "Re-approval requested: " + reason
 	}
 	return rationale + "\n\nRe-approval requested: " + reason
+}
+
+// planApprovedPayload is the body of the `mission:plan_approved`
+// ExtensionFrame. Recorded on every transition into the
+// firstPlanApproved=true state so an eventual Recovery
+// implementation can replay the bit after restart instead of
+// re-opening the approval modal on the next iteration. Today no
+// Recovery hook reads it — the frame is audit-only and a forward-
+// compatible stash. See `mission-research-and-approval.md` §10
+// (open question on approval state recovery).
+type planApprovedPayload struct {
+	// Trigger names which branch set the bit:
+	//   "policy_skip" — manifest opted out of approvals.
+	//   "user_modal"  — user clicked approve on the modal.
+	Trigger string `json:"trigger"`
+	// Reason carries the user's free-text reason (if any) from
+	// the approve-with-reason path. Empty for policy_skip.
+	Reason string `json:"reason,omitempty"`
+}
+
+// emitPlanApproved publishes the mission:plan_approved ExtensionFrame
+// so the bit can be reconstructed on a future restart.
+func (e *Extension) emitPlanApproved(mission extension.SessionState, payload planApprovedPayload) {
+	e.emitMissionOp(mission, "plan_approved", payload)
 }
 
 // interpretValidateApprovalResponse normalises an InquiryResponse
