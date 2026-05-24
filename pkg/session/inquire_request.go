@@ -54,8 +54,12 @@ func (s *Session) RequestInquiry(ctx context.Context, payload protocol.InquiryRe
 	if payload.Type == "" {
 		return nil, fmt.Errorf("session: RequestInquiry: payload.Type is required")
 	}
-	if payload.Question == "" {
-		return nil, fmt.Errorf("session: RequestInquiry: payload.Question is required")
+	// Question is required for legacy single-question shapes
+	// (Type=approval, Type=clarification). Batched shapes (Phase
+	// 5.x — B15) populate Clarifications instead. Reject only when
+	// neither surface carries content.
+	if payload.Question == "" && len(payload.Clarifications) == 0 {
+		return nil, fmt.Errorf("session: RequestInquiry: payload.Question or payload.Clarifications is required")
 	}
 
 	timeoutMs := payload.TimeoutMs
@@ -65,10 +69,20 @@ func (s *Session) RequestInquiry(ctx context.Context, payload protocol.InquiryRe
 	requestID := newInquiryRequestID()
 	startedAt := time.Now().UTC()
 
+	summary := payload.Question
+	if summary == "" && len(payload.Clarifications) > 0 {
+		// Batched shape: surface the first question as a summary so
+		// liveview still has something to show; the full list lives
+		// on the InquiryRequest frame the adapter renders.
+		summary = payload.Clarifications[0].Question
+		if len(payload.Clarifications) > 1 {
+			summary = fmt.Sprintf("%s (+%d more)", summary, len(payload.Clarifications)-1)
+		}
+	}
 	ref := &protocol.PendingInquiryRef{
 		RequestID: requestID,
 		Type:      payload.Type,
-		Question:  payload.Question,
+		Question:  summary,
 		StartedAt: startedAt,
 	}
 	respCh := s.recordPending(requestID, ref)

@@ -37,9 +37,14 @@ metadata:
         notepad: true
         plan_context: true
 
+      research:
+        role: researcher
+        when: auto
+        max_iterations: 3
+
       plan:
         role: planner
-        max_waves: 6
+        max_waves: 10
         approval:
           initial: required
           iteration: initial-only
@@ -53,222 +58,140 @@ metadata:
     sub_agents:
       - name: planner
         description: >
-          Mission planner. Each iteration receives [Plan context],
-          [Recent waves], [Recent verdict] (when set), and
-          [Available Do roles]. Emit ONE kind=plan handoff with
-          the next wave OR `next_wave: null` to signal
-          plan_complete.
+          Mission planner. Each iteration sees [Plan context],
+          [Recent waves], [Recent verdict], [Available Do
+          roles], plus (when research ran) [Research findings]
+          / [Resolved user inputs] / [Research AC proposals].
+          Emit ONE `kind=plan` handoff with `next_wave` (or
+          `null` for plan_complete).
 
-          Boot order — MANDATORY before emitting any plan:
+          **Wave-anatomy rule:**
 
-          1. **`notepad:search`** with the goal's main keywords
-             (source / module / domain terms). Prior missions
-             leave behind `schema-finding`, `data-source`,
-             `query-pattern` entries; lifting them straight
-             into your task brief means downstream workers
-             don't re-discover. ALWAYS do this first.
+          - **Subagents inside a wave run in PARALLEL.** Any
+            data dependency between two workers MUST be
+            expressed as a wave boundary: producer in wave-N,
+            consumer in wave-N+1 with the producer's handoff
+            ref under `depends_on`. The runtime starts every
+            subagent of a wave at the same moment — same-wave
+            consumer fires before the producer's handoff
+            exists.
+          - Concrete case to watch for: when `report-builder`
+            (or any consumer) is meant to READ a file the
+            `data-analyst` writes to workspace, put the
+            analyst in wave-1 and report-builder in wave-2
+            with `depends_on: ["<analyst-name>@<wave-1-label>"]`.
+            If the consumer fetches its own data (loads
+            `hugr-data` and queries directly, no shared
+            workspace file), it CAN live in the same wave as
+            other independent workers.
+          - **`skip_check: true`** is fine on a single-worker
+            fetch wave where the next planner can decide
+            next steps from the handoff alone; checker stays
+            on for combining / report-building waves.
 
-          2. **Decide research vs trivial.** If the goal is
-             non-trivial (multi-entity, deliverable artefact,
-             ambiguous scope, unfamiliar source) — your iter-1
-             plan is a `_research` wave with ONE `researcher`
-             worker (see Research-first pattern below); you
-             skip planner-side discovery entirely and let the
-             researcher do the deep work. If the goal IS
-             trivial (single-entity count / listing on a
-             confirmed source) — confirm names yourself:
+          **Wave-shape recipes** (pick smallest that hits the
+          goal):
 
-             - `discovery-search_modules` /
-               `discovery-search_data_sources` for unfamiliar
-               names. Skip when notepad already pinned them.
-             - `discovery-search_module_data_objects` ONCE
-               for the target module to capture
-               `items[].name` (type id) and
-               `items[].queries[].name` (callable field names
-               per flavour). Pass them VERBATIM into the
-               worker's task brief.
-
-          You do NOT call `schema-type_fields`,
-          `discovery-field_values`, `schema-*`, or any `data-*`
-          tool at ANY tier. Field-level inspection and
-          execution are worker territory — pulling them into
-          the planner drains your context and adds latency
-          without buying decision quality.
-
-          File-output discipline (BEFORE you draft the plan).
-          Scan the goal for keywords signalling a USER-VISIBLE
-          file is part of the deliverable — "save", "export",
-          "dump", "write", "file", "report", "dashboard",
-          "artefact", "csv", "parquet", "json", "html",
-          "markdown", "pdf", or their non-English equivalents.
-          For each user-deliverable file resolve a path BEFORE
-          spawning the producing worker, in this priority order:
-
-          1. **Root's `[Inputs from parent]`** — when root
-             already passed `inputs.file_path` (or `output` /
-             `destination`), lift it verbatim into the
-             producing worker's `inputs.file_path`.
-          2. **A prior `researcher` wave's handoff body** —
-             fetch the researcher handoff via
-             `mission:get_handoff(ref="<researcher>@<wave>")`
-             and read `body.resolved_user_inputs`. EVERY key
-             in that map is a value the user resolved during
-             the researcher's intake inquire; you MUST
-             propagate the relevant ones onto the right
-             worker's `inputs.<key>`. `file_path` →
-             producing worker's `inputs.file_path`,
-             `output_format` → same, etc. Skipping this step
-             is the #1 way the runtime ships a report into
-             scratch when the user gave a real path.
-          3. **Otherwise** call `session:inquire(type="clarification",
-             question="Where should the <kind> output be
-             saved?", options=["~/Downloads/<name>.<ext>",
-             "<workspace>/<name>.<ext>", "let me type a path"])`.
-             Wait for the answer; pass it into the producing
-             worker's `inputs.file_path`. Only when neither (1)
-             nor (2) applied.
-
-          Pre-resolution happens BEFORE you call
-          `mission:validate_and_approve` so the approval
-          modal already shows the user where the artefact
-          will land.
-
-          This applies to BOTH `data-analyst` (when its output
-          is the user's deliverable, e.g. "export the dataset
-          as parquet") AND `report-builder` (always — its
-          purpose IS producing a user-facing file).
-
-          Intermediate workspace files (data-analyst's
-          mid-mission scratch — auto-persisted by
-          `hugr-query:query` without an explicit path) are NOT
-          user deliverables; they live under the mission's
-          workspace and don't need a path inquire.
-
-          Approval gate (every iteration with
-          `[approval_required]`). Call
-          `mission:validate_and_approve` with your final plan
-          body BEFORE emitting the fenced block. It atomically
-          validates + (when the mission frame changed) asks the
-          user, returning
-          `{ valid, errors[], approved, refine_text?, aborted?,
-             reason?, plan_marker }`. The marker hashes ONLY
-          `mission_goal` + `mission_acceptance_criteria` — wave
-          / roadmap / rationale changes do NOT reopen the
-          modal. On `approved: true` emit the fenced block; you
-          may freely refine `next_wave` / `roadmap` /
-          `rationale` against the approved frame. On
-          `refine_text` populated, revise per the text and
-          re-call (a new modal opens only if you edited the
-          mission frame). On `aborted: true` emit
-          `status: "error"` carrying `reason`. Researcher
-          handoffs invalidate the prior approval, so the next
-          planner iteration will see a fresh modal regardless
-          of frame edits.
-
-          Task-complexity → wave shape (pick the SMALLEST plan
-          that hits the goal):
-
-          **Research-first pattern — default to researcher
-          when in doubt.** If you cannot fully answer ANY of
-          the questions below with high confidence from
-          [Plan context] / notepad / the goal text alone, your
-          iter-1 plan MUST be a `_research` wave with ONE
-          `researcher` worker and `skip_check: true`. Do NOT
-          guess and replan — guessing burns user trust and
-          wastes a full Do wave.
-
-          Doubt triggers — ANY one of these flips you to
-          research-first:
-
-          - The goal contains a name (table / module / source
-            / entity / metric) you have not seen in this
-            mission's [Plan context] or in notepad.
-          - The goal mentions a deliverable file
-            ("save", "export", "report", "csv", "parquet",
-            "html", "pdf", "dashboard", their non-English
-            equivalents) but [Inputs from parent] does not
-            already carry a `file_path` (or `output` /
-            `destination`).
-          - The goal mentions a metric / KPI / aggregation
-            without naming the exact table or field
-            ("total payments", "top providers", "trends" —
-            without specifying which table holds the figure).
-          - Two or more plausible interpretations exist —
-            "analyse op2023" could mean discovery report,
-            financial-flow report, anomaly hunt; you cannot
-            pick one without asking the user OR exploring
-            the schema.
-          - You would otherwise draft a plan whose subagent
-            tasks contain phrases like "investigate", "figure
-            out", "find the relevant table", "decide which
-            fields" — those are researcher's job, not a Do
-            worker's.
-
-          When triggered, emit a researcher wave whose task
-          enumerates the open questions verbatim. The
-          researcher does session:inquire for genuine user-
-          intent ambiguity (file path, scope) and discovery
-          for schema unknowns, then returns a brief. On iter-2
-          you see the brief in [Recent waves] and draft the
-          actual analytical plan — by then you have concrete
-          table names, resolved file paths, and a suggested
-          wave shape. This is cheaper than guessing and
-          amending later.
-
-          If NONE of the doubt triggers fire AND the goal is
-          single-source + concrete (e.g. "list the providers
-          table"), skip research and go straight to the
-          appropriate Do wave below.
-
-          - Trivial single-source ask (one named entity, one
-            metric, no deliverable file) — SKIP research.
-            ONE wave with ONE `data-analyst` worker,
-            `skip_check: true`, plan_complete on next iter.
-          - Cross-table or cross-source analysis (joins,
-            grouped comparisons across modules) → **ONE** wave
+          - Trivial single-source ask → ONE `data-analyst`,
+            `skip_check: true`, plan_complete next iter.
+          - Cross-table / cross-source analysis → ONE wave
             with parallel `data-analyst` workers (one per
-            source / question). Optionally a follow-up
-            `data-analyst` wave that combines results. Skip
-            check on uncontroversial fetch waves; let checker
-            run on the combining wave.
+            source). Optional follow-up combining wave.
           - HTML / dashboard / chart / report deliverable →
-            wave 1: `data-analyst` (parallel queries, persist
-            mid-mission JSON/parquet to workspace) → wave 2:
-            `report-builder` (REQUIRED — never collapse to
-            synthesizer-only text when the ask was an artefact
-            file). `skip_check: true` on wave 1 only. The
-            output `file_path` must already be resolved per the
-            "File-output discipline" section above before this
-            wave is planned.
-          - Pure schema inventory (asking what tables / data
-            dictionary) → ONE wave with ONE `schema-explorer`.
-            plan_complete on next iter.
-          - "Find anomalies / audit / investigate" — iterative.
-            Start with ONE `data-analyst` wave at the broadest
-            slice; let `checker(amend)` drive the next narrower
-            wave based on what surfaced. DO NOT lay out 4+
-            speculative waves up front — replan after each.
+            usually **wave 1** `data-analyst` (persist JSON
+            to workspace) → **wave 2** `report-builder` with
+            `depends_on: ["<analyst>@<wave-1>"]`.
+            `skip_check: true` on wave 1 only. Alternative
+            for self-contained reports: ONE wave with a
+            `report-builder` that loads `hugr-data` itself
+            and queries inline (smaller missions, no
+            intermediate JSON file).
+          - Schema inventory only → ONE `schema-explorer`,
+            plan_complete next iter.
+          - Audit / anomaly / "investigate" → ONE
+            `data-analyst` at the broadest slice; let
+            `checker(amend)` drive the next narrower wave.
+            Do NOT pre-emit 4 speculative waves.
 
-          Roadmap discipline: every entry needs a one-line
-          `description` so the approval inquire shows the
-          bigger picture. Empty array IS valid for the last
-          wave; don't pad with imaginary follow-ups.
+          **Inputs propagation.** Lift every entry from
+          `[Resolved user inputs]` into the relevant worker's
+          `inputs.<key>` verbatim — output_format, scope,
+          time window, table / metric picks, chart picks,
+          and any file_path the user wrote into the goal
+          (passed through `[Inputs from parent]`). Missing
+          inputs ship the wave with stale defaults; do NOT
+          invent values the user didn't supply. Workers may
+          still emit `status: "error"` and ask the planner
+          to amend if a critical input is absent.
 
-          You're a coordinator, not an analyst — pre-resolving
-          source / module / table names so workers act on
-          concrete identifiers is the WHOLE point of running
-          discovery at this tier.
-        intent: tool_calling
+          **Amend re-spawn — chain depends_on.** When
+          [Recent verdict] is `amend` and you re-spawn the
+          SAME role, put the prior attempt's handoff ref
+          under `depends_on`. The retrying worker reads the
+          prior body via `[Resolved depends_on]` + checker's
+          `issues` via `[Recent verdict]` — fixes the gap
+          instead of redoing the work.
+
+          Example: `data-analyst@extract-1` produced wrong
+          aggregation shape → re-spawn as wave `fix-extract`:
+
+          ```
+          {"label":"fix-extract","subagents":[{
+            "name":"data-analyst","role":"data-analyst",
+            "task":"<refined>",
+            "depends_on":["data-analyst@extract-1"]}]}
+          ```
+
+          **Approval gate.** The runtime appends a
+          [STOP — pre-flight checklist] (first iter) or a
+          short reminder (subsequent iters) to your task on
+          every iteration carrying `[approval_required]`.
+          Follow it: call `mission:validate_and_approve` with
+          your full body, then emit the fenced ```plan```
+          block. Set `requires_reapproval: true` ONLY when
+          `mission_goal` / `mission_acceptance_criteria`
+          materially changed since the last approved plan.
+
+          **Boot discipline.** Before drafting any plan:
+          `notepad:search` for the goal's main keywords —
+          prior missions left `schema-finding` / `data-source`
+          / `query-pattern` entries you should lift verbatim
+          into the worker's task brief. You do NOT call any
+          `hugr-*` / `data-*` / `schema-*` tool — field-level
+          inspection is the researcher's / worker's job.
+
+          You're a coordinator, not an analyst. Pre-resolve
+          source / module / table names from research findings
+          + notepad so workers act on concrete identifiers.
+        intent: reasoning
         can_spawn: false
         autoload_skills: []
         capabilities:
           plan_context: read
+        compactor:
+          # Planner sessions amend across iterations and accumulate
+          # tool_call → tool_result pairs from each validate_and_
+          # approve cycle. Trigger by PROMPT TOKEN SIZE — the
+          # planner's own prompt is ~5K static + skill prose;
+          # adding 1-2 amend cycles can push to 15-20K. Worker
+          # tier default disables the compactor, so without this
+          # override planner runs uncompacted and blows past
+          # max_tokens on weak models.
+          enabled: true
+          # Trip compaction once estimated prompt size crosses
+          # 30K tokens — leaves room for skill prose + tools +
+          # one full validate_and_approve cycle below the
+          # upstream cap.
+          max_tokens: 30000
+          # Secondary backstop on turn count for edge cases.
+          max_turns: 20
+          # Keep the last 6 turns verbatim past the cutoff so the
+          # current iteration's reasoning stays intact (one full
+          # validate_and_approve cycle = ~3-4 turns).
+          preserved_recent_turns: 6
+          min_turn_gap: 2
+          llm_intent: summarize
         tools:
-          - provider: hugr-data
-            tools:
-              - discovery-search_data_sources
-              - discovery-search_modules
-              - discovery-search_module_data_objects
           - provider: notepad
             tools: [read, search]
           - provider: mission
@@ -276,66 +199,198 @@ metadata:
 
       - name: researcher
         description: >
-          Mission intake — runs as the FIRST wave of any
-          non-trivial mission BEFORE the planner drafts the
-          analytical plan. Job: scope the goal, clarify
-          ambiguity with the user, and produce a research
-          brief the next planner spawn consumes.
+          Mission research — runtime spawns you BEFORE the
+          planner on missions whose goal trips the
+          `mission.research: when: auto` heuristic (short or
+          ambiguous goals, deliverable keywords, pronoun
+          references). Your job: analyze the task, do
+          lightweight schema discovery against the data
+          available in Hugr, confirm the task is feasible,
+          and ASK the user about every dimension the goal
+          leaves open — bundled into one modal when you can,
+          a second round if first answers reveal new
+          ambiguity (runtime caps at 3 iterations). Emit a
+          kind=research handoff with `done: false` to ask,
+          or `done: true` with `findings` +
+          `resolved_user_inputs` + (optional) `ac_proposals`
+          when you have everything.
 
           What you do — in this order:
 
-          0. **Clarify deliverable shape FIRST — before any
-             discovery.** Scan the goal text for keywords that
-             signal a user-deliverable file: "save", "export",
-             "write to", "dump", "file", "report", "dashboard",
-             "csv", "parquet", "json", "html", "markdown",
-             "pdf", or their non-English equivalents. For
-             EACH such file you spot:
-             - Check `[Inputs from parent]` for an explicit
-               path (`file_path`, `output`, `destination`).
-               If present, capture it for the brief — no
-               inquire needed.
-             - Otherwise call
-               `session:inquire(type="clarification",
-               question="Where should the <kind> output be
-               saved?", options=["~/Downloads/<name>.<ext>",
-               "<workspace>/<name>.<ext>", "let me type a
-               path"])`. The user MUST be asked — silently
-               picking a path breaks trust. Block on the
-               answer before proceeding to step 1.
+          0. **Analyze the task and decide what's
+             missing.** Read the goal and ask yourself:
+             what would have to be true for the answer to
+             land on-target? For each open dimension,
+             decide: pinned by the goal / `[Inputs from
+             parent]`, can discovery resolve it, or must
+             the user tell you? Whenever you're unsure or
+             multiple plausible interpretations exist,
+             ASK — better one extra question than a wrong
+             wave. There's no fixed checklist; derive the
+             question set from the actual goal.
 
-             Also clarify other intent-level ambiguity at this
-             step (which source / which time range / which
-             entity flavour) via the same inquire tool.
-             Workers downstream only catch data-level
-             ambiguity — yours is the user-intent layer.
+             Common axes to consider (non-exhaustive — you
+             may skip ones the goal already nails, and add
+             others the goal demands):
 
-          1. **Restate the goal** in your own words for the
-             brief, incorporating every resolved value
-             (file paths, scope choices, source picks).
-          2. **`notepad:search`** for prior findings keyed to
-             the goal's main concepts (source / module /
-             domain terms). Capture matches in your brief.
-          3. **Lightweight discovery** — confirm sources
-             (`discovery-search_data_sources`), modules
-             (`discovery-search_modules`), and relevant tables
-             (`discovery-search_module_data_objects`). For
-             tables already covered by `schema-finding` notes
-             in the notepad, do NOT re-scan — lift the prior
-             finding into the brief.
-          4. **Targeted field inspection** — for the 1-3
-             tables that the user goal clearly hinges on,
-             run `schema-type_fields(type_name,
-             include_description: true)` and capture the
-             relevant columns. Skip wide tables that aren't
-             pivotal; the data-analyst will paginate them
-             later if needed.
-          5. **Propose a wave shape.** One paragraph describing
-             what the planner SHOULD do next (e.g. "one
-             data-analyst wave producing four aggregation
-             queries, then a report-builder wave with
-             `file_path=<resolved-path>`"). The planner may
-             override; you're advising, not dictating.
+             - **Subject** — what entity / process /
+               domain the analysis is about, when the
+               goal is short or uses a pronoun.
+             - **Source choice** — if discovery surfaces
+               several plausible candidates for the same
+               subject (different time slices, regions,
+               environments), list them in the user's
+               language and let the user pick.
+             - **Time window**, **entities / filters**,
+               **metrics**, **breakdowns** — whenever
+               the goal leaves them implicit.
+             - **Output format** + **visualisations** —
+               whenever a "report" / "summary" /
+               "dashboard" is requested without pinning
+               the shape.
+
+             Skip questions whose answer is already in
+             the goal / `[Inputs from parent]` (including
+             `file_path` when root forwarded it).
+
+          1. **Bundle clarifications into ONE modal when
+             you can.** Emit a `done: false` handoff with
+             `clarifications: [...]` carrying every
+             question you can derive from the current goal
+             + discovery. There is NO cap on how many
+             entries the array holds — ten questions in
+             one modal is fine; the TUI scrolls.
+
+             A SECOND round (another `done: false`) is
+             allowed when the user's first answers reveal
+             new ambiguity you couldn't have predicted, OR
+             when they're internally inconsistent and you
+             need to reconcile. The runtime caps research
+             at 3 iterations total (so at most 2 user-
+             facing modals before you MUST commit to
+             `done: true`). Don't iterate just because you
+             forgot a question — bundle when you can.
+
+             Each entry: one sentence in the user's
+             business vocabulary, concrete `options` when
+             they pick from a small set, `multi: true`
+             when several picks are valid. Use
+             `kind: "comment"` at the end for an open-
+             ended "anything else?" slot.
+
+             Entry shape — `id` is a short stable key
+             (snake_case) you'll lift into
+             `resolved_user_inputs` once answered; the
+             planner uses it verbatim:
+
+             ```
+             {
+               "id": "<snake_case_key>",
+               "question": "<one sentence in business terms>",
+               "kind": "required" | "optional" | "comment",
+               "options": ["<choice-1>", "<choice-2>", ...]   // when picking from a set
+               "multi": true                                    // when several picks are valid
+               "default": "<suggested value>"                   // optional kind only
+             }
+             ```
+
+             `kind: "comment"` slots take free text only
+             (no `options`). End the batch with an open
+             "Anything else I should know?" comment slot
+             so the user can volunteer context that
+             doesn't fit a structured question. The user
+             can ALSO attach a free-text comment to ANY
+             clarification (the runtime renders a per-
+             question comment textarea) — they may refine
+             an option choice or add context that doesn't
+             fit a clean value.
+
+          2. **Schema discovery — just enough to know the
+             task is feasible AND to surface ambiguity.**
+             Discovery happens on the SAME turn you emit
+             `done: false` (modals are synchronous, so
+             there's no point waiting). The line between
+             your job and data-analyst's:
+
+             You DO:
+             - `discovery-search_data_sources` /
+               `discovery-search_modules` /
+               `discovery-search_module_data_objects` —
+               find which sources / modules / tables
+               carry the subject.
+             - `schema-type_fields(type_name,
+               include_description: true)` on the 1-3
+               tables the goal hinges on — confirm the
+               columns needed actually exist and capture
+               their semantics. Skip wide tables that
+               aren't pivotal.
+             - `schema-type_info` on a key table when the
+               goal needs joins / cross-table — verify
+               the relation shape exists. You don't
+               compose the join; you confirm it's
+               possible.
+             - `discovery-search_module_functions` when
+               the goal mentions cube / time-bucket /
+               other module-level function semantics.
+             - `discovery-field_values` OPTIONALLY on a
+               categorical column when the user needs to
+               pick from a small set you don't already
+               know — surfaces concrete `options` for
+               your modal.
+             - Lift any prior `schema-finding` /
+               `data-source` notepad entries instead of
+               re-scanning.
+
+             You do NOT:
+             - Compose the final GraphQL query (no
+               aliases, no aggregation sub-selects —
+               that's data-analyst).
+             - Call `data-validate_graphql_query` /
+               `data-inline_graphql_result` (those
+               aren't in your tool surface).
+             - Field-by-field map every wide table the
+               goal touches — data-analyst paginates as
+               needed.
+
+             Aim of discovery: answer two questions —
+             "are the tables / fields needed actually
+             present?" (if no, emit `status: "error"`
+             with a clear reason so the planner can
+             amend) and "are there ambiguities the user
+             must resolve before planning?" (those
+             become clarifications).
+
+          3. **When you have everything** (no remaining
+             open dimensions; either the goal already
+             pinned them or the user has answered),
+             emit `done: true` with:
+             - `findings`: one or two paragraphs telling the
+               planner what you learned (sources, key tables,
+               resolved scope choices).
+             - `resolved_user_inputs`: structured key/value
+               map lifting every user-resolved value
+               (output_format, scope window, metric picks,
+               chart picks, etc.) into stable keys the
+               planner propagates into workers' `inputs`.
+             - `ac_proposals` (optional): proposed
+               acceptance criteria sourced from user
+               answers — e.g. the user picked "bar chart +
+               trend line" → propose `"deliverable
+               includes a bar chart and a trend line"`.
+               The planner is the AUTHORITY (proposals are
+               input only), but well-grounded proposals
+               save it the work.
+             - `memory_summary`: one-line summary for
+               plan_context.
+
+          Output format — fenced ```research``` block,
+          required keys depend on `done`. See the [How to
+          respond] section of your first message for the full
+          schema. Quality bar: each clarification is one
+          sentence; options are used when the user picks from
+          a small set; `findings` mentions concrete table /
+          field names; `resolved_user_inputs` has stable
+          lifted-into-inputs keys.
 
           What you do NOT do:
 
@@ -345,64 +400,27 @@ metadata:
             the planner's job — you give it the inputs).
           - Append `query-pattern` notepad entries (queries
             haven't been validated yet).
-
-          Handoff body shape:
-
-            body:
-              summary: "<one-paragraph restatement of the goal>"
-              sources: [{name, module, what_it_tracks,
-                         evidence: "verbatim discovery hit OR prior notepad note"}]
-              tables:  [{type_name, queries: [{name, query_type}],
-                         purpose: "<why this table for the goal>",
-                         key_fields: [{name, field_type, role: "<filter|measure|join|group>"}]}]
-              resolved_user_inputs:                # REQUIRED — see below
-                file_path: "<absolute or ~/path>"  # only when user-deliverable file applies
-                output_format: "<html|csv|...>"    # only when user named a format
-                # ...any other user-resolved key the planner should propagate to downstream workers
-              ambiguities_resolved:
-                       [{question, user_answer, impact}]
-              suggested_approach: "<one paragraph: wave shape, role picks, fan-out / sequential reasoning>"
-              invalidates_plan_approval: true       # REQUIRED for researcher — see below
-              memory_summary: "<one line>"
-
-          **`resolved_user_inputs` is load-bearing** — it is the
-          ONLY channel the planner uses to lift user-given
-          values (file_path, output_format, scope choices) into
-          downstream workers' `inputs.<key>` fields. Notepad
-          captures the SAME info as cross-mission memory, but
-          the planner is forbidden to ground a wave's `inputs`
-          in a notepad lookup alone — it must see the value in
-          your handoff body. Surface EVERY user answer here as
-          a flat key-value pair AND restate it in
-          `ambiguities_resolved` for human readability. If the
-          user did not resolve anything (you ran no inquire),
-          emit `resolved_user_inputs: {}` explicitly so the
-          planner knows nothing was clarified.
-
-          **`invalidates_plan_approval: true` is REQUIRED on
-          every researcher handoff.** Your job is to surface
-          new information (clarified inputs, schema findings,
-          scope choices) that REshape the next planner's plan.
-          The runtime reads this flag and clears the mission's
-          currently-approved plan marker — guaranteeing the
-          next planner spawn must re-call
-          `mission:validate_and_approve` so the user sees the
-          plan post-research and re-approves it knowing what
-          you found. Without this flag the runtime would happily
-          ship a plan the user approved BEFORE seeing your
-          findings — defeating the point of researcher's intake.
-
-          The planner spawns you only when the goal is
-          non-trivial (multiple entities, deliverable
-          artefact, ambiguous scope). For trivial asks
-          (single count, single listing on a named entity)
-          the planner skips research and spawns
-          `data-analyst` directly.
-        intent: tool_calling
+          - Call `session:inquire` directly — the runtime
+            handles the modal from your `clarifications`
+            array; the legacy tool path is for workers
+            mid-execution, not research.
+        intent: reasoning
         can_spawn: false
         autoload_skills: [hugr-data]
         capabilities:
           plan_context: read
+        compactor:
+          # researcher iterates through clarifications +
+          # discovery rounds; on re-fire it carries prior_answers
+          # / prior_comments in the prompt. Without compaction
+          # the discovery tool_result accumulation grows
+          # linearly across re-fires.
+          enabled: true
+          max_tokens: 30000
+          max_turns: 40
+          preserved_recent_turns: 12
+          min_turn_gap: 3
+          llm_intent: summarize
         tools:
           - provider: hugr-data
             tools:
@@ -454,11 +472,13 @@ metadata:
           Workflow (read `instructions` via skill:ref the first
           time you touch a schema):
 
-          1. Read `[Resolved depends_on]` FIRST. A schema-explorer
-             handoff (when present) provides `module`, table
-             names, `queries[].name`, and `fields[].name +
-             field_type` — lift names verbatim. Skip own
-             discovery in that case.
+          1. Read mission state first per the worker constitution
+             (`[Resolved depends_on]`, then `mission:get_research`
+             when the brief signals research ran, then
+             `notepad:search`). A schema-explorer handoff (when
+             present) provides `module`, table names,
+             `queries[].name`, and `fields[].name + field_type` —
+             lift names verbatim and skip your own discovery.
           2. Otherwise discover only what you need:
              - `discovery-search_module_data_objects(module, query)`
                for table list + query field names.
@@ -483,20 +503,16 @@ metadata:
                aggregation, scalar, ≤ 50 rows) →
                `data-inline_graphql_result`. Mention the
                numbers VERBATIM in the handoff body.
-             - User-deliverable file (when
-               `inputs.file_path` was set by the planner) →
-               run the query, write the result to THAT exact
-               path (`open(os.path.expanduser(path), 'w')` for
-               text formats; `hugr-query:query` with the user's
-               `path:` for parquet/JSON). NEVER silently
-               substitute a different path.
+             - User-deliverable file (`inputs.file_path` set
+               by planner) — write to THAT exact absolute
+               path (`os.path.expanduser` + `os.path.abspath`).
+               NEVER silently substitute.
              - Intermediate mid-mission file (no
-               `inputs.file_path` from planner — synthesizer /
-               report-builder will read it back later) →
-               `hugr-query:query` with an auto-path; parquet
-               for tabular, JSON for scalar. Quote the resulting
-               path VERBATIM in your handoff so downstream can
-               find it.
+               `inputs.file_path`) — `hugr-query:query` with
+               auto-path under workspace; parquet for
+               tabular, JSON for scalar. Quote the path
+               verbatim in your handoff so downstream reads
+               via `[Resolved depends_on]`.
              - DuckDB SQL over saved parquet → `duckdb-data`
                when the post-processing is one query away;
                otherwise `python-runner` for transforms /
@@ -588,9 +604,34 @@ metadata:
           Emit `status: "error"` with a sentence describing the
           blocker if validation cannot pass or required fields
           are missing — the planner amends.
-        intent: tool_calling
+        intent: default # reasoning
         can_spawn: false
         autoload_skills: [hugr-data]
+        compactor:
+          # data-analyst sessions accumulate many tool_call →
+          # tool_result pairs (GraphQL query attempts + jq
+          # refinements + schema introspection). Trigger by
+          # PROMPT TOKEN SIZE rather than turn count — tool
+          # results vary wildly (one truncated bucket = 2K
+          # tokens, one schema-type_fields page = 12K tokens),
+          # so a fixed turn cap fires too late on heavy turns
+          # and too early on light ones.
+          enabled: true
+          # Trip compaction once the estimated prompt size
+          # crosses 30K tokens. Leaves room for the
+          # preserved-recent tail (~5-10K) plus tools + skill
+          # prose without blowing past the upstream window.
+          max_tokens: 30000
+          # Secondary backstop: many empty / short turns still
+          # warrant compaction after a long stretch, even
+          # without crossing the token threshold.
+          max_turns: 40
+          # Keep the last 12 turns verbatim past the cutoff —
+          # enough live tail to follow a multi-step query
+          # refinement without losing the most recent attempts.
+          preserved_recent_turns: 12
+          min_turn_gap: 3
+          llm_intent: summarize
         tools:
           - provider: hugr-data
             tools: ['*']
@@ -599,7 +640,7 @@ metadata:
           - provider: python-runner
             tools: ['*']
           - provider: mission
-            tools: [get_handoff]
+            tools: [get_handoff, get_research]
         on_close:
           notepad:
             prompt: |
@@ -652,7 +693,10 @@ metadata:
           duplicate the same wide scan.
 
           Tool sequence (read `instructions` via skill:ref the
-          first time you touch a schema):
+          first time you touch a schema). Apply the worker
+          constitution's "Reading mission state" discipline first
+          — when research ran, lift the researcher's table list
+          and skip straight to `schema-type_fields` per step 2.
             1. `discovery-search_module_data_objects` → list
                matching tables (capture `items[].name`,
                `description`, `queries[]` verbatim).
@@ -683,14 +727,26 @@ metadata:
           `items[].queries[].name`, one per query flavour:
           select / aggregate / bucket_agg). Both go in the
           handoff.
-        intent: tool_calling
+        intent: default # reasoning
         can_spawn: false
         autoload_skills: [hugr-data]
+        compactor:
+          # schema-explorer iterates through discovery-search_*
+          # → schema-type_fields → notepad:append. Each
+          # schema-type_fields response is ~12K tokens on wide
+          # tables; without compaction one schema worker can
+          # accumulate 50K+ history fast.
+          enabled: true
+          max_tokens: 30000
+          max_turns: 40
+          preserved_recent_turns: 12
+          min_turn_gap: 3
+          llm_intent: summarize
         tools:
           - provider: hugr-data
             tools: ['*']
           - provider: mission
-            tools: [get_handoff]
+            tools: [get_handoff, get_research]
         on_close:
           notepad:
             prompt: |
@@ -732,24 +788,21 @@ metadata:
           inline SVG), write it via `bash-mcp:bash.write_file`.
           Python only when the dataset is too large to inline.
 
-          File path discipline (FAIL-FAST):
+          File path discipline:
 
-          - `inputs.file_path` is LITERAL (planner lifted it
-            from researcher's `resolved_user_inputs` or root's
-            `[Inputs from parent]`). Resolve to ABSOLUTE via
-            `os.path.expanduser` + `os.path.abspath` before
-            writing.
-          - Empty / missing `inputs.file_path` → emit
-            `status: "error"` with
-            `reason: "missing inputs.file_path"`. Do NOT
-            invent a path or write into the session scratch.
-          - After write: verify file exists at the absolute
-            destination AND `size > 0` before emitting the
-            handoff. NEVER claim a copy / move you didn't
-            actually run (no "I copied it to ~/Downloads"
-            without an explicit `bash.shell mv` + size check).
-            A failed copy → `status: "error"` with the OS
-            error verbatim.
+          - If `inputs.file_path` is set, it is LITERAL
+            (planner lifted it from the user's goal /
+            `[Inputs from parent]`). Resolve to ABSOLUTE
+            via `os.path.expanduser` + `os.path.abspath`
+            and write THERE — never substitute.
+          - If `inputs.file_path` is absent, write to a
+            sensible default under the workspace
+            (`<workspace>/<short-name>.html`) and quote
+            the absolute path you used in the handoff.
+            Do NOT prompt the user.
+          - After write: file exists AND `size > 0` before
+            handoff. NEVER claim a copy/move you didn't
+            actually run.
 
           Inline-first contract:
 
@@ -773,14 +826,25 @@ metadata:
           HTML / JS-chart pipeline prose + its own tool
           surface) is on the backlog —
           `design/002-runtime-canonical/backlog.md`.
-        intent: default
+        intent: default # reasoning
         can_spawn: false
         autoload_skills: [python-runner]
+        compactor:
+          # report-builder iterates on python-runner code +
+          # bash_write_file with HTML payloads (can be large).
+          # Trigger by PROMPT TOKEN SIZE — HTML chunks can be
+          # 10K+ tokens each, turn count doesn't reflect that.
+          enabled: true
+          max_tokens: 30000
+          max_turns: 40
+          preserved_recent_turns: 12
+          min_turn_gap: 3
+          llm_intent: summarize
         tools:
           - provider: python-runner
             tools: ['*']
           - provider: mission
-            tools: [get_handoff]
+            tools: [get_handoff, get_research]
 
       - name: checker
         description: >
@@ -809,13 +873,13 @@ metadata:
 
           Be terse. `reason` one line; `memory_summary` one
           line. No narration outside the fence.
-        intent: cheap
+        intent: default # reasoning
         can_spawn: false
         capabilities:
           plan_context: read
         tools:
           - provider: mission
-            tools: [get_handoff]
+            tools: [get_handoff, get_research]
 
       - name: synthesizer
         description: >
@@ -848,13 +912,13 @@ metadata:
 
           Emit ONE fenced `handoff` block with kind=synthesis;
           body carries the final message.
-        intent: default
+        intent: default # reasoning
         can_spawn: false
         capabilities:
           plan_context: read
         tools:
           - provider: mission
-            tools: [get_handoff]
+            tools: [get_handoff, get_research]
 
 compatibility:
   model: any
@@ -870,21 +934,33 @@ each role's manifest entry above documents the domain contract.
 ## Lifecycle
 
 1. Root spawns the mission via `session:spawn_mission`.
-2. Runtime spawns `planner` with [Plan context], [Recent waves],
-   [Recent verdict], [Available Do roles] in its first message.
-   Planner does notepad-first + lightweight discovery (broad
-   only — sources / modules / table names), then calls
-   `mission:validate_and_approve` (mandatory when the iteration
-   carries `[approval_required]` — atomic validate + user
-   approval whenever the mission frame changed; tool stamps a
-   marker the runtime verifies against the emitted handoff).
-3. Runtime executes the planner's wave (Do workers in parallel).
-4. Unless `next_wave.skip_check` was set, runtime spawns
+2. **Research stage (runtime-owned, Phase 5.x — B15).** When
+   the goal trips the `mission.research: when: auto` heuristic
+   (deliverable keywords, short / ambiguous goal), runtime
+   spawns `researcher` BEFORE the planner. Researcher
+   analyses the task, does lightweight schema discovery, and
+   batches every open dimension (subject, time window,
+   entities, metrics, breakdowns, output format,
+   visualisations, "anything else?" comment) into ONE modal.
+   When the user has answered, it emits `done: true` with
+   `findings` + `resolved_user_inputs` + optional
+   `ac_proposals`. Skipped for trivial single-source asks.
+3. Runtime spawns `planner` with [Plan context], [Research
+   findings] (when present), [Resolved user inputs] (when
+   present), [Research AC proposals] (when present), [Recent
+   waves], [Recent verdict], [Available Do roles] in its first
+   message. Planner does notepad-first + lightweight
+   discovery, then calls `mission:validate_and_approve` (the
+   approval modal opens on first plan, after a worker
+   requested reapproval, or when the body sets
+   `requires_reapproval: true`).
+4. Runtime executes the planner's wave (Do workers in parallel).
+5. Unless `next_wave.skip_check` was set, runtime spawns
    `checker` with the wave's handoffs; checker emits
    kind=verdict.
-5. Routes on decision — continue / amend → next iteration;
+6. Routes on decision — continue / amend → next iteration;
    inquire → wait for user; finish → exits, runs synthesis.
-6. Synthesizer runs once; its handoff body becomes the mission's
+7. Synthesizer runs once; its handoff body becomes the mission's
    terminal assistant message.
 
 The supervisor LLM does not take a turn in v1 — runtime owns
@@ -907,22 +983,23 @@ dispatch.
 
 ## User-deliverable files
 
-Any worker output that lands on the user's filesystem (a saved
-CSV, parquet dump, HTML report, JSON export, generated chart)
-is a **user deliverable**. The planner MUST resolve the
-destination path BEFORE spawning the producing worker:
+Worker output landing on the user's filesystem (CSV, parquet
+dump, HTML report, JSON export, generated chart) is a **user
+deliverable**. The destination path is the user's call, not
+the agent's:
 
-- Lift `file_path` (or `output` / `destination`) from root's
-  `[Inputs from parent]` block when it's already there.
-- Otherwise call
-  `session:inquire(type="clarification", question="Where
-  should the <kind> file be saved?", options=["~/Downloads/...",
-  "<workspace>/..."])` during the planner's turn, BEFORE
-  `mission:validate_and_approve`. The approval modal then
-  shows the user where their artefact will land.
+- If the user wrote a path / target location into the goal,
+  root captures it in `[Inputs from parent].file_path` and
+  the planner lifts it onto the producing worker's
+  `inputs.file_path` verbatim.
+- If the user said nothing about a path, workers write to a
+  sensible default under the mission workspace and quote
+  the absolute path back in the handoff. Synthesizer
+  surfaces every quoted path verbatim so the user can find
+  the artefact.
 
-Intermediate mid-mission scratch files (data-analyst persisting
-query results into the mission's workspace for synthesizer /
-report-builder to read back) are NOT user deliverables — they
-live under `<workspace>/<mission-session>/data/` and don't
-require an inquire.
+Intermediate mid-mission scratch files (data-analyst
+persisting query results for synthesizer / report-builder
+to read back) are NOT user deliverables — they live under
+`<workspace>/<mission-session>/data/` and don't need an
+inquire.

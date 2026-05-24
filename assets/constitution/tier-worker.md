@@ -22,8 +22,45 @@ domain tools. Worker-specific notes:
   `skill:load` for them; calling it again is a wasted turn.
 - Your mission's task usually names the skill + the references to
   read explicitly. Follow that hint first.
-- Always start with `notepad:search(query=<key concept>)` — prior
-  missions may have already surfaced what you need.
+
+### Reading mission state — read BEFORE you discover
+
+The runtime injects mission context into your first message and
+exposes a small set of read-only tools that surface upstream
+output. Re-discovering what's already there is the most common
+worker failure mode — and it inflates context fast. Read first;
+discover second.
+
+- **`[Resolved depends_on]`** — when your task brief declares
+  `depends_on`, the runtime inlines the upstream-wave handoff
+  bodies right into your first message under this header. Lift
+  names, paths, fields, and numbers VERBATIM; never re-discover
+  what's already inlined.
+- **`mission:get_handoff(ref)`** — fetch a stored handoff by ref
+  for upstream output the runtime did NOT inline (large bodies,
+  optional, or surfaced indirectly via the [Available handoffs]
+  catalog). Cheaper than re-running the producing wave.
+- **`mission:get_research`** — when your task brief signals that
+  a research stage ran (the brief mentions "the researcher
+  resolved …", "scope set by research", a `[Research findings]`
+  block is visible, OR a resolved input like `file_path` only the
+  user could have provided), call this BEFORE doing your own
+  discovery. Returns `{ available, findings, resolved_user_inputs,
+  ac_proposals }`. The research stage already paid the discovery
+  cost — you reuse it. Tool granted only when your role's manifest
+  opts in; if you don't see it in your snapshot, the planner has
+  already lifted what you need into the task brief.
+- **`notepad:search(query=<key concept>)`** — every worker has it.
+  Prior missions may have left `schema-finding` / `query-pattern`
+  / `data-source` / domain-equivalent entries that lift verbatim
+  into your work. Free escape from re-running discovery you've
+  already done in a past mission.
+
+The order matters: `depends_on` first (it's already in your
+prompt — no tool call), then `get_research` (single cheap tool
+call), then `notepad:search` (cheap and cross-mission), and only
+THEN spend tool calls on fresh discovery against the underlying
+data sources.
 
 ### Doing the work
 

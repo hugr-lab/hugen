@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -385,6 +386,12 @@ func (t *tab) firePanicCancel() {
 // handling. Slice 3 — phase 5.1c §7.
 func (t *tab) dispatchInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 	pend := t.pendingInquiry
+	// Phase 5.x — B15. Tab-style batched flow handles its own
+	// keystrokes (Enter advances, Tab toggles value/comment phase,
+	// digits pick options).
+	if pend.isBatched() {
+		return t.dispatchBatchedInquiryKey(k)
+	}
 	if pend.replyMode {
 		switch k.String() {
 		case "enter":
@@ -433,6 +440,287 @@ func (t *tab) dispatchInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// dispatchBatchedInquiryKey routes keypresses for the tab-style
+// research_batch modal. Phase 5.x — B15.
+//
+// Bindings:
+//
+//   - ↑ / ↓      — cycle the option highlight on questions with
+//                  numbered options (wraps at bounds). No-op when
+//                  no options or focus is on the comment field.
+//   - Enter      — commit value + comment for the current question
+//                  and advance (or submit batch on the last one).
+//                  Value priority: typed text in the focused field
+//                  > highlighted option > empty. Comment: typed
+//                  text in the comment field if focused, else
+//                  preserved.
+//   - Tab        — switch focus between the value and comment
+//                  fields. Switching persists the textarea content
+//                  into whichever field was active.
+//   - Shift+Tab  — step back to the previous question. The prior
+//                  value (or comment, if focus was on comment)
+//                  pre-fills the textarea so the operator can
+//                  amend in place. No-op on Q1.
+//   - digit 1-N  — keep as a shortcut: typed `2` + Enter commits
+//                  options[1] as the value.
+//   - Esc        — abort the batch (modal closes; request stays
+//                  pending server-side).
+func (t *tab) dispatchBatchedInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
+	pend := t.pendingInquiry
+	key := k.String()
+	total := len(pend.req.Clarifications)
+
+	switch key {
+	case "esc":
+		t.pendingInquiry = nil
+		t.textarea.Reset()
+		t.bannerError = "inquiry dismissed (still pending server-side)"
+		return true, nil
+
+	case "left":
+		// Question-level back nav. No-op at q1 / when textarea has
+		// no committed-yet content (persists then steps back).
+		if pend.currentIdx <= 0 {
+			return true, nil
+		}
+		text := strings.TrimSpace(t.textarea.Value())
+		t.persistBatchedTextareaForFocus(pend, text)
+		pend.currentIdx--
+		t.resetPanelForQuestion(pend)
+		t.prefillBatchedTextarea(pend)
+		return true, nil
+
+	case "right":
+		// Question-level forward nav — caps at the review screen.
+		// Right past review is no-op (Enter submits).
+		if pend.currentIdx >= total {
+			return true, nil
+		}
+		text := strings.TrimSpace(t.textarea.Value())
+		t.persistBatchedTextareaForFocus(pend, text)
+		pend.currentIdx++
+		t.resetPanelForQuestion(pend)
+		t.prefillBatchedTextarea(pend)
+		return true, nil
+
+	case "tab":
+		// Panel switch within the current question. No-op on the
+		// review screen (no per-question panels there).
+		if pend.onReview() {
+			return true, nil
+		}
+		cur := pend.currentClarification()
+		if cur.Kind == protocol.ClarificationKindComment {
+			return true, nil
+		}
+		text := strings.TrimSpace(t.textarea.Value())
+		t.persistBatchedTextareaForFocus(pend, text)
+		if pend.panel == batchedPanelValue {
+			pend.panel = batchedPanelComment
+		} else {
+			pend.panel = batchedPanelValue
+		}
+		t.prefillBatchedTextarea(pend)
+		return true, nil
+
+	case "shift+tab":
+		if pend.onReview() {
+			return true, nil
+		}
+		cur := pend.currentClarification()
+		if cur.Kind == protocol.ClarificationKindComment {
+			return true, nil
+		}
+		text := strings.TrimSpace(t.textarea.Value())
+		t.persistBatchedTextareaForFocus(pend, text)
+		if pend.panel == batchedPanelComment {
+			pend.panel = batchedPanelValue
+		} else {
+			pend.panel = batchedPanelComment
+		}
+		t.prefillBatchedTextarea(pend)
+		return true, nil
+
+	case "up":
+		if pend.onReview() {
+			return true, nil
+		}
+		cur := pend.currentClarification()
+		if len(cur.Options) > 0 && pend.panel == batchedPanelValue {
+			pend.cycleOptionHighlight(-1)
+		}
+		return true, nil
+
+	case "down":
+		if pend.onReview() {
+			return true, nil
+		}
+		cur := pend.currentClarification()
+		if len(cur.Options) > 0 && pend.panel == batchedPanelValue {
+			pend.cycleOptionHighlight(+1)
+		}
+		return true, nil
+
+	case " ", "space":
+		// Multi-select toggle on the currently-highlighted option.
+		// Only fires when the active question carries multi:true +
+		// non-empty options + focus on value panel.
+		if pend.onReview() {
+			return true, nil
+		}
+		cur := pend.currentClarification()
+		if cur.Multi && len(cur.Options) > 0 && pend.panel == batchedPanelValue {
+			pend.togglePickedOption()
+			return true, nil
+		}
+		// Otherwise let the textarea handle space.
+		return false, nil
+
+	case "enter":
+		if pend.onReview() {
+			// Final review screen — Enter submits the whole batch.
+			if err := t.submitBatchedAnswers(pend); err != nil {
+				t.bannerError = err.Error()
+			}
+			return true, nil
+		}
+		cur := pend.currentClarification()
+		text := strings.TrimSpace(t.textarea.Value())
+		t.persistBatchedTextareaForFocus(pend, text)
+		// Multi-select questions resolve their value from the
+		// picked-options set when the textarea is empty / matches a
+		// digit; ↑↓ highlight only chooses, Space toggles. Enter
+		// always commits the joined set.
+		entry := pend.answers[cur.ID]
+		if cur.Multi && len(cur.Options) > 0 && pend.panel == batchedPanelValue {
+			if joined := pend.pickedOptionsValue(); joined != "" {
+				entry.Value = joined
+				if pend.answers == nil {
+					pend.answers = make(map[string]protocol.AnswerEntry)
+				}
+				pend.answers[cur.ID] = entry
+			}
+		}
+		// Required-kind value must be non-empty — fall back to the
+		// ↑↓ highlighted option if the operator left it implicit.
+		if cur.Kind == protocol.ClarificationKindRequired && entry.Value == "" {
+			if hi := pend.optionHighlight(); hi >= 0 && hi < len(cur.Options) {
+				entry.Value = cur.Options[hi]
+				if pend.answers == nil {
+					pend.answers = make(map[string]protocol.AnswerEntry)
+				}
+				pend.answers[cur.ID] = entry
+			}
+		}
+		if cur.Kind == protocol.ClarificationKindRequired && entry.Value == "" {
+			t.bannerError = fmt.Sprintf("%q is required", cur.ID)
+			return true, nil
+		}
+		// Advance: next question, or review screen on the last one.
+		pend.currentIdx++
+		t.resetPanelForQuestion(pend)
+		t.textarea.Reset()
+		if !pend.onReview() {
+			t.prefillBatchedTextarea(pend)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// resetPanelForQuestion sets the panel cursor to the correct
+// default for the current question: comment-kind locks on the
+// comment panel; everyone else starts (or stays) on value.
+// No-op when the modal is now on the review screen.
+func (t *tab) resetPanelForQuestion(pend *inquiryState) {
+	if pend.onReview() {
+		return
+	}
+	if pend.currentClarification().Kind == protocol.ClarificationKindComment {
+		pend.panel = batchedPanelComment
+	} else {
+		pend.panel = batchedPanelValue
+	}
+}
+
+// persistBatchedTextareaForFocus captures whatever the operator has
+// typed in the textarea into the field the focus currently points
+// at (value OR comment) for the current clarification. Empty input
+// is a no-op so the persisted entry stays whatever it already was
+// (lets the operator clear the textarea to switch context without
+// erasing a prior commit).
+func (t *tab) persistBatchedTextareaForFocus(pend *inquiryState, text string) {
+	if text == "" {
+		return
+	}
+	cur := pend.currentClarification()
+	if pend.answers == nil {
+		pend.answers = make(map[string]protocol.AnswerEntry)
+	}
+	entry := pend.answers[cur.ID]
+	if pend.panel == batchedPanelComment || cur.Kind == protocol.ClarificationKindComment {
+		entry.Comment = text
+	} else {
+		// Power-user digit shortcut: `2` + Enter still picks
+		// options[1] verbatim.
+		if picked, ok := pend.resolveOptionPick(text); ok {
+			entry.Value = picked
+		} else {
+			entry.Value = text
+		}
+	}
+	pend.answers[cur.ID] = entry
+}
+
+// prefillBatchedTextarea resets the textarea then loads it with the
+// current question + focus's previously-captured text, if any. Lets
+// the operator amend a prior answer in place rather than re-typing.
+func (t *tab) prefillBatchedTextarea(pend *inquiryState) {
+	t.textarea.Reset()
+	cur := pend.currentClarification()
+	entry, ok := pend.answers[cur.ID]
+	if !ok {
+		return
+	}
+	if pend.panel == batchedPanelComment || cur.Kind == protocol.ClarificationKindComment {
+		if entry.Comment != "" {
+			t.textarea.SetValue(entry.Comment)
+		}
+		return
+	}
+	if entry.Value != "" {
+		t.textarea.SetValue(entry.Value)
+	}
+}
+
+// submitBatchedAnswers builds an InquiryResponse with the typed
+// Answers map collected by the tab-style modal walk and submits it.
+// Skipped (no-value) entries for optional + comment kinds drop out
+// so the runtime sees only the ids the operator actually touched.
+// Phase 5.x — B15.
+func (t *tab) submitBatchedAnswers(pend *inquiryState) error {
+	answers := make(map[string]protocol.AnswerEntry, len(pend.answers))
+	for id, e := range pend.answers {
+		if e.Value == "" && e.Comment == "" {
+			continue
+		}
+		answers[id] = e
+	}
+	payload := protocol.InquiryResponsePayload{
+		RequestID:       pend.req.RequestID,
+		CallerSessionID: pend.req.CallerSessionID,
+		Answers:         answers,
+		RespondedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	resp := protocol.NewInquiryResponse(t.sessionID, t.user, payload)
+	if err := t.submit(resp); err != nil {
+		return err
+	}
+	t.pendingInquiry = nil
+	t.textarea.Reset()
+	return nil
 }
 
 // submitInquiryReply builds the InquiryResponse via BuildInquiryReply

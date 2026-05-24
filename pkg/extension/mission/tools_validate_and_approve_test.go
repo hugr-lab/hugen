@@ -20,7 +20,6 @@ type validateAndApproveResult struct {
 	Aborted    bool     `json:"aborted,omitempty"`
 	RefineText string   `json:"refine_text,omitempty"`
 	Reason     string   `json:"reason,omitempty"`
-	PlanMarker string   `json:"plan_marker,omitempty"`
 }
 
 // callValidateForBody runs the tool from a planner session with a
@@ -74,9 +73,6 @@ func TestValidateAndApprove_ValidPlan(t *testing.T) {
 	}
 	if !res.Approved {
 		t.Fatalf("zero-policy mission → implicit approve, got approved=false (%+v)", res)
-	}
-	if res.PlanMarker == "" {
-		t.Fatal("want plan_marker populated on implicit approve")
 	}
 }
 
@@ -160,11 +156,11 @@ func callValidateAndApproveRaw(t *testing.T, args string) (json.RawMessage, erro
 	return ext.Call(ctx, "mission:validate_and_approve", json.RawMessage(args))
 }
 
-// TestValidateAndApprove_ApprovalRequired_Approve covers the
-// inquire path: policy demands approval, user approves, the
-// tool stamps the canonical marker on MissionState so the
-// runtime gate accepts the planner's handoff.
-func TestValidateAndApprove_ApprovalRequired_Approve(t *testing.T) {
+// TestValidateAndApprove_FirstIterApprove covers the gate's first-
+// iter path: policy demands approval, no plan has ever been
+// approved, user approves → modal runs once, firstPlanApproved
+// flips to true.
+func TestValidateAndApprove_FirstIterApprove(t *testing.T) {
 	ext := newPlannerExtension()
 	mission := newRenderedFakeState("mis-vna-approve", productionRenderer(t))
 	installMissionState(&mission.fakeState)
@@ -203,11 +199,8 @@ func TestValidateAndApprove_ApprovalRequired_Approve(t *testing.T) {
 	if !res.Approved {
 		t.Fatalf("want approved=true, got %+v", res)
 	}
-	if res.PlanMarker == "" {
-		t.Fatal("want plan_marker populated on approve")
-	}
-	if got := mState.ApprovedPlanMarker(); got != res.PlanMarker {
-		t.Fatalf("ApprovedPlanMarker = %q, want %q", got, res.PlanMarker)
+	if !mState.IsPlanApproved() {
+		t.Fatal("IsPlanApproved = false after approve, want true")
 	}
 	if len(mission.inquiryRequests) != 1 {
 		t.Fatalf("inquiryRequests = %d, want 1", len(mission.inquiryRequests))
@@ -218,11 +211,10 @@ func TestValidateAndApprove_ApprovalRequired_Approve(t *testing.T) {
 	}
 }
 
-// TestValidateAndApprove_ApprovalRequired_Deny covers the inquire
-// deny path: approved=false + aborted=true + reason; no marker is
-// stamped so the runtime gate rejects any handoff the planner
-// might still emit.
-func TestValidateAndApprove_ApprovalRequired_Deny(t *testing.T) {
+// TestValidateAndApprove_FirstIterDeny covers the first-iter deny
+// path: user rejects, firstPlanApproved stays false so the runtime
+// gate will reject any handoff the planner might still emit.
+func TestValidateAndApprove_FirstIterDeny(t *testing.T) {
 	ext := newPlannerExtension()
 	mission := newRenderedFakeState("mis-vna-deny", productionRenderer(t))
 	installMissionState(&mission.fakeState)
@@ -267,61 +259,203 @@ func TestValidateAndApprove_ApprovalRequired_Deny(t *testing.T) {
 	if !strings.Contains(res.Reason, "wrong scope") {
 		t.Errorf("reason missing user feedback: %q", res.Reason)
 	}
-	if got := mState.ApprovedPlanMarker(); got != "" {
-		t.Fatalf("ApprovedPlanMarker = %q, want empty (denial should not stamp)", got)
+	if mState.IsPlanApproved() {
+		t.Fatal("IsPlanApproved = true after deny, want false")
 	}
 }
 
-// TestValidateAndApprove_IdempotentSameBody covers the
-// already-approved short-circuit: when the planner re-submits a
-// body whose marker matches the mission's currently-approved
-// marker, the tool returns approved=true without re-inquiring.
-func TestValidateAndApprove_IdempotentSameBody(t *testing.T) {
+// TestValidateAndApprove_SubsequentIterSilent covers the B13 happy
+// path: a second iteration with the same goal/AC and no
+// requires_reapproval flag passes silently without re-opening the
+// modal. Weak-model wording drift in mission_goal/AC stays out of
+// the user's face.
+func TestValidateAndApprove_SubsequentIterSilent(t *testing.T) {
 	ext := newPlannerExtension()
-	mission := newRenderedFakeState("mis-vna-idem", productionRenderer(t))
+	mission := newRenderedFakeState("mis-vna-silent", productionRenderer(t))
 	installMissionState(&mission.fakeState)
 	mState := FromState(mission)
 	if mState == nil {
 		t.Fatal("FromState(mission) = nil")
 	}
-	planner := newRenderedFakeState("mis-vna-idem-planner", productionRenderer(t))
+	mState.IterationCounter = 2
+	mState.SetPlannerApproval(PlanApproval{Initial: "required", Iteration: "always"})
+	// Simulate "user already approved the initial plan on iter 1".
+	mState.MarkPlanApproved()
+	planner := newRenderedFakeState("mis-vna-silent-planner", productionRenderer(t))
 	planner.fakeState.parent = mission
 	ctx := extension.WithSessionState(context.Background(), planner)
-
-	body := map[string]any{
-		"mission_goal":                "idempotent test",
-		"mission_acceptance_criteria": []any{"discover wave runs"},
-		"next_wave": map[string]any{
-			"label":     "discover",
-			"subagents": []any{map[string]any{"name": "w", "role": "researcher", "task": "t"}},
-		},
-		"roadmap":   []any{map[string]any{"label": "later", "description": "follow up"}},
-		"rationale": "idempotent",
-	}
-	marker, err := canonicalPlanMarker(body)
+	// Mild wording drift in mission_goal — must NOT re-open modal.
+	body := `{
+        "mission_goal": "Deliver the Q4 sales dashboard end-to-end",
+        "mission_acceptance_criteria": ["HTML file saved", "Charts render client-side"],
+        "next_wave": {"label": "wave-2", "subagents": [{"name": "w", "role": "data-analyst", "task": "t"}]},
+        "roadmap": [],
+        "rationale": "continue execution"
+    }`
+	args, _ := json.Marshal(map[string]any{"body": json.RawMessage(body)})
+	out, err := ext.Call(ctx, "mission:validate_and_approve", args)
 	if err != nil {
-		t.Fatalf("canonicalPlanMarker: %v", err)
-	}
-	mState.SetApprovedPlanMarker(marker)
-
-	bodyJSON, _ := json.Marshal(body)
-	args, _ := json.Marshal(map[string]any{"body": json.RawMessage(bodyJSON)})
-	out, callErr := ext.Call(ctx, "mission:validate_and_approve", args)
-	if callErr != nil {
-		t.Fatalf("Call: %v", callErr)
+		t.Fatalf("Call: %v", err)
 	}
 	var res validateAndApproveResult
 	if uErr := json.Unmarshal(out, &res); uErr != nil {
 		t.Fatalf("unmarshal: %v", uErr)
 	}
 	if !res.Valid || !res.Approved {
-		t.Fatalf("idempotent re-approve: want valid+approved, got %+v", res)
-	}
-	if res.PlanMarker != marker {
-		t.Errorf("PlanMarker = %q, want %q", res.PlanMarker, marker)
+		t.Fatalf("subsequent iter same contract: want valid+approved, got %+v", res)
 	}
 	if len(mission.inquiryRequests) != 0 {
-		t.Errorf("idempotent re-approve should NOT inquire; got %d", len(mission.inquiryRequests))
+		t.Errorf("subsequent iter without requires_reapproval should NOT inquire; got %d", len(mission.inquiryRequests))
+	}
+}
+
+// TestValidateAndApprove_RequiresReapprovalFlagReopens covers the
+// B13 explicit signal: planner sets requires_reapproval:true → modal
+// re-opens even though firstPlanApproved is on the bit.
+func TestValidateAndApprove_RequiresReapprovalFlagReopens(t *testing.T) {
+	ext := newPlannerExtension()
+	mission := newRenderedFakeState("mis-vna-reapprove", productionRenderer(t))
+	installMissionState(&mission.fakeState)
+	mState := FromState(mission)
+	if mState == nil {
+		t.Fatal("FromState(mission) = nil")
+	}
+	mState.IterationCounter = 2
+	mState.SetPlannerApproval(PlanApproval{Initial: "required", Iteration: "always"})
+	mState.MarkPlanApproved()
+	approved := true
+	mission.inquiryResp = &protocol.InquiryResponse{
+		Payload: protocol.InquiryResponsePayload{Approved: &approved},
+	}
+	planner := newRenderedFakeState("mis-vna-reapprove-planner", productionRenderer(t))
+	planner.fakeState.parent = mission
+	ctx := extension.WithSessionState(context.Background(), planner)
+	body := `{
+        "mission_goal": "Deliver a sales dashboard AND ingest pipeline",
+        "mission_acceptance_criteria": ["HTML saved", "Charts render", "Ingest job scheduled"],
+        "next_wave": {"label": "wave-2", "subagents": [{"name": "w", "role": "data-analyst", "task": "t"}]},
+        "roadmap": [],
+        "rationale": "scope expanded after refine-loop",
+        "requires_reapproval": true,
+        "reapproval_reason": "user expanded scope to include ingest pipeline"
+    }`
+	args, _ := json.Marshal(map[string]any{"body": json.RawMessage(body)})
+	out, err := ext.Call(ctx, "mission:validate_and_approve", args)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	var res validateAndApproveResult
+	if uErr := json.Unmarshal(out, &res); uErr != nil {
+		t.Fatalf("unmarshal: %v", uErr)
+	}
+	if !res.Valid || !res.Approved {
+		t.Fatalf("requires_reapproval+approve: want valid+approved, got %+v", res)
+	}
+	if len(mission.inquiryRequests) != 1 {
+		t.Fatalf("requires_reapproval should open modal; got %d inquiry requests", len(mission.inquiryRequests))
+	}
+	q := mission.inquiryRequests[0]
+	if !strings.Contains(q.Context, "ingest pipeline") {
+		t.Errorf("context should surface reapproval_reason; got %q", q.Context)
+	}
+}
+
+// TestValidateAndApprove_PendingReapprovalReopens covers the worker-
+// triggered branch: a worker handoff requested reapproval since the
+// last approve, so the next planner iteration must see the modal
+// regardless of its own requires_reapproval flag.
+func TestValidateAndApprove_PendingReapprovalReopens(t *testing.T) {
+	ext := newPlannerExtension()
+	mission := newRenderedFakeState("mis-vna-pending", productionRenderer(t))
+	installMissionState(&mission.fakeState)
+	mState := FromState(mission)
+	if mState == nil {
+		t.Fatal("FromState(mission) = nil")
+	}
+	mState.IterationCounter = 2
+	mState.SetPlannerApproval(PlanApproval{Initial: "required", Iteration: "always"})
+	mState.MarkPlanApproved()
+	mState.RequestReapproval("worker discovered new scope")
+	approved := true
+	mission.inquiryResp = &protocol.InquiryResponse{
+		Payload: protocol.InquiryResponsePayload{Approved: &approved},
+	}
+	planner := newRenderedFakeState("mis-vna-pending-planner", productionRenderer(t))
+	planner.fakeState.parent = mission
+	ctx := extension.WithSessionState(context.Background(), planner)
+	// Note: requires_reapproval is NOT set on the body — the worker's
+	// pending bit alone must trigger the modal.
+	body := `{
+        "mission_goal": "Updated goal after worker insight",
+        "mission_acceptance_criteria": ["Updated criterion"],
+        "next_wave": {"label": "wave-2", "subagents": [{"name": "w", "role": "data-analyst", "task": "t"}]},
+        "roadmap": [],
+        "rationale": "responding to worker findings"
+    }`
+	args, _ := json.Marshal(map[string]any{"body": json.RawMessage(body)})
+	out, err := ext.Call(ctx, "mission:validate_and_approve", args)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	var res validateAndApproveResult
+	if uErr := json.Unmarshal(out, &res); uErr != nil {
+		t.Fatalf("unmarshal: %v", uErr)
+	}
+	if !res.Approved {
+		t.Fatalf("want approved=true, got %+v", res)
+	}
+	if len(mission.inquiryRequests) != 1 {
+		t.Fatalf("pending_reapproval should open modal; got %d inquiries", len(mission.inquiryRequests))
+	}
+	if !strings.Contains(mission.inquiryRequests[0].Context, "worker discovered new scope") {
+		t.Errorf("context should carry worker reason; got %q", mission.inquiryRequests[0].Context)
+	}
+	// After approve, both bits should be in the "cleared" state.
+	if !mState.IsPlanApproved() {
+		t.Fatal("IsPlanApproved = false after reapprove, want true")
+	}
+	if pending, _ := mState.PendingReapproval(); pending {
+		t.Fatal("PendingReapproval still true after reapprove, want false")
+	}
+}
+
+// TestValidateAndApprove_PlanCompleteBypassesModal covers the
+// finish path: plan_complete (next_wave=null) must not re-prompt
+// the user even when requires_reapproval was set — finish is
+// AC-gated downstream, not approval-gated here.
+func TestValidateAndApprove_PlanCompleteBypassesModal(t *testing.T) {
+	ext := newPlannerExtension()
+	mission := newRenderedFakeState("mis-vna-complete", productionRenderer(t))
+	installMissionState(&mission.fakeState)
+	mState := FromState(mission)
+	if mState == nil {
+		t.Fatal("FromState(mission) = nil")
+	}
+	mState.IterationCounter = 3
+	mState.SetPlannerApproval(PlanApproval{Initial: "required", Iteration: "always"})
+	mState.MarkPlanApproved()
+	planner := newRenderedFakeState("mis-vna-complete-planner", productionRenderer(t))
+	planner.fakeState.parent = mission
+	ctx := extension.WithSessionState(context.Background(), planner)
+	body := `{
+        "next_wave": null,
+        "roadmap": [],
+        "rationale": "all AC satisfied"
+    }`
+	args, _ := json.Marshal(map[string]any{"body": json.RawMessage(body)})
+	out, err := ext.Call(ctx, "mission:validate_and_approve", args)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	var res validateAndApproveResult
+	if uErr := json.Unmarshal(out, &res); uErr != nil {
+		t.Fatalf("unmarshal: %v", uErr)
+	}
+	if !res.Approved {
+		t.Fatalf("plan_complete should approve silently, got %+v", res)
+	}
+	if len(mission.inquiryRequests) != 0 {
+		t.Errorf("plan_complete must not open modal; got %d inquiries", len(mission.inquiryRequests))
 	}
 }
 
@@ -334,125 +468,36 @@ func containsAny(haystack []string, needle string) bool {
 	return false
 }
 
-// TestCanonicalPlanMarker_FrameOnly proves the Phase I.27 invariant:
-// the marker hashes ONLY mission_goal + mission_acceptance_criteria.
-// Plans that share the same frame but differ in next_wave / roadmap
-// / rationale must collapse to the same digest so the approval modal
-// doesn't reopen on every iteration.
-func TestCanonicalPlanMarker_FrameOnly(t *testing.T) {
-	frame := map[string]any{
-		"mission_goal":                "Build sales dashboard",
-		"mission_acceptance_criteria": []any{"HTML saved", "charts render"},
-	}
-	bodyA := map[string]any{
-		"mission_goal":                frame["mission_goal"],
-		"mission_acceptance_criteria": frame["mission_acceptance_criteria"],
-		"next_wave": map[string]any{
-			"label":     "discover",
-			"subagents": []any{map[string]any{"name": "w", "role": "schema-explorer", "task": "look"}},
-		},
-		"roadmap":   []any{map[string]any{"label": "analyse", "description": "aggregate"}},
-		"rationale": "begin with discovery",
-	}
-	bodyB := map[string]any{
-		"mission_goal":                frame["mission_goal"],
-		"mission_acceptance_criteria": frame["mission_acceptance_criteria"],
-		"next_wave": map[string]any{
-			"label":     "analyse", // different wave
-			"subagents": []any{map[string]any{"name": "x", "role": "data-analyst", "task": "compute"}},
-		},
-		"roadmap":   []any{map[string]any{"label": "report", "description": "produce final"}},
-		"rationale": "now we crunch numbers",
-	}
-	markerA, err := canonicalPlanMarker(bodyA)
-	if err != nil {
-		t.Fatalf("canonicalPlanMarker(A): %v", err)
-	}
-	markerB, err := canonicalPlanMarker(bodyB)
-	if err != nil {
-		t.Fatalf("canonicalPlanMarker(B): %v", err)
-	}
-	if markerA != markerB {
-		t.Errorf("frame-only marker: A=%q B=%q want identical (only wave/roadmap differ)", markerA, markerB)
-	}
-	if markerA == "" {
-		t.Error("marker is empty")
-	}
-}
-
-// TestCanonicalPlanMarker_FrameChange covers the contrast: any edit
-// to mission_goal or mission_acceptance_criteria must produce a
-// distinct marker so the runtime forces a fresh approval modal.
-func TestCanonicalPlanMarker_FrameChange(t *testing.T) {
-	base := map[string]any{
-		"mission_goal":                "Build sales dashboard",
-		"mission_acceptance_criteria": []any{"HTML saved", "charts render"},
-		"next_wave":                   map[string]any{"label": "x", "subagents": []any{map[string]any{"name": "w", "role": "r", "task": "t"}}},
-		"roadmap":                     []any{},
-		"rationale":                   "v1",
-	}
-	baseMarker, err := canonicalPlanMarker(base)
-	if err != nil {
-		t.Fatalf("canonicalPlanMarker(base): %v", err)
-	}
-
+// TestShouldOpenApprovalModal exercises the B13 gate decision table
+// directly — proves only the documented triggers open the modal.
+func TestShouldOpenApprovalModal(t *testing.T) {
 	cases := []struct {
-		name  string
-		mutate func(m map[string]any)
+		name             string
+		approved         bool
+		pendingReason    string
+		planRequiresFlag bool
+		want             bool
 	}{
-		{"goal reworded", func(m map[string]any) {
-			m["mission_goal"] = "Build sales dashboard for Q4"
-		}},
-		{"AC added", func(m map[string]any) {
-			m["mission_acceptance_criteria"] = []any{"HTML saved", "charts render", "deployed to dist/"}
-		}},
-		{"AC dropped", func(m map[string]any) {
-			m["mission_acceptance_criteria"] = []any{"HTML saved"}
-		}},
-		{"AC reordered", func(m map[string]any) {
-			m["mission_acceptance_criteria"] = []any{"charts render", "HTML saved"}
-		}},
+		{"first plan ever", false, "", false, true},
+		{"first plan ever even with flag", false, "", true, true},
+		{"approved + no flag + no pending", true, "", false, false},
+		{"approved + planner flag", true, "", true, true},
+		{"approved + worker requested reapproval", true, "worker reason", false, true},
+		{"approved + flag + worker reason", true, "worker reason", true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			modified := map[string]any{}
-			for k, v := range base {
-				modified[k] = v
+			m := NewMissionState()
+			if tc.approved {
+				m.MarkPlanApproved()
 			}
-			tc.mutate(modified)
-			got, err := canonicalPlanMarker(modified)
-			if err != nil {
-				t.Fatalf("canonicalPlanMarker: %v", err)
+			if tc.pendingReason != "" {
+				m.RequestReapproval(tc.pendingReason)
 			}
-			if got == baseMarker {
-				t.Errorf("marker did not change after frame edit %q: still %q", tc.name, got)
+			plan := &Plan{RequiresReapproval: tc.planRequiresFlag}
+			if got := shouldOpenApprovalModal(m, plan); got != tc.want {
+				t.Errorf("shouldOpenApprovalModal = %v, want %v", got, tc.want)
 			}
 		})
-	}
-}
-
-// TestCanonicalPlanMarker_TrimsWhitespace verifies cosmetic
-// whitespace around mission_goal / AC entries doesn't flip the
-// marker — the planner can re-emit with stray spaces and the user
-// won't be re-prompted.
-func TestCanonicalPlanMarker_TrimsWhitespace(t *testing.T) {
-	clean := map[string]any{
-		"mission_goal":                "Build sales dashboard",
-		"mission_acceptance_criteria": []any{"HTML saved", "charts render"},
-	}
-	whitespaced := map[string]any{
-		"mission_goal":                "  Build sales dashboard  ",
-		"mission_acceptance_criteria": []any{"  HTML saved", "charts render  "},
-	}
-	a, err := canonicalPlanMarker(clean)
-	if err != nil {
-		t.Fatalf("canonicalPlanMarker(clean): %v", err)
-	}
-	b, err := canonicalPlanMarker(whitespaced)
-	if err != nil {
-		t.Fatalf("canonicalPlanMarker(whitespaced): %v", err)
-	}
-	if a != b {
-		t.Errorf("whitespace-only diff flipped marker: clean=%q whitespaced=%q", a, b)
 	}
 }

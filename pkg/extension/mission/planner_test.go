@@ -176,12 +176,12 @@ func (f *plannerFakeSpawner) spawn(_ context.Context, _ extension.SessionState, 
 	// executor's wait loop is exercised (matches the production
 	// ChildFrameObserver path which fires on a separate goroutine).
 	// Mirror the side-effects production's ingestHandoff applies
-	// (Phase I.23: invalidate plan approval on worker-flagged
-	// handoffs) so tests exercise the same state transitions.
+	// (B13: request reapproval on worker-flagged handoffs) so
+	// tests exercise the same state transitions.
 	go func() {
 		m.Handoffs.Put(h)
-		if invalidatesPlanApproval(h.Body) {
-			m.InvalidatePlanApproval()
+		if invalidates, reason := invalidatesPlanApproval(h.Body); invalidates {
+			m.RequestReapproval(reason)
 		}
 	}()
 
@@ -377,12 +377,16 @@ func TestPlannerLoop_MaxWavesCap(t *testing.T) {
 func TestPlannerLoop_RetriesOnDecodeFailureUntilCap(t *testing.T) {
 	// Phase I — a planner that consistently emits an invalid
 	// handoff (wrong kind, malformed JSON, missing required
-	// field) no longer aborts the mission. Each parse failure
-	// folds into a synthetic verdict-amend so the NEXT planner
-	// spawn sees the error under [Recent verdict] and can
-	// re-emit. The loop ends cleanly at max_waves cap without an
-	// error — synthesis then recaps whatever (possibly empty)
-	// state was produced.
+	// field) no longer aborts the mission on the first failure.
+	// Each parse failure folds into a synthetic verdict-amend so
+	// the NEXT planner spawn sees the error under [Recent
+	// verdict] and can re-emit.
+	//
+	// Phase 5.x — consecutive-error cap. After
+	// [maxConsecutiveErrors] back-to-back failures the loop
+	// aborts (aborted=true, nil error) so a stuck wave can't
+	// monopolise the iteration budget. Synthesis then recaps
+	// whatever partial state was produced.
 	state := newRenderedFakeState("mis-planner-4", productionRenderer(t))
 	installMissionState(&state.fakeState)
 
@@ -414,22 +418,22 @@ func TestPlannerLoop_RetriesOnDecodeFailureUntilCap(t *testing.T) {
 
 	aborted, err := ext.runPlannerLoop(ctx, executor, state, manifest, manifest.Name, "bad")
 	if err != nil {
-		t.Fatalf("runPlannerLoop: want nil error at cap, got %v", err)
+		t.Fatalf("runPlannerLoop: want nil error at consecutive-error cap, got %v", err)
 	}
-	if aborted {
-		t.Fatal("aborted = true, want false (retry loop hit cap, not aborted)")
+	if !aborted {
+		t.Fatal("aborted = false, want true (consecutive-error cap should abort the loop)")
 	}
-	// 3 iterations × 1 planner spawn each = 3 planner spawns (no
-	// worker / checker spawns because the planner never produces
-	// a valid plan).
+	// After maxConsecutiveErrors back-to-back failures the loop
+	// returns — so the planner spawns exactly that many times,
+	// not the full max_waves budget.
 	plannerSpawns := 0
 	for _, r := range spawner.requests {
 		if r.Name == "planner" {
 			plannerSpawns++
 		}
 	}
-	if plannerSpawns != manifest.Plan.MaxWaves {
-		t.Errorf("planner spawn count = %d, want %d", plannerSpawns, manifest.Plan.MaxWaves)
+	if plannerSpawns != maxConsecutiveErrors {
+		t.Errorf("planner spawn count = %d, want %d (consecutive-error cap)", plannerSpawns, maxConsecutiveErrors)
 	}
 }
 
@@ -476,18 +480,14 @@ func TestPlannerLoop_ApprovalGate_HonouredOnApprove(t *testing.T) {
 		"roadmap":   []any{},
 		"rationale": "approved",
 	}
-	iter1Marker, mkErr := canonicalPlanMarker(iter1Body)
-	if mkErr != nil {
-		t.Fatalf("canonicalPlanMarker: %v", mkErr)
-	}
 
 	spawner := &plannerFakeSpawner{state: state}
 	spawner.onPlannerSpawn = func(iteration int) Handoff {
 		// Simulate the in-turn tool path: validate_and_approve
 		// called + user approved BEFORE the handoff is emitted
-		// (stamps the canonical marker on the mission state).
+		// (flips the firstPlanApproved bit on mission state).
 		if m := FromState(state); m != nil && iteration == 1 {
-			m.SetApprovedPlanMarker(iter1Marker)
+			m.MarkPlanApproved()
 		}
 		if iteration == 1 {
 			return Handoff{
@@ -521,12 +521,14 @@ func TestPlannerLoop_ApprovalGate_HonouredOnApprove(t *testing.T) {
 }
 
 func TestPlannerLoop_ApprovalGate_WorkerInvalidationReopensApproval(t *testing.T) {
-	// Phase I.23 — runtime is skill-agnostic. The approval gate
-	// trusts a single mission-level marker (currentApprovedMarker).
-	// When a worker emits `invalidates_plan_approval: true` in
-	// its handoff body, the runtime clears the marker; the next
-	// planner iteration MUST re-call validate_and_approve and
-	// stamp a fresh marker before its handoff is accepted.
+	// Phase 5.x — B13. Runtime is skill-agnostic. The approval
+	// gate trusts two bits on mission state: firstPlanApproved +
+	// pendingReapproval. When a worker emits
+	// `invalidates_plan_approval: true` in its handoff body, the
+	// runtime flips pendingReapproval on; the next planner
+	// iteration MUST re-call validate_and_approve and flip
+	// pendingReapproval back off (via MarkPlanApproved) before
+	// its handoff is accepted.
 	state := newRenderedFakeState("mis-invalidate", productionRenderer(t))
 	installMissionState(&state.fakeState)
 
@@ -549,10 +551,6 @@ func TestPlannerLoop_ApprovalGate_WorkerInvalidationReopensApproval(t *testing.T
 		"roadmap":   []any{},
 		"rationale": "intake",
 	}
-	iter1Marker, mkErr1 := canonicalPlanMarker(iter1Body)
-	if mkErr1 != nil {
-		t.Fatalf("canonicalPlanMarker: %v", mkErr1)
-	}
 
 	iter2Body := map[string]any{
 		"mission_goal":                "fixture",
@@ -564,28 +562,25 @@ func TestPlannerLoop_ApprovalGate_WorkerInvalidationReopensApproval(t *testing.T
 		"roadmap":   []any{},
 		"rationale": "real plan",
 	}
-	iter2Marker, mkErr2 := canonicalPlanMarker(iter2Body)
-	if mkErr2 != nil {
-		t.Fatalf("canonicalPlanMarker: %v", mkErr2)
-	}
 
 	spawner := &plannerFakeSpawner{state: state}
 	spawner.onPlannerSpawn = func(iteration int) Handoff {
 		switch iteration {
 		case 1:
 			if m := FromState(state); m != nil {
-				m.SetApprovedPlanMarker(iter1Marker)
+				m.MarkPlanApproved()
 			}
 			return Handoff{Kind: KindPlan, Status: "ok", Body: iter1Body}
 		case 2:
 			// After the researcher wave invalidated the prior
-			// approval, the marker is empty. Planner re-stamps for
-			// the new analytical plan.
+			// approval, pendingReapproval is true. Planner re-runs
+			// validate_and_approve (simulated below) which clears
+			// the pending flag.
 			if m := FromState(state); m != nil {
-				if m.ApprovedPlanMarker() != "" {
-					t.Errorf("iter-2 start: ApprovedPlanMarker = %q, want empty (researcher should have invalidated)", m.ApprovedPlanMarker())
+				if pending, _ := m.PendingReapproval(); !pending {
+					t.Errorf("iter-2 start: PendingReapproval = false, want true (researcher should have invalidated)")
 				}
-				m.SetApprovedPlanMarker(iter2Marker)
+				m.MarkPlanApproved()
 			}
 			return Handoff{Kind: KindPlan, Status: "ok", Body: iter2Body}
 		default:
@@ -604,7 +599,8 @@ func TestPlannerLoop_ApprovalGate_WorkerInvalidationReopensApproval(t *testing.T
 				Status: "ok",
 				Body: map[string]any{
 					"summary":                    "clarified scope",
-					"invalidates_plan_approval": true,
+					"invalidates_plan_approval":  true,
+					"invalidates_reason":         "discovered new scope constraint",
 				},
 			}
 		}
@@ -626,12 +622,12 @@ func TestPlannerLoop_ApprovalGate_WorkerInvalidationReopensApproval(t *testing.T
 }
 
 func TestPlannerLoop_ApprovalGate_RejectsSkippedTool(t *testing.T) {
-	// Planner never calls mission:validate_plan; runtime sees
-	// ApprovalAttempted=false → rejects with PlannerError →
-	// synthetic verdict-amend → next iteration. By the second
-	// iteration the approval policy is initial-only (not required),
-	// so the loop progresses cleanly when the second planner
-	// emits a valid plan.
+	// Phase 5.x — B13. Planner never calls
+	// mission:validate_and_approve; runtime sees firstPlanApproved
+	// = false on mission state → rejects with PlannerError →
+	// synthetic verdict-amend → next iteration. The loop recovers
+	// when a later planner spawn either calls the tool or signals
+	// plan_complete.
 	state := newRenderedFakeState("mis-approval-skip", productionRenderer(t))
 	installMissionState(&state.fakeState)
 
@@ -699,15 +695,24 @@ func TestPlannerLoop_ApprovalGate_RejectsSkippedTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runPlannerLoop: %v", err)
 	}
-	if aborted {
-		t.Fatal("aborted = true, want false (replan should recover)")
+	// Phase 5.x — every iteration in this test fails the approval
+	// gate (no MarkApprovalAttempt). With the consecutive-error
+	// cap at [maxConsecutiveErrors] the loop aborts cleanly after
+	// that many back-to-back rejections — synthesis still runs on
+	// whatever partial state exists. The recovery-on-iter-2 test
+	// covers the happy path where a later iteration calls
+	// validate_and_approve.
+	if !aborted {
+		t.Fatal("aborted = false, want true (consecutive-error cap should fire after every iter fails approval)")
 	}
 }
 
-func TestPlannerLoop_ApprovalGate_RejectsDeniedThenOk(t *testing.T) {
-	// Planner called validate_plan but the user denied — and the
-	// planner emitted status=ok anyway. Runtime sees
-	// ApprovalAttempted=true + IterationApproved=false → rejects.
+func TestPlannerLoop_ApprovalGate_RecoversAfterMissedApprovalOnIter2(t *testing.T) {
+	// Phase 5.x — B13. Iter-1 planner ships without calling
+	// validate_and_approve (firstPlanApproved stays false →
+	// runtime rejects). Iter-2 simulates the proper in-turn tool
+	// call by flipping the bit on mission state, then emits a
+	// valid plan that flows through. Covers the recovery path.
 	state := newRenderedFakeState("mis-approval-deny", productionRenderer(t))
 	installMissionState(&state.fakeState)
 
@@ -720,20 +725,16 @@ func TestPlannerLoop_ApprovalGate_RejectsDeniedThenOk(t *testing.T) {
 		},
 	}
 
-	// Iter-1 planner stamps a marker for the DRAFT body, then
-	// emits a DIFFERENT body — runtime computes the emitted
-	// marker, sees it doesn't match what was approved → reject.
-	draftMarker := "fake-draft-marker"
+	// Iter-1 planner ships without calling validate_and_approve —
+	// firstPlanApproved is false on mission state, runtime rejects.
+	// Iter-2 simulates the proper path: validate_and_approve runs
+	// (MarkPlanApproved flips the bit) and the planner emits a
+	// clean plan.
 	spawner := &plannerFakeSpawner{state: state}
 	spawner.onPlannerSpawn = func(iteration int) Handoff {
-		if m := FromState(state); m != nil && iteration == 1 {
-			// Simulate "user denied a different draft" by
-			// stamping a marker that won't match what the
-			// planner emits.
-			m.SetApprovedPlanMarker(draftMarker)
-		}
 		switch iteration {
 		case 1:
+			// No MarkPlanApproved — runtime gate rejects.
 			return Handoff{
 				Kind:   KindPlan,
 				Status: "ok",
@@ -745,26 +746,14 @@ func TestPlannerLoop_ApprovalGate_RejectsDeniedThenOk(t *testing.T) {
 						"subagents": []any{map[string]any{"name": "w", "role": "echo", "task": "t"}},
 					},
 					"roadmap":   []any{},
-					"rationale": "shipped despite deny",
+					"rationale": "shipped without calling validate_and_approve",
 				},
 			}
 		case 2:
-			// Iter-2 stamps the marker for the body it ACTUALLY
-			// emits this time, to clear the loop.
+			// Iter-2 marks plan approved (simulating the in-turn
+			// tool call) and emits a clean plan.
 			if m := FromState(state); m != nil {
-				body := map[string]any{
-					"mission_goal":                "fixture",
-					"mission_acceptance_criteria": []any{"fixture"},
-					"next_wave": map[string]any{
-						"label":     "wave-2",
-						"subagents": []any{map[string]any{"name": "w", "role": "echo", "task": "t"}},
-					},
-					"roadmap":   []any{},
-					"rationale": "revised",
-				}
-				if mk, err := canonicalPlanMarker(body); err == nil {
-					m.SetApprovedPlanMarker(mk)
-				}
+				m.MarkPlanApproved()
 			}
 			return Handoff{
 				Kind:   KindPlan,

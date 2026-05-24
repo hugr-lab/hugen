@@ -68,6 +68,25 @@ type Plan struct {
 	// into the [Plan context] section of downstream phase roles'
 	// first message (phase D).
 	Rationale string `json:"rationale,omitempty" yaml:"rationale,omitempty"`
+
+	// RequiresReapproval signals that the planner believes the
+	// mission contract changed materially since the user last
+	// approved (goal reframed, AC added/dropped, new constraint
+	// surfaced via refine-loop or worker handoff). When true on a
+	// non-first iteration, `mission:validate_and_approve` re-opens
+	// the approval modal even though the user already signed off on
+	// an earlier plan. When false, subsequent iterations pass
+	// silently as long as no worker handoff invalidated the prior
+	// approval. Phase 5.x — B13 supersedes the sha256 frame-hashing
+	// gate that re-prompted on cosmetic wording drift.
+	RequiresReapproval bool `json:"requires_reapproval,omitempty" yaml:"requires_reapproval,omitempty"`
+
+	// ReapprovalReason is the planner's one-line explanation of why
+	// this iteration sets RequiresReapproval. Surfaces in the
+	// approval modal's context so the user understands what changed
+	// vs the previous approval. Ignored when RequiresReapproval is
+	// false.
+	ReapprovalReason string `json:"reapproval_reason,omitempty" yaml:"reapproval_reason,omitempty"`
 }
 
 // Wave is one parallel batch of subagent spawns sharing a label.

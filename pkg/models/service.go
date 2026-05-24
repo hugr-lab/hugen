@@ -119,6 +119,17 @@ func buildOptsFor(cfg config.ModelsConfig) []Option {
 		initialBackoff = config.DefaultRetryInitialBackoff
 	}
 	out = append(out, WithRetry(maxAttempts, initialBackoff))
+
+	// First-batch deadline. Zero in cfg → apply the package
+	// default. Non-zero → pass through verbatim (WithFirstBatchDeadline
+	// treats non-positive values as "disabled" internally, so an
+	// explicit negative cfg.FirstBatchDeadline routes to the same
+	// disabled branch without a separate switch arm here).
+	if cfg.FirstBatchDeadline == 0 {
+		out = append(out, WithFirstBatchDeadline(config.DefaultFirstBatchDeadline))
+	} else {
+		out = append(out, WithFirstBatchDeadline(cfg.FirstBatchDeadline))
+	}
 	return out
 }
 

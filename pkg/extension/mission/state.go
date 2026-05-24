@@ -64,30 +64,24 @@ type MissionState struct {
 	// session is still attributable.
 	inquired map[string]bool
 
-	// currentApprovedMarker is the canonical sha256-hex of the plan
-	// body the user most recently approved (Phase I.23). Empty when
-	// no plan is currently approved — either because no inquire has
-	// landed yet, or because a downstream worker invalidated the
-	// approval via its handoff body's `invalidates_plan_approval`
-	// flag. mission:validate_and_approve checks against this:
-	//
-	//   - marker(body) == currentApprovedMarker → already approved,
-	//     return idempotently without re-inquiring (the planner
-	//     re-emitted the SAME body — a refine loop converging).
-	//   - mismatch / empty → run the inquire; on approve overwrite
-	//     with the new marker.
-	//
-	// spawnAndAwaitPlanner's gate uses the same value to verify the
-	// planner emits the SAME body it had approved.
-	//
-	// Skill-agnostic by design: the runtime knows nothing about
-	// role names; it only knows "approved-or-not". Skills express
-	// their own per-role invalidation policy via the
-	// `invalidates_plan_approval` handoff field — clarification /
-	// scoping roles typically set it true because their findings
-	// reshape what the next planner should propose, while execution
-	// roles leave it false so the approved plan flows through.
-	currentApprovedMarker string
+	// firstPlanApproved flips to true the first time the user closes
+	// the approval modal with approve=true (or when the policy opts
+	// out via Initial=skip — the implicit-approve path also flips
+	// it). Phase 5.x — B13. The gate uses this bit + pendingReapproval
+	// + the planner's RequiresReapproval flag to decide whether to
+	// (re-)open the modal. Never reset within a mission.
+	firstPlanApproved bool
+
+	// pendingReapproval is set when a worker handoff carried
+	// `invalidates_plan_approval: true` since the last modal closed
+	// approve. The next planner iteration's validate_and_approve
+	// call re-opens the modal regardless of the planner's own
+	// RequiresReapproval flag. Cleared once the modal closes
+	// approve. pendingReapprovalReason carries the worker's
+	// `invalidates_reason` (when present) so the planner / modal
+	// can surface why approval was invalidated.
+	pendingReapproval       bool
+	pendingReapprovalReason string
 
 	// plannerApproval mirrors MissionManifest.Plan.Approval so the
 	// validate_and_approve tool handler (which doesn't see the full
@@ -119,6 +113,39 @@ type MissionState struct {
 	// per the plan shape — empty when the planner didn't narrow.
 	// Phase I.26.
 	currentWaveAC []string
+
+	// researchFindings is the free-form summary the research role
+	// emitted on its done=true handoff. Surfaced to the planner via
+	// plan_context.research_findings so iter-1 plans see what the
+	// research stage discovered. Phase 5.x — B15.
+	researchFindings string
+
+	// resolvedUserInputs is the structured key/value map the
+	// research role surfaced via its done=true handoff. Planner
+	// reads it under plan_context.resolved_user_inputs (treats
+	// each entry as a user-confirmed input for the downstream
+	// workers). Phase 5.x — B15.
+	resolvedUserInputs map[string]any
+
+	// researchACProposals is the per-criterion list the research
+	// role recommended for the planner to consider. Planner is
+	// the authority on what becomes mission_acceptance_criteria;
+	// proposals are input only (§3.2.1). Phase 5.x — B15.
+	researchACProposals []ResearchACProposal
+
+	// researchAttempted tracks whether the research stage was
+	// invoked on this mission, regardless of outcome. Flipped to
+	// true at the very start of runResearchStage when the manifest
+	// declares a research block AND the When-predicate fires.
+	// Read by callGetResearch to disambiguate three otherwise-
+	// indistinguishable "available: false" cases:
+	//   - manifest had no research block          → !attempted, no findings
+	//   - research ran but emitted empty findings → attempted, no findings
+	//   - research ran and was aborted            → attempted, no findings
+	// `available: false, attempted: true` signals to the worker
+	// that research was tried but yielded nothing — the worker
+	// should NOT assume scope was researched.
+	researchAttempted bool
 }
 
 // workerCursor names a spawned worker so ChildFrameObserver can
@@ -229,37 +256,53 @@ func (m *MissionState) PlannerApproval() PlanApproval {
 	return m.plannerApproval
 }
 
-// SetApprovedPlanMarker overwrites the mission's current approved
-// plan marker. Empty input is treated as "clear approval". Called
-// by the validate_and_approve tool after the user's approve reply.
-func (m *MissionState) SetApprovedPlanMarker(marker string) {
+// MarkPlanApproved flips firstPlanApproved on and clears any
+// pending reapproval request. Called by validate_and_approve after
+// the user's approve reply (and by the implicit-approve path when
+// the mission's policy opts out of approvals entirely). Idempotent.
+// Phase 5.x — B13.
+func (m *MissionState) MarkPlanApproved() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.currentApprovedMarker = marker
+	m.firstPlanApproved = true
+	m.pendingReapproval = false
+	m.pendingReapprovalReason = ""
 }
 
-// ApprovedPlanMarker returns the mission's currently approved plan
-// marker, or "" when no plan is approved (either no inquire has
-// landed yet, or a worker invalidated the prior approval).
-func (m *MissionState) ApprovedPlanMarker() string {
+// IsPlanApproved reports whether the user has ever approved a plan
+// in this mission. Used by validate_and_approve to skip the modal
+// on subsequent iterations when nothing has invalidated the prior
+// approval, and by spawnAndAwaitPlanner to require approval before
+// accepting a plan handoff. Phase 5.x — B13.
+func (m *MissionState) IsPlanApproved() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.currentApprovedMarker
+	return m.firstPlanApproved
 }
 
-// InvalidatePlanApproval clears the mission's currently approved
-// plan marker. Called by ingestHandoff when a worker emits a
-// handoff body carrying `invalidates_plan_approval: true` — the
-// worker's discovery (e.g. user-clarified inputs) means the next
-// planner spawn cannot rely on the prior approval and must
-// re-validate from scratch.
-//
-// Skill-agnostic: the runtime decides "the next plan needs fresh
-// approval"; per-skill prose decides which roles set the flag.
-func (m *MissionState) InvalidatePlanApproval() {
+// RequestReapproval marks the mission as needing a fresh approval
+// modal on the next planner iteration. Called by ingestHandoff
+// when a worker emits a handoff body carrying
+// `invalidates_plan_approval: true`. The reason (free-form short
+// string from the worker, optional) surfaces in the modal so the
+// user sees what changed. Skill-agnostic: the runtime decides "the
+// next plan needs fresh approval"; per-skill prose decides which
+// roles set the flag. Phase 5.x — B13.
+func (m *MissionState) RequestReapproval(reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.currentApprovedMarker = ""
+	m.pendingReapproval = true
+	m.pendingReapprovalReason = strings.TrimSpace(reason)
+}
+
+// PendingReapproval returns (true, reason) when a worker handoff
+// has invalidated the prior approval since the last modal closed
+// approve. The next planner iteration's validate_and_approve call
+// must re-open the modal. Phase 5.x — B13.
+func (m *MissionState) PendingReapproval() (bool, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pendingReapproval, m.pendingReapprovalReason
 }
 
 // SetMissionFrame stamps the planner's current understanding of
@@ -283,6 +326,67 @@ func (m *MissionState) MissionFrame() (goal string, mission []string, wave []str
 	mission = append([]string(nil), m.currentMissionAC...)
 	wave = append([]string(nil), m.currentWaveAC...)
 	return m.currentMissionGoal, mission, wave
+}
+
+// SetResearchOutput stashes the research role's done=true result
+// on mission state so the subsequent planner spawn reads it from
+// plan_context. Idempotent (subsequent calls overwrite). Phase
+// 5.x — B15.
+func (m *MissionState) SetResearchOutput(findings string, resolvedUserInputs map[string]any, acProposals []ResearchACProposal) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.researchFindings = strings.TrimSpace(findings)
+	if len(resolvedUserInputs) == 0 {
+		m.resolvedUserInputs = nil
+	} else {
+		m.resolvedUserInputs = make(map[string]any, len(resolvedUserInputs))
+		for k, v := range resolvedUserInputs {
+			m.resolvedUserInputs[k] = v
+		}
+	}
+	if len(acProposals) == 0 {
+		m.researchACProposals = nil
+	} else {
+		m.researchACProposals = append(m.researchACProposals[:0:0], acProposals...)
+	}
+}
+
+// MarkResearchAttempted flips the researchAttempted bit on.
+// Called by runResearchStage at the start of the loop AFTER the
+// When-predicate fires so callGetResearch can disambiguate "no
+// research configured" from "research ran but failed / aborted".
+// Phase 5.x — B15 follow-up.
+func (m *MissionState) MarkResearchAttempted() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.researchAttempted = true
+}
+
+// ResearchAttempted reports whether the research stage was
+// invoked on this mission, regardless of outcome.
+func (m *MissionState) ResearchAttempted() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.researchAttempted
+}
+
+// ResearchOutput returns the stashed research output (findings +
+// resolved user inputs + ac proposals). Empty / nil when the
+// mission has no research stage or it hasn't yet emitted done=true.
+// Phase 5.x — B15.
+func (m *MissionState) ResearchOutput() (findings string, resolvedUserInputs map[string]any, acProposals []ResearchACProposal) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.resolvedUserInputs) > 0 {
+		resolvedUserInputs = make(map[string]any, len(m.resolvedUserInputs))
+		for k, v := range m.resolvedUserInputs {
+			resolvedUserInputs[k] = v
+		}
+	}
+	if len(m.researchACProposals) > 0 {
+		acProposals = append(acProposals, m.researchACProposals...)
+	}
+	return m.researchFindings, resolvedUserInputs, acProposals
 }
 
 // FromState resolves the [*MissionState] handle attached to state,

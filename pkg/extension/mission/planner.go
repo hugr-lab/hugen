@@ -25,6 +25,18 @@ const plannerWaveLabelPrefix = "_plan-"
 // verdict phase. Full label: "_check-<iteration>".
 const checkerWaveLabelPrefix = "_check-"
 
+// maxConsecutiveErrors caps how many wave failures or planner
+// parse failures the runtime tolerates in a row before bailing
+// out of the planner loop and routing to synthesis. Distinct from
+// max_waves — that's the overall iteration budget, this is a
+// tighter "retry budget" so a single broken wave can't burn the
+// whole budget on amend cycles. Resets on the first successful
+// wave. 3 is the dogfood-validated value: enough for a weak model
+// to recover (planner-amend-on-invalid-handoff usually clears on
+// retry-1 or retry-2) without letting a genuinely-stuck wave
+// monopolise the rest of the budget.
+const maxConsecutiveErrors = 3
+
 // PlannerError flags a non-recoverable failure inside the planner
 // loop — a planner wave that never produced a handoff, an output
 // that failed validation past the retry cap, or an approval
@@ -69,6 +81,22 @@ func (e *Extension) driveMissionPlanner(mission extension.SessionState, spawner 
 	executor := NewExecutor(e.makeSpawnerCallback(mission, spawner, missionSkill), e.logger)
 	ctx := context.Background()
 	_ = inputs
+
+	// Phase 5.x — B15. Optional pre-planner research stage.
+	// Surfaces user clarifications + scope findings into mission
+	// state before the planner spawn so iter-1 plans see
+	// resolved inputs (not "is it markdown or html?" left for the
+	// planner to ask later via a researcher wave).
+	if researchAborted, researchErr := e.runResearchStage(ctx, executor, mission, manifest, missionSkill, goal); researchErr != nil {
+		e.logger.Warn("mission: driveMissionPlanner: research stage failed",
+			"mission_session", mission.SessionID(),
+			"err", researchErr, "aborted", researchAborted)
+		if researchAborted {
+			final := buildFinalText(mission, "", true)
+			e.finishMission(ctx, mission, final)
+			return
+		}
+	}
 
 	aborted, err := e.runPlannerLoop(ctx, executor, mission, manifest, missionSkill, goal)
 	if err != nil {
@@ -118,6 +146,12 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 	// a control role is declared. Phase C.
 	var recentVerdict *Verdict
 
+	// consecutiveErrors tracks back-to-back planner-parse failures
+	// and wave-execution failures. Reset on any successful wave.
+	// Caps at [maxConsecutiveErrors] — a single stuck wave can't
+	// monopolise the entire max_waves budget on amend cycles.
+	consecutiveErrors := 0
+
 	for iteration := 1; iteration <= maxIter; iteration++ {
 		// Stamp the iteration on MissionState so ingestHandoff
 		// tags plan_context entries with the right number even
@@ -132,17 +166,29 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 		// 1. Spawn the planner subagent.
 		plan, plannerErr := e.spawnAndAwaitPlanner(ctx, executor, mission, manifest, missionSkill, goal, iteration, recentVerdict)
 		if plannerErr != nil {
+			consecutiveErrors++
 			e.logger.Warn("mission: planner loop: planner closed with an invalid plan — handing back to planner for amend",
 				"mission_session", mission.SessionID(),
-				"iteration", iteration, "err", plannerErr)
+				"iteration", iteration,
+				"consecutive_errors", consecutiveErrors,
+				"err", plannerErr)
+			if consecutiveErrors >= maxConsecutiveErrors {
+				e.logger.Warn("mission: planner loop: aborting — consecutive error cap reached",
+					"mission_session", mission.SessionID(),
+					"iteration", iteration,
+					"consecutive_errors", consecutiveErrors,
+					"cap", maxConsecutiveErrors)
+				return true, nil
+			}
 			// A *PlannerError indicates the planner closed with a
 			// malformed handoff (parse / decode / role / output-
 			// contract failure). The handoff is NOT actionable, but
 			// the loop is — surface the parser's reason to the next
 			// planner spawn as a synthetic amend verdict so it can
 			// re-emit a valid plan. max_waves caps the retry budget;
-			// genuinely broken planners hit the cap and synthesis
-			// recaps the partial state.
+			// consecutiveErrors caps the retry budget per stuck
+			// wave so an unrecoverable error doesn't burn the full
+			// iteration cap on amend cycles.
 			recentVerdict = &Verdict{
 				Decision: VerdictAmend,
 				Reason:   "previous planner handoff was invalid — re-emit a clean plan",
@@ -181,18 +227,28 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 		status, _, runErr := executor.RunWave(ctx, mission, decorated, RunWaveOptions{})
 		e.emitWaveComplete(mission, plan.NextWave.Label, status, runErr)
 		if runErr != nil || status == WaveStatusFailed {
+			consecutiveErrors++
 			e.logger.Warn("mission: planner loop: executed wave failed — handing to planner for amend",
 				"mission_session", mission.SessionID(),
 				"iteration", iteration,
 				"wave", plan.NextWave.Label,
 				"status", status,
+				"consecutive_errors", consecutiveErrors,
 				"err", runErr)
+			if consecutiveErrors >= maxConsecutiveErrors {
+				e.logger.Warn("mission: planner loop: aborting — consecutive error cap reached",
+					"mission_session", mission.SessionID(),
+					"iteration", iteration,
+					"consecutive_errors", consecutiveErrors,
+					"cap", maxConsecutiveErrors)
+				return true, nil
+			}
 			// Fold wave failure into a synthetic verdict so the next
 			// planner spawn sees the failure under [Recent verdict]
 			// and replans rather than aborting the mission. Caps at
-			// max_waves cleanly; consecutive identical failures get
-			// flushed when the iteration counter hits the cap and
-			// synthesis recaps whatever partial state was produced.
+			// max_waves cleanly; consecutiveErrors caps the retry
+			// budget per stuck wave so an unrecoverable failure
+			// doesn't burn the full iteration cap on amend cycles.
 			recentVerdict = &Verdict{
 				Decision: VerdictAmend,
 				Reason:   fmt.Sprintf("wave %q failed", plan.NextWave.Label),
@@ -200,6 +256,12 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 			}
 			continue
 		}
+		// Wave succeeded — do NOT reset consecutiveErrors yet.
+		// The checker still runs below; resetting here would mask a
+		// chronically-broken checker (every wave succeeds, every
+		// checker fails — counter would bounce back to 0 every iter
+		// and the cap would never trip). Reset happens at the END
+		// of the iteration after BOTH wave + checker succeed.
 
 		// 4. Phase C — verdict phase. Spawn checker if declared,
 		// route on its decision. Absent control collapses to the
@@ -217,10 +279,30 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 		} else if manifest.Control.Role != "" {
 			verdict, checkErr := e.spawnAndAwaitChecker(ctx, executor, mission, manifest, missionSkill, goal, iteration)
 			if checkErr != nil {
-				e.logger.Warn("mission: planner loop: checker failed",
+				consecutiveErrors++
+				e.logger.Warn("mission: planner loop: checker failed — folding into amend verdict for next iter",
 					"mission_session", mission.SessionID(),
-					"iteration", iteration, "err", checkErr)
-				return true, checkErr
+					"iteration", iteration,
+					"consecutive_errors", consecutiveErrors,
+					"err", checkErr)
+				if consecutiveErrors >= maxConsecutiveErrors {
+					e.logger.Warn("mission: planner loop: aborting — consecutive error cap reached on checker fail",
+						"mission_session", mission.SessionID(),
+						"iteration", iteration,
+						"consecutive_errors", consecutiveErrors,
+						"cap", maxConsecutiveErrors)
+					return true, checkErr
+				}
+				// Synthetic amend so the next planner sees the
+				// checker failure under [Recent verdict] and can
+				// keep the mission moving instead of dying on a
+				// transient parse glitch in the checker role.
+				recentVerdict = &Verdict{
+					Decision: VerdictAmend,
+					Reason:   "previous checker handoff failed to parse — re-emit a clean wave; the prior wave's outputs are intact",
+					Issues:   []string{checkErr.Error()},
+				}
+				continue
 			}
 			e.emitVerdictReady(mission, iteration, verdict)
 			vCopy := verdict
@@ -261,6 +343,12 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 				return false, nil
 			}
 		}
+		// End-of-iteration success path — wave AND checker (when
+		// declared) both succeeded. Reset the consecutive-error
+		// budget so the next stuck wave / checker gets a fresh
+		// retry budget independent of prior failures earlier in
+		// the mission.
+		consecutiveErrors = 0
 	}
 
 	// Max-iterations cap hit without plan_complete. Treated as a
@@ -339,40 +427,28 @@ func (e *Extension) spawnAndAwaitPlanner(ctx context.Context, executor *Executor
 		return nil, &PlannerError{Iteration: iteration, Reason: "decode plan", Err: decodeErr}
 	}
 
-	// Phase I.23 — skill-agnostic approval gate. Mission state
-	// carries ONE marker: the body the user most recently
-	// approved (or empty when no plan is currently approved).
-	// The planner MUST have called `mission:validate_and_approve`
-	// with the same body it now emits in the handoff fence,
-	// AND that body must produce the same canonical marker the
-	// tool stamped. Mismatch → reject the handoff. Worker
-	// invalidation (handoff body `invalidates_plan_approval:
-	// true`) clears the marker between iterations, forcing the
-	// next planner to re-validate from scratch.
-	//
-	// Missions whose policy opts out (Initial=skip) skip the
-	// gate entirely — automation / test missions take the
-	// approved-by-default branch.
+	// Phase 5.x — B13. Skill-agnostic approval gate. The mission
+	// carries a single bit: has the user ever approved a plan in
+	// this mission? When approval is required by policy AND the
+	// planner emitted a plan handoff without that bit being set
+	// (or after a worker re-invalidated it without the planner
+	// re-running the modal), reject the handoff so the synthetic
+	// verdict-amend path re-spawns the planner with the gap surfaced
+	// under [Recent verdict]. Missions whose policy opts out
+	// (Initial=skip) skip the gate entirely.
 	if approvalRequiredForIteration(manifest.Plan.Approval, iteration, m) {
-		emittedMarker, markerErr := canonicalPlanMarker(h.Body)
-		if markerErr != nil {
-			return nil, &PlannerError{Iteration: iteration, Reason: "compute emitted plan marker", Err: markerErr}
+		if !m.IsPlanApproved() {
+			return nil, &PlannerError{
+				Iteration: iteration,
+				Reason:    "planner emitted a plan handoff without a recorded approval; call mission:validate_and_approve with the body you intend to emit before shipping the fence",
+			}
 		}
-		stored := m.ApprovedPlanMarker()
-		switch {
-		case stored == "":
-			return nil, &PlannerError{
-				Iteration: iteration,
-				Reason:    "planner emitted a plan handoff without a recorded approval; call mission:validate_and_approve with the body you intend to emit, then ship the fence verbatim",
+		if pending, reason := m.PendingReapproval(); pending {
+			msg := "a worker handoff invalidated the prior plan approval; call mission:validate_and_approve again (this iteration MUST re-open the modal)"
+			if reason != "" {
+				msg = msg + " — worker reason: " + reason
 			}
-		case stored != emittedMarker:
-			return nil, &PlannerError{
-				Iteration: iteration,
-				Reason: fmt.Sprintf(
-					"plan body marker mismatch: approved=%s emitted=%s — the body you shipped in the handoff is not the body the user approved. Re-call mission:validate_and_approve with the body you intend to commit, or emit the previously-approved body verbatim.",
-					stored, emittedMarker,
-				),
-			}
+			return nil, &PlannerError{Iteration: iteration, Reason: msg}
 		}
 	}
 	// Phase I.26 — snapshot the planner's current mission frame
@@ -556,7 +632,15 @@ func (e *Extension) makeSpawnerCallback(mission extension.SessionState, spawner 
 		if err != nil {
 			return SpawnResult{}, err
 		}
-		first := protocol.NewUserMessage(child.SessionID(), agentParticipant(mission, e.agentID), req.Task)
+		// Mission ext owns the worker's first-message contract — render
+		// the [Inputs from parent] block here so the planner's lifted
+		// `inputs.<key>` actually reach the worker LLM. Until this fix
+		// the values flowed into SpawnSpec.Inputs (parent-side
+		// SubagentStarted frame metadata) but never into the worker's
+		// own context, leaving workers with task references like
+		// "save to inputs.file_path" but no concrete value to deref.
+		body := buildWorkerFirstMessage(req.Task, req.Inputs)
+		first := protocol.NewUserMessage(child.SessionID(), agentParticipant(mission, e.agentID), body)
 		settled := child.Submit(context.Background(), first)
 		return SpawnResult{SessionID: child.SessionID(), Settled: settled}, nil
 	}
@@ -572,6 +656,22 @@ type plannerTaskView struct {
 	Iteration        int
 	MaxWaves         int
 	ApprovalRequired bool
+	// FirstPlanGate signals "no plan has been approved yet on this
+	// mission". Drives the long-form [STOP — pre-flight checklist]
+	// rendering on the planner's first gate-bearing turn so the
+	// model learns the validate_and_approve discipline; subsequent
+	// iterations see a short one-line reminder instead, saving
+	// ~1.5K chars of prompt context. Sourced from
+	// MissionState.IsPlanApproved() — false = first gate-bearing
+	// iteration. Phase 5.x — B15 follow-up.
+	FirstPlanGate bool
+	// PendingReapproval signals that a worker handoff invalidated
+	// the prior plan approval since the last modal closed. Renders
+	// the [pending_reapproval] section so the planner restates the
+	// goal/AC honestly given the new findings, then calls
+	// validate_and_approve to re-open the modal. Phase 5.x — B13.
+	PendingReapproval       bool
+	PendingReapprovalReason string
 	// PlanContext is a placeholder for Phase D; rendered empty in
 	// Phase C so the template's section header is stable.
 	PlanContext []plannerContextEntry
@@ -588,6 +688,29 @@ type plannerTaskView struct {
 	// of guessing `worker` and falling through to the generic
 	// _worker autoload (which has no domain tools).
 	DoRoles []plannerDoRoleView
+	// ResearchFindings is the research role's done=true narrative.
+	// Rendered under [Plan context] so the planner sees what the
+	// research stage discovered before drafting iter-1. Empty when
+	// the skill declares no mission.research block or when the
+	// stage was skipped by trigger predicate. Phase 5.x — B15.
+	ResearchFindings string
+	// ResolvedUserInputs lists the user-confirmed key/value pairs
+	// the research stage pulled out via clarifications. Planner
+	// reads it to lift `file_path` / `output_format` / etc. into
+	// workers' `inputs` without re-asking the user. Phase 5.x — B15.
+	ResolvedUserInputs []researchKV
+	// ResearchACProposals lists the proposed acceptance criteria
+	// research recommends for planner consideration. Planner is
+	// the authority — proposals are input only (§3.2.1). Phase
+	// 5.x — B15.
+	ResearchACProposals []researchACProposalView
+}
+
+// researchACProposalView is one row in the [Research AC proposals]
+// section of the planner's first message.
+type researchACProposalView struct {
+	Statement string
+	Rationale string
 }
 
 // plannerDoRoleView is one row in the planner's
@@ -656,6 +779,22 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		DoRoles:          doRoles,
 		Recent:           collectRecentWaves(mission),
 		PlanContext:      collectPlanContext(mission),
+	}
+	if m := FromState(mission); m != nil {
+		// FirstPlanGate: planner has never gotten an approve yet.
+		// Drives the long-form STOP-checklist on the very first
+		// gate-bearing iteration so weak models learn the
+		// validate_and_approve discipline; subsequent iterations
+		// get a short one-line reminder. Phase 5.x — B15 follow-up.
+		view.FirstPlanGate = !m.IsPlanApproved()
+		if pending, reason := m.PendingReapproval(); pending {
+			view.PendingReapproval = true
+			view.PendingReapprovalReason = reason
+		}
+		findings, resolvedInputs, acProposals := m.ResearchOutput()
+		view.ResearchFindings = findings
+		view.ResolvedUserInputs = projectResolvedInputsForTemplate(resolvedInputs)
+		view.ResearchACProposals = projectACProposalsForTemplate(acProposals)
 	}
 	if recentVerdict != nil {
 		view.RecentVerdict = &plannerVerdictView{

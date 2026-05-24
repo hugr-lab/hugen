@@ -14,10 +14,11 @@ import (
 // shipped :finish + :get_handoff; Phase E adds :notify so root
 // can deliver mid-mission followups without re-spawning.
 const (
-	PermFinish            = "hugen:mission:finish"
-	PermGetHandoff        = "hugen:mission:get_handoff"
-	PermNotify            = "hugen:mission:notify"
+	PermFinish             = "hugen:mission:finish"
+	PermGetHandoff         = "hugen:mission:get_handoff"
+	PermNotify             = "hugen:mission:notify"
 	PermValidateAndApprove = "hugen:mission:validate_and_approve"
+	PermGetResearch        = "hugen:mission:get_research"
 )
 
 const (
@@ -71,6 +72,11 @@ const (
     }
   },
   "required": ["name", "text"]
+}`
+
+	missionGetResearchSchema = `{
+  "type": "object",
+  "properties": {}
 }`
 )
 
@@ -131,10 +137,17 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 		},
 		{
 			Name:             providerName + ":validate_and_approve",
-			Description:      "Validate a candidate plan body AND, in the same call, surface it to the user as an approval inquire (when the iteration's policy requires approval). Pass the same JSON object you intend to emit under `body` in the fenced `plan` block. Returns `{ valid, errors[], approved, refine_text?, aborted?, plan_marker }`. The plan_marker is the canonical sha256-hex of the body the runtime stores against this iteration; you MUST emit the SAME body verbatim in your handoff fence or the runtime will reject it (marker mismatch). Approval flow: on `approved=true` emit the plan fence. On `refine_text` populated, revise the plan and call this tool again. On `aborted=true` emit a `status: error` handoff carrying the abort reason. Refuses re-approval for an already-dispatched iteration. Planner-tier only.",
+			Description:      "Validate a candidate plan body AND, in the same call, surface it to the user as an approval inquire when this iteration needs sign-off. Pass the same JSON object you intend to emit under `body` in the fenced `plan` block. Returns `{ valid, errors[], approved, refine_text?, aborted?, reason? }`. The modal opens when (1) this is the first plan in the mission, (2) a worker handoff requested reapproval, or (3) this body sets `requires_reapproval: true`. Otherwise the call passes silently and the prior approval stands. Approval flow: on `approved=true` emit the plan fence. On `refine_text` populated, revise the plan and call this tool again. On `aborted=true` emit a `status: error` handoff carrying the abort reason. Planner-tier only.",
 			Provider:         providerName,
 			PermissionObject: PermValidateAndApprove,
 			ArgSchema:        json.RawMessage(missionValidateAndApproveSchema),
+		},
+		{
+			Name:             providerName + ":get_research",
+			Description:      "Fetch the mission's research-stage output: the findings paragraph the researcher emitted on done=true, plus any structured resolved_user_inputs (file_path, output_format, scope choices the user picked) and ac_proposals. Returns `{ available: bool, findings: string, resolved_user_inputs: {...}, ac_proposals: [...] }`. Call when your task brief references scope set by the research stage and you need the full context — schema names, decided file paths, resolved scope choices — rather than re-discovering them. `available: false` means the mission didn't run a research stage; treat your task brief as the canonical source.",
+			Provider:         providerName,
+			PermissionObject: PermGetResearch,
+			ArgSchema:        json.RawMessage(missionGetResearchSchema),
 		},
 	}, nil
 }
@@ -151,6 +164,8 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 		return e.callNotify(ctx, args)
 	case "validate_and_approve":
 		return e.callValidateAndApprove(ctx, args)
+	case "get_research":
+		return e.callGetResearch(ctx, args)
 	default:
 		return nil, fmt.Errorf("%w: mission:%s", tool.ErrUnknownTool, short)
 	}
@@ -288,6 +303,59 @@ func readIterationCounter(m *MissionState) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.IterationCounter
+}
+
+// getResearchResponse is the JSON shape callGetResearch emits.
+// available=true with populated findings means the researcher
+// emitted done=true and stashed output on MissionState.
+// available=false + attempted=false means the mission has no
+// research stage configured — the worker's task brief is the
+// canonical source.
+// available=false + attempted=true means research ran but
+// produced no usable output (empty findings, decode failure,
+// or stage aborted). Worker should NOT assume scope was
+// pre-researched; the task brief stands alone.
+type getResearchResponse struct {
+	Available          bool                 `json:"available"`
+	Attempted          bool                 `json:"attempted,omitempty"`
+	Findings           string               `json:"findings,omitempty"`
+	ResolvedUserInputs map[string]any       `json:"resolved_user_inputs,omitempty"`
+	ACProposals        []ResearchACProposal `json:"ac_proposals,omitempty"`
+}
+
+// callGetResearch projects MissionState.ResearchOutput() onto the
+// JSON envelope workers see. The mission state is resolved via
+// FromState which walks the parent chain — so a worker calling
+// this tool from within its own session lands on the parent
+// mission's state without any explicit handle plumbing.
+//
+// Same dispatch context handling as callGetHandoff: returns
+// session_gone when no session attached, unavailable when the
+// MissionState extension wasn't initialised on the resolved
+// session.
+func (e *Extension) callGetResearch(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+	state, ok := extension.SessionStateFromContext(ctx)
+	if !ok || state == nil {
+		return toolErr("session_gone", "no session attached to dispatch ctx")
+	}
+	m := FromState(state)
+	if m == nil {
+		return toolErr("unavailable", "mission state not initialised on this session")
+	}
+	findings, resolved, acProposals := m.ResearchOutput()
+	if strings.TrimSpace(findings) == "" && len(resolved) == 0 && len(acProposals) == 0 {
+		return json.Marshal(getResearchResponse{
+			Available: false,
+			Attempted: m.ResearchAttempted(),
+		})
+	}
+	return json.Marshal(getResearchResponse{
+		Available:          true,
+		Attempted:          true,
+		Findings:           findings,
+		ResolvedUserInputs: resolved,
+		ACProposals:        acProposals,
+	})
 }
 
 // callGetHandoff reads a handoff from the per-mission store. Any

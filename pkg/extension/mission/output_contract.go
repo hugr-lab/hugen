@@ -23,12 +23,18 @@ const (
 	KindPlan      OutputContractKind = "plan"
 	KindVerdict   OutputContractKind = "verdict"
 	KindSynthesis OutputContractKind = "synthesis"
+	// KindResearch is the Phase 5.x — B15 research-stage shape.
+	// Body is the typed ResearchOutput (clarifications,
+	// resolved_user_inputs, done, ac_proposals, findings,
+	// memory_summary). Emitted by the research role; consumed by
+	// the runtime's research-stage loop before the planner runs.
+	KindResearch OutputContractKind = "research"
 )
 
-// Known returns true when k is one of the four declared kinds.
+// Known returns true when k is one of the five declared kinds.
 func (k OutputContractKind) Known() bool {
 	switch k {
-	case KindHandoff, KindPlan, KindVerdict, KindSynthesis:
+	case KindHandoff, KindPlan, KindVerdict, KindSynthesis, KindResearch:
 		return true
 	default:
 		return false
@@ -72,13 +78,13 @@ func (e *ParseError) Error() string {
 }
 
 // handoffBlockRe matches a fenced YAML or JSON block tagged
-// `handoff` / `plan` / `verdict` / `synthesis`. Tolerant to
-// surrounding prose — the parser scans for the first matching
-// block; everything outside is treated as commentary.
+// `handoff` / `plan` / `verdict` / `synthesis` / `research`.
+// Tolerant to surrounding prose — the parser scans for the first
+// matching block; everything outside is treated as commentary.
 //
 // (?s) — dot matches newline.
 var handoffBlockRe = regexp.MustCompile(
-	"(?s)```(handoff|plan|verdict|synthesis)\\s*\\n(.+?)```",
+	"(?s)```(handoff|plan|verdict|synthesis|research)\\s*\\n(.+?)```",
 )
 
 // jsonBlockRe matches a fenced ```json``` block, used as a fallback
@@ -256,9 +262,90 @@ func validateRequired(kind OutputContractKind, h Handoff, raw map[string]any) er
 		if !VerdictDecision(decision).Known() {
 			return &ParseError{Reason: fmt.Sprintf("kind=verdict: unknown decision %q (allowed: continue | amend | inquire | finish)", decision)}
 		}
+	case KindResearch:
+		body, _ := raw["body"].(map[string]any)
+		if body == nil {
+			return &ParseError{Reason: "kind=research requires a body object"}
+		}
+		// `done` is required so the runtime can decide whether to
+		// re-fire the research role or move to the planner. Empty
+		// `clarifications` + `done: false` is legitimate (the role
+		// asks for one more turn to process prior_answers before
+		// finalising findings).
+		if _, ok := body["done"]; !ok {
+			return &ParseError{Reason: "kind=research requires body.done (boolean)"}
+		}
+		if v, ok := body["done"].(bool); !ok {
+			return &ParseError{Reason: fmt.Sprintf("kind=research: body.done must be a boolean, got %T", body["done"])}
+		} else if !v {
+			// done=false REQUIRES at least one clarification — the
+			// only sensible reason to re-fire research is to ask
+			// the user something. Without clarifications it would
+			// loop forever.
+			cl, _ := body["clarifications"].([]any)
+			if len(cl) == 0 {
+				return &ParseError{Reason: "kind=research: body.done=false requires at least one entry in body.clarifications"}
+			}
+		}
+		// When done=true the role MUST emit `findings` (free-form
+		// summary the planner reads). Empty findings on done=true
+		// is a misbehaving role — the runtime fails loud so the
+		// retry path engages.
+		if done, _ := body["done"].(bool); done {
+			findings, _ := body["findings"].(string)
+			if strings.TrimSpace(findings) == "" {
+				return &ParseError{Reason: "kind=research: body.findings is required when body.done=true (one-paragraph summary of what was learned)"}
+			}
+		}
+		if cl, ok := body["clarifications"]; ok {
+			arr, isArr := cl.([]any)
+			if !isArr {
+				return &ParseError{Reason: "kind=research: body.clarifications must be an array of objects"}
+			}
+			if len(arr) > researchMaxClarificationsPerBatch {
+				return &ParseError{Reason: fmt.Sprintf("kind=research: body.clarifications has %d entries; max %d per batch", len(arr), researchMaxClarificationsPerBatch)}
+			}
+			seen := make(map[string]struct{}, len(arr))
+			for i, e := range arr {
+				entry, ok := e.(map[string]any)
+				if !ok {
+					return &ParseError{Reason: fmt.Sprintf("kind=research: body.clarifications[%d] must be an object", i)}
+				}
+				q, _ := entry["question"].(string)
+				if strings.TrimSpace(q) == "" {
+					return &ParseError{Reason: fmt.Sprintf("kind=research: body.clarifications[%d].question is required", i)}
+				}
+				id, _ := entry["id"].(string)
+				if id == "" {
+					// Soft recovery — auto-assign q1/q2/... isn't done
+					// here (we'd mutate raw); the runtime fills it in
+					// after parsing. We only reject duplicates that
+					// the role itself emitted.
+					continue
+				}
+				if _, dup := seen[id]; dup {
+					return &ParseError{Reason: fmt.Sprintf("kind=research: body.clarifications[%d].id = %q duplicates an earlier entry", i, id)}
+				}
+				seen[id] = struct{}{}
+				if k, _ := entry["kind"].(string); k != "" {
+					switch k {
+					case "required", "optional", "comment":
+					default:
+						return &ParseError{Reason: fmt.Sprintf("kind=research: body.clarifications[%d].kind = %q: must be one of [required, optional, comment]", i, k)}
+					}
+				}
+			}
+		}
 	}
 	return nil
 }
+
+// researchMaxClarificationsPerBatch caps the number of questions
+// one research output can emit. Mirrors spec §2.7 cap (default 8).
+// Above the cap the runtime treats it as a contract violation and
+// fails the parse — the retry path then prompts the role to
+// narrow its batch.
+const researchMaxClarificationsPerBatch = 8
 
 // VerdictDecision is the typed enum the checker emits to direct
 // the planner loop. Phase C — four-valued: continue, amend,

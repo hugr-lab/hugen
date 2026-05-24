@@ -7,11 +7,13 @@ import (
 
 // planContextSoftCap is the FIFO threshold the plan_context journal
 // trims to once its character count exceeds the cap. Roughly
-// 8000 characters ≈ 2000 tokens for English text — matches canon
-// §18's "2000-token cap" knob without pulling a real tokenizer in.
-// Phase 5.2 compactor replaces this fixed FIFO trim with
-// summarisation; for v1 it's just "drop the oldest entries".
-const planContextSoftCap = 8000
+// 2500 characters ≈ 600 tokens for English text — sized so the
+// rendered journal fits well under the planner's input budget on
+// weak models (Gemma 4-26B with max_tokens=8192 leaves room for
+// the rest of the prompt). Phase 5.2 compactor's per-role
+// override is the path to richer summarisation; this is a hard
+// fallback when the compactor is disabled or hasn't kicked in.
+const planContextSoftCap = 2500
 
 // PlanContextEntry is one row in the per-mission plan_context
 // journal — a compact projection of a single handoff's

@@ -13,6 +13,11 @@ import (
 // adapter rendered it, and now waits for the user to answer.
 // Phase 5.1 — adapters own the user-facing leg of the inquiry
 // round trip; the runtime stays UI-agnostic.
+//
+// Research-batch shape (Phase 5.x — B15) does NOT route through
+// BuildInquiryReply; the TUI's tab-style modal builds the typed
+// Answers map directly via tab.submitBatchedAnswers. Only Approval
+// + Clarification kinds reach this struct.
 type PendingInquiry struct {
 	RequestID       string
 	CallerSessionID string
@@ -47,6 +52,10 @@ func BuildInquiryReply(user protocol.ParticipantInfo, rootSessionID string, pend
 			return nil, err
 		}
 		payload.Response = text
+	// Phase 5.x — B15. ResearchBatch replies are constructed
+	// directly by the TUI's tab-style modal via
+	// tab.submitBatchedAnswers — BuildInquiryReply does NOT cover
+	// this kind. Routing it here is a bug; surface loud.
 	default:
 		return nil, fmt.Errorf("unknown inquiry type %q", pend.Kind)
 	}

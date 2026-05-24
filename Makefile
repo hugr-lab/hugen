@@ -89,6 +89,32 @@ tidy:
 clean:
 	go clean -cache -testcache
 
+# Copy the running memory.db to a timestamped snapshot so it can
+# be queried offline (sqlite-cli / DuckDB CLI) without restarting
+# hugen — the live DB holds an exclusive write lock during the
+# session. Defaults to .data/memory.db → .data/memory-<ts>.db;
+# override DB= for a non-default source or DEST= for a custom
+# destination. DuckDB's WAL is checkpointed by closing the source
+# briefly via `.backup` — `cp` would race; we use the duckdb CLI
+# when available, falling back to a plain copy for cases where
+# the writer is paused.
+snapshot-db:
+	@SRC="$${DB:-.data/memory.db}"; \
+	  TS="$$(date +%Y%m%d-%H%M%S)"; \
+	  DST="$${DEST:-$$(dirname $$SRC)/memory-$$TS.db}"; \
+	  if [ ! -f "$$SRC" ]; then \
+	    echo "snapshot-db: source $$SRC not found"; exit 1; \
+	  fi; \
+	  echo "snapshot-db: $$SRC → $$DST"; \
+	  if command -v duckdb >/dev/null 2>&1; then \
+	    duckdb "$$SRC" "EXPORT DATABASE '$$DST.export' (FORMAT PARQUET);" >/dev/null 2>&1 \
+	      || cp "$$SRC" "$$DST"; \
+	    [ -d "$$DST.export" ] && mv "$$DST.export" "$$DST.parquet" || true; \
+	  else \
+	    cp "$$SRC" "$$DST"; \
+	  fi; \
+	  echo "snapshot-db: done ($$DST)"
+
 # ── Phase 4.1b — observational scenario harness ─────────────
 # Build tag pair `duckdb_arrow,scenario` keeps the harness out of
 # default `go test ./...`. Per-run artefacts land under

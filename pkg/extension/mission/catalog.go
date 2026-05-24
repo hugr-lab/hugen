@@ -39,6 +39,13 @@ type MissionManifest struct {
 	// top-level description in adapters.
 	Summary string
 
+	// Research declares the optional pre-planner research stage.
+	// Phase 5.x — B15. Nil means "no research stage". When set,
+	// the runtime spawns Role before the planner loop, lets it
+	// gather user clarifications + scope findings, and surfaces
+	// those into the planner's plan_context.
+	Research *ResearchManifest
+
 	// Plan declares how the mission's wave sequence is sourced.
 	// Phase A — only ExperimentalInline is recognised.
 	Plan MissionPlanManifest
@@ -105,6 +112,52 @@ const (
 type ControlManifest struct {
 	Role string
 }
+
+// ResearchManifest is the typed projection of the skill manifest's
+// `metadata.hugen.mission.research` block. Phase 5.x — B15.
+//
+// The runtime auto-runner spawns Role before the planner loop on
+// missions where the trigger (When + optional Predicate) fires.
+// Output is parsed via DecodeResearchOutput; on `done: true` the
+// runtime stamps ResearchFindings + ResolvedUserInputs +
+// ACProposals on MissionState and moves to the planner spawn.
+type ResearchManifest struct {
+	// Role names the research sub-agent role declared in the
+	// skill's `sub_agents` block. Required when the block is
+	// present.
+	Role string
+
+	// When selects the trigger predicate. Canonical values:
+	// `always`, `auto`, `if_goal_matches`. Empty defaults to
+	// `auto` at projection time.
+	When string
+
+	// Predicate is the goal-string regex evaluated when
+	// When=`if_goal_matches`. Empty for other trigger modes.
+	Predicate string
+
+	// MaxIterations caps research re-fire cycles when the role
+	// emits `done: false`. Defaults to ResearchDefaultMaxIterations
+	// at projection time.
+	MaxIterations int
+}
+
+// Recognised values for ResearchManifest.When. Mirror the skill
+// manifest constants so the runtime side can keep a closed
+// vocabulary.
+const (
+	ResearchWhenAlways        = "always"
+	ResearchWhenAuto          = "auto"
+	ResearchWhenIfGoalMatches = "if_goal_matches"
+
+	// ResearchDefaultMaxIterations matches spec §2.1's default.
+	ResearchDefaultMaxIterations = 3
+
+	// ResearchMaxIterationsCap is the operator-visible hard ceiling
+	// to keep a weak model from looping forever on a malformed
+	// clarification batch.
+	ResearchMaxIterationsCap = 6
+)
 
 // MissionPlanManifest is the typed plan section of a PDCA mission.
 // Either ExperimentalInline (Phase A) or Role (Phase B) is non-zero

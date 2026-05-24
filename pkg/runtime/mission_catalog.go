@@ -135,6 +135,25 @@ func projectMissionManifest(m skillpkg.Manifest) *missionext.MissionManifest {
 	if mb.Control.Role != "" {
 		out.Control = missionext.ControlManifest{Role: mb.Control.Role}
 	}
+	if mb.Research != nil && mb.Research.Role != "" {
+		when := mb.Research.When
+		if when == "" {
+			when = missionext.ResearchWhenAuto
+		}
+		maxIter := mb.Research.MaxIterations
+		if maxIter <= 0 {
+			maxIter = missionext.ResearchDefaultMaxIterations
+		}
+		if maxIter > missionext.ResearchMaxIterationsCap {
+			maxIter = missionext.ResearchMaxIterationsCap
+		}
+		out.Research = &missionext.ResearchManifest{
+			Role:          mb.Research.Role,
+			When:          when,
+			Predicate:     mb.Research.Predicate,
+			MaxIterations: maxIter,
+		}
+	}
 	out.Capabilities = projectMissionCapabilities(mb.Capabilities)
 	out.Roles = projectRoleCapabilities(m.Hugen.SubAgents)
 	out.Workers = projectDoWorkers(m.Hugen.SubAgents, mb.Plan.Role, mb.Control.Role, mb.Synthesis.Role)

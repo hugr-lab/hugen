@@ -222,6 +222,7 @@ first.
    - Small inline reply? → `hugr-main:data-inline_graphql_result` (use jq to reshape; increase `max_result_size` up to 5000 if truncated)
    - Big result, file output? → `hugr-query:query` (engine response decides Parquet vs JSON per leaf)
    - JQ post-process to one JSON value? → `hugr-query:query_jq` — JQ input is the full `{data, errors}` envelope; results live under `.data.<field>`
+   - If the inline result is `is_truncated: true` AND preview doesn't cover what you need — read `tips` ref for the file-output escape hatch instead of re-bumping `max_result_size` blindly.
 9. **Present** — tight structured finding. Write it to the
    whiteboard (mission reads between waves) and return your
    final assistant message with verbatim numbers from the
@@ -252,6 +253,11 @@ shape. Read the error, then escalate to the right tool:
   not standard GraphQL.
 - **Repeated identical error after one retry** — you're guessing. Stop
   the loop, switch to discovery / schema tools, and re-plan.
+- **Query succeeds but returns null / empty / `is_truncated`** —
+  the data IS empty (or the cap clipped your preview); re-running
+  identical queries with minor jq tweaks won't change that. Read
+  the `tips` reference for diagnoses + the file-output escape
+  hatch.
 
 The same applies before the first query on a schema: if you've never
 seen `instructions` in this session and the user asks for non-trivial
@@ -280,6 +286,7 @@ keep the body in working context for the rest of your task.
 | `dashboard` | Multi-panel KPI / chart query shapes. | Building a visual dashboard. |
 | `queries-deep-dive` | JQ functions, geometry / JSON filter operators, parameterised view internals. | Hit a JQ / geometry / JSON / view edge case. |
 | `hugr-query` | Output-to-file mechanics: Parquet vs JSON per leaf, path layout, preview. | First time using `hugr-query:query` / `hugr-query:query_jq`. |
+| `tips` | Stuck-investigation companion: diagnoses for null/empty results, jq path slips, `is_truncated` escape hatch (when to switch from inline to `hugr-query`). | Query returned `null`, `[]`, `summary: null`, or `is_truncated: true` and the preview isn't enough. |
 
 Reading order on a new task:
 1. **`instructions`** if you haven't read it this session.
