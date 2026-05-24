@@ -44,7 +44,7 @@ metadata:
 
       plan:
         role: planner
-        max_waves: 6
+        max_waves: 10
         approval:
           initial: required
           iteration: initial-only
