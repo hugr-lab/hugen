@@ -1186,104 +1186,92 @@ func TestBuildPlannerTask_RendersPlanContextSection(t *testing.T) {
 	}
 }
 
-// TestUnsatisfiedMissionAC covers the Phase I.26 runtime gate:
-// the helper takes a checker verdict and returns the unsatisfied
-// mission criteria as human-readable strings. Empty status array
-// is treated as "the checker misbehaved" and surfaces a single
-// reminder so the planner can ask for proper mission_ac_status
-// next iteration.
+// TestUnsatisfiedMissionAC covers the Phase 5.x B11 §3.7 runtime gate:
+// the helper reads state.AC and returns one "<id>: <statement>"
+// string per still-unsatisfied row. Dropped rows are excluded;
+// satisfied rows are excluded; nil state returns nil.
 func TestUnsatisfiedMissionAC(t *testing.T) {
-	cases := []struct {
-		name        string
-		verdict     Verdict
-		wantCount   int
-		wantSubstr  []string
-		wantEvidence []string
-	}{
-		{
-			name:       "empty status produces guidance",
-			verdict:    Verdict{},
-			wantCount:  1,
-			wantSubstr: []string{"mission_ac_status"},
-		},
-		{
-			name: "all satisfied returns nil",
-			verdict: Verdict{
-				MissionACStatus: []ACCriterionStatus{
-					{Criterion: "HTML saved", Satisfied: true, Evidence: "wrk@x path=/a"},
-					{Criterion: "charts render", Satisfied: true, Evidence: "wrk@x carries svg"},
-				},
-			},
-			wantCount: 0,
-		},
-		{
-			name: "mixed surfaces only unsatisfied",
-			verdict: Verdict{
-				MissionACStatus: []ACCriterionStatus{
-					{Criterion: "HTML saved", Satisfied: true, Evidence: "wrk@x path=/a"},
-					{Criterion: "charts render", Satisfied: false, Evidence: "no svg in handoff body"},
-					{Criterion: "data complete", Satisfied: false},
-				},
-			},
-			wantCount:    2,
-			wantSubstr:   []string{"charts render", "data complete"},
-			wantEvidence: []string{"no svg in handoff body", "no evidence in handoffs"},
-		},
-		{
-			name: "blank criterion gets placeholder name",
-			verdict: Verdict{
-				MissionACStatus: []ACCriterionStatus{
-					{Criterion: "", Satisfied: false, Evidence: "blank"},
-				},
-			},
-			wantCount:  1,
-			wantSubstr: []string{"unnamed criterion"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := unsatisfiedMissionAC(tc.verdict)
-			if len(got) != tc.wantCount {
-				t.Fatalf("len(out) = %d, want %d (out=%v)", len(got), tc.wantCount, got)
+	t.Run("nil state returns nil", func(t *testing.T) {
+		if got := unsatisfiedMissionAC(nil); got != nil {
+			t.Errorf("unsatisfiedMissionAC(nil) = %v, want nil", got)
+		}
+	})
+	t.Run("empty AC returns nil", func(t *testing.T) {
+		m := NewMissionState()
+		if got := unsatisfiedMissionAC(m); got != nil {
+			t.Errorf("unsatisfiedMissionAC(empty) = %v, want nil", got)
+		}
+	})
+	t.Run("all satisfied returns nil", func(t *testing.T) {
+		m := NewMissionState()
+		m.SeedAC([]ACAddSpec{{Statement: "HTML saved"}, {Statement: "charts render"}}, OriginManifest)
+		_ = m.ApplyStatusOnly([]ACUpdateSpec{
+			{ID: "ac-1", Status: ACSatisfied, Evidence: "wrk@x path=/a"},
+			{ID: "ac-2", Status: ACSatisfied, Evidence: "wrk@x carries svg"},
+		}, 1, "checker iter-1")
+		if got := unsatisfiedMissionAC(m); len(got) != 0 {
+			t.Errorf("all-satisfied should return nil, got %v", got)
+		}
+	})
+	t.Run("mixed surfaces only unsatisfied", func(t *testing.T) {
+		m := NewMissionState()
+		m.SeedAC([]ACAddSpec{
+			{Statement: "HTML saved"},
+			{Statement: "charts render"},
+			{Statement: "data complete"},
+		}, OriginManifest)
+		_ = m.ApplyStatusOnly([]ACUpdateSpec{
+			{ID: "ac-1", Status: ACSatisfied, Evidence: "wrk@x path=/a"},
+			{ID: "ac-2", Status: ACUnsatisfied, Evidence: "no svg in handoff body"},
+		}, 1, "checker iter-1")
+		got := unsatisfiedMissionAC(m)
+		if len(got) != 2 {
+			t.Fatalf("len(out) = %d, want 2 (out=%v)", len(got), got)
+		}
+		// charts render carries its evidence; data complete has none.
+		joined := strings.Join(got, "\n")
+		for _, want := range []string{"ac-2: charts render", "ac-3: data complete", "no svg in handoff body", "no evidence yet"} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("expected %q in output:\n%s", want, joined)
 			}
-			for _, want := range tc.wantSubstr {
-				found := false
-				for _, line := range got {
-					if strings.Contains(line, want) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("missing substring %q in %v", want, got)
-				}
-			}
-			for _, ev := range tc.wantEvidence {
-				found := false
-				for _, line := range got {
-					if strings.Contains(line, ev) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("missing evidence text %q in %v", ev, got)
-				}
-			}
-		})
-	}
+		}
+	})
+	t.Run("dropped rows excluded", func(t *testing.T) {
+		m := NewMissionState()
+		m.SeedAC([]ACAddSpec{{Statement: "ac-1"}, {Statement: "ac-2 to be dropped"}}, OriginManifest)
+		if err := m.StagePlannerDiff(ACDiff{Update: []ACUpdateSpec{
+			{ID: "ac-2", Drop: true, DropReason: "out of scope"},
+		}}, 1, PlannerOriginAt(1), ""); err != nil {
+			t.Fatalf("stage: %v", err)
+		}
+		if _, err := m.CommitStagedDiff(ACDiff{}); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		got := unsatisfiedMissionAC(m)
+		if len(got) != 1 {
+			t.Fatalf("len(out)=%d, want 1 (only ac-1 remains)", len(got))
+		}
+		if !strings.Contains(got[0], "ac-1") {
+			t.Errorf("got=%q", got[0])
+		}
+	})
 }
 
 // TestPlannerLoop_Checker_FinishWithUnsatisfiedAC_CoercesToAmend
-// covers the Phase I.26 runtime gate inside runPlannerLoop. When
-// the checker proposes `finish` while mission_ac_status carries
-// any unsatisfied entry, the loop must coerce that verdict into a
-// synthetic amend so the next planner spawn sees the gap. The
-// recovery flows when the planner replans, the next checker
-// closes the gap, and the loop exits cleanly.
+// covers the Phase 5.x B11 §3.7 runtime gate inside runPlannerLoop.
+// State.AC is seeded with two rows; checker iter-1 marks only ac-1
+// satisfied and proposes finish — runtime coerces to amend, planner
+// replans, checker iter-2 marks ac-2 satisfied too and finish flows
+// through.
 func TestPlannerLoop_Checker_FinishWithUnsatisfiedAC_CoercesToAmend(t *testing.T) {
 	state := newRenderedFakeState("mis-checker-finish-gated", productionRenderer(t))
 	installMissionState(&state.fakeState)
+	// Seed state.AC up front — the manifest-level seed path will land
+	// in γ's auto_runner.RunMission, but runPlannerLoop is invoked
+	// directly in this test, so we mimic the seed here.
+	if m := FromState(state); m != nil {
+		m.SeedAC([]ACAddSpec{{Statement: "HTML saved"}, {Statement: "charts render"}}, OriginManifest)
+	}
 
 	manifest := MissionManifest{
 		Name: "checker-finish-gated",
@@ -1309,8 +1297,7 @@ func TestPlannerLoop_Checker_FinishWithUnsatisfiedAC_CoercesToAmend(t *testing.T
 				Kind:   KindPlan,
 				Status: "ok",
 				Body: map[string]any{
-					"mission_goal":                "deliver dashboard",
-					"mission_acceptance_criteria": []any{"HTML saved", "charts render"},
+					"mission_goal": "deliver dashboard",
 					"next_wave": map[string]any{
 						"label":     "wave-" + numToStr(iteration),
 						"subagents": []any{map[string]any{"name": "w", "role": "echo", "task": "t"}},
@@ -1330,8 +1317,8 @@ func TestPlannerLoop_Checker_FinishWithUnsatisfiedAC_CoercesToAmend(t *testing.T
 	spawner.onWorkerSpawn = func(_ SpawnRequest) Handoff {
 		return Handoff{Kind: KindHandoff, Status: "ok", Body: "ok"}
 	}
-	// First checker: finish with unsatisfied AC → must be coerced.
-	// Second checker: finish with everything satisfied → loop exits.
+	// Checker iter-1: only ac-1 satisfied → finish-gate coerces.
+	// Checker iter-2: ac-2 satisfied too → finish passes.
 	spawner.onCheckerSpawn = func(iteration int) Handoff {
 		switch iteration {
 		case 1:
@@ -1341,9 +1328,9 @@ func TestPlannerLoop_Checker_FinishWithUnsatisfiedAC_CoercesToAmend(t *testing.T
 				Body: map[string]any{
 					"decision": "finish",
 					"reason":   "looks done",
-					"mission_ac_status": []any{
-						map[string]any{"criterion": "HTML saved", "satisfied": true, "evidence": "w@wave-1 carries path"},
-						map[string]any{"criterion": "charts render", "satisfied": false, "evidence": "no svg yet"},
+					"ac_update": []any{
+						map[string]any{"id": "ac-1", "status": "satisfied", "evidence": "w@wave-1 carries path"},
+						map[string]any{"id": "ac-2", "status": "unsatisfied", "evidence": "no svg yet"},
 					},
 				},
 			}
@@ -1354,9 +1341,8 @@ func TestPlannerLoop_Checker_FinishWithUnsatisfiedAC_CoercesToAmend(t *testing.T
 				Body: map[string]any{
 					"decision": "finish",
 					"reason":   "now satisfied",
-					"mission_ac_status": []any{
-						map[string]any{"criterion": "HTML saved", "satisfied": true, "evidence": "w@wave-2 carries path"},
-						map[string]any{"criterion": "charts render", "satisfied": true, "evidence": "w@wave-2 produced svg"},
+					"ac_update": []any{
+						map[string]any{"id": "ac-2", "status": "satisfied", "evidence": "w@wave-2 produced svg"},
 					},
 				},
 			}

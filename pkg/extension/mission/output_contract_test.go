@@ -182,6 +182,60 @@ func TestParseHandoff_Kind(t *testing.T) {
 			},
 		},
 		{
+			name: "verdict ac_update happy path",
+			raw: "```verdict\n" +
+				`{"status":"ok","body":{"decision":"continue","ac_update":[{"id":"ac-1","status":"satisfied","evidence":"wrk@x"}]}}` +
+				"\n```",
+			wantOk: true,
+			check: func(t *testing.T, h Handoff) {
+				v, err := DecodeVerdict(h)
+				if err != nil {
+					t.Fatalf("DecodeVerdict: %v", err)
+				}
+				if len(v.ACUpdate) != 1 || v.ACUpdate[0].ID != "ac-1" {
+					t.Errorf("ACUpdate = %+v", v.ACUpdate)
+				}
+				if v.ACUpdate[0].Status != ACSatisfied {
+					t.Errorf("status=%q", v.ACUpdate[0].Status)
+				}
+			},
+		},
+		{
+			name: "verdict ac_update rejects statement (planner-only field)",
+			raw: "```verdict\n" +
+				`{"status":"ok","body":{"decision":"amend","ac_update":[{"id":"ac-1","statement":"rewrite","status":"unsatisfied"}]}}` +
+				"\n```",
+			wantErr: "checker cannot rewrite criteria",
+		},
+		{
+			name: "verdict ac_update rejects drop (planner-only field)",
+			raw: "```verdict\n" +
+				`{"status":"ok","body":{"decision":"amend","ac_update":[{"id":"ac-1","drop":true}]}}` +
+				"\n```",
+			wantErr: "checker cannot drop criteria",
+		},
+		{
+			name: "verdict ac_update rejects status=dropped wire",
+			raw: "```verdict\n" +
+				`{"status":"ok","body":{"decision":"amend","ac_update":[{"id":"ac-1","status":"dropped"}]}}` +
+				"\n```",
+			wantErr: "checker cannot drop criteria",
+		},
+		{
+			name: "verdict ac_update requires status",
+			raw: "```verdict\n" +
+				`{"status":"ok","body":{"decision":"amend","ac_update":[{"id":"ac-1","evidence":"x"}]}}` +
+				"\n```",
+			wantErr: "status is required",
+		},
+		{
+			name: "verdict ac_update requires id",
+			raw: "```verdict\n" +
+				`{"status":"ok","body":{"decision":"amend","ac_update":[{"status":"satisfied"}]}}` +
+				"\n```",
+			wantErr: "id is required",
+		},
+		{
 			name: "synthesis happy path",
 			raw: "```synthesis\n" +
 				`{"status":"ok","body":"final answer here"}` +

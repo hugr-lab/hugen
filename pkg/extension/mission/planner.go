@@ -318,13 +318,17 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 				// the checker closed; the next planner sees the
 				// verdict's reason in its [Recent verdict] block.
 			case VerdictFinish:
-				// Phase I.26 — runtime gate. The checker may only
-				// finish when every mission AC is satisfied. Any
-				// unsatisfied entry in mission_ac_status coerces the
-				// verdict into a synthetic amend with the gaps
-				// folded into issues, so the next planner can revise
-				// the plan to address them.
-				if pendings := unsatisfiedMissionAC(verdict); len(pendings) > 0 {
+				// Phase 5.x B11 §3.7 — runtime gate. The checker
+				// may only finish when every mission AC row is
+				// satisfied (status=satisfied OR status=dropped).
+				// Any still-unsatisfied row coerces the verdict
+				// into a synthetic amend with the gaps folded into
+				// issues, so the next planner can revise the plan
+				// to address them. AC state comes from MissionState
+				// (which has folded the checker's ac_update[] +
+				// any worker satisfies channel on this iter
+				// already), not from the verdict payload itself.
+				if pendings := unsatisfiedMissionAC(FromState(mission)); len(pendings) > 0 {
 					e.logger.Warn("mission: planner loop: rejecting finish — mission acceptance criteria unsatisfied",
 						"mission_session", mission.SessionID(),
 						"iteration", iteration,
@@ -467,32 +471,31 @@ func (e *Extension) spawnAndAwaitPlanner(ctx context.Context, executor *Executor
 	return plan, nil
 }
 
-// unsatisfiedMissionAC walks the checker's per-criterion mission
-// AC report and returns a string slice of "<criterion> (evidence:
-// <text>)" entries for every row whose `satisfied` flag is false.
-// Empty MissionACStatus is treated as "every criterion still
-// pending" — a checker proposing `finish` without filling AC
-// status is misbehaving and the runtime keeps it honest by
-// surfacing the gap via the synthetic-amend issue list. Phase I.26.
-func unsatisfiedMissionAC(v Verdict) []string {
-	if len(v.MissionACStatus) == 0 {
-		return []string{
-			"checker proposed finish but emitted no mission_ac_status — fill mission_ac_status[] with per-criterion satisfaction so the runtime can verify completion",
-		}
+// unsatisfiedMissionAC reads state.AC and returns one
+// "<id>: <statement>" entry per row whose status is still
+// unsatisfied (dropped rows are excluded — they're out of contract).
+//
+// Empty state.AC after iter 1 is misbehaving — the planner should
+// have seeded at least one AC. The caller's finish-gate emits the
+// synthetic amend issues from this slice; an empty list means the
+// mission is genuinely done.
+//
+// Phase 5.x — B11 §3.7 (was Phase I.26 reading from verdict).
+func unsatisfiedMissionAC(m *MissionState) []string {
+	if m == nil {
+		return nil
 	}
-	var out []string
-	for _, entry := range v.MissionACStatus {
-		if entry.Satisfied {
-			continue
-		}
-		msg := entry.Criterion
-		if msg == "" {
-			msg = "(unnamed criterion)"
-		}
-		if ev := strings.TrimSpace(entry.Evidence); ev != "" {
-			msg = msg + " (evidence: " + ev + ")"
+	rows := m.UnsatisfiedAC()
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		msg := row.ID + ": " + row.Statement
+		if ev := strings.TrimSpace(row.LastEvidence); ev != "" {
+			msg = msg + " (last evidence: " + ev + ")"
 		} else {
-			msg = msg + " (no evidence in handoffs)"
+			msg = msg + " (no evidence yet)"
 		}
 		out = append(out, msg)
 	}
@@ -555,6 +558,16 @@ func (e *Extension) spawnAndAwaitChecker(ctx context.Context, executor *Executor
 	verdict, decodeErr := DecodeVerdict(h)
 	if decodeErr != nil {
 		return Verdict{}, &PlannerError{Iteration: iteration, Reason: "decode verdict", Err: decodeErr}
+	}
+	// Phase 5.x B11 §3.5 — fold the checker's per-id ac_update[]
+	// into state.AC before the finish gate reads it. Validation
+	// already enforced status-only (no statement / drop) at the
+	// output_contract layer, so the runtime call is safe to apply.
+	if len(verdict.ACUpdate) > 0 {
+		evidenceSource := "checker iter-" + strconv.Itoa(iteration)
+		if err := m.ApplyStatusOnly(verdict.ACUpdate, iteration, evidenceSource); err != nil {
+			return Verdict{}, &PlannerError{Iteration: iteration, Reason: "apply checker ac_update", Err: err}
+		}
 	}
 	// When the checker emits decision=inquire, require that it
 	// actually called session:inquire during its turn (parallel
@@ -898,14 +911,14 @@ func collectPlanContext(mission extension.SessionState) []plannerContextEntry {
 // PendingRoadmap surfaced so the checker can refuse `finish`
 // when the user goal still has unexecuted roadmap commitments.
 type checkerTaskView struct {
-	Goal              string
-	PlannerGoal       string
-	MissionAC         []string
-	WaveAC            []string
-	Iteration         int
-	Handoffs          []synthesisHandoffView
-	PlanContext       []plannerContextEntry
-	PendingRoadmap    []plannerRoadmapView
+	Goal           string
+	PlannerGoal    string
+	MissionAC      []plannerACView
+	WaveAC         []string
+	Iteration      int
+	Handoffs       []synthesisHandoffView
+	PlanContext    []plannerContextEntry
+	PendingRoadmap []plannerRoadmapView
 }
 
 // plannerRoadmapView projects one un-executed roadmap entry from
@@ -931,9 +944,13 @@ func buildCheckerTask(mission extension.SessionState, _ MissionManifest, goal st
 		PendingRoadmap: collectPendingRoadmap(mission),
 	}
 	if m := FromState(mission); m != nil {
-		view.PlannerGoal, view.MissionAC, view.WaveAC = m.MissionFrame()
-	}
-	if m := FromState(mission); m != nil {
+		// PlannerGoal + WaveAC pull from MissionFrame (which projects
+		// state.AC for legacy callers); for the structured roster we
+		// use ACSnapshot() directly so the checker sees stable ids.
+		goalProjection, _, waveProjection := m.MissionFrame()
+		view.PlannerGoal = goalProjection
+		view.WaveAC = waveProjection
+		view.MissionAC = projectMissionACForTemplate(m.ACSnapshot())
 		for _, h := range m.Handoffs.List() {
 			if strings.HasPrefix(h.Ref, "planner@") || strings.HasPrefix(h.Ref, "checker@") || strings.HasPrefix(h.Ref, "synthesizer@") {
 				continue

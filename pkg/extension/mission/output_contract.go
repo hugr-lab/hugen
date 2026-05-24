@@ -254,6 +254,9 @@ func validateRequired(kind OutputContractKind, h Handoff, raw map[string]any) er
 		if !VerdictDecision(decision).Known() {
 			return &ParseError{Reason: fmt.Sprintf("kind=verdict: unknown decision %q (allowed: continue | amend | inquire | finish)", decision)}
 		}
+		if err := validateCheckerACUpdateWire(body); err != nil {
+			return err
+		}
 	case KindResearch:
 		body, _ := raw["body"].(map[string]any)
 		if body == nil {
@@ -426,6 +429,52 @@ func DecodePlan(h Handoff) (*Plan, error) {
 		return nil, fmt.Errorf("mission: DecodePlan: next_wave.subagents is empty after decode")
 	}
 	return &p, nil
+}
+
+// validateCheckerACUpdateWire shape-checks body.ac_update for kind=verdict
+// emissions. Checker is status-tracking authority only — entries
+// carrying `statement` / `drop` belong to the planner channel and
+// must be rejected here (the runtime would refuse to apply them
+// otherwise, but a wire-level error gives the checker a clearer
+// retry signal). Phase 5.x — B11 §3.5.
+func validateCheckerACUpdateWire(body map[string]any) error {
+	updRaw, ok := body["ac_update"]
+	if !ok || updRaw == nil {
+		return nil
+	}
+	updList, ok := updRaw.([]any)
+	if !ok {
+		return &ParseError{Reason: "kind=verdict: body.ac_update must be an array (omit when empty)"}
+	}
+	for i, e := range updList {
+		entry, ok := e.(map[string]any)
+		if !ok {
+			return &ParseError{Reason: fmt.Sprintf("kind=verdict: body.ac_update[%d] must be an object {id, status, evidence?}", i)}
+		}
+		id, _ := entry["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			return &ParseError{Reason: fmt.Sprintf("kind=verdict: body.ac_update[%d].id is required (the row's stable ac-N id)", i)}
+		}
+		if _, hasStmt := entry["statement"]; hasStmt {
+			return &ParseError{Reason: fmt.Sprintf("kind=verdict: body.ac_update[%d] cannot carry statement — checker cannot rewrite criteria; raise an issue in the verdict body instead", i)}
+		}
+		if drop, _ := entry["drop"].(bool); drop {
+			return &ParseError{Reason: fmt.Sprintf("kind=verdict: body.ac_update[%d] cannot carry drop=true — checker cannot drop criteria; raise an issue in the verdict body instead", i)}
+		}
+		status, _ := entry["status"].(string)
+		if strings.TrimSpace(status) == "" {
+			return &ParseError{Reason: fmt.Sprintf("kind=verdict: body.ac_update[%d].status is required (unsatisfied|satisfied)", i)}
+		}
+		switch ACStatus(strings.TrimSpace(status)) {
+		case ACUnsatisfied, ACSatisfied:
+			// ok
+		case ACDropped:
+			return &ParseError{Reason: fmt.Sprintf("kind=verdict: body.ac_update[%d].status=\"dropped\" is not a valid wire value — checker cannot drop criteria", i)}
+		default:
+			return &ParseError{Reason: fmt.Sprintf("kind=verdict: body.ac_update[%d].status=%q is not one of unsatisfied|satisfied", i, status)}
+		}
+	}
+	return nil
 }
 
 // validatePlanACDiffWire shape-checks body.ac_add / body.ac_update
