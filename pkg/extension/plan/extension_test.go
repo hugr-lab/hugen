@@ -11,7 +11,30 @@ import (
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
+
+// TestExtension_List_AllSchemasValidate guards against shipping a
+// JSON-Schema field the cross-provider chat-completion subset
+// rejects. Gemini returns 400 INVALID_ARGUMENT when
+// `additionalProperties` / `$ref` / `oneOf` / `anyOf` / `allOf`
+// appear in tools[*].parameters — that surfaces only on a live
+// run. Mirrors the same check on mission + skill extensions.
+func TestExtension_List_AllSchemasValidate(t *testing.T) {
+	ext := NewExtension("agent-test")
+	tools, err := ext.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(tools) == 0 {
+		t.Fatalf("List returned no tools — extension surface regressed")
+	}
+	for _, tl := range tools {
+		if err := tool.ValidateLLMSchema(tl.ArgSchema); err != nil {
+			t.Errorf("%s schema invalid: %v", tl.Name, err)
+		}
+	}
+}
 
 // callCtx builds a dispatch ctx with the session state attached —
 // the shape Session.dispatchToolCall would produce.

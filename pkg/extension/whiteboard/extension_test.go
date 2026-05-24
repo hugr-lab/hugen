@@ -11,12 +11,32 @@ import (
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
 const testAgentID = "agent-1"
 
 func newExt() *Extension {
 	return NewExtension(testAgentID)
+}
+
+// TestExtension_List_AllSchemasValidate — see plan/extension_test.go
+// for the rationale. Guards against shipping a schema field Gemini
+// would reject.
+func TestExtension_List_AllSchemasValidate(t *testing.T) {
+	ext := newExt()
+	tools, err := ext.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(tools) == 0 {
+		t.Fatalf("List returned no tools — extension surface regressed")
+	}
+	for _, tl := range tools {
+		if err := tool.ValidateLLMSchema(tl.ArgSchema); err != nil {
+			t.Errorf("%s schema invalid: %v", tl.Name, err)
+		}
+	}
 }
 
 // initState seeds a TestSessionState with a SessionWhiteboard handle

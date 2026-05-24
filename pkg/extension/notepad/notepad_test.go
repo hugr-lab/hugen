@@ -9,7 +9,27 @@ import (
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/skill"
+	"github.com/hugr-lab/hugen/pkg/tool"
 )
+
+// TestExtension_List_AllSchemasValidate — see
+// pkg/extension/plan/extension_test.go for rationale. Guards
+// against shipping a schema field Gemini would reject.
+func TestExtension_List_AllSchemasValidate(t *testing.T) {
+	ext := NewExtension(fixture.NewTestStore(), "a1", Config{})
+	tools, err := ext.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(tools) == 0 {
+		t.Fatalf("List returned no tools — extension surface regressed")
+	}
+	for _, tl := range tools {
+		if err := tool.ValidateLLMSchema(tl.ArgSchema); err != nil {
+			t.Errorf("%s schema invalid: %v", tl.Name, err)
+		}
+	}
+}
 
 // newFixture builds an Extension + a state seeded by InitState so
 // every test starts from "fresh, ready-to-call".

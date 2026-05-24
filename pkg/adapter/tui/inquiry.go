@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -73,8 +74,17 @@ func (s *inquiryState) isBatched() bool {
 }
 
 // currentClarification returns the clarification the operator is
-// currently answering. Safe to call only when isBatched() returns
-// true.
+// currently answering.
+//
+// Precondition: caller has verified isBatched()==true AND
+// onReview()==false. The zero-value fallback on out-of-bounds
+// (review screen or a corrupt currentIdx) is intentional — it
+// keeps the renderer from crashing on a malformed state, but the
+// returned Clarification will have an empty ID/Question and option
+// helpers (togglePickedOption / pickedOptionsValue /
+// optionIsPicked) will bail on the empty-options guard. Callers
+// that depend on a real question MUST gate their work behind the
+// preconditions above; do NOT use this on the review screen.
 func (s *inquiryState) currentClarification() protocol.Clarification {
 	if s.currentIdx < 0 || s.currentIdx >= len(s.req.Clarifications) {
 		return protocol.Clarification{}
@@ -138,11 +148,7 @@ func (s *inquiryState) pickedOptionsValue() string {
 	for i := range set {
 		indices = append(indices, i)
 	}
-	for i := 1; i < len(indices); i++ {
-		for j := i; j > 0 && indices[j] < indices[j-1]; j-- {
-			indices[j], indices[j-1] = indices[j-1], indices[j]
-		}
-	}
+	sort.Ints(indices)
 	parts := make([]string, 0, len(indices))
 	for _, i := range indices {
 		if i >= 0 && i < len(cur.Options) {
