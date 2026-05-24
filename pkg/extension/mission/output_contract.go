@@ -169,6 +169,16 @@ func decodeHandoff(kind OutputContractKind, body string) (Handoff, error) {
 	if v, ok := generic["body"]; ok {
 		h.Body = v
 	}
+	if raw, ok := generic["satisfies"].([]any); ok {
+		for _, e := range raw {
+			if s, ok := e.(string); ok {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					h.Satisfies = append(h.Satisfies, s)
+				}
+			}
+		}
+	}
 
 	if err := validateRequired(kind, h, generic); err != nil {
 		return Handoff{}, err

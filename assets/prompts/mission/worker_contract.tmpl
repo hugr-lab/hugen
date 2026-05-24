@@ -60,6 +60,23 @@ will read it and replan instead of aborting:
 {"status":"error","reason":"<one-sentence cause — name the missing tool / data / clarification>","memory_summary":"<one line>"}
 ```
 
+Optional `satisfies` field — when your output produces evidence
+that meets one or more `ac-N` rows from `[Mission acceptance
+criteria]` (visible in your first message when the spawning skill
+carries one), list those ids:
+
+```handoff
+{"status":"ok","body":{...},"memory_summary":"...","satisfies":["ac-1","ac-3"]}
+```
+
+The runtime marks those rows satisfied with evidence stamped from
+your handoff. Only list ids whose CURRENT TURN materially produced
+the evidence — re-confirming rows the prior wave already
+satisfied is harmless but noisy. Unknown ids are silently skipped;
+already-satisfied rows are not overwritten (checker / planner
+authority wins). Status updates only — you cannot add, rewrite,
+or drop AC; the planner owns the contract.
+
 Notes:
 - Intermediate tool calls and assistant prose during the turn are
   fine. The runtime parses ONLY the terminal fenced block.

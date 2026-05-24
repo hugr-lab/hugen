@@ -45,6 +45,21 @@ type Handoff struct {
 	// skill convention; runtime does not enforce length here.
 	MemorySummary string `json:"memory_summary,omitempty"`
 
+	// Satisfies is the worker's shorthand for "this output produces
+	// evidence that the listed mission AC rows are now satisfied".
+	// Format: a list of `ac-N` ids. Runtime applies on handoff
+	// receipt via MissionState.ApplyWorkerSatisfies, stamping
+	// evidence as "worker {role} handoff iter-{N} wave-{label}".
+	// Unknown ids are best-effort (logged + skipped). Already
+	// satisfied / dropped rows are left untouched.
+	//
+	// Workers do NOT carry contract authority — they cannot add /
+	// rewrite / drop AC. Only the planner can; the worker's job is
+	// to report what's been delivered.
+	//
+	// Phase 5.x — B11 §3.3.
+	Satisfies []string `json:"satisfies,omitempty"`
+
 	// Subagent records who authored this handoff. SessionID is the
 	// worker's session id; Name / Role / Skill mirror the spawn
 	// metadata for catalog rendering.
