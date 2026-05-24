@@ -132,6 +132,20 @@ type MissionState struct {
 	// the authority on what becomes mission_acceptance_criteria;
 	// proposals are input only (§3.2.1). Phase 5.x — B15.
 	researchACProposals []ResearchACProposal
+
+	// researchAttempted tracks whether the research stage was
+	// invoked on this mission, regardless of outcome. Flipped to
+	// true at the very start of runResearchStage when the manifest
+	// declares a research block AND the When-predicate fires.
+	// Read by callGetResearch to disambiguate three otherwise-
+	// indistinguishable "available: false" cases:
+	//   - manifest had no research block          → !attempted, no findings
+	//   - research ran but emitted empty findings → attempted, no findings
+	//   - research ran and was aborted            → attempted, no findings
+	// `available: false, attempted: true` signals to the worker
+	// that research was tried but yielded nothing — the worker
+	// should NOT assume scope was researched.
+	researchAttempted bool
 }
 
 // workerCursor names a spawned worker so ChildFrameObserver can
@@ -335,6 +349,25 @@ func (m *MissionState) SetResearchOutput(findings string, resolvedUserInputs map
 	} else {
 		m.researchACProposals = append(m.researchACProposals[:0:0], acProposals...)
 	}
+}
+
+// MarkResearchAttempted flips the researchAttempted bit on.
+// Called by runResearchStage at the start of the loop AFTER the
+// When-predicate fires so callGetResearch can disambiguate "no
+// research configured" from "research ran but failed / aborted".
+// Phase 5.x — B15 follow-up.
+func (m *MissionState) MarkResearchAttempted() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.researchAttempted = true
+}
+
+// ResearchAttempted reports whether the research stage was
+// invoked on this mission, regardless of outcome.
+func (m *MissionState) ResearchAttempted() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.researchAttempted
 }
 
 // ResearchOutput returns the stashed research output (findings +

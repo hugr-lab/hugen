@@ -92,6 +92,14 @@ func matchGoalPredicate(pattern, goal string) bool {
 // is bordered by non-word characters (or string edges). Lets
 // "html" match in "save it as html" but NOT in "fileMustExist:
 // htmlOnly".
+//
+// ASCII-only by design — paired with the ASCII-only keyword tables
+// above. `isWordChar` reads single bytes, so passing UTF-8 multi-
+// byte runes would treat continuation bytes (0x80-0xBF) as non-word
+// and false-match prefixes inside inflected forms. The heuristic
+// is the floor for routing weak models into the research stage;
+// non-Latin user goals go through the LLM-driven research prose
+// path instead, which handles multilingualism natively.
 func containsWord(haystack, needle string) bool {
 	idx := strings.Index(haystack, needle)
 	for idx >= 0 {
@@ -132,19 +140,18 @@ const autoResearchShortGoalWords = 8
 // autoResearchDeliverableKeywords — phrases indicating the user
 // expects an artefact file. Catches the analyst's most-exercised
 // "save this report" flow without enumerating every domain term.
+// ASCII-only by design — the runtime heuristic relies on byte-level
+// word boundaries; non-Latin languages get routed through the LLM-
+// driven research role's own prose rather than a literal-token map.
 var autoResearchDeliverableKeywords = []string{
 	"save", "export", "report", "dashboard", "dump", "write",
 	"file", "csv", "parquet", "json", "html", "markdown", "pdf",
-	// Russian common forms.
-	"сохрани", "сохранить", "отчёт", "отчет", "выгрузи", "выгрузить",
-	"экспорт", "файл",
 }
 
 // autoResearchPronouns — standalone pronoun references suggesting
 // the goal carried context the runtime didn't preserve.
 var autoResearchPronouns = []string{
 	"this", "that", "it",
-	"это", "то",
 }
 
 // autoResearchTriggerPhrases — explicit user cues that the goal
@@ -154,9 +161,6 @@ var autoResearchTriggerPhrases = []string{
 	"i want to schedule",
 	"i need help",
 	"not sure",
-	"не могу понять",
-	"помоги разобраться",
-	"расскажи",
 }
 
 // regexCache memoises compiled regex predicates so a hot mission

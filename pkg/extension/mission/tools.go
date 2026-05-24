@@ -306,17 +306,21 @@ func readIterationCounter(m *MissionState) int {
 }
 
 // getResearchResponse is the JSON shape callGetResearch emits.
-// available=false signals the mission ran without a research stage
-// (or the research role exited via abort); workers fall back to
-// their task brief as the canonical source. When available=true,
-// findings is the paragraph the researcher emitted on done=true,
-// and resolved_user_inputs / ac_proposals carry the structured
-// extras when the researcher populated them.
+// available=true with populated findings means the researcher
+// emitted done=true and stashed output on MissionState.
+// available=false + attempted=false means the mission has no
+// research stage configured — the worker's task brief is the
+// canonical source.
+// available=false + attempted=true means research ran but
+// produced no usable output (empty findings, decode failure,
+// or stage aborted). Worker should NOT assume scope was
+// pre-researched; the task brief stands alone.
 type getResearchResponse struct {
-	Available          bool                  `json:"available"`
-	Findings           string                `json:"findings,omitempty"`
-	ResolvedUserInputs map[string]any        `json:"resolved_user_inputs,omitempty"`
-	ACProposals        []ResearchACProposal  `json:"ac_proposals,omitempty"`
+	Available          bool                 `json:"available"`
+	Attempted          bool                 `json:"attempted,omitempty"`
+	Findings           string               `json:"findings,omitempty"`
+	ResolvedUserInputs map[string]any       `json:"resolved_user_inputs,omitempty"`
+	ACProposals        []ResearchACProposal `json:"ac_proposals,omitempty"`
 }
 
 // callGetResearch projects MissionState.ResearchOutput() onto the
@@ -340,10 +344,14 @@ func (e *Extension) callGetResearch(ctx context.Context, _ json.RawMessage) (jso
 	}
 	findings, resolved, acProposals := m.ResearchOutput()
 	if strings.TrimSpace(findings) == "" && len(resolved) == 0 && len(acProposals) == 0 {
-		return json.Marshal(getResearchResponse{Available: false})
+		return json.Marshal(getResearchResponse{
+			Available: false,
+			Attempted: m.ResearchAttempted(),
+		})
 	}
 	return json.Marshal(getResearchResponse{
 		Available:          true,
+		Attempted:          true,
 		Findings:           findings,
 		ResolvedUserInputs: resolved,
 		ACProposals:        acProposals,

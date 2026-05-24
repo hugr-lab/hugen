@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -58,10 +59,24 @@ func (e *Extension) runResearchStage(ctx context.Context, executor *Executor, mi
 	if m == nil {
 		return true, errors.New("mission: research: no MissionState on session")
 	}
+	// Flip the attempted bit early — even an immediate abort still
+	// counts as "research ran" so callGetResearch can disambiguate
+	// "no research configured" from "tried and failed".
+	m.MarkResearchAttempted()
 
 	var priorAnswers map[string]string
 	var priorComments map[string]string
 	var validationFeedback []string
+	// validationRetries is the MONOTONIC retry-budget counter for
+	// wrong-kind / decode-failure handoffs. Survives across
+	// alternating valid/invalid sequences (the previous
+	// `len(validationFeedback)` cap reset on every valid handoff,
+	// which let a malformed-valid-malformed loop run forever).
+	// Caps at researchValidationRetryCap; the iteration counter
+	// still ticks on every spawn so a chronically-broken role
+	// burns the MaxIterations budget exactly like a chronically-
+	// broken planner does.
+	validationRetries := 0
 
 	for iter := 1; iter <= maxIter; iter++ {
 		e.emitResearchIteration(mission, iter, maxIter)
@@ -99,19 +114,11 @@ func (e *Extension) runResearchStage(ctx context.Context, executor *Executor, mi
 			return true, fmt.Errorf("mission: research iter %d: no handoff under %q", iter, ref)
 		}
 		if h.Kind != KindResearch {
-			// Researcher emitted a different kind — surface and
-			// retry once via validation feedback. After 2 retries
-			// (matching planner pattern) we abort. We reuse the
-			// validationFeedback path so the role sees the same
-			// re-fire cue as for schema failures.
-			validationFeedback = append(validationFeedback, fmt.Sprintf("expected kind=research handoff, got kind=%q. Emit a fenced ```research``` block.", h.Kind))
-			if len(validationFeedback) >= researchValidationRetryCap {
-				return true, fmt.Errorf("mission: research iter %d: handoff kind=%q (not research) after %d retries", iter, h.Kind, len(validationFeedback))
+			validationRetries++
+			if validationRetries >= researchValidationRetryCap {
+				return true, fmt.Errorf("mission: research iter %d: handoff kind=%q (not research) after %d retries", iter, h.Kind, validationRetries)
 			}
-			// Don't count this iter against MaxIterations — the role
-			// hasn't actually emitted a valid research output yet.
-			iter--
-			maxIter--
+			validationFeedback = append(validationFeedback, fmt.Sprintf("expected kind=research handoff, got kind=%q. Emit a fenced ```research``` block.", h.Kind))
 			continue
 		}
 		if h.Status != "ok" {
@@ -121,7 +128,12 @@ func (e *Extension) runResearchStage(ctx context.Context, executor *Executor, mi
 
 		out, decodeErr := DecodeResearchOutput(h)
 		if decodeErr != nil {
-			return true, fmt.Errorf("mission: research iter %d: decode: %w", iter, decodeErr)
+			validationRetries++
+			if validationRetries >= researchValidationRetryCap {
+				return true, fmt.Errorf("mission: research iter %d: decode: %w (after %d retries)", iter, decodeErr, validationRetries)
+			}
+			validationFeedback = append(validationFeedback, fmt.Sprintf("research handoff failed to decode: %s. Re-emit a valid `research` fenced block matching the contract.", decodeErr.Error()))
+			continue
 		}
 
 		// Findings + memory_summary always flow to plan_context so
@@ -153,16 +165,20 @@ func (e *Extension) runResearchStage(ctx context.Context, executor *Executor, mi
 			return true, fmt.Errorf("mission: research iter %d: done=false with no clarifications", iter)
 		}
 
+		// Bail BEFORE prompting the user on the last iter — answers
+		// collected at maxIter would be discarded as the loop exits,
+		// so the modal is wasted UI churn. The user sees the abort
+		// error in the mission terminal frame instead.
+		if iter == maxIter {
+			return true, fmt.Errorf("mission: research: exceeded MaxIterations=%d without done=true", maxIter)
+		}
+
 		answers, comments, inqErr := e.batchedInquire(ctx, mission, out.Clarifications)
 		if inqErr != nil {
 			return true, fmt.Errorf("mission: research iter %d: inquire: %w", iter, inqErr)
 		}
 		priorAnswers = answers
 		priorComments = comments
-
-		if iter == maxIter {
-			return true, fmt.Errorf("mission: research: exceeded MaxIterations=%d without done=true", maxIter)
-		}
 	}
 	return true, errors.New("mission: research: loop exit without resolution")
 }
@@ -179,8 +195,9 @@ const researchValidationRetryCap = 2
 //
 // Returns:
 //   - (answers, comments, nil) on a successful round-trip.
-//   - (nil, nil, err) on emit failure, timeout, or empty user
-//     reply (treated as decline — research aborts).
+//   - (nil, nil, err) on emit failure, timeout, or user dismiss
+//     (every required clarification ended up empty — treat as
+//     decline so research aborts cleanly).
 //
 // The mission session inquires on its own behalf; the parent
 // chain bubbles the request up to root and back. The pump
@@ -213,27 +230,35 @@ func (e *Extension) batchedInquire(ctx context.Context, mission extension.Sessio
 	}
 	answers := make(map[string]string, len(clarifications))
 	comments := make(map[string]string, len(clarifications))
-	// Prefer the typed answers map. Fall back to splitting the
-	// flat Response string on newlines for adapters that haven't
-	// learned the new shape yet (treats each line as the next
-	// clarification's value in order).
-	if len(resp.Payload.Answers) > 0 {
-		for id, entry := range resp.Payload.Answers {
-			if entry.Value != "" {
-				answers[id] = entry.Value
-			}
-			if entry.Comment != "" {
-				comments[id] = entry.Comment
-			}
+	for id, entry := range resp.Payload.Answers {
+		if entry.Value != "" {
+			answers[id] = entry.Value
 		}
-	} else if free := strings.TrimSpace(resp.Payload.Response); free != "" {
-		lines := strings.Split(free, "\n")
-		for i, line := range lines {
-			if i >= len(clarifications) {
-				break
-			}
-			answers[clarifications[i].ID] = strings.TrimSpace(line)
+		if entry.Comment != "" {
+			comments[id] = entry.Comment
 		}
+	}
+	// User-dismiss guard. If the batch had required clarifications
+	// and NONE got a non-empty answer back, the adapter most likely
+	// dismissed the modal (Esc) or returned a malformed payload.
+	// Treat as decline so the loop aborts instead of looping for
+	// another iteration with no new information.
+	requiredCount, requiredAnswered := 0, 0
+	for _, c := range clarifications {
+		kind := c.Kind
+		if kind == "" {
+			kind = protocol.ClarificationKindRequired
+		}
+		if kind != protocol.ClarificationKindRequired {
+			continue
+		}
+		requiredCount++
+		if strings.TrimSpace(answers[c.ID]) != "" {
+			requiredAnswered++
+		}
+	}
+	if requiredCount > 0 && requiredAnswered == 0 {
+		return nil, nil, errors.New("research inquire dismissed: no required clarifications answered")
 	}
 	return answers, comments, nil
 }
@@ -321,11 +346,7 @@ func projectKVForTemplate(m map[string]string) []researchKV {
 	}
 	// Lexical sort — stable + cheap; the template doesn't rely on
 	// emission order beyond "consistent across runs".
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
-			keys[j], keys[j-1] = keys[j-1], keys[j]
-		}
-	}
+	sort.Strings(keys)
 	out := make([]researchKV, 0, len(keys))
 	for _, k := range keys {
 		out = append(out, researchKV{Key: k, Value: m[k]})
