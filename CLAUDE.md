@@ -73,6 +73,8 @@ Phase plan:
 | 5.2 root-as-chat. Bundled with 5.4.b workspace + 5.4.c.1-10 weak-model hardening + Stage 3 FromName + analyst SKILL review. 18 commits. | shipped (`1c0e0a7`, 2026-05-18, PR #21) |
 | A + I. Mission-PDCA runtime (`pkg/extension/mission`) — planner / checker / synthesizer executor; `mission:validate_and_approve` atomic validate+inquire+marker stamp (frame-only); skill-agnostic approval state with `invalidates_plan_approval` worker signal; `mission_goal` + `mission_acceptance_criteria` in plan with runtime AC-gated `finish` (synthetic amend coercion); 28 sub-phases (I.1-I.28). | shipped (`e83b003`, 2026-05-20, PR #22) |
 | 5.2. Compactor — content-aware history summarisation (`pkg/extension/compactor`). TurnBoundaryHook capability; FrameObserver-maintained boundary index; hybrid trigger (turn-count + abs token budget); per-Kind dispatch with incremental SummaryBlocks + cap-driven collapse; pure-chat short-circuit (no SummaryBlock emitted when range carries no tool calls / inquiries); inquiry Q/A preserved verbatim in KeptVerbatim; KeptVerbatim FIFO cap with first-user-message pin; three-layer config resolver (operator YAML view → tier overlay → skill manifest overrides); StatusReporter projection; TUI inline marker rendering with payload-driven `ui_marker_enabled` flag; `/compactor status|reset|compact` slash commands; lossless fanout (blocking subscriber send + ctx escape + 30s warn). Live Gemma 4-26B dogfood pass + PR #23 review-fixes (console adapter removed; S1-S6 + B2 closed; B19-B25 deferred to η). Known gap: `s.history` live truncation lands in η. | shipped on `025-phase-5.2-compactor` (PR #23 review fixes 2026-05-21) |
+| B13 + B15 (mission-research-and-approval Step 1+2) — planner-signalled `requires_reapproval` flag replaces sha256 frame-hashing; mission research stage as runtime primitive (`mission.research:` block, `auto` predicate, ≤3 iter batched inquire); analyst SKILL migration; weak-model hardening (review fixes R1-R5 + S1-S10). | shipped (`f88d98a`, 2026-05-24, PR #25) |
+| B11 (mission-research-and-approval Step 4) — Structured acceptance criteria with stable `ac-N` identity. Eight sub-phases: α data model + state helpers (Seed/Stage/Commit/Discard/ApplyStatusOnly/ApplyWorkerSatisfies); β planner `ac_add` / `ac_update` schema + diff merge + auto-promote modal on any contract change; γ manifest `acceptance_criteria` iter-0 seed (Go template against `.Inputs`); δ checker `ac_update[]` by id + finish gate reads `state.AC`; ε worker `satisfies: ["ac-N"]` shorthand; ζ approval modal structured diff renderer (✓ / ▸ / + / ✗ icons + [EDITED]/[NEW]/[DROPPED] tags); η synthesis evidence trail + analyst SKILL prose. | shipped on `027-mission-research-approval-pr2` (PR pending 2026-05-24) |
 | 6. Cron + scheduler | open |
 | 7. Memory pipeline + LLM Wiki — cross-conversation distilled knowledge. Reads 4.2.3 notepad as input; session-scoped working memory is owned by 4.2.3. | open |
 | 8. Artifacts | open |
@@ -85,37 +87,42 @@ Goal: finish design-001 cleanly, then move to **hub integration**
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
 
-## Active focus — Phase 5 closed; B13 + Phase 6 (cron) next
+## Active focus — B11 shipped; §4.6 modal v2 + Phase 6 (cron) next
 
-Phase 5.2 (compactor) closed Phase 5. The five-commit branch
-`025-phase-5.2-compactor` lands α-ε in one PR: skeleton +
-TurnBoundaryHook capability (α), per-Kind dispatch + LLM
-summariser + incremental digest (β), per-tier config + skill
-manifest opt-in + slash commands (γ), SnapshotSession
-projection + UI markers + scenarios (δ), dogfood polish
-(pure-chat short-circuit) verified on Gemma 4-26B.
+B11 (structured AC) shipped on `027-mission-research-approval-pr2`
+(2026-05-24, PR pending). Eight sub-phases α-θ deliver the
+identity-bearing acceptance-criteria model the mission-research-
+and-approval spec §3 describes — replacing the I.26 string-list
+AC with `state.AC []AcceptanceCriterion` carrying stable `ac-N`
+ids + status + evidence trail. Planner emits diffs (`ac_add` /
+`ac_update`), checker updates status-only by id, worker can
+shorthand `satisfies: ["ac-N"]`, finish gate reads `state.AC`,
+approval modal renders ✓/▸/+/✗ diff with [EDITED]/[NEW]/[DROPPED]
+tags, synthesis sees per-AC evidence trail.
 
-Phase I (PR #22, `e83b003`, 2026-05-20) closed the mission-PDCA
-work earlier in the cycle. Phase 5.2 root-as-chat (PR #21,
-`1c0e0a7`, 2026-05-18) bundled weak-model hardening + analyst
-SKILL review. Phase 5.x.skill-polish-1 (PR #19, `9be1fdd`,
-2026-05-16) closed cancel-ux R-followups + Bucket-D clarify.
+PR #25 (`f88d98a`, 2026-05-24) closed B13 + B15 in one bundle:
+planner-signalled re-approval + research stage primitive + weak-
+model hardening (R1-R5 + S1-S10).
 
-- **B13 — planner-signalled re-approval** *(tactical fix, ~80
-  LOC)* — drop sha256 frame-hashing in favour of planner-
-  emitted `requires_reapproval: true` flag. Tracked in
-  `004/backlog.md`. May land independently before Phase 6.
-- **B11 — structured AC with identity** *(queued)* — long-term
-  replacement for freeform AC strings. Composes with B13. Spec
-  pending.
+Phase 5.2 (compactor) — `025-phase-5.2-compactor` lands α-ε in
+one PR. Phase I (PR #22, `e83b003`, 2026-05-20) closed the
+mission-PDCA work. Phase 5.2 root-as-chat (PR #21, `1c0e0a7`,
+2026-05-18) bundled weak-model hardening + analyst SKILL review.
+Phase 5.x.skill-polish-1 (PR #19, `9be1fdd`, 2026-05-16) closed
+cancel-ux R-followups + Bucket-D clarify.
+
+- **§4.6 Approval modal v2** *(queued next, ~450 LOC)* — 4
+  options (`approve` / `approve with tools` / `reject` /
+  `refine`) + tool auto-approve. Required before Phase 6 cron
+  (scheduled missions cannot block on HITL).
 - **B12 — mission visibility surface (TUI)** *(queued)* —
-  approval-modal AC diff + status bar tool count + persistent
-  mission status panel. Driven from already-on-the-wire
-  liveview frames.
+  approval-modal AC diff already in place via ζ; status bar
+  tool count + persistent mission status panel still pending.
 - **5.3.policy-ux** *(queued)* — HITL "always allow / always
   deny" keybinds + remote admin policies.
-- **Phase 6 cron + scheduler** *(queued after 5.2)* — first
-  periodic / wake-up primitive.
+- **Phase 6 cron + scheduler** *(queued after §4.6)* — first
+  periodic / wake-up primitive. Depends on modal-v2's
+  auto-approve-tools.
 
 Phase plan beyond 5.2: 6 cron → 7 memory pipeline → 8 artifacts
 → 9 A2A → 10 workspaces. See `design/004-runtime-post-phase-i/
