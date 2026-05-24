@@ -66,21 +66,56 @@ func (e *Extension) runApprovalInquire(ctx context.Context, mission extension.Se
 }
 
 // approvalQuestionView is the typed payload the
-// `mission/approval_question` template renders against. Mirrors
-// the planner's mission frame (goal + AC) + NextWave + Roadmap +
-// Rationale so the user sees the same contract the runtime is
-// about to hash into the plan marker. The mission frame is what
-// the user is actually signing off on — wave/roadmap can evolve
-// freely after approval, but mission_goal + mission_acceptance_
-// criteria changes reopen the modal.
+// `mission/approval_question` template renders against. The
+// AcceptanceCriteriaDiff field is the structured per-row view
+// (id, statement, status, change tag) the modal renders with
+// status icons + [NEW]/[EDITED]/[DROPPED] markers (§3.6); the
+// `MissionAcceptanceCriteria` flat slice survives only as the
+// pre-diff fallback for callers that haven't migrated to the
+// structured renderer.
 type approvalQuestionView struct {
 	MissionGoal               string
 	MissionAcceptanceCriteria []string
+	AcceptanceCriteriaDiff    []ACViewEntry
 	NextWave                  approvalWaveView
 	WaveAcceptanceCriteria    []string
 	Roadmap                   []RoadmapEntry
 	Rationale                 string
 }
+
+// ACViewEntry is one row of the structured diff the approval modal
+// renders. Carries the post-apply contract (statement / status)
+// PLUS a `Change` tag describing how this row got there relative
+// to state.AC pre-diff. Phase 5.x — B11 §3.6.
+type ACViewEntry struct {
+	// ID is the stable row id (`ac-N`). Empty only for entries the
+	// planner-staged ac_add hasn't yet been assigned an id (modal
+	// renders without the id prefix in that case).
+	ID string
+
+	// Statement is the row's text, post-diff (i.e. with planner's
+	// statement rewrite already applied).
+	Statement string
+
+	// Status is the row's status, post-diff. One of
+	// unsatisfied / satisfied / dropped.
+	Status ACStatus
+
+	// Change tags how this row relates to the pre-diff state. One of
+	// `carry` (unchanged), `edited` (statement rewritten), `new`
+	// (added in this diff), `dropped` (dropped in this diff).
+	Change string
+
+	// DropReason carries the diff's drop_reason when Change=dropped.
+	DropReason string
+}
+
+const (
+	ACChangeCarry   = "carry"
+	ACChangeEdited  = "edited"
+	ACChangeNew     = "new"
+	ACChangeDropped = "dropped"
+)
 
 type approvalWaveView struct {
 	Label     string
@@ -110,6 +145,7 @@ func renderApprovalQuestion(mission extension.SessionState, plan Plan) (string, 
 	view := approvalQuestionView{
 		MissionGoal:               strings.TrimSpace(plan.MissionGoal),
 		MissionAcceptanceCriteria: projectACForApproval(mission, plan),
+		AcceptanceCriteriaDiff:    projectACDiffViewForApproval(mission, plan),
 		NextWave: approvalWaveView{
 			Label:     plan.NextWave.Label,
 			Subagents: make([]approvalSubagentView, 0, len(plan.NextWave.Subagents)),
@@ -130,6 +166,92 @@ func renderApprovalQuestion(mission extension.SessionState, plan Plan) (string, 
 		return "", fmt.Errorf("mission: approval: no prompts renderer on session")
 	}
 	return renderer.Render("mission/approval_question", view)
+}
+
+// projectACDiffViewForApproval builds the structured per-row diff
+// view the approval modal renders with icons + change tags
+// ([NEW]/[EDITED]/[DROPPED]). Each entry carries the post-apply
+// statement + status + change marker.
+//
+// Algorithm (§3.6):
+//
+//   - For every row currently in state.AC, start with Change=carry.
+//   - Apply plan.ACUpdate overlays: statement rewrite → Change=edited;
+//     drop → Change=dropped (with reason).
+//   - Append plan.ACAdd entries at the bottom with Change=new (no
+//     id yet — the id mints at commit time).
+//
+// Dropped rows render at the bottom of the kept list (after
+// edited / carry, before new) so the modal reads top-to-bottom as
+// "this is what stays / changes / disappears / is added".
+//
+// Returns nil when state is unreachable AND the plan carries no
+// diff — the modal then falls back to the flat
+// MissionAcceptanceCriteria slice (legacy renderer).
+func projectACDiffViewForApproval(mission extension.SessionState, plan Plan) []ACViewEntry {
+	m := FromState(mission)
+	planUpdatesByID := make(map[string]ACUpdateSpec, len(plan.ACUpdate))
+	for _, u := range plan.ACUpdate {
+		planUpdatesByID[strings.TrimSpace(u.ID)] = u
+	}
+	var carry, edited, dropped, news []ACViewEntry
+	if m != nil {
+		for _, row := range m.ACSnapshot() {
+			entry := ACViewEntry{
+				ID:        row.ID,
+				Statement: row.Statement,
+				Status:    row.Status,
+				Change:    ACChangeCarry,
+			}
+			if row.Status == ACDropped {
+				entry.Change = ACChangeDropped
+				entry.DropReason = row.DropReason
+				dropped = append(dropped, entry)
+				continue
+			}
+			if u, ok := planUpdatesByID[row.ID]; ok {
+				if u.Drop {
+					entry.Status = ACDropped
+					entry.Change = ACChangeDropped
+					entry.DropReason = strings.TrimSpace(u.DropReason)
+					dropped = append(dropped, entry)
+					continue
+				}
+				if u.Statement != "" {
+					entry.Statement = strings.TrimSpace(u.Statement)
+					entry.Change = ACChangeEdited
+					edited = append(edited, entry)
+					continue
+				}
+				// status-only update on a carried row — render under
+				// carry with the updated status.
+				if u.Status != "" {
+					entry.Status = u.Status
+				}
+			}
+			carry = append(carry, entry)
+		}
+	}
+	for _, a := range plan.ACAdd {
+		stmt := strings.TrimSpace(a.Statement)
+		if stmt == "" {
+			continue
+		}
+		news = append(news, ACViewEntry{
+			Statement: stmt,
+			Status:    ACUnsatisfied,
+			Change:    ACChangeNew,
+		})
+	}
+	if len(carry)+len(edited)+len(dropped)+len(news) == 0 {
+		return nil
+	}
+	out := make([]ACViewEntry, 0, len(carry)+len(edited)+len(dropped)+len(news))
+	out = append(out, carry...)
+	out = append(out, edited...)
+	out = append(out, news...)
+	out = append(out, dropped...)
+	return out
 }
 
 // projectACForApproval renders the bullet list shown in the
