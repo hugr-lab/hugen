@@ -632,7 +632,15 @@ func (e *Extension) makeSpawnerCallback(mission extension.SessionState, spawner 
 		if err != nil {
 			return SpawnResult{}, err
 		}
-		first := protocol.NewUserMessage(child.SessionID(), agentParticipant(mission, e.agentID), req.Task)
+		// Mission ext owns the worker's first-message contract — render
+		// the [Inputs from parent] block here so the planner's lifted
+		// `inputs.<key>` actually reach the worker LLM. Until this fix
+		// the values flowed into SpawnSpec.Inputs (parent-side
+		// SubagentStarted frame metadata) but never into the worker's
+		// own context, leaving workers with task references like
+		// "save to inputs.file_path" but no concrete value to deref.
+		body := buildWorkerFirstMessage(req.Task, req.Inputs)
+		first := protocol.NewUserMessage(child.SessionID(), agentParticipant(mission, e.agentID), body)
 		settled := child.Submit(context.Background(), first)
 		return SpawnResult{SessionID: child.SessionID(), Settled: settled}, nil
 	}
