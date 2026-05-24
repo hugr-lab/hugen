@@ -42,6 +42,14 @@ type ResearchClarification struct {
 	Options      []string `json:"options,omitempty"`
 	Default      string   `json:"default,omitempty"`
 	AllowComment *bool    `json:"allow_comment,omitempty"`
+	// Multi, when true on a question with non-empty Options,
+	// renders as a checkbox multi-select in the adapter modal
+	// (TUI: Space toggles each option in/out of the selection
+	// set). The answer is the comma-joined set of picked option
+	// strings. Mirrors protocol.Clarification.Multi — the runtime
+	// passes the value through to the session:inquire payload
+	// verbatim. Phase 5.x — B15 follow-up.
+	Multi bool `json:"multi,omitempty"`
 }
 
 // ResearchACProposal is one proposed acceptance criterion the

@@ -63,6 +63,38 @@ func TestParseHandoff_KindResearch_DoneFalseWithClarifications(t *testing.T) {
 	}
 }
 
+// TestParseHandoff_KindResearch_MultiPropagates verifies the
+// `multi: true` flag on a clarification flows through
+// ParseHandoff → DecodeResearchOutput → ResearchClarification.Multi
+// without being silently dropped. Regression guard: prior to the
+// Multi field being declared on ResearchClarification, the JSON
+// decoder ignored the value and the TUI rendered the question as
+// a single-select list with no checkbox markers.
+func TestParseHandoff_KindResearch_MultiPropagates(t *testing.T) {
+	raw := "```research\n" + `{"status":"ok","body":{
+		"done": false,
+		"clarifications": [
+			{"id":"focus","question":"Which datasets?","kind":"required","options":["A","B","C"],"multi":true},
+			{"id":"format","question":"Output format?","kind":"required","options":["html","pdf"]}
+		],
+		"memory_summary": "asking scope + format"
+	}}` + "\n```"
+	h, err := ParseHandoff(raw)
+	if err != nil {
+		t.Fatalf("ParseHandoff: %v", err)
+	}
+	out, decodeErr := DecodeResearchOutput(h)
+	if decodeErr != nil {
+		t.Fatalf("DecodeResearchOutput: %v", decodeErr)
+	}
+	if !out.Clarifications[0].Multi {
+		t.Errorf("clarifications[0].Multi = false, want true (the `multi: true` was lost in decode)")
+	}
+	if out.Clarifications[1].Multi {
+		t.Errorf("clarifications[1].Multi = true, want false (no multi flag on the second entry)")
+	}
+}
+
 func TestParseHandoff_KindResearch_AutoAssignIDs(t *testing.T) {
 	// Role omitted ids — DecodeResearchOutput auto-assigns q1/q2.
 	raw := "```research\n" + `{"status":"ok","body":{

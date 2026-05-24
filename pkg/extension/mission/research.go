@@ -212,6 +212,7 @@ func (e *Extension) batchedInquire(ctx context.Context, mission extension.Sessio
 			Options:      append([]string(nil), c.Options...),
 			Default:      c.Default,
 			AllowComment: c.AllowComment,
+			Multi:        c.Multi,
 		})
 	}
 	payload := protocol.InquiryRequestPayload{
