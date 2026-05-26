@@ -38,9 +38,9 @@ func (e *Extension) MaybeAutoApprove(ctx context.Context, caller extension.Sessi
 			if m, _ := v.(*MissionState); m != nil && m.AutoApproveTools() {
 				missionID := s.SessionID()
 				e.emitToolApprovalAutoGranted(s, toolApprovalAutoGrantedPayload{
-					Tool:                       tool,
-					CallerSessionID:            caller.SessionID(),
-					GrantedByMissionSessionID:  missionID,
+					Tool:                      tool,
+					CallerSessionID:           caller.SessionID(),
+					GrantedByMissionSessionID: missionID,
 				})
 				return missionID, true
 			}

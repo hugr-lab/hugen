@@ -72,12 +72,12 @@ steps:
       - name: approval_inquiry_requests
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.session_events | map({seq, sid: .session_id, content})") {
+            jq(query: ".hub.db.agent.session_events | map(select(.metadata.type == \"approval\")) | map({seq, sid: .session_id, request_id: .metadata.request_id, question: .metadata.question})") {
               hub { db { agent {
                 session_events(
-                  filter: {root_session_id: {eq: $sid}, event_type: {eq: "inquiry_request"}, content: {like: "%type\":\"approval%"}}
+                  filter: {root_session_id: {eq: $sid}, event_type: {eq: "inquiry_request"}}
                   order_by: [{field: "seq", direction: ASC}]
-                ) { seq session_id content }
+                ) { seq session_id metadata }
               }}}
             }
           }
@@ -86,16 +86,20 @@ steps:
 
       # mission:tool_approval_policy_set audit frame — fired on
       # every approval modal close, payload carries the post-
-      # modal AutoApproveTools state.
+      # modal AutoApproveTools state. ExtensionFrames persist with
+      # event_type="extension_frame" and metadata.{extension, op}
+      # for the routing discriminator. Use the jq projection to
+      # narrow on the right (extension, op) tuple — content-LIKE
+      # is too loose (other frames may transit the same string).
       - name: policy_set_events
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.session_events | map({seq, sid: .session_id, content})") {
+            jq(query: ".hub.db.agent.session_events | map(select(.metadata.extension == \"mission\" and .metadata.op == \"tool_approval_policy_set\")) | map({seq, sid: .session_id, data: .metadata.data})") {
               hub { db { agent {
                 session_events(
-                  filter: {root_session_id: {eq: $sid}, event_type: {eq: "extension"}, content: {like: "%tool_approval_policy_set%"}}
+                  filter: {root_session_id: {eq: $sid}, event_type: {eq: "extension_frame"}}
                   order_by: [{field: "seq", direction: ASC}]
-                ) { seq session_id content }
+                ) { seq session_id metadata }
               }}}
             }
           }
@@ -108,12 +112,12 @@ steps:
       - name: auto_granted_events
         graphql: |
           query ($sid: String!) {
-            jq(query: ".hub.db.agent.session_events | map({seq, sid: .session_id, content})") {
+            jq(query: ".hub.db.agent.session_events | map(select(.metadata.extension == \"mission\" and .metadata.op == \"tool_approval_auto_granted\")) | map({seq, sid: .session_id, data: .metadata.data})") {
               hub { db { agent {
                 session_events(
-                  filter: {root_session_id: {eq: $sid}, event_type: {eq: "extension"}, content: {like: "%tool_approval_auto_granted%"}}
+                  filter: {root_session_id: {eq: $sid}, event_type: {eq: "extension_frame"}}
                   order_by: [{field: "seq", direction: ASC}]
-                ) { seq session_id content }
+                ) { seq session_id metadata }
               }}}
             }
           }

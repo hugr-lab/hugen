@@ -127,9 +127,12 @@ func TestValidateAndApprove_AutoApproveTools_ResetOnEveryModalOpen(t *testing.T)
 
 // TestValidateAndApprove_AutoApproveTools_NotStampedOnReject covers
 // the reject path: response.Approved=false leaves the flag at its
-// reset state, no policy_set frame emits (we only stamp+emit on
-// approve in this revision; reject's audit lives in plan_approved
-// negation channel). The flag must NOT survive a denied modal.
+// reset state, and the audit frame fires with auto_approve_tools=false
+// per §4.6.4 ("emitted on every approval modal close so the audit
+// log carries the full sequence of user picks per approval"). The
+// flag must NOT survive a denied modal — even if the response
+// payload carries AutoApproveTools=true, that bit is ignored when
+// Approved=false.
 func TestValidateAndApprove_AutoApproveTools_NotStampedOnReject(t *testing.T) {
 	mState, mission, res := callApprovalModalForAutoApprove(t, false, true, func(m *MissionState) {
 		m.SetAutoApproveTools(true)
@@ -140,12 +143,13 @@ func TestValidateAndApprove_AutoApproveTools_NotStampedOnReject(t *testing.T) {
 	if mState.AutoApproveTools() {
 		t.Errorf("rejected modal must leave AutoApproveTools at reset (false), got true")
 	}
-	// On reject we do NOT emit policy_set (would be a lie — no
-	// policy was set; the user opted out of the modal entirely).
-	for _, f := range mission.emittedFrames {
-		if ef, ok := f.(*protocol.ExtensionFrame); ok && ef.Payload.Op == "tool_approval_policy_set" {
-			t.Errorf("policy_set frame should not emit on reject; got %+v", ef.Payload)
-		}
+	// Spec §4.6.4: emit on EVERY modal close, regardless of pick.
+	// Reject path carries auto_approve_tools=false because the
+	// modal didn't grant blanket auto-approval — the audit log
+	// reads truthfully.
+	if !findPolicySetFrame(t, mission.emittedFrames, false) {
+		t.Errorf("expected mission:tool_approval_policy_set frame with auto_approve_tools=false on reject; emitted=%v",
+			frameKinds(mission.emittedFrames))
 	}
 }
 

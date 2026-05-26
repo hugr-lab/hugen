@@ -186,19 +186,25 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 		return toolErr("inquire_failed", "nil response from inquire")
 	}
 	approved, refine, aborted, reason := interpretValidateApprovalResponse(resp)
+	// §4.6.4 — emit the audit frame on EVERY modal close so the audit
+	// log carries the full sequence of user picks per approval. The
+	// `auto_approve_tools` field reads from the response payload for
+	// the approve branch; refine / reject reset to false (the modal
+	// didn't grant blanket auto-approval). The frame is default-deny
+	// visibility — never reaches the model prompt.
+	autoApproveTools := approved && resp.Payload.AutoApproveTools
+	e.emitToolApprovalPolicySet(parent, toolApprovalPolicySetPayload{
+		AutoApproveTools: autoApproveTools,
+		Iteration:        mState.IterationCounter,
+	})
 	if approved {
 		if _, err := mState.CommitStagedDiff(ACDiff{}); err != nil {
 			return toolErr("internal", "commit staged ac diff: "+err.Error())
 		}
 		mState.MarkPlanApproved()
-		autoApproveTools := resp.Payload.AutoApproveTools
 		if autoApproveTools {
 			mState.SetAutoApproveTools(true)
 		}
-		e.emitToolApprovalPolicySet(parent, toolApprovalPolicySetPayload{
-			AutoApproveTools: autoApproveTools,
-			Iteration:        mState.IterationCounter,
-		})
 		e.emitPlanApproved(parent, planApprovedPayload{Trigger: "user_modal", Reason: reason})
 		return emitValidateResult(validateResult{
 			Approved: true,

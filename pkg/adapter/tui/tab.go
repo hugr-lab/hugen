@@ -497,11 +497,11 @@ func (t *tab) dispatchApprovalChoiceKey(pend *inquiryState, k tea.KeyMsg) (handl
 }
 
 // commitApprovalChoice maps a §4.6 choice to its on-wire payload
-// shape and submits (or, for refine, opens the textarea so the
-// user can type feedback first). The Reject + Refine paths drop
-// into reply mode rather than submitting immediately; the actual
-// submit happens on Enter inside the textarea, which re-routes
-// through dispatchInquiryKey's replyMode branch.
+// shape and submits (approve / approve-with-tools / reject ship
+// immediately; only refine drops into reply mode so the user can
+// type feedback first — the actual submit then happens on Enter
+// inside the textarea, which re-routes through dispatchInquiryKey's
+// replyMode branch).
 func (t *tab) commitApprovalChoice(pend *inquiryState, kind approvalChoiceKind) {
 	switch kind {
 	case approvalChoiceApproveWithTools:
