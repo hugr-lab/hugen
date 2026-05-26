@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -74,10 +76,12 @@ func registerTools(srv *server.MCPServer, deps *execDeps) {
 		return handleRun(ctx, req, deps, runRequest{kind: "run_code"})
 	})
 	srv.AddTool(mcp.NewTool("run_script",
-		mcp.WithDescription(`Execute a Python script file in the per-session venv. The path is relative to the session workspace; absolute paths and ".." escapes are rejected. Result envelope is identical to run_code.`),
+		mcp.WithDescription(`Execute a Python script file in the per-session venv. The path is relative to the session workspace; absolute paths and ".." escapes are rejected. Positional argv comes from "args"; "kwargs" expands sorted by key as --key value pairs after the positional argv. Result envelope is identical to run_code.`),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Script path relative to the session workspace.")),
-		mcp.WithArray("args", mcp.Description("Optional argv passed to the script."),
+		mcp.WithArray("args", mcp.Description("Optional positional argv passed to the script."),
 			func(s map[string]any) { s["items"] = map[string]any{"type": "string"} }),
+		mcp.WithObject("kwargs", mcp.Description("Optional keyword args expanded as --key value pairs, sorted by key, appended after positional argv. Values must be strings; the script does its own parsing."),
+			func(s map[string]any) { s["additionalProperties"] = map[string]any{"type": "string"} }),
 		mcp.WithNumber("timeout_ms", mcp.Description("Same semantics as run_code.")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return handleRun(ctx, req, deps, runRequest{kind: "run_script"})
@@ -87,11 +91,12 @@ func registerTools(srv *server.MCPServer, deps *execDeps) {
 // runRequest is the parsed-argument view of one call. Filled by
 // handleRun's argument parser; passed to runPython.
 type runRequest struct {
-	kind      string // "run_code" or "run_script"
-	code      string
-	path      string
-	scriptArg []string
-	timeoutMs int64
+	kind        string // "run_code" or "run_script"
+	code        string
+	path        string
+	scriptArg   []string
+	scriptKwarg map[string]string
+	timeoutMs   int64
 }
 
 func handleRun(ctx context.Context, req mcp.CallToolRequest, deps *execDeps, base runRequest) (*mcp.CallToolResult, error) {
@@ -140,6 +145,19 @@ func parseRunArgs(req mcp.CallToolRequest, r *runRequest) error {
 				if s, ok := v.(string); ok {
 					r.scriptArg = append(r.scriptArg, s)
 				}
+			}
+		}
+		if rawKwargs, ok := args["kwargs"].(map[string]any); ok {
+			r.scriptKwarg = make(map[string]string, len(rawKwargs))
+			for k, v := range rawKwargs {
+				if !kwargKeyRe.MatchString(k) {
+					return &toolError{Code: "arg_validation", Msg: fmt.Sprintf("kwargs key %q must match [A-Za-z_][A-Za-z0-9_-]*", k)}
+				}
+				s, ok := v.(string)
+				if !ok {
+					return &toolError{Code: "arg_validation", Msg: fmt.Sprintf("kwargs.%s must be a string", k)}
+				}
+				r.scriptKwarg[k] = s
 			}
 		}
 	}
@@ -271,7 +289,9 @@ func runPython(ctx context.Context, deps *execDeps, r runRequest, sessDir, sessV
 		if err != nil {
 			return runResult{}, err
 		}
-		cmd = exec.CommandContext(cctx, pyBin, append([]string{scriptPath}, r.scriptArg...)...)
+		argv := append([]string{scriptPath}, r.scriptArg...)
+		argv = append(argv, flattenKwargs(r.scriptKwarg)...)
+		cmd = exec.CommandContext(cctx, pyBin, argv...)
 	default:
 		return runResult{}, &toolError{Code: "io", Msg: "unknown tool kind: " + r.kind}
 	}
@@ -317,6 +337,32 @@ func runPython(ctx context.Context, deps *execDeps, r runRequest, sessDir, sessV
 		return res, nil
 	}
 	return runResult{}, &toolError{Code: "io", Msg: err.Error()}
+}
+
+// kwargKeyRe rejects keys that would mangle argv when expanded into
+// `--<key>`: empty (`--` is POSIX end-of-options), leading `-`
+// (`---x`), `=` (collapses key+value into one token), or anything
+// outside identifier-ish chars. Mirrors argparse's allowed `dest`
+// shape with a `-` concession for `--my-flag` style.
+var kwargKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
+
+// flattenKwargs emits a sorted `--key value` argv tail. Sorting is
+// load-bearing: the cron-task checker compares command shapes across
+// fires, so map iteration order would create spurious diffs.
+func flattenKwargs(kw map[string]string) []string {
+	if len(kw) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(kw))
+	for k := range kw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(kw)*2)
+	for _, k := range keys {
+		out = append(out, "--"+k, kw[k])
+	}
+	return out
 }
 
 // resolveScriptPath enforces the session-workspace boundary
