@@ -601,6 +601,18 @@ type MissionBlock struct {
 	// declarative schema; future phases can narrow defaults to
 	// "off unless declared".
 	Capabilities MissionCapabilities `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
+
+	// AcceptanceCriteria is the optional iter-0 seed of mission
+	// acceptance criteria. Each statement is a Go-template string
+	// rendered with `.Inputs` (the structured map passed to
+	// session:spawn_mission). The runtime mints `ac-1`, `ac-2`, ...
+	// rows with origin=`manifest` at mission spawn — the planner
+	// reads them under [Mission acceptance criteria] and can keep,
+	// rewrite (via ac_update), or drop them via the approval modal.
+	//
+	// Empty / absent → no manifest seed; the planner is responsible
+	// for emitting ≥1 ac_add on iter 1. Phase 5.x — B11 §3.2.2.
+	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty" yaml:"acceptance_criteria,omitempty"`
 }
 
 // MissionCapabilities lists the mission-tier opt-in toggles.
@@ -641,9 +653,9 @@ type MissionControlBlock struct {
 // Trigger semantics (When):
 //   - `always`           — research runs every mission.
 //   - `auto`             — runtime heuristic (pronoun-only goals,
-//                          short goals, mission_inputs gaps). Spec §2.5.
+//     short goals, mission_inputs gaps). Spec §2.5.
 //   - `if_goal_matches`  — Predicate regex tested against the goal
-//                          string; fires when it matches.
+//     string; fires when it matches.
 //
 // MaxIterations caps re-fire cycles (when research emits `done:
 // false` it gets re-spawned, with prior_answers / prior_comments

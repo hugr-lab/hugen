@@ -59,6 +59,24 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 	// manifest.
 	if mState := FromState(mission); mState != nil {
 		mState.SetPlannerApproval(manifest.Plan.Approval)
+		// Phase 5.x-followup — stash the caller's structured inputs
+		// so the researcher / planner / synthesizer prompts can
+		// surface caller-supplied params (file_path, output_format,
+		// schedule_kind, …) instead of inventing them from the
+		// mission goal prose. The AC seeding below renders templates
+		// against the SAME inputs, but the planner needs the raw
+		// map for its `[Inputs from caller]` brief section.
+		mState.SetSpawnInputs(inputs)
+		// Phase 5.x — B11 §3.2.2 — seed manifest acceptance criteria
+		// at iter 0 with origin=manifest. Each statement is a Go
+		// template rendered against `.Inputs` so authors can write
+		// "Schedule expression parses for {{.Inputs.Kind}}" and the
+		// resulting AC carries the resolved kind. Render failures
+		// surface as a hard error — the mission can't start with a
+		// broken contract.
+		if seedErr := seedManifestAC(mState, *manifest, inputs); seedErr != nil {
+			return fmt.Errorf("mission: RunMission: seed AC: %w", seedErr)
+		}
 	}
 	if !hasInline && !hasPlanner {
 		return fmt.Errorf("mission: RunMission: skill %q has no executable plan (need plan.experimental_inline or plan.role)", skill)
@@ -208,8 +226,9 @@ type synthesisHandoffView struct {
 // by design ([[feedback-prompts-in-assets]]).
 func buildSynthesisTask(mission extension.SessionState, goal string) (string, error) {
 	data := struct {
-		Goal     string
-		Handoffs []synthesisHandoffView
+		Goal      string
+		Handoffs  []synthesisHandoffView
+		MissionAC []plannerACView
 	}{Goal: goal}
 	if m := FromState(mission); m != nil {
 		for _, h := range m.Handoffs.List() {
@@ -222,6 +241,7 @@ func buildSynthesisTask(mission extension.SessionState, goal string) (string, er
 				Body:          synthesisHandoffBody(h.Body),
 			})
 		}
+		data.MissionAC = projectMissionACForTemplate(m.ACSnapshot())
 	}
 	renderer := mission.Prompts()
 	if renderer == nil {

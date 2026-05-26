@@ -318,13 +318,17 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 				// the checker closed; the next planner sees the
 				// verdict's reason in its [Recent verdict] block.
 			case VerdictFinish:
-				// Phase I.26 — runtime gate. The checker may only
-				// finish when every mission AC is satisfied. Any
-				// unsatisfied entry in mission_ac_status coerces the
-				// verdict into a synthetic amend with the gaps
-				// folded into issues, so the next planner can revise
-				// the plan to address them.
-				if pendings := unsatisfiedMissionAC(verdict); len(pendings) > 0 {
+				// Phase 5.x B11 §3.7 — runtime gate. The checker
+				// may only finish when every mission AC row is
+				// satisfied (status=satisfied OR status=dropped).
+				// Any still-unsatisfied row coerces the verdict
+				// into a synthetic amend with the gaps folded into
+				// issues, so the next planner can revise the plan
+				// to address them. AC state comes from MissionState
+				// (which has folded the checker's ac_update[] +
+				// any worker satisfies channel on this iter
+				// already), not from the verdict payload itself.
+				if pendings := unsatisfiedMissionAC(FromState(mission)); len(pendings) > 0 {
 					e.logger.Warn("mission: planner loop: rejecting finish — mission acceptance criteria unsatisfied",
 						"mission_session", mission.SessionID(),
 						"iteration", iteration,
@@ -451,43 +455,47 @@ func (e *Extension) spawnAndAwaitPlanner(ctx context.Context, executor *Executor
 			return nil, &PlannerError{Iteration: iteration, Reason: msg}
 		}
 	}
-	// Phase I.26 — snapshot the planner's current mission frame
-	// (goal restatement + mission AC + wave AC) so the checker sees
-	// the latest definition of done. plan_complete (nil plan) skips
-	// the snapshot — the existing frame remains as the synthesizer's
-	// reference.
+	// Phase 5.x — B11 §3.2: every AC mutation funnels through
+	// callValidateAndApprove (stage / commit / apply-status-only) at
+	// modal time. The planner's fence carries the same diff as the
+	// validated body, so by the time we get here the AC state has
+	// already been reconciled. We only stamp the goal restatement +
+	// per-wave AC slot — both are non-load-bearing across approval
+	// gates (the contract part of `[Mission acceptance criteria]` is
+	// the structured state.AC, which validate_and_approve committed).
+	// plan_complete (nil plan) preserves the existing frame as the
+	// synthesizer's reference.
 	if plan != nil && plan.NextWave.Label != "" {
-		m.SetMissionFrame(plan.MissionGoal, plan.MissionAcceptanceCriteria, plan.NextWave.AcceptanceCriteria)
+		m.SetGoalAndWaveAC(plan.MissionGoal, plan.NextWave.AcceptanceCriteria)
 	}
 	return plan, nil
 }
 
-// unsatisfiedMissionAC walks the checker's per-criterion mission
-// AC report and returns a string slice of "<criterion> (evidence:
-// <text>)" entries for every row whose `satisfied` flag is false.
-// Empty MissionACStatus is treated as "every criterion still
-// pending" — a checker proposing `finish` without filling AC
-// status is misbehaving and the runtime keeps it honest by
-// surfacing the gap via the synthetic-amend issue list. Phase I.26.
-func unsatisfiedMissionAC(v Verdict) []string {
-	if len(v.MissionACStatus) == 0 {
-		return []string{
-			"checker proposed finish but emitted no mission_ac_status — fill mission_ac_status[] with per-criterion satisfaction so the runtime can verify completion",
-		}
+// unsatisfiedMissionAC reads state.AC and returns one
+// "<id>: <statement>" entry per row whose status is still
+// unsatisfied (dropped rows are excluded — they're out of contract).
+//
+// Empty state.AC after iter 1 is misbehaving — the planner should
+// have seeded at least one AC. The caller's finish-gate emits the
+// synthetic amend issues from this slice; an empty list means the
+// mission is genuinely done.
+//
+// Phase 5.x — B11 §3.7 (was Phase I.26 reading from verdict).
+func unsatisfiedMissionAC(m *MissionState) []string {
+	if m == nil {
+		return nil
 	}
-	var out []string
-	for _, entry := range v.MissionACStatus {
-		if entry.Satisfied {
-			continue
-		}
-		msg := entry.Criterion
-		if msg == "" {
-			msg = "(unnamed criterion)"
-		}
-		if ev := strings.TrimSpace(entry.Evidence); ev != "" {
-			msg = msg + " (evidence: " + ev + ")"
+	rows := m.UnsatisfiedAC()
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		msg := row.ID + ": " + row.Statement
+		if ev := strings.TrimSpace(row.LastEvidence); ev != "" {
+			msg = msg + " (last evidence: " + ev + ")"
 		} else {
-			msg = msg + " (no evidence in handoffs)"
+			msg = msg + " (no evidence yet)"
 		}
 		out = append(out, msg)
 	}
@@ -550,6 +558,16 @@ func (e *Extension) spawnAndAwaitChecker(ctx context.Context, executor *Executor
 	verdict, decodeErr := DecodeVerdict(h)
 	if decodeErr != nil {
 		return Verdict{}, &PlannerError{Iteration: iteration, Reason: "decode verdict", Err: decodeErr}
+	}
+	// Phase 5.x B11 §3.5 — fold the checker's per-id ac_update[]
+	// into state.AC before the finish gate reads it. Validation
+	// already enforced status-only (no statement / drop) at the
+	// output_contract layer, so the runtime call is safe to apply.
+	if len(verdict.ACUpdate) > 0 {
+		evidenceSource := "checker iter-" + strconv.Itoa(iteration)
+		if err := m.ApplyStatusOnly(verdict.ACUpdate, iteration, evidenceSource); err != nil {
+			return Verdict{}, &PlannerError{Iteration: iteration, Reason: "apply checker ac_update", Err: err}
+		}
 	}
 	// When the checker emits decision=inquire, require that it
 	// actually called session:inquire during its turn (parallel
@@ -699,11 +717,46 @@ type plannerTaskView struct {
 	// reads it to lift `file_path` / `output_format` / etc. into
 	// workers' `inputs` without re-asking the user. Phase 5.x — B15.
 	ResolvedUserInputs []researchKV
+	// SpawnInputs lists the structured key/value pairs the caller
+	// (root / parent mission) passed to `session:spawn_mission`
+	// at spawn time. Distinct from `ResolvedUserInputs` (which the
+	// research stage populates via clarifications) — these are
+	// authoritative caller intent, NOT inferred from user prose.
+	// The planner MUST propagate them verbatim to relevant
+	// worker subagents via their `inputs` field. Empty when the
+	// caller spawned without inputs. Phase 5.x-followup.
+	SpawnInputs []researchKV
 	// ResearchACProposals lists the proposed acceptance criteria
 	// research recommends for planner consideration. Planner is
 	// the authority — proposals are input only (§3.2.1). Phase
 	// 5.x — B15.
 	ResearchACProposals []researchACProposalView
+	// MissionAC is the current acceptance-criteria roster (with
+	// identity) rendered into [Mission acceptance criteria]. Rows
+	// stay visible across the lifecycle — dropped entries surface
+	// so the planner knows not to re-propose them; satisfied rows
+	// remain so the planner sees what's already covered. Empty on
+	// iter 1 before any manifest / research seeding. Phase 5.x —
+	// B11 §3.4.
+	MissionAC []plannerACView
+}
+
+// plannerACView is one row of the [Mission acceptance criteria]
+// table the planner reads at every iteration. Carries enough
+// context for the planner to:
+//   - reference rows by `id` in `ac_update`,
+//   - skip status-only re-emits (status already tracked),
+//   - avoid re-proposing dropped rows by accident.
+type plannerACView struct {
+	ID            string
+	Statement     string
+	Origin        string
+	Status        string
+	LastEvidence  string
+	AddedAtIter   int
+	SatisfiedIter int
+	Dropped       bool
+	DropReason    string
 }
 
 // researchACProposalView is one row in the [Research AC proposals]
@@ -795,6 +848,12 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		view.ResearchFindings = findings
 		view.ResolvedUserInputs = projectResolvedInputsForTemplate(resolvedInputs)
 		view.ResearchACProposals = projectACProposalsForTemplate(acProposals)
+		view.MissionAC = projectMissionACForTemplate(m.ACSnapshot())
+		// Phase 5.x-followup — surface the caller's spawn-time
+		// inputs so the planner propagates them verbatim to
+		// worker `inputs` (file_path, output_format, etc.) and
+		// doesn't invent values from goal prose.
+		view.SpawnInputs = projectResolvedInputsForTemplate(m.SpawnInputs())
 	}
 	if recentVerdict != nil {
 		view.RecentVerdict = &plannerVerdictView{
@@ -808,6 +867,33 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		return "", fmt.Errorf("mission: planner task: no prompts renderer on session")
 	}
 	return renderer.Render("mission/planner_task", view)
+}
+
+// projectMissionACForTemplate copies state.AC rows into the
+// flat plannerACView shape the planner_task template renders.
+// Dropped rows still surface so the planner sees not to
+// re-propose them (with the "dropped" flag + reason); satisfied
+// rows surface so the planner can see what's already covered
+// without re-emitting status. Phase 5.x — B11 §3.4.
+func projectMissionACForTemplate(rows []AcceptanceCriterion) []plannerACView {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]plannerACView, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, plannerACView{
+			ID:            r.ID,
+			Statement:     r.Statement,
+			Origin:        r.Origin,
+			Status:        string(r.Status),
+			LastEvidence:  r.LastEvidence,
+			AddedAtIter:   r.AddedAtIter,
+			SatisfiedIter: r.SatisfiedAtIter,
+			Dropped:       r.Status == ACDropped,
+			DropReason:    r.DropReason,
+		})
+	}
+	return out
 }
 
 // collectPlanContext projects PlanContext.List() into the
@@ -839,14 +925,14 @@ func collectPlanContext(mission extension.SessionState) []plannerContextEntry {
 // PendingRoadmap surfaced so the checker can refuse `finish`
 // when the user goal still has unexecuted roadmap commitments.
 type checkerTaskView struct {
-	Goal              string
-	PlannerGoal       string
-	MissionAC         []string
-	WaveAC            []string
-	Iteration         int
-	Handoffs          []synthesisHandoffView
-	PlanContext       []plannerContextEntry
-	PendingRoadmap    []plannerRoadmapView
+	Goal           string
+	PlannerGoal    string
+	MissionAC      []plannerACView
+	WaveAC         []string
+	Iteration      int
+	Handoffs       []synthesisHandoffView
+	PlanContext    []plannerContextEntry
+	PendingRoadmap []plannerRoadmapView
 }
 
 // plannerRoadmapView projects one un-executed roadmap entry from
@@ -872,9 +958,13 @@ func buildCheckerTask(mission extension.SessionState, _ MissionManifest, goal st
 		PendingRoadmap: collectPendingRoadmap(mission),
 	}
 	if m := FromState(mission); m != nil {
-		view.PlannerGoal, view.MissionAC, view.WaveAC = m.MissionFrame()
-	}
-	if m := FromState(mission); m != nil {
+		// PlannerGoal + WaveAC pull from MissionFrame (which projects
+		// state.AC for legacy callers); for the structured roster we
+		// use ACSnapshot() directly so the checker sees stable ids.
+		goalProjection, _, waveProjection := m.MissionFrame()
+		view.PlannerGoal = goalProjection
+		view.WaveAC = waveProjection
+		view.MissionAC = projectMissionACForTemplate(m.ACSnapshot())
 		for _, h := range m.Handoffs.List() {
 			if strings.HasPrefix(h.Ref, "planner@") || strings.HasPrefix(h.Ref, "checker@") || strings.HasPrefix(h.Ref, "synthesizer@") {
 				continue

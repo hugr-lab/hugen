@@ -45,6 +45,21 @@ type Handoff struct {
 	// skill convention; runtime does not enforce length here.
 	MemorySummary string `json:"memory_summary,omitempty"`
 
+	// Satisfies is the worker's shorthand for "this output produces
+	// evidence that the listed mission AC rows are now satisfied".
+	// Format: a list of `ac-N` ids. Runtime applies on handoff
+	// receipt via MissionState.ApplyWorkerSatisfies, stamping
+	// evidence as "worker {role} handoff iter-{N} wave-{label}".
+	// Unknown ids are best-effort (logged + skipped). Already
+	// satisfied / dropped rows are left untouched.
+	//
+	// Workers do NOT carry contract authority — they cannot add /
+	// rewrite / drop AC. Only the planner can; the worker's job is
+	// to report what's been delivered.
+	//
+	// Phase 5.x — B11 §3.3.
+	Satisfies []string `json:"satisfies,omitempty"`
+
 	// Subagent records who authored this handoff. SessionID is the
 	// worker's session id; Name / Role / Skill mirror the spawn
 	// metadata for catalog rendering.
@@ -97,20 +112,29 @@ type Verdict struct {
 
 	// WaveACStatus lists per-criterion satisfaction for the
 	// just-completed wave's acceptance_criteria. Empty when the
-	// planner didn't set wave AC. Phase I.26.
+	// planner didn't set wave AC. Phase I.26 — kept as a flat
+	// string list because wave AC are transient (one-shot per
+	// wave) and don't carry identity.
 	WaveACStatus []ACCriterionStatus `json:"wave_ac_status,omitempty"`
 
-	// MissionACStatus lists per-criterion satisfaction for the
-	// mission's acceptance_criteria as of this verdict. Runtime
-	// gates `finish` on every entry being satisfied — a finish
-	// verdict with any unsatisfied criterion is coerced to a
-	// synthetic amend so the next planner can address the gap.
-	// Phase I.26.
-	MissionACStatus []ACCriterionStatus `json:"mission_ac_status,omitempty"`
+	// ACUpdate is the checker's per-id status update channel for
+	// mission acceptance criteria. Each entry MUST carry id +
+	// status (unsatisfied | satisfied) + optional evidence. The
+	// validator (output_contract.go) rejects entries carrying
+	// `statement` or `drop` — those belong to the planner.
+	//
+	// Runtime applies on verdict receipt via
+	// MissionState.ApplyStatusOnly, which folds the per-id status
+	// + evidence into state.AC. The finish gate then reads
+	// state.AC.HasUnsatisfiedAC() — no longer reads this slice.
+	//
+	// Phase 5.x — B11 §3.5 (supersedes MissionACStatus).
+	ACUpdate []ACUpdateSpec `json:"ac_update,omitempty"`
 }
 
-// ACCriterionStatus is one row of the per-criterion check the
-// checker emits. Phase I.26.
+// ACCriterionStatus is one row of the per-wave check the checker
+// emits — used for `wave_ac_status` only. Mission-level status
+// updates now flow through `Verdict.ACUpdate []ACUpdateSpec` (B11).
 type ACCriterionStatus struct {
 	Criterion string `json:"criterion"`
 	Satisfied bool   `json:"satisfied"`

@@ -44,6 +44,13 @@ type InquiryAnswer struct {
 	Response string `json:"response,omitempty" yaml:"response,omitempty"`
 	Reason   string `json:"reason,omitempty" yaml:"reason,omitempty"`
 	Timeout  bool   `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+
+	// AutoApproveTools maps to the §4.6 "approve with tools" option.
+	// Only meaningful when Approved=*true on Type=approval — the
+	// runtime stamps MissionState.AutoApproveTools=true so the
+	// policy hook (§4.6.5) skips every requires_approval tool
+	// inquiry under that mission. Phase 5.x — §4.6.
+	AutoApproveTools bool `json:"auto_approve_tools,omitempty" yaml:"auto_approve_tools,omitempty"` //nolint:tagliatelle
 }
 
 // inquiryDispatcher is the per-step responder pool. SessionHandle
@@ -110,11 +117,12 @@ func buildInquiryResponse(rootID string, author protocol.ParticipantInfo,
 	req *protocol.InquiryRequest, ans InquiryAnswer,
 ) *protocol.InquiryResponse {
 	payload := protocol.InquiryResponsePayload{
-		RequestID:       req.Payload.RequestID,
-		CallerSessionID: req.Payload.CallerSessionID,
-		Reason:          ans.Reason,
-		Response:        ans.Response,
-		RespondedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+		RequestID:        req.Payload.RequestID,
+		CallerSessionID:  req.Payload.CallerSessionID,
+		Reason:           ans.Reason,
+		Response:         ans.Response,
+		AutoApproveTools: ans.AutoApproveTools,
+		RespondedAt:      time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if ans.Approved != nil {
 		v := *ans.Approved

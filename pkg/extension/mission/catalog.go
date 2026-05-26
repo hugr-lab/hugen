@@ -79,6 +79,14 @@ type MissionManifest struct {
 	// for roles that declare no Capabilities; resolution falls
 	// through to the role-class default.
 	Roles map[string]RoleCapabilities
+
+	// AcceptanceCriteria is the typed projection of the manifest's
+	// iter-0 AC seed. Each entry is the raw template string from the
+	// skill manifest; the runtime renders it with `.Inputs` at
+	// mission spawn time and calls SeedAC(..., OriginManifest).
+	//
+	// Empty / nil → no manifest seed. Phase 5.x — B11 §3.2.2.
+	AcceptanceCriteria []string
 }
 
 // MissionCapabilities is the mission-tier capability projection.
@@ -203,13 +211,13 @@ type PlanApproval struct {
 // Canonical approval values. Constants kept narrow — the v1 enum
 // surface is tight per spec § 0.4 / Phase B; Phase I broadens it.
 const (
-	ApprovalInitialRequired    = "required"
-	ApprovalInitialSkip        = "skip"
-	ApprovalIterationAlways    = "always"
-	ApprovalIterationNever     = "never"
-	ApprovalIterationInitOnly  = "initial-only"
-	DefaultMaxWaves            = 10
-	MaxMaxWaves                = 50
+	ApprovalInitialRequired   = "required"
+	ApprovalInitialSkip       = "skip"
+	ApprovalIterationAlways   = "always"
+	ApprovalIterationNever    = "never"
+	ApprovalIterationInitOnly = "initial-only"
+	DefaultMaxWaves           = 10
+	MaxMaxWaves               = 50
 )
 
 // NormalizePlanApproval fills empty fields with their spec

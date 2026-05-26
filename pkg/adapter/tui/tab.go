@@ -399,6 +399,19 @@ func (t *tab) dispatchInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 			if pend.req.Type == protocol.InquiryTypeClarification && text == "" {
 				return true, nil
 			}
+			// Phase 5.x §4.6 — refine path produces a payload with
+			// Approved=nil + Response=text so the mission ext
+			// interprets it as planner refinement, not abort.
+			if pend.req.Type == protocol.InquiryTypeApproval && pend.replyVerb == "refine" {
+				if text == "" {
+					t.bannerError = "refine needs a non-empty feedback"
+					return true, nil
+				}
+				if err := t.submitApprovalRefine(pend, text); err != nil {
+					t.bannerError = err.Error()
+				}
+				return true, nil
+			}
 			if err := t.submitInquiryReply(pend, text); err != nil {
 				t.bannerError = err.Error()
 			}
@@ -417,22 +430,63 @@ func (t *tab) dispatchInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 		}
 		return false, nil
 	}
+	// Phase 5.x §4.6 — four-option approval modal.
+	if pend.req.Type == protocol.InquiryTypeApproval && len(pend.approvalChoices) > 0 {
+		return t.dispatchApprovalChoiceKey(pend, k)
+	}
 	switch k.String() {
-	case "y", "a":
-		if err := t.submitInquiryReply(pend, "/approve"); err != nil {
-			t.bannerError = err.Error()
+	case "esc":
+		t.pendingInquiry = nil
+		t.bannerError = "inquiry dismissed (still pending server-side)"
+		return true, nil
+	}
+	return false, nil
+}
+
+// dispatchApprovalChoiceKey handles keystrokes for the §4.6 four-
+// option approval modal. The renderer draws an option list; this
+// routes j/k navigation, digit shortcuts (1-4), direct keys
+// (a/A/n/r + y/d legacy aliases), Enter commit, and Esc dismiss.
+//
+// Direct keys commit the matching choice immediately — no need to
+// move the highlight first. The highlight + Enter path exists for
+// keyboard-list-style operators and for environments where the
+// option key conflicts with the terminal.
+func (t *tab) dispatchApprovalChoiceKey(pend *inquiryState, k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
+	switch k.String() {
+	case "j", "down":
+		if n := len(pend.approvalChoices); n > 0 {
+			pend.approvalHighlight = (pend.approvalHighlight + 1) % n
 		}
+		return true, nil
+	case "k", "up":
+		if n := len(pend.approvalChoices); n > 0 {
+			pend.approvalHighlight = (pend.approvalHighlight - 1 + n) % n
+		}
+		return true, nil
+	case "1", "2", "3", "4":
+		idx := int(k.String()[0]-'0') - 1
+		if idx >= 0 && idx < len(pend.approvalChoices) {
+			pend.approvalHighlight = idx
+			t.commitApprovalChoice(pend, pend.approvalChoices[idx].Kind)
+		}
+		return true, nil
+	case "enter":
+		if pend.approvalHighlight >= 0 && pend.approvalHighlight < len(pend.approvalChoices) {
+			t.commitApprovalChoice(pend, pend.approvalChoices[pend.approvalHighlight].Kind)
+		}
+		return true, nil
+	case "a":
+		t.commitApprovalChoice(pend, approvalChoiceApproveWithTools)
+		return true, nil
+	case "A", "shift+a", "y":
+		t.commitApprovalChoice(pend, approvalChoiceApprove)
 		return true, nil
 	case "n", "d":
-		if err := t.submitInquiryReply(pend, "/deny"); err != nil {
-			t.bannerError = err.Error()
-		}
+		t.commitApprovalChoice(pend, approvalChoiceReject)
 		return true, nil
 	case "r":
-		pend.replyMode = true
-		pend.replyVerb = "approve"
-		t.textarea.Reset()
-		t.textarea.Focus()
+		t.commitApprovalChoice(pend, approvalChoiceRefine)
 		return true, nil
 	case "esc":
 		t.pendingInquiry = nil
@@ -442,31 +496,64 @@ func (t *tab) dispatchInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 	return false, nil
 }
 
+// commitApprovalChoice maps a §4.6 choice to its on-wire payload
+// shape and submits (approve / approve-with-tools / reject ship
+// immediately; only refine drops into reply mode so the user can
+// type feedback first — the actual submit then happens on Enter
+// inside the textarea, which re-routes through dispatchInquiryKey's
+// replyMode branch).
+func (t *tab) commitApprovalChoice(pend *inquiryState, kind approvalChoiceKind) {
+	switch kind {
+	case approvalChoiceApproveWithTools:
+		if err := t.submitApprovalChoice(pend, true, true, ""); err != nil {
+			t.bannerError = err.Error()
+		}
+	case approvalChoiceApprove:
+		if err := t.submitApprovalChoice(pend, true, false, ""); err != nil {
+			t.bannerError = err.Error()
+		}
+	case approvalChoiceReject:
+		// Reject can carry an optional reason; we don't force the
+		// reply textarea on press — the immediate-deny flow matches
+		// the prior single-keystroke UX. Operators who want to
+		// attach a reason can use the refine path or future
+		// extension. Submit with empty Reason.
+		if err := t.submitApprovalChoice(pend, false, false, ""); err != nil {
+			t.bannerError = err.Error()
+		}
+	case approvalChoiceRefine:
+		pend.replyMode = true
+		pend.replyVerb = "refine"
+		t.textarea.Reset()
+		t.textarea.Focus()
+	}
+}
+
 // dispatchBatchedInquiryKey routes keypresses for the tab-style
 // research_batch modal. Phase 5.x — B15.
 //
 // Bindings:
 //
 //   - ↑ / ↓      — cycle the option highlight on questions with
-//                  numbered options (wraps at bounds). No-op when
-//                  no options or focus is on the comment field.
+//     numbered options (wraps at bounds). No-op when
+//     no options or focus is on the comment field.
 //   - Enter      — commit value + comment for the current question
-//                  and advance (or submit batch on the last one).
-//                  Value priority: typed text in the focused field
-//                  > highlighted option > empty. Comment: typed
-//                  text in the comment field if focused, else
-//                  preserved.
+//     and advance (or submit batch on the last one).
+//     Value priority: typed text in the focused field
+//     > highlighted option > empty. Comment: typed
+//     text in the comment field if focused, else
+//     preserved.
 //   - Tab        — switch focus between the value and comment
-//                  fields. Switching persists the textarea content
-//                  into whichever field was active.
+//     fields. Switching persists the textarea content
+//     into whichever field was active.
 //   - Shift+Tab  — step back to the previous question. The prior
-//                  value (or comment, if focus was on comment)
-//                  pre-fills the textarea so the operator can
-//                  amend in place. No-op on Q1.
+//     value (or comment, if focus was on comment)
+//     pre-fills the textarea so the operator can
+//     amend in place. No-op on Q1.
 //   - digit 1-N  — keep as a shortcut: typed `2` + Enter commits
-//                  options[1] as the value.
+//     options[1] as the value.
 //   - Esc        — abort the batch (modal closes; request stays
-//                  pending server-side).
+//     pending server-side).
 func (t *tab) dispatchBatchedInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 	pend := t.pendingInquiry
 	key := k.String()
@@ -712,6 +799,57 @@ func (t *tab) submitBatchedAnswers(pend *inquiryState) error {
 		RequestID:       pend.req.RequestID,
 		CallerSessionID: pend.req.CallerSessionID,
 		Answers:         answers,
+		RespondedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	resp := protocol.NewInquiryResponse(t.sessionID, t.user, payload)
+	if err := t.submit(resp); err != nil {
+		return err
+	}
+	t.pendingInquiry = nil
+	t.textarea.Reset()
+	return nil
+}
+
+// submitApprovalChoice builds the on-wire payload for the §4.6
+// four-option approval modal directly (no string-parse round trip
+// through BuildInquiryReply, which can't express the
+// AutoApproveTools flag or the nil-Approved refine shape).
+//
+//	approved + autoApproveTools → approve-with-tools / approve
+//	!approved                   → reject (Reason carries optional text)
+//
+// Refine has its own dedicated submitApprovalRefine helper because
+// its wire shape (Approved=nil + Response=feedback) doesn't fit
+// the (approved bool, autoApproveTools bool) signature cleanly.
+func (t *tab) submitApprovalChoice(pend *inquiryState, approved, autoApproveTools bool, reason string) error {
+	approvedFlag := approved
+	payload := protocol.InquiryResponsePayload{
+		RequestID:        pend.req.RequestID,
+		CallerSessionID:  pend.req.CallerSessionID,
+		Approved:         &approvedFlag,
+		Reason:           reason,
+		AutoApproveTools: autoApproveTools,
+		RespondedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	resp := protocol.NewInquiryResponse(t.sessionID, t.user, payload)
+	if err := t.submit(resp); err != nil {
+		return err
+	}
+	t.pendingInquiry = nil
+	t.textarea.Reset()
+	return nil
+}
+
+// submitApprovalRefine builds the §4.6 refine payload:
+// Approved=nil + Response=feedback. The mission ext's
+// interpretValidateApprovalResponse interprets a free-form Response
+// (not lead by approve/abort/refine) as refinement guidance the
+// planner should fold into its next iteration.
+func (t *tab) submitApprovalRefine(pend *inquiryState, feedback string) error {
+	payload := protocol.InquiryResponsePayload{
+		RequestID:       pend.req.RequestID,
+		CallerSessionID: pend.req.CallerSessionID,
+		Response:        feedback,
 		RespondedAt:     time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	resp := protocol.NewInquiryResponse(t.sessionID, t.user, payload)

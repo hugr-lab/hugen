@@ -223,6 +223,24 @@ func (e *Extension) ingestHandoff(m *MissionState, childSessionID string, cur wo
 	iter := m.IterationCounter
 	m.mu.Unlock()
 	m.PlanContext.AppendHandoff(iter, wave, h)
+	// Phase 5.x — B11 §3.3. Worker satisfies channel. Each id in
+	// h.Satisfies marks the row satisfied with synthesised evidence
+	// "worker {role} handoff iter-N wave-{label}". Best-effort —
+	// unknown ids logged and skipped (workers can't always know the
+	// canonical id roster, and we don't want a typo to fail the
+	// wave). Already-satisfied rows are left untouched so worker
+	// claims can't overwrite checker-confirmed evidence.
+	if len(h.Satisfies) > 0 {
+		applied, unknown := m.ApplyWorkerSatisfies(h.Satisfies, iter, cur.Role, wave)
+		if len(unknown) > 0 {
+			e.logger.Debug("mission: ingestHandoff: worker satisfies referenced unknown ids",
+				"ref", ref, "role", cur.Role, "unknown", unknown)
+		}
+		if len(applied) > 0 {
+			e.logger.Debug("mission: ingestHandoff: worker satisfies applied",
+				"ref", ref, "role", cur.Role, "applied", applied)
+		}
+	}
 	// Phase 5.x — B13. Skill-driven approval invalidation. Any
 	// worker (regardless of role) can request that the next planner
 	// iteration re-open the approval modal by including

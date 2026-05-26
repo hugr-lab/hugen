@@ -11,9 +11,14 @@ to route the next iteration.
 [Mission goal (planner's framing — latest restatement after research / refine / follow-ups)]
 {{.PlannerGoal}}
 {{end}}{{if .MissionAC}}
-[Mission acceptance criteria — every entry MUST be satisfied for `finish`]
-{{range .MissionAC}}- {{.}}
-{{end}}{{end}}{{if .WaveAC}}
+[Mission acceptance criteria — every non-dropped entry MUST be satisfied for `finish`]
+{{range .MissionAC}}- `{{.ID}}` [{{.Status}}{{if .Dropped}}: {{.DropReason}}{{end}}] {{.Statement}}{{if .LastEvidence}} — last evidence: {{.LastEvidence}}{{end}}
+{{end}}
+Reference each row by its stable `ac-N` id when emitting `ac_update`
+entries — NEVER invent ids. Rows marked `dropped` are out of contract
+(excluded from the finish-gate); rows already `satisfied` stay
+visible so you can re-evaluate if a later wave reverted their state.
+{{end}}{{if .WaveAC}}
 [Wave acceptance criteria — what THIS wave was meant to deliver]
 {{range .WaveAC}}- {{.}}
 {{end}}{{end}}{{if .PendingRoadmap}}
@@ -40,22 +45,49 @@ Pick exactly one decision. The runtime will route on this value:
   MUST call `session:inquire` before emitting your handoff. The
   runtime rejects an `inquire` verdict if no inquiry happened.
 - `finish` — the mission goal is satisfied; runtime should run
-  synthesis and end the mission. Use this confidently; you do
-  not need to add a verification wave.
+  synthesis and end the mission. ONLY emit AFTER walking the
+  [Finish discipline] checklist below — runtime coerces premature
+  finishes (any non-dropped AC row still unsatisfied after your
+  `ac_update[]` applies) into synthetic amend, wasting a wave.
 
 [Verdict body — acceptance criteria status]
 
-You MUST evaluate each acceptance criterion in [Mission acceptance
-criteria] AND each in [Wave acceptance criteria] against the
-prior waves' handoffs + plan_context. Emit per-criterion status
-inside the verdict body:
+**STOP — read [Mission acceptance criteria] above NOW.** Note every
+`ac-N` id, its current `[status]`, and `last evidence`. If that
+section is absent, the mission has no AC roster — skip the
+`ac_update[]` field entirely. Otherwise: that list IS the contract
+you grade against.
 
-- `wave_ac_status[]` — one entry per [Wave acceptance criteria]
-  item: `{criterion: "<verbatim>", satisfied: true|false,
-  evidence: "<handoff ref or short quote>"}`. Empty when there
-  are no wave AC.
-- `mission_ac_status[]` — same shape, one entry per [Mission
-  acceptance criteria] item.
+You are the **AUTHORITY** on AC status. Workers don't claim
+satisfaction themselves; the planner doesn't track it. State.AC
+only flips when YOU emit `ac_update[]`. Omission = runtime carries
+the row forward at its CURRENT status — so an unsatisfied row
+stays unsatisfied unless you explicitly mark it satisfied.
+
+`ac_update[]` — emit one entry for **every non-dropped mission AC
+row whose status YOU evaluated this turn**. That includes:
+
+  1. Rows the just-completed wave produced evidence for → set
+     `status: "satisfied"` with `evidence` pointing at a concrete
+     handoff body field (`<ref> path=/...`, `<ref> series=[...]`,
+     `<ref> body contains chart svg`).
+  2. Rows the wave attempted but failed to satisfy → set
+     `status: "unsatisfied"` with `evidence` explaining the gap
+     ("only 3 of 4 tables in <ref>", "no chart svg in body").
+  3. Rows the wave didn't touch at all → omit (carry forward).
+     If you're unsure whether a row was touched, **re-confirm
+     with the prior evidence** rather than omit — explicit beats
+     implicit.
+
+Each entry: `{id: "ac-N", status: "satisfied" | "unsatisfied",
+evidence: "<handoff ref + body-field quote>"}`. You MUST NOT set
+`statement` or `drop` — those are planner authority; raise an
+`issues[]` entry instead.
+
+`wave_ac_status[]` — one entry per [Wave acceptance criteria]
+bullet: `{criterion: "<verbatim>", satisfied: true|false,
+evidence: "<handoff ref or short quote>"}`. Omit when there are
+no wave AC.
 
 Evidence rule: a criterion is satisfied ONLY when a handoff
 carries actual proof:
@@ -71,41 +103,50 @@ is NOT proof.
 
 [Finish discipline — refuse to finish prematurely]
 
-`finish` is ONLY valid when:
+Before you write `decision: "finish"` walk this checklist literally:
 
-1. Every entry in `mission_ac_status[]` has `satisfied=true`
-   with credible `evidence`.
-2. [Pending roadmap] is empty (planner has no committed-but-
-   unexecuted waves).
-3. [User goal] is covered by [Mission acceptance criteria] —
-   if you spot drift (user asked for X, planner's AC never
-   mentions X), emit `amend` with an issue describing the
-   missed requirement so the next planner expands the AC.
+  1. Scan [Mission acceptance criteria] above. For EVERY non-dropped
+     row currently shown as `[unsatisfied]`, did this wave (or any
+     prior wave per [Plan context]) actually produce the evidence
+     needed?
+     - YES → add a `{id: "ac-N", status: "satisfied", evidence: "..."}`
+       entry to `ac_update[]` (skip this and the runtime will coerce
+       your verdict to a synthetic amend).
+     - NO  → you cannot finish. Use `continue` (planner spawns the
+       next wave) or `amend` (this wave's output is wrong, planner
+       must redo).
+  2. [Pending roadmap] is empty? If non-empty, the planner committed
+     to waves that haven't run — emit `continue` to let them execute.
+  3. [User goal] is covered by [Mission acceptance criteria]? If you
+     spot drift (user asked for X, AC list never mentions X), emit
+     `amend` with an issue describing the gap so the planner can
+     `ac_add` a new row.
 
-If any check fails, emit `continue` (mission still in progress,
-planner spawns the next wave) or `amend` (the just-completed
-wave's output is wrong, planner needs to fix it). Wave AC
-unsatisfied → typically `amend` (the wave didn't deliver what
-it promised). Mission AC unsatisfied but wave AC satisfied →
-typically `continue` (we're on track, just not done).
+The runtime double-checks #1 AFTER applying your `ac_update[]`:
+any non-dropped row whose status remains unsatisfied coerces your
+`finish` into a synthetic amend with the gap folded into issues —
+which wastes a planner+checker iteration. Front-load the work
+HERE.
 
-If unsure, emit `continue` over `finish`. `continue` is the
-safe default; `finish` ends the mission.
+Wave AC unsatisfied → typically `amend` (the wave didn't deliver
+what it promised). Mission AC unsatisfied but wave AC satisfied →
+typically `continue` (we're on track, just not done). If unsure,
+emit `continue` over `finish` — `continue` is the safe default.
 
 Reply with EXACTLY ONE fenced block (no other text, no narration):
 
 ```verdict
-{"status":"ok","body":{"decision":"continue","issues":[],"reason":"<one sentence>","wave_ac_status":[{"criterion":"...","satisfied":true,"evidence":"<ref>"}],"mission_ac_status":[{"criterion":"...","satisfied":false,"evidence":"none yet"}]}}
+{"status":"ok","body":{"decision":"continue","issues":[],"reason":"<one sentence>","ac_update":[{"id":"ac-1","status":"satisfied","evidence":"<ref>"},{"id":"ac-2","status":"unsatisfied","evidence":"missing svg"}],"wave_ac_status":[{"criterion":"...","satisfied":true,"evidence":"<ref>"}]}}
 ```
 
 Examples of valid verdict shapes:
 
 ```verdict
-{"status":"ok","body":{"decision":"amend","issues":["wave wrote to wrong table","filter missed null rows"],"reason":"replan needed","wave_ac_status":[{"criterion":"Numbers cover 4 tables","satisfied":false,"evidence":"only 3 tables in handoff"}]}}
+{"status":"ok","body":{"decision":"amend","issues":["wave wrote to wrong table","filter missed null rows"],"reason":"replan needed","ac_update":[{"id":"ac-1","status":"unsatisfied","evidence":"only 3 tables in handoff"}],"wave_ac_status":[{"criterion":"Numbers cover 4 tables","satisfied":false,"evidence":"only 3 tables in handoff"}]}}
 ```
 
 ```verdict
-{"status":"ok","body":{"decision":"finish","reason":"goal met","mission_ac_status":[{"criterion":"HTML saved at ~/Downloads/r.html","satisfied":true,"evidence":"worker@some-wave path=/Users/x/Downloads/r.html"}]}}
+{"status":"ok","body":{"decision":"finish","reason":"goal met","ac_update":[{"id":"ac-1","status":"satisfied","evidence":"worker@some-wave path=/Users/x/Downloads/r.html"}]}}
 ```
 
 The triple-backticks and the word `verdict` are mandatory; the

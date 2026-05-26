@@ -157,6 +157,13 @@ func projectMissionManifest(m skillpkg.Manifest) *missionext.MissionManifest {
 	out.Capabilities = projectMissionCapabilities(mb.Capabilities)
 	out.Roles = projectRoleCapabilities(m.Hugen.SubAgents)
 	out.Workers = projectDoWorkers(m.Hugen.SubAgents, mb.Plan.Role, mb.Control.Role, mb.Synthesis.Role)
+	// Phase 5.x — B11 §3.2.2 — pass the manifest's iter-0 AC seed
+	// through verbatim. Templates are rendered with .Inputs at
+	// mission spawn (auto_runner.RunMission), not here, since the
+	// catalog projection has no access to the spawn-time inputs.
+	if len(mb.AcceptanceCriteria) > 0 {
+		out.AcceptanceCriteria = append([]string(nil), mb.AcceptanceCriteria...)
+	}
 	return out
 }
 

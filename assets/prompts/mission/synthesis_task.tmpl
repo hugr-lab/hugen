@@ -2,6 +2,15 @@ Synthesize the mission's results.
 {{if .Goal}}
 Mission goal:
 {{.Goal}}
+{{end}}{{if .MissionAC}}
+Acceptance criteria and evidence trail:
+{{range .MissionAC}}- `{{.ID}}` [{{.Status}}{{if .Dropped}}: {{.DropReason}}{{end}}] {{.Statement}}{{if .LastEvidence}}
+  evidence: {{.LastEvidence}}{{end}}
+{{end}}
+Reference these in your answer when the user might want to know
+how each requirement was met — e.g. "the HTML lives at <path> (see
+ac-1 evidence)". Dropped rows are out of contract; do not claim
+they were delivered.
 {{end}}{{if .Handoffs}}
 Prior handoffs:
 {{range .Handoffs}}- {{.Ref}} ({{.Role}}/{{.Skill}}, status={{.Status}})

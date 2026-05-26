@@ -1,0 +1,180 @@
+# approval_modal_v2_auto_approve — Phase 5.x § 4.6.
+#
+# Drives a mission that requires tool approval mid-run, picks
+# "approve with tools" on the plan-approval modal, and asserts:
+#
+#   1. Exactly ONE approval-type inquiry_request bubbled through
+#      the tree — the plan-approval modal. The subsequent
+#      requires_approval tool call (bash.write_file under
+#      whatever skill the planner spawns) MUST NOT emit a second
+#      approval inquiry, because the §4.6.5 policy hook
+#      auto-grants it under the umbrella of the just-stamped
+#      MissionState.AutoApproveTools=true.
+#
+#   2. A mission:tool_approval_policy_set ExtensionFrame fired
+#      on the mission session with auto_approve_tools=true.
+#      This is the audit trail confirming the runtime acted on
+#      the inbound AutoApproveTools=true bit.
+#
+#   3. At least one mission:tool_approval_auto_granted
+#      ExtensionFrame fired carrying the tool name + caller +
+#      granting mission ids. Without this the run might have
+#      silently degraded to plain-approve and the assertion in
+#      (1) would pass vacuously.
+#
+#   4. The bash.write_file (or equivalent) tool_call landed and
+#      produced a non-denied tool_result — i.e. the policy hook
+#      didn't accidentally block the call.
+#
+# Tuning notes:
+#   - Uses the same prompt as approval_gate_blocks_mutation so we
+#     pick up its proven tool-coercion shape. Where that scenario
+#     denies the modal, this one approves-with-tools.
+#   - Plan modal opens at most twice per the §4.6.6 reset rule
+#     (replan triggers a fresh modal). The inquiry_responses list
+#     answers up to two; if the run hits a third, something is
+#     wrong upstream — that's the fail mode we want surfaced.
+name: approval_modal_v2_auto_approve
+requires: [hugr]
+
+steps:
+  - say: |
+      Write a short markdown summary of "northwind data source
+      contents" to `/tmp/hugen-approval-v2-test.md`. You MUST
+      use the `bash-mcp:bash_write_file` tool (or
+      `bash-mcp:bash_shell` with a redirected `echo`) to do the
+      write directly. Do NOT use `python-mcp` — the test
+      validates the runtime's tool-approval gate, which only
+      intercepts `requires_approval` tools (bash family). Using
+      python sidesteps the gate and renders the test vacuous.
+    budget: 480s
+    wait_for_subagents: 360s
+
+    # Phase 5.x §4.6 — every approval inquiry that bubbles to
+    # root is approved with the AutoApproveTools flag set. The
+    # mission's first plan-approval modal is the only one we
+    # expect; any subsequent requires_approval tool inquiry
+    # would represent a regression in the policy hook.
+    inquiry_responses:
+      - match:
+          type: approval
+        respond:
+          approved: true
+          auto_approve_tools: true
+        delay: 200ms
+      - match:
+          type: approval
+        respond:
+          approved: true
+          auto_approve_tools: true
+        delay: 200ms
+
+    queries:
+      # The full set of approval inquiry_request frames in the
+      # tree. Should be exactly 1 (the plan modal); if there's a
+      # second one, the policy hook didn't fire and the run
+      # regressed.
+      - name: approval_inquiry_requests
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map(select(.metadata.type == \"approval\")) | map({seq, sid: .session_id, request_id: .metadata.request_id, question: .metadata.question})") {
+              hub { db { agent {
+                session_events(
+                  filter: {root_session_id: {eq: $sid}, event_type: {eq: "inquiry_request"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq session_id metadata }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # mission:tool_approval_policy_set audit frame — fired on
+      # every approval modal close, payload carries the post-
+      # modal AutoApproveTools state. ExtensionFrames persist with
+      # event_type="extension_frame" and metadata.{extension, op}
+      # for the routing discriminator. Use the jq projection to
+      # narrow on the right (extension, op) tuple — content-LIKE
+      # is too loose (other frames may transit the same string).
+      - name: policy_set_events
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map(select(.metadata.extension == \"mission\" and .metadata.op == \"tool_approval_policy_set\")) | map({seq, sid: .session_id, data: .metadata.data})") {
+              hub { db { agent {
+                session_events(
+                  filter: {root_session_id: {eq: $sid}, event_type: {eq: "extension_frame"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq session_id metadata }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # mission:tool_approval_auto_granted audit frame — fired
+      # once per implicit grant. Existence proves the policy
+      # hook actually short-circuited a requires_approval inquiry.
+      - name: auto_granted_events
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map(select(.metadata.extension == \"mission\" and .metadata.op == \"tool_approval_auto_granted\")) | map({seq, sid: .session_id, data: .metadata.data})") {
+              hub { db { agent {
+                session_events(
+                  filter: {root_session_id: {eq: $sid}, event_type: {eq: "extension_frame"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq session_id metadata }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # bash.write_file (or bash.run / bash.shell) tool_call sites.
+      # The call must have landed in the tree — otherwise the
+      # auto-approve assertion is vacuous (no requires_approval
+      # tool ran).
+      - name: bash_write_attempts
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map({seq, sid: .session_id, tool: .tool_name})") {
+              hub { db { agent {
+                session_events(
+                  filter: {root_session_id: {eq: $sid}, event_type: {eq: "tool_call"}, tool_name: {like: "bash%"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq session_id tool_name }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      # Tool result envelopes — confirm none of the bash calls
+      # came back denied (which would mean the policy hook
+      # incorrectly fell through to a modal that then got denied).
+      - name: denied_tool_results
+        graphql: |
+          query ($sid: String!) {
+            jq(query: ".hub.db.agent.session_events | map({seq, sid: .session_id, content})") {
+              hub { db { agent {
+                session_events(
+                  filter: {root_session_id: {eq: $sid}, event_type: {eq: "tool_result"}, content: {like: "%denied_by_user%"}}
+                  order_by: [{field: "seq", direction: ASC}]
+                ) { seq session_id content }
+              }}}
+            }
+          }
+        vars: { sid: "$sid" }
+        path: extensions.jq.jq
+
+      - name: root_final_message
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {session_id: {eq: $sid}, event_type: {eq: "agent_message"}}
+                order_by: [{field: "seq", direction: DESC}]
+                limit: 3
+              ) { seq content }
+            }}}
+          }
+        vars: { sid: "$sid" }

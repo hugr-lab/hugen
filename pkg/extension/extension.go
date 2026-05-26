@@ -475,3 +475,30 @@ type HistoryOwner interface {
 	// pkg/extension/compactor.
 	RollbackTo(ctx context.Context, state SessionState, seq int64)
 }
+
+// ToolApprovalPolicy lets an extension pre-empt a runtime-initiated
+// tool-approval inquiry on the caller's behalf — answering
+// "approved" immediately so the user never sees the modal. The
+// mission extension implements this for the §4.6 "approve with
+// tools" plan-approval option: when an ancestor mission session
+// stamped MissionState.AutoApproveTools=true on its own approval
+// modal, the policy hook walks the caller's parent chain and
+// grants any subsequent requires_approval tool inquiry under that
+// mission's umbrella.
+//
+// Contract: implementations are consulted in deps.Extensions order
+// at the top of [Session.requestApproval]. The first non-nil
+// (grantedByMissionID, ok=true) return wins — remaining extensions
+// are skipped, and the caller emits an audit ExtensionFrame
+// documenting the implicit grant. On ok=false the runtime falls
+// through to the normal session:inquire(type=approval) path.
+//
+// The returned grantedByMissionID identifies the mission whose
+// state granted the approval (audit-only — the runtime doesn't act
+// on it beyond audit). Empty when no mission granted; non-empty
+// only with ok=true.
+//
+// Phase 5.x — §4.6.5.
+type ToolApprovalPolicy interface {
+	MaybeAutoApprove(ctx context.Context, caller SessionState, tool string) (grantedByMissionID string, ok bool)
+}

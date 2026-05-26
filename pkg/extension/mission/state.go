@@ -97,13 +97,30 @@ type MissionState struct {
 	// Phase I.26.
 	currentMissionGoal string
 
-	// currentMissionAC is the latest planner's list of mission
-	// acceptance criteria. Snapshotted from
-	// Plan.MissionAcceptanceCriteria after spawnAndAwaitPlanner
-	// accepts a planner handoff. Surfaced in the checker's task as
-	// `[Mission acceptance criteria]`; the checker emits per-
-	// criterion satisfied flags in its verdict body. Phase I.26.
-	currentMissionAC []string
+	// ac is the identity-bearing list of acceptance criteria — the
+	// single source of truth for what the mission must deliver. Each
+	// row carries id / statement / origin / status / evidence + iter
+	// stamps. Mutated only via the helpers in state_ac.go (SeedAC,
+	// CommitStagedDiff, ApplyStatusOnly, ApplyWorkerSatisfies); never
+	// touch the slice directly outside that file.
+	//
+	// Phase 5.x — B11.
+	ac []AcceptanceCriterion
+
+	// nextACID is the monotonically-increasing id counter for new
+	// rows. Runtime stamps "ac-<nextACID>" on every ac_add then
+	// increments. IDs are never reused inside a mission — even
+	// dropped rows keep theirs for audit.
+	nextACID int
+
+	// pendingDiff is the staged planner diff awaiting approval. Set
+	// by StagePlannerDiff when the planner emits a contract-changing
+	// or requires_reapproval iter; cleared by CommitStagedDiff
+	// (modal-approve / refine) or DiscardStagedDiff (modal-reject).
+	// Nil between approval gates.
+	//
+	// Phase 5.x — B11 §3.2.1.
+	pendingDiff *stagedDiff
 
 	// currentWaveAC tracks the acceptance criteria of the wave
 	// currently in flight (or just completed). Set by
@@ -132,6 +149,36 @@ type MissionState struct {
 	// the authority on what becomes mission_acceptance_criteria;
 	// proposals are input only (§3.2.1). Phase 5.x — B15.
 	researchACProposals []ResearchACProposal
+
+	// autoApproveTools mirrors the user's last pick on an approval
+	// modal — true when they chose "approve with tools", false on
+	// "approve" / refine / abort / reject. RESET to false at the
+	// top of every fresh approval modal (before RequestInquiry
+	// returns) so each modal asks afresh; the flag does NOT
+	// auto-inherit across replans. Consulted by MaybeAutoApprove
+	// (§4.6.5) on every requires_approval tool call — when set on
+	// any ancestor mission in the caller's parent chain, the tool
+	// inquiry is skipped and approval granted immediately.
+	//
+	// Phase 5.x — §4.6.
+	autoApproveTools bool
+
+	// spawnInputs captures the structured `inputs` map the caller
+	// passed to `session:spawn_mission` (root → mission). The runtime
+	// stamps the map here at RunMission time so downstream stages
+	// (researcher + planner + synthesizer) can surface caller-
+	// supplied parameters like `file_path`, `output_format`,
+	// `schedule_kind` verbatim. Without this stash the planner
+	// would only see the mission goal prose and invent these
+	// values, drifting from what the caller asked for. Phase
+	// 5.x-followup.
+	//
+	// Stored as map[string]any to match the wire shape of
+	// session:spawn_mission's inputs JSON object. Empty / nil
+	// when the caller passed no inputs. Read-only after stamp —
+	// no in-mission writer; the AC seed + every prompt render
+	// just projects from it.
+	spawnInputs map[string]any
 
 	// researchAttempted tracks whether the research stage was
 	// invoked on this mission, regardless of outcome. Flipped to
@@ -305,27 +352,109 @@ func (m *MissionState) PendingReapproval() (bool, string) {
 	return m.pendingReapproval, m.pendingReapprovalReason
 }
 
-// SetMissionFrame stamps the planner's current understanding of
-// what the mission delivers + the exit criteria the checker reads.
-// Called by spawnAndAwaitPlanner when accepting a non-complete
-// plan; latest wins (each iteration's planner re-emits the full
-// list, runtime keeps the snapshot). Phase I.26.
-func (m *MissionState) SetMissionFrame(goal string, mission []string, wave []string) {
+// SetGoalAndWaveAC stamps the planner's restated mission_goal and
+// the per-wave acceptance criteria. The MISSION-level AC list is no
+// longer carried as a flat string slice — it now lives on state.AC
+// (the structured B11 model) and is mutated through StagePlannerDiff
+// / CommitStagedDiff / ApplyStatusOnly / ApplyWorkerSatisfies.
+//
+// Empty mission goal is accepted (matches the prior SetMissionFrame
+// behaviour, which trimmed whitespace and stored regardless). Wave
+// AC may be empty when the planner didn't narrow.
+//
+// Phase 5.x — B11 §3.2.
+func (m *MissionState) SetGoalAndWaveAC(goal string, wave []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.currentMissionGoal = strings.TrimSpace(goal)
-	m.currentMissionAC = append(m.currentMissionAC[:0:0], mission...)
 	m.currentWaveAC = append(m.currentWaveAC[:0:0], wave...)
 }
 
-// MissionFrame reads the latest planner-set frame. Returns empty
-// values when no plan has been accepted yet. Phase I.26.
+// MissionFrame returns (goal, mission-AC statements, wave-AC). The
+// mission-AC slice is a fresh projection of state.AC: rows whose
+// status != dropped, in insertion order, with statement-only
+// rendering. Empty list when no AC seeded yet. Used by the checker
+// task template + approval modal renderer for the legacy
+// string-bullet view while the structured ac_view (ζ) lands.
+//
+// Phase 5.x — B11 §3.2 (was Phase I.26's SetMissionFrame snapshot).
 func (m *MissionState) MissionFrame() (goal string, mission []string, wave []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	mission = append([]string(nil), m.currentMissionAC...)
 	wave = append([]string(nil), m.currentWaveAC...)
+	mission = make([]string, 0, len(m.ac))
+	for _, row := range m.ac {
+		if row.Status == ACDropped {
+			continue
+		}
+		mission = append(mission, row.Statement)
+	}
 	return m.currentMissionGoal, mission, wave
+}
+
+// SetSpawnInputs stashes the structured `inputs` map the caller
+// passed to session:spawn_mission. Stamped once by the auto-runner
+// at RunMission entry; downstream stages (research + planner +
+// synthesizer) project from it via SpawnInputs(). Nil / empty
+// maps are normalised to nil so SpawnInputs() returns the
+// zero-value (empty) slice the templates can guard on.
+//
+// Phase 5.x-followup. Inputs ride the wire as a JSON object on
+// spawn_mission's tool_args; the session machinery decodes them
+// into `inputs any` (typically map[string]any). We accept the
+// generic `any` to match the runtime's call signature and
+// type-assert here — a non-map value (string, number) is treated
+// as nil because the inputs contract is "structured map".
+func (m *MissionState) SetSpawnInputs(inputs any) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	asMap, _ := inputs.(map[string]any)
+	if len(asMap) == 0 {
+		m.spawnInputs = nil
+		return
+	}
+	m.spawnInputs = make(map[string]any, len(asMap))
+	for k, v := range asMap {
+		m.spawnInputs[k] = v
+	}
+}
+
+// SpawnInputs returns a defensive copy of the spawn-time inputs
+// map. Empty map when SetSpawnInputs never fired or the caller
+// passed nothing. The returned map is safe to mutate without
+// affecting MissionState. Phase 5.x-followup.
+func (m *MissionState) SpawnInputs() map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.spawnInputs) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(m.spawnInputs))
+	for k, v := range m.spawnInputs {
+		out[k] = v
+	}
+	return out
+}
+
+// SetAutoApproveTools sets the auto-approve-tools flag. Called by
+// validate_and_approve after a successful approve-with-tools modal
+// (value=true) and at the top of every fresh approval modal
+// (value=false, the reset) so the user's pick from a prior modal
+// doesn't silently carry over into a replan. Phase 5.x — §4.6.
+func (m *MissionState) SetAutoApproveTools(v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.autoApproveTools = v
+}
+
+// AutoApproveTools reports the current auto-approve-tools flag.
+// MaybeAutoApprove walks the caller's parent chain looking for an
+// ancestor mission with this flag set; on hit it skips the tool
+// approval inquiry entirely. Phase 5.x — §4.6.
+func (m *MissionState) AutoApproveTools() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.autoApproveTools
 }
 
 // SetResearchOutput stashes the research role's done=true result

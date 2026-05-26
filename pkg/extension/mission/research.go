@@ -28,14 +28,14 @@ const researchWaveLabelPrefix = "_research-"
 //
 // The loop:
 //
-//   1. Spawn the research role as a single-subagent wave.
-//   2. Decode the handoff as kind=research.
-//   3. If output.Done — stash findings on MissionState, return.
-//   4. Else — batch the clarifications into a single
-//      session:inquire modal, collect answers, fold them into
-//      `prior_answers` + `prior_comments` for the next research
-//      iteration's first message.
-//   5. Cap at manifest.Research.MaxIterations.
+//  1. Spawn the research role as a single-subagent wave.
+//  2. Decode the handoff as kind=research.
+//  3. If output.Done — stash findings on MissionState, return.
+//  4. Else — batch the clarifications into a single
+//     session:inquire modal, collect answers, fold them into
+//     `prior_answers` + `prior_comments` for the next research
+//     iteration's first message.
+//  5. Cap at manifest.Research.MaxIterations.
 func (e *Extension) runResearchStage(ctx context.Context, executor *Executor, mission extension.SessionState, manifest MissionManifest, missionSkill, goal string) (bool, error) {
 	if manifest.Research == nil {
 		return false, nil
@@ -307,6 +307,15 @@ func buildResearchTask(mission extension.SessionState, manifest MissionManifest,
 		PriorComments:      projectKVForTemplate(priorComments),
 		ValidationFeedback: validationFeedback,
 	}
+	if m := FromState(mission); m != nil {
+		// Phase 5.x-followup — caller's spawn-time inputs are
+		// authoritative; the research role MUST treat them as
+		// already-resolved and skip any clarification it would
+		// otherwise ask for those keys. Without this surface the
+		// researcher re-prompts for things the caller already
+		// passed (file_path, output_format, schedule_kind, …).
+		view.SpawnInputs = projectResolvedInputsForTemplate(m.SpawnInputs())
+	}
 	renderer := mission.Prompts()
 	if renderer == nil {
 		return "", fmt.Errorf("mission: research task: no prompts renderer on session")
@@ -326,6 +335,12 @@ type researchTaskView struct {
 	PriorAnswers       []researchKV
 	PriorComments      []researchKV
 	ValidationFeedback []string
+	// SpawnInputs lists the structured key/value pairs the caller
+	// passed at spawn_mission time. Authoritative — the researcher
+	// MUST treat these keys as already resolved and skip any
+	// clarification it would otherwise ask for them. Phase
+	// 5.x-followup.
+	SpawnInputs []researchKV
 }
 
 // researchKV is a sortable (id, value) pair for the template's

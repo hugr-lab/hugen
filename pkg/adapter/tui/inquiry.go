@@ -31,6 +31,15 @@ type inquiryState struct {
 	// stitched onto: "approve" or "deny". Empty for clarifications.
 	replyVerb string
 
+	// Phase 5.x — §4.6 four-option approval modal. Populated by
+	// newInquiryState for Type=approval requests and consumed by
+	// the option-list renderer + key dispatch. The highlight
+	// defaults to the first row (approve-with-tools) so a
+	// confirm-by-Enter operator can complete a mission in one
+	// keypress when they trust the plan.
+	approvalChoices   []approvalChoice
+	approvalHighlight int
+
 	// Phase 5.x — B15. Tab-style batched-research state. The
 	// modal walks the operator through clarifications one at a
 	// time, with three panels per question (value / comment /
@@ -65,6 +74,67 @@ const (
 	batchedPanelComment = 1
 	batchedPanelReview  = 2
 )
+
+// approvalChoice is one row of the four-option approval modal
+// (§4.6.1). Carries the user-facing label + the keystroke
+// shortcut + a one-line explanation rendered as helper text.
+//
+// The four canonical choices are:
+//
+//   - kind=approveWithTools : auto-approve every requires_approval
+//     tool inquiry under this mission. One keypress for the whole
+//     run. Key `a`.
+//   - kind=approve          : approve the plan but each tool call
+//     still asks. Key `A` (Shift+a) or `y` (legacy alias).
+//   - kind=reject           : abort the mission. Key `n` or `d`
+//     (legacy alias).
+//   - kind=refine           : open the reply textarea so the user
+//     types feedback; the planner replans next iteration. Key `r`.
+type approvalChoice struct {
+	Kind    approvalChoiceKind
+	Key     string
+	Label   string
+	Explain string
+}
+
+type approvalChoiceKind int
+
+const (
+	approvalChoiceApproveWithTools approvalChoiceKind = iota
+	approvalChoiceApprove
+	approvalChoiceReject
+	approvalChoiceRefine
+)
+
+// defaultApprovalChoices is the canonical 4-row option list. Order
+// matters — the renderer walks the slice top-to-bottom and digit
+// shortcuts (`1`-`4`) map 1-indexed into this slice.
+var defaultApprovalChoices = []approvalChoice{
+	{
+		Kind:    approvalChoiceApproveWithTools,
+		Key:     "a",
+		Label:   "approve with tools",
+		Explain: "approve the plan AND auto-approve every requires_approval tool under this mission.",
+	},
+	{
+		Kind:    approvalChoiceApprove,
+		Key:     "A",
+		Label:   "approve",
+		Explain: "approve the plan; each tool call still asks (current default).",
+	},
+	{
+		Kind:    approvalChoiceReject,
+		Key:     "n",
+		Label:   "reject",
+		Explain: "abort the mission. Optional reason supported via reply mode (press `r` then type).",
+	},
+	{
+		Kind:    approvalChoiceRefine,
+		Key:     "r",
+		Label:   "refine",
+		Explain: "send feedback to the planner so it replans next iteration (textarea opens).",
+	},
+}
 
 // isBatched reports whether this state is rendering a research_batch
 // modal. Used to switch the modal renderer + key dispatch into the
@@ -265,6 +335,12 @@ func newInquiryState(req *protocol.InquiryRequest) *inquiryState {
 	switch req.Payload.Type {
 	case protocol.InquiryTypeClarification, protocol.InquiryTypeResearchBatch:
 		s.replyMode = true
+	case protocol.InquiryTypeApproval:
+		// Phase 5.x §4.6 — four-option modal. Default highlight on
+		// the first row (approve-with-tools) so a confirm-by-Enter
+		// operator can sign off a trusted plan with one keypress.
+		s.approvalChoices = append(s.approvalChoices, defaultApprovalChoices...)
+		s.approvalHighlight = 0
 	}
 	// Phase 5.x — B15. Initialise focus for the batched walk:
 	// comment-kind first question locks focus on the comment
@@ -344,10 +420,45 @@ func renderInquiryModal(state *inquiryState, width int) string {
 			sb.WriteString("\n")
 		}
 	}
+	// Phase 5.x §4.6 — render the four-option list for approval
+	// modals when no reason textarea is active. replyMode (set when
+	// the user picks `reject`/`refine`) falls through to the
+	// hint-only line so the textarea below has room to breathe.
+	if state.req.Type == protocol.InquiryTypeApproval && !state.replyMode && len(state.approvalChoices) > 0 {
+		sb.WriteString("\n")
+		sb.WriteString(renderApprovalChoices(state, contentW))
+	}
 	sb.WriteString("\n")
 	sb.WriteString(inquiryHintStyle.Render(actionHint(state)))
 
 	return inquiryBoxStyle.Width(width - 2).Render(sb.String())
+}
+
+// renderApprovalChoices draws the four-option list with the
+// highlighted row inverse-styled (lipgloss bright). Each row carries
+// "[<key>] <label>" + a one-line explanation below in faint style.
+// Keeps the modal vertical-budget tight (4 rows * 2 lines = 8) so
+// even narrow terminals show all options without scroll.
+func renderApprovalChoices(state *inquiryState, contentW int) string {
+	if contentW < 20 {
+		contentW = 20
+	}
+	var sb strings.Builder
+	for i, c := range state.approvalChoices {
+		header := fmt.Sprintf("[%s]  %s", c.Key, c.Label)
+		body := wrap("     "+c.Explain, contentW)
+		if i == state.approvalHighlight {
+			sb.WriteString(approvalChoiceActiveStyle.Render("▸ " + header))
+			sb.WriteString("\n")
+			sb.WriteString(approvalChoiceActiveExplainStyle.Render(body))
+		} else {
+			sb.WriteString(approvalChoiceIdleStyle.Render("  " + header))
+			sb.WriteString("\n")
+			sb.WriteString(inquiryFaintStyle.Render(body))
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 // renderBatchedInquiryModal renders the modal for research_batch
@@ -634,13 +745,16 @@ func actionHint(s *inquiryState) string {
 	switch s.req.Type {
 	case protocol.InquiryTypeApproval:
 		if s.replyMode {
-			verb := s.replyVerb
-			if verb == "" {
-				verb = "approve"
+			switch s.replyVerb {
+			case "refine":
+				return "[type feedback for the planner, Enter to submit | esc to cancel]"
+			case "deny":
+				return "[type reject reason, Enter to submit | esc to cancel]"
+			default:
+				return fmt.Sprintf("[type reason, Enter to /%s | esc to cancel]", s.replyVerb)
 			}
-			return fmt.Sprintf("[type reason, Enter to /%s | esc to cancel]", verb)
 		}
-		return "[y] approve  [n] deny  [r] reply with reason  [esc] dismiss"
+		return "[j/k or ↑/↓ to move | Enter commit | 1-4 jump | a/A/n/r direct | esc dismiss]"
 	case protocol.InquiryTypeClarification:
 		return "[type answer, Enter to submit | esc to dismiss]"
 	case protocol.InquiryTypeResearchBatch:
@@ -694,4 +808,15 @@ var (
 				Foreground(lipgloss.Color("11"))
 	inquiryFaintStyle = lipgloss.NewStyle().Faint(true)
 	inquiryHintStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
+
+	// approvalChoice styles — used only for the §4.6 four-option
+	// approval modal. Highlighted row carries a brighter foreground
+	// + bold marker; idle rows render normally with a faint
+	// explanation block.
+	approvalChoiceActiveStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("11")).
+					Bold(true)
+	approvalChoiceActiveExplainStyle = lipgloss.NewStyle().
+						Foreground(lipgloss.Color("14"))
+	approvalChoiceIdleStyle = lipgloss.NewStyle()
 )

@@ -598,19 +598,19 @@ const (
 
 // Phase-4 system_marker subjects (machine-readable, adapter-only).
 const (
-	SubjectMCPRecovered    = "mcp_recovered"
-	SubjectHardCeilingHit  = "hard_ceiling_hit"
-	SubjectNoProgress      = "no_progress"
+	SubjectMCPRecovered   = "mcp_recovered"
+	SubjectHardCeilingHit = "hard_ceiling_hit"
+	SubjectNoProgress     = "no_progress"
 )
 
 // Phase-4 session_terminated reason constants. Reason is free-form;
 // these are the well-known values phase-4 producers emit.
 const (
-	TerminationCompleted      = "completed"
-	TerminationHardCeiling    = "hard_ceiling"
-	TerminationCancelCascade  = "cancel_cascade"
-	TerminationRestartDied    = "restart_died"
-	TerminationUserEnd        = "user:/end"
+	TerminationCompleted     = "completed"
+	TerminationHardCeiling   = "hard_ceiling"
+	TerminationCancelCascade = "cancel_cascade"
+	TerminationRestartDied   = "restart_died"
+	TerminationUserEnd       = "user:/end"
 	// TerminationSubagentCancelPrefix is concatenated with the
 	// caller-provided rationale: "subagent_cancel: <rationale>".
 	TerminationSubagentCancelPrefix = "subagent_cancel: "
@@ -751,14 +751,24 @@ type Clarification struct {
 // 5.x — B15); Timeout for runtime-synthesised expiries. Phase 5.1
 // § 2.2.
 type InquiryResponsePayload struct {
-	RequestID       string                  `json:"request_id"`
-	CallerSessionID string                  `json:"caller_session_id"`
-	Approved        *bool                   `json:"approved,omitempty"`
-	Reason          string                  `json:"reason,omitempty"`
-	Response        string                  `json:"response,omitempty"`
-	Answers         map[string]AnswerEntry  `json:"answers,omitempty"`
-	RespondedAt     string                  `json:"responded_at,omitempty"`
-	Timeout         bool                    `json:"timeout,omitempty"`
+	RequestID       string                 `json:"request_id"`
+	CallerSessionID string                 `json:"caller_session_id"`
+	Approved        *bool                  `json:"approved,omitempty"`
+	Reason          string                 `json:"reason,omitempty"`
+	Response        string                 `json:"response,omitempty"`
+	Answers         map[string]AnswerEntry `json:"answers,omitempty"`
+	RespondedAt     string                 `json:"responded_at,omitempty"`
+	Timeout         bool                   `json:"timeout,omitempty"`
+
+	// AutoApproveTools — true when the user picked
+	// "approve with tools" on an approval modal. Mission ext
+	// stamps the flag on MissionState; the runtime consults it
+	// before opening any tool-approval inquiry on this mission's
+	// descendants and skips when set. Ignored unless
+	// Approved=true on Type=approval. Each new approval modal
+	// asks afresh — flag does NOT auto-inherit across replans.
+	// Phase 5.x — §4.6.
+	AutoApproveTools bool `json:"auto_approve_tools,omitempty"`
 }
 
 // AnswerEntry pairs a structured answer value with an optional
@@ -775,9 +785,9 @@ type AnswerEntry struct {
 // 5.1 introduced approval/clarification; Phase 5.x — B15 added
 // research_batch for the runtime-driven research-stage modal.
 const (
-	InquiryTypeApproval       = "approval"
-	InquiryTypeClarification  = "clarification"
-	InquiryTypeResearchBatch  = "research_batch"
+	InquiryTypeApproval      = "approval"
+	InquiryTypeClarification = "clarification"
+	InquiryTypeResearchBatch = "research_batch"
 )
 
 // Clarification kinds — values for Clarification.Kind. Phase

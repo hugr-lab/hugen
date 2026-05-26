@@ -1,7 +1,10 @@
 Approve this plan?
 {{if .MissionGoal}}
 Mission goal: {{.MissionGoal}}
-{{end}}{{if .MissionAcceptanceCriteria}}
+{{end}}{{if .AcceptanceCriteriaDiff}}
+Acceptance criteria (mission ends when ALL non-dropped are satisfied):
+{{range .AcceptanceCriteriaDiff}}{{if eq .Change "carry"}}{{if eq (printf "%s" .Status) "satisfied"}}  ✓ {{else}}  • {{end}}{{end}}{{if eq .Change "edited"}}  ▸ {{end}}{{if eq .Change "new"}}  + {{end}}{{if eq .Change "dropped"}}  ✗ {{end}}{{if .ID}}`{{.ID}}` {{end}}{{.Statement}}{{if eq .Change "edited"}}  [EDITED]{{end}}{{if eq .Change "new"}}  [NEW]{{end}}{{if eq .Change "dropped"}}  [DROPPED{{if .DropReason}}: {{.DropReason}}{{end}}]{{end}}
+{{end}}{{else if .MissionAcceptanceCriteria}}
 Mission acceptance criteria (the mission ends when ALL are satisfied):
 {{range .MissionAcceptanceCriteria}}- {{.}}
 {{end}}{{end}}
