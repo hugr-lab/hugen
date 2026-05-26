@@ -145,7 +145,7 @@ func TestEnsure_v002_AdditiveColumns(t *testing.T) {
 	require.NoError(t, conn.QueryRow(
 		`SELECT version FROM version WHERE name = 'schema'`,
 	).Scan(&ver))
-	assert.Equal(t, "0.0.6", ver)
+	assert.Equal(t, "0.0.7", ver)
 
 	// spec 008 / migration 0.0.3 — artifacts + artifact_grants tables
 	// land additively. Both must exist on a fresh DuckDB provision.
@@ -220,6 +220,28 @@ func TestEnsure_v002_AdditiveColumns(t *testing.T) {
          WHERE table_name = 'session_notes' AND column_name = 'embedding'`,
 	).Scan(&notepadEmbed))
 	assert.Equal(t, 1, notepadEmbed, "session_notes.embedding should exist when VectorSize > 0")
+
+	// Phase 6 / migration 0.0.7 — tasks + task_log tables land
+	// additively. Both must exist on a fresh DuckDB provision.
+	for _, table := range []string{"tasks", "task_log"} {
+		t.Run("phase6/"+table, func(t *testing.T) {
+			var n int
+			err := conn.QueryRow(
+				`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`,
+				table,
+			).Scan(&n)
+			require.NoError(t, err)
+			assert.Equalf(t, 1, n, "expected table %s to exist", table)
+		})
+	}
+	// Project rule: indexes only on Postgres. DuckDB must have zero
+	// secondary indexes on tasks / task_log.
+	var phase6IdxCount int
+	require.NoError(t, conn.QueryRow(
+		`SELECT count(*) FROM duckdb_indexes
+         WHERE table_name IN ('tasks','task_log')`,
+	).Scan(&phase6IdxCount))
+	assert.Equal(t, 0, phase6IdxCount, "DuckDB must have zero indexes on tasks / task_log")
 }
 
 // TestEnsure_v002_NoVectorColumnWhenDisabled — when VectorSize == 0

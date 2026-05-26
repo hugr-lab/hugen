@@ -425,3 +425,77 @@ CREATE INDEX IF NOT EXISTS idx_approvals_coord
 CREATE INDEX IF NOT EXISTS idx_policies_agent_scope
     ON tool_policies (agent_id, scope);
 {{ end }}
+
+-- ============================================================
+-- Tasks + task_log (Phase 6 / migration 0.0.6) — user-defined
+-- schedule entries + append-only fire event log.
+--
+-- `tasks` UPDATEs are bounded by operator actions (pause /
+-- resume / cancel / spec edit). `task_log` is pure INSERT — no
+-- UPDATE column, no finalisation patch. Schedule anchor lives
+-- in the latest `planned` row (denormalised fire_seq + planned_at
+-- on every entry). See phase-6-spec.md §2.7 for the
+-- update-minimisation contract.
+-- ============================================================
+
+-- Phase 6 / 0.0.7 deliberately stores task timestamps in TIMESTAMPTZ
+-- on BOTH backends (DuckDB included). Existing tables use a naive
+-- TIMESTAMP on DuckDB for legacy reasons; tasks need correct TZ
+-- handling because Runner reads `planned_at` and compares it against
+-- the wall clock for the due check — a silent UTC -> local drift
+-- inside DuckDB would push the schedule off by the local offset.
+-- DuckDB's TIMESTAMPTZ is fully wire-compatible with Postgres'
+-- timestamptz; same Hugr scan path on both.
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id                VARCHAR PRIMARY KEY,
+    agent_id          VARCHAR NOT NULL,
+    kind              VARCHAR NOT NULL,
+    status            VARCHAR NOT NULL DEFAULT 'active',
+    schedule_kind     VARCHAR NOT NULL,
+    owner_session_id  VARCHAR NOT NULL,
+    skill_ref         VARCHAR,
+    spec              {{ if isPostgres }}JSONB{{ else }}JSON{{ end }} NOT NULL,
+    pause_reason      VARCHAR,
+    created_at        TIMESTAMPTZ DEFAULT {{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }} NOT NULL,
+    updated_at        TIMESTAMPTZ DEFAULT {{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }} NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS task_log (
+    id          VARCHAR   {{ if not .IsTimescale }}PRIMARY KEY{{ end }},
+    task_id     VARCHAR   NOT NULL,
+    agent_id    VARCHAR   NOT NULL,
+    fire_seq    INTEGER   NOT NULL,
+    event_type  VARCHAR   NOT NULL,
+    planned_at  TIMESTAMPTZ NOT NULL,
+    session_id  VARCHAR,
+    outcome     {{ if isPostgres }}JSONB{{ else }}JSON{{ end }},
+    content     VARCHAR,
+    created_at  TIMESTAMPTZ DEFAULT {{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }} NOT NULL
+    {{ if .IsTimescale }}, PRIMARY KEY (created_at, id){{ end }}
+);
+
+{{ if .IsTimescale }}
+SELECT create_hypertable('task_log', 'created_at', if_not_exists => TRUE);
+{{ end }}
+
+{{ if isPostgres }}
+-- Tasks: lifecycle + ownership lookups. Partial index on active
+-- rows keeps the Runner's ListDue scan cheap when most tasks are
+-- paused / cancelled.
+CREATE INDEX IF NOT EXISTS idx_tasks_active
+    ON tasks (agent_id, status) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_tasks_owner
+    ON tasks (agent_id, owner_session_id);
+
+-- Task log: every read is keyed by (task_id, event_type, fire_seq
+-- DESC). Single composite index covers `next planned` +
+-- `last successful` + `latest of any event_type per fire`.
+CREATE INDEX IF NOT EXISTS idx_task_log_latest
+    ON task_log (task_id, event_type, fire_seq DESC, created_at DESC);
+
+-- In-flight scan (reaper): started rows older than cutoff.
+CREATE INDEX IF NOT EXISTS idx_task_log_started
+    ON task_log (agent_id, created_at)
+    WHERE event_type = 'started';
+{{ end }}

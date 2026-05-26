@@ -983,6 +983,112 @@ type tool_policies @table(name: "tool_policies") @module(name: "agent") {
 }
 
 # ============================================================
+# Tasks (Phase 6) — user-defined schedule entries.
+#
+# Lifecycle UPDATEs only (pause / resume / cancel / spec edit) —
+# 0-2 writes per task lifetime, never per fire. The schedule
+# anchor (next planned fire) lives in `task_log` as a `planned`
+# row inserted at OpenTask (fire_seq=1) and at the end of every
+# fire (fire_seq=N+1). See phase-6-spec.md §2 for the full
+# update-minimisation contract.
+# ============================================================
+
+"""A scheduled task owned by a session. Created via the `task:create` tool from the TaskManager extension. Each fire emits append-only rows into `task_log`; the next planned fire is reachable via `task.log(filter: {event_type: {eq: "planned"}}, order_by: [{fire_seq: DESC}], limit: 1)`."""
+type tasks @table(name: "tasks") @module(name: "agent") {
+  """Synthetic sortable id: tsk_{agent}_{ts}_{rnd}"""
+  id:               String! @pk
+  """Agent that owns this task"""
+  agent_id:         String! @field_references(
+    references_name: "agents"
+    field: "id"
+    query: "agent"
+    description: "Agent that owns this task"
+    references_query: "tasks"
+    references_description: "Tasks owned by this agent"
+  )
+  """Fire delivery kind: 'wake' (UserMessage into owner session) | 'spawn' (new cron session)"""
+  kind:             String!
+  """Lifecycle: 'active' | 'paused' | 'cancelled' | 'completed'. The only column on this row that mutates after insert (plus paired pause_reason and rare spec edits) — never UPDATEd per fire."""
+  status:           String! @default(value: "active")
+  """Schedule shape: 'once_in' | 'once_at' | 'cron' | 'interval'"""
+  schedule_kind:    String!
+  """Session that created (and OWNS) this task. Notifications route here. Task is visible only to this session's TaskManager extension."""
+  owner_session_id: String! @field_references(
+    references_name: "sessions"
+    field: "id"
+    query: "owner_session"
+    description: "Session that owns this task"
+    references_query: "owned_tasks"
+    references_description: "Tasks owned by this session"
+  )
+  """Skill name to load on each fire (spawn kind). NULL for wake kind."""
+  skill_ref:        String
+  """Typed configuration body — projected from the JSON column."""
+  spec:             JSON!
+  """When paused: 'user' | 'skill_changed' | 'schema_changed' | 'render_failed' | 'owner_terminated'. NULL while active. Written atomically with status='paused'."""
+  pause_reason:     String
+  """Created at"""
+  created_at:       Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+  """Last lifecycle change (pause / resume / cancel / spec edit). Quiet across fires — only moves on operator action."""
+  updated_at:       Timestamp @default(update_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}")
+}
+
+# ============================================================
+# Task log (Phase 6) — append-only event log per fire.
+#
+# Every scheduler fire emits >= 2 rows (planned then terminal
+# completed/failed), plus optional started/log rows in between.
+# NO UPDATEs ever. `fire_seq` + `planned_at` are denormalised
+# onto every row so latest-by-fire queries don't need joins.
+# Symmetric with `session_events` / `memory_log`. Hypertable on
+# Timescale.
+# ============================================================
+
+"""Append-only event log: every scheduler fire emits >= 2 rows (planned -> completed|failed), plus optional started/log rows in between. NO UPDATEs ever. `fire_seq` + `planned_at` are denormalised onto every row so latest-by-fire queries skip joins. Symmetric with `session_events` / `memory_log`."""
+type task_log @table(name: "task_log") @module(name: "agent")
+  {{ if .IsTimescale }}@hypertable{{ end }} {
+  """Synthetic sortable id: tlog_{task}_{ts}_{rnd}"""
+  id:           String! {{ if not .IsTimescale }}@pk{{ end }}
+  """Task this row belongs to"""
+  task_id:      String! @field_references(
+    references_name: "tasks"
+    field: "id"
+    query: "task"
+    description: "Task this log row belongs to"
+    references_query: "log"
+    references_description: "Append-only event log for this task"
+  )
+  """Agent owning the task"""
+  agent_id:     String! @field_references(
+    references_name: "agents"
+    field: "id"
+    query: "agent"
+    description: "Agent that owns the task"
+  )
+  """Per-task 1-indexed fire counter; identifies the fire this row belongs to. Denormalised on EVERY row of the fire so latest-by-fire queries skip joins."""
+  fire_seq:     Int!
+  """Event kind: 'planned' (Runner scheduled this fire) | 'started' (fire dispatch began) | 'log' (mid-fire progress note; free-form content) | 'completed' | 'failed' | 'skipped' | 'cancelled'."""
+  event_type:   String!
+  """Planned fire instant. On 'planned' rows it's the schedule output; on follow-up rows of the same fire it matches the parent 'planned' row's value."""
+  planned_at:   Timestamp!
+  """Spawned cron session id (for spawn kind). Set on 'started' and later rows. NULL for wake kind and for 'planned' rows."""
+  session_id:   String @field_references(
+    references_name: "sessions"
+    field: "id"
+    query: "session"
+    description: "Cron session that ran this fire"
+    references_query: "task_log"
+    references_description: "Task log rows for this session"
+  )
+  """Outcome blob on terminal events ('completed' / 'failed' / 'skipped' / 'cancelled'). NULL on 'planned' / 'started' / 'log'."""
+  outcome:      JSON
+  """Free-form text body for event_type='log' (mid-fire progress note). NULL otherwise."""
+  content:      String
+  """When this row was written. Timescale time key. Combined with fire_seq DESC for latest-event queries."""
+  created_at:   Timestamp {{ if .IsTimescale }}@pk @timescale_key{{ end }} @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+}
+
+# ============================================================
 # Data source config:
 #   Name:     "hub.db"
 #   AsModule: true

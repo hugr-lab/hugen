@@ -57,6 +57,15 @@ type OpenRequest struct {
 	// collision-suffix resolution. Persisted into row.Metadata so
 	// restore can rebuild s.name. Phase 5.2 α (subagent naming).
 	Name string
+
+	// Cron carries the scheduler fire envelope for sessions opened
+	// by TaskManager (Phase 6 §5.2). Non-nil only when the session
+	// is being opened as a scheduler-driven cron fire; nil for
+	// regular root sessions and subagent spawns. When set, the
+	// manager stamps `session_type = protocol.SessionKindCron` and
+	// surfaces the envelope to the mission executor for template
+	// rendering / CronApprovalPolicy enforcement.
+	Cron *protocol.FireContext
 }
 
 // SpawnSpec is the input to Session.Spawn. Carries the model-supplied

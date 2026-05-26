@@ -7,6 +7,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/identity"
+	schedstore "github.com/hugr-lab/hugen/pkg/scheduler/store"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 	"github.com/hugr-lab/hugen/pkg/store/local"
@@ -122,5 +123,21 @@ func phaseStorage(ctx context.Context, core *Core) error {
 		return fmt.Errorf("no querier available (need local engine or remote hub)")
 	}
 	core.Store = store
+
+	// TaskStore shares the same Querier — it issues GraphQL
+	// mutations / queries against hub.db.agent.tasks +
+	// hub.db.agent.task_log just like the session store does for
+	// sessions + session_events. ChooseStore picked the live
+	// querier (local engine preferred over remote hub); reuse it
+	// here so the two stores stay coherent.
+	var taskQuerier types.Querier
+	if core.LocalQuerier != nil {
+		taskQuerier = core.LocalQuerier
+	} else if core.RemoteQuerier != nil {
+		taskQuerier = core.RemoteQuerier
+	}
+	if taskQuerier != nil {
+		core.TaskStore = schedstore.NewLocalTaskStore(taskQuerier)
+	}
 	return nil
 }

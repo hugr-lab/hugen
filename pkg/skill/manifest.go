@@ -201,6 +201,16 @@ type HugenMetadata struct {
 	// dispatch targets.
 	Mission MissionBlock `json:"mission,omitempty" yaml:"mission,omitempty"`
 
+	// Task, when Eligible, declares the skill as task-eligible:
+	// `task:create` may bind a recurring schedule to it (Phase 6
+	// §0.5.4). Surface is purely declarative — the TaskManager
+	// extension reads InputsSchema for JSON-Schema validation at
+	// create time and AllowedToolsDefault as the default tool
+	// allow-list operator can override in the approval modal
+	// (6.1c). Empty / Eligible=false → skill is invisible to
+	// `task:create`.
+	Task TaskBlock `json:"task,omitempty" yaml:"task,omitempty"`
+
 	// MaxTurns / MaxTurnsHard / StuckDetection are conceptually
 	// per-session-tier, not per-skill — they tune the turn-loop and
 	// stuck-detect heuristics, which depend on the session's role
@@ -612,6 +622,64 @@ type MissionBlock struct {
 	// Empty / absent → no manifest seed; the planner is responsible
 	// for emitting ≥1 ac_add on iter 1. Phase 5.x — B11 §3.2.2.
 	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty" yaml:"acceptance_criteria,omitempty"`
+}
+
+// TaskBlock is the typed projection of `metadata.hugen.task`. When
+// `Eligible: true`, the skill is selectable by the `task:create`
+// tool — operators (or the future `_task_builder` mission) bind a
+// recurring schedule to it and TaskManager fires the skill per
+// scheduler tick. Phase 6 §0.5.4.
+//
+// Semantics:
+//
+//   - `Kind` is the fire shape. MVP supports `worker` only;
+//     `mission` is reserved (guarded with a "not yet supported"
+//     error by `task:create` until mission-shape cron lands).
+//   - `InputsSchema` validates the structured `inputs` blob the
+//     operator passes at task-create time (separate gate from
+//     `mission.inputs_schema`, which only fires at
+//     `session:spawn_mission`).
+//   - `AllowedToolsDefault` is the recommended per-task tool
+//     allow-list the approval modal pre-fills. Operator may
+//     edit / extend / shrink before approving; the final list
+//     freezes into `tasks.spec.allowed_tools` and the future
+//     CronApprovalPolicy enforces it at every dispatch.
+//   - `BodyIsTemplate`, when true, opts the skill body into per-fire
+//     Go-template rendering with [protocol.FireContext]. Default
+//     false — SKILL.md is static.
+type TaskBlock struct {
+	// Eligible is the master flag. `task:create` lists only skills
+	// where this is true. Absent / false → skill is invisible to
+	// the task surface.
+	Eligible bool `json:"eligible,omitempty" yaml:"eligible,omitempty"`
+
+	// Kind is `worker` (default) or `mission` (guarded as "not yet
+	// supported" in 6.1b MVP). Empty value is treated as `worker`.
+	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
+
+	// GoalSummary is the default imperative one-line brief used
+	// when the caller omits `goal` at task-create time. Surfaces
+	// in liveview + notification subjects. Free-form prose.
+	GoalSummary string `json:"goal_summary,omitempty" yaml:"goal_summary,omitempty"`
+
+	// InputsSchema is a JSON Schema (draft 2020-12) validated
+	// against the caller's `inputs` blob at task-create time.
+	// Empty / nil → skill accepts any inputs (no schema gate).
+	// Distinct from `mission.inputs_schema` — that one fires at
+	// `session:spawn_mission`, this one at `task:create`.
+	InputsSchema map[string]any `json:"inputs_schema,omitempty" yaml:"inputs_schema,omitempty"`
+
+	// AllowedToolsDefault is the recommended tool allow-list the
+	// approval modal pre-fills. Empty list = no auto-approved
+	// tools; operator must approve every dispatch (or extend the
+	// list explicitly).
+	AllowedToolsDefault []string `json:"allowed_tools_default,omitempty" yaml:"allowed_tools_default,omitempty"`
+
+	// BodyIsTemplate opts the SKILL.md body into per-fire Go-template
+	// rendering with [protocol.FireContext]. Default false; relevant
+	// only when the skill body contains `{{ ... }}` actions that
+	// depend on the per-fire envelope.
+	BodyIsTemplate bool `json:"body_is_template,omitempty" yaml:"body_is_template,omitempty"`
 }
 
 // MissionCapabilities lists the mission-tier opt-in toggles.
