@@ -75,6 +75,71 @@ func TestEnsure_MatchingConfigOK(t *testing.T) {
 	require.NoError(t, migrate.Ensure(cfg))
 }
 
+// TestEnsure_v007_UpgradePath provisions a DB pinned at 0.0.6
+// (the prior schema version) then re-runs Ensure to upgrade it to
+// 0.0.7. Verifies that the migration script lands the new tasks +
+// task_log tables on an existing deployment — not just on a fresh
+// provision. Critical for production where users' DBs were created
+// before the Phase 6 schema landed.
+func TestEnsure_v007_UpgradePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	baseCfg := migrate.Config{
+		Path: path, VectorSize: 384, EmbedderModel: "gemma-embedding",
+		Seed: &migrate.SeedData{
+			AgentType: migrate.SeedAgentType{ID: "hugr-data", Name: "X", Config: map[string]any{}},
+			Agent:     migrate.SeedAgent{ID: "agt_ag01", ShortID: "ag01", Name: "x"},
+		},
+	}
+
+	// Step 1: provision at 0.0.6.
+	pin := baseCfg
+	pin.TargetVersion = "0.0.6"
+	require.NoError(t, migrate.Ensure(pin))
+
+	conn, err := sql.Open("duckdb", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// schema.tmpl.sql always ships the latest table set, so a
+	// provision pinned to 0.0.6 still creates tasks + task_log
+	// here — only the version row tracks "0.0.6". To exercise the
+	// real upgrade path we DROP the 0.0.7 tables so the migration
+	// script has to recreate them on the bump below. CREATE TABLE
+	// IF NOT EXISTS in the migration script keeps it idempotent
+	// for users on already-upgraded DBs.
+	for _, table := range []string{"task_log", "tasks"} {
+		_, err := conn.Exec(`DROP TABLE IF EXISTS ` + table)
+		require.NoError(t, err)
+	}
+	for _, table := range []string{"tasks", "task_log"} {
+		var n int
+		require.NoError(t, conn.QueryRow(
+			`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`, table,
+		).Scan(&n))
+		require.Equalf(t, 0, n, "drop should remove %s", table)
+	}
+
+	// Step 2: upgrade to 0.0.7 (default target).
+	bump := baseCfg
+	bump.Seed = nil // seed already present
+	require.NoError(t, migrate.Ensure(bump))
+
+	// Verify version row + tables.
+	var ver string
+	require.NoError(t, conn.QueryRow(
+		`SELECT version FROM version WHERE name = 'schema'`,
+	).Scan(&ver))
+	assert.Equal(t, "0.0.7", ver)
+
+	for _, table := range []string{"tasks", "task_log"} {
+		var n int
+		require.NoError(t, conn.QueryRow(
+			`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`, table,
+		).Scan(&n))
+		assert.Equalf(t, 1, n, "table %s must exist after 0.0.7 upgrade", table)
+	}
+}
+
 // TestEnsure_v002_AdditiveColumns verifies the spec-006 (schema 0.0.2)
 // additive columns + indices land correctly on a fresh provision.
 func TestEnsure_v002_AdditiveColumns(t *testing.T) {

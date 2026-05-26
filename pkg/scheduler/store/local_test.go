@@ -379,6 +379,7 @@ func TestAppendLog_RejectsInvalidEntry(t *testing.T) {
 		{"zero FireSeq", store.TaskLogEntry{TaskID: "t", AgentID: "a", EventType: store.LogEventPlanned, PlannedAt: time.Now()}},
 		{"missing EventType", store.TaskLogEntry{TaskID: "t", AgentID: "a", FireSeq: 1, PlannedAt: time.Now()}},
 		{"zero PlannedAt", store.TaskLogEntry{TaskID: "t", AgentID: "a", FireSeq: 1, EventType: store.LogEventPlanned}},
+		{"unknown EventType", store.TaskLogEntry{TaskID: "t", AgentID: "a", FireSeq: 1, EventType: "garbage", PlannedAt: time.Now()}},
 	}
 	for _, c := range cases {
 		c := c

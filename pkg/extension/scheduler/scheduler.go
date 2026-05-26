@@ -238,7 +238,7 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 		if !sk.Manifest.Hugen.Task.Eligible {
 			return toolErr("not_task_eligible", fmt.Sprintf("skill %q is not task-eligible (metadata.hugen.task.eligible)", in.SkillRef))
 		}
-		if sk.Manifest.Hugen.Task.Kind == "mission" {
+		if sk.Manifest.Hugen.Task.Kind == skill.TaskKindMission {
 			return toolErr("not_yet_implemented", "mission-shape tasks are reserved — MVP supports kind=worker only")
 		}
 	}

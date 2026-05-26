@@ -411,6 +411,9 @@ func (s *LocalTaskStore) AppendLog(ctx context.Context, entry TaskLogEntry) erro
 	if entry.EventType == "" {
 		return fmt.Errorf("%w: missing EventType", ErrInvalidLog)
 	}
+	if !validLogEventType(entry.EventType) {
+		return fmt.Errorf("%w: unknown EventType %q — must be one of planned|started|log|completed|failed|skipped|cancelled", ErrInvalidLog, entry.EventType)
+	}
 	if entry.FireSeq <= 0 {
 		return fmt.Errorf("%w: FireSeq must be > 0", ErrInvalidLog)
 	}
@@ -649,6 +652,20 @@ func decodeLogRows(in []taskLogRowDB) ([]TaskLogEntry, error) {
 		out = append(out, entry)
 	}
 	return out, nil
+}
+
+// validLogEventType gates the `event_type` column to the seven
+// values latest-by-event_type queries expect. A garbage value in
+// the column would silently break ListDue / .PrevFire / reaper
+// logic (they filter on the enum), so AppendLog rejects unknown
+// values upfront rather than letting bad rows land.
+func validLogEventType(t string) bool {
+	switch t {
+	case LogEventPlanned, LogEventStarted, LogEventLog,
+		LogEventCompleted, LogEventFailed, LogEventSkipped, LogEventCancelled:
+		return true
+	}
+	return false
 }
 
 // newTaskLogID generates the synthetic sortable ID for a log entry

@@ -624,6 +624,22 @@ type MissionBlock struct {
 	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty" yaml:"acceptance_criteria,omitempty"`
 }
 
+// Task kind constants — used both by manifest authors (yaml value)
+// and by [pkg/extension/scheduler] / Phase 6.1c CronApprovalPolicy
+// when branching on the declared shape. Keeping them here keeps
+// the spelling authoritative in one place.
+const (
+	// TaskKindWorker is the MVP shape — a single worker session
+	// per fire executing the skill's deterministic body. Default
+	// when [TaskBlock.Kind] is empty.
+	TaskKindWorker = "worker"
+
+	// TaskKindMission is reserved for adaptive plan-driven tasks
+	// (the skill is itself a mission). `task:create` guards this
+	// kind as "not yet supported" in 6.1b MVP.
+	TaskKindMission = "mission"
+)
+
 // TaskBlock is the typed projection of `metadata.hugen.task`. When
 // `Eligible: true`, the skill is selectable by the `task:create`
 // tool — operators (or the future `_task_builder` mission) bind a
