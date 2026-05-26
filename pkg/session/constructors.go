@@ -94,11 +94,11 @@ func NewRestore(ctx context.Context, id string, deps *Deps) (*Session, error) {
 func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenRequest) (*Session, error) {
 	id := newSessionID()
 	depth := 0
-	sessionType := "root"
+	sessionType := protocol.SessionKindRoot
 	var parentCtx context.Context
 	if parent != nil {
 		depth = parent.depth + 1
-		sessionType = "subagent"
+		sessionType = protocol.SessionKindSubagent
 		parentCtx = parent.ctx
 	} else {
 		parentCtx = deps.RootCtx

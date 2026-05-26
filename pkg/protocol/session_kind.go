@@ -3,41 +3,37 @@ package protocol
 import "time"
 
 // SessionKind classifies a session by its origin / lifecycle shape.
-// Stored on the hub.db.agent.sessions row's `session_type` column —
-// Phase 6 reuses the existing discriminator rather than introducing
-// a parallel `kind` column. Values:
+// Stored on the hub.db.agent.sessions row's `session_type` column.
+// Values:
 //
 //   - [SessionKindRoot]     — user-initiated conversation. Default.
 //   - [SessionKindSubagent] — agent-spawned specialist with its own
-//     isolated context (session_type for the existing subagent shape).
-//   - [SessionKindCron]     — scheduler-spawned fire session
-//     (Phase 6 §1.1 Type B2 / B3). Filtered out of root-session
-//     adapter listings; operator sees only the resulting
-//     `scheduler:notification` ExtensionFrame in the owner session.
+//     isolated context. Cron fire sessions (Phase 6.1c) are also
+//     subagents — they spawn under the task's owner root and emit
+//     a SubagentResult into the parent on teardown.
 //   - [SessionKindFork]     — reserved for future user-initiated forks
 //     (shared parent history). Pre-existing reservation; unused.
 const (
 	SessionKindRoot     = "root"
 	SessionKindSubagent = "subagent"
-	SessionKindCron     = "cron"
 	SessionKindFork     = "fork"
 )
 
-// FireContext is the Cron-spawn parameter envelope. Set on the
-// session.OpenRequest.Cron field by TaskManager when opening a
-// scheduler-driven session (Phase 6 §5.2). Nil for all other kinds.
+// FireContext is the per-cron-fire envelope the scheduler hands to
+// the spawned subagent via [SchedulerFireStateKey]. The envelope
+// carries the task identity, the fire counter, the planned instant,
+// the user-declared goal + structured inputs, the prior-fire's
+// outcome (for `.PrevFire` template references), and the per-task
+// tool allow-list that [CronApprovalPolicy] enforces during the
+// fire.
 //
-// Carries the per-fire data the spawned mission needs: task identity,
-// fire sequence, planned instant, the user-declared goal + structured
-// inputs, the prior-fire's outcome blob (`.PrevFire` source for
-// template rendering — §1.2.4), and the per-task tool allow-list that
-// CronApprovalPolicy enforces in 6.1c (§0.5.6). Pre-approval marker
-// rides MissionState in 6.2; the field is here from day one so the
-// envelope shape stays stable.
+// The scheduler extension is the sole producer; consumers are the
+// cron-system prompt advertiser, the CronApprovalPolicy, and any
+// future template-rendering surface that wants per-fire metadata.
 type FireContext struct {
 	// TaskID is the `tasks.id` of the owning user task. Stamped into
-	// task_log + session metadata so the spawned cron session can be
-	// traced back to its source row.
+	// task_log + child session metadata so the spawned cron subagent
+	// can be traced back to its source row.
 	TaskID string
 
 	// FireSeq is the per-task 1-indexed fire counter. Matches the
@@ -50,26 +46,38 @@ type FireContext struct {
 	PlannedAt time.Time
 
 	// Goal is the imperative one-line brief from
-	// `tasks.spec.goal`. Surfaces in liveview, notification
-	// subjects. Empty for `wake` kind (which uses `WakeMessage`).
+	// `tasks.spec.goal`. Empty for `wake` kind (which uses
+	// `WakeMessage` instead).
 	Goal string
 
 	// Inputs is the structured per-skill parameter blob from
-	// `tasks.spec.inputs`, validated against the skill's
-	// `task.inputs_schema` at task-create time. Free-form map.
+	// `tasks.spec.inputs`. Free-form map; the scheduler propagates
+	// it verbatim onto [SpawnSpec.Inputs] so the spawned worker's
+	// skill template can interpolate via the standard
+	// `[Inputs from caller]` channel.
 	Inputs map[string]any
 
 	// PrevFire is the most recent successful fire's outcome, or nil
 	// on the first fire. Used as `.PrevFire` in cron-spawn template
-	// rendering (§1.2.4) — populated by TaskManager from
-	// `TaskStore.LatestSuccessfulFire` before Open.
+	// rendering — populated by TaskManager from
+	// `TaskStore.LatestSuccessfulFire` before Spawn.
 	PrevFire *PrevFireOutcome
 
 	// AllowedTools is the per-task tool allow-list pre-approved at
 	// task-create time. Empty list means "no tool calls allowed in
-	// this fire". Drives CronApprovalPolicy in 6.1c.
+	// this fire". Drives CronApprovalPolicy.
 	AllowedTools []string
 }
+
+// SchedulerFireStateKey is the [SessionState.SetValue] key the
+// scheduler stamps with a `*FireContext` value on cron-spawned
+// subagents (via [SubagentSpawnApplier]). Extensions that need to
+// detect "this is a cron fire" (CronApprovalPolicy, the cron-prompt
+// advertiser) read it from session state without widening the
+// SessionState interface. The constant lives alongside [FireContext]
+// so producers (pkg/extension/scheduler) and consumers share one
+// canonical key.
+const SchedulerFireStateKey = "scheduler.fire"
 
 // PrevFireOutcome is the subset of `task_log{event_type='completed'}.outcome`
 // that template rendering may reference via `.PrevFire`. Shape kept
@@ -86,7 +94,7 @@ type PrevFireOutcome struct {
 	// Body is the prior fire's full notification body. May be large.
 	Body string
 
-	// SessionID is the prior cron session id (empty for wake fires).
+	// SessionID is the prior cron subagent id (empty for wake fires).
 	SessionID string
 
 	// State carries the prior fire's cumulative `task:set_state`
