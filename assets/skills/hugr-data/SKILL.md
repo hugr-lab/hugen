@@ -133,9 +133,9 @@ references.
 | `hugr-main:schema-type_info` | Get metadata for a type |
 | `hugr-main:schema-enum_values` | Get enum values |
 | `hugr-main:data-validate_graphql_query` | Validate a query before executing |
-| `hugr-main:data-inline_graphql_result` | Execute a query with optional jq transform — inline reply |
+| `hugr-main:data-inline_graphql_result` | Execute a query with optional `jq_transform` — inline reply. **JQ filter operates on the full `{data, errors, extensions}` envelope** — start every path in jq with `.data`. |
 | `hugr-query:query` | Execute a query, persist Parquet/JSON to disk, return path + preview |
-| `hugr-query:query_jq` | Execute a query + JQ transform, persist single JSON value, return path + preview |
+| `hugr-query:query_jq` | Execute a query + JQ transform, persist single JSON value, return path + preview. **Same envelope rule — `.data`.** |
 
 ## Per-turn query workflow — read your tier first
 
@@ -219,10 +219,21 @@ first.
    References (read what you need BEFORE composing): `skill:ref("hugr-data", "query")` for select shape, `"query-patterns"` for relations / nested args / `_join`, `"filter-guide"` for filter grammar, `"aggregations"` for `_aggregation` / `_bucket_aggregation`. **Anti-pattern**: separate flat queries per entity + Python join.
 7. **Validate** → `hugr-main:data-validate_graphql_query`
 8. **Execute** —
-   - Small inline reply? → `hugr-main:data-inline_graphql_result` (use jq to reshape; increase `max_result_size` up to 5000 if truncated)
+   - Small inline reply? → `hugr-main:data-inline_graphql_result` (use `jq_transform` to reshape; increase `max_result_size` up to 5000 if truncated)
    - Big result, file output? → `hugr-query:query` (engine response decides Parquet vs JSON per leaf)
-   - JQ post-process to one JSON value? → `hugr-query:query_jq` — JQ input is the full `{data, errors}` envelope; results live under `.data.<field>`
+   - JQ post-process to one JSON value? → `hugr-query:query_jq`
    - If the inline result is `is_truncated: true` AND preview doesn't cover what you need — read `tips` ref for the file-output escape hatch instead of re-bumping `max_result_size` blindly.
+
+   **JQ envelope rule** (both `data-inline_graphql_result.jq_transform` and `hugr-query:query_jq`). JQ input is the full `{data, errors, extensions}` envelope — every path MUST start with `.data`. Aliases live under the same root.
+
+   ```jq
+   # WRONG — .<root> is null → empty output
+   .<root> | { foo: .<field> }
+   # RIGHT
+   .data.<root> | { foo: .<field> }
+   ```
+
+   If your jq output is `null` / `{}` / has unexpected `errors`, you likely missed the `.data.` prefix.
 9. **Present** — tight structured finding. Write it to the
    whiteboard (mission reads between waves) and return your
    final assistant message with verbatim numbers from the
