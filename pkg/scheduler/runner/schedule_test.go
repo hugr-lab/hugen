@@ -40,8 +40,11 @@ func TestOnceFiresThenZero(t *testing.T) {
 	if got := s.Next(target.Add(-time.Second)); !got.Equal(target) {
 		t.Fatalf("Once.Next before target: got %v want %v", got, target)
 	}
-	if got := s.Next(target); !got.IsZero() {
-		t.Fatalf("Once.Next at target should be zero, got %v", got)
+	// Boundary: Once(at).Next(at) MUST return at — otherwise
+	// Register(Once(time.Now())) would race the clock and silently
+	// install a dead registration with nextFireAt=zero.
+	if got := s.Next(target); !got.Equal(target) {
+		t.Fatalf("Once.Next at target should return target, got %v", got)
 	}
 	if got := s.Next(target.Add(time.Second)); !got.IsZero() {
 		t.Fatalf("Once.Next after target should be zero, got %v", got)

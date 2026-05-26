@@ -212,9 +212,18 @@ func TestServicePanicIsolated(t *testing.T) {
 		t.Fatalf("good fn should still fire after sibling panic, got %d", got)
 	}
 
+	// Advance again to prove the tick loop survived the panic across
+	// a second cycle — the first joint tick only proves goroutine
+	// isolation, not loop survival.
+	clk.Advance(2 * time.Second)
+	awaitFireCount(t, svc, "good", 2)
+	if got := atomic.LoadInt32(&goodFired); got < 2 {
+		t.Fatalf("good fn should fire twice after two panics, got %d", got)
+	}
+
 	st, _ := svc.Status(context.Background(), "bad")
-	if st.FireCount == 0 {
-		t.Fatalf("bad fn FireCount should still increment (panic recovered): %+v", st)
+	if st.FireCount < 2 {
+		t.Fatalf("bad fn FireCount should re-dispatch after panic recovery: %+v", st)
 	}
 }
 

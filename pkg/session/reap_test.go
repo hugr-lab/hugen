@@ -61,10 +61,26 @@ func openRow(t *testing.T, st *reapStore, row store.SessionRow) {
 func TestReapProcessOrphans_TerminatesStaleNonLive(t *testing.T) {
 	t.Parallel()
 	st := newReapStore()
-	stale := time.Now().Add(-2 * time.Hour)
-	openRow(t, st, store.SessionRow{ID: "stale", AgentID: agentID, SessionType: "root", Status: store.StatusActive, UpdatedAt: stale})
-	openRow(t, st, store.SessionRow{ID: "fresh", AgentID: agentID, SessionType: "root", Status: store.StatusActive, UpdatedAt: time.Now()})
-	openRow(t, st, store.SessionRow{ID: "live", AgentID: agentID, SessionType: "root", Status: store.StatusActive, UpdatedAt: stale})
+	openRow(t, st, store.SessionRow{ID: "stale", AgentID: agentID, SessionType: "root", Status: store.StatusActive})
+	openRow(t, st, store.SessionRow{ID: "fresh", AgentID: agentID, SessionType: "root", Status: store.StatusActive})
+	openRow(t, st, store.SessionRow{ID: "live", AgentID: agentID, SessionType: "root", Status: store.StatusActive})
+
+	// "fresh" has a recent event → event-freshness guard protects it.
+	// "stale" appends only an OLD event → cutoff filters it out, reaper sees none.
+	// "live" needs no events — the liveSet oracle protects it
+	// regardless of activity.
+	if err := st.AppendEvent(context.Background(), store.EventRow{
+		ID: "ev-fresh", SessionID: "fresh", AgentID: agentID,
+		EventType: "user_message", CreatedAt: time.Now(),
+	}, ""); err != nil {
+		t.Fatalf("AppendEvent fresh: %v", err)
+	}
+	if err := st.AppendEvent(context.Background(), store.EventRow{
+		ID: "ev-stale", SessionID: "stale", AgentID: agentID,
+		EventType: "user_message", CreatedAt: time.Now().Add(-2 * time.Hour),
+	}, ""); err != nil {
+		t.Fatalf("AppendEvent stale: %v", err)
+	}
 
 	fn := session.ReapProcessOrphans(agentID, st, liveSet{"live"}, discardLogger())
 	outcome, err := fn(context.Background(), runner.FireMeta{Name: "test"})

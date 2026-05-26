@@ -25,11 +25,14 @@ func (s everySchedule) Next(after time.Time) time.Time {
 	return after.Add(s.d)
 }
 
-// Once fires at exactly at and never again. Once at has passed
-// the schedule reports zero — the Runner keeps the registration
-// installed (consumers can re-Schedule via Unregister + Register)
-// but never dispatches it. Useful for one-shot reminder timers in
-// Phase 6.1b (the "wake" task kind).
+// Once fires at exactly at and never again. The semantics are
+// inclusive on the boundary: a registration created with
+// `Once(now)` fires on the next tick rather than becoming a
+// dead row with nextFireAt=zero. Once `at` has passed (i.e. the
+// schedule was already consulted at or after `at`) Next returns
+// zero — the Runner keeps the registration installed but skips
+// it forever. Useful for one-shot reminder timers in Phase 6.1b
+// (the "wake" task kind).
 func Once(at time.Time) Schedule {
 	return onceSchedule{at: at}
 }
@@ -39,7 +42,7 @@ type onceSchedule struct {
 }
 
 func (s onceSchedule) Next(after time.Time) time.Time {
-	if s.at.After(after) {
+	if !s.at.Before(after) {
 		return s.at
 	}
 	return time.Time{}

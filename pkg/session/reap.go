@@ -10,13 +10,18 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
-// processOrphanCutoff is the minimum age an `active` session row
-// must reach before [ReapProcessOrphans] will retire it. The
-// guard keeps the reaper from racing the boot path that loads
-// sessions into the live manager but hasn't yet finished
-// [manager.Manager.RestoreActive]. Tuned long enough to outlast
-// every restart sequence we have observed.
-const processOrphanCutoff = time.Hour
+// processOrphanQuietWindow is the minimum quiet period an
+// `active` session row must accumulate before [ReapProcessOrphans]
+// will retire it. The quiet check looks at the session's event
+// log — a session with at least one event newer than `now -
+// processOrphanQuietWindow` is treated as still in use,
+// regardless of whether the in-memory manager currently has it
+// pumping. The append-only `session_events` table is the
+// canonical freshness signal; `sessions.updated_at` is NOT used
+// because phase-4 keeps the sessions row append-light (only
+// status changes touch it, so an actively chatting session can
+// have a frozen `updated_at`).
+const processOrphanQuietWindow = time.Hour
 
 // ReapProcessOrphans builds the [runner.RunnerFn] for the
 // `sessions_reap_process_orphans` system runner (Phase 6.1a
@@ -28,11 +33,20 @@ const processOrphanCutoff = time.Hour
 // not list ghost sessions and so subsequent restart walks have a
 // clean baseline.
 //
+// Two protection layers guard healthy rows:
+//
+//  1. `live` is the in-process Manager's "session is currently
+//     active in memory" oracle; rows for which it reports true
+//     are protected unconditionally.
+//  2. The event log is consulted via [store.RuntimeStore.ListEvents]
+//     with `From = now - processOrphanQuietWindow`. A session that
+//     has appended any event inside that window is treated as in
+//     use — its goroutine may be stalled or its parent may have
+//     not yet resumed it, but the row is recent enough that
+//     terminating it would lose work.
+//
 // agentID scopes the reap to the local agent — multi-agent
-// stores keep peers isolated. live is the in-process Manager's
-// "session is currently active in memory" oracle; rows for which
-// live reports true are protected unconditionally regardless of
-// row age.
+// stores keep peers isolated.
 func ReapProcessOrphans(agentID string, st store.RuntimeStore, live LiveSessions, logger *slog.Logger) runner.RunnerFn {
 	if logger == nil {
 		logger = slog.Default()
@@ -49,14 +63,25 @@ func ReapProcessOrphans(agentID string, st store.RuntimeStore, live LiveSessions
 			return runner.Outcome{Summary: "no active sessions"}, nil
 		}
 		liveIDs := liveSet(live)
-		cutoff := time.Now().Add(-processOrphanCutoff)
+		cutoff := time.Now().Add(-processOrphanQuietWindow)
 
 		var reaped, skipped int
 		for _, row := range rows {
 			if _, isLive := liveIDs[row.ID]; isLive {
 				continue
 			}
-			if !row.UpdatedAt.IsZero() && row.UpdatedAt.After(cutoff) {
+			recent, err := st.ListEvents(ctx, row.ID, store.ListEventsOpts{
+				From:  cutoff,
+				Limit: 1,
+			})
+			if err != nil {
+				logger.Warn("session reap: list recent events failed",
+					"session_id", row.ID,
+					"err", err,
+				)
+				continue
+			}
+			if len(recent) > 0 {
 				skipped++
 				continue
 			}

@@ -230,14 +230,17 @@ func (s *Service) Start(ctx context.Context) error {
 		return errors.New("runner: Start on stopped service")
 	}
 	s.started = true
-	loopCtx, cancel := context.WithCancel(context.Background())
+	// Derive the tick loop's ctx from the caller so external
+	// cancellation (e.g. an errgroup unwinding around the runtime)
+	// also stops the runner. Stop's own cancel() short-circuits the
+	// same goroutine.
+	loopCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 	s.mu.Unlock()
 
 	s.wg.Add(1)
 	go s.tickLoop(loopCtx)
 	s.log.Debug("runner: started", "tick", s.tickInterval)
-	_ = ctx
 	return nil
 }
 
