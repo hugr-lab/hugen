@@ -59,6 +59,14 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 	// manifest.
 	if mState := FromState(mission); mState != nil {
 		mState.SetPlannerApproval(manifest.Plan.Approval)
+		// Phase 5.x-followup — stash the caller's structured inputs
+		// so the researcher / planner / synthesizer prompts can
+		// surface caller-supplied params (file_path, output_format,
+		// schedule_kind, …) instead of inventing them from the
+		// mission goal prose. The AC seeding below renders templates
+		// against the SAME inputs, but the planner needs the raw
+		// map for its `[Inputs from caller]` brief section.
+		mState.SetSpawnInputs(inputs)
 		// Phase 5.x — B11 §3.2.2 — seed manifest acceptance criteria
 		// at iter 0 with origin=manifest. Each statement is a Go
 		// template rendered against `.Inputs` so authors can write

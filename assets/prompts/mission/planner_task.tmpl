@@ -43,6 +43,20 @@ drafting your plan — your `mission_goal` + `mission_acceptance_criteria`
 MUST reflect what was discovered. If the findings resolved an
 ambiguity the user originally had, surface that explicitly in
 your AC.
+{{end}}{{if .SpawnInputs}}
+[Inputs from caller — propagate VERBATIM to worker `inputs`]
+{{range .SpawnInputs}}- {{.Key}}: {{.Value}}
+{{end}}
+These key/value pairs were passed by the caller (root chat or
+parent mission) at `session:spawn_mission` time. They are
+AUTHORITATIVE — NOT inferred from the goal prose. Whenever a
+wave's worker needs one (a `file_path` for the report writer, an
+`output_format` for the renderer, a `schedule_kind` for the
+registrar, …) you MUST copy the value verbatim into that
+subagent's `inputs.<key>` field. NEVER invent a substitute
+filename / path / format when the caller already passed one —
+silently changing these is a contract violation the user will
+flag as a bug.
 {{end}}{{if .ResolvedUserInputs}}
 [Resolved user inputs]
 {{range .ResolvedUserInputs}}- {{.Key}}: {{.Value}}

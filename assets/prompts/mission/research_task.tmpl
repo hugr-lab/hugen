@@ -9,7 +9,17 @@ mission plan.
 
 [Research iteration]
 {{.Iteration}}{{if .MaxIterations}} of {{.MaxIterations}}{{end}}
-{{if .PriorAnswers}}
+{{if .SpawnInputs}}
+[Inputs from caller — already resolved, do NOT re-ask]
+{{range .SpawnInputs}}- {{.Key}}: {{.Value}}
+{{end}}
+These key/value pairs were passed by the caller at spawn time —
+they are AUTHORITATIVE. Treat each key as already resolved: do
+NOT emit a clarification asking for any of these. Use them as
+context when scoping the goal; surface them verbatim under your
+done=true `resolved_user_inputs` so the planner sees them in
+one place.
+{{end}}{{if .PriorAnswers}}
 [Prior answers from the user]
 {{range .PriorAnswers}}- {{.Key}}: {{.Value}}
 {{end}}{{end}}{{if .PriorComments}}

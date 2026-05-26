@@ -114,15 +114,22 @@ metadata:
             Do NOT pre-emit 4 speculative waves.
 
           **Inputs propagation.** Lift every entry from
-          `[Resolved user inputs]` into the relevant worker's
+          BOTH `[Inputs from caller]` (authoritative — what
+          the caller passed verbatim at spawn_mission time)
+          AND `[Resolved user inputs]` (researcher resolved
+          via clarifications) into the relevant worker's
           `inputs.<key>` verbatim — output_format, scope,
           time window, table / metric picks, chart picks,
-          and any file_path the user wrote into the goal
-          (passed through `[Inputs from parent]`). Missing
-          inputs ship the wave with stale defaults; do NOT
-          invent values the user didn't supply. Workers may
-          still emit `status: "error"` and ask the planner
-          to amend if a critical input is absent.
+          and any file_path the user wrote into the goal.
+          Caller-supplied inputs WIN over your own
+          intuition: if `[Inputs from caller]` has
+          `file_path: ~/Downloads/op2023_report.html`, the
+          report writer MUST get exactly that path — NEVER
+          invent a substitute name (`op2023_overview.html`,
+          `report_final.html`, etc.). Missing inputs ship
+          the wave with stale defaults; workers may emit
+          `status: "error"` and ask the planner to amend
+          if a critical input is absent.
 
           **Amend re-spawn — chain depends_on.** When
           [Recent verdict] is `amend` and you re-spawn the

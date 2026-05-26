@@ -163,6 +163,23 @@ type MissionState struct {
 	// Phase 5.x — §4.6.
 	autoApproveTools bool
 
+	// spawnInputs captures the structured `inputs` map the caller
+	// passed to `session:spawn_mission` (root → mission). The runtime
+	// stamps the map here at RunMission time so downstream stages
+	// (researcher + planner + synthesizer) can surface caller-
+	// supplied parameters like `file_path`, `output_format`,
+	// `schedule_kind` verbatim. Without this stash the planner
+	// would only see the mission goal prose and invent these
+	// values, drifting from what the caller asked for. Phase
+	// 5.x-followup.
+	//
+	// Stored as map[string]any to match the wire shape of
+	// session:spawn_mission's inputs JSON object. Empty / nil
+	// when the caller passed no inputs. Read-only after stamp —
+	// no in-mission writer; the AC seed + every prompt render
+	// just projects from it.
+	spawnInputs map[string]any
+
 	// researchAttempted tracks whether the research stage was
 	// invoked on this mission, regardless of outcome. Flipped to
 	// true at the very start of runResearchStage when the manifest
@@ -373,6 +390,50 @@ func (m *MissionState) MissionFrame() (goal string, mission []string, wave []str
 		mission = append(mission, row.Statement)
 	}
 	return m.currentMissionGoal, mission, wave
+}
+
+// SetSpawnInputs stashes the structured `inputs` map the caller
+// passed to session:spawn_mission. Stamped once by the auto-runner
+// at RunMission entry; downstream stages (research + planner +
+// synthesizer) project from it via SpawnInputs(). Nil / empty
+// maps are normalised to nil so SpawnInputs() returns the
+// zero-value (empty) slice the templates can guard on.
+//
+// Phase 5.x-followup. Inputs ride the wire as a JSON object on
+// spawn_mission's tool_args; the session machinery decodes them
+// into `inputs any` (typically map[string]any). We accept the
+// generic `any` to match the runtime's call signature and
+// type-assert here — a non-map value (string, number) is treated
+// as nil because the inputs contract is "structured map".
+func (m *MissionState) SetSpawnInputs(inputs any) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	asMap, _ := inputs.(map[string]any)
+	if len(asMap) == 0 {
+		m.spawnInputs = nil
+		return
+	}
+	m.spawnInputs = make(map[string]any, len(asMap))
+	for k, v := range asMap {
+		m.spawnInputs[k] = v
+	}
+}
+
+// SpawnInputs returns a defensive copy of the spawn-time inputs
+// map. Empty map when SetSpawnInputs never fired or the caller
+// passed nothing. The returned map is safe to mutate without
+// affecting MissionState. Phase 5.x-followup.
+func (m *MissionState) SpawnInputs() map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.spawnInputs) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(m.spawnInputs))
+	for k, v := range m.spawnInputs {
+		out[k] = v
+	}
+	return out
 }
 
 // SetAutoApproveTools sets the auto-approve-tools flag. Called by

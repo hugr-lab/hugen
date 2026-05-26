@@ -717,6 +717,15 @@ type plannerTaskView struct {
 	// reads it to lift `file_path` / `output_format` / etc. into
 	// workers' `inputs` without re-asking the user. Phase 5.x — B15.
 	ResolvedUserInputs []researchKV
+	// SpawnInputs lists the structured key/value pairs the caller
+	// (root / parent mission) passed to `session:spawn_mission`
+	// at spawn time. Distinct from `ResolvedUserInputs` (which the
+	// research stage populates via clarifications) — these are
+	// authoritative caller intent, NOT inferred from user prose.
+	// The planner MUST propagate them verbatim to relevant
+	// worker subagents via their `inputs` field. Empty when the
+	// caller spawned without inputs. Phase 5.x-followup.
+	SpawnInputs []researchKV
 	// ResearchACProposals lists the proposed acceptance criteria
 	// research recommends for planner consideration. Planner is
 	// the authority — proposals are input only (§3.2.1). Phase
@@ -840,6 +849,11 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		view.ResolvedUserInputs = projectResolvedInputsForTemplate(resolvedInputs)
 		view.ResearchACProposals = projectACProposalsForTemplate(acProposals)
 		view.MissionAC = projectMissionACForTemplate(m.ACSnapshot())
+		// Phase 5.x-followup — surface the caller's spawn-time
+		// inputs so the planner propagates them verbatim to
+		// worker `inputs` (file_path, output_format, etc.) and
+		// doesn't invent values from goal prose.
+		view.SpawnInputs = projectResolvedInputsForTemplate(m.SpawnInputs())
 	}
 	if recentVerdict != nil {
 		view.RecentVerdict = &plannerVerdictView{
