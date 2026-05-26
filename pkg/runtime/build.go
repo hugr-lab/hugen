@@ -58,6 +58,9 @@ func Build(ctx context.Context, cfg Config) (*Core, error) {
 	if err := phaseSessionManager(ctx, core); err != nil {
 		return nil, failed("session_manager", err)
 	}
+	if err := phaseRunner(ctx, core); err != nil {
+		return nil, failed("runner", err)
+	}
 
 	return core, nil
 }
