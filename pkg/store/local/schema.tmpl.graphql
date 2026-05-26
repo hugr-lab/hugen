@@ -993,7 +993,7 @@ type tool_policies @table(name: "tool_policies") @module(name: "agent") {
 # update-minimisation contract.
 # ============================================================
 
-"""A scheduled task owned by a session. Created via the `task:create` tool from the TaskManager extension. Each fire emits append-only rows into `task_log`; the next planned fire is reachable via `task.log(filter: {event_type: {eq: "planned"}}, order_by: [{fire_seq: DESC}], limit: 1)`."""
+"""A scheduled task owned by a session. Created via the `task:create` tool from the TaskManager extension. Each fire emits append-only rows into `task_log`; the next planned fire is reachable via `task.log(filter: {event_type: {eq: "planned"}}, nested_order_by: [{field: "fire_seq", direction: DESC}], nested_limit: 1)`. Use `nested_order_by` / `nested_limit` on relation subqueries — plain `order_by` / `limit` apply BEFORE the join (global) and silently null-out per-parent semantics."""
 type tasks @table(name: "tasks") @module(name: "agent") {
   """Synthetic sortable id: tsk_{agent}_{ts}_{rnd}"""
   id:               String! @pk
