@@ -122,14 +122,15 @@ metadata:
           time window, table / metric picks, chart picks,
           and any file_path the user wrote into the goal.
           Caller-supplied inputs WIN over your own
-          intuition: if `[Inputs from caller]` has
-          `file_path: ~/Downloads/op2023_report.html`, the
-          report writer MUST get exactly that path — NEVER
-          invent a substitute name (`op2023_overview.html`,
-          `report_final.html`, etc.). Missing inputs ship
-          the wave with stale defaults; workers may emit
-          `status: "error"` and ask the planner to amend
-          if a critical input is absent.
+          intuition: when `[Inputs from caller]` carries a
+          `file_path`, the report writer MUST get exactly
+          that path — never substitute a "nicer" filename
+          you invented from the goal text. Same for
+          `output_format`, scope, or any other key the
+          caller pinned. Missing inputs ship the wave with
+          stale defaults; workers may emit `status: "error"`
+          and ask the planner to amend if a critical input
+          is absent.
 
           **Amend re-spawn — chain depends_on.** When
           [Recent verdict] is `amend` and you re-spawn the
