@@ -150,6 +150,19 @@ type MissionState struct {
 	// proposals are input only (§3.2.1). Phase 5.x — B15.
 	researchACProposals []ResearchACProposal
 
+	// autoApproveTools mirrors the user's last pick on an approval
+	// modal — true when they chose "approve with tools", false on
+	// "approve" / refine / abort / reject. RESET to false at the
+	// top of every fresh approval modal (before RequestInquiry
+	// returns) so each modal asks afresh; the flag does NOT
+	// auto-inherit across replans. Consulted by MaybeAutoApprove
+	// (§4.6.5) on every requires_approval tool call — when set on
+	// any ancestor mission in the caller's parent chain, the tool
+	// inquiry is skipped and approval granted immediately.
+	//
+	// Phase 5.x — §4.6.
+	autoApproveTools bool
+
 	// researchAttempted tracks whether the research stage was
 	// invoked on this mission, regardless of outcome. Flipped to
 	// true at the very start of runResearchStage when the manifest
@@ -360,6 +373,27 @@ func (m *MissionState) MissionFrame() (goal string, mission []string, wave []str
 		mission = append(mission, row.Statement)
 	}
 	return m.currentMissionGoal, mission, wave
+}
+
+// SetAutoApproveTools sets the auto-approve-tools flag. Called by
+// validate_and_approve after a successful approve-with-tools modal
+// (value=true) and at the top of every fresh approval modal
+// (value=false, the reset) so the user's pick from a prior modal
+// doesn't silently carry over into a replan. Phase 5.x — §4.6.
+func (m *MissionState) SetAutoApproveTools(v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.autoApproveTools = v
+}
+
+// AutoApproveTools reports the current auto-approve-tools flag.
+// MaybeAutoApprove walks the caller's parent chain looking for an
+// ancestor mission with this flag set; on hit it skips the tool
+// approval inquiry entirely. Phase 5.x — §4.6.
+func (m *MissionState) AutoApproveTools() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.autoApproveTools
 }
 
 // SetResearchOutput stashes the research role's done=true result

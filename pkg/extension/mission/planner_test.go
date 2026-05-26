@@ -33,6 +33,13 @@ type renderedFakeState struct {
 	inquiryResp     *protocol.InquiryResponse
 	inquiryErr      error
 	inquiryRequests []protocol.InquiryRequestPayload
+
+	// emittedFrames captures every frame the production code routes
+	// through Emit on this session. Tests assert on audit-event
+	// emission by walking this slice (mission:tool_approval_policy_set,
+	// mission:plan_approved, etc.). Opt-in: zero-valued by default
+	// so existing tests that don't care pay nothing.
+	emittedFrames []protocol.Frame
 }
 
 func newRenderedFakeState(id string, renderer *prompts.Renderer) *renderedFakeState {
@@ -42,6 +49,11 @@ func newRenderedFakeState(id string, renderer *prompts.Renderer) *renderedFakeSt
 }
 
 func (s *renderedFakeState) Prompts() *prompts.Renderer { return s.renderer }
+
+func (s *renderedFakeState) Emit(_ context.Context, f protocol.Frame) error {
+	s.emittedFrames = append(s.emittedFrames, f)
+	return nil
+}
 
 func (s *renderedFakeState) RequestInquiry(_ context.Context, payload protocol.InquiryRequestPayload) (*protocol.InquiryResponse, error) {
 	s.inquiryRequests = append(s.inquiryRequests, payload)

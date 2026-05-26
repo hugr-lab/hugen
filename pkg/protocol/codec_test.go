@@ -498,3 +498,58 @@ func TestSessionStatus_EnrichedPayloadRoundTrip(t *testing.T) {
 		}
 	})
 }
+
+// TestCodec_RoundTrip_InquiryResponseAutoApproveTools asserts the
+// Phase 5.x §4.6 AutoApproveTools field round-trips when set and is
+// omitted on the wire when false. The wire-shape contract matters:
+// downstream policy hook decodes responses and must see the bool;
+// adapters from older binaries must not be tripped by an unexpected
+// key when the user picked "approve" instead of "approve with tools".
+func TestCodec_RoundTrip_InquiryResponseAutoApproveTools(t *testing.T) {
+	codec := NewCodec()
+	approved := true
+
+	t.Run("set", func(t *testing.T) {
+		f := NewInquiryResponse("s1", testAgent, InquiryResponsePayload{
+			RequestID:        "req-7",
+			CallerSessionID:  "s1",
+			Approved:         &approved,
+			AutoApproveTools: true,
+		})
+		data, err := codec.EncodeFrame(f)
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		if !strings.Contains(string(data), `"auto_approve_tools":true`) {
+			t.Errorf("wire missing auto_approve_tools key: %s", data)
+		}
+		out, err := codec.DecodeFrame(data)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		got, ok := out.(*InquiryResponse)
+		if !ok {
+			t.Fatalf("decoded type %T", out)
+		}
+		if !got.Payload.AutoApproveTools {
+			t.Errorf("AutoApproveTools = false after round-trip; payload=%+v",
+				got.Payload)
+		}
+	})
+
+	t.Run("omitted_when_false", func(t *testing.T) {
+		f := NewInquiryResponse("s1", testAgent, InquiryResponsePayload{
+			RequestID:       "req-7",
+			CallerSessionID: "s1",
+			Approved:        &approved,
+			// AutoApproveTools: false (zero value)
+		})
+		data, err := codec.EncodeFrame(f)
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		if strings.Contains(string(data), "auto_approve_tools") {
+			t.Errorf("wire carries auto_approve_tools for zero value: %s", data)
+		}
+	})
+}

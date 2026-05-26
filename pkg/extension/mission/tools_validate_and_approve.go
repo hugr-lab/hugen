@@ -166,6 +166,12 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 		mState.DiscardStagedDiff()
 		return toolErr("internal", "render approval question: "+qErr.Error())
 	}
+	// §4.6.6 lifecycle — every fresh approval modal clears the
+	// prior auto-approve-tools pick. The flag re-sets only when
+	// THIS modal closes with AutoApproveTools=true (approve-with-
+	// tools path). Refine / abort / approve-without-tools all
+	// leave the flag in its reset (false) state.
+	mState.SetAutoApproveTools(false)
 	resp, inqErr := parent.RequestInquiry(ctx, protocol.InquiryRequestPayload{
 		Type:     protocol.InquiryTypeApproval,
 		Question: question,
@@ -185,6 +191,14 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 			return toolErr("internal", "commit staged ac diff: "+err.Error())
 		}
 		mState.MarkPlanApproved()
+		autoApproveTools := resp.Payload.AutoApproveTools
+		if autoApproveTools {
+			mState.SetAutoApproveTools(true)
+		}
+		e.emitToolApprovalPolicySet(parent, toolApprovalPolicySetPayload{
+			AutoApproveTools: autoApproveTools,
+			Iteration:        mState.IterationCounter,
+		})
 		e.emitPlanApproved(parent, planApprovedPayload{Trigger: "user_modal", Reason: reason})
 		return emitValidateResult(validateResult{
 			Approved: true,
@@ -318,6 +332,25 @@ type planApprovedPayload struct {
 // so the bit can be reconstructed on a future restart.
 func (e *Extension) emitPlanApproved(mission extension.SessionState, payload planApprovedPayload) {
 	e.emitMissionOp(mission, "plan_approved", payload)
+}
+
+// toolApprovalPolicySetPayload is the body of the
+// `mission:tool_approval_policy_set` ExtensionFrame — recorded on
+// every approval-modal close (regardless of whether the user picked
+// auto-approve) so the audit log carries the full sequence of "user
+// picks per approval" over the mission's lifetime. Phase 5.x — §4.6.4.
+type toolApprovalPolicySetPayload struct {
+	// AutoApproveTools is the post-modal state of the flag.
+	AutoApproveTools bool `json:"auto_approve_tools"`
+	// Iteration is the planner iteration the modal closed on.
+	Iteration int `json:"iteration"`
+}
+
+// emitToolApprovalPolicySet publishes the
+// mission:tool_approval_policy_set ExtensionFrame. Default-deny in
+// visibility filters — never reaches the model prompt; audit-only.
+func (e *Extension) emitToolApprovalPolicySet(mission extension.SessionState, payload toolApprovalPolicySetPayload) {
+	e.emitMissionOp(mission, "tool_approval_policy_set", payload)
 }
 
 // interpretValidateApprovalResponse normalises an InquiryResponse
