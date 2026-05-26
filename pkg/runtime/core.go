@@ -13,6 +13,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/scheduler/runner"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/manager"
 	"github.com/hugr-lab/hugen/pkg/skill"
@@ -76,6 +77,14 @@ type Core struct {
 
 	// Phase 9 (session_manager).
 	Manager *manager.Manager
+
+	// Phase 10 (runner). Agent-level scheduling primitive that
+	// dispatches always-on resilience reapers today (§16.1) and
+	// per-session TaskManager fire fns once Phase 6.1b ships.
+	// Constructed + started by phaseRunner; stopped via the
+	// cleanup stack ahead of Manager.Stop so in-flight reapers
+	// drain before the session manager unwinds.
+	Runner runner.Runner
 
 	// cleanups stacks per-phase teardown closures in registration
 	// order. cleanupPartial (failure path) and Shutdown (success
