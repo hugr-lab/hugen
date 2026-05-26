@@ -38,7 +38,7 @@ const PlannerSkillName = "_mission_v3"
 // instructions in the runtime-injected task body are authoritative.
 const PlannerManifestYAML = "---\n" +
 	"name: _mission_v3\n" +
-	"description: Phase B fixture — planner-driven PDCA mission with synthesizer. Deleted at Phase H end alongside the experimental_inline escape hatch.\n" +
+	"description: Fixture — planner-driven PDCA mission with synthesizer.\n" +
 	"license: Apache-2.0\n" +
 	"allowed-tools:\n" +
 	"  - provider: mission\n" +

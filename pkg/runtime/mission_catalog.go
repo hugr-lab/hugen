@@ -15,8 +15,7 @@ import (
 // owned by pkg/runtime where both packages already converge.
 //
 // Mission-PDCA (design 003) recognises any installed skill whose
-// manifest carries `metadata.hugen.mission.plan.*`. Today only the
-// experimental_inline shape is exercised (Phase A); the adapter
+// manifest carries `metadata.hugen.mission.plan.*`. The adapter
 // projects the typed pkg/skill.MissionPlanInline value verbatim
 // into the in-mission shape mission ext consumes.
 type skillManagerMissionCatalog struct {
@@ -70,12 +69,12 @@ func (c *skillManagerMissionCatalog) ListMissions(ctx context.Context) ([]missio
 }
 
 // isPdcaMission returns true when the skill carries a mission.plan
-// section recognised by mission ext. Phase A — inline waves; Phase
-// B — `plan.role` (LLM planner). Either is sufficient; the runtime
-// dispatch path picks the active mode at run time.
+// section recognised by mission ext. Inline waves (deterministic
+// pipeline) and `plan.role` (LLM planner) are both sufficient; the
+// runtime dispatch path picks the active mode at run time.
 func isPdcaMission(m skillpkg.Manifest) bool {
 	plan := m.Hugen.Mission.Plan
-	if plan.ExperimentalInline != nil && len(plan.ExperimentalInline.Waves) > 0 {
+	if plan.Inline != nil && len(plan.Inline.Waves) > 0 {
 		return true
 	}
 	if plan.Role != "" {
@@ -107,15 +106,15 @@ func projectMissionManifest(m skillpkg.Manifest) *missionext.MissionManifest {
 	if mb.Summary == "" {
 		out.Summary = m.Description
 	}
-	if mb.Plan.ExperimentalInline != nil {
-		waves := make([]missionext.Wave, 0, len(mb.Plan.ExperimentalInline.Waves))
-		for _, w := range mb.Plan.ExperimentalInline.Waves {
+	if mb.Plan.Inline != nil {
+		waves := make([]missionext.Wave, 0, len(mb.Plan.Inline.Waves))
+		for _, w := range mb.Plan.Inline.Waves {
 			waves = append(waves, missionext.Wave{
 				Label:     w.Label,
 				Subagents: projectSubagents(w.Subagents),
 			})
 		}
-		out.Plan.ExperimentalInline = &missionext.InlinePlan{Waves: waves}
+		out.Plan.Inline = &missionext.InlinePlan{Waves: waves}
 	}
 	out.Plan.Role = mb.Plan.Role
 	out.Plan.Approval = missionext.NormalizePlanApproval(missionext.PlanApproval{

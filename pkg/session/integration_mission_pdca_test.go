@@ -256,7 +256,7 @@ func TestMissionPDCA_RunMission_TerminatesMission(t *testing.T) {
 		Name:    "echo-mission",
 		Summary: "Phase A α.4 fixture",
 		Plan: missionext.MissionPlanManifest{
-			ExperimentalInline: &missionext.InlinePlan{
+			Inline: &missionext.InlinePlan{
 				Waves: []missionext.Wave{
 					{
 						Label: "wave-1",

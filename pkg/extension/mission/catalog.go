@@ -7,11 +7,12 @@ import "context"
 // wiring (pkg/runtime) supplies an adapter wrapping the real
 // SkillManager; tests pass an in-memory stub.
 //
-// The mission-PDCA Phase-A shape is recognised by the presence of
-// `metadata.hugen.mission.plan.experimental_inline.waves` in the
-// skill's manifest. Phase B adds `plan.role` for LLM planners.
-// Skills whose manifests carry neither aren't mission-eligible —
-// MissionSkillExists returns false and spawn_mission rejects them.
+// The mission-PDCA shape is recognised by the presence of
+// `metadata.hugen.mission.plan.inline.waves` (deterministic
+// pipeline) or `plan.role` (LLM-driven planner) in the skill's
+// manifest. Skills whose manifests carry neither aren't mission-
+// eligible — MissionSkillExists returns false and spawn_mission
+// rejects them.
 type Catalog interface {
 	// LookupMission returns the typed mission manifest projection
 	// for the named skill, or (nil, nil) when the skill exists but
@@ -46,8 +47,9 @@ type MissionManifest struct {
 	// those into the planner's plan_context.
 	Research *ResearchManifest
 
-	// Plan declares how the mission's wave sequence is sourced.
-	// Phase A — only ExperimentalInline is recognised.
+	// Plan declares how the mission's wave sequence is sourced —
+	// either Inline waves (deterministic pipeline) or a planner
+	// Role (LLM-driven).
 	Plan MissionPlanManifest
 
 	// Synthesis names the role that produces the mission's final
@@ -168,16 +170,18 @@ const (
 )
 
 // MissionPlanManifest is the typed plan section of a PDCA mission.
-// Either ExperimentalInline (Phase A) or Role (Phase B) is non-zero
-// for a mission-eligible skill; the runtime picks the dispatch
-// path off whichever field is populated. The two shapes never
-// co-exist on a single manifest — the runtime catalog projection
-// rejects ambiguous manifests at load.
+// Either Inline or Role is non-zero for a mission-eligible skill;
+// the runtime picks the dispatch path off whichever field is
+// populated. The two shapes never co-exist on a single manifest —
+// the runtime catalog projection rejects ambiguous manifests at
+// load.
 type MissionPlanManifest struct {
-	// ExperimentalInline is the Phase-A escape hatch: the skill
-	// author lists waves directly. Nil when the manifest declares
-	// a planner role instead. Removed at Phase H.
-	ExperimentalInline *InlinePlan
+	// Inline declares the wave sequence directly in the manifest
+	// (deterministic pipeline — fixtures + task skills). Nil when
+	// the manifest declares a planner role instead. Previously
+	// named ExperimentalInline; renamed at Phase 6.0 when it
+	// became load-bearing for task skills.
+	Inline *InlinePlan
 
 	// Role names the planner sub-agent role from the skill's
 	// `sub_agents` block. Empty when the manifest uses the inline
