@@ -40,8 +40,13 @@ requires: [hugr]
 steps:
   - say: |
       Write a short markdown summary of "northwind data source
-      contents" to `/tmp/hugen-approval-v2-test.md`. Use the
-      shell tool to do the write directly.
+      contents" to `/tmp/hugen-approval-v2-test.md`. You MUST
+      use the `bash-mcp:bash_write_file` tool (or
+      `bash-mcp:bash_shell` with a redirected `echo`) to do the
+      write directly. Do NOT use `python-mcp` — the test
+      validates the runtime's tool-approval gate, which only
+      intercepts `requires_approval` tools (bash family). Using
+      python sidesteps the gate and renders the test vacuous.
     budget: 480s
     wait_for_subagents: 360s
 

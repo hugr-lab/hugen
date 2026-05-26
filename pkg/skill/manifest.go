@@ -653,9 +653,9 @@ type MissionControlBlock struct {
 // Trigger semantics (When):
 //   - `always`           — research runs every mission.
 //   - `auto`             — runtime heuristic (pronoun-only goals,
-//                          short goals, mission_inputs gaps). Spec §2.5.
+//     short goals, mission_inputs gaps). Spec §2.5.
 //   - `if_goal_matches`  — Predicate regex tested against the goal
-//                          string; fires when it matches.
+//     string; fires when it matches.
 //
 // MaxIterations caps re-fire cycles (when research emits `done:
 // false` it gets re-spawned, with prior_answers / prior_comments

@@ -535,25 +535,25 @@ func (t *tab) commitApprovalChoice(pend *inquiryState, kind approvalChoiceKind) 
 // Bindings:
 //
 //   - ↑ / ↓      — cycle the option highlight on questions with
-//                  numbered options (wraps at bounds). No-op when
-//                  no options or focus is on the comment field.
+//     numbered options (wraps at bounds). No-op when
+//     no options or focus is on the comment field.
 //   - Enter      — commit value + comment for the current question
-//                  and advance (or submit batch on the last one).
-//                  Value priority: typed text in the focused field
-//                  > highlighted option > empty. Comment: typed
-//                  text in the comment field if focused, else
-//                  preserved.
+//     and advance (or submit batch on the last one).
+//     Value priority: typed text in the focused field
+//     > highlighted option > empty. Comment: typed
+//     text in the comment field if focused, else
+//     preserved.
 //   - Tab        — switch focus between the value and comment
-//                  fields. Switching persists the textarea content
-//                  into whichever field was active.
+//     fields. Switching persists the textarea content
+//     into whichever field was active.
 //   - Shift+Tab  — step back to the previous question. The prior
-//                  value (or comment, if focus was on comment)
-//                  pre-fills the textarea so the operator can
-//                  amend in place. No-op on Q1.
+//     value (or comment, if focus was on comment)
+//     pre-fills the textarea so the operator can
+//     amend in place. No-op on Q1.
 //   - digit 1-N  — keep as a shortcut: typed `2` + Enter commits
-//                  options[1] as the value.
+//     options[1] as the value.
 //   - Esc        — abort the batch (modal closes; request stays
-//                  pending server-side).
+//     pending server-side).
 func (t *tab) dispatchBatchedInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 	pend := t.pendingInquiry
 	key := k.String()
@@ -815,8 +815,8 @@ func (t *tab) submitBatchedAnswers(pend *inquiryState) error {
 // through BuildInquiryReply, which can't express the
 // AutoApproveTools flag or the nil-Approved refine shape).
 //
-//   approved + autoApproveTools → approve-with-tools / approve
-//   !approved                   → reject (Reason carries optional text)
+//	approved + autoApproveTools → approve-with-tools / approve
+//	!approved                   → reject (Reason carries optional text)
 //
 // Refine has its own dedicated submitApprovalRefine helper because
 // its wire shape (Approved=nil + Response=feedback) doesn't fit

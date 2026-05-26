@@ -26,9 +26,9 @@ import (
 //     session:inquire(type=approval) on the MISSION session so the
 //     user sees the typed plan, rationale, and roadmap. The user's
 //     response is folded into the result envelope:
-//       - approve     → `approved: true`
-//       - refine TEXT → `approved: false, refine_text: TEXT`
-//       - abort       → `approved: false, aborted: true`
+//     - approve     → `approved: true`
+//     - refine TEXT → `approved: false, refine_text: TEXT`
+//     - abort       → `approved: false, aborted: true`
 //  3. On `approved=true` (explicit or implicit), flips the
 //     mission's firstPlanApproved bit on and clears any pending
 //     reapproval flag so subsequent iterations pass silently — as

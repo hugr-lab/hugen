@@ -598,19 +598,19 @@ const (
 
 // Phase-4 system_marker subjects (machine-readable, adapter-only).
 const (
-	SubjectMCPRecovered    = "mcp_recovered"
-	SubjectHardCeilingHit  = "hard_ceiling_hit"
-	SubjectNoProgress      = "no_progress"
+	SubjectMCPRecovered   = "mcp_recovered"
+	SubjectHardCeilingHit = "hard_ceiling_hit"
+	SubjectNoProgress     = "no_progress"
 )
 
 // Phase-4 session_terminated reason constants. Reason is free-form;
 // these are the well-known values phase-4 producers emit.
 const (
-	TerminationCompleted      = "completed"
-	TerminationHardCeiling    = "hard_ceiling"
-	TerminationCancelCascade  = "cancel_cascade"
-	TerminationRestartDied    = "restart_died"
-	TerminationUserEnd        = "user:/end"
+	TerminationCompleted     = "completed"
+	TerminationHardCeiling   = "hard_ceiling"
+	TerminationCancelCascade = "cancel_cascade"
+	TerminationRestartDied   = "restart_died"
+	TerminationUserEnd       = "user:/end"
 	// TerminationSubagentCancelPrefix is concatenated with the
 	// caller-provided rationale: "subagent_cancel: <rationale>".
 	TerminationSubagentCancelPrefix = "subagent_cancel: "
@@ -785,9 +785,9 @@ type AnswerEntry struct {
 // 5.1 introduced approval/clarification; Phase 5.x — B15 added
 // research_batch for the runtime-driven research-stage modal.
 const (
-	InquiryTypeApproval       = "approval"
-	InquiryTypeClarification  = "clarification"
-	InquiryTypeResearchBatch  = "research_batch"
+	InquiryTypeApproval      = "approval"
+	InquiryTypeClarification = "clarification"
+	InquiryTypeResearchBatch = "research_batch"
 )
 
 // Clarification kinds — values for Clarification.Kind. Phase

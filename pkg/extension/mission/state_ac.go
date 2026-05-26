@@ -177,10 +177,10 @@ func (m *MissionState) CommitStagedDiff(extra ACDiff) ([]string, error) {
 				origin = OriginUserRefine
 			}
 		}
+		// Both staged and user_refine entries adopt the staging iter
+		// — they ride the same approval gate, so the iter stamp is
+		// the same regardless of which sub-slice the entry came from.
 		iter := stagedIter
-		if i >= stagedAddCount {
-			iter = stagedIter // user_refine entries adopt the staging iter — they ride the same approval gate
-		}
 		m.nextACID++
 		id := fmt.Sprintf("ac-%d", m.nextACID)
 		m.ac = append(m.ac, AcceptanceCriterion{

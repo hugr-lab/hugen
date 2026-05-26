@@ -211,13 +211,13 @@ type PlanApproval struct {
 // Canonical approval values. Constants kept narrow — the v1 enum
 // surface is tight per spec § 0.4 / Phase B; Phase I broadens it.
 const (
-	ApprovalInitialRequired    = "required"
-	ApprovalInitialSkip        = "skip"
-	ApprovalIterationAlways    = "always"
-	ApprovalIterationNever     = "never"
-	ApprovalIterationInitOnly  = "initial-only"
-	DefaultMaxWaves            = 10
-	MaxMaxWaves                = 50
+	ApprovalInitialRequired   = "required"
+	ApprovalInitialSkip       = "skip"
+	ApprovalIterationAlways   = "always"
+	ApprovalIterationNever    = "never"
+	ApprovalIterationInitOnly = "initial-only"
+	DefaultMaxWaves           = 10
+	MaxMaxWaves               = 50
 )
 
 // NormalizePlanApproval fills empty fields with their spec

@@ -610,9 +610,9 @@ func TestPlannerLoop_ApprovalGate_WorkerInvalidationReopensApproval(t *testing.T
 				Kind:   KindHandoff,
 				Status: "ok",
 				Body: map[string]any{
-					"summary":                    "clarified scope",
-					"invalidates_plan_approval":  true,
-					"invalidates_reason":         "discovered new scope constraint",
+					"summary":                   "clarified scope",
+					"invalidates_plan_approval": true,
+					"invalidates_reason":        "discovered new scope constraint",
 				},
 			}
 		}
