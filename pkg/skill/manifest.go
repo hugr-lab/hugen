@@ -572,11 +572,10 @@ type MissionBlock struct {
 
 	// Plan declares the mission's planning configuration —
 	// mission-PDCA (design 003) shape. When present, the mission ext
-	// treats this skill as a PDCA mission. v1 supports the
-	// `experimental_inline` Phase-A escape hatch; v2 will add
-	// `role: planner` for LLM-driven planning. Phase A — only
-	// ExperimentalInline is recognised; Plan absent means "not a
-	// PDCA mission".
+	// treats this skill as a PDCA mission. Supports two shapes:
+	// `inline` (manifest-declared waves, used by fixtures + cron task
+	// skills) and `role` (LLM-driven planner, used by interactive
+	// missions). Plan absent means "not a PDCA mission".
 	Plan MissionPlanBlock `json:"plan,omitempty" yaml:"plan,omitempty"`
 
 	// Synthesis declares the role that produces the mission's
@@ -676,21 +675,21 @@ const (
 	ResearchWhenIfGoalMatches = "if_goal_matches"
 )
 
-// MissionPlanBlock is the mission-PDCA `plan:` section. Phase B
-// adds `Role` (LLM-driven planner) + `Approval` policy + `MaxWaves`
-// cap. `ExperimentalInline` stays as the Phase-A escape hatch
-// (deleted at Phase H) so the new and old worlds coexist behind
-// the same manifest schema during migration.
+// MissionPlanBlock is the mission-PDCA `plan:` section. `Role`
+// drives LLM-planned missions; `Inline` declares waves directly
+// in the manifest (used by fixtures and — Phase 6 — cron task
+// skills that ship deterministic pipelines).
 //
-// A skill is a PDCA mission when either ExperimentalInline is
-// populated OR Role is non-empty. The mission ext picks the
-// dispatch path off the first non-empty selector.
+// A skill is a PDCA mission when either Inline is populated OR
+// Role is non-empty. The mission ext picks the dispatch path off
+// the first non-empty selector.
 type MissionPlanBlock struct {
-	// ExperimentalInline is the Phase-A escape hatch: the skill
-	// author hardcodes the waves directly in the manifest,
-	// bypassing the planner LLM. Removed at Phase H. Nil/empty
-	// when not used.
-	ExperimentalInline *MissionPlanInline `json:"experimental_inline,omitempty" yaml:"experimental_inline,omitempty"`
+	// Inline is the manifest-declared wave list: the skill author
+	// hardcodes the waves, bypassing the planner LLM. Used by
+	// fixtures and deterministic task skills. Nil/empty when not
+	// used. Previously called `experimental_inline`; renamed at
+	// Phase 6.0 once it became load-bearing for task skills.
+	Inline *MissionPlanInline `json:"inline,omitempty" yaml:"inline,omitempty"`
 
 	// Role names the planner sub-agent role declared in the
 	// skill's sub_agents block. When non-empty, mission ext drives

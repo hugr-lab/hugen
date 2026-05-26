@@ -140,9 +140,7 @@ func ParseHandoff(raw string) (Handoff, error) {
 // decodeHandoff parses the body bytes (YAML- or JSON-shaped) into a
 // Handoff value for the named kind. Tries JSON first (strict) and
 // falls back to a lenient YAML-ish decode that maps the canonical
-// keys we care about. The full YAML dependency is a Phase B
-// addition once we ship a planner; Phase A's experimental_inline
-// fixture emits JSON only.
+// keys we care about.
 func decodeHandoff(kind OutputContractKind, body string) (Handoff, error) {
 	if !kind.Known() {
 		return Handoff{}, &ParseError{Reason: fmt.Sprintf("unknown kind %q", kind)}

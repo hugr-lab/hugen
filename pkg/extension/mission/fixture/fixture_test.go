@@ -19,12 +19,12 @@ func TestManifestParses(t *testing.T) {
 	if m.Name != SkillName {
 		t.Errorf("Name = %q, want %q", m.Name, SkillName)
 	}
-	plan := m.Hugen.Mission.Plan.ExperimentalInline
+	plan := m.Hugen.Mission.Plan.Inline
 	if plan == nil {
-		t.Fatal("Hugen.Mission.Plan.ExperimentalInline is nil")
+		t.Fatal("Hugen.Mission.Plan.Inline is nil")
 	}
 	if len(plan.Waves) != 1 {
-		t.Fatalf("Plan.ExperimentalInline.Waves len = %d, want 1", len(plan.Waves))
+		t.Fatalf("Plan.Inline.Waves len = %d, want 1", len(plan.Waves))
 	}
 	w := plan.Waves[0]
 	if w.Label != "wave-1" {

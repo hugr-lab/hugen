@@ -20,10 +20,10 @@ import "encoding/json"
 var jsonUnmarshal = json.Unmarshal
 
 // Plan is the structured representation of a mission plan. The
-// canonical source is a planner LLM subagent (phase B+) that emits
-// a YAML/JSON fenced block conforming to output_contract.kind=plan;
-// for Phase A the same shape is hardcoded inside a fixture skill
-// manifest under mission.plan.experimental_inline.
+// canonical source is a planner LLM subagent that emits a YAML/JSON
+// fenced block conforming to output_contract.kind=plan; the same
+// shape can also be hardcoded inside a fixture or task skill
+// manifest under mission.plan.inline.
 //
 // Plan is intentionally small: NextWave is the one wave the executor
 // runs next, Roadmap is the planner's high-level intent for what's
@@ -105,9 +105,8 @@ type Plan struct {
 
 // Wave is one parallel batch of subagent spawns sharing a label.
 // The label is the human-readable wave identifier used in handoff
-// refs ("<subagent_name>@<wave_label>"); for Phase A's
-// experimental_inline shape the skill author picks the label
-// directly.
+// refs ("<subagent_name>@<wave_label>"); for the inline plan shape
+// the skill author picks the label directly.
 type Wave struct {
 	// Label is the unique-per-mission wave identifier. Required.
 	// Canonical form: kebab-case ("schema-discovery", "analysis").

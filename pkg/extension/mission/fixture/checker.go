@@ -22,7 +22,7 @@ const CheckerSkillName = "_mission_v4"
 // `control.role: checker` block + a `checker` sub_agent role.
 const CheckerManifestYAML = "---\n" +
 	"name: _mission_v4\n" +
-	"description: Phase C/D/E fixture — full PDCA mission with planner + checker + synthesizer. Deleted at Phase H end alongside the experimental_inline escape hatch.\n" +
+	"description: Fixture — full PDCA mission with planner + checker + synthesizer.\n" +
 	"license: Apache-2.0\n" +
 	"allowed-tools:\n" +
 	"  - provider: mission\n" +

@@ -16,11 +16,11 @@ import (
 // `mission.enabled:true` flag is NOT consulted; missions in
 // hugen are PDCA-shaped only.
 //
-// Either shape counts as "exists": ExperimentalInline waves (Phase
-// A escape hatch) or a non-empty Plan.Role (Phase B planner-driven
-// loop). A manifest declaring NEITHER section is in-progress and
-// surfaces as not-found until completed, so spawn_mission can't
-// kick off a mission with no executable plan.
+// Either shape counts as "exists": Inline waves (deterministic
+// pipeline — fixtures + task skills) or a non-empty Plan.Role
+// (LLM-driven planner loop). A manifest declaring NEITHER section
+// is in-progress and surfaces as not-found until completed, so
+// spawn_mission can't kick off a mission with no executable plan.
 func (e *Extension) MissionSkillExists(ctx context.Context, skill string) (bool, error) {
 	if skill == "" || e.catalog == nil {
 		return false, nil
@@ -32,7 +32,7 @@ func (e *Extension) MissionSkillExists(ctx context.Context, skill string) (bool,
 	if m == nil {
 		return false, nil
 	}
-	hasInline := m.Plan.ExperimentalInline != nil && len(m.Plan.ExperimentalInline.Waves) > 0
+	hasInline := m.Plan.Inline != nil && len(m.Plan.Inline.Waves) > 0
 	hasPlanner := m.Plan.Role != ""
 	if !hasInline && !hasPlanner {
 		return false, nil

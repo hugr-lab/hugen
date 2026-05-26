@@ -32,8 +32,8 @@ func TestPlannerManifestParses(t *testing.T) {
 	if plan.Approval.Iteration != "never" {
 		t.Errorf("Plan.Approval.Iteration = %q, want never", plan.Approval.Iteration)
 	}
-	if plan.ExperimentalInline != nil {
-		t.Errorf("Plan.ExperimentalInline = %+v, want nil (planner-driven)", plan.ExperimentalInline)
+	if plan.Inline != nil {
+		t.Errorf("Plan.Inline = %+v, want nil (planner-driven)", plan.Inline)
 	}
 	if m.Hugen.Mission.Synthesis.Role != "synthesizer" {
 		t.Errorf("Synthesis.Role = %q, want synthesizer", m.Hugen.Mission.Synthesis.Role)

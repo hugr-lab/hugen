@@ -1,19 +1,17 @@
-// Package fixture carries the Phase A smoke-test mission skill —
-// the manifest scenarios load as `_mission_v2` to exercise mission
+// Package fixture carries the smoke-test mission skill — the
+// manifest scenarios load as `_mission_v2` to exercise mission
 // ext end-to-end without an LLM planner in the loop.
 //
 // The fixture is a Go constant rather than an asset under
-// assets/system/ so it's deletable at Phase B end alongside the
-// `plan.experimental_inline` escape hatch. Production paths never
-// import this package; only unit tests under pkg/extension/mission
-// and the scenario harness reach in.
+// assets/system/ so production paths never import this package;
+// only unit tests under pkg/extension/mission and the scenario
+// harness reach in.
 //
 // Deliberately NOT under `internal/` even though the spec describes
 // it that way: the scenario harness lives outside `pkg/` and Go's
 // internal rule would block the import. Treat the package as
 // fixture-scope by convention — no production wiring should pull
-// it in. Phase B deletes the package wholesale alongside the
-// `plan.experimental_inline` escape hatch.
+// it in.
 package fixture
 
 import (
@@ -40,7 +38,7 @@ const SkillName = "_mission_v2"
 // both roles.
 const ManifestYAML = "---\n" +
 	"name: _mission_v2\n" +
-	"description: Phase A fixture — single-wave PDCA mission with optional synthesizer. Deleted at Phase B end alongside plan.experimental_inline.\n" +
+	"description: Fixture — single-wave PDCA mission with optional synthesizer.\n" +
 	"license: Apache-2.0\n" +
 	"allowed-tools:\n" +
 	"  - provider: mission\n" +
@@ -58,7 +56,7 @@ const ManifestYAML = "---\n" +
 	"    mission:\n" +
 	"      summary: \"Phase A smoke-test mission — runs one echo wave then synthesises.\"\n" +
 	"      plan:\n" +
-	"        experimental_inline:\n" +
+	"        inline:\n" +
 	"          waves:\n" +
 	"            - label: wave-1\n" +
 	"              subagents:\n" +
@@ -85,12 +83,10 @@ const ManifestYAML = "---\n" +
 	"\n" +
 	"# _mission_v2 fixture skill\n" +
 	"\n" +
-	"Phase A smoke-test mission. Drives one wave (a single `echo` worker) and\n" +
+	"Smoke-test mission. Drives one wave (a single `echo` worker) and\n" +
 	"an optional synthesizer that consumes the prior wave's handoff and\n" +
 	"emits the mission's final answer. The whole plan is hardcoded in\n" +
-	"the manifest's `mission.plan.experimental_inline` — there is no\n" +
-	"planner LLM. Phase B replaces this with a real planner role and the\n" +
-	"fixture is deleted.\n"
+	"the manifest's `mission.plan.inline` — there is no planner LLM.\n"
 
 // WriteTo writes the fixture as a SKILL.md file under
 // localSkillsRoot/<SkillName>/SKILL.md. The SkillStore's local-tier

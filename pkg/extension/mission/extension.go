@@ -29,11 +29,10 @@ import (
 // suppress per-worker terminal projection on the mission's
 // supervisor LLM.
 //
-// Phase A — only StateInitializer + ChildFrameObserver +
-// StatusReporter + the two tools are wired. The executor exists as
-// a callable primitive but no automatic dispatch path triggers it;
-// the integration scenario / a future phase wires the
-// `mission.plan.experimental_inline` → executor link.
+// The extension wires StateInitializer + ChildFrameObserver +
+// StatusReporter + the mission tools, plus the
+// `mission.plan.inline` → executor dispatch path for deterministic
+// pipeline missions.
 type Extension struct {
 	agentID string
 	logger  *slog.Logger

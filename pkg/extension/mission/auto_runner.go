@@ -51,7 +51,7 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 	if manifest == nil {
 		return fmt.Errorf("mission: RunMission: skill %q is not a PDCA mission", skill)
 	}
-	hasInline := manifest.Plan.ExperimentalInline != nil && len(manifest.Plan.ExperimentalInline.Waves) > 0
+	hasInline := manifest.Plan.Inline != nil && len(manifest.Plan.Inline.Waves) > 0
 	hasPlanner := manifest.Plan.Role != ""
 	// Phase I.19 — stamp the approval policy on MissionState so the
 	// validate_and_approve tool branches on the same predicate as
@@ -79,7 +79,7 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 		}
 	}
 	if !hasInline && !hasPlanner {
-		return fmt.Errorf("mission: RunMission: skill %q has no executable plan (need plan.experimental_inline or plan.role)", skill)
+		return fmt.Errorf("mission: RunMission: skill %q has no executable plan (need plan.inline or plan.role)", skill)
 	}
 	spawner, ok := mission.(extension.SessionSpawner)
 	if !ok {
@@ -87,8 +87,9 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 	}
 
 	// Dispatch by configured plan shape. The planner-driven loop
-	// wins when both selectors are set — the inline waves are
-	// Phase-A fixtures, the planner is the production path.
+	// wins when both selectors are set — inline waves are the
+	// deterministic-pipeline path (fixtures + task skills); the
+	// planner is the LLM-driven path.
 	if hasPlanner {
 		go e.driveMissionPlanner(mission, spawner, *manifest, skill, goal, inputs)
 		return nil
@@ -114,7 +115,7 @@ func (e *Extension) driveMission(mission extension.SessionState, spawner extensi
 	// pipeline; the mission still terminates with whatever recap
 	// the partial run can produce.
 	aborted := false
-	for _, waveDecl := range manifest.Plan.ExperimentalInline.Waves {
+	for _, waveDecl := range manifest.Plan.Inline.Waves {
 		status, _, err := executor.RunWave(ctx, mission, waveDecl, RunWaveOptions{})
 		e.emitWaveComplete(mission, waveDecl.Label, status, err)
 		if err != nil || status == WaveStatusFailed {
