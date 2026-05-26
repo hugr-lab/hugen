@@ -368,6 +368,37 @@ func TestParseRunArgs_Kwargs(t *testing.T) {
 		}
 	})
 
+	// Each of these would break argv parsing downstream — an empty
+	// key becomes "--" (POSIX end-of-options sentinel), "=" collapses
+	// key+value, leading "-" produces "---x", whitespace/metachars
+	// confuse argparse-style consumers.
+	badKeys := []string{"", "-leading-dash", "has=equals", "with space", "semi;colon", "1starts-digit"}
+	for _, k := range badKeys {
+		t.Run("bad-key/"+k, func(t *testing.T) {
+			req := buildScriptRequest(t, map[string]any{
+				"path":   "ok.py",
+				"kwargs": map[string]any{k: "v"},
+			})
+			r := runRequest{kind: "run_script"}
+			err := parseRunArgs(req, &r)
+			te, ok := err.(*toolError)
+			if !ok || te.Code != "arg_validation" {
+				t.Fatalf("expected arg_validation rejection for key %q, got %v", k, err)
+			}
+		})
+	}
+
+	t.Run("dash-in-key allowed", func(t *testing.T) {
+		req := buildScriptRequest(t, map[string]any{
+			"path":   "ok.py",
+			"kwargs": map[string]any{"my-flag": "v"},
+		})
+		r := runRequest{kind: "run_script"}
+		if err := parseRunArgs(req, &r); err != nil {
+			t.Fatalf("dash should be allowed mid-key: %v", err)
+		}
+	})
+
 	t.Run("absent kwargs leaves nil map", func(t *testing.T) {
 		req := buildScriptRequest(t, map[string]any{"path": "ok.py"})
 		r := runRequest{kind: "run_script"}

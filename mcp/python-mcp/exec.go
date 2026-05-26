@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -149,6 +150,9 @@ func parseRunArgs(req mcp.CallToolRequest, r *runRequest) error {
 		if rawKwargs, ok := args["kwargs"].(map[string]any); ok {
 			r.scriptKwarg = make(map[string]string, len(rawKwargs))
 			for k, v := range rawKwargs {
+				if !kwargKeyRe.MatchString(k) {
+					return &toolError{Code: "arg_validation", Msg: fmt.Sprintf("kwargs key %q must match [A-Za-z_][A-Za-z0-9_-]*", k)}
+				}
 				s, ok := v.(string)
 				if !ok {
 					return &toolError{Code: "arg_validation", Msg: fmt.Sprintf("kwargs.%s must be a string", k)}
@@ -335,10 +339,16 @@ func runPython(ctx context.Context, deps *execDeps, r runRequest, sessDir, sessV
 	return runResult{}, &toolError{Code: "io", Msg: err.Error()}
 }
 
-// flattenKwargs converts the kwargs map into a deterministic
-// --key value argv tail. Keys are sorted so the spawned command is
-// reproducible regardless of map iteration order — important for
-// cron tasks whose checker compares command shapes across fires.
+// kwargKeyRe rejects keys that would mangle argv when expanded into
+// `--<key>`: empty (`--` is POSIX end-of-options), leading `-`
+// (`---x`), `=` (collapses key+value into one token), or anything
+// outside identifier-ish chars. Mirrors argparse's allowed `dest`
+// shape with a `-` concession for `--my-flag` style.
+var kwargKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
+
+// flattenKwargs emits a sorted `--key value` argv tail. Sorting is
+// load-bearing: the cron-task checker compares command shapes across
+// fires, so map iteration order would create spurious diffs.
 func flattenKwargs(kw map[string]string) []string {
 	if len(kw) == 0 {
 		return nil
