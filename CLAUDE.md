@@ -75,6 +75,7 @@ Phase plan:
 | 5.2. Compactor — content-aware history summarisation (`pkg/extension/compactor`). TurnBoundaryHook capability; FrameObserver-maintained boundary index; hybrid trigger (turn-count + abs token budget); per-Kind dispatch with incremental SummaryBlocks + cap-driven collapse; pure-chat short-circuit (no SummaryBlock emitted when range carries no tool calls / inquiries); inquiry Q/A preserved verbatim in KeptVerbatim; KeptVerbatim FIFO cap with first-user-message pin; three-layer config resolver (operator YAML view → tier overlay → skill manifest overrides); StatusReporter projection; TUI inline marker rendering with payload-driven `ui_marker_enabled` flag; `/compactor status|reset|compact` slash commands; lossless fanout (blocking subscriber send + ctx escape + 30s warn). Live Gemma 4-26B dogfood pass + PR #23 review-fixes (console adapter removed; S1-S6 + B2 closed; B19-B25 deferred to η). Known gap: `s.history` live truncation lands in η. | shipped on `025-phase-5.2-compactor` (PR #23 review fixes 2026-05-21) |
 | B13 + B15 (mission-research-and-approval Step 1+2) — planner-signalled `requires_reapproval` flag replaces sha256 frame-hashing; mission research stage as runtime primitive (`mission.research:` block, `auto` predicate, ≤3 iter batched inquire); analyst SKILL migration; weak-model hardening (review fixes R1-R5 + S1-S10). | shipped (`f88d98a`, 2026-05-24, PR #25) |
 | B11 (mission-research-and-approval Step 4) — Structured acceptance criteria with stable `ac-N` identity. Eight sub-phases: α data model + state helpers (Seed/Stage/Commit/Discard/ApplyStatusOnly/ApplyWorkerSatisfies); β planner `ac_add` / `ac_update` schema + diff merge + auto-promote modal on any contract change; γ manifest `acceptance_criteria` iter-0 seed (Go template against `.Inputs`); δ checker `ac_update[]` by id + finish gate reads `state.AC`; ε worker `satisfies: ["ac-N"]` shorthand; ζ approval modal structured diff renderer (✓ / ▸ / + / ✗ icons + [EDITED]/[NEW]/[DROPPED] tags); η synthesis evidence trail + analyst SKILL prose. | shipped on `027-mission-research-approval-pr2` (PR pending 2026-05-24) |
+| §4.6 Approval modal v2 — Four-option approval modal (approve-with-tools / approve / reject / refine) replacing the legacy `y/n/r` single-key UX. Bundled on the B11 branch. α `InquiryResponsePayload.AutoApproveTools` protocol field; β `MissionState.AutoApproveTools` + reset-on-modal-open lifecycle + `mission:tool_approval_policy_set` audit frame; γ `extension.ToolApprovalPolicy` capability + mission `MaybeAutoApprove` walking parent chain + `mission:tool_approval_auto_granted` audit; δ TUI 4-row option list (j/k nav + 1-4 jump + a/A/n/r direct keys + y/d legacy aliases) + dedicated `submitApprovalChoice` / `submitApprovalRefine` helpers; ε harness `auto_approve_tools` YAML field + `approval_modal_v2_auto_approve` scenario. | shipped on `027-mission-research-approval-pr2` (dogfood pending 2026-05-26) |
 | 6. Cron + scheduler | open |
 | 7. Memory pipeline + LLM Wiki — cross-conversation distilled knowledge. Reads 4.2.3 notepad as input; session-scoped working memory is owned by 4.2.3. | open |
 | 8. Artifacts | open |
@@ -111,18 +112,21 @@ mission-PDCA work. Phase 5.2 root-as-chat (PR #21, `1c0e0a7`,
 Phase 5.x.skill-polish-1 (PR #19, `9be1fdd`, 2026-05-16) closed
 cancel-ux R-followups + Bucket-D clarify.
 
-- **§4.6 Approval modal v2** *(queued next, ~450 LOC)* — 4
-  options (`approve` / `approve with tools` / `reject` /
-  `refine`) + tool auto-approve. Required before Phase 6 cron
-  (scheduled missions cannot block on HITL).
+- **§4.6 Approval modal v2** *(shipped 2026-05-26, dogfood
+  pending)* — 4 options (`approve with tools` / `approve` /
+  `reject` / `refine`) + tool auto-approve. Bundled on the
+  same B11 branch (`027-mission-research-approval-pr2`). Four
+  commits α-δ + scenario harness wiring; live scenario added
+  to `runs.yaml`. Required before Phase 6 cron (scheduled
+  missions cannot block on HITL).
 - **B12 — mission visibility surface (TUI)** *(queued)* —
   approval-modal AC diff already in place via ζ; status bar
   tool count + persistent mission status panel still pending.
 - **5.3.policy-ux** *(queued)* — HITL "always allow / always
   deny" keybinds + remote admin policies.
-- **Phase 6 cron + scheduler** *(queued after §4.6)* — first
-  periodic / wake-up primitive. Depends on modal-v2's
-  auto-approve-tools.
+- **Phase 6 cron + scheduler** *(queued after §4.6 dogfood)* —
+  first periodic / wake-up primitive. Consumes
+  `MissionState.AutoApproveTools` via spawn-time pre-stamp.
 
 Phase plan beyond 5.2: 6 cron → 7 memory pipeline → 8 artifacts
 → 9 A2A → 10 workspaces. See `design/004-runtime-post-phase-i/

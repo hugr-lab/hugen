@@ -131,6 +131,13 @@ runs:
       - cancel_and_respawn
       - async_mission_completion
       - approval_gate_blocks_mutation
+      # Phase 5.x §4.6 — four-option approval modal. The
+      # "approve with tools" path stamps MissionState.AutoApprove
+      # Tools=true; subsequent requires_approval tool calls must
+      # auto-grant without re-opening a modal. Companion to
+      # approval_gate_blocks_mutation (which exercises the deny
+      # branch on the same prompt shape).
+      - approval_modal_v2_auto_approve
       - clarification_resolves_ambiguity
       - multi_root_independence
       # Phase 5.1c.async-root — root defaults to wait="async" +

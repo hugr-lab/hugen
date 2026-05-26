@@ -142,3 +142,36 @@ func TestBuildInquiryResponseCopiesRouting(t *testing.T) {
 		t.Fatalf("RespondedAt not stamped")
 	}
 }
+
+// TestBuildInquiryResponseCarriesAutoApproveTools verifies the
+// §4.6 "approve with tools" flag round-trips through the harness
+// response builder. Without this wiring, scenarios couldn't drive
+// the new option from YAML — defeating the whole point of having
+// auto-approve scenarios in the harness suite.
+func TestBuildInquiryResponseCarriesAutoApproveTools(t *testing.T) {
+	yes := true
+	author := protocol.ParticipantInfo{ID: "harness-user", Kind: protocol.ParticipantUser}
+	req := &protocol.InquiryRequest{
+		Payload: protocol.InquiryRequestPayload{
+			RequestID:       "rq-101",
+			CallerSessionID: "mission-7",
+			Type:            "approval",
+		},
+	}
+	resp := buildInquiryResponse("root-1", author, req, InquiryAnswer{
+		Approved:         &yes,
+		AutoApproveTools: true,
+	})
+	if !resp.Payload.AutoApproveTools {
+		t.Errorf("AutoApproveTools should propagate from InquiryAnswer; got false")
+	}
+	// And the omit path — false stays false (omitempty drops it on
+	// the wire, but the struct field still reads false).
+	resp2 := buildInquiryResponse("root-1", author, req, InquiryAnswer{
+		Approved: &yes,
+		// AutoApproveTools omitted — zero value
+	})
+	if resp2.Payload.AutoApproveTools {
+		t.Errorf("AutoApproveTools should be false when InquiryAnswer omits it; got true")
+	}
+}
