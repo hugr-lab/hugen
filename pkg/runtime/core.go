@@ -13,6 +13,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	schedstore "github.com/hugr-lab/hugen/pkg/scheduler/store"
 	"github.com/hugr-lab/hugen/pkg/scheduler/runner"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/manager"
@@ -51,6 +52,11 @@ type Core struct {
 	LocalEngine  *hugr.Service
 	LocalQuerier types.Querier
 	Store        session.RuntimeStore
+
+	// Phase 6.1b (scheduler storage). Backs TaskManager extension
+	// + task_log_reap_stuck system runner. Constructed in
+	// phaseStorage alongside Store.
+	TaskStore schedstore.TaskStore
 
 	// Phase 5 (models).
 	Models *model.ModelRouter

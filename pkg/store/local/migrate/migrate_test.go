@@ -75,6 +75,71 @@ func TestEnsure_MatchingConfigOK(t *testing.T) {
 	require.NoError(t, migrate.Ensure(cfg))
 }
 
+// TestEnsure_v007_UpgradePath provisions a DB pinned at 0.0.6
+// (the prior schema version) then re-runs Ensure to upgrade it to
+// 0.0.7. Verifies that the migration script lands the new tasks +
+// task_log tables on an existing deployment — not just on a fresh
+// provision. Critical for production where users' DBs were created
+// before the Phase 6 schema landed.
+func TestEnsure_v007_UpgradePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	baseCfg := migrate.Config{
+		Path: path, VectorSize: 384, EmbedderModel: "gemma-embedding",
+		Seed: &migrate.SeedData{
+			AgentType: migrate.SeedAgentType{ID: "hugr-data", Name: "X", Config: map[string]any{}},
+			Agent:     migrate.SeedAgent{ID: "agt_ag01", ShortID: "ag01", Name: "x"},
+		},
+	}
+
+	// Step 1: provision at 0.0.6.
+	pin := baseCfg
+	pin.TargetVersion = "0.0.6"
+	require.NoError(t, migrate.Ensure(pin))
+
+	conn, err := sql.Open("duckdb", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// schema.tmpl.sql always ships the latest table set, so a
+	// provision pinned to 0.0.6 still creates tasks + task_log
+	// here — only the version row tracks "0.0.6". To exercise the
+	// real upgrade path we DROP the 0.0.7 tables so the migration
+	// script has to recreate them on the bump below. CREATE TABLE
+	// IF NOT EXISTS in the migration script keeps it idempotent
+	// for users on already-upgraded DBs.
+	for _, table := range []string{"task_log", "tasks"} {
+		_, err := conn.Exec(`DROP TABLE IF EXISTS ` + table)
+		require.NoError(t, err)
+	}
+	for _, table := range []string{"tasks", "task_log"} {
+		var n int
+		require.NoError(t, conn.QueryRow(
+			`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`, table,
+		).Scan(&n))
+		require.Equalf(t, 0, n, "drop should remove %s", table)
+	}
+
+	// Step 2: upgrade to 0.0.7 (default target).
+	bump := baseCfg
+	bump.Seed = nil // seed already present
+	require.NoError(t, migrate.Ensure(bump))
+
+	// Verify version row + tables.
+	var ver string
+	require.NoError(t, conn.QueryRow(
+		`SELECT version FROM version WHERE name = 'schema'`,
+	).Scan(&ver))
+	assert.Equal(t, "0.0.7", ver)
+
+	for _, table := range []string{"tasks", "task_log"} {
+		var n int
+		require.NoError(t, conn.QueryRow(
+			`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`, table,
+		).Scan(&n))
+		assert.Equalf(t, 1, n, "table %s must exist after 0.0.7 upgrade", table)
+	}
+}
+
 // TestEnsure_v002_AdditiveColumns verifies the spec-006 (schema 0.0.2)
 // additive columns + indices land correctly on a fresh provision.
 func TestEnsure_v002_AdditiveColumns(t *testing.T) {
@@ -145,7 +210,7 @@ func TestEnsure_v002_AdditiveColumns(t *testing.T) {
 	require.NoError(t, conn.QueryRow(
 		`SELECT version FROM version WHERE name = 'schema'`,
 	).Scan(&ver))
-	assert.Equal(t, "0.0.6", ver)
+	assert.Equal(t, "0.0.7", ver)
 
 	// spec 008 / migration 0.0.3 — artifacts + artifact_grants tables
 	// land additively. Both must exist on a fresh DuckDB provision.
@@ -220,6 +285,28 @@ func TestEnsure_v002_AdditiveColumns(t *testing.T) {
          WHERE table_name = 'session_notes' AND column_name = 'embedding'`,
 	).Scan(&notepadEmbed))
 	assert.Equal(t, 1, notepadEmbed, "session_notes.embedding should exist when VectorSize > 0")
+
+	// Phase 6 / migration 0.0.7 — tasks + task_log tables land
+	// additively. Both must exist on a fresh DuckDB provision.
+	for _, table := range []string{"tasks", "task_log"} {
+		t.Run("phase6/"+table, func(t *testing.T) {
+			var n int
+			err := conn.QueryRow(
+				`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`,
+				table,
+			).Scan(&n)
+			require.NoError(t, err)
+			assert.Equalf(t, 1, n, "expected table %s to exist", table)
+		})
+	}
+	// Project rule: indexes only on Postgres. DuckDB must have zero
+	// secondary indexes on tasks / task_log.
+	var phase6IdxCount int
+	require.NoError(t, conn.QueryRow(
+		`SELECT count(*) FROM duckdb_indexes
+         WHERE table_name IN ('tasks','task_log')`,
+	).Scan(&phase6IdxCount))
+	assert.Equal(t, 0, phase6IdxCount, "DuckDB must have zero indexes on tasks / task_log")
 }
 
 // TestEnsure_v002_NoVectorColumnWhenDisabled — when VectorSize == 0

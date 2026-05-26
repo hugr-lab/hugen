@@ -41,12 +41,19 @@ func phaseRunner(ctx context.Context, core *Core) error {
 		return fmt.Errorf("register subagents_reap_orphan_parent: %w", err)
 	}
 
-	if err := svc.Register(ctx,
-		"task_runs_reap_stuck",
-		runner.Every(time.Hour),
-		schedext.ReapStuckTaskRuns(),
-	); err != nil {
-		return fmt.Errorf("register task_runs_reap_stuck: %w", err)
+	// Phase 6.1b — `task_log_reap_stuck` (renamed from the 6.1a
+	// stub `task_runs_reap_stuck`). The body now drives against
+	// the real `task_log` table and INSERTs `cancelled` rows
+	// append-only when a fire's `started` row sits without a
+	// terminal match past the cutoff.
+	if core.TaskStore != nil {
+		if err := svc.Register(ctx,
+			"task_log_reap_stuck",
+			runner.Every(time.Hour),
+			schedext.ReapStuckTaskRuns(core.Agent.ID(), core.TaskStore, core.Logger),
+		); err != nil {
+			return fmt.Errorf("register task_log_reap_stuck: %w", err)
+		}
 	}
 
 	if err := svc.Start(ctx); err != nil {

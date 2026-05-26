@@ -12,6 +12,7 @@ import (
 	missionext "github.com/hugr-lab/hugen/pkg/extension/mission"
 	notepadext "github.com/hugr-lab/hugen/pkg/extension/notepad"
 	planext "github.com/hugr-lab/hugen/pkg/extension/plan"
+	schedext "github.com/hugr-lab/hugen/pkg/extension/scheduler"
 	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
 	stuckdetectorext "github.com/hugr-lab/hugen/pkg/extension/stuckdetector"
 	wbext "github.com/hugr-lab/hugen/pkg/extension/whiteboard"
@@ -92,6 +93,12 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		// extensions; ordering is otherwise free.
 		stuckdetectorext.NewExtension(core.Logger),
 		mcpext.NewExtension(core.Config.ToolProviders(), core.Logger),
+		// scheduler extension (Phase 6.1b): exposes task:create +
+		// task:* stubs. Full fire dispatch / Runner registration
+		// lands in 6.1c. Constructed even when TaskStore is nil so
+		// the tool surface stays advertised (Call paths return
+		// not_yet_implemented or store_error in that case).
+		schedext.NewExtension(core.TaskStore, core.Skills, core.Agent.ID(), core.Logger),
 		// liveview lands last so its FrameObserver / ChildFrameObserver
 		// see frames AFTER siblings have processed them via their own
 		// Recovery / state mutations. It contributes no tool surface;
