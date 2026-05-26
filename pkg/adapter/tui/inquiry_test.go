@@ -37,14 +37,22 @@ func clarificationInquiry() *protocol.InquiryRequest {
 
 func TestRenderInquiryModal_ApprovalContainsHintAndQuestion(t *testing.T) {
 	state := newInquiryState(approvalInquiry())
-	out := renderInquiryModal(state, 60)
+	out := renderInquiryModal(state, 80)
+	// Phase 5.x §4.6 — four-option approval modal. The renderer
+	// must surface all four labels + the keystroke shortcuts so
+	// the operator sees every available choice without scrolling.
 	for _, want := range []string{
 		"Approval required",
 		"worker-7", // session id truncated by shortID() — 8 chars
 		"Run bash.shell",
+		"approve with tools",
 		"approve",
-		"deny",
-		"reply with reason",
+		"reject",
+		"refine",
+		"[a]",
+		"[A]",
+		"[n]",
+		"[r]",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("modal missing %q in:\n%s", want, out)
@@ -137,12 +145,16 @@ func TestModel_InquiryReplyMode_RKeyEntersReplyMode(t *testing.T) {
 	if m.currentTab().pendingInquiry == nil || !m.currentTab().pendingInquiry.replyMode {
 		t.Fatalf("r should enter replyMode; got %+v", m.currentTab().pendingInquiry)
 	}
-	if m.currentTab().pendingInquiry.replyVerb != "approve" {
-		t.Errorf("replyVerb default = %q; want approve", m.currentTab().pendingInquiry.replyVerb)
+	// Phase 5.x §4.6 — `r` is the refine path now, not generic
+	// "reply with reason". The wire shape on Enter is
+	// Approved=nil + Response=feedback, NOT Approved=*false +
+	// Reason=feedback (which would mean reject with reason).
+	if m.currentTab().pendingInquiry.replyVerb != "refine" {
+		t.Errorf("replyVerb = %q; want refine", m.currentTab().pendingInquiry.replyVerb)
 	}
 	view := m.View()
-	if !strings.Contains(view, "type reason") {
-		t.Errorf("reply-mode hint missing in:\n%s", view)
+	if !strings.Contains(view, "type feedback for the planner") {
+		t.Errorf("refine reply-mode hint missing in:\n%s", view)
 	}
 }
 
