@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -309,6 +310,23 @@ func newInquiryRequestID() string {
 // with reason carrying the timeout notice. On ctx cancel: err
 // propagates so the dispatcher surfaces an io error.
 func (s *Session) requestApproval(ctx context.Context, toolName, argsSummary string) (bool, string, error) {
+	// Phase 5.x §4.6.5 — give any registered ToolApprovalPolicy
+	// extension a chance to grant approval implicitly (e.g. the
+	// mission ext's "approve with tools" plan-approval option).
+	// First implementation returning ok=true wins; remaining
+	// extensions are skipped. ok=false (or no policy registered)
+	// falls through to the normal user-facing modal path below.
+	if s.deps != nil {
+		for _, ext := range s.deps.Extensions {
+			policy, ok := ext.(extension.ToolApprovalPolicy)
+			if !ok {
+				continue
+			}
+			if _, granted := policy.MaybeAutoApprove(ctx, s, toolName); granted {
+				return true, "", nil
+			}
+		}
+	}
 	question := ""
 	if s.deps != nil && s.deps.Prompts != nil {
 		question = strings.TrimRight(s.deps.Prompts.MustRender(
