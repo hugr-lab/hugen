@@ -5,16 +5,15 @@ description: >
   aggregation, with optional filter. One number out, suitable as
   a quick health metric or a scheduled diagnostic.
 license: Apache-2.0
-allowed-tools:
-  - provider: hugr-main
-    tools:
-      - discovery-*
-      - schema-*
-      - data-validate_graphql_query
-      - data-inline_graphql_result
+# Tools are inherited from the `hugr-data` closure
+# (`requires_skills`) — discovery / schema / validate / inline
+# GraphQL all come from there. Keeping this list empty avoids
+# duplicating the grant list and stays in lockstep with hugr-data
+# when the platform adds new discovery / data tools.
+allowed-tools: []
 metadata:
   hugen:
-    requires_skills: []
+    requires_skills: [hugr-data]
     autoload: false
     tier_compatibility: [worker]
 
