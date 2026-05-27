@@ -10,7 +10,7 @@ import (
 )
 
 // TestCreate_RegistersWithRunner asserts the load-bearing 6.1c
-// invariant: `task:create` not only persists the row + initial
+// invariant: `schedule:create` not only persists the row + initial
 // planned log entry, but also registers a runner fn so the task
 // fires without an InitState bootstrap. (6.1b stopped at the
 // persistence layer; 6.1c closes the loop.)

@@ -1,7 +1,7 @@
 // Package scheduler hosts the Phase 6 TaskManager per-session
 // extension + the always-on `task_log_reap_stuck` system runner
 // (see reap.go). The extension's 6.1b shape is intentionally narrow:
-// it exposes the `task:create` tool so operators / the future
+// it exposes the `schedule:create` tool so operators / the future
 // `_task_builder` mission can persist task rows + the initial
 // `planned` row into hub.db. Fire dispatch, drift detection, and
 // the pause / resume / cancel / list surface land in 6.1c — those
@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,23 +28,17 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
-const providerName = "task"
+const providerName = "schedule"
 
 // Permission objects gated by Tier-1 operator config + Tier-2 Hugr
 // role rules + Tier-3 per-user policies. The extension exposes the
 // full surface; per-tier narrowing is the manifest's job.
 const (
-	PermCreate = "hugen:task:create"
-	PermList   = "hugen:task:list"
-	PermPause  = "hugen:task:pause"
-	PermResume = "hugen:task:resume"
-	PermCancel = "hugen:task:cancel"
-	// PermRunRecipe is the umbrella permission object every
-	// synthetic `task:<recipe-name>` tool advertises. Per-recipe
-	// policy refinement lands later (5.3.policy-ux); today the
-	// allowed-tools allow-set on the loaded category skill is the
-	// gate. Phase 6.1d.
-	PermRunRecipe = "hugen:task:run_recipe"
+	PermCreate = "hugen:schedule:create"
+	PermList   = "hugen:schedule:list"
+	PermPause  = "hugen:schedule:pause"
+	PermResume = "hugen:schedule:resume"
+	PermCancel = "hugen:schedule:cancel"
 )
 
 // Extension is the per-session TaskManager. Constructed once at
@@ -94,7 +87,7 @@ type Extension struct {
 }
 
 // NewExtension constructs the TaskManager extension. The
-// SkillManager pointer is used by `task:create` to validate skill
+// SkillManager pointer is used by `schedule:create` to validate skill
 // references + read `task.inputs_schema` for Phase 6.1c JSON-Schema
 // validation; today the 6.1b path only confirms the skill exists.
 func NewExtension(st schedstore.TaskStore, skills *skill.SkillManager, agentID string, logger *slog.Logger) *Extension {
@@ -425,7 +418,7 @@ const createSchema = `{
   "required": ["kind", "schedule_kind", "schedule_spec", "name"]
 }`
 
-// listSchema documents `task:list` — no required fields; optional
+// listSchema documents `schedule:list` — no required fields; optional
 // filters narrow by status / cap result count.
 const listSchema = `{
   "type": "object",
@@ -439,22 +432,20 @@ const listSchema = `{
 const taskIDSchema = `{
   "type": "object",
   "properties": {
-    "task_id": {"type": "string", "description": "Source task id from a prior task:create / task:list response."},
+    "task_id": {"type": "string", "description": "Source task id from a prior schedule:create / schedule:list response."},
     "reason":  {"type": "string", "description": "Pause-reason category (pause only). Defaults to 'user'."}
   },
   "required": ["task_id"]
 }`
 
-// List implements [tool.ToolProvider]. Returns the static
-// scheduler surface (create / list / pause / resume / cancel) PLUS
-// one synthetic `task:<recipe-name>` entry per task-eligible skill
-// the SkillManager knows about — generated from each recipe
-// manifest's `task` block. The synthetic tools are universal:
-// FilterTools narrows them per session against the loaded
-// category-skills' `allowed-tools`, so root sees only what its
-// loaded categories admit. Phase 6.1d.
-func (e *Extension) List(ctx context.Context) ([]tool.Tool, error) {
-	out := []tool.Tool{
+// List implements [tool.ToolProvider]. Returns the scheduler-tier
+// management surface: create / list / pause / resume / cancel.
+// Recipe execution is a sibling concern owned by the task
+// extension (`pkg/extension/task`) — that ext emits one synthetic
+// `task:<recipe-name>` tool per task-eligible skill and dispatches
+// the spawn. Phase 6.1d.
+func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
+	return []tool.Tool{
 		{
 			Name:             providerName + ":create",
 			Description:      "Create a scheduled task. Persists a `tasks` row + the initial `task_log` planned row atomically. Phase 6.1b — fire dispatch lands in 6.1c; rows created here remain visible via GraphQL but are not yet executed.",
@@ -471,7 +462,7 @@ func (e *Extension) List(ctx context.Context) ([]tool.Tool, error) {
 		},
 		{
 			Name:             providerName + ":pause",
-			Description:      "Pause a task (status='paused'). Future fires skip until task:resume; current in-flight fire (if any) is allowed to finish.",
+			Description:      "Pause a task (status='paused'). Future fires skip until schedule:resume; current in-flight fire (if any) is allowed to finish.",
 			Provider:         providerName,
 			PermissionObject: PermPause,
 			ArgSchema:        json.RawMessage(taskIDSchema),
@@ -490,69 +481,7 @@ func (e *Extension) List(ctx context.Context) ([]tool.Tool, error) {
 			PermissionObject: PermCancel,
 			ArgSchema:        json.RawMessage(taskIDSchema),
 		},
-	}
-	if e.skills != nil {
-		synth, err := syntheticRecipeTools(ctx, e.skills)
-		if err != nil {
-			// Synthesis failures are non-fatal — log + skip; the
-			// static surface above still works and FilterTools never
-			// gets to see the missing entries.
-			e.logger.Warn("scheduler: synthetic tool emit failed", "err", err)
-		} else {
-			out = append(out, synth...)
-		}
-	}
-	return out, nil
-}
-
-// syntheticRecipeTools walks the SkillManager catalogue and emits
-// one tool entry per task-eligible skill. The tool name is
-// `task:<skill-name>`; description comes from `task.goal_summary`
-// (falling back to the manifest's top-level description);
-// parameters come straight from `task.inputs_schema` (with a
-// minimal default when absent so a model still sees a valid schema
-// shape). Phase 6.1d.
-func syntheticRecipeTools(ctx context.Context, mgr *skill.SkillManager) ([]tool.Tool, error) {
-	if mgr == nil {
-		return nil, nil
-	}
-	all, err := mgr.List(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list skills: %w", err)
-	}
-	out := make([]tool.Tool, 0, len(all))
-	for _, sk := range all {
-		tb := sk.Manifest.Hugen.Task
-		if !tb.Eligible {
-			continue
-		}
-		desc := strings.TrimSpace(tb.GoalSummary)
-		if desc == "" {
-			desc = strings.TrimSpace(sk.Manifest.Description)
-		}
-		var argSchema json.RawMessage
-		if len(tb.InputsSchema) > 0 {
-			raw, mErr := json.Marshal(tb.InputsSchema)
-			if mErr != nil {
-				return nil, fmt.Errorf("recipe %q inputs_schema marshal: %w", sk.Manifest.Name, mErr)
-			}
-			argSchema = raw
-		} else {
-			argSchema = json.RawMessage(`{"type":"object","properties":{},"additionalProperties":true}`)
-		}
-		out = append(out, tool.Tool{
-			Name:        providerName + ":" + sk.Manifest.Name,
-			Description: desc,
-			Provider:    providerName,
-			// Phase 6.1d — synthetic recipe tools share the umbrella
-			// permission object so per-recipe policy can sit at the
-			// scheduler tier; per-recipe policy refinement lands
-			// later when policy-ux grows recipe-aware predicates.
-			PermissionObject: PermRunRecipe,
-			ArgSchema:        argSchema,
-		})
-	}
-	return out, nil
+	}, nil
 }
 
 // Call implements [tool.ToolProvider].
@@ -588,7 +517,7 @@ func stripProviderPrefix(name string) string {
 	return name
 }
 
-// createInput is the shape `task:create` accepts. Field order matches
+// createInput is the shape `schedule:create` accepts. Field order matches
 // the JSON Schema declared in createSchema above. Optional fields are
 // omitted via pointer or zero-value sentinels.
 type createInput struct {
@@ -666,7 +595,7 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 
 	// Owner = ROOT of the caller's tree so fire dispatch can spawn
 	// subagents predictably from a long-lived root regardless of
-	// who actually invoked task:create (could be a worker inside a
+	// who actually invoked schedule:create (could be a worker inside a
 	// mission). Walking up here is cheap (depth is typically <=3)
 	// and keeps the cron subagent depth invariant at root.depth+1.
 	owner := rootOf(state)
@@ -716,7 +645,7 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 	// surface success.
 	if e.runtimeBound() {
 		if err := e.registerTask(ctx, row); err != nil {
-			e.logger.Warn("scheduler: task:create register",
+			e.logger.Warn("scheduler: schedule:create register",
 				"task_id", taskID, "err", err)
 		}
 	}
@@ -728,12 +657,12 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 	}
 	body, err := json.Marshal(out)
 	if err != nil {
-		return nil, fmt.Errorf("task:create: marshal response: %w", err)
+		return nil, fmt.Errorf("schedule:create: marshal response: %w", err)
 	}
 	return body, nil
 }
 
-// listInput / listOutput shape the `task:list` surface.
+// listInput / listOutput shape the `schedule:list` surface.
 type listInput struct {
 	Status string `json:"status,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
@@ -769,7 +698,7 @@ func (e *Extension) callList(ctx context.Context, args json.RawMessage) (json.Ra
 			return toolErr("invalid_args", fmt.Sprintf("decode: %v", err))
 		}
 	}
-	// Owner = root of caller's tree, matching task:create + /tasks.
+	// Owner = root of caller's tree, matching schedule:create + /tasks.
 	owner := rootOf(state)
 	rows, err := e.store.ListTasksBySession(ctx, owner.SessionID(), schedstore.ListTasksOpts{
 		Status: in.Status,
@@ -797,7 +726,7 @@ func (e *Extension) callList(ctx context.Context, args json.RawMessage) (json.Ra
 	}
 	body, err := json.Marshal(out)
 	if err != nil {
-		return nil, fmt.Errorf("task:list: marshal: %w", err)
+		return nil, fmt.Errorf("schedule:list: marshal: %w", err)
 	}
 	return body, nil
 }
@@ -907,7 +836,7 @@ func (e *Extension) resolveOwnedTask(ctx context.Context, args json.RawMessage) 
 		resp, err2 := toolErr("not_found", fmt.Sprintf("task %q: %v", in.TaskID, err))
 		return in, row, resp, err2
 	}
-	// Owner = root of caller's tree, matching task:create + /tasks.
+	// Owner = root of caller's tree, matching schedule:create + /tasks.
 	if row.OwnerSessionID != rootOf(state).SessionID() {
 		resp, err := toolErr("forbidden", "task is not owned by this session")
 		return in, row, resp, err
@@ -939,7 +868,7 @@ func toolErr(code, msg string) (json.RawMessage, error) {
 // and let the runtime do the arithmetic — while still letting an
 // operator nail a specific UTC moment when needed (e.g. a recurring
 // task that must align to the top of the hour regardless of when
-// task:create runs).
+// schedule:create runs).
 //
 // Returns an error formatted for direct surfacing as the tool's
 // invalid_args message body.

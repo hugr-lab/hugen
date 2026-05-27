@@ -30,11 +30,13 @@ allowed-tools:
       - read
       - search
       - show
-  # Phase 6.1c — scheduled tasks. Root owns the full task surface
-  # because cron tasks belong to the user-facing conversation; they
-  # spawn cron-fire subagents under this root when they fire, and
-  # the SubagentResult lands here in chat history.
-  - provider: task
+  # Phase 6.1c — scheduled tasks. Root owns the schedule management
+  # surface because scheduled fires belong to the user-facing
+  # conversation; they spawn cron-fire subagents under this root
+  # when they fire, and the SubagentResult lands here in chat
+  # history. Recipe execution itself flows through the `task` ext
+  # (synthetic `task:<recipe>` tools admitted by category skills).
+  - provider: schedule
     tools:
       - create
       - list
@@ -93,7 +95,7 @@ manual references but does not detail.
   diagnostic value).
 - `notepad:append` / `read` / `search` / `show` — session-
   scoped working memory.
-- `task:create` / `list` / `pause` / `resume` / `cancel` —
+- `schedule:create` / `list` / `pause` / `resume` / `cancel` —
   scheduled tasks. `kind="wake"` synthesises a UserMessage into
   THIS root at fire time (a reminder / nudge). `kind="spawn"`
   spawns a cron subagent under this root against the named
@@ -241,7 +243,7 @@ recipe runs.
 User asked for a recipe to run on a schedule. Use the scheduler:
 
 ```
-task:create(
+schedule:create(
   kind="spawn",
   skill_ref="<recipe-name>",
   schedule_kind=..., schedule_spec=...,
@@ -252,14 +254,14 @@ task:create(
 `skill_ref` MUST be from `## Available tasks`. Unlike Path A, the
 scheduled fire has no live user — there is no `input-collector`. If
 the recipe needs values you don't have, **ask the user for them
-before calling `task:create`**, then pass the complete map.
+before calling `schedule:create`**, then pass the complete map.
 
 ### Path C — wake-only nudge (no recipe)
 
 User wants a reminder / ping, no recipe involved:
 
 ```
-task:create(
+schedule:create(
   kind="wake",
   wake_message="<literal text>",
   schedule_kind=..., schedule_spec=...
@@ -322,7 +324,7 @@ for "do this N times", `{"kind":"until","spec":"<RFC3339>"}` for
 
 ### Acknowledgement
 
-After successful `task:create`, emit a short user-visible
+After successful `schedule:create`, emit a short user-visible
 acknowledgement naming the schedule (≤ 1 sentence, match the
 user's language). After Path A's `spawn_mission`, the regular
 async-result projection handles the user-facing reply when the

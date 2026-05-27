@@ -100,8 +100,8 @@ func TestMaybeAutoApprove_OnCronSession_AllowedTool(t *testing.T) {
 	if !ok {
 		t.Fatalf("frame[0] type=%T, want *ExtensionFrame", frames[0])
 	}
-	if ef.Payload.Extension != "task" {
-		t.Errorf("frame extension = %q, want task", ef.Payload.Extension)
+	if ef.Payload.Extension != "schedule" {
+		t.Errorf("frame extension = %q, want schedule", ef.Payload.Extension)
 	}
 	if ef.Payload.Op != "tool_auto_granted_by_task" {
 		t.Errorf("frame op = %q", ef.Payload.Op)

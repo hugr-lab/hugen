@@ -4,15 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
-	"sort"
-	"strings"
 	"sync"
 	"text/template"
 
 	"github.com/hugr-lab/hugen/assets"
 	"github.com/hugr-lab/hugen/pkg/extension"
 	tplpkg "github.com/hugr-lab/hugen/pkg/runtime/template"
-	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // cronSystemPromptPath is the embedded-FS path for the cron fire
@@ -24,136 +21,33 @@ import (
 // Renderer's text/template namespace doesn't expose.
 const cronSystemPromptPath = "prompts/task/cron_system.tmpl"
 
-// AdvertiseSystemPrompt implements [extension.Advertiser]. Two
-// mutually exclusive surfaces share this hook:
-//
-//   - Root sessions (depth 0) get the `## Available tasks` catalog
-//     listing every skill flagged `metadata.hugen.task.eligible:
-//     true`. The root reads this to discover which recipes it can
-//     run ad-hoc (via `_run_task` mission) or schedule (via
-//     `task:create`). Mirrors mission ext's "Available missions"
-//     pattern (pkg/extension/mission/dispatcher.go). Phase 6.1d.
-//   - Cron-fire sessions get the bundled cron-contract block. Phase
-//     6 §1.2.4 / §3.5.
-//
-// Non-root sessions without a FireContext get the empty string
-// (skipped by the runtime's concatenator).
+// AdvertiseSystemPrompt implements [extension.Advertiser]. Renders
+// the cron-contract block on sessions firing under a schedule (the
+// FireContext stamp is present). Non-fire sessions get the empty
+// string; recipe discovery is the task ext's responsibility — task-
+// eligible recipes surface as synthetic `task:<recipe>` tools, not
+// prose blocks.
 //
 // Idempotent: the cron-contract template is parsed once and cached
-// on first render; the tasks block re-enumerates the skill manager
-// each call so freshly published task-eligible skills surface
-// without a session restart.
-func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.SessionState) string {
-	// FireContext wins as the most specific signal: a session that
-	// carries one is a cron fire by construction and gets the
-	// contract block regardless of nominal depth. Production cron
-	// fires sit at depth > 0 (subagent of owner root); tests stamp
-	// the same key on a fake root and expect contract rendering.
-	if fc, ok := fireContextFromState(state); ok && fc != nil {
-		tmpl, err := e.cronPromptTemplate()
-		if err != nil {
-			e.logger.Warn("scheduler: cron prompt parse",
-				"session", state.SessionID(), "err", err)
-			return ""
-		}
-		rendered, err := tplpkg.RenderInto(tmpl, tplpkg.NewFireRenderContext(fc))
-		if err != nil {
-			e.logger.Warn("scheduler: cron prompt render",
-				"session", state.SessionID(), "task_id", fc.TaskID, "err", err)
-			return ""
-		}
-		return rendered
-	}
-	if state != nil && state.Depth() == 0 {
-		return e.renderAvailableTasks(ctx, state)
-	}
-	return ""
-}
-
-// renderAvailableTasks returns the `## Available tasks` block. Empty
-// when the skill manager carries no task-eligible skills (the
-// catalogue is opt-in — a fresh agent without recipes contributes
-// nothing).
-func (e *Extension) renderAvailableTasks(ctx context.Context, state extension.SessionState) string {
-	if e.skills == nil {
+// on first render.
+func (e *Extension) AdvertiseSystemPrompt(_ context.Context, state extension.SessionState) string {
+	fc, ok := fireContextFromState(state)
+	if !ok || fc == nil {
 		return ""
 	}
-	all, err := e.skills.List(ctx)
+	tmpl, err := e.cronPromptTemplate()
 	if err != nil {
-		e.logger.Warn("scheduler: list skills for tasks catalogue",
+		e.logger.Warn("scheduler: cron prompt parse",
 			"session", state.SessionID(), "err", err)
 		return ""
 	}
-	entries := taskEligibleEntries(all)
-	if len(entries) == 0 {
+	rendered, err := tplpkg.RenderInto(tmpl, tplpkg.NewFireRenderContext(fc))
+	if err != nil {
+		e.logger.Warn("scheduler: cron prompt render",
+			"session", state.SessionID(), "task_id", fc.TaskID, "err", err)
 		return ""
 	}
-	var b strings.Builder
-	b.WriteString("## Available tasks\n\n")
-	b.WriteString("Recipes that can be RUN. Two paths:\n")
-	b.WriteString("- Ad-hoc: `session:spawn_mission(skill=\"_run_task\", inputs={task_skill, ...})`\n")
-	b.WriteString("- Scheduled: `task:create(skill_ref=<name>, schedule_spec, inputs)`\n\n")
-	for _, entry := range entries {
-		fmt.Fprintf(&b, "- `%s`", entry.Name)
-		if entry.Kind != "" {
-			fmt.Fprintf(&b, " (kind=%s)", entry.Kind)
-		}
-		if entry.Summary != "" {
-			fmt.Fprintf(&b, " — %s", entry.Summary)
-		}
-		b.WriteByte('\n')
-		// Phase 6.1d — render the recipe's inputs schema so root
-		// can pre-fill task_inputs / inputs with the correct keys
-		// without guessing. Helper produces "  inputs (required):"
-		// / "  inputs (optional):" blocks; absent / empty schema
-		// renders nothing.
-		if block := skill.RenderInputsSchemaBlock(entry.InputsSchema, "  "); block != "" {
-			b.WriteString(block)
-			b.WriteByte('\n')
-		}
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// TaskCatalogEntry is one row in the Available tasks block. Kept
-// exported so external callers (TUI, /tasks slash command status,
-// future hub APIs) can render the same catalogue without re-deriving
-// the eligibility predicate.
-type TaskCatalogEntry struct {
-	Name    string
-	Kind    string
-	Summary string
-	// InputsSchema is the recipe's `task.inputs_schema` (JSON
-	// Schema) passed through unchanged. Available tasks rendering
-	// flattens it into a compact key/type/description list via
-	// skill.RenderInputsSchemaBlock; downstream consumers may
-	// inspect the raw structure. nil when the recipe declares no
-	// schema. Phase 6.1d.
-	InputsSchema map[string]any
-}
-
-// taskEligibleEntries filters and sorts task-eligible skills for the
-// catalogue. Sort is alphabetical by name so the LLM sees a stable
-// ordering across renders.
-func taskEligibleEntries(all []skill.Skill) []TaskCatalogEntry {
-	out := make([]TaskCatalogEntry, 0, len(all))
-	for _, sk := range all {
-		if !sk.Manifest.Hugen.Task.Eligible {
-			continue
-		}
-		summary := strings.TrimSpace(sk.Manifest.Hugen.Task.GoalSummary)
-		if summary == "" {
-			summary = strings.TrimSpace(sk.Manifest.Description)
-		}
-		out = append(out, TaskCatalogEntry{
-			Name:         sk.Manifest.Name,
-			Kind:         strings.TrimSpace(sk.Manifest.Hugen.Task.Kind),
-			Summary:      summary,
-			InputsSchema: sk.Manifest.Hugen.Task.InputsSchema,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	return rendered
 }
 
 // cronPromptCache lives at package scope rather than on *Extension

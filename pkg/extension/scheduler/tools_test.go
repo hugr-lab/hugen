@@ -19,9 +19,9 @@ func callTool(t *testing.T, ext *Extension, state extension.SessionState, name s
 		t.Fatalf("marshal args: %v", err)
 	}
 	ctx := extension.WithSessionState(context.Background(), state)
-	out, err := ext.Call(ctx, "task:"+name, body)
+	out, err := ext.Call(ctx, "schedule:"+name, body)
 	if err != nil {
-		t.Fatalf("Call task:%s: %v", name, err)
+		t.Fatalf("Call schedule:%s: %v", name, err)
 	}
 	return out
 }

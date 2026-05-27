@@ -14,6 +14,7 @@ import (
 	planext "github.com/hugr-lab/hugen/pkg/extension/plan"
 	schedext "github.com/hugr-lab/hugen/pkg/extension/scheduler"
 	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
+	taskext "github.com/hugr-lab/hugen/pkg/extension/task"
 	stuckdetectorext "github.com/hugr-lab/hugen/pkg/extension/stuckdetector"
 	wbext "github.com/hugr-lab/hugen/pkg/extension/whiteboard"
 	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
@@ -93,12 +94,21 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		// extensions; ordering is otherwise free.
 		stuckdetectorext.NewExtension(core.Logger),
 		mcpext.NewExtension(core.Config.ToolProviders(), core.Logger),
-		// scheduler extension (Phase 6.1b): exposes task:create +
-		// task:* stubs. Full fire dispatch / Runner registration
-		// lands in 6.1c. Constructed even when TaskStore is nil so
-		// the tool surface stays advertised (Call paths return
-		// not_yet_implemented or store_error in that case).
+		// scheduler extension (Phase 6.1b): exposes the schedule:*
+		// management surface (create / list / pause / resume / cancel).
+		// Full fire dispatch / Runner registration lands in 6.1c.
+		// Constructed even when TaskStore is nil so the tool surface
+		// stays advertised (Call paths return not_yet_implemented or
+		// store_error in that case).
 		schedext.NewExtension(core.TaskStore, core.Skills, core.Agent.ID(), core.Logger),
+		// task extension (Phase 6.1d): exposes one synthetic
+		// `task:<recipe>` tool per task-eligible skill in the
+		// manager. Dispatch spawns a leaf subagent under the
+		// caller's root for kind=worker recipes; kind=mission is
+		// stub-rejected until a future phase wires the mission
+		// shape. Bound to the session manager via phaseRunner so
+		// the dispatch path can resolve the owner session.
+		taskext.NewExtension(core.Skills, core.Logger),
 		// liveview lands last so its FrameObserver / ChildFrameObserver
 		// see frames AFTER siblings have processed them via their own
 		// Recovery / state mutations. It contributes no tool surface;

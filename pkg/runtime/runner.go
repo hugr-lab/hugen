@@ -7,6 +7,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension/mission"
 	schedext "github.com/hugr-lab/hugen/pkg/extension/scheduler"
+	taskext "github.com/hugr-lab/hugen/pkg/extension/task"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/scheduler/runner"
 	"github.com/hugr-lab/hugen/pkg/session"
@@ -68,6 +69,13 @@ func phaseRunner(ctx context.Context, core *Core) error {
 	if sched := findSchedulerExtension(core); sched != nil && core.Manager != nil {
 		sched.Bind(schedulerHost{mgr: core.Manager}, svc)
 	}
+	// Phase 6.1d — Bind the task extension to the session manager
+	// so synthetic `task:<recipe>` calls can resolve the owner
+	// session for spawn dispatch. No Runner dependency — task ext
+	// only fires through tool calls, not scheduled ticks.
+	if te := findTaskExtension(core); te != nil && core.Manager != nil {
+		te.Bind(taskHost{mgr: core.Manager})
+	}
 
 	if err := svc.Start(ctx); err != nil {
 		return fmt.Errorf("start runner: %w", err)
@@ -116,5 +124,27 @@ func (h schedulerHost) Deliver(ctx context.Context, to string, f protocol.Frame)
 }
 
 func (h schedulerHost) Get(id string) (*session.Session, bool) {
+	return h.mgr.Get(id)
+}
+
+// findTaskExtension returns the *taskext.Extension registered in
+// phaseExtensions, or nil when task isn't in the slice.
+func findTaskExtension(core *Core) *taskext.Extension {
+	for _, ext := range core.Extensions {
+		if t, ok := ext.(*taskext.Extension); ok {
+			return t
+		}
+	}
+	return nil
+}
+
+// taskHost adapts the runtime's *manager.Manager onto the narrow
+// [taskext.SessionHost] surface — Get only (no Deliver; task ext
+// doesn't push frames into the owner session, it spawns subagents).
+type taskHost struct {
+	mgr *manager.Manager
+}
+
+func (h taskHost) Get(id string) (*session.Session, bool) {
 	return h.mgr.Get(id)
 }

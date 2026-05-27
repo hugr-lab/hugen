@@ -202,13 +202,13 @@ type HugenMetadata struct {
 	Mission MissionBlock `json:"mission,omitempty" yaml:"mission,omitempty"`
 
 	// Task, when Eligible, declares the skill as task-eligible:
-	// `task:create` may bind a recurring schedule to it (Phase 6
+	// `schedule:create` may bind a recurring schedule to it (Phase 6
 	// §0.5.4). Surface is purely declarative — the TaskManager
 	// extension reads InputsSchema for JSON-Schema validation at
 	// create time and AllowedToolsDefault as the default tool
 	// allow-list operator can override in the approval modal
 	// (6.1c). Empty / Eligible=false → skill is invisible to
-	// `task:create`.
+	// `schedule:create`.
 	Task TaskBlock `json:"task,omitempty" yaml:"task,omitempty"`
 
 	// MaxTurns / MaxTurnsHard / StuckDetection are conceptually
@@ -629,7 +629,7 @@ type MissionBlock struct {
 	// into the root's `## Available missions` prompt block so the
 	// model knows exactly which keys to pass without guessing.
 	// Distinct from `task.inputs_schema` — that one fires at
-	// `task:create`. Phase 6.1d.
+	// `schedule:create`. Phase 6.1d.
 	InputsSchema map[string]any `json:"inputs_schema,omitempty" yaml:"inputs_schema,omitempty"`
 }
 
@@ -644,13 +644,13 @@ const (
 	TaskKindWorker = "worker"
 
 	// TaskKindMission is reserved for adaptive plan-driven tasks
-	// (the skill is itself a mission). `task:create` guards this
+	// (the skill is itself a mission). `schedule:create` guards this
 	// kind as "not yet supported" in 6.1b MVP.
 	TaskKindMission = "mission"
 )
 
 // TaskBlock is the typed projection of `metadata.hugen.task`. When
-// `Eligible: true`, the skill is selectable by the `task:create`
+// `Eligible: true`, the skill is selectable by the `schedule:create`
 // tool — operators (or the future `_task_builder` mission) bind a
 // recurring schedule to it and TaskManager fires the skill per
 // scheduler tick. Phase 6 §0.5.4.
@@ -659,7 +659,7 @@ const (
 //
 //   - `Kind` is the fire shape. MVP supports `worker` only;
 //     `mission` is reserved (guarded with a "not yet supported"
-//     error by `task:create` until mission-shape cron lands).
+//     error by `schedule:create` until mission-shape cron lands).
 //   - `InputsSchema` validates the structured `inputs` blob the
 //     operator passes at task-create time (separate gate from
 //     `mission.inputs_schema`, which only fires at
@@ -673,7 +673,7 @@ const (
 //     Go-template rendering with [protocol.FireContext]. Default
 //     false — SKILL.md is static.
 type TaskBlock struct {
-	// Eligible is the master flag. `task:create` lists only skills
+	// Eligible is the master flag. `schedule:create` lists only skills
 	// where this is true. Absent / false → skill is invisible to
 	// the task surface.
 	Eligible bool `json:"eligible,omitempty" yaml:"eligible,omitempty"`
@@ -691,7 +691,7 @@ type TaskBlock struct {
 	// against the caller's `inputs` blob at task-create time.
 	// Empty / nil → skill accepts any inputs (no schema gate).
 	// Distinct from `mission.inputs_schema` — that one fires at
-	// `session:spawn_mission`, this one at `task:create`.
+	// `session:spawn_mission`, this one at `schedule:create`.
 	InputsSchema map[string]any `json:"inputs_schema,omitempty" yaml:"inputs_schema,omitempty"`
 
 	// AllowedToolsDefault is the recommended tool allow-list the

@@ -42,7 +42,7 @@ func (e *Extension) cmdTasks(ctx context.Context, state extension.SessionState, 
 		}, nil
 	}
 
-	// Owner = root of this session's tree (task:create anchors on
+	// Owner = root of this session's tree (schedule:create anchors on
 	// the same walk, so this matches the persisted owner_session_id).
 	owner := rootOf(state)
 	opts := schedstore.ListTasksOpts{}
@@ -75,7 +75,7 @@ func (e *Extension) cmdTasks(ctx context.Context, state extension.SessionState, 
 // table-ish projection suitable for in-chat display. We probe
 // LatestPlannedFire per row so the operator sees the next fire
 // instant without a separate query — this is the same N+1 pattern
-// as the task:list tool surface.
+// as the schedule:list tool surface.
 func renderTaskList(ctx context.Context, store schedstore.TaskStore, rows []schedstore.TaskRow) string {
 	// Stable order: active first, then paused, then terminal;
 	// alphabetical by name within group.
