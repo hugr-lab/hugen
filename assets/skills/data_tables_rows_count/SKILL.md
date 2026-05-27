@@ -1,5 +1,5 @@
 ---
-name: data_row_count
+name: data_tables_rows_count
 description: >
   Count rows in a Hugr Data Mesh data object via the aggregation
   GraphQL field. One number out, suitable as a quick health metric
