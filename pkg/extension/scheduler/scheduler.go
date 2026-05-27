@@ -693,7 +693,9 @@ func (e *Extension) callList(ctx context.Context, args json.RawMessage) (json.Ra
 			return toolErr("invalid_args", fmt.Sprintf("decode: %v", err))
 		}
 	}
-	rows, err := e.store.ListTasksBySession(ctx, state.SessionID(), schedstore.ListTasksOpts{
+	// Owner = root of caller's tree, matching task:create + /tasks.
+	owner := rootOf(state)
+	rows, err := e.store.ListTasksBySession(ctx, owner.SessionID(), schedstore.ListTasksOpts{
 		Status: in.Status,
 		Limit:  in.Limit,
 	})
@@ -829,7 +831,8 @@ func (e *Extension) resolveOwnedTask(ctx context.Context, args json.RawMessage) 
 		resp, err2 := toolErr("not_found", fmt.Sprintf("task %q: %v", in.TaskID, err))
 		return in, row, resp, err2
 	}
-	if row.OwnerSessionID != state.SessionID() {
+	// Owner = root of caller's tree, matching task:create + /tasks.
+	if row.OwnerSessionID != rootOf(state).SessionID() {
 		resp, err := toolErr("forbidden", "task is not owned by this session")
 		return in, row, resp, err
 	}
