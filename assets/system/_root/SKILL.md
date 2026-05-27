@@ -30,6 +30,17 @@ allowed-tools:
       - read
       - search
       - show
+  # Phase 6.1c — scheduled tasks. Root owns the full task surface
+  # because cron tasks belong to the user-facing conversation; they
+  # spawn cron-fire subagents under this root when they fire, and
+  # the SubagentResult lands here in chat history.
+  - provider: task
+    tools:
+      - create
+      - list
+      - pause
+      - resume
+      - cancel
 metadata:
   hugen:
     requires_skills: []
@@ -82,6 +93,14 @@ manual references but does not detail.
   diagnostic value).
 - `notepad:append` / `read` / `search` / `show` — session-
   scoped working memory.
+- `task:create` / `list` / `pause` / `resume` / `cancel` —
+  scheduled tasks. `kind="wake"` synthesises a UserMessage into
+  THIS root at fire time (a reminder / nudge). `kind="spawn"`
+  spawns a cron subagent under this root against the named
+  `skill_ref` and projects the SubagentResult back into history.
+  See Knob 7 for the full schema; the minimum is
+  `{kind, schedule_kind, schedule_spec, name}` plus `wake_message`
+  for wake / `skill_ref`+`inputs` for spawn.
 
 Granted by `_system` (always present): shell (`bash-mcp:*`),
 skill catalogue (`skill:load` / `unload` / `ref` / `files`),
@@ -192,15 +211,56 @@ or spawn a fresh mission folding the context in.
 
 `mission:notify` against a completed id returns `not_found`.
 
-## Knob 7 — skill-save trigger (pre-classification)
+## Knob 7 — scheduled tasks (`task:*`)
 
-Before deciding chat vs spawn, scan for explicit save phrases —
-"save this as a skill", "let's make a skill that", "remember
-this procedure", or their equivalents in the user's language.
-If matched, do NOT proceed with the normal default —
-`skill:load(name: "_skill_builder")` and follow its save
-protocol. A save request that gets `spawn_mission`'d as a new
-task is a classifier failure.
+Use `task:create` ONLY when the user explicitly asks for a
+delayed or recurring action — they named a future time, an
+interval, or used cadence words ("remind me", "every morning",
+"in 30 minutes", or their equivalents in the user's language).
+
+Pick `kind`:
+
+- `wake` — one-shot or recurring nudge into THIS root.
+  `wake_message` is the literal text the user will see as a
+  fresh user message at fire time. Use for reminders / pings.
+- `spawn` — open a fresh subagent under THIS root against
+  `skill_ref` at fire time, project the SubagentResult back
+  into history. Use for recurring data work ("every morning
+  summarise yesterday's …"). The named skill MUST declare
+  `metadata.hugen.task.eligible: true` in its manifest.
+
+Pick `schedule_kind`:
+
+- `once_in` / `once_at` — single fire. `schedule_spec` is a
+  Go duration (`"30m"`, `"1h"`) for `once_in`, or an RFC3339
+  timestamp for `once_at`.
+- `interval` — repeating cadence. `schedule_spec` is a Go
+  duration (`"24h"`, `"15m"`).
+- `cron` — full cron expression. Land in 6.2; today returns
+  `not_yet_implemented` if used.
+
+NOT a task-trigger:
+
+- The user wants the thing done now → just do it.
+- The user wants a single piece of work that happens to take
+  a while → spawn a mission, do not schedule it.
+
+`initial_planned_at`: USUALLY OMIT. The runtime derives the
+first fire from `schedule_spec`: `now+duration` for once_in /
+interval, the timestamp itself for once_at. Pass an explicit
+RFC3339 UTC override only when you need to anchor on a specific
+moment unrelated to the schedule cadence.
+
+`end_condition`: OPTIONAL — defaults to `{"kind":"until_cancel"}`.
+For one-shot kinds (once_in / once_at) the value is structurally
+ignored; the task auto-cancels after the first fire. Pass
+explicitly only for recurring kinds: `{"kind":"count","spec":"<N>"}`
+for "do this N times", `{"kind":"until","spec":"<RFC3339>"}` for
+"stop on this date".
+
+After successful `task:create`, emit a short user-visible
+acknowledgement naming the schedule (≤ 1 sentence, match the
+user's language).
 
 ## What this skill does NOT grant
 

@@ -394,19 +394,20 @@ func rootOf(state extension.SessionState) extension.SessionState {
 const createSchema = `{
   "type": "object",
   "properties": {
-    "skill_ref":     {"type": "string", "description": "Skill name to load on each fire (spawn kind). NULL/empty for wake kind."},
-    "kind":          {"type": "string", "enum": ["wake", "spawn"], "description": "Fire delivery kind. 'wake' = synthetic UserMessage into owner session; 'spawn' = new cron session per fire."},
+    "skill_ref":     {"type": "string", "description": "Skill name to load on each fire (spawn kind). Leave empty for wake kind."},
+    "kind":          {"type": "string", "enum": ["wake", "spawn"], "description": "Fire delivery kind. 'wake' = synthetic UserMessage into owner session; 'spawn' = cron-fire subagent under the owner per fire."},
     "schedule_kind": {"type": "string", "enum": ["once_in", "once_at", "cron", "interval"], "description": "Schedule shape; semantics keyed by schedule_spec."},
-    "schedule_spec": {"type": "string", "description": "Schedule expression — cron string, duration, RFC3339 timestamp etc. Interpreted by schedule_kind."},
-    "initial_planned_at": {"type": "string", "description": "RFC3339 timestamp for the first fire. Required."},
+    "schedule_spec": {"type": "string", "description": "Schedule expression — Go duration ('5m', '24h') for once_in/interval; RFC3339 timestamp for once_at; cron expression for cron (cron deferred to 6.2)."},
     "name":          {"type": "string", "description": "Short label for UI / logs."},
     "description":   {"type": "string", "description": "User's intent in words. Optional."},
     "goal":          {"type": "string", "description": "Imperative one-line brief for spawn fires."},
-    "wake_message":  {"type": "string", "description": "Synthetic UserMessage body for wake fires."},
-    "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Per-task tool allow-list frozen at create time. CronApprovalPolicy auto-approves matching tools during each cron fire so the model never blocks on a modal there's no operator to answer."},
+    "wake_message":  {"type": "string", "description": "Synthetic UserMessage body for wake fires. Treated as a Go text/template against FireRenderContext."},
+    "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Per-task tool allow-list frozen at create time. CronApprovalPolicy auto-approves matching tools during each cron fire so the worker never blocks on a modal the absent operator can't answer."},
     "inputs":        {"type": "object", "description": "Structured inputs blob — interpolated into the skill body / goal at fire time via the FireRenderContext templates."},
+    "initial_planned_at": {"type": "string", "description": "Optional RFC3339 UTC override for the first fire instant. When omitted the runtime derives it from schedule_spec: now+duration for once_in/interval, the timestamp itself for once_at."},
     "end_condition": {
       "type": "object",
+      "description": "Optional — defaults to {kind:'until_cancel'}. For once_in/once_at the schedule itself is one-shot so this field is ignored.",
       "properties": {
         "kind": {"type": "string", "enum": ["until_cancel", "count", "until"]},
         "spec": {"type": "string"}
@@ -414,7 +415,7 @@ const createSchema = `{
       "required": ["kind"]
     }
   },
-  "required": ["kind", "schedule_kind", "schedule_spec", "initial_planned_at", "name", "end_condition"]
+  "required": ["kind", "schedule_kind", "schedule_spec", "name"]
 }`
 
 // listSchema documents `task:list` — no required fields; optional
@@ -556,12 +557,15 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 	if in.ScheduleSpec == "" {
 		return toolErr("invalid_args", "schedule_spec required")
 	}
-	planned, err := time.Parse(time.RFC3339, in.InitialPlannedAt)
+	planned, err := resolveInitialPlannedAt(in)
 	if err != nil {
-		return toolErr("invalid_args", fmt.Sprintf("initial_planned_at must be RFC3339 (got %q): %v", in.InitialPlannedAt, err))
+		return toolErr("invalid_args", err.Error())
 	}
+	// end_condition defaults to until_cancel; for once_in/once_at
+	// the schedule itself is one-shot and maybeScheduleNext cancels
+	// the task on the first fire regardless of this value.
 	if in.EndCondition.Kind == "" {
-		return toolErr("invalid_args", "end_condition.kind required")
+		in.EndCondition.Kind = "until_cancel"
 	}
 
 	// Skill existence check (6.1b minimum). Full task.inputs_schema
@@ -847,6 +851,52 @@ func toolErr(code, msg string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("task: marshal tool error: %w", err)
 	}
 	return body, nil
+}
+
+// resolveInitialPlannedAt computes the first-fire instant from the
+// optional InitialPlannedAt override, falling back to deriving it
+// from schedule_kind + schedule_spec. The dual-source path keeps
+// the tool surface minimal — most callers can omit the override
+// and let the runtime do the arithmetic — while still letting an
+// operator nail a specific UTC moment when needed (e.g. a recurring
+// task that must align to the top of the hour regardless of when
+// task:create runs).
+//
+// Returns an error formatted for direct surfacing as the tool's
+// invalid_args message body.
+func resolveInitialPlannedAt(in createInput) (time.Time, error) {
+	if in.InitialPlannedAt != "" {
+		t, err := time.Parse(time.RFC3339, in.InitialPlannedAt)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("initial_planned_at must be RFC3339 (got %q): %v", in.InitialPlannedAt, err)
+		}
+		return t.UTC(), nil
+	}
+	now := time.Now().UTC()
+	switch in.ScheduleKind {
+	case schedstore.ScheduleOnceIn, schedstore.ScheduleInterval:
+		d, err := time.ParseDuration(in.ScheduleSpec)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("schedule_spec must be a Go duration for %q (got %q): %v",
+				in.ScheduleKind, in.ScheduleSpec, err)
+		}
+		if d <= 0 {
+			return time.Time{}, fmt.Errorf("schedule_spec duration must be positive for %q (got %q)",
+				in.ScheduleKind, in.ScheduleSpec)
+		}
+		return now.Add(d), nil
+	case schedstore.ScheduleOnceAt:
+		t, err := time.Parse(time.RFC3339, in.ScheduleSpec)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("schedule_spec must be RFC3339 for %q (got %q): %v",
+				in.ScheduleKind, in.ScheduleSpec, err)
+		}
+		return t.UTC(), nil
+	case schedstore.ScheduleCron:
+		return time.Time{}, fmt.Errorf("cron-expression schedule_kind not yet supported — defer to 6.2; pass initial_planned_at explicitly to schedule manually")
+	default:
+		return time.Time{}, fmt.Errorf("unknown schedule_kind %q", in.ScheduleKind)
+	}
 }
 
 // newTaskID is the synthetic sortable id used for tasks rows. Shape
