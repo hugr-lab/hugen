@@ -28,8 +28,11 @@ import (
 // model can react with the appropriate retry path (fix args, choose
 // a different recipe, escalate to user) instead of silently looping.
 func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+	// ToolManager.Dispatch passes the short name (after `toolField`
+	// strips the `task:` prefix) — but we accept either form
+	// defensively for tests / future direct callers.
 	short := stripProviderPrefix(name)
-	if short == "" || short == name {
+	if short == "" {
 		return nil, fmt.Errorf("%w: %s", tool.ErrUnknownTool, name)
 	}
 	if e.skills == nil {
