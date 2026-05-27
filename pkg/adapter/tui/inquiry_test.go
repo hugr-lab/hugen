@@ -45,7 +45,7 @@ func TestRenderInquiryModal_ApprovalContainsHintAndQuestion(t *testing.T) {
 		"Approval required",
 		"worker-7", // session id truncated by shortID() — 8 chars
 		"Run bash.shell",
-		"approve with tools",
+		"approve + auto-tools",
 		"approve",
 		"reject",
 		"refine",

@@ -113,8 +113,8 @@ var defaultApprovalChoices = []approvalChoice{
 	{
 		Kind:    approvalChoiceApproveWithTools,
 		Key:     "a",
-		Label:   "approve with tools",
-		Explain: "approve the plan AND auto-approve every requires_approval tool under this mission.",
+		Label:   "approve + auto-tools",
+		Explain: "approve the plan AND auto-approve every requires_approval tool under this mission. Read as 'approve, no further tool prompts'.",
 	},
 	{
 		Kind:    approvalChoiceApprove,
