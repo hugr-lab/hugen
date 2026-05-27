@@ -843,6 +843,13 @@ type MissionPlanSubagent struct {
 	Task      string   `json:"task,omitempty" yaml:"task,omitempty"`
 	Inputs    any      `json:"inputs,omitempty" yaml:"inputs,omitempty"`
 	DependsOn []string `json:"depends_on,omitempty" yaml:"depends_on,omitempty"`
+	// InputsFromResolved, when true, makes the runtime replace this
+	// subagent's Inputs with the mission's research-stage
+	// ResolvedUserInputs map verbatim. Mutually exclusive with
+	// literal Inputs. Used by the universal `_run_task` mission so
+	// the recipe spawn carries user-confirmed values without the
+	// mission needing to know each recipe's schema. Phase 6.1d.
+	InputsFromResolved bool `json:"inputs_from_resolved,omitempty" yaml:"inputs_from_resolved,omitempty"`
 }
 
 // MissionSynthesisBlock names the role that produces the

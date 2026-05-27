@@ -247,12 +247,13 @@ func projectSubagents(in []skillpkg.MissionPlanSubagent) []missionext.SubagentSp
 	out := make([]missionext.SubagentSpec, 0, len(in))
 	for _, s := range in {
 		out = append(out, missionext.SubagentSpec{
-			Name:      s.Name,
-			Skill:     s.Skill,
-			Role:      s.Role,
-			Task:      s.Task,
-			Inputs:    s.Inputs,
-			DependsOn: append([]string(nil), s.DependsOn...),
+			Name:               s.Name,
+			Skill:              s.Skill,
+			Role:               s.Role,
+			Task:               s.Task,
+			Inputs:             s.Inputs,
+			InputsFromResolved: s.InputsFromResolved,
+			DependsOn:          append([]string(nil), s.DependsOn...),
 		})
 	}
 	return out
