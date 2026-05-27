@@ -1,0 +1,606 @@
+package scheduler
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sort"
+	"time"
+
+	"github.com/hugr-lab/hugen/pkg/protocol"
+	tplpkg "github.com/hugr-lab/hugen/pkg/runtime/template"
+	"github.com/hugr-lab/hugen/pkg/scheduler/runner"
+	schedstore "github.com/hugr-lab/hugen/pkg/scheduler/store"
+	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/skill"
+)
+
+// SessionHost is the narrow surface the fire dispatch path needs
+// from the runtime's session supervisor. Production wiring binds
+// *pkg/session/manager.Manager; tests inject a fake. Defining the
+// interface inside the scheduler package keeps pkg/extension/scheduler
+// from depending on the concrete supervisor.
+//
+// Phase 6.1c models cron-spawn fires as subagents of the owner root
+// session — the spawn itself goes through `owner.Spawn(...)`, NOT
+// through this interface. SessionHost is reduced to two operations:
+// finding the owner (Get) and pushing wake-kind UserMessages
+// (Deliver). The reduction is load-bearing: by reusing
+// `parent.Spawn` we inherit subagent_pump (drain), natural
+// teardown→SubagentResult termination, and parent-history
+// projection — all the plumbing the cron-as-root variant would
+// otherwise have to reinvent.
+type SessionHost interface {
+	// Deliver pushes a frame onto an existing live root session's
+	// inbox. Phase 6.1c uses it for `wake` fires — synthesising a
+	// UserMessage into the owning session.
+	Deliver(ctx context.Context, to string, f protocol.Frame) error
+
+	// Get looks up a live session by id. Returns (nil, false) for
+	// terminated / unknown ids. Spawn fires resolve the owner this
+	// way, then call owner.Spawn directly; wake fires use this to
+	// short-circuit dispatch when the owner session is gone (the
+	// task auto-pauses on next-fire scheduling).
+	Get(id string) (*session.Session, bool)
+}
+
+// buildFireFn returns the RunnerFn the scheduler registers for one
+// task. The fn closes over `task`, `store`, `host`, `skills`,
+// `agentID`, `logger`; the surrounding extension passes them in
+// once at bootstrap. Returned fn is goroutine-safe — runner.Service
+// guarantees no concurrent fires of the same registration, so the
+// fn relies on Runner serialisation rather than its own mutex.
+//
+// Per-fire layout (spawn kind):
+//
+//   1. Drift hash recompute (skill manifest changed since task-create?).
+//      Mismatch → AppendLog(skipped, reason=skill_changed), PauseTask,
+//      notify owner, return without firing.
+//   2. AppendLog(started, planned_at=fire.PlannedAt).
+//   3. Build FireContext (LatestSuccessfulFire as PrevFire, etc).
+//   4. host.Open(req{Cron: ctx}) → fresh cron session.
+//   5. Render the goal template; Deliver a UserMessage that kicks
+//      the model loop.
+//   6. Wait for the session to terminate via <-sess.Done().
+//   7. AppendLog(completed | failed) with last assistant text as
+//      outcome.body.
+//   8. Compute next planned via the schedule; AppendLog(planned)
+//      for the next fire. Recurring tasks re-register a fresh
+//      Schedule via the captured runner reference (Phase 6.1c
+//      ships interval / once_in / once_at; cron-expression in 6.2).
+//   9. Emit scheduler:notification ExtensionFrame on the owner
+//      session so the operator sees a status line.
+//
+// Wake kind path (steps 1, 3 skip):
+//   - AppendLog(started)
+//   - Render WakeMessage; host.Deliver UserMessage to owner session.
+//   - AppendLog(completed) immediately (wake fires don't wait).
+//   - Schedule next planned; emit notification.
+//
+// Returning an error from the fn surfaces as runner-side failure
+// (run-log status=failed) AND a task_log failed row. Either signal
+// alone is enough; both are written so the runner audit trail +
+// task_log stay consistent.
+func buildFireFn(task schedstore.TaskRow, deps fireDeps) runner.RunnerFn {
+	return func(ctx context.Context, fire runner.FireMeta) (runner.Outcome, error) {
+		switch task.Kind {
+		case schedstore.KindWake:
+			return dispatchWakeFire(ctx, task, fire, deps)
+		case schedstore.KindSpawn:
+			return dispatchSpawnFire(ctx, task, fire, deps)
+		default:
+			err := fmt.Errorf("unknown task kind %q", task.Kind)
+			appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
+				ErrorMessage: err.Error(),
+			}))
+			return runner.Outcome{ErrorMessage: err.Error()}, err
+		}
+	}
+}
+
+// fireDeps bundles the references buildFireFn captures so the
+// factory signature stays compact and adding a new dep (Phase 6.2
+// task:set_state writer) doesn't churn every call site.
+type fireDeps struct {
+	store      schedstore.TaskStore
+	host       SessionHost
+	skills     *skill.SkillManager
+	agentID    string
+	logger     *slog.Logger
+	registerFn func(taskID string, sched runner.Schedule) error
+	pauseFn    func(taskID string) error
+
+	// stashFire / releaseFire are the per-fire FireContext
+	// rendezvous between dispatchSpawnFire (writer) and
+	// scheduler.ApplyOnSubagentSpawn (reader). The applier looks up
+	// by sanitised SpawnSpec.Name; spawn-name uniqueness is
+	// guaranteed by takeSpawnToken (monotonic per-extension counter).
+	stashFire    func(spawnName string, fc *protocol.FireContext)
+	releaseFire  func(spawnName string)
+	takeSpawnToken func() int64
+}
+
+// dispatchWakeFire delivers a synthetic UserMessage into the
+// owning session and stamps planned-completed-planned bookkeeping
+// on task_log. Wake fires never spawn a new session — they nudge
+// the owner directly so the model sees a fresh user-role turn the
+// next time it's resumed.
+func dispatchWakeFire(ctx context.Context, task schedstore.TaskRow, fire runner.FireMeta, deps fireDeps) (runner.Outcome, error) {
+	if _, alive := deps.host.Get(task.OwnerSessionID); !alive {
+		// Owner session terminated since the task was created —
+		// pause the task; a subsequent reattach can resume / cancel.
+		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseOwnerTerminated)
+		if deps.pauseFn != nil {
+			_ = deps.pauseFn(task.ID)
+		}
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventSkipped, &schedstore.TaskOutcome{
+			Reason:  schedstore.PauseOwnerTerminated,
+			Summary: "owner session terminated",
+		}))
+		return runner.Outcome{Reason: schedstore.PauseOwnerTerminated}, nil
+	}
+
+	appendLogSafely(ctx, deps, schedstore.TaskLogEntry{
+		TaskID:    task.ID,
+		AgentID:   deps.agentID,
+		FireSeq:   fire.FireSeq,
+		EventType: schedstore.LogEventStarted,
+		PlannedAt: fire.PlannedAt,
+	})
+
+	rendered, err := tplpkg.RenderTemplate(task.Spec.WakeMessage, tplpkg.NewFireRenderContext(&protocol.FireContext{
+		TaskID:    task.ID,
+		FireSeq:   fire.FireSeq,
+		PlannedAt: fire.PlannedAt,
+		Goal:      task.Spec.Goal,
+		Inputs:    task.Spec.Inputs,
+		PrevFire:  prevFireFromLog(ctx, deps.store, task.ID, deps.logger),
+	}))
+	if err != nil {
+		// Render failure auto-pauses the task in the store AND the
+		// runner — without the runner pause the broken template
+		// would keep re-firing on every tick.
+		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+		if deps.pauseFn != nil {
+			_ = deps.pauseFn(task.ID)
+		}
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
+			ErrorMessage: err.Error(),
+			Reason:       schedstore.PauseRenderFailed,
+		}))
+		return runner.Outcome{ErrorMessage: err.Error()}, err
+	}
+
+	frame := protocol.NewUserMessage(task.OwnerSessionID, schedulerParticipant(deps.agentID), rendered)
+	if err := deps.host.Deliver(ctx, task.OwnerSessionID, frame); err != nil {
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
+			ErrorMessage: err.Error(),
+			Reason:       "deliver_failed",
+		}))
+		return runner.Outcome{ErrorMessage: err.Error()}, err
+	}
+
+	appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventCompleted, &schedstore.TaskOutcome{
+		Summary: fmt.Sprintf("wake delivered (%d chars)", len(rendered)),
+	}))
+	maybeScheduleNext(ctx, task, fire, deps)
+	return runner.Outcome{Summary: "wake delivered"}, nil
+}
+
+// dispatchSpawnFire spawns a cron-fire subagent under the task's
+// owner root session, kicks the model loop with the rendered goal,
+// waits for the subagent to terminate naturally (close_turn ⇒
+// SessionClose ⇒ teardown emits SubagentResult into the parent
+// pipeline), and folds the outcome into task_log. Drift-pause runs
+// FIRST so a renamed-out-from-under-us skill doesn't spawn against
+// a stale manifest.
+//
+// Subagent semantics (vs. the prior cron-as-root design):
+//
+//   - Drain: subagent_pump in pkg/session already reads child.Outbox
+//     and projects relevant frames into the parent. We don't have to
+//     spin a separate drainer.
+//   - Termination: the subagent emits SubagentResult during teardown
+//     once close_turn fires (model-emits-final-response path) — the
+//     parent handles it via its normal subagent flow and projects
+//     the body into history. No scheduler-specific termination
+//     primitive is needed.
+//   - Visibility: the SubagentResult lands in the owner's history,
+//     so the model sees the cron output on its next turn naturally
+//     (this replaces the explicit `scheduler:notification` frame).
+func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner.FireMeta, deps fireDeps) (runner.Outcome, error) {
+	if drift, err := detectSkillDrift(ctx, deps.skills, task); err != nil {
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
+			ErrorMessage: err.Error(),
+			Reason:       "drift_check_failed",
+		}))
+		return runner.Outcome{ErrorMessage: err.Error()}, err
+	} else if drift != "" {
+		// Skill removed / renamed since task-create. Pause + skip.
+		_ = deps.store.PauseTask(context.Background(), task.ID, drift)
+		if deps.pauseFn != nil {
+			_ = deps.pauseFn(task.ID)
+		}
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventSkipped, &schedstore.TaskOutcome{
+			Reason:  drift,
+			Summary: "paused on skill drift",
+		}))
+		return runner.Outcome{Reason: drift}, nil
+	}
+
+	owner, alive := deps.host.Get(task.OwnerSessionID)
+	if !alive || owner == nil {
+		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseOwnerTerminated)
+		if deps.pauseFn != nil {
+			_ = deps.pauseFn(task.ID)
+		}
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventSkipped, &schedstore.TaskOutcome{
+			Reason:  schedstore.PauseOwnerTerminated,
+			Summary: "owner session terminated",
+		}))
+		return runner.Outcome{Reason: schedstore.PauseOwnerTerminated}, nil
+	}
+
+	appendLogSafely(ctx, deps, schedstore.TaskLogEntry{
+		TaskID:    task.ID,
+		AgentID:   deps.agentID,
+		FireSeq:   fire.FireSeq,
+		EventType: schedstore.LogEventStarted,
+		PlannedAt: fire.PlannedAt,
+	})
+
+	prev := prevFireFromLog(ctx, deps.store, task.ID, deps.logger)
+	fireCtx := &protocol.FireContext{
+		TaskID:       task.ID,
+		FireSeq:      fire.FireSeq,
+		PlannedAt:    fire.PlannedAt,
+		Goal:         task.Spec.Goal,
+		Inputs:       task.Spec.Inputs,
+		PrevFire:     prev,
+		AllowedTools: task.Spec.AllowedTools,
+	}
+
+	// Render the goal as the spawn task body. Render failure is
+	// recoverable: we degrade to the literal goal so the subagent
+	// still has a kick.
+	renderedGoal, err := tplpkg.RenderTemplate(task.Spec.Goal, tplpkg.NewFireRenderContext(fireCtx))
+	if err != nil {
+		deps.logger.Warn("scheduler: goal render failed; using literal",
+			"task_id", task.ID, "fire_seq", fire.FireSeq, "err", err)
+		renderedGoal = task.Spec.Goal
+	}
+
+	// Stash FireContext under a spawn-name token so the scheduler's
+	// SubagentSpawnApplier can stamp it on the child's state BEFORE
+	// the first task UserMessage lands in the child's inbox.
+	// Monotonic counter keeps the token unique across concurrent
+	// fires; sanitisation by pkg/session preserves the bare alnum +
+	// dash payload (well under the 32-char Name cap).
+	spawnName := fmt.Sprintf("cron-%d-%d", fire.FireSeq, deps.takeSpawnToken())
+	deps.stashFire(spawnName, fireCtx)
+	defer deps.releaseFire(spawnName)
+
+	child, err := owner.Spawn(ctx, session.SpawnSpec{
+		Name:   spawnName,
+		Skill:  task.SkillRef,
+		Task:   renderedGoal,
+		Inputs: task.Spec.Inputs,
+		// Persist origin metadata on the child row for liveview /
+		// audit grouping by source task without rejoining task_log.
+		Metadata: map[string]any{
+			"cron_task_id":  task.ID,
+			"cron_fire_seq": fire.FireSeq,
+		},
+	})
+	if err != nil {
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
+			ErrorMessage: err.Error(),
+			Reason:       "spawn_failed",
+		}))
+		return runner.Outcome{ErrorMessage: err.Error()}, err
+	}
+
+	// Wait for the subagent to terminate. close_turn (or any
+	// model-side SessionClose / mission:finish equivalent) drives
+	// teardown; sess.Done() closes when the goroutine exits after
+	// emitting SubagentResult to the parent. The Runner's per-fire
+	// timeout (DefaultFireTimeout 30m) caps the wait via ctx.Done.
+	select {
+	case <-child.Done():
+	case <-ctx.Done():
+		outErr := ctx.Err()
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
+			ErrorMessage: outErr.Error(),
+			Reason:       "fire_timeout",
+		}))
+		return runner.Outcome{ErrorMessage: outErr.Error()}, outErr
+	}
+
+	outcome := &schedstore.TaskOutcome{
+		Summary: fmt.Sprintf("cron fire %d completed", fire.FireSeq),
+	}
+	completed := terminalLog(task, fire, schedstore.LogEventCompleted, outcome)
+	completed.SessionID = child.ID()
+	appendLogSafely(ctx, deps, completed)
+	maybeScheduleNext(ctx, task, fire, deps)
+	return runner.Outcome{Summary: outcome.Summary}, nil
+}
+
+// detectSkillDrift returns the pause reason name (PauseSkillChanged
+// / PauseSchemaChanged) when the source skill's manifest no longer
+// matches the hashes captured at task-create time. Returns ("", nil)
+// when the row's hash columns are empty (legacy / hand-edited rows)
+// — drift can't be assessed without a baseline.
+//
+// `tasks.spec.hashes.skill` covers the full manifest YAML; the
+// inputs_schema hash narrows the comparison to the task block's
+// JSON-Schema subset so a benign body edit doesn't auto-pause.
+func detectSkillDrift(ctx context.Context, skills *skill.SkillManager, task schedstore.TaskRow) (string, error) {
+	if task.SkillRef == "" || skills == nil {
+		return "", nil
+	}
+	want := task.Spec.Hashes
+	if want.Skill == "" && want.InputsSchema == "" {
+		return "", nil
+	}
+	sk, err := skills.Get(ctx, task.SkillRef)
+	if err != nil {
+		return schedstore.PauseSkillChanged, nil
+	}
+	if want.Skill != "" {
+		got := hashSkillManifest(sk.Manifest)
+		if got != want.Skill {
+			return schedstore.PauseSkillChanged, nil
+		}
+	}
+	if want.InputsSchema != "" {
+		got := hashJSON(sk.Manifest.Hugen.Task.InputsSchema)
+		if got != want.InputsSchema {
+			return schedstore.PauseSchemaChanged, nil
+		}
+	}
+	return "", nil
+}
+
+// hashSkillManifest computes a stable sha256 over the manifest's
+// frontmatter + body. Used by drift detection at fire time and (in
+// 6.2) by task:create to populate `tasks.spec.hashes.skill`.
+func hashSkillManifest(m skill.Manifest) string {
+	h := sha256.New()
+	h.Write(m.Raw)
+	h.Write(m.Body)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// hashJSON computes a stable sha256 over a JSON-serialisable value
+// with sorted-keys serialisation so map ordering doesn't perturb
+// the digest.
+func hashJSON(v any) string {
+	if v == nil {
+		return ""
+	}
+	body, err := stableJSONMarshal(v)
+	if err != nil {
+		return ""
+	}
+	h := sha256.New()
+	h.Write(body)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// stableJSONMarshal serialises v with sorted map keys so the same
+// logical value always produces the same byte stream — needed for
+// hash-equality across processes.
+func stableJSONMarshal(v any) ([]byte, error) {
+	return stableMarshalValue(v)
+}
+
+func stableMarshalValue(v any) ([]byte, error) {
+	switch val := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var buf []byte
+		buf = append(buf, '{')
+		for i, k := range keys {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			kb, _ := json.Marshal(k)
+			buf = append(buf, kb...)
+			buf = append(buf, ':')
+			child, err := stableMarshalValue(val[k])
+			if err != nil {
+				return nil, err
+			}
+			buf = append(buf, child...)
+		}
+		buf = append(buf, '}')
+		return buf, nil
+	case []any:
+		var buf []byte
+		buf = append(buf, '[')
+		for i, item := range val {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			child, err := stableMarshalValue(item)
+			if err != nil {
+				return nil, err
+			}
+			buf = append(buf, child...)
+		}
+		buf = append(buf, ']')
+		return buf, nil
+	default:
+		return json.Marshal(v)
+	}
+}
+
+// prevFireFromLog reads the LatestSuccessfulFire entry and projects
+// its outcome onto a [protocol.PrevFireOutcome] suitable for
+// FireRenderContext. Returns nil when no prior completion exists.
+func prevFireFromLog(ctx context.Context, st schedstore.TaskStore, taskID string, log *slog.Logger) *protocol.PrevFireOutcome {
+	entry, err := st.LatestSuccessfulFire(ctx, taskID)
+	if err != nil {
+		log.Warn("scheduler: LatestSuccessfulFire failed",
+			"task_id", taskID, "err", err)
+		return nil
+	}
+	if entry == nil {
+		return nil
+	}
+	out := &protocol.PrevFireOutcome{
+		FiredAt:   entry.PlannedAt,
+		SessionID: entry.SessionID,
+	}
+	if entry.Outcome != nil {
+		out.Summary = entry.Outcome.Summary
+		out.Body = entry.Outcome.Body
+		out.State = entry.Outcome.StateDiff
+	}
+	return out
+}
+
+// terminalLog builds a TaskLogEntry for the terminal event of a
+// fire. Caller fills SessionID / extra fields if relevant.
+func terminalLog(task schedstore.TaskRow, fire runner.FireMeta, eventType string, outcome *schedstore.TaskOutcome) schedstore.TaskLogEntry {
+	return schedstore.TaskLogEntry{
+		TaskID:    task.ID,
+		AgentID:   task.AgentID,
+		FireSeq:   fire.FireSeq,
+		EventType: eventType,
+		PlannedAt: fire.PlannedAt,
+		Outcome:   outcome,
+	}
+}
+
+// maybeScheduleNext computes the next planned instant from the
+// task's schedule, inserts the corresponding `planned` row, and
+// re-registers the fn under the new Once schedule so Runner fires
+// it on time. End-condition check (count exceeded / until passed)
+// short-circuits with status='completed' on the task row.
+//
+// Recurring schedule parsing for cron-expression strings is
+// deferred to Phase 6.2; today interval / once_in / once_at are
+// supported. For one-shot kinds we skip the next planned row.
+func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner.FireMeta, deps fireDeps) {
+	switch task.ScheduleKind {
+	case schedstore.ScheduleOnceIn, schedstore.ScheduleOnceAt:
+		// One-shot — mark the task completed so ListDue stops
+		// returning it.
+		if err := deps.store.CancelTask(context.Background(), task.ID); err != nil {
+			deps.logger.Warn("scheduler: mark one-shot completed",
+				"task_id", task.ID, "err", err)
+		}
+		return
+	case schedstore.ScheduleInterval:
+		d, err := time.ParseDuration(task.Spec.ScheduleSpec)
+		if err != nil || d <= 0 {
+			deps.logger.Warn("scheduler: invalid interval; pausing task",
+				"task_id", task.ID, "spec", task.Spec.ScheduleSpec, "err", err)
+			_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+			if deps.pauseFn != nil {
+				_ = deps.pauseFn(task.ID)
+			}
+			return
+		}
+		next := fire.PlannedAt.Add(d).UTC()
+		if shouldEndAfter(task.Spec.EndCondition, fire.FireSeq, next) {
+			if err := deps.store.CancelTask(context.Background(), task.ID); err != nil {
+				deps.logger.Warn("scheduler: end-condition cancel",
+					"task_id", task.ID, "err", err)
+			}
+			return
+		}
+		appendLogSafely(ctx, deps, schedstore.TaskLogEntry{
+			TaskID:    task.ID,
+			AgentID:   deps.agentID,
+			FireSeq:   fire.FireSeq + 1,
+			EventType: schedstore.LogEventPlanned,
+			PlannedAt: next,
+		})
+		if deps.registerFn != nil {
+			if err := deps.registerFn(task.ID, runner.Once(next)); err != nil {
+				deps.logger.Warn("scheduler: re-register interval task",
+					"task_id", task.ID, "err", err)
+			}
+		}
+	case schedstore.ScheduleCron:
+		// Cron-expression schedules land in 6.2 — see backlog.
+		deps.logger.Warn("scheduler: cron-expression schedule not yet supported; pausing",
+			"task_id", task.ID, "spec", task.Spec.ScheduleSpec)
+		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+		if deps.pauseFn != nil {
+			_ = deps.pauseFn(task.ID)
+		}
+	default:
+		deps.logger.Warn("scheduler: unknown schedule_kind; pausing",
+			"task_id", task.ID, "schedule_kind", task.ScheduleKind)
+		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+		if deps.pauseFn != nil {
+			_ = deps.pauseFn(task.ID)
+		}
+	}
+}
+
+// shouldEndAfter reports whether the end condition has been reached
+// at fire `seq` planned for `next`. Used by maybeScheduleNext to
+// short-circuit one further fire.
+func shouldEndAfter(end schedstore.TaskEndCondition, completedSeq int, nextAt time.Time) bool {
+	switch end.Kind {
+	case "", "until_cancel":
+		return false
+	case "count":
+		n, err := parseIntStrict(end.Spec)
+		if err != nil || n <= 0 {
+			return false
+		}
+		return completedSeq >= n
+	case "until":
+		at, err := time.Parse(time.RFC3339, end.Spec)
+		if err != nil {
+			return false
+		}
+		return !nextAt.Before(at)
+	default:
+		return false
+	}
+}
+
+func parseIntStrict(s string) (int, error) {
+	n := 0
+	if s == "" {
+		return 0, errors.New("empty")
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("non-digit %q at %d", c, i)
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, nil
+}
+
+// appendLogSafely wraps a single store.AppendLog with a background
+// ctx so a cancelled fire still persists its terminal event. Errors
+// are logged at warn; the audit trail is best-effort but the
+// non-cancelled retry pipeline catches genuine store outages.
+func appendLogSafely(_ context.Context, deps fireDeps, entry schedstore.TaskLogEntry) {
+	if err := deps.store.AppendLog(context.Background(), entry); err != nil {
+		deps.logger.Warn("scheduler: AppendLog failed",
+			"task_id", entry.TaskID,
+			"event_type", entry.EventType,
+			"fire_seq", entry.FireSeq,
+			"err", err)
+	}
+}
+

@@ -41,23 +41,35 @@ func (c *fakeClock) Advance(d time.Duration) {
 }
 
 // awaitFireCount polls the registration's snapshot until FireCount
-// reaches want AND the most recent fire's fn body has returned
-// (LastFireAt set in recordOutcome AFTER the fn returns). Returns
-// the final snapshot for diagnostic.
+// reaches want AND the most recent fire's fn body has returned.
+//
+// The FireCount and LastFireAt signals come from two different
+// moments in runFire — prepareFire stamps FireCount BEFORE the fn
+// goroutine launches, while recordOutcome sets LastFireAt AFTER
+// the fn body returns. So a check that only asserts
+// `!LastFireAt.IsZero()` accepts as little as "some prior fire
+// has completed at all", which races against a freshly-prepared
+// FireCount whose fn body is still pending.
+//
+// Capture the pre-call LastFireAt as a baseline and require the
+// observed value to be strictly after it. First-call semantics are
+// preserved (baseline=zero, any non-zero LastFireAt qualifies);
+// later calls correctly wait for a NEW recordOutcome to land.
 func awaitFireCount(t *testing.T, s *Service, name string, want int) RunnerStatus {
 	t.Helper()
+	baseline, _ := s.Status(context.Background(), name)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		st, ok := s.Status(context.Background(), name)
 		if !ok {
 			t.Fatalf("status %q: not registered", name)
 		}
-		if st.FireCount >= want && !st.LastFireAt.IsZero() {
+		if st.FireCount >= want && st.LastFireAt.After(baseline.LastFireAt) {
 			return st
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("await %q FireCount=%d/want=%d lastFire=%v",
-				name, st.FireCount, want, st.LastFireAt)
+			t.Fatalf("await %q FireCount=%d/want=%d lastFire=%v baseline=%v",
+				name, st.FireCount, want, st.LastFireAt, baseline.LastFireAt)
 		}
 		time.Sleep(time.Millisecond)
 	}

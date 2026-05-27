@@ -7,9 +7,12 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension/mission"
 	schedext "github.com/hugr-lab/hugen/pkg/extension/scheduler"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/scheduler/runner"
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/session/manager"
 )
+
 
 // phaseRunner runs phase 10: builds the agent-level scheduling
 // runner (Phase 6.1a) and registers the always-on resilience
@@ -56,6 +59,16 @@ func phaseRunner(ctx context.Context, core *Core) error {
 		}
 	}
 
+	// Phase 6.1c — Bind the scheduler extension to the session
+	// manager + runner so InitState (called when sessions open after
+	// this phase) can bootstrap user tasks and the fire fns can
+	// dispatch wake / spawn fires. The Bind has to run BEFORE
+	// svc.Start so a tick that fires immediately after start finds
+	// a fully-wired extension.
+	if sched := findSchedulerExtension(core); sched != nil && core.Manager != nil {
+		sched.Bind(schedulerHost{mgr: core.Manager}, svc)
+	}
+
 	if err := svc.Start(ctx); err != nil {
 		return fmt.Errorf("start runner: %w", err)
 	}
@@ -69,4 +82,39 @@ func phaseRunner(ctx context.Context, core *Core) error {
 		}
 	})
 	return nil
+}
+
+// findSchedulerExtension returns the *schedext.Extension registered
+// in phaseExtensions, or nil when scheduler isn't in the slice.
+// Helper exists so runner.go doesn't have to import schedext for
+// pure type assertions; concentrating it here keeps the Bind site
+// readable.
+func findSchedulerExtension(core *Core) *schedext.Extension {
+	for _, ext := range core.Extensions {
+		if s, ok := ext.(*schedext.Extension); ok {
+			return s
+		}
+	}
+	return nil
+}
+
+// schedulerHost adapts the runtime's *manager.Manager onto the
+// narrow [schedext.SessionHost] surface the fire-dispatch path
+// needs. Lives in pkg/runtime so the scheduler extension stays
+// decoupled from the concrete manager type — the extension only
+// sees the interface.
+//
+// Phase 6.1c shrinks this to Get + Deliver: spawn dispatch uses
+// `owner.Spawn(...)` directly off the *Session returned by Get,
+// not a host-level Open.
+type schedulerHost struct {
+	mgr *manager.Manager
+}
+
+func (h schedulerHost) Deliver(ctx context.Context, to string, f protocol.Frame) error {
+	return h.mgr.Deliver(ctx, to, f)
+}
+
+func (h schedulerHost) Get(id string) (*session.Session, bool) {
+	return h.mgr.Get(id)
 }

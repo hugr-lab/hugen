@@ -122,6 +122,21 @@ func (t *tab) handleFrame(f protocol.Frame) tea.Cmd {
 	case *protocol.SystemMarker:
 		t.chat.appendSystem(v.Payload.Subject)
 		t.refreshChat()
+	case *protocol.SystemMessage:
+		// Slash-command output (e.g. /tasks, /compactor status) and
+		// extension-emitted user-visible notes flow through
+		// SystemMessage frames. Render the Content body verbatim in
+		// the chat — same surface SystemMarker uses, but with the
+		// full multi-line body field instead of the one-line
+		// Subject. Model-internal SystemMessage frames (stuck
+		// nudges, child notes) come through the same case; they
+		// already carry concise text intended for the operator to
+		// see when they happen, so rendering them unconditionally
+		// is fine.
+		if body := v.Payload.Content; body != "" {
+			t.chat.appendSystem(body)
+			t.refreshChat()
+		}
 	case *protocol.ExtensionFrame:
 		if v.Payload.Extension == "liveview" && v.Payload.Op == "status" {
 			if st, err := parseLiveviewStatus(v.Payload.Data); err == nil {
