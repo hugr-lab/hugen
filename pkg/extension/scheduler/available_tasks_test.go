@@ -135,6 +135,48 @@ body
 	}
 }
 
+func TestAvailableTasks_RendersInputsSchema(t *testing.T) {
+	ext := newExtWithSkills(t, map[string][]byte{
+		"data_row_count": []byte(`---
+name: data_row_count
+description: Count rows in a Hugr data object.
+license: MIT
+metadata:
+  hugen:
+    task:
+      eligible: true
+      kind: worker
+      goal_summary: Count rows in a Hugr data object.
+      inputs_schema:
+        type: object
+        required: [data_object]
+        properties:
+          data_object:
+            type: string
+            description: The data object (table/view) to count.
+          module:
+            type: string
+            description: Optional module path.
+---
+body
+`),
+	})
+	state := newFakeState("ses-root")
+	out := ext.AdvertiseSystemPrompt(context.Background(), state)
+	if !strings.Contains(out, "inputs (required):") {
+		t.Errorf("required block missing:\n%s", out)
+	}
+	if !strings.Contains(out, "data_object (string) — The data object (table/view) to count.") {
+		t.Errorf("required entry missing:\n%s", out)
+	}
+	if !strings.Contains(out, "inputs (optional):") {
+		t.Errorf("optional block missing:\n%s", out)
+	}
+	if !strings.Contains(out, "module (string) — Optional module path.") {
+		t.Errorf("optional entry missing:\n%s", out)
+	}
+}
+
 func TestAvailableTasks_NilSkillManagerReturnsEmpty(t *testing.T) {
 	ext := NewExtension(nil, nil, "agt-test", nil)
 	state := newFakeState("ses-root")

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // MissionSkillExists implements [extension.MissionDispatcher].
@@ -68,9 +69,17 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 		summary := strings.TrimSpace(m.Summary)
 		if summary == "" {
 			fmt.Fprintf(&b, "- `%s`\n", m.Name)
-			continue
+		} else {
+			fmt.Fprintf(&b, "- `%s` — %s\n", m.Name, summary)
 		}
-		fmt.Fprintf(&b, "- `%s` — %s\n", m.Name, summary)
+		// Phase 6.1d — render the mission's spawn-time inputs
+		// schema so root knows the exact `inputs={...}` keys to
+		// pass. Missions without a schema (the legacy default) get
+		// the bare summary line only.
+		if block := skill.RenderInputsSchemaBlock(m.InputsSchema, "  "); block != "" {
+			b.WriteString(block)
+			b.WriteByte('\n')
+		}
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

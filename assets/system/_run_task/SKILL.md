@@ -26,6 +26,22 @@ metadata:
         names a recipe from the `## Available tasks` block but
         wants it now (no schedule).
 
+      inputs_schema:
+        type: object
+        required: [task_skill]
+        properties:
+          task_skill:
+            type: string
+            description: >
+              Recipe name from the `## Available tasks` block. Must
+              be task-eligible (`metadata.hugen.task.eligible: true`).
+          task_inputs:
+            type: object
+            description: >
+              Pre-filled inputs map matching the named recipe's own
+              `task.inputs_schema`. Anything missing the
+              input-collector will batch-inquire from the user.
+
       research:
         role: input-collector
         when: auto

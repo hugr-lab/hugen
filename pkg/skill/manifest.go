@@ -622,6 +622,15 @@ type MissionBlock struct {
 	// Empty / absent → no manifest seed; the planner is responsible
 	// for emitting ≥1 ac_add on iter 1. Phase 5.x — B11 §3.2.2.
 	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty" yaml:"acceptance_criteria,omitempty"`
+
+	// InputsSchema is a JSON Schema (draft 2020-12) declaring the
+	// shape of the structured `inputs` blob the caller passes to
+	// `session:spawn_mission(skill=<this>, inputs=...)`. Rendered
+	// into the root's `## Available missions` prompt block so the
+	// model knows exactly which keys to pass without guessing.
+	// Distinct from `task.inputs_schema` — that one fires at
+	// `task:create`. Phase 6.1d.
+	InputsSchema map[string]any `json:"inputs_schema,omitempty" yaml:"inputs_schema,omitempty"`
 }
 
 // Task kind constants — used both by manifest authors (yaml value)

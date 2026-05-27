@@ -89,6 +89,13 @@ type MissionManifest struct {
 	//
 	// Empty / nil → no manifest seed. Phase 5.x — B11 §3.2.2.
 	AcceptanceCriteria []string
+
+	// InputsSchema is the JSON Schema declaring the structured
+	// `inputs` blob `session:spawn_mission` accepts. Surfaces in the
+	// `## Available missions` prompt block so root knows the exact
+	// keys to pass without guessing. nil / empty → schema absent;
+	// the prompt block falls back to the bare summary. Phase 6.1d.
+	InputsSchema map[string]any
 }
 
 // MissionCapabilities is the mission-tier capability projection.
@@ -267,6 +274,11 @@ type WorkerManifest struct {
 type MissionCatalogEntry struct {
 	Name    string
 	Summary string
+	// InputsSchema mirrors MissionManifest.InputsSchema — included
+	// here so the AdvertiseSystemPrompt renderer can show input keys
+	// without a second LookupMission call per entry. nil when the
+	// mission declares no schema. Phase 6.1d.
+	InputsSchema map[string]any
 }
 
 // staticCatalog is an in-memory Catalog implementation tests +
@@ -309,7 +321,11 @@ func (c *staticCatalog) ListMissions(_ context.Context) ([]MissionCatalogEntry, 
 	}
 	out := make([]MissionCatalogEntry, 0, len(c.missions))
 	for _, m := range c.missions {
-		out = append(out, MissionCatalogEntry{Name: m.Name, Summary: m.Summary})
+		out = append(out, MissionCatalogEntry{
+			Name:         m.Name,
+			Summary:      m.Summary,
+			InputsSchema: m.InputsSchema,
+		})
 	}
 	return out, nil
 }

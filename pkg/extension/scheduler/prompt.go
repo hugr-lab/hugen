@@ -102,6 +102,15 @@ func (e *Extension) renderAvailableTasks(ctx context.Context, state extension.Se
 			fmt.Fprintf(&b, " — %s", entry.Summary)
 		}
 		b.WriteByte('\n')
+		// Phase 6.1d — render the recipe's inputs schema so root
+		// can pre-fill task_inputs / inputs with the correct keys
+		// without guessing. Helper produces "  inputs (required):"
+		// / "  inputs (optional):" blocks; absent / empty schema
+		// renders nothing.
+		if block := skill.RenderInputsSchemaBlock(entry.InputsSchema, "  "); block != "" {
+			b.WriteString(block)
+			b.WriteByte('\n')
+		}
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -114,6 +123,13 @@ type TaskCatalogEntry struct {
 	Name    string
 	Kind    string
 	Summary string
+	// InputsSchema is the recipe's `task.inputs_schema` (JSON
+	// Schema) passed through unchanged. Available tasks rendering
+	// flattens it into a compact key/type/description list via
+	// skill.RenderInputsSchemaBlock; downstream consumers may
+	// inspect the raw structure. nil when the recipe declares no
+	// schema. Phase 6.1d.
+	InputsSchema map[string]any
 }
 
 // taskEligibleEntries filters and sorts task-eligible skills for the
@@ -130,9 +146,10 @@ func taskEligibleEntries(all []skill.Skill) []TaskCatalogEntry {
 			summary = strings.TrimSpace(sk.Manifest.Description)
 		}
 		out = append(out, TaskCatalogEntry{
-			Name:    sk.Manifest.Name,
-			Kind:    strings.TrimSpace(sk.Manifest.Hugen.Task.Kind),
-			Summary: summary,
+			Name:         sk.Manifest.Name,
+			Kind:         strings.TrimSpace(sk.Manifest.Hugen.Task.Kind),
+			Summary:      summary,
+			InputsSchema: sk.Manifest.Hugen.Task.InputsSchema,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
