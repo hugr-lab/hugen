@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,6 +40,12 @@ const (
 	PermPause  = "hugen:task:pause"
 	PermResume = "hugen:task:resume"
 	PermCancel = "hugen:task:cancel"
+	// PermRunRecipe is the umbrella permission object every
+	// synthetic `task:<recipe-name>` tool advertises. Per-recipe
+	// policy refinement lands later (5.3.policy-ux); today the
+	// allowed-tools allow-set on the loaded category skill is the
+	// gate. Phase 6.1d.
+	PermRunRecipe = "hugen:task:run_recipe"
 )
 
 // Extension is the per-session TaskManager. Constructed once at
@@ -438,9 +445,16 @@ const taskIDSchema = `{
   "required": ["task_id"]
 }`
 
-// List implements [tool.ToolProvider].
-func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
-	return []tool.Tool{
+// List implements [tool.ToolProvider]. Returns the static
+// scheduler surface (create / list / pause / resume / cancel) PLUS
+// one synthetic `task:<recipe-name>` entry per task-eligible skill
+// the SkillManager knows about — generated from each recipe
+// manifest's `task` block. The synthetic tools are universal:
+// FilterTools narrows them per session against the loaded
+// category-skills' `allowed-tools`, so root sees only what its
+// loaded categories admit. Phase 6.1d.
+func (e *Extension) List(ctx context.Context) ([]tool.Tool, error) {
+	out := []tool.Tool{
 		{
 			Name:             providerName + ":create",
 			Description:      "Create a scheduled task. Persists a `tasks` row + the initial `task_log` planned row atomically. Phase 6.1b — fire dispatch lands in 6.1c; rows created here remain visible via GraphQL but are not yet executed.",
@@ -476,7 +490,69 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 			PermissionObject: PermCancel,
 			ArgSchema:        json.RawMessage(taskIDSchema),
 		},
-	}, nil
+	}
+	if e.skills != nil {
+		synth, err := syntheticRecipeTools(ctx, e.skills)
+		if err != nil {
+			// Synthesis failures are non-fatal — log + skip; the
+			// static surface above still works and FilterTools never
+			// gets to see the missing entries.
+			e.logger.Warn("scheduler: synthetic tool emit failed", "err", err)
+		} else {
+			out = append(out, synth...)
+		}
+	}
+	return out, nil
+}
+
+// syntheticRecipeTools walks the SkillManager catalogue and emits
+// one tool entry per task-eligible skill. The tool name is
+// `task:<skill-name>`; description comes from `task.goal_summary`
+// (falling back to the manifest's top-level description);
+// parameters come straight from `task.inputs_schema` (with a
+// minimal default when absent so a model still sees a valid schema
+// shape). Phase 6.1d.
+func syntheticRecipeTools(ctx context.Context, mgr *skill.SkillManager) ([]tool.Tool, error) {
+	if mgr == nil {
+		return nil, nil
+	}
+	all, err := mgr.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list skills: %w", err)
+	}
+	out := make([]tool.Tool, 0, len(all))
+	for _, sk := range all {
+		tb := sk.Manifest.Hugen.Task
+		if !tb.Eligible {
+			continue
+		}
+		desc := strings.TrimSpace(tb.GoalSummary)
+		if desc == "" {
+			desc = strings.TrimSpace(sk.Manifest.Description)
+		}
+		var argSchema json.RawMessage
+		if len(tb.InputsSchema) > 0 {
+			raw, mErr := json.Marshal(tb.InputsSchema)
+			if mErr != nil {
+				return nil, fmt.Errorf("recipe %q inputs_schema marshal: %w", sk.Manifest.Name, mErr)
+			}
+			argSchema = raw
+		} else {
+			argSchema = json.RawMessage(`{"type":"object","properties":{},"additionalProperties":true}`)
+		}
+		out = append(out, tool.Tool{
+			Name:        providerName + ":" + sk.Manifest.Name,
+			Description: desc,
+			Provider:    providerName,
+			// Phase 6.1d — synthetic recipe tools share the umbrella
+			// permission object so per-recipe policy can sit at the
+			// scheduler tier; per-recipe policy refinement lands
+			// later when policy-ux grows recipe-aware predicates.
+			PermissionObject: PermRunRecipe,
+			ArgSchema:        argSchema,
+		})
+	}
+	return out, nil
 }
 
 // Call implements [tool.ToolProvider].

@@ -371,6 +371,42 @@ func TestAdvertiseSystemPrompt_CatalogueOnly(t *testing.T) {
 	}
 }
 
+// TestAdvertiseSystemPrompt_TaskEligibleSkillsHidden verifies the
+// Phase 6.1d filter: skills with `task.eligible: true` do NOT appear
+// in the `## Available skills` catalogue. They surface to the model
+// as synthetic `task:<recipe-name>` tools via scheduler ext; the
+// regular skill catalogue is reserved for loadable category /
+// utility skills.
+func TestAdvertiseSystemPrompt_TaskEligibleSkillsHidden(t *testing.T) {
+	ctx := context.Background()
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"alpha": []byte(inlineAlphaManifest),
+		"data_tables_rows_count": []byte(`---
+name: data_tables_rows_count
+description: A recipe.
+license: MIT
+metadata:
+  hugen:
+    tier_compatibility: [worker]
+    task: {eligible: true, kind: worker}
+---
+`),
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a1")
+	state := fixture.NewTestSessionState("ses-adv-recipes").WithDepth(2)
+	if err := ext.InitState(ctx, state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	out := ext.AdvertiseSystemPrompt(ctx, state)
+	if !strings.Contains(out, "`alpha`") {
+		t.Errorf("non-recipe alpha must still appear:\n%s", out)
+	}
+	if strings.Contains(out, "data_tables_rows_count") {
+		t.Errorf("task-eligible recipe leaked into Available skills:\n%s", out)
+	}
+}
+
 // TestReportStatus_AdvertiseSplit_LoadedVsCatalogue verifies the
 // γ split: ReportStatus surfaces `loaded_skill_tokens` and
 // `available_skill_tokens` separately so the context-budget UI

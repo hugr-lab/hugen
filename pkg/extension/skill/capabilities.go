@@ -409,6 +409,15 @@ func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *Session
 	}
 	items := make([]skillItem, 0, len(all))
 	for _, sk := range all {
+		// Phase 6.1d — task-eligible recipe skills are not listed
+		// here. They surface to the model as synthetic
+		// `task:<recipe-name>` tools (scheduler ext provider), and
+		// loading them as regular skills is not part of the
+		// task-runner flow — the category skill admits the synthetic
+		// tool via its allowed-tools instead.
+		if sk.Manifest.Hugen.Task.Eligible {
+			continue
+		}
 		_, on := loadedSet[sk.Manifest.Name]
 		items = append(items, skillItem{
 			Name:        sk.Manifest.Name,
