@@ -69,9 +69,9 @@ type SessionHost interface {
 //   7. AppendLog(completed | failed) with last assistant text as
 //      outcome.body.
 //   8. Compute next planned via the schedule; AppendLog(planned)
-//      for the next fire. Recurring tasks re-register a fresh
-//      Schedule via the captured runner reference (Phase 6.1c
-//      ships interval / once_in / once_at; cron-expression in 6.2).
+//      for the next fire. Recurring tasks (interval / cron)
+//      re-register a fresh Schedule via the captured runner
+//      reference; one-shot kinds (once_in / once_at) complete.
 //   9. Emit scheduler:notification ExtensionFrame on the owner
 //      session so the operator sees a status line.
 //
@@ -488,9 +488,10 @@ func terminalLog(task schedstore.TaskRow, fire runner.FireMeta, eventType string
 // it on time. End-condition check (count exceeded / until passed)
 // short-circuits with status='completed' on the task row.
 //
-// Recurring schedule parsing for cron-expression strings is
-// deferred to Phase 6.2; today interval / once_in / once_at are
-// supported. For one-shot kinds we skip the next planned row.
+// Recurring kinds (interval, cron) compute the next instant + insert
+// a fresh `planned` row + re-register a Once schedule. One-shot kinds
+// (once_in / once_at) skip the next planned row and mark the task
+// completed.
 func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner.FireMeta, deps fireDeps) {
 	switch task.ScheduleKind {
 	case schedstore.ScheduleOnceIn, schedstore.ScheduleOnceAt:
@@ -534,12 +535,54 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 			}
 		}
 	case schedstore.ScheduleCron:
-		// Cron-expression schedules land in 6.2 — see backlog.
-		deps.logger.Warn("scheduler: cron-expression schedule not yet supported; pausing",
-			"task_id", task.ID, "spec", task.Spec.ScheduleSpec)
-		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
-		if deps.pauseFn != nil {
-			_ = deps.pauseFn(task.ID)
+		loc, err := resolveLocation(task.Spec.Timezone)
+		if err != nil {
+			deps.logger.Warn("scheduler: invalid cron timezone; pausing task",
+				"task_id", task.ID, "timezone", task.Spec.Timezone, "err", err)
+			_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+			if deps.pauseFn != nil {
+				_ = deps.pauseFn(task.ID)
+			}
+			return
+		}
+		sched, err := runner.Cron(task.Spec.ScheduleSpec, loc)
+		if err != nil {
+			deps.logger.Warn("scheduler: invalid cron expression; pausing task",
+				"task_id", task.ID, "spec", task.Spec.ScheduleSpec, "err", err)
+			_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+			if deps.pauseFn != nil {
+				_ = deps.pauseFn(task.ID)
+			}
+			return
+		}
+		next := sched.Next(fire.PlannedAt)
+		if next.IsZero() {
+			// No further fire (a cron that can never match again).
+			if err := deps.store.CancelTask(context.Background(), task.ID); err != nil {
+				deps.logger.Warn("scheduler: cron exhausted cancel",
+					"task_id", task.ID, "err", err)
+			}
+			return
+		}
+		if shouldEndAfter(task.Spec.EndCondition, fire.FireSeq, next) {
+			if err := deps.store.CancelTask(context.Background(), task.ID); err != nil {
+				deps.logger.Warn("scheduler: end-condition cancel",
+					"task_id", task.ID, "err", err)
+			}
+			return
+		}
+		appendLogSafely(ctx, deps, schedstore.TaskLogEntry{
+			TaskID:    task.ID,
+			AgentID:   deps.agentID,
+			FireSeq:   fire.FireSeq + 1,
+			EventType: schedstore.LogEventPlanned,
+			PlannedAt: next,
+		})
+		if deps.registerFn != nil {
+			if err := deps.registerFn(task.ID, runner.Once(next)); err != nil {
+				deps.logger.Warn("scheduler: re-register cron task",
+					"task_id", task.ID, "err", err)
+			}
 		}
 	default:
 		deps.logger.Warn("scheduler: unknown schedule_kind; pausing",

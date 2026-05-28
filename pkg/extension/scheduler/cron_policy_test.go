@@ -196,3 +196,44 @@ func TestMaybeAutoApprove_ValueIsWrongType(t *testing.T) {
 		t.Fatal("malformed state value must not produce a grant")
 	}
 }
+
+func TestMaybeDenyInquiry_OnCronSession(t *testing.T) {
+	ext := newExt(t)
+	cron := newFakeState("ses-cron-deny")
+	cron.SetValue(protocol.SchedulerFireStateKey, &protocol.FireContext{TaskID: "tsk_deny"})
+
+	reason, deny := ext.MaybeDenyInquiry(context.Background(), cron)
+	if !deny {
+		t.Fatal("cron session inquiry must be denied")
+	}
+	if reason == "" {
+		t.Error("deny reason must be non-empty so the model can recover")
+	}
+}
+
+func TestMaybeDenyInquiry_OnNonCronSession(t *testing.T) {
+	ext := newExt(t)
+	root := newFakeState("ses-root-allow")
+	if _, deny := ext.MaybeDenyInquiry(context.Background(), root); deny {
+		t.Fatal("interactive (non-cron) session must NOT be denied")
+	}
+}
+
+func TestMaybeDenyInquiry_ChildOfCron(t *testing.T) {
+	ext := newExt(t)
+	cron := newFakeState("ses-cron-deny-parent")
+	cron.SetValue(protocol.SchedulerFireStateKey, &protocol.FireContext{TaskID: "tsk_chain_deny"})
+	worker := newFakeState("ses-worker-deny")
+	worker.parent = cron
+
+	if _, deny := ext.MaybeDenyInquiry(context.Background(), worker); !deny {
+		t.Fatal("worker under a cron fire must be denied")
+	}
+}
+
+func TestMaybeDenyInquiry_NilCaller(t *testing.T) {
+	ext := newExt(t)
+	if _, deny := ext.MaybeDenyInquiry(context.Background(), nil); deny {
+		t.Fatal("nil caller must not deny")
+	}
+}

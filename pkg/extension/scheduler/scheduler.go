@@ -141,6 +141,7 @@ var (
 	_ extension.Extension             = (*Extension)(nil)
 	_ tool.ToolProvider               = (*Extension)(nil)
 	_ extension.ToolApprovalPolicy    = (*Extension)(nil)
+	_ extension.InquiryPolicy         = (*Extension)(nil)
 	_ extension.SubagentSpawnApplier  = (*Extension)(nil)
 )
 
@@ -397,7 +398,8 @@ const createSchema = `{
     "skill_ref":     {"type": "string", "description": "Skill name to load on each fire (spawn kind). Leave empty for wake kind."},
     "kind":          {"type": "string", "enum": ["wake", "spawn"], "description": "Fire delivery kind. 'wake' = synthetic UserMessage into owner session; 'spawn' = cron-fire subagent under the owner per fire."},
     "schedule_kind": {"type": "string", "enum": ["once_in", "once_at", "cron", "interval"], "description": "Schedule shape; semantics keyed by schedule_spec."},
-    "schedule_spec": {"type": "string", "description": "Schedule expression — Go duration ('5m', '24h') for once_in/interval; RFC3339 timestamp for once_at; cron expression for cron (cron deferred to 6.2)."},
+    "schedule_spec": {"type": "string", "description": "Schedule expression — Go duration ('5m', '24h') for once_in/interval; RFC3339 timestamp for once_at; 5-field cron expression ('0 9 * * 1' = Mon 09:00) for cron."},
+    "timezone":      {"type": "string", "description": "IANA location name (e.g. 'Europe/Berlin') a cron schedule_spec is evaluated in. Defaults to UTC. Only used by schedule_kind=cron."},
     "name":          {"type": "string", "description": "Short label for UI / logs."},
     "description":   {"type": "string", "description": "User's intent in words. Optional."},
     "goal":          {"type": "string", "description": "Imperative one-line brief for spawn fires."},
@@ -525,6 +527,7 @@ type createInput struct {
 	Kind             string                       `json:"kind"`
 	ScheduleKind     string                       `json:"schedule_kind"`
 	ScheduleSpec     string                       `json:"schedule_spec"`
+	Timezone         string                       `json:"timezone,omitempty"`
 	InitialPlannedAt string                       `json:"initial_planned_at"`
 	Name             string                       `json:"name"`
 	Description      string                       `json:"description,omitempty"`
@@ -561,6 +564,20 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 	}
 	if in.ScheduleSpec == "" {
 		return toolErr("invalid_args", "schedule_spec required")
+	}
+	// Validate the cron expression + timezone at create time so a bad
+	// spec is rejected up front — including the initial_planned_at
+	// override path, where resolveInitialPlannedAt returns early
+	// without consulting the expression. Recompute would otherwise
+	// pause the task on its first fire.
+	if in.ScheduleKind == schedstore.ScheduleCron {
+		loc, lerr := resolveLocation(in.Timezone)
+		if lerr != nil {
+			return toolErr("invalid_args", lerr.Error())
+		}
+		if _, cerr := runner.Cron(in.ScheduleSpec, loc); cerr != nil {
+			return toolErr("invalid_args", fmt.Sprintf("schedule_spec %v", cerr))
+		}
 	}
 	planned, err := resolveInitialPlannedAt(in)
 	if err != nil {
@@ -613,6 +630,7 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 			Name:         in.Name,
 			Description:  in.Description,
 			ScheduleSpec: in.ScheduleSpec,
+			Timezone:     in.Timezone,
 			EndCondition: in.EndCondition,
 			Goal:         in.Goal,
 			WakeMessage:  in.WakeMessage,
@@ -901,10 +919,36 @@ func resolveInitialPlannedAt(in createInput) (time.Time, error) {
 		}
 		return t.UTC(), nil
 	case schedstore.ScheduleCron:
-		return time.Time{}, fmt.Errorf("cron-expression schedule_kind not yet supported — defer to 6.2; pass initial_planned_at explicitly to schedule manually")
+		loc, err := resolveLocation(in.Timezone)
+		if err != nil {
+			return time.Time{}, err
+		}
+		sched, err := runner.Cron(in.ScheduleSpec, loc)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("schedule_spec %v", err)
+		}
+		next := sched.Next(now)
+		if next.IsZero() {
+			return time.Time{}, fmt.Errorf("cron expression %q yields no future fire", in.ScheduleSpec)
+		}
+		return next, nil
 	default:
 		return time.Time{}, fmt.Errorf("unknown schedule_kind %q", in.ScheduleKind)
 	}
+}
+
+// resolveLocation maps an optional IANA timezone name to a
+// *time.Location. Empty → UTC. Invalid names surface as an error the
+// caller turns into an invalid_args tool response.
+func resolveLocation(tz string) (*time.Location, error) {
+	if tz == "" {
+		return time.UTC, nil
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return nil, fmt.Errorf("invalid timezone %q: %v", tz, err)
+	}
+	return loc, nil
 }
 
 // newTaskID is the synthetic sortable id used for tasks rows. Shape

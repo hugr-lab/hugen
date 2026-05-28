@@ -256,6 +256,142 @@ func TestDispatchSpawnFire_DeadOwnerPauses(t *testing.T) {
 	}
 }
 
+// TestMaybeScheduleNext_CronRecomputes asserts the recompute path
+// for a recurring cron task: after a fire it inserts the next
+// `planned` row at the cron-derived instant and re-registers a Once
+// schedule so the Runner fires it on time. "0 9 * * 1" advances from
+// one Monday 09:00 to the next.
+func TestMaybeScheduleNext_CronRecomputes(t *testing.T) {
+	store := newFakeStore()
+	row := schedstore.TaskRow{
+		ID:           "tsk_cron_1",
+		AgentID:      "agt_test",
+		Kind:         schedstore.KindWake,
+		Status:       schedstore.StatusActive,
+		ScheduleKind: schedstore.ScheduleCron,
+		Spec: schedstore.TaskSpec{
+			Name:         "weekly",
+			ScheduleSpec: "0 9 * * 1",
+			EndCondition: schedstore.TaskEndCondition{Kind: "until_cancel"},
+		},
+	}
+	planned := time.Date(2024, 1, 1, 9, 0, 0, 0, time.UTC) // Monday
+	if err := store.OpenTask(context.Background(), row, planned); err != nil {
+		t.Fatalf("seed OpenTask: %v", err)
+	}
+
+	var registered []time.Time
+	deps := fireDeps{
+		store:   store,
+		agentID: "agt_test",
+		logger:  slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
+		registerFn: func(_ string, sched runner.Schedule) error {
+			// Extract the Once instant by probing just before it.
+			registered = append(registered, sched.Next(planned))
+			return nil
+		},
+	}
+
+	maybeScheduleNext(context.Background(), row, runner.FireMeta{FireSeq: 1, PlannedAt: planned}, deps)
+
+	wantNext := time.Date(2024, 1, 8, 9, 0, 0, 0, time.UTC) // following Monday
+	pl, err := store.LatestPlannedFire(context.Background(), row.ID)
+	if err != nil || pl == nil {
+		t.Fatalf("LatestPlannedFire: %v (%v)", err, pl)
+	}
+	if !pl.PlannedAt.Equal(wantNext) {
+		t.Errorf("next planned_at=%v, want %v", pl.PlannedAt, wantNext)
+	}
+	if pl.FireSeq != 2 {
+		t.Errorf("next fire_seq=%d, want 2", pl.FireSeq)
+	}
+	if len(registered) != 1 || !registered[0].Equal(wantNext) {
+		t.Errorf("re-register schedule = %v, want one Once(%v)", registered, wantNext)
+	}
+}
+
+// TestMaybeScheduleNext_CronEndConditionCount stops a cron task once
+// the count end-condition is reached — no further planned row, the
+// task is cancelled.
+func TestMaybeScheduleNext_CronEndConditionCount(t *testing.T) {
+	store := newFakeStore()
+	row := schedstore.TaskRow{
+		ID:           "tsk_cron_count",
+		AgentID:      "agt_test",
+		Kind:         schedstore.KindWake,
+		Status:       schedstore.StatusActive,
+		ScheduleKind: schedstore.ScheduleCron,
+		Spec: schedstore.TaskSpec{
+			Name:         "twice",
+			ScheduleSpec: "0 9 * * 1",
+			EndCondition: schedstore.TaskEndCondition{Kind: "count", Spec: "2"},
+		},
+	}
+	planned := time.Date(2024, 1, 1, 9, 0, 0, 0, time.UTC)
+	if err := store.OpenTask(context.Background(), row, planned); err != nil {
+		t.Fatalf("seed OpenTask: %v", err)
+	}
+	deps := fireDeps{
+		store:      store,
+		agentID:    "agt_test",
+		logger:     slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
+		registerFn: func(string, runner.Schedule) error { return nil },
+	}
+	// fire_seq 2 completed; count=2 reached → cancel, no new planned.
+	maybeScheduleNext(context.Background(), row, runner.FireMeta{FireSeq: 2, PlannedAt: planned}, deps)
+
+	got, err := store.GetTask(context.Background(), row.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.Status != schedstore.StatusCancelled {
+		t.Errorf("status=%q, want cancelled after end-condition", got.Status)
+	}
+}
+
+// TestMaybeScheduleNext_CronBadExprPauses asserts a hand-edited /
+// drifted row carrying an unparseable cron spec pauses rather than
+// crashing the fire loop (create validates, but the store is also
+// writable via GraphQL).
+func TestMaybeScheduleNext_CronBadExprPauses(t *testing.T) {
+	store := newFakeStore()
+	row := schedstore.TaskRow{
+		ID:           "tsk_cron_bad",
+		AgentID:      "agt_test",
+		Kind:         schedstore.KindWake,
+		Status:       schedstore.StatusActive,
+		ScheduleKind: schedstore.ScheduleCron,
+		Spec: schedstore.TaskSpec{
+			Name:         "broken",
+			ScheduleSpec: "not a cron",
+			EndCondition: schedstore.TaskEndCondition{Kind: "until_cancel"},
+		},
+	}
+	planned := time.Date(2024, 1, 1, 9, 0, 0, 0, time.UTC)
+	if err := store.OpenTask(context.Background(), row, planned); err != nil {
+		t.Fatalf("seed OpenTask: %v", err)
+	}
+	var pauses []string
+	deps := fireDeps{
+		store:   store,
+		agentID: "agt_test",
+		logger:  slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
+		pauseFn: func(taskID string) error { pauses = append(pauses, taskID); return nil },
+	}
+	maybeScheduleNext(context.Background(), row, runner.FireMeta{FireSeq: 1, PlannedAt: planned}, deps)
+
+	got, err := store.GetTask(context.Background(), row.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if got.Status != schedstore.StatusPaused {
+		t.Errorf("status=%q, want paused on bad cron expr", got.Status)
+	}
+	if len(pauses) != 1 {
+		t.Errorf("pauseFn calls=%v, want one", pauses)
+	}
+}
+
 func TestHashJSON_StableAcrossKeyOrder(t *testing.T) {
 	a := map[string]any{"foo": 1, "bar": "x"}
 	b := map[string]any{"bar": "x", "foo": 1}

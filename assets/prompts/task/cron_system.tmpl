@@ -30,6 +30,8 @@ self-contained.
 {{- end }}
 
 [Cron contract]
+- This fire is HEADLESS: there is no operator to answer questions or
+  approve anything in real time. Plan to finish on your own.
 - Pre-approved tools (frozen at task-create time):
 {{- if .AllowedTools }}
 {{- range .AllowedTools }}
@@ -38,10 +40,13 @@ self-contained.
 {{- else }}
   (none — this fire is read-only)
 {{- end }}
-  Calling any other tool opens an approval modal that bubbles up to
-  the owner conversation. If the owner is unattended (cron run while
-  user is away) the modal will sit unanswered — prefer the pre-approved
-  list. Calling `session:inquire` works the same way: the question
-  bubbles to the owner, and the answer comes back. Use sparingly.
+  These are auto-approved — call them freely. Any tool NOT on this
+  list that needs approval is denied immediately (no operator to
+  grant it); don't call it, stick to the pre-approved list.
+- Do NOT call `session:inquire` (clarification or approval). It is
+  denied in a cron fire — there is no operator to answer, and you get
+  back a `denied_no_operator` error. Resolve any ambiguity from the
+  inputs and goal above; if you genuinely cannot proceed, end with a
+  short message stating what was missing instead of asking.
 - Optimise for a single short outcome message. The owner conversation
   reads your final assistant text as the cron's result.

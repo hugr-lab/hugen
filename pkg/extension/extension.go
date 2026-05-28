@@ -510,3 +510,29 @@ type HistoryOwner interface {
 type ToolApprovalPolicy interface {
 	MaybeAutoApprove(ctx context.Context, caller SessionState, tool string) (grantedByMissionID string, ok bool)
 }
+
+// InquiryPolicy lets an extension deny a session:inquire before it
+// parks + bubbles to an operator — e.g. a headless cron fire that has
+// no interactive operator to answer. Without this gate a cron session
+// whose model calls session:inquire (clarification OR approval) parks
+// forever: the request bubbles to nobody and the session hangs in
+// `active`/`wait_*` until the fire timeout. The gate turns that into
+// a fast structured failure the model can read + recover from.
+//
+// Contract: implementations are consulted in deps.Extensions order at
+// the top of [Session.callInquire], BEFORE any feed/timer setup. The
+// first (reason, deny=true) wins — remaining extensions are skipped
+// and callInquire returns a `denied_no_operator` tool error (NOT a Go
+// error). deny=false (or no policy registered) falls through to the
+// normal park/bubble path.
+//
+// Because [Session.requestApproval] calls callInquire AFTER its own
+// ToolApprovalPolicy auto-approve walk, this single gate also backstops
+// the approval path: a cron tool on the fire's allow-list is
+// auto-granted upstream; one that isn't reaches callInquire here and
+// is denied rather than parking.
+//
+// Phase 6.2a.
+type InquiryPolicy interface {
+	MaybeDenyInquiry(ctx context.Context, caller SessionState) (reason string, deny bool)
+}
