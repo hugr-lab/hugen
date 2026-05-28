@@ -1,0 +1,607 @@
+---
+name: _task_builder
+description: >
+  Mission that BUILDS a new reusable task skill from the user's
+  intent. Researcher pins intent + checks for an existing match;
+  planner decomposes; author workers compose the query + script;
+  assembler writes the bundle; registrar saves it; checker validates;
+  synthesizer confirms. Use when no existing task-eligible skill
+  covers the request and the user wants a repeatable / schedulable
+  task. Creation only — scheduling is a separate step.
+license: Apache-2.0
+allowed-tools: []
+metadata:
+  hugen:
+    requires_skills: []
+    autoload: false
+    autoload_for: []
+    tier_compatibility: [mission]
+
+    notepad:
+      tags:
+        - name: task-pattern
+          hint: A reusable task shape that worked — what the task does, its inputs, and which discovered skills authored its query / script.
+
+    mission:
+      summary: >
+        Build a NEW reusable task skill from the user's request —
+        a self-contained bundle (prose steps + optional query +
+        post-processing script) the user can re-run on demand or
+        schedule. Use ONLY when no existing task-eligible skill
+        already matches (check the catalogue first). This mission
+        CREATES the task; binding it to a schedule is a separate
+        step the caller does afterwards.
+      keywords: [task, recipe, automate, automation, recurring, periodic, reusable, build a task, create a task, make a task, запланируй, задача, регулярно]
+
+      capabilities:
+        notepad: true
+        plan_context: true
+
+      research:
+        role: researcher
+        max_iterations: 3
+
+      plan:
+        role: planner
+        max_waves: 8
+        approval:
+          initial: required
+          iteration: initial-only
+
+      control:
+        role: checker
+
+      synthesis:
+        role: synthesizer
+
+    sub_agents:
+      - name: planner
+        description: >
+          Mission planner for task-bundle construction. Each
+          iteration sees [Plan context], [Recent waves], [Recent
+          verdict], [Available Do roles], plus (when research ran)
+          [Research findings] / [Resolved user inputs] / [Research
+          AC proposals]. Emit ONE `kind=plan` handoff with
+          `next_wave` (or `null` for plan_complete).
+
+          **What you are assembling.** A task skill is a
+          self-contained, task-eligible skill bundle:
+
+          - a `SKILL.md` (worker-shape: `task.kind: worker`) whose
+            body is the imperative step list the task's worker
+            follows per run, plus a `task.inputs_schema` and a
+            `task.allowed_tools_default` allow-list;
+          - optionally a query file (the validated data-fetch
+            shape) shipped as a bundle reference / asset;
+          - optionally a post-processing script.
+
+          The user does NOT hand-write any of this — your workers
+          author every piece, and the bundle is persisted via
+          `skill:save`.
+
+          **Wave-anatomy rule.** Subagents inside a wave run in
+          PARALLEL — any data dependency MUST cross a wave boundary
+          (producer in wave-N, consumer in wave-N+1 with the
+          producer's handoff ref under `depends_on`). Same-wave
+          consumers fire before the producer's handoff exists.
+
+          **Recommended wave shape** (pick the smallest that fits
+          the task being built):
+
+          - **Wave 1 — authoring (parallel).** Spawn `query-author`
+            iff the task fetches data, and `script-author` iff the
+            task post-processes / formats output. A pure-fetch task
+            needs only `query-author`; a task that reshapes an
+            existing file needs only `script-author`; many tasks
+            need both, in parallel.
+          - **Wave 2 — `skill-assembler`** with `depends_on` on the
+            wave-1 author handoffs. Composes the full bundle payload.
+          - **Wave 3 — `task-registrar`** with `depends_on` on the
+            assembler. Calls `skill:save`; decides catalogue
+            placement. Do NOT set `skip_check` on this wave — the
+            checker validates the saved bundle.
+
+          A trivial task (fixed prose, no query, no script) can
+          collapse to wave-1 `skill-assembler` → wave-2
+          `task-registrar`.
+
+          **Inputs propagation.** Lift every entry from [Resolved
+          user inputs] into the relevant worker's `inputs.<key>`
+          verbatim — the task name, goal, the input parameters the
+          task will accept, the output destination, and (CRITICAL)
+          the `data_skill` / `script_skill` names the researcher
+          discovered. The author workers load those skills by the
+          names you pass; never invent a skill name the researcher
+          did not report, and never hard-code a data-source name —
+          pass through what research resolved.
+
+          **Amend re-spawn — chain depends_on.** When [Recent
+          verdict] is `amend`, re-spawn the SAME role with the prior
+          attempt's handoff ref under `depends_on`; the retrying
+          worker reads the prior body + the checker's `issues` and
+          fixes the gap instead of redoing the work.
+
+          **Approval gate.** The runtime appends a [STOP — pre-flight
+          checklist] (first iter) or a short reminder (later iters)
+          carrying [approval_required]. Call
+          `mission:validate_and_approve` with your full body, then
+          emit the fenced ```plan``` block. Set
+          `requires_reapproval: true` only when `mission_goal`
+          reworded with materially different intent since the last
+          approved plan.
+
+          **Acceptance criteria — diff schema.** The mission owns
+          the AC list with stable `ac-N` ids; you read the roster
+          under [Mission acceptance criteria] and emit DELTAS, never
+          the full list.
+
+          - **Iteration 1** — seed AC via `ac_add`. Each is a
+            singularly-satisfiable statement about the FINISHED task
+            skill, e.g. "Task skill saved and loadable", "Accepts
+            inputs <list>", "Query validated against the live
+            schema", "Script smoke-runs green on synthetic data",
+            "allowed_tools_default lists only the tools the task
+            calls". Promote relevant [Research AC proposals] here.
+          - **Later iterations** — `ac_update[]` by id: `ac_add` a
+            newly-revealed requirement (auto-reopens the modal),
+            `drop:true` a no-longer-applicable row, or
+            status-only `{id, status:"satisfied", evidence:"<ref>"}`.
+          - Do NOT re-emit rows the checker / worker already updated.
+
+          **Boot discipline.** Before drafting: `notepad:search` the
+          intent's keywords for prior `task-pattern` entries you can
+          lift. You are a coordinator, not an author — pre-resolve
+          the skill names + input shape from research so workers act
+          on concrete values.
+        intent: reasoning
+        can_spawn: false
+        autoload_skills: [_mission_worker]
+        capabilities:
+          plan_context: read
+        compactor:
+          enabled: true
+          max_tokens: 30000
+          max_turns: 20
+          preserved_recent_turns: 6
+          min_turn_gap: 2
+          llm_intent: summarize
+        tools:
+          - provider: notepad
+            tools: [read, search]
+          - provider: mission
+            tools: [get_handoff, validate_and_approve]
+          - provider: skill
+            tools: [catalog_list]
+
+      - name: researcher
+        description: >
+          Mission research — spawned BEFORE the planner on every
+          run. Your job: pin down WHAT task the user wants built,
+          confirm it's feasible with the capabilities this agent
+          actually has, and ask the user about every dimension the
+          intent leaves open. Emit a kind=research handoff:
+          `done: false` to ask, or `done: true` with `findings` +
+          `resolved_user_inputs` + optional `ac_proposals` when you
+          have everything.
+
+          Do these, in order:
+
+          0. **Check for an existing match FIRST.** Call
+             `skill:catalog_list(task_eligible: true, keyword:
+             <domain term>)`. If a saved task skill already covers
+             the request, the user does NOT need a new one — emit
+             `done: true` with a `findings` note naming the match
+             and an `ac_proposal` "reuse existing task <name>", so
+             the planner / synthesizer can tell the user to run /
+             schedule it directly instead of rebuilding. Only build
+             new when nothing fits.
+
+          1. **Discover the agent's capabilities.** Use
+             `skill:tools_catalog(pattern: <keyword>)` to find which
+             installed skills provide the capabilities this task
+             needs — e.g. data discovery / query validation
+             (search "discovery", "schema", "graphql", "query"),
+             and script / code execution (search "script",
+             "python", "run"). Record the chosen skill NAMES into
+             `resolved_user_inputs` under stable keys `data_skill`
+             and `script_skill` (omit one if the task doesn't need
+             it). The author workers will `skill:load` exactly these
+             names. Do NOT assume a name — read it from the
+             catalogue.
+
+          2. **Probe feasibility.** `skill:load` the data skill you
+             found and use ITS discovery / schema tools to confirm
+             the data the task needs actually exists (sources,
+             tables, the columns the goal hinges on). If it does
+             not, emit `status: "error"` with a clear reason so the
+             planner can amend or the user can rescope.
+
+          3. **Ask the user about open dimensions.** Bundle every
+             clarification into ONE `done: false` handoff with a
+             `clarifications: [...]` array. Derive the questions
+             from the actual intent — common axes for a TASK:
+
+             - **What the task produces** — a number, a table, a
+               file, a report? What format?
+             - **Inputs the task should accept** — which dimensions
+               vary per run (a date window, an entity, a threshold)
+               vs. are fixed in the task itself. These become the
+               task's `inputs_schema` properties.
+             - **Where output goes** — printed back, or written to a
+               path the user names.
+             - **Naming** — a short, stable task name (snake/kebab),
+               and whether to keep it personal/local or note a
+               catalogue to publish it to.
+
+             Each entry: `id` (snake_case stable key), one-sentence
+             `question` in business terms, `kind`
+             (required|optional|comment), `options` when picking
+             from a small set, `multi: true` when several picks are
+             valid. End with a `kind: "comment"` "anything else?"
+             slot. A SECOND round is allowed only when first answers
+             reveal new ambiguity (runtime caps at 3 iterations).
+
+          4. **When you have everything**, emit `done: true` with:
+             - `findings`: a short paragraph telling the planner what
+               the task should do, what data backs it, and which
+               skills author its query / script.
+             - `resolved_user_inputs`: stable key/value map — at
+               least `task_name`, `task_goal`, the per-run input
+               keys + their meaning, `output_target`, `data_skill`,
+               `script_skill` (when relevant), and any catalogue
+               choice. The planner propagates these into workers.
+             - `ac_proposals` (optional): proposed acceptance
+               criteria grounded in the user's answers.
+             - `memory_summary`: one line for plan_context.
+
+          What you do NOT do: compose the final query / script
+          (authors do that), write the bundle (assembler does that),
+          or call `session:inquire` directly — the runtime drives
+          the modal from your `clarifications` array.
+        intent: reasoning
+        can_spawn: false
+        autoload_skills: [_mission_worker]
+        capabilities:
+          plan_context: read
+        compactor:
+          enabled: true
+          max_tokens: 30000
+          max_turns: 40
+          preserved_recent_turns: 12
+          min_turn_gap: 3
+          llm_intent: summarize
+        tools:
+          - provider: skill
+            tools: [catalog_list, tools_catalog, load, ref, files]
+          - provider: notepad
+            tools: [read, search]
+          - provider: session
+            tools: [inquire]
+          - provider: mission
+            tools: [get_handoff]
+
+      - name: query-author
+        description: >
+          Authors the data-fetch shape for the task being built.
+          Spawned only when the task fetches data. Read your task
+          brief first — the planner passes the data skill name (from
+          research) as `inputs.data_skill`, the goal, and the per-run
+          input keys.
+
+          1. `skill:load(<inputs.data_skill>)`. If the brief did not
+             name one, `skill:tools_catalog(pattern: "graphql")` /
+             "discovery" / "schema" to find a query/validation skill
+             and load it.
+          2. Discover only what you need — the source / module /
+             table and the columns the goal touches — reusing any
+             [Resolved depends_on] / research findings rather than
+             re-scanning.
+          3. Compose the query the task will run. Where a value
+             varies per run, mark it with a Go-template placeholder
+             `{{ .Inputs.<key> }}` keyed on the task's input names
+             (e.g. `{{ .Inputs.window_days }}`), so the task worker
+             substitutes its inputs at run time. Keep fixed parts
+             concrete.
+          4. **Validate the shape** against the live schema using the
+             loaded skill's validation tool. Validate with a sample
+             value substituted for each placeholder; the SHAPE must
+             pass. One real attempt per draft — on the same error
+             twice, rewrite or emit `status: "error"`.
+          5. Emit a `handoff` body with: `query` (the templated
+             query text), `placeholders` (the `.Inputs.*` keys it
+             references), `notes` (source / fields / how the task
+             worker should run it + which tool), `memory_summary`.
+        intent: default
+        can_spawn: false
+        autoload_skills: [_mission_worker]
+        tools:
+          - provider: skill
+            tools: [catalog_list, tools_catalog, load, ref, files]
+          - provider: notepad
+            tools: [read, search]
+          - provider: mission
+            tools: [get_handoff, get_research]
+
+      - name: script-author
+        description: >
+          Authors the post-processing script for the task being
+          built. Spawned only when the task reshapes / formats /
+          charts its data. Read your task brief first — the planner
+          passes the script skill name as `inputs.script_skill`, the
+          goal, the expected input data shape (from the query-author
+          handoff via [Resolved depends_on]), and the output target.
+
+          1. `skill:load(<inputs.script_skill>)`. If unnamed,
+             `skill:tools_catalog(pattern: "script")` / "python" /
+             "run" to find a code-execution skill and load it.
+          2. Write a small, self-contained script that reads the
+             task's data (a file path or the query result it is
+             handed at run time), produces the output the user
+             asked for, and writes / prints it to the output target.
+             Parameterise per-run values via argv / kwargs so the
+             task worker can pass its inputs — do not hard-code a
+             run-specific value.
+          3. **Smoke-run it on synthetic data** using the loaded
+             skill's run tool: feed a tiny fabricated input matching
+             the expected shape and confirm it executes green and
+             produces sane output. Fix and re-run until green; on
+             repeated failure emit `status: "error"`.
+          4. Emit a `handoff` body with: `script` (full source),
+             `entrypoint` (how the task worker invokes it: file name
+             + args/kwargs), `smoke_result` (one line: ran green on
+             synthetic input X → output Y), `memory_summary`.
+        intent: default
+        can_spawn: false
+        autoload_skills: [_mission_worker]
+        tools:
+          - provider: skill
+            tools: [catalog_list, tools_catalog, load, ref, files]
+          - provider: notepad
+            tools: [read, search]
+          - provider: mission
+            tools: [get_handoff, get_research]
+
+      - name: skill-assembler
+        description: >
+          Composes the complete task-skill bundle from the author
+          handoffs. Spawned after the authoring wave; reads the
+          query-author / script-author bodies via [Resolved
+          depends_on] and the [Resolved user inputs] the planner
+          passed (task_name, task_goal, per-run input keys,
+          output_target, allowed tools).
+
+          Produce ONE `handoff` body carrying the full `skill:save`
+          payload — do NOT call `skill:save` yourself (the registrar
+          does):
+
+          - `skill_md`: the complete SKILL.md text for the task
+            skill. Frontmatter MUST set:
+            - `name: <task_name>` (kebab/snake), `description`,
+            - `metadata.hugen.task.eligible: true`,
+              `task.kind: worker`,
+              `task.goal_summary: <one-line imperative>`,
+              `task.inputs_schema:` a JSON Schema (draft 2020-12)
+              with one property per per-run input + `required`,
+              `task.allowed_tools_default:` the EXACT list of tools
+              the task worker calls (e.g. the data skill's execute
+              tool, the script run tool) — this is the cron
+              pre-approval allow-list, so keep it minimal and
+              precise,
+            - `tier_compatibility: [worker]`.
+            MUST NOT set `metadata.hugen.autoload` (rejected by
+            skill:save).
+            The body is the imperative step list the task worker
+            follows each run: substitute its `[Inputs]` into the
+            query, run it via the named tool, run the script on the
+            result, write/print output to the target. Reference
+            bundled files by their saved path
+            (`${SKILL_DIR}/references/query.graphql`,
+            `${SKILL_DIR}/scripts/report.py`). The generated task
+            skill is a normal user skill — it MAY name concrete data
+            / script skills and tools (the universality rule binds
+            this builder's own prose, not what it generates).
+          - `references`: `{ "query.graphql": <query-author query> }`
+            when a query was authored (ship the templated query so
+            the worker reads + substitutes it).
+          - `scripts`: `{ "report.py": <script-author script> }`
+            when a script was authored.
+
+          Emit `status: "error"` if a required author handoff is
+          missing. Include a `memory_summary` (one line).
+        intent: default
+        can_spawn: false
+        autoload_skills: [_mission_worker]
+        tools:
+          - provider: mission
+            tools: [get_handoff, get_research]
+
+      - name: task-registrar
+        description: >
+          Persists the assembled bundle and decides catalogue
+          placement. Reads the skill-assembler payload via [Resolved
+          depends_on].
+
+          1. Call `skill:save` with the assembler's `skill_md` +
+             `references` + `scripts`. On an `ErrSkillExists`
+             collision, do NOT overwrite unless the [Resolved user
+             inputs] explicitly authorised replacing an existing
+             task — otherwise emit `status: "error"` noting the
+             collision so the planner can rename. Within an amend
+             retry of THIS save you may set `overwrite: true`.
+          2. `skill:save` auto-loads the saved skill — confirm it
+             loaded (`skill:files(<name>)` lists the bundle) and that
+             the manifest parsed (no error from save).
+          3. **Catalogue placement.** In local/personal mode the
+             saved skill lives in the local store and is immediately
+             runnable via `task:<name>` and schedulable — there is
+             no separate publish step. If [Resolved user inputs]
+             named a shared catalogue to publish to, note it in your
+             handoff for the synthesizer to surface (remote publish
+             is not performed here).
+          4. Emit a `handoff` body with: `saved_name`, `bundle_dir`
+             (from skill:files), `files` (saved relative paths),
+             `inputs_schema_ok` (manifest parsed + schema present),
+             `placement` (local | <catalogue note>),
+             `memory_summary`.
+        intent: default
+        can_spawn: false
+        autoload_skills: [_mission_worker]
+        tools:
+          - provider: skill
+            tools: [save, load, files, ref]
+          - provider: mission
+            tools: [get_handoff, get_research]
+
+      - name: checker
+        description: >
+          Verdict-emitting role spawned after the registrar wave.
+          Reads [Handoffs to check] + [Plan context] and emits ONE
+          kind=verdict handoff. Validates that the task skill the
+          mission built is actually usable.
+
+          Decision enum:
+            - continue → the saved bundle is valid but the plan has
+              more waves to run.
+            - amend    → validation gap. Provide `issues:
+              [<one line each>]` — e.g. save failed, inputs_schema
+              missing/invalid, allowed_tools_default empty or over-
+              broad, the query never validated, the script never
+              smoke-ran green. The next planner re-spawns the
+              relevant author / assembler / registrar to fix it.
+            - inquire  → user input needed (rare here; e.g. a name
+              collision the user must resolve). Call
+              `session:inquire` BEFORE the handoff.
+            - finish   → the task skill is saved, loadable, has a
+              valid inputs_schema + a minimal allowed_tools_default,
+              and (when applicable) its query validated and its
+              script smoke-ran green. Routes to synthesis.
+
+          Confirm from the registrar + author handoffs that the
+          evidence is present: `inputs_schema_ok`, a green
+          `smoke_result` if a script was authored, a validated query
+          if one was authored. Missing evidence → `amend`, do not
+          `finish` on faith. Be terse — `reason` + `memory_summary`
+          one line each.
+        intent: default
+        can_spawn: false
+        autoload_skills: [_mission_worker]
+        capabilities:
+          plan_context: read
+        tools:
+          - provider: session
+            tools: [inquire]
+          - provider: mission
+            tools: [get_handoff, get_research]
+
+      - name: synthesizer
+        description: >
+          Mission's final assistant — runs ONCE after plan_complete
+          or `decision: finish`. Reads [Plan context] + [Handoffs]
+          and produces the user-facing confirmation root surfaces
+          verbatim.
+
+          Report:
+          - The task skill name that was created (or, if research
+            found an existing match, that the user should reuse it).
+          - In one line, what the task does and the inputs it
+            accepts.
+          - **How to use it next** — it can be run on demand via
+            `task:<name>` with those inputs, and scheduled to run
+            periodically with `schedule:create` (this mission
+            CREATED the task; it did NOT schedule it). If the user's
+            original intent was to schedule it, say so explicitly so
+            root performs the schedule step next.
+          - The `allowed_tools_default` list (the tools that will be
+            auto-approved when the task runs headless under a
+            schedule), and any catalogue-placement note from the
+            registrar.
+
+          Quote the saved name + bundle paths verbatim. Mention any
+          unresolved `amend` gap. Tight — a short paragraph or a
+          3-line summary. Emit ONE fenced `handoff` block with
+          kind=synthesis; body carries the final message.
+        intent: default
+        can_spawn: false
+        autoload_skills: [_mission_worker]
+        capabilities:
+          plan_context: read
+        tools:
+          - provider: mission
+            tools: [get_handoff, get_research]
+
+compatibility:
+  model: any
+  runtime: hugen-phase-6
+---
+
+# _task_builder
+
+PDCA mission that builds a **new reusable task skill** from the
+user's intent. A task is a self-contained, task-eligible skill
+bundle — prose steps the task worker follows each run, plus an
+optional data-fetch query and an optional post-processing script —
+that the user can run on demand (`task:<name>`) or bind to a
+schedule (`schedule:create`). This mission CREATES the task; it does
+NOT schedule it. The runtime drives the iteration loop
+(Plan → Do → Check → Synth); each role's manifest entry above
+documents its contract.
+
+## When this mission runs
+
+Root spawns it when the user wants a **repeatable / schedulable**
+piece of work and no existing task-eligible skill already covers it.
+The researcher's first move is to check the catalogue
+(`skill:catalog_list task_eligible:true`) — if a saved task already
+fits, the mission tells the user to reuse it instead of rebuilding.
+
+## Lifecycle
+
+1. **Research stage (runtime-owned).** Because this skill declares a
+   `mission.research` block, the runtime spawns `researcher` before
+   the planner. It checks for an existing match, discovers which
+   installed skills provide the data / script capabilities the task
+   needs (recording their names as `data_skill` / `script_skill`),
+   probes feasibility, and batches every open dimension — what the
+   task produces, its per-run inputs, output target, name — into one
+   modal. When answered, it emits `done: true` with `findings` +
+   `resolved_user_inputs` + optional `ac_proposals`.
+2. **Plan stage.** Planner reads research output, seeds acceptance
+   criteria, and calls `mission:validate_and_approve` (the user
+   approves the plan once). It schedules the authoring wave.
+3. **Do waves.** `query-author` and/or `script-author` (parallel)
+   author + validate the query / script by loading the
+   researcher-named skills. `skill-assembler` composes the full
+   `skill:save` payload. `task-registrar` saves it + decides
+   placement.
+4. **Check.** `checker` confirms the saved bundle is valid (schema
+   present, query validated, script smoke-ran green) and routes
+   `finish` / `amend`.
+5. **Synth.** `synthesizer` confirms the created task to the user
+   and points at the run / schedule next-steps.
+
+## What the builder produces vs. what binds it to a schedule
+
+- **This mission = stage 1 (create).** Output: a saved task-eligible
+  skill. Standalone — runnable ad-hoc, or never.
+- **Scheduling = stage 2 (separate).** Binding the task to a periodic
+  run is `schedule:create(kind=spawn, skill_ref=<name>,
+  schedule_kind=cron, schedule_spec=...)`, performed by root after
+  this mission returns.
+
+## Universality note
+
+This builder's OWN prose names no specific data source, provider, or
+hub skill — its workers discover and `skill:load` what they need at
+runtime via the catalogue. The **generated** task skill is an
+ordinary user skill and MAY name concrete data / script skills and
+tools; the universality rule binds the builder, not its output.
+
+## Handoff channels
+
+- **By ref** — every worker ends with one fenced `handoff` block;
+  the runtime stores it under `<name>@<wave>` and inlines depended-on
+  bodies into the next wave's first message.
+- **Plan context journal** — each handoff's `memory_summary` feeds a
+  FIFO digest visible to planner / checker / synthesizer.
+- **Notepad** — durable `task-pattern` entries (what worked) for
+  future builds; never live values.
