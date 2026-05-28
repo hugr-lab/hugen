@@ -136,11 +136,16 @@ var defaultApprovalChoices = []approvalChoice{
 	},
 }
 
-// isBatched reports whether this state is rendering a research_batch
-// modal. Used to switch the modal renderer + key dispatch into the
-// one-question-at-a-time tab walk.
+// isBatched reports whether this state is rendering a batched
+// clarifications modal (research_batch from the research stage,
+// or a tool-emitted clarification carrying a Clarifications[]).
+// Used to switch the modal renderer + key dispatch into the
+// one-question-at-a-time tab walk with per-option arrow-key
+// selection. Phase 6.1d — the gate is now Clarifications[]
+// presence, not Type, so the recipe's `session:inquire` call
+// with structured options renders with the same rich UI.
 func (s *inquiryState) isBatched() bool {
-	return s != nil && s.req.Type == protocol.InquiryTypeResearchBatch && len(s.req.Clarifications) > 0
+	return s != nil && len(s.req.Clarifications) > 0
 }
 
 // currentClarification returns the clarification the operator is

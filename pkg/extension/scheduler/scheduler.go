@@ -423,7 +423,7 @@ const createSchema = `{
 const listSchema = `{
   "type": "object",
   "properties": {
-    "status": {"type": "string", "enum": ["", "active", "paused", "cancelled", "completed"], "description": "Filter to tasks in this status. Empty / omitted = all."},
+    "status": {"type": "string", "enum": ["active", "paused", "cancelled", "completed"], "description": "Filter to tasks in this status. Omitted = all."},
     "limit":  {"type": "integer", "description": "Cap result rows. <= 0 uses the store default."}
   }
 }`

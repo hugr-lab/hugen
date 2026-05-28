@@ -23,14 +23,21 @@ reply, short data questions resolvable with one or two tool calls,
 status questions about a running mission — all of these stay on
 root. You do not spawn a mission for every information request.
 
-### 2. For data: load the relevant skill, then query
+### 2. For data: prefer a recipe, else load the skill and query
 
-For data-shaped questions (counts, listings, schema lookups,
-single values, query drafts), use the data tools you have loaded.
-The `## Available skills` block in your system prompt lists every
-skill loadable on this tier. If the skill that owns the relevant
-data source / engine is not loaded yet, call
-`skill:load(name: "<skill>")` first, then call its tools.
+FIRST, before loading any skill or running any tool for the
+request: if a `(recipe catalog)` in `## Available skills` covers
+it, load that catalog and call its `task:*` recipe — even when a
+more general skill is already loaded. (This is the recipe-catalog
+rule from your universal rules.)
+
+Only if no recipe catalog matches: for data-shaped questions
+(counts, listings, schema lookups, single values, query drafts),
+use the data tools you have loaded. The `## Available skills`
+block in your system prompt lists every skill loadable on this
+tier. If the skill that owns the relevant data source / engine is
+not loaded yet, call `skill:load(name: "<skill>")` first, then
+call its tools.
 
 A single quick question should land in ~3 LLM calls end-to-end:
 load-if-needed → query → format-and-reply. If you find yourself

@@ -6,7 +6,6 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
-	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // resolveTierConfig returns the fully-resolved [Config] for the
@@ -19,7 +18,9 @@ import (
 //     static [Config] supplied via [NewExtensionWithConfig],
 //     else [DefaultConfig].
 //  2. per-tier overlay from the baseline's Tiers map at
-//     tier = skill.TierFromDepth(state.Depth()).
+//     tier = state.Tier() (Phase 6.1d: caller-supplied
+//     SpawnSpec.Tier overrides depth-derived default; legacy
+//     paths fall back to skill.TierFromDepth(depth) implicitly).
 //  3. mission-level skill override, looked up via
 //     [Deps.SkillCatalog] using [SessionState.Skill] +
 //     [SessionState.Role] (skill is the dispatcher; the role lookup
@@ -41,7 +42,7 @@ func (e *Extension) resolveTierConfig(ctx context.Context, state extension.Sessi
 		return cfg
 	}
 
-	tier := skill.TierFromDepth(state.Depth())
+	tier := state.Tier()
 	if t, ok := cfg.Tiers[tier]; ok {
 		applyTierOverride(&cfg, t)
 	}

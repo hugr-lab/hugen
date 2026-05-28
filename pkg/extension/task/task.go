@@ -63,8 +63,9 @@ type SessionHost interface {
 // live skill catalogue so newly-published recipes surface without a
 // session restart.
 type Extension struct {
-	skills *skill.SkillManager
-	logger *slog.Logger
+	skills  *skill.SkillManager
+	logger  *slog.Logger
+	agentID string // stamped onto the synthetic first-message participant the dispatch path injects into the recipe child.
 
 	mu   sync.RWMutex
 	host SessionHost
@@ -92,14 +93,17 @@ func (c *atomicCounter) Next() int64 {
 
 // NewExtension constructs the task extension. SkillManager may be
 // nil in pathological test setups — the resulting List returns an
-// empty surface, and Call rejects every name.
-func NewExtension(skills *skill.SkillManager, logger *slog.Logger) *Extension {
+// empty surface, and Call rejects every name. agentID is stamped
+// onto the synthetic UserMessage the dispatch path injects into
+// the recipe child to drive its first turn — see dispatch.go.
+func NewExtension(skills *skill.SkillManager, agentID string, logger *slog.Logger) *Extension {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Extension{
-		skills: skills,
-		logger: logger,
+		skills:  skills,
+		agentID: agentID,
+		logger:  logger,
 	}
 }
 

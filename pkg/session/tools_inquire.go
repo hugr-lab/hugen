@@ -23,20 +23,38 @@ const inquireSchema = `{
   "type": "object",
   "properties": {
     "type":       {"type": "string", "enum": ["approval", "clarification"], "description": "REQUIRED. Must be exactly \"approval\" (yes/no answer) or \"clarification\" (free-form text). Calls without this field are rejected."},
-    "question":   {"type": "string", "description": "REQUIRED. Concise stand-alone question shown to the user — they may not see the rest of the agent's reasoning."},
+    "question":   {"type": "string", "description": "REQUIRED for single-question clarifications and for approvals. OPTIONAL when 'clarifications' is non-empty — the first clarification's question is used as the modal title. Concise stand-alone question shown to the user."},
     "context":    {"type": "string", "description": "Optional extra context the user might need to answer. Keep short — long context belongs in the question."},
-    "options":    {"type": "array", "items": {"type": "string"}, "description": "Optional pre-defined answers for clarification questions."},
+    "options":    {"type": "array", "items": {"type": "string"}, "description": "Optional pre-defined answers for clarification questions (single-question mode)."},
+    "clarifications": {
+      "type": "array",
+      "description": "Optional batched-clarification array. When non-empty, the modal renders one question at a time with arrow-key option selection (the same rich UI the research stage uses) and the response carries an Answers map keyed by Clarification.ID. The top-level 'question' field becomes optional in this mode — the first clarification's question is used as the modal title if 'question' is absent.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id":            {"type": "string", "description": "Stable identifier the runtime keys the answer by. Unique within the batch."},
+          "question":      {"type": "string", "description": "Prompt the user reads."},
+          "kind":          {"type": "string", "enum": ["required", "optional", "comment"], "description": "Answer shape. Defaults to required."},
+          "options":       {"type": "array", "items": {"type": "string"}, "description": "Discrete choices for the value field. Empty means free-form text."},
+          "default":       {"type": "string", "description": "Pre-filled value shown to the user."},
+          "allow_comment": {"type": "boolean", "description": "When true, exposes a per-question comment textarea alongside the value field."},
+          "multi":         {"type": "boolean", "description": "Multi-select mode. Only meaningful when options is non-empty."}
+        },
+        "required": ["id", "question"]
+      }
+    },
     "timeout_ms": {"type": "integer", "minimum": 1, "description": "Per-call deadline override. Defaults to the runtime-configured global timeout."}
   },
-  "required": ["type", "question"]
+  "required": ["type"]
 }`
 
 type inquireInput struct {
-	Type      string   `json:"type"`
-	Question  string   `json:"question"`
-	Context   string   `json:"context,omitempty"`
-	Options   []string `json:"options,omitempty"`
-	TimeoutMs int      `json:"timeout_ms,omitempty"`
+	Type           string                  `json:"type"`
+	Question       string                  `json:"question"`
+	Context        string                  `json:"context,omitempty"`
+	Options        []string                `json:"options,omitempty"`
+	Clarifications []protocol.Clarification `json:"clarifications,omitempty"`
+	TimeoutMs      int                     `json:"timeout_ms,omitempty"`
 }
 
 type approvalResult struct {
@@ -87,8 +105,26 @@ func (s *Session) callInquire(ctx context.Context, args json.RawMessage) (json.R
 		return toolErr("bad_request",
 			fmt.Sprintf("type must be approval|clarification; got %q", in.Type))
 	}
+	// Phase 6.1d — when `clarifications` is non-empty the top-level
+	// `question` is optional: the first clarification's question
+	// serves as the modal title. Recipes routinely emit batched
+	// payloads without bothering to mirror a question into the
+	// legacy field; rejecting them stalls the recipe child until
+	// the stuck detector fires. Fill in a default from the batch so
+	// downstream consumers (legacy adapters, status snapshots)
+	// always see a non-empty Question.
 	if strings.TrimSpace(in.Question) == "" {
-		return toolErr("bad_request", "question is required")
+		if len(in.Clarifications) > 0 {
+			for _, c := range in.Clarifications {
+				if q := strings.TrimSpace(c.Question); q != "" {
+					in.Question = q
+					break
+				}
+			}
+		}
+	}
+	if strings.TrimSpace(in.Question) == "" {
+		return toolErr("bad_request", "question is required (or non-empty clarifications[].question)")
 	}
 	defaultMs := s.resolveInquireTimeout()
 	timeoutMs := in.TimeoutMs
@@ -185,6 +221,7 @@ func (s *Session) callInquire(ctx context.Context, args json.RawMessage) (json.R
 			Question:        in.Question,
 			Context:         in.Context,
 			Options:         in.Options,
+			Clarifications:  in.Clarifications,
 			TimeoutMs:       timeoutMs,
 		})
 	if err := s.emit(ctx, req); err != nil {
@@ -196,7 +233,7 @@ func (s *Session) callInquire(ctx context.Context, args json.RawMessage) (json.R
 
 	select {
 	case resp := <-respCh:
-		return marshalInquiryResponse(in.Type, resp)
+		return marshalInquiryResponse(in.Type, resp, len(in.Clarifications) > 0)
 	case <-deadline.C:
 		// Race window: the deadline can fire AFTER a response has
 		// already landed in the buffered channel (cap 1). Drain
@@ -205,7 +242,7 @@ func (s *Session) callInquire(ctx context.Context, args json.RawMessage) (json.R
 		// timeout envelope.
 		select {
 		case resp := <-respCh:
-			return marshalInquiryResponse(in.Type, resp)
+			return marshalInquiryResponse(in.Type, resp, len(in.Clarifications) > 0)
 		default:
 		}
 		return marshalInquiryTimeout(s, in.Type)
@@ -215,7 +252,7 @@ func (s *Session) callInquire(ctx context.Context, args json.RawMessage) (json.R
 		// concurrent session-close.
 		select {
 		case resp := <-respCh:
-			return marshalInquiryResponse(in.Type, resp)
+			return marshalInquiryResponse(in.Type, resp, len(in.Clarifications) > 0)
 		default:
 		}
 		return toolErr("cancelled",
@@ -234,9 +271,23 @@ func (s *Session) resolveInquireTimeout() int {
 	return defaultInquireTimeoutMs
 }
 
-func marshalInquiryResponse(kind string, resp *protocol.InquiryResponse) (json.RawMessage, error) {
+func marshalInquiryResponse(kind string, resp *protocol.InquiryResponse, batched bool) (json.RawMessage, error) {
 	if resp.Payload.Timeout {
 		return marshalInquiryTimeoutPayload(kind, resp.Payload.Reason)
+	}
+	if batched {
+		// Phase 6.1d — tool-emitted batched clarifications mirror
+		// research_batch's Answers map shape verbatim. Callers
+		// (recipes) iterate by Clarification.ID and read .value /
+		// .comment per entry.
+		answers := resp.Payload.Answers
+		if answers == nil {
+			answers = map[string]protocol.AnswerEntry{}
+		}
+		return json.Marshal(map[string]any{
+			"answers":      answers,
+			"responded_at": resp.Payload.RespondedAt,
+		})
 	}
 	switch kind {
 	case protocol.InquiryTypeApproval:

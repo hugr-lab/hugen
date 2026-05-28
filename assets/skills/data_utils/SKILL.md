@@ -1,10 +1,11 @@
 ---
 name: data_utils
 description: >
-  Quick Hugr Data Mesh utilities — diagnostic recipes you can run
-  on a table without writing a full GraphQL query yourself. Load
-  this skill to get a small toolkit of one-shot recipes in the tool
-  catalog.
+  One-shot data diagnostics for a single table, no GraphQL by hand.
+  Counts the number of rows / records in a table and answers similar
+  single-number questions. Load this catalog when the user asks how
+  many rows / records / items a table holds; joins, group-by, and
+  dashboards belong in an analyst mission instead.
 license: Apache-2.0
 allowed-tools:
   - provider: task
@@ -13,6 +14,7 @@ allowed-tools:
 metadata:
   hugen:
     requires_skills: []
+    recipe_catalog: true
     autoload: false
     tier_compatibility: [root, mission, worker]
 compatibility:
@@ -42,3 +44,13 @@ similarly tiny one-question answer about a single data object —
 load this category, call the appropriate `task:*` tool, surface the
 result. Bigger questions (joins, group-by, dashboards) still belong
 in the analyst mission.
+
+## How to call
+
+Pass the user's request straight to the `task:*` tool. If the user
+named a table, pass it as `name`; otherwise pass their natural-
+language description as `query`. The recipe does its OWN table
+lookup, schema check, and disambiguation — do NOT run discovery /
+search tools or resolve the table yourself first, and do NOT load a
+general data skill to "prepare" the call. That only duplicates the
+recipe's internal work and wastes tool calls.

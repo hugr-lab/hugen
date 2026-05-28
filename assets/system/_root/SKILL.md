@@ -227,9 +227,11 @@ your tool catalog with typed parameters.
 User described work that matches a recipe but did NOT name a
 future time / cadence:
 
-1. Find the category in `## Available skills` whose description
-   mentions the recipe family the user wants. Load it via
+1. Find the `(recipe catalog)` skill in `## Available skills` whose
+   domain covers what the user wants. Load it via
    `skill:load("<category>")` (only if it isn't already loaded).
+   Prefer this over hand-rolling the job with raw tools you may
+   already have loaded — recipes are tested (constitution rule).
 2. The recipe's synthetic tool `task:<recipe-name>` is now in your
    tool catalog with its typed `inputs_schema`. Call it directly
    with the user's parameters:

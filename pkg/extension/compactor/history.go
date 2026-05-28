@@ -131,24 +131,16 @@ func projectFrameToEntry(renderer *prompts.Renderer, frame protocol.Frame) (Hist
 			Message:   model.Message{Role: model.RoleUser, Content: text},
 		}, true
 	case *protocol.SubagentStarted:
-		if renderer == nil {
-			return HistoryEntry{}, false
-		}
-		body := strings.TrimRight(renderer.MustRender(
-			"system/spawned_note",
-			map[string]any{
-				"ChildID": v.Payload.ChildSessionID,
-				"Role":    v.Payload.Role,
-				"Depth":   v.Payload.Depth,
-			},
-		), "\n")
-		text := fmt.Sprintf("[system: %s] %s",
-			protocol.SystemMessageSpawnedNote, body)
-		return HistoryEntry{
-			Seq:       seq,
-			Timestamp: ts,
-			Message:   model.Message{Role: model.RoleUser, Content: text},
-		}, true
+		// Not rendered into model history. A spawn driven by a tool
+		// call (recipe `task:*`, sync `spawn_mission`) blocks the
+		// dispatcher, so this note lands BETWEEN the tool's
+		// function_call and its function_response — strict providers
+		// (Gemini) reject a function_response that doesn't immediately
+		// follow its function_call. It is also redundant: the model
+		// already learns the child from the spawn tool's result and
+		// the outcome from the later subagent_result. Stays a live
+		// observability frame for adapters / liveview.
+		return HistoryEntry{}, false
 	case *protocol.SubagentResult:
 		if renderer == nil {
 			return HistoryEntry{}, false
@@ -264,28 +256,14 @@ func projectRowToEntry(renderer *prompts.Renderer, row *store.EventRow) (History
 			},
 		}, true
 	case protocol.KindSubagentStarted:
-		if renderer == nil {
-			return HistoryEntry{}, false
-		}
-		cid, _ := row.Metadata["child_session_id"].(string)
-		role, _ := row.Metadata["role"].(string)
-		depthStr := metadataIntString(row.Metadata, "depth")
-		body := strings.TrimRight(renderer.MustRender(
-			"system/spawned_note",
-			map[string]any{
-				"ChildID": cid,
-				"Role":    role,
-				"Depth":   depthStr,
-			},
-		), "\n")
-		return HistoryEntry{
-			Seq:       seq,
-			Timestamp: ts,
-			Message: model.Message{
-				Role:    model.RoleUser,
-				Content: fmt.Sprintf("[system: %s] %s", protocol.SystemMessageSpawnedNote, body),
-			},
-		}, true
+		// Not rendered into model history — see the matching
+		// *protocol.SubagentStarted case in projectFrameToEntry. A
+		// tool-driven spawn (recipe `task:*`, sync `spawn_mission`)
+		// emits this note while the dispatcher blocks, so it lands
+		// between the tool's function_call and function_response and
+		// breaks strict providers (Gemini); it is redundant with the
+		// spawn tool's result + the later subagent_result anyway.
+		return HistoryEntry{}, false
 	case protocol.KindSubagentResult:
 		if renderer == nil {
 			return HistoryEntry{}, false

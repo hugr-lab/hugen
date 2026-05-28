@@ -57,6 +57,13 @@ type OpenRequest struct {
 	// collision-suffix resolution. Persisted into row.Metadata so
 	// restore can rebuild s.name. Phase 5.2 α (subagent naming).
 	Name string
+	// Tier is the resolved semantic role label
+	// (skill.TierRoot/TierMission/TierWorker) the session reports
+	// via Session.Tier(). Empty in OpenRequest means newSession
+	// derives the default from depth via skill.TierFromDepth; the
+	// caller in Session.Spawn fills this in non-empty when
+	// SpawnSpec.Tier asked for an override. Phase 6.1d.
+	Tier string
 }
 
 // SpawnSpec is the input to Session.Spawn. Carries the model-supplied
@@ -74,6 +81,15 @@ type SpawnSpec struct {
 	Task    string
 	Inputs  any
 	EventID string
+	// Tier overrides the child's semantic role independent of its
+	// structural depth. Empty (the default) means Spawn derives the
+	// child's tier from childDepth via skill.TierFromDepth — what
+	// every legacy caller relied on. Non-empty values must match a
+	// skill.Tier* constant; an invalid value is rejected at Spawn.
+	// The canonical non-default caller is the task ext, where an
+	// ad-hoc recipe child at depth=1 wants worker semantics (leaf
+	// executor, not a coordinator).
+	Tier string
 	// Metadata is merged into the child session row's metadata map
 	// after the manager fills in metadata["depth"] / metadata["spawn_role"]
 	// / metadata["spawn_skill"]. Caller-supplied keys win on collision.

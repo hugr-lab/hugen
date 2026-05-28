@@ -11,12 +11,22 @@ import "context"
 // *session.Session structurally satisfies [SessionSpawner] via a
 // translation method that maps these fields onto its own SpawnSpec.
 // RenderMode mirrors pkg/protocol.SubagentRender* constants.
+//
+// Tier overrides the child's semantic role independent of its
+// structural depth. Empty (the default) means the runtime derives
+// the child's tier from depth via skill.TierFromDepth — the legacy
+// behaviour the mission ext executor relies on. Non-empty values
+// must match one of skill.TierRoot / TierMission / TierWorker;
+// invalid values are rejected at Spawn. The canonical caller for
+// non-empty Tier is the task ext, where an ad-hoc recipe child at
+// depth=1 wants worker semantics (leaf executor, not a coordinator).
 type SpawnSpec struct {
 	Name       string
 	Skill      string
 	Role       string
 	Task       string
 	Inputs     any
+	Tier       string
 	RenderMode string
 }
 

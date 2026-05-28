@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
@@ -59,7 +62,7 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 
 	switch kind {
 	case skill.TaskKindWorker:
-		return e.dispatchWorker(ctx, short, args)
+		return e.dispatchWorker(ctx, sk, short, args)
 	case skill.TaskKindMission:
 		return toolErr("kind_not_supported",
 			fmt.Sprintf("task.kind=%q is not yet wired in this Phase 6.1d MVP; recipe %q must declare kind=worker for ad-hoc execution", kind, short)), nil
@@ -79,7 +82,7 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 // user is watching. Workers spawned by a mission's executor pump
 // (synthesis, planner waves, etc.) shouldn't reach this surface;
 // task:* is root-tier-only by allow-set design.
-func (e *Extension) dispatchWorker(ctx context.Context, recipe string, args json.RawMessage) (json.RawMessage, error) {
+func (e *Extension) dispatchWorker(ctx context.Context, sk skill.Skill, recipe string, args json.RawMessage) (json.RawMessage, error) {
 	state, ok := extension.SessionStateFromContext(ctx)
 	if !ok || state == nil {
 		return toolErr("no_session_state", "caller session state missing from context"), nil
@@ -110,11 +113,19 @@ func (e *Extension) dispatchWorker(ctx context.Context, recipe string, args json
 	// keeps the per-call audit name predictable.
 	spawnName := fmt.Sprintf("task-%s-%d", recipe, e.spawnCounter.Next())
 
+	taskBody := fmt.Sprintf("Run the %s recipe once with the supplied inputs.", recipe)
 	child, err := owner.Spawn(ctx, session.SpawnSpec{
-		Name:  spawnName,
-		Skill: recipe,
-		Task:  fmt.Sprintf("Run the %s recipe once with the supplied inputs.", recipe),
+		Name:   spawnName,
+		Skill:  recipe,
+		Task:   taskBody,
 		Inputs: inputs,
+		// Phase 6.1d: pin the recipe child to worker tier so its
+		// structural depth=1 (child of root) doesn't get mission
+		// semantics. Recipes are leaf executors, not coordinators —
+		// skill autoload then matches the recipe manifest's
+		// `tier_compatibility: [worker]`; constitution + compactor
+		// overlays + routing intent all see worker.
+		Tier: skill.TierWorker,
 		Metadata: map[string]any{
 			"task_recipe": recipe,
 		},
@@ -122,6 +133,56 @@ func (e *Extension) dispatchWorker(ctx context.Context, recipe string, args json
 	if err != nil {
 		return toolErr("spawn_failed", err.Error()), nil
 	}
+
+	// Phase 6.1d — scope the recipe child's `skill:load` and
+	// `## Available skills` catalogue to the manifest-declared
+	// AllowedSkills whitelist. The skill extension reads this Value
+	// (key SessionAllowedSkillsKey) at callLoad + catalogue render.
+	// An empty list locks the surface to whatever was pre-loaded by
+	// the spawner (universal `_system`/`_worker` + RequiresSkills);
+	// a populated list adds reachable-via-skill-load entries on top
+	// of that. Mission ext spawns do NOT set this — wave-workers
+	// keep full dynamic-load flexibility. Pass `[]string` directly
+	// so handlers.go's typed switch hits the fast path without
+	// reaching the []any reflection branch.
+	allowList := append([]string(nil), sk.Manifest.Hugen.AllowedSkills...)
+	child.SetValue(skillext.SessionAllowedSkillsKey, allowList)
+
+	// Phase 6.1d — load the recipe skill itself (so its body lands
+	// in the system prompt and the LLM actually sees the steps it
+	// must execute) plus its `requires_skills` declared dependencies
+	// (eager pre-load, no `skill:load` round-trip needed before the
+	// recipe's first step). SkillManager.Load walks the closure via
+	// `requires_skills` automatically, so the explicit per-dep loop
+	// is belt-and-braces — it surfaces individual failures in the
+	// log without the closure walk hiding them inside one aggregate
+	// error. Per-skill failures log + skip — one missing dependency
+	// must not deny the recipe its baseline surface; the recipe
+	// body limps along on partial deps and the result handoff
+	// surfaces the gap.
+	if skillState := skillext.FromState(child); skillState != nil {
+		if loadErr := skillState.Load(ctx, recipe); loadErr != nil {
+			e.logger.Warn("task: load recipe skill failed",
+				"recipe", recipe, "err", loadErr)
+		}
+		for _, dep := range sk.Manifest.Hugen.RequiresSkills {
+			if loadErr := skillState.Load(ctx, dep); loadErr != nil {
+				e.logger.Warn("task: pre-load requires_skills failed",
+					"recipe", recipe, "dep", dep, "err", loadErr)
+			}
+		}
+	}
+
+	// Phase 6.1d: deliver the first UserMessage so the recipe child
+	// actually starts a turn. Without this the child sits idle after
+	// autoload — Session.Spawn opens the session and runs appliers
+	// but never injects an inbound user frame; the LLM loop has
+	// nothing to fire on. Mirrors the mission ext's planner.go
+	// spawner callback (which builds the wave-worker first message
+	// the same way).
+	first := protocol.NewUserMessage(child.ID(), e.agentParticipant(),
+		buildFirstMessage(taskBody, inputs))
+	_ = child.Submit(ctx, first)
 
 	// Wait for the subagent to terminate. Per-call cancellation
 	// flows through ctx — the tool dispatcher caps tool runs with
@@ -139,6 +200,42 @@ func (e *Extension) dispatchWorker(ctx context.Context, recipe string, args json
 	// completion ack, naming the child session_id for cross-
 	// referencing.
 	return toolOK(recipe, spawnName, child.ID()), nil
+}
+
+// agentParticipant builds the participant the task extension stamps
+// onto the synthetic UserMessage it injects into a recipe child to
+// drive the first turn. Mirrors the mission ext's agentParticipant
+// helper but lives here to keep task ext free of cross-extension
+// imports.
+func (e *Extension) agentParticipant() protocol.ParticipantInfo {
+	return protocol.ParticipantInfo{
+		ID:   e.agentID,
+		Kind: protocol.ParticipantAgent,
+		Name: "hugen",
+	}
+}
+
+// buildFirstMessage renders the recipe child's first user message
+// body. Trivial inputs (nil / empty map / empty array) leave the
+// task description as-is; otherwise the inputs JSON is prepended
+// under an `[Inputs]` block so the LLM sees concrete values for
+// every key its recipe body references. Mirrors mission ext's
+// `buildWorkerFirstMessage` (Phase A) but kept local to avoid a
+// cross-extension dependency.
+func buildFirstMessage(task string, inputs any) string {
+	if inputs == nil {
+		return task
+	}
+	raw, err := json.MarshalIndent(inputs, "", "  ")
+	if err != nil {
+		return task
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	switch trimmed {
+	case "", "null", "{}", "[]", `""`:
+		return task
+	}
+	return "[Inputs]\n" + trimmed + "\n\n[Task]\n" + task
 }
 
 // rootOf walks the parent chain until it finds the depth-0 ancestor.

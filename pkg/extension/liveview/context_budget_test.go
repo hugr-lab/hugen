@@ -26,6 +26,7 @@ func (s *budgetTestState) SubagentName() string                   { return "" }
 func (s *budgetTestState) Role() string                           { return "" }
 func (s *budgetTestState) Skill() string                          { return "" }
 func (s *budgetTestState) Depth() int                             { return 0 }
+func (s *budgetTestState) Tier() string                           { return "root" }
 func (s *budgetTestState) Parent() (extension.SessionState, bool) { return nil, false }
 func (s *budgetTestState) Children() []extension.SessionState     { return nil }
 func (s *budgetTestState) Tools() *tool.ToolManager               { return nil }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // Spawn opens a sub-agent session as a child of s. The child row is
@@ -39,6 +40,18 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 		return nil, ErrDepthExceeded
 	}
 	childDepth := s.depth + 1
+	// Phase 6.1d (tier-aware spawn): caller-supplied SpawnSpec.Tier
+	// overrides the depth-derived default — recipes spawned by the
+	// task ext at depth=1 carry worker semantics, not the
+	// depth=1=mission default. Validate against the closed Tier*
+	// constant set so a typo doesn't silently fall through to the
+	// depth-derived fallback later. Empty stays empty here; newSession
+	// applies skill.TierFromDepth(childDepth) when nothing was asked.
+	switch spec.Tier {
+	case "", skillpkg.TierRoot, skillpkg.TierMission, skillpkg.TierWorker:
+	default:
+		return nil, fmt.Errorf("session: spawn: invalid tier %q (want root|mission|worker)", spec.Tier)
+	}
 
 	// Phase 5.2 α: sanitise the model-supplied name and reserve a
 	// collision-free slot among the parent's live children +
@@ -73,6 +86,10 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 		// surface it without scanning events.
 		Mission: spec.Task,
 		Name:    resolvedName,
+		// Phase 6.1d: forward the resolved tier override (already
+		// validated above) into newSession. Empty here means
+		// newSession falls back to skillpkg.TierFromDepth.
+		Tier: spec.Tier,
 	}
 	child, err := newSession(ctx, s, s.deps, req)
 	if err != nil {
@@ -141,8 +158,12 @@ func (s *Session) Spawn(ctx context.Context, spec SpawnSpec) (*Session, error) {
 		Role:           spec.Role,
 		Task:           spec.Task,
 		Depth:          childDepth,
-		StartedAt:      child.openedAt,
-		Inputs:         spec.Inputs,
+		// Phase 6.1d: surface the resolved tier so observers (TUI
+		// sidebar, liveview ChildMeta) render the override without
+		// having to re-derive from depth.
+		Tier:      child.tier,
+		StartedAt: child.openedAt,
+		Inputs:    spec.Inputs,
 	})
 	if err := s.emit(ctx, started); err != nil {
 		s.deps.Logger.Warn("session: emit subagent_started",
@@ -184,6 +205,7 @@ func (s *Session) SpawnChild(ctx context.Context, spec extension.SpawnSpec) (ext
 		Role:       spec.Role,
 		Task:       spec.Task,
 		Inputs:     spec.Inputs,
+		Tier:       spec.Tier,
 		RenderMode: spec.RenderMode,
 	})
 	if err != nil {

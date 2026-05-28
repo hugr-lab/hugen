@@ -351,13 +351,21 @@ type CloseTurnBlock struct {
 	// its main task. Cheap-path shortcut for trivial sessions
 	// (simple-answerer, /end at root).
 	SkipIfIdle bool
+
+	// Skip, when true, UNCONDITIONALLY suppresses the close turn
+	// for this session — regardless of tool-call count. Recipe
+	// children (Phase 6.1d) set this so the handoff's own
+	// memory_summary stays the canonical takeaway and the runtime
+	// doesn't burn a second LLM round-trip on a redundant notepad
+	// append.
+	Skip bool
 }
 
 // IsEmpty reports whether the block carries no actionable
 // configuration. The runtime treats an empty block the same as
 // "lookup returned nil" — no close turn fires.
 func (b CloseTurnBlock) IsEmpty() bool {
-	return b.SystemPrompt == "" && len(b.AllowedTools) == 0 && b.MaxTurns == 0 && !b.SkipIfIdle
+	return b.SystemPrompt == "" && len(b.AllowedTools) == 0 && b.MaxTurns == 0 && !b.SkipIfIdle && !b.Skip
 }
 
 // CloseTurnLookup extensions resolve the on_close block for a

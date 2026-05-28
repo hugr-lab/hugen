@@ -30,6 +30,7 @@ func (s *rootWithChild) SubagentName() string               { return s.subagentN
 func (s *rootWithChild) Role() string                       { return "" }
 func (s *rootWithChild) Skill() string                      { return "" }
 func (s *rootWithChild) Depth() int                         { return s.depth }
+func (s *rootWithChild) Tier() string                       { return "root" }
 func (s *rootWithChild) Parent() (extension.SessionState, bool) {
 	if s.parent == nil {
 		return nil, false

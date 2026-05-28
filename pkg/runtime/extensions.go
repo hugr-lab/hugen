@@ -108,7 +108,7 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		// stub-rejected until a future phase wires the mission
 		// shape. Bound to the session manager via phaseRunner so
 		// the dispatch path can resolve the owner session.
-		taskext.NewExtension(core.Skills, core.Logger),
+		taskext.NewExtension(core.Skills, core.Agent.ID(), core.Logger),
 		// liveview lands last so its FrameObserver / ChildFrameObserver
 		// see frames AFTER siblings have processed them via their own
 		// Recovery / state mutations. It contributes no tool surface;

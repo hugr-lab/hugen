@@ -9,7 +9,11 @@ description: >
   dynamic joins, save large results to Parquet via hugr-query, and
   apply jq transforms. Read-only data fetch from the platform —
   for SQL on local files load `duckdb-data`; for charts / HTML / PDF
-  reports load `python-runner`.
+  reports load `python-runner`. FIRST consider recipes: for a simple
+  single-object question (a count, a single value, a quick listing),
+  if a `(recipe catalog)` in `## Available skills` covers it, prefer
+  that recipe over hand-rolling the query here — load hugr-data for
+  questions that need composition, joins, aggregation, or exploration.
 allowed-tools:
   - provider: hugr-main
     tools:
@@ -150,22 +154,26 @@ intent:
   (search_modules → search_module_data_objects → small data call,
   or schema lookup → inline result).
 
-  **Disambiguate before you query.** When `discovery-search_*`
-  returns more than one plausible candidate (≥ 2 modules / data
-  sources / tables that match the user's concept by name or
-  description), STOP before the first `data-*` call and call
-  `session:inquire(type="clarification")` with the candidate
-  list as `options`. Asking "which one?" once is cheap; silently
-  picking the first match and returning its number is worse than
-  no answer — the user reads a single figure and treats it as
-  truth without knowing it came from the wrong source. Examples
-  of triggers: two tables with `doctor` in the name across
-  different modules, the same entity exposed in a raw module and
-  a curated module, a metric (e.g. "count of patients") that
-  could mean rows in a registry vs distinct subjects across
-  events. Skip the inquire only when one candidate is an
-  obvious dominant match (alone in its module, or the user
-  named the module explicitly).
+  **Hugr federates many sources, so similar or overlapping data
+  sources, modules, and tables are common** — the same entity in
+  a raw module and a curated one, one concept across two sources,
+  a metric (e.g. "count of patients") that could mean rows in a
+  registry vs distinct subjects across events. So **disambiguate
+  before you query**: when you must produce a concrete answer and
+  `discovery-search_*` returns ≥ 2 plausible candidates (modules /
+  data sources / tables matching the concept by name or
+  description) that the context does not let you choose between,
+  STOP before the first `data-*` call and
+  `session:inquire(type="clarification")`. List the candidates one
+  per line as `name — short description`, plus a trailing `Other —
+  none of these; describe what you mean` option whose comment you
+  reuse as a refined search query (same shape as the
+  `data_tables_rows_count` recipe). Silently picking the first
+  match and returning its number is worse than no answer — the
+  user reads a single figure and treats it as truth without
+  knowing it came from the wrong source. Skip the inquire only
+  when one candidate is an obvious dominant match (alone in its
+  module, or the user / task named it explicitly).
 
   If the answer needs heavy exploration, multi-step aggregation,
   or a structured artifact, recognise it as batch-shaped and call
@@ -193,11 +201,19 @@ first.
    cases live in the reference. **One `skill_ref` call now beats fifteen
    trial-and-error tool calls later.**
 1. **Parse the task as given** — your mission already scoped it
-   (module, entity, metric, filter, time range). If anything is
-   unclear or two equally-plausible options exist, prefer
-   `session:inquire(type="clarification")` (data-level
-   ambiguity is workers' call; intent ambiguity belongs to your
-   mission — return the finding instead of guessing).
+   (module, entity, metric, filter, time range). Hugr has
+   overlapping sources / modules / tables, so if the brief leaves
+   the target genuinely ambiguous and you alone can see it (two
+   equally-plausible source tables for the named entity), prefer
+   `session:inquire(type="clarification")` — data-level ambiguity
+   is the worker's call; intent ambiguity belongs to your mission
+   (return a `status:"error"` finding instead of guessing).
+   **Exception — research tasks.** If your brief says you are
+   doing research / exploration (surveying which sources, modules,
+   or tables exist), do NOT inquire — that ambiguity IS your
+   subject: record the candidates in your finding and let the
+   research flow ask. Inquire only when committing to a concrete
+   answer.
 2. **Find modules** → `hugr-main:discovery-search_modules`. Note the
    exact module names returned: dots in names are **structure**, not
    typos (see "Critical Rules" below). Often unnecessary at worker

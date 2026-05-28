@@ -39,6 +39,7 @@ type Session struct {
 	name             string // sanitised kebab-case; "" for roots. REQUIRED at spawn; addressing identifier exposed to the model. Set once during newSession / restore (before the session is published into any parent's children map); subsequent reads need no lock.
 	ownerID          string // owner from SessionRow.OwnerID; inherited by subagents
 	depth            int    // 0 for root; parent.depth+1 for subagent
+	tier             string // semantic role: skill.TierRoot/TierMission/TierWorker; set in newSession (caller-supplied SpawnSpec.Tier or skill.TierFromDepth(depth) fallback). Never empty post-construction. Phase 6.1d.
 	deps             *Deps  // shared bundle; nil only in legacy NewSession callers
 	agent            *Agent
 	store            store.RuntimeStore
@@ -522,6 +523,13 @@ func (s *Session) OpenedAt() time.Time { return s.openedAt }
 // mutated.
 func (s *Session) Depth() int { return s.depth }
 
+// Tier implements [extension.SessionState]. Returns the semantic
+// role label resolved at construction time — caller-supplied
+// SpawnSpec.Tier overrides depth-derived default, otherwise
+// skill.TierFromDepth(depth) fills in. Never empty for real
+// sessions. Phase 6.1d.
+func (s *Session) Tier() string { return s.tier }
+
 // Discard cancels the session's per-session ctx without writing
 // any terminal event. Used for race-loser disposal of a freshly-
 // built session whose registration in Manager.live lost to an
@@ -900,7 +908,14 @@ func (s *Session) teardown(runCtx context.Context) {
 	// cleanup is driven by Run exit, not by close-turn success).
 	if s.shouldRunCloseTurn() {
 		block := s.resolveCloseTurnBlock(runCtx)
-		if !block.IsEmpty() && !(block.SkipIfIdle && s.mainToolCalls.Load() == 0) {
+		// Phase 6.1d — `block.Skip` is the unconditional opt-out
+		// recipes use to suppress the close turn (the recipe's
+		// handoff `memory_summary` is the canonical takeaway, so a
+		// notepad-append round-trip is wasted). `SkipIfIdle` is the
+		// idle-only short-circuit kept for the simple-answerer
+		// path. Either gate suppresses the turn; the manifest
+		// resolves which (or both) apply.
+		if !block.IsEmpty() && !block.Skip && !(block.SkipIfIdle && s.mainToolCalls.Load() == 0) {
 			if err := s.runCloseTurnSync(runCtx, block); err != nil {
 				s.logger.Warn("close turn: aborted",
 					"session", s.id, "reason", s.closeReason, "err", err)
@@ -1702,7 +1717,7 @@ func (s *Session) historyOwner() extension.HistoryOwner {
 //     catalogue of every skill the agent can reach.
 func (s *Session) systemPrompt(ctx context.Context) string {
 	var parts []string
-	tier := skillpkg.TierFromDepth(s.depth)
+	tier := s.tier
 	parts = append(parts, "Session tier: "+tier)
 	if s.agent != nil {
 		if c := s.agent.ConstitutionFor(tier); c != "" {
@@ -1745,7 +1760,7 @@ func (s *Session) modelToolsForSession(ctx context.Context) ([]model.Tool, error
 		}
 		s.logger.Debug("session: tool snapshot",
 			"session", s.id,
-			"tier", skillpkg.TierFromDepth(s.depth),
+			"tier", s.tier,
 			"depth", s.depth,
 			"count", len(snap.Tools),
 			"tools", names)

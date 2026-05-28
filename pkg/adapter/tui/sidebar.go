@@ -20,6 +20,7 @@ import (
 type liveviewStatus struct {
 	SessionID      string                      `json:"session_id"`
 	Depth          int                         `json:"depth"`
+	Tier           string                      `json:"tier,omitempty"` // Phase 6.1d — resolved tier from liveview emit; empty for legacy frames, fall back to shortTierLabel(Depth).
 	LifecycleState string                      `json:"lifecycle_state,omitempty"`
 	LastToolCall   *protocol.ToolCallRef       `json:"last_tool_call,omitempty"`
 	PendingInquiry *protocol.PendingInquiryRef `json:"pending_inquiry,omitempty"`
@@ -56,6 +57,7 @@ type childMetaEntry struct {
 	Role      string    `json:"role,omitempty"`
 	Skill     string    `json:"skill,omitempty"`
 	Task      string    `json:"task,omitempty"`
+	Tier      string    `json:"tier,omitempty"` // Phase 6.1d — captured from SubagentStartedPayload.Tier.
 	StartedAt time.Time `json:"started_at,omitempty"`
 }
 
@@ -65,6 +67,7 @@ type childMetaEntry struct {
 type recentChildEntry struct {
 	SessionID    string    `json:"session_id"`
 	Depth        int       `json:"depth,omitempty"`
+	Tier         string    `json:"tier,omitempty"` // Phase 6.1d — copied from the live child's status at termination time.
 	Role         string    `json:"role,omitempty"`
 	Skill        string    `json:"skill,omitempty"`
 	Reason       string    `json:"reason,omitempty"`
@@ -94,7 +97,9 @@ func renderSidebar(s *liveviewStatus, width int) string {
 	var sb strings.Builder
 
 	// Tier header (root / mission / worker) + lifecycle pill.
-	sb.WriteString(styleSidebarHeading.Render(tierLabel(s.Depth)))
+	// Phase 6.1d — read the resolved tier when present, falling
+	// back to depth-derive for legacy frames.
+	sb.WriteString(styleSidebarHeading.Render("Tier: " + tierLabelOrDepth(s.Tier, s.Depth)))
 	sb.WriteString("\n")
 	sb.WriteString(lifecyclePill(s.LifecycleState))
 	sb.WriteString("\n")
@@ -327,7 +332,14 @@ func renderSubagent(s *liveviewStatus, meta childMetaEntry, indent, width int) s
 		return ""
 	}
 	prefix := strings.Repeat("  ", indent-1) + "▸ "
-	label := shortTierLabel(s.Depth)
+	// Phase 6.1d — prefer the resolved tier carried in the child's
+	// status (or in the parent's spawn-time meta), falling back to
+	// depth-derive only for legacy frames lacking the field.
+	tier := s.Tier
+	if tier == "" {
+		tier = meta.Tier
+	}
+	label := tierLabelOrDepth(tier, s.Depth)
 	if meta.Role != "" {
 		label = label + ":" + meta.Role
 	}
@@ -575,7 +587,7 @@ func parseSkillStatus(exts map[string]json.RawMessage) (skills []string, tools i
 // Phase 5.1c dogfood follow-up.
 func renderRecentChild(rc recentChildEntry, width int) string {
 	var sb strings.Builder
-	label := shortTierLabel(rc.Depth)
+	label := tierLabelOrDepth(rc.Tier, rc.Depth)
 	if rc.Role != "" {
 		label = label + ":" + rc.Role
 	}
@@ -642,6 +654,14 @@ func tierLabel(depth int) string {
 // shortTierLabel is the indent-friendly version used inside the
 // subtree stripe; the top-level sidebar header uses tierLabel for
 // the explicit "Tier: " prefix.
+//
+// Phase 6.1d: tier-aware spawn lets a child's semantic tier diverge
+// from its structural depth (e.g. an ad-hoc recipe child at
+// depth=1 carries worker semantics). When the caller has the
+// resolved tier value it should pass it via [tierLabelOrDepth];
+// this helper is the legacy depth-only fallback for events whose
+// upstream did not populate Tier (rows persisted before this
+// commit, frame payloads predating the protocol field).
 func shortTierLabel(depth int) string {
 	switch depth {
 	case 0:
@@ -651,6 +671,18 @@ func shortTierLabel(depth int) string {
 	default:
 		return "worker"
 	}
+}
+
+// tierLabelOrDepth returns the resolved tier value when non-empty,
+// otherwise falls back to depth-derived [shortTierLabel]. Used by
+// every sidebar / mission-modal renderer that has access to a
+// liveview status or child meta carrying the Tier field. Phase
+// 6.1d.
+func tierLabelOrDepth(tier string, depth int) string {
+	if tier != "" {
+		return tier
+	}
+	return shortTierLabel(depth)
 }
 
 func lifecyclePill(state string) string {

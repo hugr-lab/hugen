@@ -99,7 +99,9 @@ func (e *Extension) Lifetime() tool.Lifetime { return tool.LifetimePerAgent }
 // under [StateKey], registers it as a [skillpkg.SessionSink] so
 // manager-level Refresh broadcasts find it, and runs autoload
 // (skills whose metadata.hugen.autoload_for contains this
-// session's tier — root/mission/worker resolved from depth).
+// session's tier — root/mission/worker as the session reports
+// via state.Tier(); depth-derived by default, overridable by
+// SpawnSpec.Tier per Phase 6.1d).
 func (e *Extension) InitState(ctx context.Context, state extension.SessionState) error {
 	h := &SessionSkill{
 		manager:   e.manager,
@@ -107,7 +109,7 @@ func (e *Extension) InitState(ctx context.Context, state extension.SessionState)
 		sessionID: state.SessionID(),
 		author:    e.agentParticipant(),
 		loaded:    map[string]skillpkg.Skill{},
-		tier:      skillpkg.TierFromDepth(state.Depth()),
+		tier:      state.Tier(),
 	}
 	state.SetValue(StateKey, h)
 	if e.manager == nil {

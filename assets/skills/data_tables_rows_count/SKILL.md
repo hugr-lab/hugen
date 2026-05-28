@@ -1,90 +1,205 @@
 ---
 name: data_tables_rows_count
 description: >
-  Count rows in a Hugr Data Mesh data object via the aggregation
-  GraphQL field. One number out, suitable as a quick health metric
-  or a scheduled diagnostic.
+  Count rows in one Hugr data object. Input: exact `name` or
+  natural-language `query` (+ optional `module`). Output: a single
+  integer count.
 license: Apache-2.0
-allowed-tools: []
+allowed-tools:
+  - provider: hugr-main
+    tools:
+      - discovery-search_modules
+      - discovery-search_module_data_objects
+      - discovery-describe_data_object
+      - data-inline_graphql_result
+  - provider: session
+    tools:
+      - inquire
 metadata:
   hugen:
-    requires_skills: [hugr-data]
+    requires_skills: []
+    allowed_skills: []
     autoload: false
     tier_compatibility: [worker]
-
+    mission:
+      on_close:
+        notepad:
+          skip: true
     task:
       eligible: true
       kind: worker
+      # ,bintent: reasoning
       goal_summary: >
-        Count rows in a named Hugr data object via the aggregation
-        GraphQL field.
+        Count rows in one Hugr data object via the aggregation
+        GraphQL field. Resolves the target by exact name (fast path)
+        or natural-language query (search + disambiguation).
       inputs_schema:
         type: object
-        required: [data_object]
+        oneOf:
+          - required: [name]
+          - required: [query]
         properties:
-          data_object:
+          name:
             type: string
-            description: >
-              The data object (table / view) to count. Either the
-              backend's canonical name on its own, or `module.table`
-              when the user named both — discovery accepts either.
-
+            description: "Exact type name. Fast path: describe directly."
+          query:
+            type: string
+            description: "Natural-language description. Used when name is absent."
+          module:
+            type: string
+            description: "Optional module to narrow the query search."
 compatibility:
   model: any
   runtime: hugen-phase-6
 ---
 
-# `data_row_count` recipe
+# data_tables_rows_count
 
-Tiny task-eligible recipe: returns ONE row-count value for a named
-Hugr data object. Three tool calls, one structured handoff.
+Count rows in one Hugr data object. The four tools you need are in
+your catalogue — don't load anything else.
 
-## Steps
+## Pipeline
 
-1. **Discover the data object.**
-   `hugr-main:discovery-search_module_data_objects(query:
-   "<data_object>")`. The response lists matches with a `queries[]`
-   array per item; find the entry whose `query_type` is the
-   aggregation variant (`aggregation` or `bucket_aggregation` —
-   the latter only when the plain `aggregation` is absent). Copy
-   that `queries[].name` verbatim — it is the callable GraphQL
-   field name. If discovery returns zero or multiple matches that
-   look equally plausible, emit a `status=fail` handoff naming the
-   candidates rather than guessing.
+Inputs: `{name?, query?, module?}`. Schema guarantees `name` OR `query`.
 
-2. **Execute the aggregation.** Build the GraphQL query inline and
-   run it through `hugr-main:data-inline_graphql_result`:
+### 1. Resolve the table name
 
-   - **Plain aggregation** (`query_type: aggregation`):
-     ```graphql
-     query { <discovered-name> { _rows_count } }
-     ```
-     `jq_transform`: `.data.<discovered-name>._rows_count`
-   - **Bucket aggregation** (`query_type: bucket_aggregation`):
-     ```graphql
-     query { <discovered-name> { aggregations { _rows_count } } }
-     ```
-     `jq_transform`: `.data.<discovered-name>.aggregations._rows_count`
+Three routes — pick the first that matches:
 
-   JQ paths MUST start with `.data` — that's the response envelope
-   shape (see `hugr-data` skill body for the rule).
+- **`name` set** → use it. Go to step 2.
+- **`query` set, `module` set** → `search_module_data_objects(module, query)`. Pick a table.
+- **`query` set, `module` absent** → `search_modules(query)`. Pick a module. Then `search_module_data_objects(module, query)`. Pick a table.
 
-3. **Emit handoff.** One fenced JSON block:
-   ```handoff
-   {
-     "status": "ok",
-     "body": { "count": <integer>, "field": "<discovered-name>" },
-     "memory_summary": "Counted <discovered-name>: <integer> rows"
-   }
-   ```
+**`search_modules`** — module descriptions are intentionally broad
+(modules cover many tables / topics). Rules:
 
-## Not in scope
+- 0 items → handoff `no_module`. Stop.
+- 1 item → use it.
+- ≥2 items → **always inquire**. Do not pick by score or by "this
+  one looks more relevant". Module choice decides what tables
+  you'll even see at the next step; ask the user.
 
-- **Filters / partial counts.** Recipe takes no filter. For
-  filtered counts load `hugr-data` and write a real query.
-- **Multi-table joins, group-by, distincts.** Same — this recipe
-  is single-number-only by design.
-- **Validation step.** The query shape is trivial; if execution
-  fails, the inline-result error message is informative enough.
-  Re-validate via `data-validate_graphql_query` only on a clear
-  schema mismatch (e.g. discovery field rename mid-task).
+**`search_module_data_objects`** — table descriptions tend to be
+specific. Rules:
+
+- 0 items → handoff `no_match`. Stop.
+- 1 item → use it.
+- ≥2 items, exactly one has a non-empty description that literally
+  names the target (other descriptions empty or about a different
+  concept) → use that one. Score alone is not a tiebreaker; read
+  the descriptions.
+- ≥2 items, none is an obvious Clear match (multiple plausible,
+  multiple empty, or top scorer has empty description while a
+  lower scorer literally names the target) → **inquire**.
+
+Take `items[i].name` verbatim when picking — that's the catalog
+type name describe needs.
+
+### 2. Describe the table
+
+`describe_data_object(name)`.
+
+- `not_found` AND you got here from the input `name` (first time) →
+  set `query := name`, drop `name`, restart step 1. One fallback only.
+- `not_found` after a search round → handoff `not_found`. Stop.
+- From `queries[]`, pick the entry with `query_type == "aggregate"`
+  (NOT `bucket_agg`). No such entry → handoff `no_aggregation`. Stop.
+
+Bind two variables for step 3:
+
+- `M` = the `module` string from the response (may be empty, may contain dots).
+- `Q` = the aggregate query name from `queries[]` (copy verbatim).
+
+### 3. Build the GraphQL query
+
+**Dots in `M` are GraphQL nesting, never identifiers.** Translate each
+dot into a `{ ... }` wrapper. Compare:
+
+```text
+M = ""          query { Q { _rows_count } }
+M = "foo"       query { foo { Q { _rows_count } } }
+M = "foo.bar"   query { foo { bar { Q { _rows_count } } } }
+M = "a.b.c"     query { a { b { c { Q { _rows_count } } } } }
+```
+
+So `foo.bar` becomes `foo { bar { … } }`, NEVER `foo_bar { … }` or
+`"foo.bar" { … }`. Underscores inside a single segment (e.g. `Q`
+itself, or a one-word module like `osm_amenities`) stay as written —
+they're part of the name. Only the dot is a separator.
+
+Call `data-inline_graphql_result(query: "<your query>")`. No
+`jq_transform`. The count lives at the same path inside `data`:
+
+```text
+M = "foo.bar"  →  response.data.foo.bar.Q._rows_count
+M = ""         →  response.data.Q._rows_count
+```
+
+GraphQL error in response → handoff `query_failed` with the error
+text. Stop.
+
+### 4. Hand off
+
+```handoff
+{
+  "status": "ok",
+  "body": { "count": <integer>, "module": "<M>", "field": "<Q>" },
+  "memory_summary": "Counted <M>.<Q>: <integer> rows"
+}
+```
+
+`count` is verbatim — no rounding, no thousand separator, no quoting.
+
+## Inquire
+
+When step 1 needs disambiguation, call `session:inquire`:
+
+```json
+{
+  "type": "clarification",
+  "question": "Which one?",
+  "clarifications": [{
+    "id": "module_choice",
+    "question": "Which one?",
+    "kind": "required",
+    "allow_comment": true,
+    "options": [
+      "<items[0].name> — <items[0].description>",
+      "<items[1].name> — <items[1].description>",
+      "Other — none of these match; describe in the comment"
+    ]
+  }]
+}
+```
+
+For a **table** clarification: use `id: "table_choice"` and append
+` (module: <items[].module>)` to each result option line.
+
+Truncate descriptions to ~120 chars. The trailing `Other` option is
+mandatory.
+
+**Response handling** — read `answers.<id>.{value, comment}`:
+
+- `value` matches a real option → take the prefix before ` — ` as the
+  name (module or table) and continue.
+- `value` starts with `Other —` AND `comment` is non-empty → use
+  `comment` as the new `query`, re-run the SAME search. Max 2 retries
+  per step (3 searches total). After that → handoff `user_no_match`.
+- `value` starts with `Other —` AND `comment` is empty → handoff
+  `user_choice_invalid`. Stop.
+- `value` empty / no ` — ` separator → handoff `user_choice_invalid`. Stop.
+
+## Handoff reasons
+
+All `status: "fail"` (except `ok`). Always include a short
+`memory_summary`; specific fields per reason listed below.
+
+| reason | when | extra fields |
+|---|---|---|
+| `no_module` | `search_modules` returned 0 items | — |
+| `no_match` | `search_module_data_objects` returned 0 items | — |
+| `not_found` | describe failed (after the optional name→search fallback) | — |
+| `no_aggregation` | describe ok but no `aggregate` entry in `queries[]` | — |
+| `query_failed` | aggregation call returned a GraphQL error | `error` (truncated message) |
+| `user_choice_invalid` | inquire response did not match any option, or `Other` without comment | `got` (verbatim reply) |
+| `user_no_match` | user exhausted the refinement budget | `last_comment` |

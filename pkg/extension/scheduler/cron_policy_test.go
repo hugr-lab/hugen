@@ -28,6 +28,7 @@ func (s *fakeState) SubagentName() string { return "" }
 func (s *fakeState) Role() string         { return "" }
 func (s *fakeState) Skill() string        { return "" }
 func (s *fakeState) Depth() int           { return 0 }
+func (s *fakeState) Tier() string         { return "root" }
 func (s *fakeState) Parent() (extension.SessionState, bool) {
 	if s.parent == nil {
 		return nil, false

@@ -198,6 +198,79 @@ func (e *Extension) Subscribe(_ context.Context) (<-chan tool.ProviderEvent, err
 // (recovery.go); the provider itself holds no resources.
 func (e *Extension) Close() error { return nil }
 
+// allowedSkillsFromState pulls the spawner-scoped whitelist out of
+// the session state, or returns (nil, false) when the spawner did
+// not narrow the surface. A present-but-empty list still returns
+// (allowed, true) — that's the "lock the session to its pre-loaded
+// surface" mode (task ext default for recipes that declare no
+// extra `allowed_skills`). Phase 6.1d.
+func allowedSkillsFromState(state extension.SessionState) ([]string, bool) {
+	if state == nil {
+		return nil, false
+	}
+	v, ok := state.Value(SessionAllowedSkillsKey)
+	if !ok {
+		return nil, false
+	}
+	switch t := v.(type) {
+	case []string:
+		return t, true
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+// allowSkillLoad reports whether the given skill name is loadable
+// in the current session. Sessions without a spawner-scoped
+// whitelist (the absent-key default) always allow. Sessions with a
+// whitelist allow:
+//
+//   - Universal baseline (`_system`, `_worker`) — autoloaded for
+//     every worker-tier session regardless of override.
+//   - The spawner's [SessionAllowedSkillsKey] whitelist entries.
+//   - Skills already loaded in the session — repeated `skill:load`
+//     of a loaded skill is a no-op the manager handles gracefully,
+//     so blocking it would create a false-negative for harmless
+//     model behaviour.
+//
+// Transitive `requires_skills` of an allowed name still load via
+// SkillManager.Load's closure walker; the gate runs only against
+// the top-level name the LLM passed. Phase 6.1d.
+func allowSkillLoad(ctx context.Context, h *SessionSkill, state extension.SessionState, name string) bool {
+	allowed, scoped := allowedSkillsFromState(state)
+	if !scoped {
+		return true
+	}
+	switch name {
+	case "_system", "_worker":
+		return true
+	}
+	// Already-loaded — let the no-op reach Load() so the LLM can't
+	// trip on a repeat call. Cheap lookup against the live binding
+	// set (no manifest walk).
+	if h != nil {
+		for _, n := range h.LoadedNames(ctx) {
+			if n == name {
+				return true
+			}
+		}
+	}
+	for _, entry := range allowed {
+		if entry == name {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------- skill:load ----------
 
 func (h *SessionSkill) callLoad(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
@@ -212,6 +285,28 @@ func (h *SessionSkill) callLoad(ctx context.Context, args json.RawMessage) (json
 	}
 	if in.Name == "" {
 		return nil, fmt.Errorf("%w: skill:load: name required", tool.ErrArgValidation)
+	}
+	// Phase 6.1d — spawner-scoped whitelist (additive on top of the
+	// tier autoload baseline). When the calling session was opened
+	// with a [SessionAllowedSkillsKey] value (today: task ext recipe
+	// children), `skill:load` is restricted to: the universal
+	// `_system` / `_worker` baseline, the whitelist entries, and any
+	// already-loaded skill (harmless repeat). Anything else returns
+	// a structured envelope the LLM can react to without retrying
+	// the same name.
+	if state, ok := extension.SessionStateFromContext(ctx); ok {
+		if !allowSkillLoad(ctx, h, state, in.Name) {
+			body, mErr := json.Marshal(map[string]any{
+				"error": map[string]string{
+					"code":    "skill_not_in_allowlist",
+					"message": fmt.Sprintf("skill:load %q denied: this session was opened with a scoped allow-list and %q is not in it. Execute the loaded recipe's steps using the skills already in your catalogue.", in.Name, in.Name),
+				},
+			})
+			if mErr != nil {
+				return nil, fmt.Errorf("%w: skill:load: marshal allowlist denial: %v", tool.ErrSystemUnavailable, mErr)
+			}
+			return body, nil
+		}
 	}
 	if err := h.Load(ctx, in.Name); err != nil {
 		// Tier mismatch is the only error the LLM can productively
