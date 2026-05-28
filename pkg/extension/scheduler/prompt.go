@@ -21,14 +21,15 @@ import (
 // Renderer's text/template namespace doesn't expose.
 const cronSystemPromptPath = "prompts/task/cron_system.tmpl"
 
-// AdvertiseSystemPrompt implements [extension.Advertiser]. Cron
-// sessions get the bundled cron-contract block prepended to the
-// session system prompt; non-cron sessions get the empty string
-// (skipped by the runtime's concatenator). Phase 6 §1.2.4 / §3.5.
+// AdvertiseSystemPrompt implements [extension.Advertiser]. Renders
+// the cron-contract block on sessions firing under a schedule (the
+// FireContext stamp is present). Non-fire sessions get the empty
+// string; recipe discovery is the task ext's responsibility — task-
+// eligible recipes surface as synthetic `task:<recipe>` tools, not
+// prose blocks.
 //
-// Idempotent: the template is parsed once and cached on first
-// render; subsequent fires of the same agent reuse the parsed
-// tree.
+// Idempotent: the cron-contract template is parsed once and cached
+// on first render.
 func (e *Extension) AdvertiseSystemPrompt(_ context.Context, state extension.SessionState) string {
 	fc, ok := fireContextFromState(state)
 	if !ok || fc == nil {

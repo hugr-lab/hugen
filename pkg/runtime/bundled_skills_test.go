@@ -30,7 +30,7 @@ func TestInstallBundledHubSkills_FreshInstall(t *testing.T) {
 	}
 	// Agent-core skills must NOT be materialised on disk — they
 	// live embed-only under the system tier.
-	for _, sys := range []string{"_system", "_root", "_mission", "_worker"} {
+	for _, sys := range []string{"_system", "_root", "_mission", "_worker", "_mission_worker", "_admin"} {
 		path := filepath.Join(state, "skills/hub", sys)
 		if _, err := os.Stat(path); err == nil {
 			t.Errorf("system-tier skill %q leaked onto hub disk path %s", sys, path)

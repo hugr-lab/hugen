@@ -64,9 +64,21 @@ type SessionState interface {
 	// Depth returns this session's depth in the spawn tree: 0 for
 	// the user-facing root, 1 for the mission root spawned, ≥2 for
 	// workers spawned by missions (or by workers via opt-in
-	// can_spawn). The tier vocabulary (root/mission/worker) is
-	// derived from depth via skill.TierFromDepth. Phase 4.2.2 §2.
+	// can_spawn). Structural position in the tree — orthogonal to
+	// the session's semantic role (see Tier).
 	Depth() int
+
+	// Tier returns the session's semantic role label —
+	// skill.TierRoot / TierMission / TierWorker. The default
+	// derivation matches depth via skill.TierFromDepth, but
+	// SpawnSpec.Tier may override it for ad-hoc cases where a
+	// child's structural depth disagrees with its role (e.g. an
+	// ad-hoc recipe child of root has depth=1 but worker
+	// semantics — leaf executor, no PDCA). Extensions that key
+	// off semantic role (skill autoload, compactor overlays,
+	// constitution loading) read Tier() instead of computing
+	// from Depth(). Phase 6.1d §tier-aware spawn.
+	Tier() string
 
 	// Parent returns the parent session's state for spawned
 	// sessions and (nil, false) for root sessions. Callers read

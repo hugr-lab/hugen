@@ -179,6 +179,31 @@ type HugenMetadata struct {
 	// unload.
 	RequiresSkills []string `json:"requires_skills,omitempty" yaml:"requires_skills,omitempty"`
 
+	// AllowedSkills is a runtime-load whitelist scoped to children
+	// spawned with this skill as their dispatching manifest. When
+	// the task extension's dispatch path stamps a recipe child with
+	// this list (via SessionAllowedSkillsKey), the skill extension
+	// restricts `skill:load` + the Available-skills catalogue to
+	// entries in the list (plus the universal `_system` / `_worker`
+	// baseline). Empty / absent on a recipe = "fixed surface: only
+	// pre-loaded RequiresSkills are available". RequiresSkills
+	// entries get loaded eagerly at spawn; AllowedSkills entries are
+	// reachable via `skill:load` lazily — useful for skills with
+	// heavy boot cost that the recipe needs only on certain
+	// branches. Phase 6.1d.
+	AllowedSkills []string `json:"allowed_skills,omitempty" yaml:"allowed_skills,omitempty"`
+
+	// RecipeCatalog marks the skill as a curated collection of
+	// task-eligible recipes (a category skill like `data_utils`):
+	// loading it admits its recipes' synthetic `task:*` tools into
+	// the catalogue. The skill extension surfaces flagged skills
+	// distinctly in the `## Available skills` block (a `(recipe
+	// catalog)` tag, sorted to the top) so the model prefers a
+	// tested recipe over hand-rolling the same job from raw tools.
+	// Purely declarative — the constitution carries the behavioural
+	// directive. Phase 6.1d.
+	RecipeCatalog bool `json:"recipe_catalog,omitempty" yaml:"recipe_catalog,omitempty"`
+
 	Intents   []string                  `json:"intents,omitempty"`
 	SubAgents []SubAgentRole            `json:"sub_agents,omitempty"`
 	Memory    map[string]MemoryCategory `json:"memory,omitempty"`
@@ -202,13 +227,13 @@ type HugenMetadata struct {
 	Mission MissionBlock `json:"mission,omitempty" yaml:"mission,omitempty"`
 
 	// Task, when Eligible, declares the skill as task-eligible:
-	// `task:create` may bind a recurring schedule to it (Phase 6
+	// `schedule:create` may bind a recurring schedule to it (Phase 6
 	// §0.5.4). Surface is purely declarative — the TaskManager
 	// extension reads InputsSchema for JSON-Schema validation at
 	// create time and AllowedToolsDefault as the default tool
 	// allow-list operator can override in the approval modal
 	// (6.1c). Empty / Eligible=false → skill is invisible to
-	// `task:create`.
+	// `schedule:create`.
 	Task TaskBlock `json:"task,omitempty" yaml:"task,omitempty"`
 
 	// MaxTurns / MaxTurnsHard / StuckDetection are conceptually
@@ -622,6 +647,15 @@ type MissionBlock struct {
 	// Empty / absent → no manifest seed; the planner is responsible
 	// for emitting ≥1 ac_add on iter 1. Phase 5.x — B11 §3.2.2.
 	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty" yaml:"acceptance_criteria,omitempty"`
+
+	// InputsSchema is a JSON Schema (draft 2020-12) declaring the
+	// shape of the structured `inputs` blob the caller passes to
+	// `session:spawn_mission(skill=<this>, inputs=...)`. Rendered
+	// into the root's `## Available missions` prompt block so the
+	// model knows exactly which keys to pass without guessing.
+	// Distinct from `task.inputs_schema` — that one fires at
+	// `schedule:create`. Phase 6.1d.
+	InputsSchema map[string]any `json:"inputs_schema,omitempty" yaml:"inputs_schema,omitempty"`
 }
 
 // Task kind constants — used both by manifest authors (yaml value)
@@ -635,13 +669,13 @@ const (
 	TaskKindWorker = "worker"
 
 	// TaskKindMission is reserved for adaptive plan-driven tasks
-	// (the skill is itself a mission). `task:create` guards this
+	// (the skill is itself a mission). `schedule:create` guards this
 	// kind as "not yet supported" in 6.1b MVP.
 	TaskKindMission = "mission"
 )
 
 // TaskBlock is the typed projection of `metadata.hugen.task`. When
-// `Eligible: true`, the skill is selectable by the `task:create`
+// `Eligible: true`, the skill is selectable by the `schedule:create`
 // tool — operators (or the future `_task_builder` mission) bind a
 // recurring schedule to it and TaskManager fires the skill per
 // scheduler tick. Phase 6 §0.5.4.
@@ -650,7 +684,7 @@ const (
 //
 //   - `Kind` is the fire shape. MVP supports `worker` only;
 //     `mission` is reserved (guarded with a "not yet supported"
-//     error by `task:create` until mission-shape cron lands).
+//     error by `schedule:create` until mission-shape cron lands).
 //   - `InputsSchema` validates the structured `inputs` blob the
 //     operator passes at task-create time (separate gate from
 //     `mission.inputs_schema`, which only fires at
@@ -664,7 +698,7 @@ const (
 //     Go-template rendering with [protocol.FireContext]. Default
 //     false — SKILL.md is static.
 type TaskBlock struct {
-	// Eligible is the master flag. `task:create` lists only skills
+	// Eligible is the master flag. `schedule:create` lists only skills
 	// where this is true. Absent / false → skill is invisible to
 	// the task surface.
 	Eligible bool `json:"eligible,omitempty" yaml:"eligible,omitempty"`
@@ -678,11 +712,21 @@ type TaskBlock struct {
 	// in liveview + notification subjects. Free-form prose.
 	GoalSummary string `json:"goal_summary,omitempty" yaml:"goal_summary,omitempty"`
 
+	// Intent overrides the model-router intent the task ext spawns
+	// the recipe child with. Empty falls back to the worker tier's
+	// default intent (deps.TierIntents[worker]). Recipes that require
+	// stronger reasoning (procedural template substitution, multi-
+	// step disambiguation) declare `intent: reasoning`; the router
+	// then dispatches the child to whichever model spec is wired to
+	// that intent in the operator's config. Unknown intent values
+	// log a warn and the child keeps the tier default. Phase 6.1d.
+	Intent string `json:"intent,omitempty" yaml:"intent,omitempty"`
+
 	// InputsSchema is a JSON Schema (draft 2020-12) validated
 	// against the caller's `inputs` blob at task-create time.
 	// Empty / nil → skill accepts any inputs (no schema gate).
 	// Distinct from `mission.inputs_schema` — that one fires at
-	// `session:spawn_mission`, this one at `task:create`.
+	// `session:spawn_mission`, this one at `schedule:create`.
 	InputsSchema map[string]any `json:"inputs_schema,omitempty" yaml:"inputs_schema,omitempty"`
 
 	// AllowedToolsDefault is the recommended tool allow-list the
@@ -733,31 +777,20 @@ type MissionControlBlock struct {
 // `session:inquire`, and surfaces its findings into the planner's
 // plan_context so iter-1 plans see scope-resolved inputs.
 //
-// Trigger semantics (When):
-//   - `always`           — research runs every mission.
-//   - `auto`             — runtime heuristic (pronoun-only goals,
-//     short goals, mission_inputs gaps). Spec §2.5.
-//   - `if_goal_matches`  — Predicate regex tested against the goal
-//     string; fires when it matches.
+// Presence IS the gate: a skill that declares this block (with a
+// Role) always runs the research stage. The researcher decides
+// per-turn whether to ask (a `done: false` handoff with
+// clarifications) or fast-exit on a clear goal (a `done: true`
+// handoff with empty clarifications — one cheap turn, no user
+// modal). Skills that never need research simply omit the block.
 //
 // MaxIterations caps re-fire cycles (when research emits `done:
 // false` it gets re-spawned, with prior_answers / prior_comments
 // folded into its context). Default 3.
 type MissionResearchBlock struct {
 	Role          string `json:"role,omitempty" yaml:"role,omitempty"`
-	When          string `json:"when,omitempty" yaml:"when,omitempty"`
-	Predicate     string `json:"predicate,omitempty" yaml:"predicate,omitempty"`
 	MaxIterations int    `json:"max_iterations,omitempty" yaml:"max_iterations,omitempty"`
 }
-
-// Recognised values for MissionResearchBlock.When. Validated at
-// projection time; unknown values are rejected so a typo
-// (`"if_goal_match"`) doesn't silently disable research.
-const (
-	ResearchWhenAlways        = "always"
-	ResearchWhenAuto          = "auto"
-	ResearchWhenIfGoalMatches = "if_goal_matches"
-)
 
 // MissionPlanBlock is the mission-PDCA `plan:` section. `Role`
 // drives LLM-planned missions; `Inline` declares waves directly
@@ -843,6 +876,13 @@ type MissionPlanSubagent struct {
 	Task      string   `json:"task,omitempty" yaml:"task,omitempty"`
 	Inputs    any      `json:"inputs,omitempty" yaml:"inputs,omitempty"`
 	DependsOn []string `json:"depends_on,omitempty" yaml:"depends_on,omitempty"`
+	// InputsFromResolved, when true, makes the runtime replace this
+	// subagent's Inputs with the mission's research-stage
+	// ResolvedUserInputs map verbatim. Mutually exclusive with
+	// literal Inputs. Used by the universal `_run_task` mission so
+	// the recipe spawn carries user-confirmed values without the
+	// mission needing to know each recipe's schema. Phase 6.1d.
+	InputsFromResolved bool `json:"inputs_from_resolved,omitempty" yaml:"inputs_from_resolved,omitempty"`
 }
 
 // MissionSynthesisBlock names the role that produces the
@@ -946,11 +986,18 @@ type MissionOnClose struct {
 //     entirely if the session emitted no tool calls during its
 //     main task. Cheap path for trivial sessions
 //     (simple-answerer, /end at root).
+//   - Skip: when true, the runtime UNCONDITIONALLY skips the
+//     close turn regardless of tool-call count. Recipes whose
+//     handoff `memory_summary` is the canonical takeaway use
+//     this to avoid a second LLM round-trip for a redundant
+//     notepad append (the handoff body is the deliverable).
+//     Phase 6.1d.
 type MissionOnCloseNotepad struct {
 	Prompt       string   `json:"prompt,omitempty" yaml:"prompt,omitempty"`
 	AllowedTools []string `json:"allowed_tools,omitempty" yaml:"allowed_tools,omitempty"`
 	MaxTurns     int      `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
 	SkipIfIdle   bool     `json:"skip_if_idle,omitempty" yaml:"skip_if_idle,omitempty"`
+	Skip         bool     `json:"skip,omitempty" yaml:"skip,omitempty"`
 }
 
 // IsZero reports whether the MissionOnCloseNotepad is the
@@ -961,7 +1008,8 @@ func (n MissionOnCloseNotepad) IsZero() bool {
 	return n.Prompt == "" &&
 		len(n.AllowedTools) == 0 &&
 		n.MaxTurns == 0 &&
-		!n.SkipIfIdle
+		!n.SkipIfIdle &&
+		!n.Skip
 }
 
 // IsZero on MissionOnClose returns true when none of its
@@ -1092,15 +1140,6 @@ func (m *Manifest) validateHugen() error {
 	if r := m.Hugen.Mission.Research; r != nil {
 		if strings.TrimSpace(r.Role) == "" {
 			return fmt.Errorf("metadata.hugen.mission.research.role is required when the block is present")
-		}
-		switch r.When {
-		case "", ResearchWhenAlways, ResearchWhenAuto, ResearchWhenIfGoalMatches:
-		default:
-			return fmt.Errorf("metadata.hugen.mission.research.when = %q: must be one of [%q, %q, %q]",
-				r.When, ResearchWhenAlways, ResearchWhenAuto, ResearchWhenIfGoalMatches)
-		}
-		if r.When == ResearchWhenIfGoalMatches && strings.TrimSpace(r.Predicate) == "" {
-			return fmt.Errorf("metadata.hugen.mission.research.predicate is required when when=%q", ResearchWhenIfGoalMatches)
 		}
 		if r.MaxIterations < 0 {
 			return fmt.Errorf("metadata.hugen.mission.research.max_iterations = %d: must be >= 0", r.MaxIterations)

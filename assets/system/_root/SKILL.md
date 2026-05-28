@@ -30,11 +30,13 @@ allowed-tools:
       - read
       - search
       - show
-  # Phase 6.1c — scheduled tasks. Root owns the full task surface
-  # because cron tasks belong to the user-facing conversation; they
-  # spawn cron-fire subagents under this root when they fire, and
-  # the SubagentResult lands here in chat history.
-  - provider: task
+  # Phase 6.1c — scheduled tasks. Root owns the schedule management
+  # surface because scheduled fires belong to the user-facing
+  # conversation; they spawn cron-fire subagents under this root
+  # when they fire, and the SubagentResult lands here in chat
+  # history. Recipe execution itself flows through the `task` ext
+  # (synthetic `task:<recipe>` tools admitted by category skills).
+  - provider: schedule
     tools:
       - create
       - list
@@ -93,7 +95,7 @@ manual references but does not detail.
   diagnostic value).
 - `notepad:append` / `read` / `search` / `show` — session-
   scoped working memory.
-- `task:create` / `list` / `pause` / `resume` / `cancel` —
+- `schedule:create` / `list` / `pause` / `resume` / `cancel` —
   scheduled tasks. `kind="wake"` synthesises a UserMessage into
   THIS root at fire time (a reminder / nudge). `kind="spawn"`
   spawns a cron subagent under this root against the named
@@ -211,45 +213,119 @@ or spawn a fresh mission folding the context in.
 
 `mission:notify` against a completed id returns `not_found`.
 
-## Knob 7 — scheduled tasks (`task:*`)
+## Knob 7 — recipes (`task:*`) and schedules (`schedule:*`)
 
-Use `task:create` ONLY when the user explicitly asks for a
-delayed or recurring action — they named a future time, an
-interval, or used cadence words ("remind me", "every morning",
-"in 30 minutes", or their equivalents in the user's language).
+A **recipe** is a small task-eligible skill that does one concrete
+job (count rows, summarise a dashboard, generate a daily report).
+Recipes are bundled into **category skills** (`data_utils`,
+`pr_workflows`, …) that you load on demand. Loading a category
+admits its recipes' synthetic tools — `task:<recipe-name>` — into
+your tool catalog with typed parameters.
 
-Pick `kind`:
+### Path A — ad-hoc (user wants it NOW)
 
-- `wake` — one-shot or recurring nudge into THIS root.
-  `wake_message` is the literal text the user will see as a
-  fresh user message at fire time. Use for reminders / pings.
-- `spawn` — open a fresh subagent under THIS root against
-  `skill_ref` at fire time, project the SubagentResult back
-  into history. Use for recurring data work ("every morning
-  summarise yesterday's …"). The named skill MUST declare
-  `metadata.hugen.task.eligible: true` in its manifest.
+User described work that matches a recipe but did NOT name a
+future time / cadence:
 
-Pick `schedule_kind`:
+1. Find the `(recipe catalog)` skill in `## Available skills` whose
+   domain covers what the user wants. Load it via
+   `skill:load("<category>")` (only if it isn't already loaded).
+   Prefer this over hand-rolling the job with raw tools you may
+   already have loaded — recipes are tested (constitution rule).
+2. The recipe's synthetic tool `task:<recipe-name>` is now in your
+   tool catalog with its typed `inputs_schema`. Call it directly
+   with the user's parameters:
 
-- `once_in` / `once_at` — single fire. `schedule_spec` is a
-  Go duration (`"30m"`, `"1h"`) for `once_in`, or an RFC3339
+```
+task:<recipe-name>({ key1: "...", key2: "..." })
+```
+
+The runtime spawns the recipe as a subagent under THIS root,
+awaits its terminal handoff, and the result projects back into
+chat history as a SubagentResult. Then summarise the result to
+the user in one sentence.
+
+### Path B — scheduled recipe (user named a future time or cadence)
+
+User asked for a recipe to run on a schedule:
+
+```
+schedule:create(
+  kind="spawn",
+  skill_ref="<recipe-name>",
+  schedule_kind=..., schedule_spec=...,
+  inputs={ ... }   # complete inputs — no input-collector at fire time
+)
+```
+
+`skill_ref` is the recipe's skill name (the same name you'd use
+with `task:<recipe-name>` ad-hoc). The scheduled fire has no live
+user — ask the user up-front for every required input the recipe
+declares, then pass the complete map. Tip: the recipe's synthetic
+tool's schema lists exactly the same keys; consult it before
+prompting the user.
+
+### Path C — wake-only nudge (no recipe)
+
+User wants a reminder / ping, no recipe involved:
+
+```
+schedule:create(
+  kind="wake",
+  wake_message="<literal text>",
+  schedule_kind=..., schedule_spec=...
+)
+```
+
+`wake_message` is the literal text that arrives as a fresh user
+message at fire time.
+
+### Decision tree (apply in order)
+
+1. Did the user name a future time / cadence?
+   ("remind me", "every morning", "in 30 minutes", or their
+   equivalents in the user's language.)
+   - **No** → Path A or just-answer-in-chat.
+   - **Yes** → Path B or C.
+2. Does the user's intent map to a recipe?
+   - **Yes** but recipe's category not yet loaded → `skill:load`
+     the category, then Path A (no schedule) or Path B (scheduled).
+   - **Yes** and the recipe's synthetic tool is already in catalog
+     → call it directly (Path A) or `schedule:create` (Path B).
+   - **No, but the user wants a reminder** → Path C.
+   - **No, and the user wants real work** → no recipe available;
+     either decline ("no matching recipe — closest match would be
+     to spawn a regular mission") or spawn a mission with a
+     suitable mission skill instead. Do NOT invent a recipe name.
+3. Pre-fill `inputs` from what the user already said. Anything
+   missing — ask the user once via `session:inquire` BEFORE the
+   call (recipes have no input-collector at runtime; they expect
+   a complete inputs map).
+
+### NOT a task / recipe trigger
+
+- User wants the thing done now and there is **no recipe** for it
+  → just do it in chat or spawn a regular mission.
+- User wants a single piece of work that happens to take a while
+  → spawn a mission, do not schedule it.
+
+### `schedule_kind` (Paths B + C)
+
+- `once_in` / `once_at` — single fire. `schedule_spec` is a Go
+  duration (`"30m"`, `"1h"`) for `once_in`, or an RFC3339
   timestamp for `once_at`.
 - `interval` — repeating cadence. `schedule_spec` is a Go
   duration (`"24h"`, `"15m"`).
 - `cron` — full cron expression. Land in 6.2; today returns
   `not_yet_implemented` if used.
 
-NOT a task-trigger:
+### Optional knobs (Paths B + C)
 
-- The user wants the thing done now → just do it.
-- The user wants a single piece of work that happens to take
-  a while → spawn a mission, do not schedule it.
-
-`initial_planned_at`: USUALLY OMIT. The runtime derives the
-first fire from `schedule_spec`: `now+duration` for once_in /
-interval, the timestamp itself for once_at. Pass an explicit
-RFC3339 UTC override only when you need to anchor on a specific
-moment unrelated to the schedule cadence.
+`initial_planned_at`: USUALLY OMIT. The runtime derives the first
+fire from `schedule_spec`: `now+duration` for once_in / interval,
+the timestamp itself for once_at. Pass an explicit RFC3339 UTC
+override only when you need to anchor on a specific moment
+unrelated to the schedule cadence.
 
 `end_condition`: OPTIONAL — defaults to `{"kind":"until_cancel"}`.
 For one-shot kinds (once_in / once_at) the value is structurally
@@ -258,9 +334,13 @@ explicitly only for recurring kinds: `{"kind":"count","spec":"<N>"}`
 for "do this N times", `{"kind":"until","spec":"<RFC3339>"}` for
 "stop on this date".
 
-After successful `task:create`, emit a short user-visible
+### Acknowledgement
+
+After successful `schedule:create`, emit a short user-visible
 acknowledgement naming the schedule (≤ 1 sentence, match the
-user's language).
+user's language). After Path A's `task:<recipe>` call, summarise
+the recipe's projected result for the user in one sentence —
+don't just dump the raw SubagentResult fence.
 
 ## What this skill does NOT grant
 

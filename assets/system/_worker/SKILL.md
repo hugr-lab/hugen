@@ -1,13 +1,13 @@
 ---
 name: _worker
-description: Built-in skill granting a worker-tier session minimal context-reading surface; no spawn by default. Workers run under mission-PDCA — they emit a fenced handoff block as their terminal message.
+description: Built-in skill granting any worker-tier session the minimal universal read surface — no spawn, no cross-worker channel, no PDCA assumptions. Mission-spawned workers layer `_mission_worker` on top via their role's `autoload_skills`; ad-hoc workers (e.g. recipe runners) get only what's here.
 license: Apache-2.0
 allowed-tools:
   - provider: session
     tools:
       # Phase 5.1 — workers may inquire when the AMBIGUITY IS IN
       # THE DATA (two equally-plausible source tables / columns).
-      # Intent ambiguity still belongs to the planner.
+      # Intent ambiguity belongs to the caller / planner.
       - inquire
   # Phase 4.2.3 — workers read prior cross-mission findings but
   # do not write by default. Roles that need write capability can
@@ -17,12 +17,6 @@ allowed-tools:
     tools:
       - read
       - search
-  # Mission-PDCA Phase H — workers fetch prior-wave handoffs by ref
-  # via mission:get_handoff when their depends_on / catalog points
-  # them at one. Read-only; storage is managed by the executor.
-  - provider: mission
-    tools:
-      - get_handoff
 metadata:
   hugen:
     requires_skills: []
@@ -43,26 +37,32 @@ compatibility:
   runtime: hugen-phase-4
 ---
 
-# _worker skill
+# `_worker` skill
 
-Autoloaded into every worker-tier session. The full operating
-rules — fenced-handoff contract, first-message section ordering,
-boot sequence, what NOT to do — live in your tier manual
-(`tier-worker.md`). This skill body documents the tool surface
-and worker-specific knobs.
+Autoloaded into every worker-tier session. Documents the universal
+worker tool surface — the things every leaf executor can rely on
+regardless of who spawned it. The full operating rules — your
+shape (leaf), what you must not do, the inquiry contract — live
+in your tier manual (`tier-worker.md`).
+
+Mission-spawned workers also receive `_mission_worker` (loaded by
+the mission extension via the dispatching skill's
+`sub_agents[].autoload_skills`). That layered skill documents the
+upstream-state read surface (`mission:get_handoff`,
+`mission:get_research`) and the fenced-handoff terminal contract.
+Ad-hoc workers (a recipe runner under root, an external dispatch)
+will not see those bits and shouldn't need them — their task is
+its own contract.
 
 ## Tool surface (granted by this skill)
 
 - `session:inquire` — narrow data-level ambiguity only. Intent
-  ambiguity belongs to the planner; return a `status: "error"`
-  handoff instead.
+  ambiguity belongs to your caller; ad-hoc workers should report
+  the ambiguity via their normal result channel, mission-spawned
+  workers via a `status: "error"` handoff.
 - `notepad:read` / `notepad:search` — cross-mission findings
   (`schema-finding` / `data-source` / `query-pattern` /
   `data-quality-issue`). Always check before re-discovering.
-- `mission:get_handoff(ref)` — fetch a prior-wave handoff body
-  by ref. Refs come from `[Resolved depends_on]` (bytes auto-
-  injected) and `[Available handoffs]` (catalog) in your first
-  message; never invent ref names.
 
 Granted by `_system` (always present): shell (`bash-mcp:*`),
 skill catalogue (`skill:load` / `unload` / `ref` / `files`),
@@ -73,15 +73,16 @@ role may pre-declare loaded skills via `autoload_skills`).
 
 ## What this skill does NOT grant
 
-- `session:spawn_*` — workers are leaves under mission-PDCA;
-  there is no fan-out tool at this tier.
+- `session:spawn_*` — workers are leaves; there is no fan-out
+  tool at this tier, mission-spawned or not.
 - `session:parent_context` / `session:notify_subagent` /
   `session:wait_subagents` — removed under Phase H. Workers
-  receive every relevant context fragment up front (resolved
-  depends_on, inputs, plan_context, catalog); the legacy
+  receive every relevant context fragment up front; the legacy
   pull-side APIs are gone.
-- `plan:*` — workers do not own a plan; the dispatching mission's
-  planner owns the wave shape.
-- `whiteboard:*` — PDCA missions do not use the whiteboard;
-  cross-wave state flows through the handoff store + plan_context
-  journal.
+- `plan:*` — workers do not own a shared plan; their caller
+  owns wave shape (mission ext) or schedule shape (task ext).
+  Workers may still use the per-session `plan:set` for their
+  own scratch when the task spans many tool calls.
+- `whiteboard:*` — leaf workers do not coordinate across siblings;
+  cross-wave state flows through the mission's handoff store (when
+  applicable) or the task's input/output channel.

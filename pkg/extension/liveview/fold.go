@@ -210,6 +210,7 @@ func (v *sessionView) foldOwnFrame(f protocol.Frame) bool {
 			Role:      fr.Payload.Role,
 			Skill:     fr.Payload.Skill,
 			Task:      task,
+			Tier:      fr.Payload.Tier,
 			StartedAt: fr.Payload.StartedAt,
 		}
 		return true
@@ -257,6 +258,7 @@ func (v *sessionView) foldChildFrame(childID string, f protocol.Frame) bool {
 		if meta, ok := v.childMeta[childID]; ok {
 			entry.Role = meta.Role
 			entry.Skill = meta.Skill
+			entry.Tier = meta.Tier
 			delete(v.childMeta, childID)
 		}
 		// Extract depth + last tool from the child's most recent
@@ -265,10 +267,14 @@ func (v *sessionView) foldChildFrame(childID string, f protocol.Frame) bool {
 		if last, ok := v.children[childID]; ok {
 			var summary struct {
 				Depth        int                   `json:"depth"`
+				Tier         string                `json:"tier"`
 				LastToolCall *protocol.ToolCallRef `json:"last_tool_call"`
 			}
 			if json.Unmarshal(last, &summary) == nil {
 				entry.Depth = summary.Depth
+				if summary.Tier != "" {
+					entry.Tier = summary.Tier
+				}
 				if summary.LastToolCall != nil {
 					entry.LastTool = summary.LastToolCall.Name
 				}
@@ -333,6 +339,9 @@ func (v *sessionView) emitStatus() {
 	payload := map[string]any{
 		"session_id": v.sessionID,
 		"depth":      v.depth,
+	}
+	if v.tier != "" {
+		payload["tier"] = v.tier
 	}
 	if v.lifecycleState != "" {
 		payload["lifecycle_state"] = v.lifecycleState

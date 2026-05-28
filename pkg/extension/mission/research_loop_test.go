@@ -21,7 +21,6 @@ func TestRunResearchStage_HappyPath_OneIter(t *testing.T) {
 		Name: "research-mission",
 		Research: &ResearchManifest{
 			Role:          "researcher",
-			When:          ResearchWhenAlways,
 			MaxIterations: 3,
 		},
 	}
@@ -83,7 +82,6 @@ func TestRunResearchStage_ClarificationRoundTrip(t *testing.T) {
 		Name: "research-mission",
 		Research: &ResearchManifest{
 			Role:          "researcher",
-			When:          ResearchWhenAlways,
 			MaxIterations: 3,
 		},
 	}
@@ -175,7 +173,6 @@ func TestRunResearchStage_MaxIterCap(t *testing.T) {
 		Name: "research-mission",
 		Research: &ResearchManifest{
 			Role:          "researcher",
-			When:          ResearchWhenAlways,
 			MaxIterations: 2,
 		},
 	}
@@ -243,7 +240,6 @@ func TestRunResearchStage_WrongKindRetry_MonotonicBudget(t *testing.T) {
 		Name: "research-mission",
 		Research: &ResearchManifest{
 			Role:          "researcher",
-			When:          ResearchWhenAlways,
 			MaxIterations: 10,
 		},
 	}

@@ -122,6 +122,7 @@ func (e *Extension) InitState(ctx context.Context, state extension.SessionState)
 	v := &sessionView{
 		sessionID: state.SessionID(),
 		depth:     state.Depth(),
+		tier:      state.Tier(),
 		state:     state,
 		logger:    e.logger,
 		debounce:  defaultDebounce,
@@ -219,6 +220,7 @@ type frameEvent struct {
 type sessionView struct {
 	sessionID string
 	depth     int
+	tier      string // Phase 6.1d — captured at InitState alongside depth; emitted in status so TUI renders the override.
 	state     extension.SessionState // captured at InitState
 	logger    *slog.Logger
 	debounce  time.Duration
@@ -278,6 +280,7 @@ type childMetaEntry struct {
 	Role      string    `json:"role,omitempty"`
 	Skill     string    `json:"skill,omitempty"`
 	Task      string    `json:"task,omitempty"`
+	Tier      string    `json:"tier,omitempty"` // Phase 6.1d — resolved tier from SubagentStartedPayload; empty for legacy events.
 	StartedAt time.Time `json:"started_at,omitempty"`
 }
 
@@ -288,6 +291,7 @@ type childMetaEntry struct {
 type recentChild struct {
 	SessionID    string    `json:"session_id"`
 	Depth        int       `json:"depth,omitempty"`
+	Tier         string    `json:"tier,omitempty"` // Phase 6.1d — captured from child meta + last status snapshot at termination.
 	Role         string    `json:"role,omitempty"`
 	Skill        string    `json:"skill,omitempty"`
 	Reason       string    `json:"reason,omitempty"`

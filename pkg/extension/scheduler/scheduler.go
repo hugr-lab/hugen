@@ -1,7 +1,7 @@
 // Package scheduler hosts the Phase 6 TaskManager per-session
 // extension + the always-on `task_log_reap_stuck` system runner
 // (see reap.go). The extension's 6.1b shape is intentionally narrow:
-// it exposes the `task:create` tool so operators / the future
+// it exposes the `schedule:create` tool so operators / the future
 // `_task_builder` mission can persist task rows + the initial
 // `planned` row into hub.db. Fire dispatch, drift detection, and
 // the pause / resume / cancel / list surface land in 6.1c — those
@@ -28,17 +28,17 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
-const providerName = "task"
+const providerName = "schedule"
 
 // Permission objects gated by Tier-1 operator config + Tier-2 Hugr
 // role rules + Tier-3 per-user policies. The extension exposes the
 // full surface; per-tier narrowing is the manifest's job.
 const (
-	PermCreate = "hugen:task:create"
-	PermList   = "hugen:task:list"
-	PermPause  = "hugen:task:pause"
-	PermResume = "hugen:task:resume"
-	PermCancel = "hugen:task:cancel"
+	PermCreate = "hugen:schedule:create"
+	PermList   = "hugen:schedule:list"
+	PermPause  = "hugen:schedule:pause"
+	PermResume = "hugen:schedule:resume"
+	PermCancel = "hugen:schedule:cancel"
 )
 
 // Extension is the per-session TaskManager. Constructed once at
@@ -87,7 +87,7 @@ type Extension struct {
 }
 
 // NewExtension constructs the TaskManager extension. The
-// SkillManager pointer is used by `task:create` to validate skill
+// SkillManager pointer is used by `schedule:create` to validate skill
 // references + read `task.inputs_schema` for Phase 6.1c JSON-Schema
 // validation; today the 6.1b path only confirms the skill exists.
 func NewExtension(st schedstore.TaskStore, skills *skill.SkillManager, agentID string, logger *slog.Logger) *Extension {
@@ -418,12 +418,12 @@ const createSchema = `{
   "required": ["kind", "schedule_kind", "schedule_spec", "name"]
 }`
 
-// listSchema documents `task:list` — no required fields; optional
+// listSchema documents `schedule:list` — no required fields; optional
 // filters narrow by status / cap result count.
 const listSchema = `{
   "type": "object",
   "properties": {
-    "status": {"type": "string", "enum": ["", "active", "paused", "cancelled", "completed"], "description": "Filter to tasks in this status. Empty / omitted = all."},
+    "status": {"type": "string", "enum": ["active", "paused", "cancelled", "completed"], "description": "Filter to tasks in this status. Omitted = all."},
     "limit":  {"type": "integer", "description": "Cap result rows. <= 0 uses the store default."}
   }
 }`
@@ -432,13 +432,18 @@ const listSchema = `{
 const taskIDSchema = `{
   "type": "object",
   "properties": {
-    "task_id": {"type": "string", "description": "Source task id from a prior task:create / task:list response."},
+    "task_id": {"type": "string", "description": "Source task id from a prior schedule:create / schedule:list response."},
     "reason":  {"type": "string", "description": "Pause-reason category (pause only). Defaults to 'user'."}
   },
   "required": ["task_id"]
 }`
 
-// List implements [tool.ToolProvider].
+// List implements [tool.ToolProvider]. Returns the scheduler-tier
+// management surface: create / list / pause / resume / cancel.
+// Recipe execution is a sibling concern owned by the task
+// extension (`pkg/extension/task`) — that ext emits one synthetic
+// `task:<recipe-name>` tool per task-eligible skill and dispatches
+// the spawn. Phase 6.1d.
 func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 	return []tool.Tool{
 		{
@@ -457,7 +462,7 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 		},
 		{
 			Name:             providerName + ":pause",
-			Description:      "Pause a task (status='paused'). Future fires skip until task:resume; current in-flight fire (if any) is allowed to finish.",
+			Description:      "Pause a task (status='paused'). Future fires skip until schedule:resume; current in-flight fire (if any) is allowed to finish.",
 			Provider:         providerName,
 			PermissionObject: PermPause,
 			ArgSchema:        json.RawMessage(taskIDSchema),
@@ -512,7 +517,7 @@ func stripProviderPrefix(name string) string {
 	return name
 }
 
-// createInput is the shape `task:create` accepts. Field order matches
+// createInput is the shape `schedule:create` accepts. Field order matches
 // the JSON Schema declared in createSchema above. Optional fields are
 // omitted via pointer or zero-value sentinels.
 type createInput struct {
@@ -590,7 +595,7 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 
 	// Owner = ROOT of the caller's tree so fire dispatch can spawn
 	// subagents predictably from a long-lived root regardless of
-	// who actually invoked task:create (could be a worker inside a
+	// who actually invoked schedule:create (could be a worker inside a
 	// mission). Walking up here is cheap (depth is typically <=3)
 	// and keeps the cron subagent depth invariant at root.depth+1.
 	owner := rootOf(state)
@@ -640,7 +645,7 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 	// surface success.
 	if e.runtimeBound() {
 		if err := e.registerTask(ctx, row); err != nil {
-			e.logger.Warn("scheduler: task:create register",
+			e.logger.Warn("scheduler: schedule:create register",
 				"task_id", taskID, "err", err)
 		}
 	}
@@ -652,12 +657,12 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 	}
 	body, err := json.Marshal(out)
 	if err != nil {
-		return nil, fmt.Errorf("task:create: marshal response: %w", err)
+		return nil, fmt.Errorf("schedule:create: marshal response: %w", err)
 	}
 	return body, nil
 }
 
-// listInput / listOutput shape the `task:list` surface.
+// listInput / listOutput shape the `schedule:list` surface.
 type listInput struct {
 	Status string `json:"status,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
@@ -693,7 +698,7 @@ func (e *Extension) callList(ctx context.Context, args json.RawMessage) (json.Ra
 			return toolErr("invalid_args", fmt.Sprintf("decode: %v", err))
 		}
 	}
-	// Owner = root of caller's tree, matching task:create + /tasks.
+	// Owner = root of caller's tree, matching schedule:create + /tasks.
 	owner := rootOf(state)
 	rows, err := e.store.ListTasksBySession(ctx, owner.SessionID(), schedstore.ListTasksOpts{
 		Status: in.Status,
@@ -721,7 +726,7 @@ func (e *Extension) callList(ctx context.Context, args json.RawMessage) (json.Ra
 	}
 	body, err := json.Marshal(out)
 	if err != nil {
-		return nil, fmt.Errorf("task:list: marshal: %w", err)
+		return nil, fmt.Errorf("schedule:list: marshal: %w", err)
 	}
 	return body, nil
 }
@@ -831,7 +836,7 @@ func (e *Extension) resolveOwnedTask(ctx context.Context, args json.RawMessage) 
 		resp, err2 := toolErr("not_found", fmt.Sprintf("task %q: %v", in.TaskID, err))
 		return in, row, resp, err2
 	}
-	// Owner = root of caller's tree, matching task:create + /tasks.
+	// Owner = root of caller's tree, matching schedule:create + /tasks.
 	if row.OwnerSessionID != rootOf(state).SessionID() {
 		resp, err := toolErr("forbidden", "task is not owned by this session")
 		return in, row, resp, err
@@ -863,7 +868,7 @@ func toolErr(code, msg string) (json.RawMessage, error) {
 // and let the runtime do the arithmetic — while still letting an
 // operator nail a specific UTC moment when needed (e.g. a recurring
 // task that must align to the top of the hour regardless of when
-// task:create runs).
+// schedule:create runs).
 //
 // Returns an error formatted for direct surfacing as the tool's
 // invalid_args message body.

@@ -368,7 +368,7 @@ func detectSkillDrift(ctx context.Context, skills *skill.SkillManager, task sche
 
 // hashSkillManifest computes a stable sha256 over the manifest's
 // frontmatter + body. Used by drift detection at fire time and (in
-// 6.2) by task:create to populate `tasks.spec.hashes.skill`.
+// 6.2) by schedule:create to populate `tasks.spec.hashes.skill`.
 func hashSkillManifest(m skill.Manifest) string {
 	h := sha256.New()
 	h.Write(m.Raw)

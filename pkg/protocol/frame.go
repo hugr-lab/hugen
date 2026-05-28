@@ -437,6 +437,13 @@ type SubagentStartedPayload struct {
 	Role      string    `json:"role,omitempty"`
 	Task      string    `json:"task"`
 	Depth     int       `json:"depth"`
+	// Tier carries the child's resolved semantic role label
+	// (skill.TierRoot / TierMission / TierWorker). Defaults to
+	// the depth-derived tier; callers that pass SpawnSpec.Tier
+	// see their override surface here. Phase 6.1d (tier-aware
+	// spawn). Empty in legacy events predating this field —
+	// consumers fall back to skill.TierFromDepth(depth).
+	Tier      string    `json:"tier,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 	Inputs    any       `json:"inputs,omitempty"`
 }

@@ -144,22 +144,40 @@ type SubagentSpec struct {
 	Name string `json:"name" yaml:"name"`
 
 	// Skill names the skill providing the role; empty falls back to
-	// the mission's own dispatching skill.
+	// the mission's own dispatching skill. Phase 6.1d — for inline
+	// plans, may embed Go-template expressions {{ .Inputs.X }}
+	// resolved against the mission's spawn inputs merged with the
+	// research stage's ResolvedUserInputs at executor time.
 	Skill string `json:"skill,omitempty" yaml:"skill,omitempty"`
 
 	// Role is the role within Skill. Required for skills that
 	// declare multiple roles; optional for single-role skills.
 	Role string `json:"role,omitempty" yaml:"role,omitempty"`
 
-	// Task is the worker's first-message brief. May embed Go-template
-	// expressions {{ .Inputs.X }} resolved against the mission's
-	// Inputs map at executor time.
+	// Task is the worker's first-message brief. Phase 6.1d — for
+	// inline plans, may embed Go-template expressions
+	// {{ .Inputs.X }} resolved against the mission's spawn inputs
+	// merged with the research stage's ResolvedUserInputs at executor
+	// time.
 	Task string `json:"task" yaml:"task"`
 
 	// Inputs is structured JSON the worker sees alongside its task.
 	// Per-worker; merged into the worker's first-message [Inputs]
-	// section.
+	// section. Phase 6.1d — for inline plans, string values inside a
+	// map are rendered as Go templates against the same data shape
+	// used by Skill / Task above; non-string leaves pass through
+	// verbatim.
 	Inputs any `json:"inputs,omitempty" yaml:"inputs,omitempty"`
+
+	// InputsFromResolved, when true, replaces this subagent's Inputs
+	// with the mission's research-stage ResolvedUserInputs map
+	// verbatim (the structured clarifications the input-collector
+	// role gathered). Used by the universal `_run_task` mission so a
+	// per-fire recipe spawn carries the user-confirmed values without
+	// the mission needing to know each recipe's schema. Mutually
+	// exclusive with literal Inputs — the runtime panics-loud on a
+	// manifest that sets both. Phase 6.1d.
+	InputsFromResolved bool `json:"inputs_from_resolved,omitempty" yaml:"inputs_from_resolved,omitempty"`
 
 	// DependsOn lists handoff refs from earlier waves this worker
 	// needs verbatim in its first message under [Resolved depends_on].

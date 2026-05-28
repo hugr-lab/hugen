@@ -61,8 +61,9 @@ func (c *skillManagerMissionCatalog) ListMissions(ctx context.Context) ([]missio
 			summary = sk.Manifest.Description
 		}
 		out = append(out, missionext.MissionCatalogEntry{
-			Name:    sk.Manifest.Name,
-			Summary: summary,
+			Name:         sk.Manifest.Name,
+			Summary:      summary,
+			InputsSchema: sk.Manifest.Hugen.Mission.InputsSchema,
 		})
 	}
 	return out, nil
@@ -135,10 +136,6 @@ func projectMissionManifest(m skillpkg.Manifest) *missionext.MissionManifest {
 		out.Control = missionext.ControlManifest{Role: mb.Control.Role}
 	}
 	if mb.Research != nil && mb.Research.Role != "" {
-		when := mb.Research.When
-		if when == "" {
-			when = missionext.ResearchWhenAuto
-		}
 		maxIter := mb.Research.MaxIterations
 		if maxIter <= 0 {
 			maxIter = missionext.ResearchDefaultMaxIterations
@@ -148,8 +145,6 @@ func projectMissionManifest(m skillpkg.Manifest) *missionext.MissionManifest {
 		}
 		out.Research = &missionext.ResearchManifest{
 			Role:          mb.Research.Role,
-			When:          when,
-			Predicate:     mb.Research.Predicate,
 			MaxIterations: maxIter,
 		}
 	}
@@ -162,6 +157,12 @@ func projectMissionManifest(m skillpkg.Manifest) *missionext.MissionManifest {
 	// catalog projection has no access to the spawn-time inputs.
 	if len(mb.AcceptanceCriteria) > 0 {
 		out.AcceptanceCriteria = append([]string(nil), mb.AcceptanceCriteria...)
+	}
+	// Phase 6.1d — surface the spawn-time inputs schema so the
+	// Available missions advertiser can render input keys + types
+	// for the root. nil / absent passes through as nil.
+	if len(mb.InputsSchema) > 0 {
+		out.InputsSchema = mb.InputsSchema
 	}
 	return out
 }
@@ -247,12 +248,13 @@ func projectSubagents(in []skillpkg.MissionPlanSubagent) []missionext.SubagentSp
 	out := make([]missionext.SubagentSpec, 0, len(in))
 	for _, s := range in {
 		out = append(out, missionext.SubagentSpec{
-			Name:      s.Name,
-			Skill:     s.Skill,
-			Role:      s.Role,
-			Task:      s.Task,
-			Inputs:    s.Inputs,
-			DependsOn: append([]string(nil), s.DependsOn...),
+			Name:               s.Name,
+			Skill:              s.Skill,
+			Role:               s.Role,
+			Task:               s.Task,
+			Inputs:             s.Inputs,
+			InputsFromResolved: s.InputsFromResolved,
+			DependsOn:          append([]string(nil), s.DependsOn...),
 		})
 	}
 	return out

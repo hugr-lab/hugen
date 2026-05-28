@@ -72,6 +72,7 @@ func (s *fakeIntegrationState) SubagentName() string                   { return 
 func (s *fakeIntegrationState) Role() string                           { return "" }
 func (s *fakeIntegrationState) Skill() string                          { return "" }
 func (s *fakeIntegrationState) Depth() int                             { return 0 }
+func (s *fakeIntegrationState) Tier() string                           { return "root" }
 func (s *fakeIntegrationState) Parent() (extension.SessionState, bool) { return nil, false }
 func (s *fakeIntegrationState) Children() []extension.SessionState     { return nil }
 func (s *fakeIntegrationState) Tools() *tool.ToolManager               { return nil }

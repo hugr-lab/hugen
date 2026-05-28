@@ -13,6 +13,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
+	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -56,6 +57,7 @@ type TestSessionState struct {
 	prompts   *prompts.Renderer
 	parentRef *TestSessionState
 	depth     int
+	tier      string
 	state     sync.Map
 
 	childMu  sync.Mutex
@@ -156,6 +158,28 @@ func (s *TestSessionState) Skill() string { return s.skill }
 // configured via [TestSessionState.WithParent] (parent.depth+1)
 // or [TestSessionState.WithDepth]; 0 by default.
 func (s *TestSessionState) Depth() int { return s.depth }
+
+// WithTier overrides the tier label [TestSessionState.Tier]
+// reports. Empty defaults to skill.TierFromDepth(s.depth) so tests
+// that exercise tier-derived behaviour (skill autoload, compactor
+// overlays) get production-shaped defaults without explicit
+// configuration. Returns the receiver so callers can chain.
+func (s *TestSessionState) WithTier(tier string) *TestSessionState {
+	s.tier = tier
+	return s
+}
+
+// Tier implements [extension.SessionState]. Returns whatever was
+// configured via [TestSessionState.WithTier]; falls back to
+// skill.TierFromDepth(s.depth) — the production default — so tests
+// don't have to call WithTier explicitly when the depth-derived
+// tier matches their intent.
+func (s *TestSessionState) Tier() string {
+	if s.tier != "" {
+		return s.tier
+	}
+	return skill.TierFromDepth(s.depth)
+}
 
 // AppendChild registers child as a direct child so Children()
 // returns it. Idempotent on duplicate appends. Returns the

@@ -37,14 +37,13 @@ const researchWaveLabelPrefix = "_research-"
 //     iteration's first message.
 //  5. Cap at manifest.Research.MaxIterations.
 func (e *Extension) runResearchStage(ctx context.Context, executor *Executor, mission extension.SessionState, manifest MissionManifest, missionSkill, goal string) (bool, error) {
+	// Presence of the research block IS the gate (the `when`
+	// predicate was removed — see MissionResearchBlock). When a skill
+	// declares a researcher role, the stage runs on every mission and
+	// the researcher self-gates: a clear goal yields a `done: true`
+	// handoff with empty clarifications (one cheap turn, no user
+	// modal); skills that never need research omit the block.
 	if manifest.Research == nil {
-		return false, nil
-	}
-	if !shouldRunResearch(manifest, goal) {
-		e.logger.Info("mission: research stage skipped by trigger predicate",
-			"mission_session", mission.SessionID(),
-			"when", manifest.Research.When,
-			"role", manifest.Research.Role)
 		return false, nil
 	}
 	maxIter := manifest.Research.MaxIterations
@@ -262,36 +261,6 @@ func (e *Extension) batchedInquire(ctx context.Context, mission extension.Sessio
 		return nil, nil, errors.New("research inquire dismissed: no required clarifications answered")
 	}
 	return answers, comments, nil
-}
-
-// shouldRunResearch decides whether the research stage fires for
-// this mission. Centralises the When predicate so callers (mainly
-// runResearchStage but also future planner-side checks) share one
-// rule.
-//
-// Predicate kinds:
-//
-//   - `always` — fires unconditionally.
-//   - `auto`   — runtime heuristic (see autoResearchHeuristic).
-//   - `if_goal_matches` — Predicate regex against goal text.
-//
-// Empty / unknown When values default to skipping research — the
-// projection layer normalises these at load time so a manifest
-// that reaches here with an unknown When is a runtime bug.
-func shouldRunResearch(manifest MissionManifest, goal string) bool {
-	if manifest.Research == nil {
-		return false
-	}
-	switch manifest.Research.When {
-	case ResearchWhenAlways:
-		return true
-	case ResearchWhenAuto:
-		return autoResearchHeuristic(goal, manifest)
-	case ResearchWhenIfGoalMatches:
-		return matchGoalPredicate(manifest.Research.Predicate, goal)
-	default:
-		return false
-	}
 }
 
 // buildResearchTask renders the research role's first-message

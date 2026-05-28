@@ -89,6 +89,13 @@ type MissionManifest struct {
 	//
 	// Empty / nil → no manifest seed. Phase 5.x — B11 §3.2.2.
 	AcceptanceCriteria []string
+
+	// InputsSchema is the JSON Schema declaring the structured
+	// `inputs` blob `session:spawn_mission` accepts. Surfaces in the
+	// `## Available missions` prompt block so root knows the exact
+	// keys to pass without guessing. nil / empty → schema absent;
+	// the prompt block falls back to the bare summary. Phase 6.1d.
+	InputsSchema map[string]any
 }
 
 // MissionCapabilities is the mission-tier capability projection.
@@ -126,25 +133,19 @@ type ControlManifest struct {
 // ResearchManifest is the typed projection of the skill manifest's
 // `metadata.hugen.mission.research` block. Phase 5.x — B15.
 //
-// The runtime auto-runner spawns Role before the planner loop on
-// missions where the trigger (When + optional Predicate) fires.
-// Output is parsed via DecodeResearchOutput; on `done: true` the
-// runtime stamps ResearchFindings + ResolvedUserInputs +
-// ACProposals on MissionState and moves to the planner spawn.
+// Presence is the gate: when a skill declares this block the runtime
+// auto-runner spawns Role before the planner loop on every mission.
+// The researcher itself decides per-turn whether to ask the user
+// (`done: false` + clarifications) or fast-exit on a clear goal
+// (`done: true`, empty clarifications). Output is parsed via
+// DecodeResearchOutput; on `done: true` the runtime stamps
+// ResearchFindings + ResolvedUserInputs + ACProposals on
+// MissionState and moves to the planner spawn.
 type ResearchManifest struct {
 	// Role names the research sub-agent role declared in the
 	// skill's `sub_agents` block. Required when the block is
 	// present.
 	Role string
-
-	// When selects the trigger predicate. Canonical values:
-	// `always`, `auto`, `if_goal_matches`. Empty defaults to
-	// `auto` at projection time.
-	When string
-
-	// Predicate is the goal-string regex evaluated when
-	// When=`if_goal_matches`. Empty for other trigger modes.
-	Predicate string
 
 	// MaxIterations caps research re-fire cycles when the role
 	// emits `done: false`. Defaults to ResearchDefaultMaxIterations
@@ -152,14 +153,7 @@ type ResearchManifest struct {
 	MaxIterations int
 }
 
-// Recognised values for ResearchManifest.When. Mirror the skill
-// manifest constants so the runtime side can keep a closed
-// vocabulary.
 const (
-	ResearchWhenAlways        = "always"
-	ResearchWhenAuto          = "auto"
-	ResearchWhenIfGoalMatches = "if_goal_matches"
-
 	// ResearchDefaultMaxIterations matches spec §2.1's default.
 	ResearchDefaultMaxIterations = 3
 
@@ -267,6 +261,11 @@ type WorkerManifest struct {
 type MissionCatalogEntry struct {
 	Name    string
 	Summary string
+	// InputsSchema mirrors MissionManifest.InputsSchema — included
+	// here so the AdvertiseSystemPrompt renderer can show input keys
+	// without a second LookupMission call per entry. nil when the
+	// mission declares no schema. Phase 6.1d.
+	InputsSchema map[string]any
 }
 
 // staticCatalog is an in-memory Catalog implementation tests +
@@ -309,7 +308,11 @@ func (c *staticCatalog) ListMissions(_ context.Context) ([]MissionCatalogEntry, 
 	}
 	out := make([]MissionCatalogEntry, 0, len(c.missions))
 	for _, m := range c.missions {
-		out = append(out, MissionCatalogEntry{Name: m.Name, Summary: m.Summary})
+		out = append(out, MissionCatalogEntry{
+			Name:         m.Name,
+			Summary:      m.Summary,
+			InputsSchema: m.InputsSchema,
+		})
 	}
 	return out, nil
 }

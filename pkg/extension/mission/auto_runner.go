@@ -109,13 +109,44 @@ func (e *Extension) driveMission(mission extension.SessionState, spawner extensi
 
 	ctx := context.Background()
 	_ = inputs
-	_ = goal
+
+	// Phase 6.1d — inline plans now also honour the manifest's
+	// optional research stage so universal missions (`_run_task`)
+	// can use input-collector roles to gather recipe inputs before
+	// the executor wave fires. Mirrors driveMissionPlanner's
+	// research call. Aborted research short-circuits the mission
+	// with the same finalising path as the planner-driven loop.
+	if researchAborted, researchErr := e.runResearchStage(ctx, executor, mission, manifest, missionSkill, goal); researchErr != nil {
+		e.logger.Warn("mission: driveMission: research stage failed",
+			"mission_session", mission.SessionID(),
+			"err", researchErr, "aborted", researchAborted)
+		if researchAborted {
+			final := buildFinalText(mission, "", true)
+			e.finishMission(ctx, mission, final)
+			return
+		}
+	}
+
+	// Phase 6.1d — render the inline plan's template-bearing
+	// subagent fields (Skill / Task / Inputs string leaves +
+	// InputsFromResolved passthrough) against the merged inputs
+	// map (spawn ⊕ resolved). Called AFTER research so
+	// ResolvedUserInputs are available; recipes that don't use
+	// templating pay only a cheap `strings.Contains` per field.
+	renderedInline, err := e.renderInlineForMission(mission, manifest, inputs)
+	if err != nil {
+		e.logger.Warn("mission: driveMission: render inline plan failed",
+			"mission_session", mission.SessionID(), "err", err)
+		final := buildFinalText(mission, "", true)
+		e.finishMission(ctx, mission, final)
+		return
+	}
 
 	// Run every declared wave. Failure on any wave halts the
 	// pipeline; the mission still terminates with whatever recap
 	// the partial run can produce.
 	aborted := false
-	for _, waveDecl := range manifest.Plan.Inline.Waves {
+	for _, waveDecl := range renderedInline.Waves {
 		status, _, err := executor.RunWave(ctx, mission, waveDecl, RunWaveOptions{})
 		e.emitWaveComplete(mission, waveDecl.Label, status, err)
 		if err != nil || status == WaveStatusFailed {
@@ -143,6 +174,37 @@ func (e *Extension) driveMission(mission extension.SessionState, spawner extensi
 
 	final := buildFinalText(mission, synthText, aborted)
 	e.finishMission(ctx, mission, final)
+}
+
+// renderInlineForMission resolves the inline plan's template-bearing
+// fields against the mission's merged inputs (spawn ⊕ research-
+// resolved). Returns the rendered plan; the original manifest is
+// never mutated.
+//
+// When MissionState is unavailable (test paths that bypass the
+// extension's StateInitializer) the call degrades to spawn-only
+// data; an empty resolved map means InputsFromResolved subagents
+// receive nil and the runtime spawn rejects them — that surface
+// matches the production guarantee that research must run before
+// any subagent reads its output.
+//
+// Phase 6.1d.
+func (e *Extension) renderInlineForMission(mission extension.SessionState, manifest MissionManifest, inputs any) (*InlinePlan, error) {
+	if manifest.Plan.Inline == nil {
+		return &InlinePlan{}, nil
+	}
+	spawnMap, _ := inputs.(map[string]any)
+	var resolved map[string]any
+	if m := FromState(mission); m != nil {
+		// Fall back to the live SpawnInputs() snapshot when the
+		// caller passed `inputs any` rather than a typed map (the
+		// auto_runner accepts both shapes for legacy fixtures).
+		if len(spawnMap) == 0 {
+			spawnMap = m.SpawnInputs()
+		}
+		_, resolved, _ = m.ResearchOutput()
+	}
+	return renderInlinePlan(manifest.Plan.Inline, spawnMap, resolved)
 }
 
 // runSynthesis spawns a single worker under synthesisWaveLabel with

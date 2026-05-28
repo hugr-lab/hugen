@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
-	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -145,11 +144,13 @@ func (e *Extension) ReportStatus(ctx context.Context, state extension.SessionSta
 
 // InitState allocates a fresh [Notepad] for the calling session.
 // rootID is resolved once via the parent-chain walk and the
-// per-Notepad role label is derived from depth. Both are stable
-// for the session's lifetime so caching them here is safe.
+// per-Notepad role label is taken from state.Tier() (Phase 6.1d:
+// caller-supplied SpawnSpec.Tier override survives, else
+// depth-derived default). Both are stable for the session's
+// lifetime so caching them here is safe.
 func (e *Extension) InitState(_ context.Context, state extension.SessionState) error {
 	rootID := WalkToRootID(state)
-	role := skill.TierFromDepth(state.Depth())
+	role := state.Tier()
 	state.SetValue(StateKey, New(e.store, e.agentID, state.SessionID(), rootID, role, e.cfg.Window))
 	return nil
 }

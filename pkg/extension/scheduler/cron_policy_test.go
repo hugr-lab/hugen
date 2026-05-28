@@ -28,6 +28,7 @@ func (s *fakeState) SubagentName() string { return "" }
 func (s *fakeState) Role() string         { return "" }
 func (s *fakeState) Skill() string        { return "" }
 func (s *fakeState) Depth() int           { return 0 }
+func (s *fakeState) Tier() string         { return "root" }
 func (s *fakeState) Parent() (extension.SessionState, bool) {
 	if s.parent == nil {
 		return nil, false
@@ -100,8 +101,8 @@ func TestMaybeAutoApprove_OnCronSession_AllowedTool(t *testing.T) {
 	if !ok {
 		t.Fatalf("frame[0] type=%T, want *ExtensionFrame", frames[0])
 	}
-	if ef.Payload.Extension != "task" {
-		t.Errorf("frame extension = %q, want task", ef.Payload.Extension)
+	if ef.Payload.Extension != "schedule" {
+		t.Errorf("frame extension = %q, want schedule", ef.Payload.Extension)
 	}
 	if ef.Payload.Op != "tool_auto_granted_by_task" {
 		t.Errorf("frame op = %q", ef.Payload.Op)

@@ -52,9 +52,17 @@ func snapshotMissions(s *liveviewStatus) []missionRow {
 			continue
 		}
 		meta := s.ChildMeta[id]
+		// Phase 6.1d — prefer the resolved tier from the live
+		// child's status (or the parent's spawn-time meta) so an
+		// override (e.g. ad-hoc recipe = worker at depth=1) renders
+		// honestly.
+		tier := c.Tier
+		if tier == "" {
+			tier = meta.Tier
+		}
 		out = append(out, missionRow{
 			SessionID: id,
-			Tier:      shortTierLabel(c.Depth),
+			Tier:      tierLabelOrDepth(tier, c.Depth),
 			Role:      meta.Role,
 			Goal:      strings.TrimSpace(meta.Task),
 			StartedAt: meta.StartedAt,

@@ -6,13 +6,14 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
-	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // applyChildIntent resolves the freshly-spawned child's default
 // intent in two passes:
 //
-//  1. Tier default — deps.TierIntents[tier] from the child's depth.
+//  1. Tier default — deps.TierIntents[tier] from child.Tier()
+//     (Phase 6.1d: caller-supplied SpawnSpec.Tier override
+//     survives, else depth-derived default).
 //     Phase 4.2.2 §11.
 //  2. Per-role override — subagentSpawnHint's Intent (from the
 //     dispatching skill's manifest). Wins over the tier default
@@ -26,7 +27,7 @@ func (parent *Session) applyChildIntent(ctx context.Context, child *Session, ski
 	if parent.deps == nil || parent.models == nil {
 		return
 	}
-	tier := skillpkg.TierFromDepth(child.depth)
+	tier := child.tier
 
 	// 1. Tier default.
 	if intentStr, ok := parent.deps.TierIntents[tier]; ok && intentStr != "" {

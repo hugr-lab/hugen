@@ -12,6 +12,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -32,6 +33,7 @@ func (s *resolveStateFake) SubagentName() string                           { ret
 func (s *resolveStateFake) Role() string                                   { return s.role }
 func (s *resolveStateFake) Skill() string                                  { return s.skill }
 func (s *resolveStateFake) Depth() int                                     { return s.depth }
+func (s *resolveStateFake) Tier() string                                   { return skill.TierFromDepth(s.depth) }
 func (s *resolveStateFake) Parent() (extension.SessionState, bool)         { return nil, false }
 func (s *resolveStateFake) Children() []extension.SessionState             { return nil }
 func (s *resolveStateFake) Tools() *tool.ToolManager                       { return nil }

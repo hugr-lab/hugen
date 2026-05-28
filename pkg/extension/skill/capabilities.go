@@ -188,6 +188,7 @@ func closeBlockFromManifest(c skillpkg.MissionOnClose) extension.CloseTurnBlock 
 		AllowedTools: append([]string(nil), n.AllowedTools...),
 		MaxTurns:     n.MaxTurns,
 		SkipIfIdle:   n.SkipIfIdle,
+		Skip:         n.Skip,
 	}
 }
 
@@ -231,7 +232,19 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 		parts = append(parts, b.Instructions)
 		loadedTokens += extension.EstimateTokens(b.Instructions)
 	}
-	if cat := renderCatalogue(ctx, renderer, h); cat != "" {
+	// Phase 6.1d — when the session was opened with a scoped
+	// allow-list (today: task ext recipe children), render the
+	// catalogue narrowed to `loaded ∪ allowed_skills` so the LLM
+	// sees its loaded baseline plus the lazy-load whitelist. An
+	// empty whitelist still surfaces the loaded baseline so the
+	// recipe's `(loaded)` tags inform the model what it already has.
+	// Sessions without the key see the full catalogue as before.
+	if allowedList, scoped := allowedSkillsFromState(state); scoped {
+		if cat := renderCatalogueFiltered(ctx, renderer, h, allowedList); cat != "" {
+			parts = append(parts, cat)
+			catalogTokens += extension.EstimateTokens(cat)
+		}
+	} else if cat := renderCatalogue(ctx, renderer, h); cat != "" {
 		parts = append(parts, cat)
 		catalogTokens += extension.EstimateTokens(cat)
 	}
@@ -394,6 +407,26 @@ func writeBundleCategory(b *strings.Builder, sfs fs.FS, category string) {
 // the system prompt: one bullet per skill in the store using the
 // manifest description. Loaded skills carry a `(loaded)` tag.
 func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill) string {
+	return renderCatalogueScoped(ctx, renderer, h, nil)
+}
+
+// renderCatalogueFiltered narrows [renderCatalogue] to entries
+// that are EITHER in the `allowed` whitelist OR already loaded in
+// the session. Used by sessions that were opened with a spawner-
+// scoped allow-list — the recipe child sees its loaded baseline
+// (system + worker + recipe + pre-loaded deps) tagged `(loaded)`
+// alongside the whitelist entries reachable via `skill:load`.
+// Phase 6.1d (additive interpretation — allow-list adds to the
+// autoloaded baseline, never replaces it).
+func renderCatalogueFiltered(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allowed []string) string {
+	allow := make(map[string]struct{}, len(allowed))
+	for _, n := range allowed {
+		allow[n] = struct{}{}
+	}
+	return renderCatalogueScoped(ctx, renderer, h, allow)
+}
+
+func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allow map[string]struct{}) string {
 	all, err := h.manager.List(ctx)
 	if err != nil || len(all) == 0 {
 		return ""
@@ -403,19 +436,56 @@ func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *Session
 		loadedSet[n] = struct{}{}
 	}
 	type skillItem struct {
-		Name        string
-		Description string
-		Loaded      bool
+		Name          string
+		Description   string
+		Loaded        bool
+		RecipeCatalog bool
 	}
 	items := make([]skillItem, 0, len(all))
 	for _, sk := range all {
+		// Phase 6.1d — task-eligible recipe skills are not listed
+		// here. They surface to the model as synthetic
+		// `task:<recipe-name>` tools (scheduler ext provider), and
+		// loading them as regular skills is not part of the
+		// task-runner flow — the category skill admits the synthetic
+		// tool via its allowed-tools instead.
+		if sk.Manifest.Hugen.Task.Eligible {
+			continue
+		}
 		_, on := loadedSet[sk.Manifest.Name]
+		if allow != nil {
+			// Scoped session — show loaded skills (the baseline +
+			// pre-loaded layer the LLM should know it already has)
+			// PLUS whitelist entries it can still reach via
+			// skill:load. Anything outside this union is hidden so
+			// the LLM doesn't try to load it.
+			_, inAllow := allow[sk.Manifest.Name]
+			if !inAllow && !on {
+				continue
+			}
+		}
 		items = append(items, skillItem{
-			Name:        sk.Manifest.Name,
-			Description: strings.TrimSpace(sk.Manifest.Description),
-			Loaded:      on,
+			Name:          sk.Manifest.Name,
+			Description:   strings.TrimSpace(sk.Manifest.Description),
+			Loaded:        on,
+			RecipeCatalog: sk.Manifest.Hugen.RecipeCatalog,
 		})
 	}
+	if len(items) == 0 {
+		return ""
+	}
+	// Phase 6.1d — recipe catalogs (skills bundling tested `task:*`
+	// recipes) sort to the top so the model spots them before the
+	// long regular-skill tail; the constitution tells it to prefer
+	// a matching catalog's recipe over hand-rolling the job. Stable
+	// within each group, name-sorted, so the order is deterministic
+	// across renders.
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].RecipeCatalog != items[j].RecipeCatalog {
+			return items[i].RecipeCatalog
+		}
+		return items[i].Name < items[j].Name
+	})
 	return renderer.MustRender(
 		"skill/catalogue",
 		map[string]any{"Skills": items},
@@ -509,16 +579,37 @@ func (e *Extension) DescribeSubagent(ctx context.Context, state extension.Sessio
 	return extension.SubagentSkillFoundRoleMissing, nil
 }
 
-// SubagentSpawnHint implements [extension.SubagentSpawnHinter]. Returns
-// the manifest-declared Intent for (skill, role) — empty string when
-// not set, when the skill / role is unknown, or when called without a
-// role (skill-level calls have no role to inspect). Spawn-time
-// validation against the runtime's model router is the caller's job
-// (tools_subagent_spawn): a typo here surfaces as a "intent unknown"
-// warn at spawn, not as a model_unavailable error on the child's
-// first turn.
+// SubagentSpawnHint implements [extension.SubagentSpawnHinter].
+// Returns the manifest-declared Intent for the spawn:
+//
+//   - When `role` is set, looks up `sub_agents[name=role].intent`
+//     (the mission-style per-role override).
+//   - When `role` is empty AND the dispatching skill declares
+//     `metadata.hugen.task.eligible: true`, returns
+//     `metadata.hugen.task.intent` as the hint (Phase 6.1d — recipe
+//     children spawn through the task ext without a role; the
+//     recipe's manifest decides the model intent).
+//   - Otherwise returns empty hint.
+//
+// Spawn-time validation against the runtime's model router is the
+// caller's job (applyChildIntent): a typo here surfaces as a
+// "intent unknown" warn at spawn, not as a model_unavailable error
+// on the child's first turn.
 func (e *Extension) SubagentSpawnHint(ctx context.Context, state extension.SessionState, skillName, roleName string) (extension.SubagentSpawnHint, error) {
+	if e.manager == nil || skillName == "" {
+		return extension.SubagentSpawnHint{}, nil
+	}
 	if roleName == "" {
+		// Recipe path — dispatching skill IS the recipe; intent
+		// comes from its `task.intent` field.
+		sk, err := e.manager.Get(ctx, skillName)
+		if err != nil {
+			return extension.SubagentSpawnHint{}, nil
+		}
+		tb := sk.Manifest.Hugen.Task
+		if tb.Eligible && tb.Intent != "" {
+			return extension.SubagentSpawnHint{Intent: tb.Intent}, nil
+		}
 		return extension.SubagentSpawnHint{}, nil
 	}
 	_, role, err := lookupSkillRole(ctx, state, skillName, roleName)

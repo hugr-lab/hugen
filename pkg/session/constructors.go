@@ -9,6 +9,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session/store"
+	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // ErrDepthExceeded is returned by parent.Spawn when the new
@@ -110,9 +111,19 @@ func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenReques
 	}
 	sessCtx, cancel := context.WithCancelCause(parentCtx)
 
+	// Resolve semantic tier: caller-supplied OpenRequest.Tier wins;
+	// empty falls back to depth-derived default. Spawn validates the
+	// caller value before reaching newSession, so any non-empty
+	// req.Tier here is already one of the closed Tier* constants.
+	// Phase 6.1d (tier-aware spawn).
+	tier := req.Tier
+	if tier == "" {
+		tier = skillpkg.TierFromDepth(depth)
+	}
+
 	// 1. Build the *Session shell (no IO yet — easier to roll back on
 	// downstream errors below).
-	s := buildSessionShell(id, depth, parent, deps, sessCtx, cancel)
+	s := buildSessionShell(id, depth, tier, parent, deps, sessCtx, cancel)
 	s.name = req.Name
 
 	// 2. Persist the initial row (the only sessions-row WRITE on the
@@ -128,6 +139,14 @@ func newSession(ctx context.Context, parent *Session, deps *Deps, req OpenReques
 		// can come later when there's a query reason.
 		meta["name"] = req.Name
 	}
+	// Phase 6.1d: persist resolved tier so restore round-trips the
+	// override (depth alone would lose tier=worker on a depth=1
+	// recipe child). Legacy rows lacking this key fall back to
+	// TierFromDepth(depth) in newSessionRestore.
+	if meta == nil {
+		meta = make(map[string]any, 1)
+	}
+	meta["tier"] = tier
 	row := store.SessionRow{
 		ID:                 id,
 		AgentID:            deps.Agent.ID(),
@@ -231,6 +250,14 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *De
 	}
 
 	depth := depthFromRow(row)
+	// Phase 6.1d: prefer the persisted tier so any SpawnSpec.Tier
+	// override the original opener applied survives restart. Legacy
+	// rows predating this commit have no tier key — fall back to
+	// the depth-derived default to preserve old behaviour.
+	tier := tierFromRow(row)
+	if tier == "" {
+		tier = skillpkg.TierFromDepth(depth)
+	}
 	var parentCtx context.Context
 	if parent != nil {
 		parentCtx = parent.ctx
@@ -242,7 +269,7 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *De
 	}
 	sessCtx, cancel := context.WithCancelCause(parentCtx)
 
-	s := buildSessionShell(id, depth, parent, deps, sessCtx, cancel)
+	s := buildSessionShell(id, depth, tier, parent, deps, sessCtx, cancel)
 	s.openedAt = row.CreatedAt
 	s.ownerID = row.OwnerID
 	if row.Metadata != nil {
@@ -282,9 +309,16 @@ func newSessionRestore(ctx context.Context, id string, parent *Session, deps *De
 // buildSessionShell constructs the *Session struct populated with the
 // shared deps + tree links + ctx, but performs no IO. Used by both
 // constructors so the field-init pattern stays single-sourced.
-func buildSessionShell(id string, depth int, parent *Session, deps *Deps, sessCtx context.Context, cancel context.CancelCauseFunc) *Session {
+//
+// tier carries the resolved semantic role (skill.TierRoot /
+// TierMission / TierWorker). Callers MUST resolve a non-empty value
+// before invoking — newSession picks SpawnSpec.Tier override or
+// falls back to skill.TierFromDepth(depth); newSessionRestore reads
+// metadata["tier"] with the same fallback. Phase 6.1d.
+func buildSessionShell(id string, depth int, tier string, parent *Session, deps *Deps, sessCtx context.Context, cancel context.CancelCauseFunc) *Session {
 	s := NewSession(id, deps.Agent, deps.Store, deps.Models, deps.Commands, deps.Codec, deps.Tools, deps.Logger, deps.Opts...)
 	s.depth = depth
+	s.tier = tier
 	s.deps = deps
 	s.parent = parent
 	s.children = make(map[string]*Session)
@@ -348,5 +382,19 @@ func depthFromRow(row store.SessionRow) int {
 		return int(df)
 	}
 	return 0
+}
+
+// tierFromRow extracts metadata.tier from a SessionRow. Returns ""
+// when missing — caller falls back to skillpkg.TierFromDepth(depth)
+// so legacy rows (predating Phase 6.1d) restore with their depth-
+// derived tier unchanged.
+func tierFromRow(row store.SessionRow) string {
+	if row.Metadata == nil {
+		return ""
+	}
+	if t, ok := row.Metadata["tier"].(string); ok {
+		return t
+	}
+	return ""
 }
 

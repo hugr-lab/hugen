@@ -39,7 +39,6 @@ metadata:
 
       research:
         role: researcher
-        when: auto
         max_iterations: 3
 
       plan:
@@ -200,7 +199,7 @@ metadata:
           + notepad so workers act on concrete identifiers.
         intent: reasoning
         can_spawn: false
-        autoload_skills: []
+        autoload_skills: [_mission_worker]
         capabilities:
           plan_context: read
         compactor:
@@ -234,18 +233,19 @@ metadata:
 
       - name: researcher
         description: >
-          Mission research — runtime spawns you BEFORE the
-          planner on missions whose goal trips the
-          `mission.research: when: auto` heuristic (short or
-          ambiguous goals, deliverable keywords, pronoun
-          references). Your job: analyze the task, do
-          lightweight schema discovery against the data
-          available in Hugr, confirm the task is feasible,
-          and ASK the user about every dimension the goal
-          leaves open — bundled into one modal when you can,
-          a second round if first answers reveal new
-          ambiguity (runtime caps at 3 iterations). Emit a
-          kind=research handoff with `done: false` to ask,
+          Mission research — the runtime spawns you BEFORE the
+          planner on every mission this skill runs. Your job:
+          analyze the task, do lightweight schema discovery
+          against the data available in Hugr, confirm the task
+          is feasible, and ASK the user about every dimension
+          the goal leaves open — bundled into one modal when
+          you can, a second round if first answers reveal new
+          ambiguity (runtime caps at 3 iterations). If the goal
+          is already clear and complete (the caller passed every
+          input; no source / scope ambiguity), DON'T ask: emit a
+          `done: true` handoff with empty `clarifications`
+          immediately — one cheap turn, not a wasted modal. Emit
+          a kind=research handoff with `done: false` to ask,
           or `done: true` with `findings` +
           `resolved_user_inputs` + (optional) `ac_proposals`
           when you have everything.
@@ -441,7 +441,7 @@ metadata:
             mid-execution, not research.
         intent: reasoning
         can_spawn: false
-        autoload_skills: [hugr-data]
+        autoload_skills: [_mission_worker, hugr-data]
         capabilities:
           plan_context: read
         compactor:
@@ -641,7 +641,7 @@ metadata:
           are missing — the planner amends.
         intent: default # reasoning
         can_spawn: false
-        autoload_skills: [hugr-data]
+        autoload_skills: [_mission_worker, hugr-data]
         compactor:
           # data-analyst sessions accumulate many tool_call →
           # tool_result pairs (GraphQL query attempts + jq
@@ -764,7 +764,7 @@ metadata:
           handoff.
         intent: default # reasoning
         can_spawn: false
-        autoload_skills: [hugr-data]
+        autoload_skills: [_mission_worker, hugr-data]
         compactor:
           # schema-explorer iterates through discovery-search_*
           # → schema-type_fields → notepad:append. Each
@@ -863,7 +863,7 @@ metadata:
           `design/002-runtime-canonical/backlog.md`.
         intent: default # reasoning
         can_spawn: false
-        autoload_skills: [python-runner]
+        autoload_skills: [_mission_worker, python-runner]
         compactor:
           # report-builder iterates on python-runner code +
           # bash_write_file with HTML payloads (can be large).
@@ -910,6 +910,7 @@ metadata:
           line. No narration outside the fence.
         intent: default # reasoning
         can_spawn: false
+        autoload_skills: [_mission_worker]
         capabilities:
           plan_context: read
         tools:
@@ -949,6 +950,7 @@ metadata:
           body carries the final message.
         intent: default # reasoning
         can_spawn: false
+        autoload_skills: [_mission_worker]
         capabilities:
           plan_context: read
         tools:
@@ -969,15 +971,16 @@ each role's manifest entry above documents the domain contract.
 ## Lifecycle
 
 1. Root spawns the mission via `session:spawn_mission`.
-2. **Research stage (runtime-owned, Phase 5.x — B15).** When
-   the goal trips the `mission.research: when: auto` heuristic
-   (deliverable keywords, short / ambiguous goal), runtime
-   spawns `researcher` BEFORE the planner. Researcher
-   analyses the task, does lightweight schema discovery, and
-   batches every open dimension (subject, time window,
-   entities, metrics, breakdowns, output format,
+2. **Research stage (runtime-owned, Phase 5.x — B15).** Because
+   this skill declares a `mission.research` block, the runtime
+   spawns `researcher` BEFORE the planner on every mission.
+   Researcher analyses the task, does lightweight schema
+   discovery, and batches every open dimension (subject, time
+   window, entities, metrics, breakdowns, output format,
    visualisations, "anything else?" comment) into ONE modal.
-   When the user has answered, it emits `done: true` with
+   If the goal is already clear and complete it skips the modal
+   and emits `done: true` immediately. Otherwise, when the user
+   has answered, it emits `done: true` with
    `findings` + `resolved_user_inputs` + optional
    `ac_proposals`. Skipped for trivial single-source asks.
 3. Runtime spawns `planner` with [Plan context], [Research
