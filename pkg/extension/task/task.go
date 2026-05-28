@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/session"
@@ -73,22 +74,7 @@ type Extension struct {
 	// spawnCounter generates monotonic unique tokens for ad-hoc
 	// spawn names so concurrent recipe invocations under the same
 	// caller can't collide on subagent names.
-	spawnCounter atomicCounter
-}
-
-// atomicCounter is a tiny non-zero-value wrapper around an int64
-// counter — kept private to avoid leaking a sync/atomic dependency
-// into the package's public surface.
-type atomicCounter struct {
-	mu sync.Mutex
-	n  int64
-}
-
-func (c *atomicCounter) Next() int64 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.n++
-	return c.n
+	spawnCounter atomic.Int64
 }
 
 // NewExtension constructs the task extension. SkillManager may be

@@ -111,7 +111,7 @@ func (e *Extension) dispatchWorker(ctx context.Context, sk skill.Skill, recipe s
 	// Spawn name uniqueness within the parent — pkg/session.Spawn
 	// sanitises + collision-suffixes, but generating a token here
 	// keeps the per-call audit name predictable.
-	spawnName := fmt.Sprintf("task-%s-%d", recipe, e.spawnCounter.Next())
+	spawnName := fmt.Sprintf("task-%s-%d", recipe, e.spawnCounter.Add(1))
 
 	taskBody := fmt.Sprintf("Run the %s recipe once with the supplied inputs.", recipe)
 	child, err := owner.Spawn(ctx, session.SpawnSpec{
