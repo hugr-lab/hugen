@@ -110,6 +110,11 @@ type TaskSpec struct {
 	Name          string           `json:"name"`
 	Description   string           `json:"description,omitempty"`
 	ScheduleSpec  string           `json:"schedule_spec"`
+	// Timezone is the IANA location name (e.g. "Europe/Berlin") a
+	// cron schedule_spec is evaluated in. Empty = UTC. Only meaningful
+	// for schedule_kind=cron; ignored by interval / once_in / once_at
+	// (those are absolute or duration-anchored).
+	Timezone      string           `json:"timezone,omitempty"`
 	EndCondition  TaskEndCondition `json:"end_condition"`
 	Goal          string           `json:"goal,omitempty"`
 	WakeMessage   string           `json:"wake_message,omitempty"`

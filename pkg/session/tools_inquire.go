@@ -80,6 +80,17 @@ func (s *Session) callInquire(ctx context.Context, args json.RawMessage) (json.R
 	if s.IsClosed() {
 		return toolErr("session_gone", "calling session has already terminated")
 	}
+	// Phase 6.2a — a registered InquiryPolicy can deny an inquiry
+	// before it parks (e.g. a headless cron fire with no operator to
+	// answer). First deny wins; the model reads the structured error
+	// and recovers (resolve from inputs / finish with an error)
+	// instead of hanging until the fire timeout. This also backstops
+	// the approval path: requestApproval calls callInquire after its
+	// own auto-approve walk, so a non-allow-listed tool under cron is
+	// denied here rather than parking.
+	if reason, deny := s.maybeDenyInquiry(ctx); deny {
+		return toolErr("denied_no_operator", reason)
+	}
 	var in inquireInput
 	if err := json.Unmarshal(args, &in); err != nil {
 		return toolErr("bad_request", fmt.Sprintf("invalid inquire args: %v", err))
@@ -351,6 +362,27 @@ func newInquiryRequestID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	return "inq-" + hex.EncodeToString(b[:])
+}
+
+// maybeDenyInquiry consults every registered [extension.InquiryPolicy]
+// in deps.Extensions order, returning the first (reason, deny=true).
+// callInquire calls this before any feed/timer setup so a denied
+// inquiry never parks. No policy registered / none deny → ("", false)
+// and the normal park/bubble path runs. Phase 6.2a.
+func (s *Session) maybeDenyInquiry(ctx context.Context) (string, bool) {
+	if s.deps == nil {
+		return "", false
+	}
+	for _, ext := range s.deps.Extensions {
+		policy, ok := ext.(extension.InquiryPolicy)
+		if !ok {
+			continue
+		}
+		if reason, deny := policy.MaybeDenyInquiry(ctx, s); deny {
+			return reason, true
+		}
+	}
+	return "", false
 }
 
 // requestApproval is the runtime-initiated approval helper the

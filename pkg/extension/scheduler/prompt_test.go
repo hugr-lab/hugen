@@ -49,7 +49,9 @@ func TestAdvertiseSystemPrompt_CronSessionEmitsContract(t *testing.T) {
 		"language: en",
 		"hugr:query",
 		"notepad:append",
-		"bubbles up to",
+		"HEADLESS",
+		"Do NOT call `session:inquire`",
+		"denied_no_operator",
 	}
 	for _, want := range wantFragments {
 		if !strings.Contains(out, want) {

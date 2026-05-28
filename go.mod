@@ -19,6 +19,7 @@ require (
 	github.com/mark3labs/mcp-go v0.49.0
 	github.com/muesli/reflow v0.3.0
 	github.com/oasdiff/yaml v0.0.9
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
 	github.com/vektah/gqlparser/v2 v2.5.33

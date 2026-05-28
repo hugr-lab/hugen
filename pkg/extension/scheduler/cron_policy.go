@@ -71,6 +71,38 @@ func (e *Extension) MaybeAutoApprove(ctx context.Context, caller extension.Sessi
 	return "", false
 }
 
+// MaybeDenyInquiry implements [extension.InquiryPolicy]. It denies
+// any session:inquire (clarification OR approval) raised by a session
+// that runs under a cron fire — those fires are headless, so a parked
+// inquiry would bubble to nobody and hang the session until the fire
+// timeout. The walk mirrors MaybeAutoApprove: caller → root, first
+// FireContext encountered denies. Interactive (non-cron) sessions
+// find no envelope and fall through to the normal park/bubble path.
+//
+// The reason is written for the model to read in its tool_result:
+// it should resolve from inputs/goal or finish with an error handoff
+// rather than retry the inquiry. The cron system prompt already tells
+// the model not to call session:inquire; this is the runtime backstop
+// when the model ignores that.
+//
+// Phase 6.2a.
+func (e *Extension) MaybeDenyInquiry(_ context.Context, caller extension.SessionState) (string, bool) {
+	if caller == nil {
+		return "", false
+	}
+	for s := caller; s != nil; {
+		if _, ok := fireContextFromState(s); ok {
+			return "scheduled (cron) task fires run headless — there is no interactive operator to answer session:inquire (clarification or approval). Resolve from the task inputs/goal, or end the run with an error handoff; do not retry the inquiry.", true
+		}
+		parent, ok := s.Parent()
+		if !ok || parent == nil {
+			return "", false
+		}
+		s = parent
+	}
+	return "", false
+}
+
 // fireContextFromState returns the cron envelope stamped on state
 // by the session constructor when [session.OpenRequest.Cron] was
 // non-nil. Returns (nil, false) on root / subagent sessions.

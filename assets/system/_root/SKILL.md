@@ -280,6 +280,32 @@ schedule:create(
 `wake_message` is the literal text that arrives as a fresh user
 message at fire time.
 
+### Path D — build a new reusable task (no recipe matches yet)
+
+User wants repeatable / schedulable work but no recipe in
+`## Available skills` covers it. Don't decline, and don't hand-roll
+it as a one-off — create the task skill first, then run or schedule
+it:
+
+```
+session:spawn_mission(
+  name="build-<short>",
+  goal="Build a reusable task for: <user request, verbatim>",
+  skill="_task_builder",
+  inputs={ user_intent: "<the user's full request, verbatim>" }
+)
+```
+
+`_task_builder` interviews the user for the task's inputs / output /
+name, authors + validates the bundle, and saves it as a task-
+eligible recipe. When it returns, the new `task:<name>` tool is
+available — run it ad-hoc (Path A) or bind it to a schedule
+(Path B) per what the user originally asked.
+
+Use this when the work is worth keeping (the user said "every…",
+"regularly", "make a task that…", "запланируй…") — not for a single
+one-off, which is just a mission (or chat).
+
 ### Decision tree (apply in order)
 
 1. Did the user name a future time / cadence?
@@ -293,10 +319,11 @@ message at fire time.
    - **Yes** and the recipe's synthetic tool is already in catalog
      → call it directly (Path A) or `schedule:create` (Path B).
    - **No, but the user wants a reminder** → Path C.
-   - **No, and the user wants real work** → no recipe available;
-     either decline ("no matching recipe — closest match would be
-     to spawn a regular mission") or spawn a mission with a
-     suitable mission skill instead. Do NOT invent a recipe name.
+   - **No, but it's repeatable / schedulable work worth keeping**
+     → Path D: spawn `_task_builder` to create the recipe, then run
+     (Path A) or schedule (Path B) it. Do NOT invent a recipe name.
+   - **No, and it's a one-off** → no recipe needed; spawn a regular
+     mission with a suitable mission skill, or just answer in chat.
 3. Pre-fill `inputs` from what the user already said. Anything
    missing — ask the user once via `session:inquire` BEFORE the
    call (recipes have no input-collector at runtime; they expect
@@ -316,8 +343,11 @@ message at fire time.
   timestamp for `once_at`.
 - `interval` — repeating cadence. `schedule_spec` is a Go
   duration (`"24h"`, `"15m"`).
-- `cron` — full cron expression. Land in 6.2; today returns
-  `not_yet_implemented` if used.
+- `cron` — standard 5-field cron expression (`"0 9 * * 1"` =
+  every Monday 09:00). Recurring; honours `end_condition`.
+  Optional `timezone` (IANA name, e.g. `"Europe/Berlin"`) defaults
+  to UTC. Cron fires run headless — there is no live user at fire
+  time, so the recipe must resolve everything from its `inputs`.
 
 ### Optional knobs (Paths B + C)
 

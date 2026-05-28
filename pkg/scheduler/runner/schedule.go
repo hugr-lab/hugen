@@ -1,6 +1,48 @@
 package runner
 
-import "time"
+import (
+	"fmt"
+	"time"
+
+	robfig "github.com/robfig/cron/v3"
+)
+
+// cronParser parses standard 5-field cron expressions (minute hour
+// dom month dow) — no seconds field, matching crontab(5). Shared
+// across all cronSchedule instances; robfig parsers are stateless.
+var cronParser = robfig.NewParser(robfig.Minute | robfig.Hour | robfig.Dom | robfig.Month | robfig.Dow)
+
+// Cron fires on a 5-field standard cron expression evaluated in loc
+// (UTC when loc is nil). Wraps robfig/cron/v3. The expression is
+// validated here, so an invalid spec is a constructor error — callers
+// (schedule:create) surface it as a tool error rather than letting a
+// broken schedule reach the Runner. `"0 9 * * 1"` = every Monday at
+// 09:00 in loc.
+func Cron(expr string, loc *time.Location) (Schedule, error) {
+	inner, err := cronParser.Parse(expr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cron expression %q: %w", expr, err)
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	return cronSchedule{inner: inner, loc: loc}, nil
+}
+
+type cronSchedule struct {
+	inner robfig.Schedule
+	loc   *time.Location
+}
+
+// Next returns the next fire instant strictly after `after`,
+// evaluated in the schedule's location. robfig's Next is exclusive
+// on the boundary (it never returns `after` itself), which matches
+// our recurring semantics — each fire advances past the planned
+// instant. The result is normalised to UTC so callers persist a
+// consistent wall-clock-independent timestamp.
+func (s cronSchedule) Next(after time.Time) time.Time {
+	return s.inner.Next(after.In(s.loc)).UTC()
+}
 
 // Every fires the fn at fixed intervals. Next(after) returns
 // after.Add(d) — i.e. the cadence is anchored to the previous
