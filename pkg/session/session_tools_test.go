@@ -10,11 +10,31 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
+
+// fakeInTurnAdvisor is a minimal [extension.ModelInTurnAdvisor] for
+// the on_tool_error session test: it appends a fixed hint to any
+// failing result from tools matching toolPrefix.
+type fakeInTurnAdvisor struct {
+	toolPrefix string
+	hint       string
+}
+
+func (f *fakeInTurnAdvisor) Name() string { return "fake-advisor" }
+func (f *fakeInTurnAdvisor) TurnPreamble(context.Context, extension.SessionState) string {
+	return ""
+}
+func (f *fakeInTurnAdvisor) OnToolError(_ context.Context, _ extension.SessionState, ev extension.ToolErrorEvent) string {
+	if strings.HasPrefix(ev.Tool, f.toolPrefix) {
+		return f.hint
+	}
+	return ""
+}
 
 // scriptedToolModel emits tool calls on its first N invocations
 // and final content on the last invocation. Used to drive the
@@ -104,6 +124,92 @@ func newToolSession(t *testing.T, mdl model.Model, perms perm.Service, providers
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = sess.Run(ctx) }()
 	return sess, cancel
+}
+
+// newToolSessionWithExts mirrors newToolSession but wires a minimal
+// Deps carrying exts before Run starts (deps is otherwise nil in the
+// lightweight harness, and setting it after Run would race). Only the
+// fields the dispatch / message-build paths read are populated.
+func newToolSessionWithExts(t *testing.T, mdl model.Model, perms perm.Service, exts []extension.Extension, providers ...tool.ToolProvider) (*Session, context.CancelFunc) {
+	t.Helper()
+	testStore := fixture.NewTestStore()
+	_ = testStore.OpenSession(context.Background(), SessionRow{ID: "s1", AgentID: "a1", Status: StatusActive})
+
+	tm := tool.NewToolManager(perms, nil, nil)
+	for _, p := range providers {
+		if err := tm.AddProvider(p); err != nil {
+			t.Fatalf("AddProvider: %v", err)
+		}
+	}
+
+	router := newRouterWithModel(t, mdl)
+	agent, err := NewAgent("a1", "hugen", &fakeIdentity{id: "a1"}, "", nil)
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	sess := NewSession("s1", agent, testStore, router, NewCommandRegistry(), protocol.NewCodec(), tm, nil)
+	sess.deps = &Deps{Extensions: exts}
+	sess.materialised.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = sess.Run(ctx) }()
+	return sess, cancel
+}
+
+// TestSession_ToolError_InlineHint verifies the Phase 6.x
+// ModelInTurnAdvisor on_tool_error provider path: a "successful"
+// dispatch whose body carries {"is_error":true,…} gets the advisor's
+// hint folded INLINE into the same tool_result the model reads — with
+// NO separate frame emitted.
+func TestSession_ToolError_InlineHint(t *testing.T) {
+	const hint = "Enumerate modules via discovery-search_modules first."
+	mdl := &scriptedToolModel{
+		turns: [][]model.Chunk{
+			{{ToolCall: &model.ChunkToolCall{ID: "tc1", Name: "fake:data-q"}}},
+			{{Content: ptr("done"), Final: true}},
+		},
+	}
+	provider := &stubProvider{
+		tools:  []tool.Tool{{Name: "fake:data-q", Provider: "fake", PermissionObject: "hugen:tool:fake"}},
+		result: `{"is_error":true,"text":"Cannot query field \"core_modules_aggregation\""}`,
+	}
+	adv := &fakeInTurnAdvisor{toolPrefix: "fake:data-", hint: hint}
+	sess, cancel := newToolSessionWithExts(t, mdl, permsAllow{}, []extension.Extension{adv}, provider)
+	defer cancel()
+
+	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
+	sess.Inbox() <- protocol.NewUserMessage("s1", user, "go")
+
+	frames := collectFrames(t, sess, func(seen []protocol.Frame) bool {
+		am, ok := seen[len(seen)-1].(*protocol.AgentMessage)
+		return ok && am.Payload.Final
+	}, 3*time.Second)
+
+	var toolResults int
+	var hintLanded bool
+	for _, f := range frames {
+		if tr, ok := f.(*protocol.ToolResult); ok {
+			toolResults++
+			body, _ := json.Marshal(tr.Payload.Result)
+			if strings.Contains(string(body), hint) && strings.Contains(string(body), "[hint]") {
+				hintLanded = true
+			}
+			// The provider embedded-error path keeps IsError=false
+			// (the dispatch itself succeeded).
+			if tr.Payload.IsError {
+				t.Errorf("provider embedded-error tool_result should keep IsError=false")
+			}
+		}
+		// The hint must NOT arrive as a separate system_message.
+		if sm, ok := f.(*protocol.SystemMessage); ok && strings.Contains(sm.Payload.Content, hint) {
+			t.Errorf("hint leaked as a separate system_message frame: %q", sm.Payload.Content)
+		}
+	}
+	if toolResults != 1 {
+		t.Errorf("want exactly 1 tool_result frame, got %d (%v)", toolResults, kindNames(frames))
+	}
+	if !hintLanded {
+		t.Errorf("hint not folded inline into the tool_result: %v", kindNames(frames))
+	}
 }
 
 func collectFrames(t *testing.T, sess *Session, until func(seen []protocol.Frame) bool, deadline time.Duration) []protocol.Frame {
@@ -346,4 +452,43 @@ func drainOutbox(sess *Session, linger time.Duration) []protocol.Frame {
 			return out
 		}
 	}
+}
+
+// TestInsertBeforeLastUser pins the turn_preamble placement: the
+// advisor block lands immediately before the LAST user message
+// (recency for weak models), and falls back to append when no user
+// message is present.
+func TestInsertBeforeLastUser(t *testing.T) {
+	pre := model.Message{Role: model.RoleSystem, Content: "PREAMBLE"}
+
+	t.Run("before last of two users", func(t *testing.T) {
+		in := []model.Message{
+			{Role: model.RoleSystem, Content: "sys"},
+			{Role: model.RoleUser, Content: "u1"},
+			{Role: model.RoleAssistant, Content: "a1"},
+			{Role: model.RoleUser, Content: "u2"},
+		}
+		out := insertBeforeLastUser(in, pre)
+		if len(out) != 5 {
+			t.Fatalf("len = %d, want 5", len(out))
+		}
+		if out[3].Content != "PREAMBLE" || out[4].Content != "u2" {
+			t.Errorf("preamble not directly before last user: %+v", out)
+		}
+		// Earlier user message untouched.
+		if out[1].Content != "u1" {
+			t.Errorf("earlier user message disturbed: %+v", out)
+		}
+	})
+
+	t.Run("fallback append when no user", func(t *testing.T) {
+		in := []model.Message{
+			{Role: model.RoleSystem, Content: "sys"},
+			{Role: model.RoleAssistant, Content: "a1"},
+		}
+		out := insertBeforeLastUser(in, pre)
+		if len(out) != 3 || out[2].Content != "PREAMBLE" {
+			t.Errorf("expected preamble appended at end: %+v", out)
+		}
+	})
 }

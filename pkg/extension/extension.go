@@ -536,3 +536,70 @@ type ToolApprovalPolicy interface {
 type InquiryPolicy interface {
 	MaybeDenyInquiry(ctx context.Context, caller SessionState) (reason string, deny bool)
 }
+
+// ToolErrorEvent describes a tool result the runtime considers a
+// failure, handed to [ModelInTurnAdvisor.OnToolError] so an advisor
+// can append corrective steer the model reads inline.
+//
+// Two producers feed it (see the OnToolError doc): runtime-side
+// errors carry Code+Message (ResultText empty); the provider/MCP
+// path — a "successful" dispatch whose JSON body embeds
+// "is_error":true (e.g. a GraphQL error like
+// `Cannot query field "X_aggregation"`) — carries the raw result in
+// ResultText with Code+Message empty. An advisor matches against
+// whichever fields are populated.
+type ToolErrorEvent struct {
+	// Tool is the fully-qualified tool name as dispatched
+	// (e.g. "hugr-main:data-inline_graphql_result").
+	Tool string
+	// Code is the structured ToolError.Code for runtime-side
+	// errors ("not_found" / "io" / …); empty for the provider
+	// embedded-error path.
+	Code string
+	// Message is the runtime-side error text; empty for the
+	// provider embedded-error path.
+	Message string
+	// ResultText is the raw tool result JSON for the provider
+	// embedded-error path; empty for runtime-side errors. The
+	// human-readable error sits inside it.
+	ResultText string
+}
+
+// ModelInTurnAdvisor is the umbrella capability for an extension that
+// contributes content INTO the active turn — near the model's
+// decision point, ephemerally (render-time, not a persisted frame) —
+// vs. observing the turn after the fact. It exposes typed variations;
+// an implementer returns "" from any variation it does not serve.
+//
+// Naming: -Advisor (not -Actioner) because the contract is pull-pure
+// — the extension RETURNS its contribution, the session OWNS applying
+// it (mirrors [ToolPolicyAdvisor]). A future MUTATING variation
+// (e.g. pre-call arg fixup) would strain "advisor"; split a separate
+// capability then rather than bending this one.
+//
+// Variations (Phase 6.x):
+//
+//   - TurnPreamble — the dynamic-skill advertise block, injected just
+//     before the last user message in [Session.buildMessages] instead
+//     of baked into the system prompt. Two wins: recency (weak models
+//     attend near the ask, not the top of a long system prompt) and
+//     prompt cache (the system prompt stays stable/cacheable while the
+//     volatile advertise rides after the cache boundary).
+//   - OnToolError — guidance appended inline to a failing tool result
+//     (manifest `metadata.hugen.hints` of type on_tool_error). See
+//     [ToolErrorEvent] for the two error producers; the session folds
+//     the returned text into the result content the model reads, with
+//     no separate emitted frame.
+//
+// Contract: implementations are consulted in deps.Extensions order.
+// TurnPreamble contributions are joined; OnToolError contributions are
+// joined (the session de-dupes / caps). Both are pure — the session
+// owns where the text lands.
+type ModelInTurnAdvisor interface {
+	// TurnPreamble returns the ephemeral block to inject before the
+	// last user message this turn, or "" for nothing.
+	TurnPreamble(ctx context.Context, state SessionState) string
+	// OnToolError returns guidance to append to a failing tool
+	// result, or "" for nothing.
+	OnToolError(ctx context.Context, state SessionState, ev ToolErrorEvent) string
+}

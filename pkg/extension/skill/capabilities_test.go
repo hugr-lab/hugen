@@ -8,10 +8,29 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
+
+// Manifest carrying an on_tool_error hint, used by the OnToolError
+// advisor tests.
+const inlineHintManifest = `---
+name: hinted
+description: A skill with an in-turn tool-error hint.
+license: MIT
+metadata:
+  hugen:
+    tier_compatibility: [root, mission, worker]
+    hints:
+      - type: on_tool_error
+        tools: ["hugr-main:data-*"]
+        match: "Cannot query field .*_aggregation"
+        message: "Enumerate modules via discovery-search_modules first."
+---
+hinted body
+`
 
 // Manifest used by FilterTools tests: grants a wildcard discovery-*
 // + schema-* on hugr-main and an exact `query` on hugr-query.
@@ -348,9 +367,11 @@ func TestAdvertiseSystemPrompt_NoMissionsSkipsBlock(t *testing.T) {
 	}
 }
 
-// Advertiser concatenates Bindings.Instructions with the catalogue
-// section. With no skill loaded only the catalogue surfaces.
-func TestAdvertiseSystemPrompt_CatalogueOnly(t *testing.T) {
+// Phase 6.x — the AVAILABLE-skills catalogue migrated from the system
+// prompt (AdvertiseSystemPrompt) to the ModelInTurnAdvisor
+// turn_preamble. With no skill loaded only the catalogue surfaces, and
+// it now comes from TurnPreamble.
+func TestTurnPreamble_CatalogueOnly(t *testing.T) {
 	ctx := context.Background()
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"alpha": []byte(inlineAlphaManifest)}})
 	mgr := skillpkg.NewSkillManager(store, nil)
@@ -359,7 +380,11 @@ func TestAdvertiseSystemPrompt_CatalogueOnly(t *testing.T) {
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
-	out := ext.AdvertiseSystemPrompt(ctx, state)
+	// Catalogue no longer baked into the system prompt.
+	if sys := ext.AdvertiseSystemPrompt(ctx, state); strings.Contains(sys, "## Available skills") {
+		t.Errorf("catalogue leaked into system prompt: %s", sys)
+	}
+	out := ext.TurnPreamble(ctx, state)
 	if !strings.Contains(out, "## Available skills") {
 		t.Errorf("missing catalogue heading: %s", out)
 	}
@@ -371,13 +396,13 @@ func TestAdvertiseSystemPrompt_CatalogueOnly(t *testing.T) {
 	}
 }
 
-// TestAdvertiseSystemPrompt_TaskEligibleSkillsHidden verifies the
+// TestTurnPreamble_TaskEligibleSkillsHidden verifies the
 // Phase 6.1d filter: skills with `task.eligible: true` do NOT appear
-// in the `## Available skills` catalogue. They surface to the model
-// as synthetic `task:<recipe-name>` tools via scheduler ext; the
-// regular skill catalogue is reserved for loadable category /
-// utility skills.
-func TestAdvertiseSystemPrompt_TaskEligibleSkillsHidden(t *testing.T) {
+// in the `## Available skills` catalogue (now rendered in the
+// turn_preamble). They surface to the model as synthetic
+// `task:<recipe-name>` tools via scheduler ext; the regular skill
+// catalogue is reserved for loadable category / utility skills.
+func TestTurnPreamble_TaskEligibleSkillsHidden(t *testing.T) {
 	ctx := context.Background()
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
 		"alpha": []byte(inlineAlphaManifest),
@@ -398,7 +423,7 @@ metadata:
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
-	out := ext.AdvertiseSystemPrompt(ctx, state)
+	out := ext.TurnPreamble(ctx, state)
 	if !strings.Contains(out, "`alpha`") {
 		t.Errorf("non-recipe alpha must still appear:\n%s", out)
 	}
@@ -407,15 +432,15 @@ metadata:
 	}
 }
 
-// TestAdvertiseSystemPrompt_RecipeCatalogTaggedAndFloated verifies
+// TestTurnPreamble_RecipeCatalogTaggedAndFloated verifies
 // the Phase 6.1d catalogue treatment of recipe-catalog skills
-// (metadata.hugen.recipe_catalog: true): they carry a `(recipe
-// catalog)` tag and sort ahead of regular skills regardless of
-// name order — `zeta_utils` is alphabetically AFTER `alpha`, so its
-// appearing first proves the flag floats it, not the name. The
-// constitution carries the behavioural "prefer the recipe" rule;
-// this test just pins the prompt surface it keys off.
-func TestAdvertiseSystemPrompt_RecipeCatalogTaggedAndFloated(t *testing.T) {
+// (metadata.hugen.recipe_catalog: true) in the turn_preamble: they
+// carry a `(recipe catalog)` tag and sort ahead of regular skills
+// regardless of name order — `zeta_utils` is alphabetically AFTER
+// `alpha`, so its appearing first proves the flag floats it, not the
+// name. The constitution carries the behavioural "prefer the recipe"
+// rule; this test just pins the prompt surface it keys off.
+func TestTurnPreamble_RecipeCatalogTaggedAndFloated(t *testing.T) {
 	ctx := context.Background()
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
 		"alpha": []byte(inlineAlphaManifest),
@@ -436,7 +461,7 @@ metadata:
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
-	out := ext.AdvertiseSystemPrompt(ctx, state)
+	out := ext.TurnPreamble(ctx, state)
 	if !strings.Contains(out, "`zeta_utils` (recipe catalog)") {
 		t.Errorf("recipe-catalog tag missing:\n%s", out)
 	}
@@ -467,9 +492,13 @@ func TestReportStatus_AdvertiseSplit_LoadedVsCatalogue(t *testing.T) {
 		t.Fatalf("InitState: %v", err)
 	}
 
-	// First render — no skill loaded yet. Catalogue advertises
-	// alpha; loaded side stays empty.
+	// First render — no skill loaded yet. The loaded side
+	// (AdvertiseSystemPrompt) stays empty; the catalogue advertises
+	// alpha via the turn_preamble. Phase 6.x splits the render across
+	// both capabilities, so both must run before ReportStatus to
+	// populate the token split.
 	_ = ext.AdvertiseSystemPrompt(ctx, state)
+	_ = ext.TurnPreamble(ctx, state)
 	raw := ext.ReportStatus(ctx, state)
 	if raw == nil {
 		t.Fatalf("ReportStatus = nil after catalogue render")
@@ -493,6 +522,7 @@ func TestReportStatus_AdvertiseSplit_LoadedVsCatalogue(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	_ = ext.AdvertiseSystemPrompt(ctx, state)
+	_ = ext.TurnPreamble(ctx, state)
 	raw = ext.ReportStatus(ctx, state)
 	var second map[string]any
 	if err := json.Unmarshal(raw, &second); err != nil {
@@ -512,9 +542,12 @@ func TestReportStatus_AdvertiseSplit_LoadedVsCatalogue(t *testing.T) {
 	}
 }
 
-// Loading alpha tags it `(loaded)` and surfaces its body before
-// the catalogue heading.
-func TestAdvertiseSystemPrompt_LoadedTaggedAndInstructionsPrepended(t *testing.T) {
+// Loading alpha surfaces its body in the system prompt
+// (AdvertiseSystemPrompt) and tags it `(loaded)` in the turn_preamble
+// catalogue. Phase 6.x split the two halves: the loaded body stays in
+// the stable/cacheable system prompt; the volatile catalogue (with
+// the `(loaded)` annotation) rides the turn_preamble.
+func TestLoadedBodyInSystemPrompt_CatalogueInTurnPreamble(t *testing.T) {
 	ctx := context.Background()
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{"alpha": []byte(inlineAlphaManifest)}})
 	mgr := skillpkg.NewSkillManager(store, nil)
@@ -526,14 +559,19 @@ func TestAdvertiseSystemPrompt_LoadedTaggedAndInstructionsPrepended(t *testing.T
 	if err := FromState(state).Load(ctx, "alpha"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	out := ext.AdvertiseSystemPrompt(ctx, state)
-	if !strings.Contains(out, "(loaded)") {
-		t.Errorf("loaded tag missing: %s", out)
+	sys := ext.AdvertiseSystemPrompt(ctx, state)
+	if !strings.Contains(sys, "body") {
+		t.Errorf("loaded skill body missing from system prompt: %s", sys)
 	}
-	idxBody := strings.Index(out, "body")
-	idxHeading := strings.Index(out, "## Available skills")
-	if idxBody < 0 || idxHeading < 0 || idxBody >= idxHeading {
-		t.Errorf("instructions block must precede catalogue: body@%d heading@%d", idxBody, idxHeading)
+	if strings.Contains(sys, "## Available skills") {
+		t.Errorf("catalogue leaked into system prompt: %s", sys)
+	}
+	pre := ext.TurnPreamble(ctx, state)
+	if !strings.Contains(pre, "(loaded)") {
+		t.Errorf("loaded tag missing from turn_preamble: %s", pre)
+	}
+	if !strings.Contains(pre, "## Available skills") {
+		t.Errorf("catalogue heading missing from turn_preamble: %s", pre)
 	}
 }
 
@@ -1111,5 +1149,57 @@ func TestAdvertiseSystemPrompt_EmptyStore(t *testing.T) {
 	out := ext.AdvertiseSystemPrompt(context.Background(), state)
 	if out != "" {
 		t.Errorf("expected empty advertisement, got %q", out)
+	}
+}
+
+// TestOnToolError_MatchesLoadedHint verifies the ModelInTurnAdvisor
+// on_tool_error variation: a LOADED skill's hint fires when its tool
+// glob + error regex match the failing tool, and an installed-but-not-
+// loaded skill's hint stays silent (a hint is guidance for a skill the
+// model is actively using).
+func TestOnToolError_MatchesLoadedHint(t *testing.T) {
+	ctx := context.Background()
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"hinted": []byte(inlineHintManifest),
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a1")
+	state := fixture.NewTestSessionState("ses-hint").WithDepth(2)
+	if err := ext.InitState(ctx, state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+
+	ev := extension.ToolErrorEvent{
+		Tool:    "hugr-main:data-inline_graphql_result",
+		Message: `Cannot query field "core_modules_aggregation" on type "Query"`,
+	}
+
+	// Installed but not loaded → no contribution.
+	if got := ext.OnToolError(ctx, state, ev); got != "" {
+		t.Errorf("unloaded skill hint fired: %q", got)
+	}
+
+	// Load it → hint fires.
+	if err := FromState(state).Load(ctx, "hinted"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := ext.OnToolError(ctx, state, ev)
+	if !strings.Contains(got, "discovery-search_modules") {
+		t.Errorf("loaded hint did not fire: %q", got)
+	}
+
+	// Non-matching error → no contribution even when loaded.
+	noMatch := extension.ToolErrorEvent{Tool: "hugr-main:data-inline_graphql_result", Message: "unknown filter operator"}
+	if got := ext.OnToolError(ctx, state, noMatch); got != "" {
+		t.Errorf("non-matching error produced a hint: %q", got)
+	}
+
+	// Provider embedded-error path (ResultText) matches too.
+	embedded := extension.ToolErrorEvent{
+		Tool:       "hugr-main:data-inline_graphql_result",
+		ResultText: `{"is_error":true,"text":"Cannot query field \"x_aggregation\""}`,
+	}
+	if got := ext.OnToolError(ctx, state, embedded); !strings.Contains(got, "discovery-search_modules") {
+		t.Errorf("provider embedded-error hint did not fire: %q", got)
 	}
 }

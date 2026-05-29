@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1656,11 +1657,65 @@ func (s *Session) resolveHardCeiling(ctx context.Context, softCap int) int {
 // exactly one owner is registered.
 func (s *Session) buildMessages(ctx context.Context) []model.Message {
 	hist := s.ownedHistory(ctx)
-	out := make([]model.Message, 0, len(hist)+1)
+	out := make([]model.Message, 0, len(hist)+2)
 	if sys := s.systemPrompt(ctx); sys != "" {
 		out = append(out, model.Message{Role: model.RoleSystem, Content: sys})
 	}
 	out = append(out, hist...)
+	// Phase 6.x — ModelInTurnAdvisor.TurnPreamble: ephemeral content
+	// (the dynamic-skill advertise) injected just before the last
+	// user message rather than baked into the system prompt — recency
+	// for weak models + a stable/cacheable system prefix. NOT a
+	// persisted frame: rebuilt every turn from the live advisors, so
+	// the compactor never folds it and it never duplicates in history.
+	if pre := s.turnPreamble(ctx); pre != "" {
+		out = insertBeforeLastUser(out, model.Message{Role: model.RoleSystem, Content: pre})
+	}
+	return out
+}
+
+// turnPreamble gathers and joins the TurnPreamble contributions from
+// every registered [extension.ModelInTurnAdvisor], in deps.Extensions
+// order. Empty when no advisor contributes.
+func (s *Session) turnPreamble(ctx context.Context) string {
+	if s.deps == nil {
+		return ""
+	}
+	var parts []string
+	for _, ext := range s.deps.Extensions {
+		adv, ok := ext.(extension.ModelInTurnAdvisor)
+		if !ok {
+			continue
+		}
+		if p := adv.TurnPreamble(ctx, s); p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// insertBeforeLastUser splits msgs just before the last user-role
+// message and inserts m there, so the preamble reads as a system
+// reminder sitting directly above the user's latest ask (maximal
+// recency). When no user message is present (an unusual mid-loop
+// rebuild), the preamble is appended at the end as a safe fallback
+// rather than dropped. Returns a slice that may alias msgs' backing
+// array; callers treat the result as owned (buildMessages does).
+func insertBeforeLastUser(msgs []model.Message, m model.Message) []model.Message {
+	idx := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == model.RoleUser {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return append(msgs, m)
+	}
+	out := make([]model.Message, 0, len(msgs)+1)
+	out = append(out, msgs[:idx]...)
+	out = append(out, m)
+	out = append(out, msgs[idx:]...)
 	return out
 }
 
@@ -1972,12 +2027,79 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 		"session", s.id, "tool", tc.Name,
 		"result", truncatePayload(result, 2048))
 
+	// Phase 6.x — provider embedded-error path. A "successful"
+	// dispatch can still carry a tool error in its JSON body (the MCP
+	// provider marshals failures as {"is_error":true,"text":…}; a
+	// GraphQL validation error like `Cannot query field
+	// "X_aggregation"` lands here, NOT in emitToolError). When the
+	// body looks like an error, consult the ModelInTurnAdvisor
+	// extensions for a corrective hint and fold it inline into the
+	// result the model reads. Pre-filtered on a cheap substring so the
+	// hot success path never runs the advisors / their regexes.
+	if looksLikeToolErrorResult(result) {
+		if hint := s.toolErrorHint(emitCtx, extension.ToolErrorEvent{Tool: tc.Name, ResultText: string(result)}); hint != "" {
+			enriched := string(result) + hintSuffix(hint)
+			resultFrame := protocol.NewToolResult(s.id, s.agent.Participant(),
+				tc.ID, enriched, false)
+			if err := s.emit(emitCtx, resultFrame); err != nil {
+				s.logger.Warn("emit tool_result", "err", err)
+			}
+			// Return the RAW result to the dispatch loop: the hint is
+			// for the model (it reads the emitted frame via the history
+			// owner); the returned string feeds stuck-detection, which
+			// must hash the unmodified tool output.
+			return string(result), false
+		}
+	}
+
 	resultFrame := protocol.NewToolResult(s.id, s.agent.Participant(),
 		tc.ID, json.RawMessage(result), false)
 	if err := s.emit(emitCtx, resultFrame); err != nil {
 		s.logger.Warn("emit tool_result", "err", err)
 	}
 	return string(result), false
+}
+
+// looksLikeToolErrorResult is the cheap pre-filter gating the
+// provider embedded-error advisor consult: a "successful" tool
+// dispatch whose JSON body actually carries a failure. Covers the MCP
+// provider's {"is_error":true,…} shape and a GraphQL `{…,"errors":[…]}`
+// envelope (some validation errors surface as a 200-with-errors
+// payload). A false positive only triggers a (harmless) advisor call
+// that finds no matching hint.
+func looksLikeToolErrorResult(b []byte) bool {
+	return bytes.Contains(b, []byte(`"is_error":true`)) ||
+		bytes.Contains(b, []byte(`"isError":true`)) ||
+		bytes.Contains(b, []byte(`"errors":`))
+}
+
+// hintSuffix formats an in-turn advisory for inline append to a tool
+// result, set off so the model reads it as guidance distinct from the
+// tool's own output.
+func hintSuffix(hint string) string {
+	return "\n\n[hint] " + hint
+}
+
+// toolErrorHint consults the registered [extension.ModelInTurnAdvisor]
+// extensions (deps.Extensions order) for guidance on a failing tool
+// result, returning the joined non-empty contributions. Both error
+// producers feed it: emitToolError (Code+Message) and the provider
+// embedded-error path (ResultText). Empty when no advisor matches.
+func (s *Session) toolErrorHint(ctx context.Context, ev extension.ToolErrorEvent) string {
+	if s.deps == nil {
+		return ""
+	}
+	var parts []string
+	for _, ext := range s.deps.Extensions {
+		adv, ok := ext.(extension.ModelInTurnAdvisor)
+		if !ok {
+			continue
+		}
+		if h := adv.OnToolError(ctx, s, ev); h != "" {
+			parts = append(parts, h)
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // truncatePayload caps a tool's raw JSON result for log lines so a
@@ -1993,6 +2115,15 @@ func truncatePayload(b []byte, max int) string {
 }
 
 func (s *Session) emitToolError(ctx context.Context, toolID, name, code, msg, tier string) {
+	// Phase 6.x — fold any ModelInTurnAdvisor on_tool_error hint into
+	// the error Message so the model reads the corrective steer inside
+	// the very tool_result it's already looking at, with no separate
+	// frame. Matching is hint-specific (tool glob + regex / code), so
+	// runtime errors a skill didn't author a hint for pass through
+	// unchanged.
+	if hint := s.toolErrorHint(ctx, extension.ToolErrorEvent{Tool: name, Code: code, Message: msg}); hint != "" {
+		msg += hintSuffix(hint)
+	}
 	payload := protocol.ToolError{Code: code, Message: msg, Tier: tier}
 	frame := protocol.NewToolResult(s.id, s.agent.Participant(), toolID, payload, true)
 	if err := s.emit(ctx, frame); err != nil {

@@ -217,10 +217,17 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	// Phase 5.2 γ — score each render contribution separately so
 	// the context-budget UI can split "skill bodies you loaded"
 	// from "catalogue advertising more skills available".
+	//
+	// Phase 6.x — the catalogue half migrated to the
+	// ModelInTurnAdvisor turn_preamble (rendered by [TurnPreamble]
+	// and injected before the last user message for recency +
+	// prompt-cache). This method now keeps only the LOADED-side
+	// contributions, which belong in the stable/cacheable system
+	// prompt: loaded-skills meta, rendered skill bodies, and the
+	// recommended-tags advice.
 	var (
-		parts          []string
-		loadedTokens   int
-		catalogTokens  int
+		parts        []string
+		loadedTokens int
 	)
 	// Available missions — moved to pkg/extension/mission's
 	// Advertiser. Mission-PDCA (design 003).
@@ -232,22 +239,6 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 		parts = append(parts, b.Instructions)
 		loadedTokens += extension.EstimateTokens(b.Instructions)
 	}
-	// Phase 6.1d — when the session was opened with a scoped
-	// allow-list (today: task ext recipe children), render the
-	// catalogue narrowed to `loaded ∪ allowed_skills` so the LLM
-	// sees its loaded baseline plus the lazy-load whitelist. An
-	// empty whitelist still surfaces the loaded baseline so the
-	// recipe's `(loaded)` tags inform the model what it already has.
-	// Sessions without the key see the full catalogue as before.
-	if allowedList, scoped := allowedSkillsFromState(state); scoped {
-		if cat := renderCatalogueFiltered(ctx, renderer, h, allowedList); cat != "" {
-			parts = append(parts, cat)
-			catalogTokens += extension.EstimateTokens(cat)
-		}
-	} else if cat := renderCatalogue(ctx, renderer, h); cat != "" {
-		parts = append(parts, cat)
-		catalogTokens += extension.EstimateTokens(cat)
-	}
 	// Phase 4.2.3 Block A — recommended notepad tags advertised
 	// by the loaded mission dispatcher(s). Empty when no loaded
 	// skill is mission-enabled or carries a tag list.
@@ -255,12 +246,101 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 		parts = append(parts, tags)
 		loadedTokens += extension.EstimateTokens(tags)
 	}
-	h.SetAdvertiseSplit(loadedTokens, catalogTokens)
+	h.SetLoadedTokens(loadedTokens)
 	if len(parts) == 0 {
 		return ""
 	}
 	return strings.Join(parts, "\n\n")
 }
+
+// TurnPreamble implements [extension.ModelInTurnAdvisor]: it renders
+// the AVAILABLE-skills catalogue (the dynamic advertise) for injection
+// just before the last user message each turn, instead of baking it
+// into the system prompt. Two wins (Phase 6.x): recency — weak models
+// attend to content near the ask, not the top of a long system prompt
+// (the dogfood failure where the catalogue was ignored) — and prompt
+// cache, since the system prompt becomes stable while this volatile
+// block rides after the cache boundary.
+//
+// The scoped/full split mirrors the pre-6.x AdvertiseSystemPrompt
+// logic: a session opened with a recipe allow-list (Phase 6.1d) sees
+// the catalogue narrowed to `loaded ∪ allowed_skills`; others see the
+// full catalogue. Records the catalogue token estimate via
+// [SessionSkill.SetCatalogTokens] so the context-budget UI still
+// splits loaded vs catalogue. Returns "" when nothing to advertise.
+func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionState) string {
+	h := FromState(state)
+	if h == nil || h.manager == nil {
+		return ""
+	}
+	renderer := state.Prompts()
+	var cat string
+	if allowedList, scoped := allowedSkillsFromState(state); scoped {
+		cat = renderCatalogueFiltered(ctx, renderer, h, allowedList)
+	} else {
+		cat = renderCatalogue(ctx, renderer, h)
+	}
+	h.SetCatalogTokens(extension.EstimateTokens(cat))
+	return cat
+}
+
+// OnToolError implements [extension.ModelInTurnAdvisor]: it walks the
+// session's LOADED skills, gathers their `metadata.hugen.hints` of
+// type on_tool_error, matches each against the failing tool (name
+// glob + error text regex / code), and returns the matching hint
+// messages joined — the session folds them inline into the tool
+// result the model reads next, with no separate emitted frame.
+//
+// Phase 6.x Deliverable 2. Only LOADED skills contribute (a hint is
+// guidance for a skill the model is actively using); merely-installed
+// skills stay silent. Multiple matches across loaded skills compose,
+// de-duped and capped.
+func (e *Extension) OnToolError(ctx context.Context, state extension.SessionState, ev extension.ToolErrorEvent) string {
+	h := FromState(state)
+	if h == nil {
+		return ""
+	}
+	h.mu.RLock()
+	names := make([]string, 0, len(h.loaded))
+	for n := range h.loaded {
+		names = append(names, n)
+	}
+	skills := make(map[string]skillpkg.Skill, len(h.loaded))
+	for n, sk := range h.loaded {
+		skills[n] = sk
+	}
+	h.mu.RUnlock()
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names) // stable contribution order
+	var (
+		out  []string
+		seen = map[string]struct{}{}
+	)
+	for _, n := range names {
+		for _, hint := range skills[n].Manifest.Hugen.Hints {
+			msg := hint.MatchToolError(ev.Tool, ev.Code, ev.Message, ev.ResultText)
+			if msg == "" {
+				continue
+			}
+			if _, dup := seen[msg]; dup {
+				continue
+			}
+			seen[msg] = struct{}{}
+			out = append(out, msg)
+			if len(out) >= maxToolErrorHints {
+				return strings.Join(out, "\n\n")
+			}
+		}
+	}
+	return strings.Join(out, "\n\n")
+}
+
+// maxToolErrorHints caps how many distinct hint messages a single
+// failing tool result can carry, so a session with many loaded skills
+// can't balloon one error into a wall of steer. Open Q3 in the spec.
+const maxToolErrorHints = 3
 
 // renderLoadedSkillsMeta produces the per-loaded-skill metadata
 // block: directory path + bundled files listing (scripts /
