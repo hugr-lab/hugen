@@ -190,7 +190,7 @@ func (e *Extension) emitStuckNudge(ctx context.Context, state extension.SessionS
 	content := renderer.MustRender(tmpl, data)
 	frame := protocol.NewSystemMessage(
 		state.SessionID(),
-		protocol.ParticipantInfo{Kind: protocol.ParticipantAgent},
+		e.author(),
 		protocol.SystemMessageStuckNudge,
 		content,
 	)
@@ -206,7 +206,7 @@ func (e *Extension) emitStuckNudge(ctx context.Context, state extension.SessionS
 func (e *Extension) emitNoProgressMarker(ctx context.Context, state extension.SessionState, hash string) {
 	mk := protocol.NewSystemMarker(
 		state.SessionID(),
-		protocol.ParticipantInfo{Kind: protocol.ParticipantAgent},
+		e.author(),
 		protocol.SubjectNoProgress,
 		map[string]any{"hash": hash},
 	)

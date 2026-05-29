@@ -39,7 +39,7 @@ func (e *Extension) Commands() []extension.Command {
 	return []extension.Command{
 		{
 			Name:        "skill",
-			Description: "list, load or unload skills: /skill list | /skill load <name> | /skill unload <name>",
+			Description: "list, load, unload or uninstall skills: /skill list | /skill load <name> | /skill unload <name> | /skill uninstall <name>",
 			Handler:     e.handleSkillCommand,
 		},
 	}
@@ -66,10 +66,12 @@ func (e *Extension) handleSkillCommand(ctx context.Context, state extension.Sess
 		return e.handleSkillLoad(ctx, state, env, args[1:])
 	case "unload":
 		return e.handleSkillUnload(ctx, state, env, args[1:])
+	case "uninstall":
+		return e.handleSkillUninstall(ctx, state, env, args[1:])
 	default:
 		return []protocol.Frame{
 			protocol.NewError(state.SessionID(), env.AgentAuthor, "usage_error",
-				fmt.Sprintf("unknown subcommand %q; try /skill list|load|unload", args[0]), false),
+				fmt.Sprintf("unknown subcommand %q; try /skill list|load|unload|uninstall", args[0]), false),
 		}, nil
 	}
 }
@@ -99,7 +101,7 @@ func (e *Extension) handleSkillList(ctx context.Context, state extension.Session
 		o := s.Origin.String()
 		groups[o] = append(groups[o], entry{name: s.Manifest.Name, origin: o})
 	}
-	originOrder := []string{"system", "local", "community", "inline", "hub"}
+	originOrder := []string{"system", "dynamic", "local", "community", "inline", "hub"}
 
 	var b strings.Builder
 	b.WriteString("Available skills:\n")
@@ -222,5 +224,34 @@ func (e *Extension) handleSkillUnload(ctx context.Context, state extension.Sessi
 	return []protocol.Frame{
 		protocol.NewSystemMarker(state.SessionID(), env.AgentAuthor, protocol.SubjectSkillUnloaded,
 			map[string]any{"skill": name}),
+	}, nil
+}
+
+// handleSkillUninstall removes a dynamic skill from the store entirely
+// — both the on-disk bundle and its DB index row (Phase 6.2.db). This
+// is the explicit operator removal path; unlike /skill unload (which
+// only drops it from the current session) the skill is gone from the
+// catalogue until re-saved / re-installed. No-op surface when no
+// dynamic backend is wired (ErrUnsupportedBackend).
+func (e *Extension) handleSkillUninstall(ctx context.Context, state extension.SessionState, env extension.CommandContext, args []string) ([]protocol.Frame, error) {
+	if len(args) == 0 || args[0] == "" {
+		return []protocol.Frame{
+			protocol.NewError(state.SessionID(), env.AgentAuthor, "usage_error",
+				"usage: /skill uninstall <name>", false),
+		}, nil
+	}
+	name := args[0]
+	if err := e.manager.Uninstall(ctx, name); err != nil {
+		code := "skill_uninstall_failed"
+		if errors.Is(err, skillpkg.ErrUnsupportedBackend) {
+			code = "skill_uninstall_unsupported"
+		}
+		return []protocol.Frame{
+			protocol.NewError(state.SessionID(), env.AgentAuthor, code, err.Error(), true),
+		}, nil
+	}
+	return []protocol.Frame{
+		protocol.NewAgentMessage(state.SessionID(), env.AgentAuthor,
+			fmt.Sprintf("uninstalled skill %q (bundle + index removed)", name), 0, true),
 	}, nil
 }

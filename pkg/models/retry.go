@@ -107,6 +107,12 @@ func isRetryableSubscribeErr(err error) bool {
 	if errors.Is(err, ErrFirstBatchDeadline) {
 		return true
 	}
+	// Inter-batch deadline — the stream wedged mid-flight. Retryable
+	// in principle; runWithRetry's committed guard prevents a retry
+	// once any chunk reached the caller (avoids token duplication).
+	if errors.Is(err, ErrInterBatchDeadline) {
+		return true
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}

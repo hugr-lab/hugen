@@ -30,6 +30,17 @@ models:
   model: gemma4-26b
   max_tokens: 8192
   temperature: 0.4
+  # Hang detectors for the streaming pump (both configurable per-route
+  # inside `routes.<intent>`):
+  #   first_batch_deadline — max wait for the FIRST token batch before
+  #     cancel+retry (backend accepted the subscribe but produced
+  #     nothing). 0 → default 5m; negative disables.
+  #   inter_batch_deadline — max mid-stream silence once tokens flow
+  #     (backend streamed a few tokens then wedged; first-batch no
+  #     longer applies). 0 → default 2m; negative disables. A
+  #     slow-but-progressing stream is never killed.
+  #first_batch_deadline: 5m
+  #inter_batch_deadline: 2m
   routes:
     # Required by phase-1 ModelRouter — the "cheap" intent slot is
     # reserved for the Compactor (phase 5) and Reviewer (phase 7);
@@ -226,6 +237,48 @@ tool_providers:
         SET secret_directory = '.duckdb/secrets';
         INSTALL spatial; LOAD spatial;
         INSTALL httpfs;  LOAD httpfs;
+
+# ── Dynamic skills (phase 6.2.db) ───────────────────────────
+# Non-system skills (the bundled hub toolkit, recipes, catalogs) are
+# indexed into the `skills` table and discovered semantically. On disk
+# they stay in per-source dirs (${state}/skills/hub for the bundled
+# toolkit, ${state}/skills/local for skill:save-authored ones); only
+# the index is unified.
+#
+# `install` is the install set — which bundled skills get indexed at
+# boot:
+#   - OMITTED (this key absent) → install ALL bundled skills (the full
+#                                 toolkit; the safe out-of-the-box
+#                                 default).
+#   - PRESENT → install EXACTLY the listed names; config is
+#               authoritative (an empty list installs nothing). Names
+#               not in the bundle are skipped.
+# Editing it re-reconciles the store (config subscription; today
+# applied at restart).
+#
+# Bundled skills available to install:
+#   analyst · hugr-data · duckdb-data · duckdb-docs · python-runner
+#   data_utils · data_tables_rows_count
+#
+# `pin` is the advertise-pin set: installed skills that are ALWAYS
+# surfaced in discovery (bypass the usage bandit). Tri-state like
+# `install`: omitted → pins untouched; present → authoritative
+# (listed get pin=true, all others pin=false). The advertise BYPASS
+# behaviour lands with the ranking bandit (db-2); today the flag is
+# stored.
+#
+# skills:
+#   install:
+#     - analyst
+#     - hugr-data
+#     - duckdb-data
+#     - duckdb-docs
+#     - python-runner
+#     - data_utils
+#     - data_tables_rows_count
+#   pin:
+#     - hugr-data
+#     - analyst
 
 local_db_enabled: true
 local_db:

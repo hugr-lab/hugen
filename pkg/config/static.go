@@ -56,6 +56,7 @@ type StaticService struct {
 	subagents      SubagentsConfig
 	hitl           HitlConfig
 	compactor      CompactorConfig
+	skills         SkillsConfig
 }
 
 // StaticInput aggregates everything NewStaticService needs from
@@ -72,6 +73,31 @@ type StaticInput struct {
 	Subagents      SubagentsConfig
 	Hitl           HitlConfig
 	Compactor      CompactorConfig
+	Skills         SkillsConfig
+}
+
+// SkillsConfig is the operator-config surface for the Phase-6.2.db
+// dynamic-skill install set. `Install` is a tri-state pointer:
+//
+//   - nil          — the `skills.install` key is ABSENT. The runtime
+//                    installs every bundled skill (OOTB safety — the
+//                    agent still ships with its full toolkit when the
+//                    operator says nothing).
+//   - non-nil      — the key is PRESENT (even as an empty list). The
+//                    runtime installs EXACTLY the named skills; the
+//                    config is authoritative. An explicit empty list
+//                    installs nothing.
+//
+// Phase 6.2.db-1 carries names only; version pins + per-entry pin
+// land with the bandit advertise (db-2).
+type SkillsConfig struct {
+	Install *[]string `mapstructure:"install" yaml:"install,omitempty" json:"install,omitempty"`
+	// Pin is the advertise-pin set: installed skills that are ALWAYS
+	// surfaced (bypass the discovery bandit). Tri-state like Install:
+	// nil → leave pins untouched; non-nil → authoritative (listed get
+	// pin=true, all others pin=false). The advertise BEHAVIOUR (bypass)
+	// lands with the bandit (db-2); db-1 stores the flag.
+	Pin *[]string `mapstructure:"pin" yaml:"pin,omitempty" json:"pin,omitempty"`
 }
 
 // NewStaticService captures the input snapshot. The caller still
@@ -119,6 +145,7 @@ func NewStaticService(in StaticInput) *StaticService {
 		subagents:      subagents,
 		hitl:           hitl,
 		compactor:      in.Compactor,
+		skills:         in.Skills,
 	}
 }
 
@@ -133,6 +160,7 @@ func (s *StaticService) ToolProviders() ToolProvidersView { return s }
 func (s *StaticService) Subagents() SubagentsView         { return s }
 func (s *StaticService) Hitl() HitlView                   { return s }
 func (s *StaticService) Compactor() CompactorView         { return s }
+func (s *StaticService) Skills() SkillsView               { return s }
 
 // Subscribe returns a never-firing, never-closed channel. Phase-3
 // callers can wire it without special-casing; phase-6+ live
@@ -211,6 +239,40 @@ func (s *StaticService) DefaultTimeoutMs() int { return s.hitl.DefaultTimeoutMs 
 // Returning the value type (not pointer) preserves the read-only
 // contract on the View interface.
 func (s *StaticService) CompactorConfig() CompactorConfig { return s.compactor }
+
+// --- SkillsView ---
+
+// InstallSet returns the configured dynamic-skill install set, or nil
+// when `skills.install` was absent from the config (the caller then
+// installs every bundled skill — OOTB safety). A non-nil result is
+// authoritative: install exactly these names (an explicit empty list
+// installs nothing). The returned slice is a copy — callers must not
+// mutate the config.
+func (s *StaticService) InstallSet() []string {
+	if s.skills.Install == nil {
+		return nil
+	}
+	return append([]string(nil), *s.skills.Install...)
+}
+
+// InstallSetDeclared reports whether `skills.install` was present in
+// the config (distinguishes "absent → install all bundled" from an
+// explicit empty list → install nothing).
+func (s *StaticService) InstallSetDeclared() bool { return s.skills.Install != nil }
+
+// PinSet returns the advertise-pin skill names, or nil when
+// `skills.pin` was absent (leave pins untouched). A non-nil result is
+// authoritative: listed skills get pin=true, all others pin=false.
+func (s *StaticService) PinSet() []string {
+	if s.skills.Pin == nil {
+		return nil
+	}
+	return append([]string(nil), *s.skills.Pin...)
+}
+
+// PinSetDeclared reports whether `skills.pin` was present in the
+// config.
+func (s *StaticService) PinSetDeclared() bool { return s.skills.Pin != nil }
 
 // --- OnUpdate (shared no-op) ---
 

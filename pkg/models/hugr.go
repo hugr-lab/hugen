@@ -64,6 +64,16 @@ const chatCompletionSubscription = `subscription($model: String!, $messages: [St
 // attempt instead of stalling the session forever.
 var ErrFirstBatchDeadline = errors.New("hugrmodel: first batch deadline exceeded")
 
+// ErrInterBatchDeadline is returned by the subscription pump when,
+// AFTER the first batch landed, no further batch arrives within the
+// configured inter-batch deadline — the backend committed to a stream
+// then went silent mid-way (wedged llama.cpp / vLLM on a huge prefill,
+// half-closed socket without a finish event). Retryable like
+// ErrFirstBatchDeadline, but runWithRetry only retries when nothing
+// was committed yet; a post-commit mid-stream stall surfaces the error
+// to the session instead of hanging until the HTTP timeout.
+var ErrInterBatchDeadline = errors.New("hugrmodel: inter-batch deadline exceeded")
+
 // HugrModel implements pkg/model.Model against Hugr's GraphQL
 // chat_completion subscription. Each Generate opens its own
 // subscription; Stream.Close cancels the subscription's context,
@@ -79,6 +89,7 @@ type HugrModel struct {
 	toolChoiceFunc     func() string
 	retry              retryPolicy
 	firstBatchDeadline time.Duration
+	interBatchDeadline time.Duration
 }
 
 // Option configures a HugrModel.
@@ -125,14 +136,26 @@ func WithRetry(maxAttempts int, initialBackoff time.Duration) Option {
 // error. Zero leaves the deadline disabled — the original
 // stall-forever behaviour. A negative value also disables.
 //
-// Mid-stream stalls (first batch landed, then silence) are NOT
-// covered today — they require separate inter-batch deadline
-// handling (deferred until production data shows that's needed
-// too).
+// Mid-stream stalls (first batch landed, then silence) are covered
+// separately by WithInterBatchDeadline.
 func WithFirstBatchDeadline(d time.Duration) Option {
 	return func(m *HugrModel) {
 		if d > 0 {
 			m.firstBatchDeadline = d
+		}
+	}
+}
+
+// WithInterBatchDeadline caps the gap BETWEEN batches once streaming
+// has begun. If no batch arrives within d after the previous one, the
+// pump cancels the subscription and surfaces ErrInterBatchDeadline.
+// Guards against a backend that streams a few tokens then wedges (the
+// first-batch deadline no longer applies past the first batch). Zero
+// or negative leaves it disabled.
+func WithInterBatchDeadline(d time.Duration) Option {
+	return func(m *HugrModel) {
+		if d > 0 {
+			m.interBatchDeadline = d
 		}
 	}
 }
@@ -342,12 +365,16 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 	// while the handler had already started rendering — that path
 	// dropped the inflight batch without retry.
 	pumpCtx := ctx
+	var cancelPump context.CancelFunc
 	var firstBatchSeen atomic.Bool
 	var deadlineHit atomic.Bool
-	if m.firstBatchDeadline > 0 {
-		var cancelPump context.CancelFunc
+	var interBatchHit atomic.Bool
+	var lastBatchNano atomic.Int64
+	if m.firstBatchDeadline > 0 || m.interBatchDeadline > 0 {
 		pumpCtx, cancelPump = context.WithCancel(ctx)
 		defer cancelPump()
+	}
+	if m.firstBatchDeadline > 0 {
 		timer := time.AfterFunc(m.firstBatchDeadline, func() {
 			// CAS claims the "first batch not seen" state. If the
 			// handler already flipped the flag we lost the race —
@@ -360,6 +387,15 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 		})
 		defer timer.Stop()
 	}
+	if m.interBatchDeadline > 0 {
+		// Watchdog for mid-stream silence: once the first batch lands,
+		// cancel the pump if the gap to the next batch exceeds the
+		// deadline. lastBatchNano is restamped by the handler on every
+		// batch; the watcher polls at a fraction of the deadline.
+		watchStop := make(chan struct{})
+		defer close(watchStop)
+		go m.interBatchWatch(pumpCtx, watchStop, &firstBatchSeen, &lastBatchNano, &interBatchHit, cancelPump)
+	}
 
 	// Watchdog: if no batch arrives within 30s, log a heartbeat
 	// every 30s so a stuck upstream LLM is observable in real time
@@ -370,6 +406,10 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 
 	err := ReadSubscription(pumpCtx, sub, map[string]BatchHandler{
 		completionPath: func(ctx context.Context, batch arrow.RecordBatch) error {
+			// Restamp the inter-batch watchdog: every batch (content or
+			// not) counts as liveness, so a slow-but-progressing stream
+			// is never killed — only true mid-stream silence is.
+			lastBatchNano.Store(time.Now().UnixNano())
 			// CAS races the deadline timer for the "first batch"
 			// state. If we win the swap, the timer's own CAS will
 			// fail when it fires — safe to proceed even if the timer
@@ -415,6 +455,14 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 		// error so runWithRetry can re-issue the subscription
 		// instead of treating it as drained-success.
 		return committed, fmt.Errorf("%w (no batch in %s)", ErrFirstBatchDeadline, m.firstBatchDeadline)
+	}
+	if interBatchHit.Load() {
+		// Watchdog cancelled pumpCtx because the stream went silent
+		// mid-flight. Retryable, but runWithRetry only retries when
+		// nothing was committed yet — a post-commit stall surfaces to
+		// the session (it ends the turn with an error) rather than
+		// hanging until the HTTP timeout.
+		return committed, fmt.Errorf("%w (no batch for %s mid-stream)", ErrInterBatchDeadline, m.interBatchDeadline)
 	}
 	if err != nil && !isCanceled(err) {
 		return committed, err
@@ -469,6 +517,59 @@ func (m *HugrModel) pumpSubscription(ctx context.Context, sub *types.Subscriptio
 	// terminal chunk in hand. Returning nil err short-circuits the
 	// retry loop in runWithRetry.
 	return true, nil
+}
+
+// interBatchWatch cancels the pump when the stream goes silent
+// mid-flight: after the first batch is seen, if the gap since the
+// last batch exceeds m.interBatchDeadline it CAS-claims the hit flag
+// and cancels pumpCtx (the handler's restamp of lastBatchNano keeps a
+// progressing stream alive). Polls at a fraction of the deadline,
+// clamped to [1s, 15s]. Exits on pumpCtx cancellation, on watchStop
+// close (pump teardown), or after firing once.
+func (m *HugrModel) interBatchWatch(
+	ctx context.Context,
+	stop <-chan struct{},
+	firstSeen *atomic.Bool,
+	lastNano *atomic.Int64,
+	hit *atomic.Bool,
+	cancel context.CancelFunc,
+) {
+	tick := m.interBatchDeadline / 4
+	if tick < time.Second {
+		tick = time.Second
+	}
+	if tick > 15*time.Second {
+		tick = 15 * time.Second
+	}
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-stop:
+			return
+		case <-t.C:
+			if !firstSeen.Load() {
+				continue // streaming hasn't begun; first-batch deadline owns this window
+			}
+			last := lastNano.Load()
+			if last == 0 {
+				continue
+			}
+			if time.Since(time.Unix(0, last)) >= m.interBatchDeadline {
+				if hit.CompareAndSwap(false, true) {
+					m.logger.Warn("hugr chat_completion inter-batch deadline",
+						"model", m.hugrModel,
+						"deadline", m.interBatchDeadline,
+						"since_last_batch_ms", time.Since(time.Unix(0, last)).Milliseconds(),
+					)
+					cancel()
+				}
+				return
+			}
+		}
+	}
 }
 
 // subscriptionHeartbeat logs a Debug message every 30s while the

@@ -19,6 +19,7 @@ import (
 	"log/slog"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
 // StateKey is the [extension.SessionState] key the detector
@@ -33,16 +34,27 @@ const providerName = "stuckdetector"
 // per agent runtime; per-session state lives in DetectorState
 // attached to [extension.SessionState] via InitState.
 type Extension struct {
-	logger *slog.Logger
+	agentID string
+	logger  *slog.Logger
 }
 
-// NewExtension constructs the extension. logger may be nil —
-// defaults to [slog.Default].
-func NewExtension(logger *slog.Logger) *Extension {
+// NewExtension constructs the extension. agentID is the owning
+// agent's id — stamped as the author ID on every emitted frame, so
+// the stuck_nudge SystemMessage passes protocol.Validate (an empty
+// author ID is rejected, which silently dropped the nudge before).
+// logger may be nil — defaults to [slog.Default].
+func NewExtension(agentID string, logger *slog.Logger) *Extension {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Extension{logger: logger}
+	return &Extension{agentID: agentID, logger: logger}
+}
+
+// author returns the participant stamped on emitted frames. Mirrors
+// the other extensions (plan / whiteboard / skill): ID = agentID,
+// Kind = agent. A bare {Kind: agent} (no ID) fails protocol.Validate.
+func (e *Extension) author() protocol.ParticipantInfo {
+	return protocol.ParticipantInfo{ID: e.agentID, Kind: protocol.ParticipantAgent, Name: "hugen"}
 }
 
 // Name implements [extension.Extension].

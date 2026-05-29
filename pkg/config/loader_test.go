@@ -178,6 +178,70 @@ func TestLoadStaticInput_CompactorBlock(t *testing.T) {
 	}
 }
 
+// TestLoadStaticInput_SkillsInstallSet covers the install-set
+// tri-state: absent key → nil (install all bundled), present list →
+// authoritative names, present empty list → declared-but-empty
+// (install nothing).
+func TestLoadStaticInput_SkillsInstallSet(t *testing.T) {
+	// Present with names → authoritative; pin parses alongside.
+	in, err := LoadStaticInput(map[string]any{
+		"skills": map[string]any{
+			"install": []any{"analyst", "data_utils"},
+			"pin":     []any{"analyst"},
+		},
+	}, true)
+	if err != nil {
+		t.Fatalf("LoadStaticInput: %v", err)
+	}
+	svc := NewStaticService(in)
+	if !svc.Skills().InstallSetDeclared() {
+		t.Errorf("present install list: InstallSetDeclared() = false, want true")
+	}
+	if got := svc.Skills().InstallSet(); len(got) != 2 || got[0] != "analyst" || got[1] != "data_utils" {
+		t.Errorf("InstallSet() = %v, want [analyst data_utils]", got)
+	}
+	if !svc.Skills().PinSetDeclared() {
+		t.Errorf("present pin list: PinSetDeclared() = false, want true")
+	}
+	if got := svc.Skills().PinSet(); len(got) != 1 || got[0] != "analyst" {
+		t.Errorf("PinSet() = %v, want [analyst]", got)
+	}
+
+	// Present but empty → declared, installs nothing.
+	in, err = LoadStaticInput(map[string]any{
+		"skills": map[string]any{"install": []any{}},
+	}, true)
+	if err != nil {
+		t.Fatalf("LoadStaticInput (empty): %v", err)
+	}
+	svc = NewStaticService(in)
+	if !svc.Skills().InstallSetDeclared() {
+		t.Errorf("empty install list: InstallSetDeclared() = false, want true")
+	}
+	if got := svc.Skills().InstallSet(); len(got) != 0 {
+		t.Errorf("empty install list: InstallSet() = %v, want []", got)
+	}
+
+	// Absent key → nil (install all bundled); pin untouched.
+	in, err = LoadStaticInput(map[string]any{}, true)
+	if err != nil {
+		t.Fatalf("LoadStaticInput (absent): %v", err)
+	}
+	svc = NewStaticService(in)
+	if svc.Skills().InstallSetDeclared() {
+		t.Errorf("absent skills block: InstallSetDeclared() = true, want false")
+	}
+	if got := svc.Skills().InstallSet(); got != nil {
+		t.Errorf("absent skills block: InstallSet() = %v, want nil", got)
+	}
+	if svc.Skills().PinSetDeclared() {
+		t.Errorf("absent skills block: PinSetDeclared() = true, want false")
+	}
+	if got := svc.Skills().PinSet(); got != nil {
+		t.Errorf("absent skills block: PinSet() = %v, want nil", got)
+	}
+}
+
 // TestLoadStaticInput_CompactorAbsentIsZeroValue verifies that
 // a config without a `compactor:` key leaves the loaded
 // CompactorConfig at its zero value — the runtime adapter

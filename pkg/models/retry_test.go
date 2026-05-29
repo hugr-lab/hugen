@@ -142,6 +142,16 @@ func TestIsRetryableSubscribeErr(t *testing.T) {
 			err:  fmt.Errorf("hugrmodel: convert tools: invalid schema"),
 			want: false,
 		},
+		{
+			name: "first-batch deadline (wrapped sentinel)",
+			err:  fmt.Errorf("%w (no batch in 5m0s)", ErrFirstBatchDeadline),
+			want: true,
+		},
+		{
+			name: "inter-batch deadline (wrapped sentinel)",
+			err:  fmt.Errorf("%w (no batch for 2m0s mid-stream)", ErrInterBatchDeadline),
+			want: true,
+		},
 	}
 	for _, c := range cases {
 		got := isRetryableSubscribeErr(c.err)

@@ -130,6 +130,14 @@ func buildOptsFor(cfg config.ModelsConfig) []Option {
 	} else {
 		out = append(out, WithFirstBatchDeadline(cfg.FirstBatchDeadline))
 	}
+
+	// Inter-batch deadline — same zero→default / negative→disabled
+	// convention as the first-batch deadline above.
+	if cfg.InterBatchDeadline == 0 {
+		out = append(out, WithInterBatchDeadline(config.DefaultInterBatchDeadline))
+	} else {
+		out = append(out, WithInterBatchDeadline(cfg.InterBatchDeadline))
+	}
 	return out
 }
 

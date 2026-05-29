@@ -1089,6 +1089,132 @@ type task_log @table(name: "task_log") @module(name: "agent")
 }
 
 # ============================================================
+# Dynamic skills (Phase 6.2.db) — DB-backed skill source: on-disk
+# bundle + DB index for semantic discovery, usage ranking, and
+# package management. `description` is embedded server-side via the
+# @embeddings directive (same infra as memory_items / session_notes /
+# artifacts). The raw skills / skill_log / skill_links GraphQL surface
+# is runtime-internal — the 3-tier permission layer gates it so the
+# model reaches skills only through the `skill:*` tools.
+# ============================================================
+
+"""One index row per dynamic-skill bundle (task / recipe / catalog / …). DB = discovery/index, disk = content. `metadata` carries the full metadata.hugen projection so mission roles + task inputs_schema are served WITHOUT a SKILL.md read; the filter columns (type / task_eligible / task_kind / keywords / tier_compat / has_inputs_schema) are denormalised from it for cheap structural WHERE before the semantic rank. `source` is the reapability / provenance anchor; `pin` always-advertises (bypasses the discovery bandit). `description` is vectorised server-side into description_vec for semantic discovery."""
+type skills @table(name: "skills") @module(name: "agent")
+  {{ if .EmbeddingsEnabled }}@embeddings(model: "{{ .EmbedderModel }}", vector: "description_vec", distance: Cosine){{ end }} {
+  """Stable synthetic id: skl-{hex}. Immutable across version updates and renames — every FK (skill_links.source/target_id, skill_log.skill_id) points here."""
+  id:                String! @pk
+  """Agent that owns this skill (scope slice)"""
+  agent_id:          String! @field_references(
+    references_name: "agents"
+    field: "id"
+    query: "agent"
+    description: "Agent owning this dynamic skill"
+    references_query: "skills"
+    references_description: "Dynamic skills owned by this agent"
+  )
+  """Forward-compat (db-3): cross-agent visibility. Column present now; sharing LOGIC lands in hub mode."""
+  shared:            Boolean! @default(value: "false")
+  """Human handle used by skill:load / task:<name> / schedule_ref. Unique within (agent_id, source); may be renamed (id stays)."""
+  name:              String!
+  """Coarse class: 'task' | 'recipe' | 'catalog' | 'skill' | …"""
+  type:              String! @default(value: "skill")
+  """Self-contained description — embedded into description_vec for semantic discovery"""
+  description:       String
+  """Denormalised from metadata: whether this skill is a runnable task/recipe (synthetic task:<name> tool eligible)"""
+  task_eligible:     Boolean! @default(value: "false")
+  """Denormalised from metadata: 'worker' | 'mission' (task spawn tier). NULL for non-task skills."""
+  task_kind:         String
+  """Denormalised from metadata.mission.keywords — keyword discovery prefilter"""
+  keywords:          [String!]
+  """Denormalised from metadata: tier_compatibility set (agent | mission | worker)"""
+  tier_compat:       [String!]
+  """Denormalised from metadata: whether the task block carries an inputs_schema"""
+  has_inputs_schema: Boolean! @default(value: "false")
+  """FULL metadata.hugen projection (mission block + task block + sub_agents + inputs_schema + …). Served straight from the DB so the synthetic task:<name> tool build + mission roles need no SKILL.md read; disk is read only for actual content."""
+  metadata:          JSON!
+  """Always-advertise marker — bypasses the discovery bandit (operator / config force-keep)"""
+  pin:               Boolean! @default(value: "false")
+  """REQUIRED origin enum. Locally-generated (reapable): 'authored' (skill:save / _task_builder), 'memory' (Phase-7 distilled). Installed (never auto-reaped): 'hub' | 'catalogue' | 'file'."""
+  source:            String!
+  """Declared bundle version (human-facing pin)"""
+  version:           String
+  """Hash of the bundle — update-at-start change signal"""
+  content_hash:      String
+  """Link to the on-disk bundle directory"""
+  bundle_path:       String
+  """Authoring identity (user / session / 'memory')"""
+  owner:             String
+  """When this row was first created"""
+  created_at:        Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+  """Last update (install / update-at-start / config-set). Bounded — never per-fire."""
+  updated_at:        Timestamp @default(update_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}")
+  """When this skill was installed (NULL for create-path authored skills until first install)"""
+  installed_at:      Timestamp
+  {{ if .EmbeddingsEnabled }}
+  """Vector embedding of `description` for semantic discovery. Populated atomically with insert/update via the `summary:` mutation parameter."""
+  description_vec:   Vector @dim(len: {{ .VectorSize }})
+  {{ end }}
+}
+
+"""Append-only usage telemetry for dynamic skills. `event` ∈ {shown, loaded, used}: `shown` is the impression (advertised / surfaced in a search result), `loaded` / `used` are the rewards. No mutable counters on the hot path — bandit P(success) ≈ load_count/show_count rolls up off-line (db-2). Mirrors memory_log / task_log."""
+type skill_log @table(name: "skill_log") @module(name: "agent") {
+  """Synthetic id: slog-{hex}"""
+  id:         String! @pk
+  """Skill this event applies to"""
+  skill_id:   String! @field_references(
+    references_name: "skills"
+    field: "id"
+    query: "skill"
+    description: "Skill this event applies to"
+    references_query: "log"
+    references_description: "Append-only usage log for this skill"
+  )
+  """Agent that produced the event (bandit signal stays per-agent even when content is shared)"""
+  agent_id:   String! @field_references(
+    references_name: "agents"
+    field: "id"
+    query: "agent"
+    description: "Agent that produced this event"
+  )
+  """Event kind: 'shown' (impression) | 'loaded' | 'used' (rewards)"""
+  event:      String!
+  """Session in which the event occurred (NULL for background sweeps)"""
+  session_id: String
+  """Optional event detail blob {query, rank, …}"""
+  details:    JSON
+  """When the event was recorded"""
+  created_at: Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+}
+
+"""Directed edge between two dynamic skills. Plain junction (mirrors memory_links — NOT a tagged is_m2m table, so the junction stays addressable for visibility control); the relation surfaces on `skills` via the outgoing_links / incoming_links subqueries through this table. A task may have 0 / 1 / many catalogs — `catalog_member` carries that membership."""
+type skill_links @table(name: "skill_links") @module(name: "agent") {
+  """Agent scope slice"""
+  agent_id:   String! @pk
+  """Skill this edge originates from (e.g. the catalog)"""
+  source_id:  String! @pk @field_references(
+    references_name: "skills"
+    field: "id"
+    query: "source"
+    description: "Origin skill of this edge"
+    references_query: "outgoing_links"
+    references_description: "Edges from this skill to other skills"
+  )
+  """Skill this edge points to (e.g. a catalog member task)"""
+  target_id:  String! @pk @field_references(
+    references_name: "skills"
+    field: "id"
+    query: "target"
+    description: "Destination skill of this edge"
+    references_query: "incoming_links"
+    references_description: "Edges from other skills pointing to this skill"
+  )
+  """Edge type: 'catalog_member' | 'autoload' | 'requires' | 'related' | …"""
+  relation:   String! @pk
+  """When this edge was created"""
+  created_at: Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+}
+
+# ============================================================
 # Data source config:
 #   Name:     "hub.db"
 #   AsModule: true
