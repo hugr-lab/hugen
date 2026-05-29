@@ -61,12 +61,27 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 		return toolErr("bad_request", "body is required")
 	}
 
+	// Resolve mission state via parent session — the planner runs as
+	// a worker under the mission, and mission state lives on the
+	// parent. Done up front (Phase 6.x) so every terminal verdict —
+	// including a body-parse failure — can stage its outcome on
+	// MissionState for the TurnFinalizeGate + the runtime plan read.
+	parent, hasParent := state.Parent()
+	if !hasParent || parent == nil {
+		return toolErr("forbidden", "mission:validate_and_approve requires a planner session under a mission")
+	}
+	mState := FromState(parent)
+	if mState == nil {
+		return toolErr("unavailable", "mission state not initialised on the planner's parent")
+	}
+	plannerSessionID := state.SessionID()
+
 	// Parse body as a generic object — the output_contract layer
 	// expects `body` typed as `any` (map for kind=plan, string for
 	// kind=handoff).
 	var raw any
 	if err := json.Unmarshal(in.Body, &raw); err != nil {
-		return emitValidateResult(validateResult{Errors: []string{
+		return e.stageAndEmit(mState, plannerSessionID, nil, validateResult{Errors: []string{
 			fmt.Sprintf("body is not valid JSON: %v", err),
 		}})
 	}
@@ -86,24 +101,12 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 		errs = append(errs, decodeErr.Error())
 	}
 	if len(errs) > 0 {
-		return emitValidateResult(validateResult{Errors: errs})
+		return e.stageAndEmit(mState, plannerSessionID, nil, validateResult{Errors: errs})
 	}
 	// Note: plan == nil is legitimate — it's the plan_complete shape
 	// (next_wave=null). plan_complete bypasses the modal entirely
 	// (the mission contract was approved on an earlier iteration;
 	// the `finish` decision is AC-gated, not approval-gated).
-
-	// Resolve mission state via parent session — the planner runs
-	// as a worker under the mission, and mission state lives on
-	// the parent.
-	parent, hasParent := state.Parent()
-	if !hasParent || parent == nil {
-		return toolErr("forbidden", "mission:validate_and_approve requires a planner session under a mission")
-	}
-	mState := FromState(parent)
-	if mState == nil {
-		return toolErr("unavailable", "mission state not initialised on the planner's parent")
-	}
 
 	// Mission-level escape hatch — when the policy explicitly opts
 	// out of approvals (Initial=skip), flip the approved bit and
@@ -118,14 +121,14 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 		}
 		mState.MarkPlanApproved()
 		e.emitPlanApproved(parent, planApprovedPayload{Trigger: "policy_skip"})
-		return emitValidateResult(validateResult{Approved: true})
+		return e.stageAndEmit(mState, plannerSessionID, plan, validateResult{Approved: true})
 	}
 
 	// plan_complete bypasses the modal — finish is AC-gated
 	// downstream, not approval-gated here. The mission's prior
 	// approval still stands.
 	if plan == nil {
-		return emitValidateResult(validateResult{Approved: true})
+		return e.stageAndEmit(mState, plannerSessionID, nil, validateResult{Approved: true})
 	}
 
 	// Decide modal up front so the diff merge knows which path to
@@ -136,7 +139,7 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 		if err := applyPlanACSilent(mState, *plan); err != nil {
 			return toolErr("internal", "apply ac diff (silent): "+err.Error())
 		}
-		return emitValidateResult(validateResult{Approved: true})
+		return e.stageAndEmit(mState, plannerSessionID, plan, validateResult{Approved: true})
 	}
 
 	// Modal needed. Stage the diff so the renderer can overlay the
@@ -206,18 +209,40 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 			mState.SetAutoApproveTools(true)
 		}
 		e.emitPlanApproved(parent, planApprovedPayload{Trigger: "user_modal", Reason: reason})
-		return emitValidateResult(validateResult{
+		return e.stageAndEmit(mState, plannerSessionID, plan, validateResult{
 			Approved: true,
 			Reason:   reason,
 		})
 	}
 	mState.DiscardStagedDiff()
-	return emitValidateResult(validateResult{
+	return e.stageAndEmit(mState, plannerSessionID, nil, validateResult{
 		Approved:   false,
 		Aborted:    aborted,
 		RefineText: refine,
 		Reason:     reason,
 	})
+}
+
+// stageAndEmit records the validate_and_approve outcome on
+// MissionState (the single plan-submission channel + the gate's
+// verdict source) and returns the same envelope to the model. plan is
+// the validated plan staged on approve (nil for plan_complete, a
+// pre-decode failure, or refine/abort — there's no plan to run). The
+// staged `valid` bit derives from the absence of validation errors,
+// matching emitValidateResult's own Valid computation. Phase 6.x.
+func (e *Extension) stageAndEmit(mState *MissionState, plannerSessionID string, plan *Plan, r validateResult) (json.RawMessage, error) {
+	mState.setPlannerSubmission(plannerSubmission{
+		sessionID:  plannerSessionID,
+		called:     true,
+		valid:      len(r.Errors) == 0,
+		errs:       r.Errors,
+		approved:   r.Approved,
+		aborted:    r.Aborted,
+		refineText: r.RefineText,
+		reason:     r.Reason,
+		plan:       plan,
+	})
+	return emitValidateResult(r)
 }
 
 // applyPlanACSilent applies the planner's diff immediately when the

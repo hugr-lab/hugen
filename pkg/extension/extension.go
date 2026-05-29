@@ -603,3 +603,40 @@ type ModelInTurnAdvisor interface {
 	// result, or "" for nothing.
 	OnToolError(ctx context.Context, state SessionState, ev ToolErrorEvent) string
 }
+
+// TurnFinalizeGate lets an extension veto a session's turn
+// finalization — the model emitted a final message with no tool
+// call, so the turn would normally retire — and supply a
+// continuation prompt the runtime injects before re-iterating the
+// SAME session. This is the planner-gate primitive (Phase 6.x): the
+// mission ext implements it so a planner cannot end its turn until it
+// has submitted a plan the user approved via
+// `mission:validate_and_approve`, while keeping the planner's
+// in-session context (a re-plan-from-scratch respawn would discard
+// it).
+//
+// Distinct from [ModelInTurnAdvisor]: that capability is pull-pure
+// (it returns text the session decides where to place), whereas this
+// one is MUTATING / flow-controlling — its verdict changes whether
+// the turn retires or loops. The two were deliberately split rather
+// than bending the "advisor" contract.
+//
+// Contract:
+//   - allow=true (the default for any session without a declared
+//     finalize condition) lets the turn retire normally; continuation
+//     is ignored. Every non-gated session — workers, root chat,
+//     non-mission sessions — returns allow=true.
+//   - allow=false vetoes finalize: the runtime injects continuation
+//     as a system reminder into the SAME session's history and starts
+//     a fresh model iteration instead of retiring. The session enforces
+//     a hard retry backstop so a gate that never allows can't loop
+//     forever — past the cap the turn retires regardless.
+//
+// Implementations are consulted in deps.Extensions order; the first
+// to veto wins (continuation taken from it). A gate that wants to
+// terminate the session (e.g. the user aborted the plan) returns
+// allow=true and arms its own teardown via state — the gate does not
+// own session lifecycle.
+type TurnFinalizeGate interface {
+	GateTurnFinalize(ctx context.Context, state SessionState) (continuation string, allow bool)
+}

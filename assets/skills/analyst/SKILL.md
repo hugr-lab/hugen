@@ -61,8 +61,10 @@ metadata:
           [Recent waves], [Recent verdict], [Available Do
           roles], plus (when research ran) [Research findings]
           / [Resolved user inputs] / [Research AC proposals].
-          Emit ONE `kind=plan` handoff with `next_wave` (or
-          `null` for plan_complete).
+          Submit ONE plan per iteration via
+          `mission:validate_and_approve(body={...})` with
+          `next_wave` (or `null` for plan_complete) — there is
+          NO fenced ```plan``` block; the tool IS the channel.
 
           **Wave-anatomy rule:**
 
@@ -142,12 +144,16 @@ metadata:
           ```
 
           **Approval gate.** The runtime appends a
-          [STOP — pre-flight checklist] (first iter) or a
-          short reminder (subsequent iters) to your task on
-          every iteration carrying `[approval_required]`.
+          [STOP — how to submit your plan] (first iter) or a
+          short reminder (subsequent iters) to your task.
           Follow it: call `mission:validate_and_approve` with
-          your full body, then emit the fenced ```plan```
-          block. Set `requires_reapproval: true` ONLY when
+          your full body; while it returns `valid:false`, fix
+          and re-call; once it returns `valid:true` (and the
+          user approves), reply with just `done` — there is no
+          fenced block. The runtime holds your turn open until
+          a plan is submitted+approved this way, so you cannot
+          accidentally close without one.
+          Set `requires_reapproval: true` ONLY when
           `mission_goal` reworded with a different intent
           materially changed since the last approved plan
           (the runtime auto-promotes ANY contract diff in

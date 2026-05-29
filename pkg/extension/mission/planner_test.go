@@ -128,6 +128,54 @@ type plannerFakeSpawner struct {
 	// on every checker spawn id — the Phase-C equivalent for
 	// verdict=inquire validation in unit tests.
 	autoMarkCheckerInquired bool
+
+	// plannerNotApprovedIters marks planner iterations (1-indexed)
+	// that should simulate a planner closing WITHOUT an approved
+	// validate_and_approve submission — i.e. the TurnFinalizeGate's
+	// retry cap was hit. Phase 6.x: the plan is read from the staged
+	// submission, not a fence, so the harness stages an approved
+	// submission for every planner spawn by default; an entry here
+	// stages a not-approved submission instead, driving the
+	// spawnAndAwaitPlanner PlannerError → synthetic-amend path.
+	plannerNotApprovedIters map[int]bool
+}
+
+// stagePlannerSubmission mirrors what mission:validate_and_approve
+// does in production — it stages the planner's outcome on
+// MissionState — so the fence-less planner read in
+// spawnAndAwaitPlanner has something to consume. Approved by default;
+// plannerNotApprovedIters[step] flips it to a not-approved outcome.
+func (f *plannerFakeSpawner) stagePlannerSubmission(m *MissionState, sessionID string, step int, h Handoff) {
+	if f.plannerNotApprovedIters[step] {
+		m.setPlannerSubmission(plannerSubmission{
+			sessionID: sessionID,
+			called:    true,
+			valid:     true,
+			approved:  false,
+		})
+		return
+	}
+	// A malformed body decodes with an error → stage a not-approved,
+	// invalid submission (mirrors validate_and_approve returning
+	// valid:false), so the loop drives the synthetic-amend / cap path.
+	// A clean decode (incl. nil plan for plan_complete) stages approved.
+	plan, err := DecodePlan(Handoff{Kind: KindPlan, Status: "ok", Body: h.Body})
+	if err != nil {
+		m.setPlannerSubmission(plannerSubmission{
+			sessionID: sessionID,
+			called:    true,
+			valid:     false,
+			errs:      []string{err.Error()},
+		})
+		return
+	}
+	m.setPlannerSubmission(plannerSubmission{
+		sessionID: sessionID,
+		called:    true,
+		valid:     true,
+		approved:  true,
+		plan:      plan,
+	})
 }
 
 func (f *plannerFakeSpawner) spawn(_ context.Context, _ extension.SessionState, req SpawnRequest) (SpawnResult, error) {
@@ -162,6 +210,10 @@ func (f *plannerFakeSpawner) spawn(_ context.Context, _ extension.SessionState, 
 		if f.autoMarkInquired {
 			m.MarkInquired(id)
 		}
+		// Phase 6.x — stage the planner's validate_and_approve outcome
+		// (the single submission channel) so spawnAndAwaitPlanner reads
+		// the plan from MissionState instead of the removed fence.
+		f.stagePlannerSubmission(m, id, step, h)
 	case isChecker:
 		f.mu.Lock()
 		f.checkerStep++
@@ -653,10 +705,13 @@ func TestPlannerLoop_ApprovalGate_RejectsSkippedTool(t *testing.T) {
 	}
 
 	spawner := &plannerFakeSpawner{state: state}
+	// Phase 6.x — every iteration's planner closes without an approved
+	// validate_and_approve submission (the gate's retry cap was hit).
+	spawner.plannerNotApprovedIters = map[int]bool{1: true, 2: true, 3: true}
 	spawner.onPlannerSpawn = func(iteration int) Handoff {
 		switch iteration {
 		case 1:
-			// No MarkApprovalAttempt → runtime rejects.
+			// No approved submission → runtime rejects.
 			return Handoff{
 				Kind:   KindPlan,
 				Status: "ok",
@@ -743,10 +798,13 @@ func TestPlannerLoop_ApprovalGate_RecoversAfterMissedApprovalOnIter2(t *testing.
 	// (MarkPlanApproved flips the bit) and the planner emits a
 	// clean plan.
 	spawner := &plannerFakeSpawner{state: state}
+	// Phase 6.x — iter-1 closes without an approved submission (gate cap
+	// hit) → PlannerError → amend; iter-2 submits an approved plan.
+	spawner.plannerNotApprovedIters = map[int]bool{1: true}
 	spawner.onPlannerSpawn = func(iteration int) Handoff {
 		switch iteration {
 		case 1:
-			// No MarkPlanApproved — runtime gate rejects.
+			// No approved submission — runtime gate rejects.
 			return Handoff{
 				Kind:   KindPlan,
 				Status: "ok",

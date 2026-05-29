@@ -121,11 +121,14 @@ metadata:
           worker reads the prior body + the checker's `issues` and
           fixes the gap instead of redoing the work.
 
-          **Approval gate.** The runtime appends a [STOP — pre-flight
-          checklist] (first iter) or a short reminder (later iters)
-          carrying [approval_required]. Call
-          `mission:validate_and_approve` with your full body, then
-          emit the fenced ```plan``` block. Set
+          **Approval gate.** The runtime appends a [STOP — how to
+          submit your plan] (first iter) or a short reminder (later
+          iters). Call `mission:validate_and_approve` with your full
+          body; while it returns `valid:false`, fix and re-call; once
+          it returns `valid:true` (and the user approves), reply with
+          just `done` — there is NO fenced ```plan``` block; the tool
+          IS the submission channel, and the runtime holds your turn
+          open until a plan is submitted+approved. Set
           `requires_reapproval: true` only when `mission_goal`
           reworded with materially different intent since the last
           approved plan.

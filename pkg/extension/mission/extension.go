@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -78,6 +79,7 @@ var (
 	_ extension.MissionDispatcher  = (*Extension)(nil)
 	_ extension.MissionAutoRunner  = (*Extension)(nil)
 	_ extension.Advertiser         = (*Extension)(nil)
+	_ extension.TurnFinalizeGate   = (*Extension)(nil)
 	_ tool.ToolProvider            = (*Extension)(nil)
 )
 
@@ -146,8 +148,26 @@ func (e *Extension) OnChildFrame(_ context.Context, parent extension.SessionStat
 		if !(f.Payload.Final && f.Payload.Consolidated) {
 			return
 		}
+		// Phase 6.x — the planner submits its plan via the single
+		// channel mission:validate_and_approve (no terminal ```plan```
+		// fence); its final message is just "done". Record the planner
+		// wave's completion from the staged submission rather than
+		// parsing the (non-fence) text — so a bare "done" doesn't become
+		// a parse-error handoff that fails the wave. Other roles
+		// (checker / synthesizer / workers) still emit fences.
+		if strings.HasPrefix(wave, plannerWaveLabelPrefix) {
+			e.ingestPlannerCompletion(m, childSessionID, cur, wave)
+			return
+		}
 		e.ingestHandoff(m, childSessionID, cur, wave, f.Payload.Text, "")
 	case *protocol.SessionTerminated:
+		// Phase 6.x — planner wave: complete from the staged submission
+		// (same as the AgentMessage path) regardless of any Result text,
+		// so a fence-less planner close still resolves the wave.
+		if strings.HasPrefix(wave, plannerWaveLabelPrefix) {
+			e.ingestPlannerCompletion(m, childSessionID, cur, wave)
+			return
+		}
 		if f.Payload.Result == "" {
 			// Nothing to parse — leave the cursor open for now.
 			// Phase A keeps it minimal: a worker that closes
@@ -160,6 +180,64 @@ func (e *Extension) OnChildFrame(_ context.Context, parent extension.SessionStat
 	case *protocol.Error:
 		e.recordError(m, childSessionID, cur, wave, f.Payload.Code, f.Payload.Message)
 	}
+}
+
+// ingestPlannerCompletion records the planner wave's terminal handoff
+// from the staged validate_and_approve submission instead of parsing
+// a fence (Phase 6.x — the planner has no fence; its final message is
+// "done"). The handoff is a completion MARKER for the executor's
+// waitForRefs + status aggregation; spawnAndAwaitPlanner reads the
+// actual plan from MissionState.PlannerSubmission, not this body.
+//
+//   - approved or aborted (fresh submission from THIS planner)
+//     → OK handoff: the wave succeeds, spawnAndAwaitPlanner branches
+//       on approve vs abort.
+//   - anything else (never submitted, invalid past the gate cap)
+//     → error handoff: the wave fails, the planner loop re-spawns
+//       with the gap folded into a synthetic amend verdict.
+//
+// Idempotent on a duplicate terminal frame (first wins) — matches
+// ingestHandoff.
+func (e *Extension) ingestPlannerCompletion(m *MissionState, childSessionID string, cur workerCursor, wave string) {
+	ref, err := MakeRef(cur.Name, wave)
+	if err != nil {
+		e.logger.Warn("mission: ingestPlannerCompletion: bad ref",
+			"child", childSessionID, "name", cur.Name, "wave", wave, "err", err)
+		return
+	}
+	if _, dup := m.Handoffs.Get(ref); dup {
+		return
+	}
+	subRef := SubagentRef{
+		SessionID: childSessionID,
+		Name:      cur.Name,
+		Role:      cur.Role,
+		Skill:     cur.Skill,
+	}
+	sub := m.PlannerSubmission()
+	fresh := sub.called && sub.sessionID == childSessionID
+	if fresh && (sub.approved || sub.aborted) {
+		m.Handoffs.Put(Handoff{
+			Ref:       ref,
+			Kind:      KindPlan,
+			Status:    "ok",
+			Subagent:  subRef,
+			CreatedAt: nowFn(),
+		})
+		return
+	}
+	reason := "planner closed without submitting an approved plan via mission:validate_and_approve"
+	if fresh && sub.called && !sub.valid {
+		reason = "planner closed with an invalid plan (validate_and_approve never returned valid:true)"
+	}
+	m.Handoffs.Put(Handoff{
+		Ref:       ref,
+		Kind:      KindPlan,
+		Status:    "error",
+		Reason:    reason,
+		Subagent:  subRef,
+		CreatedAt: nowFn(),
+	})
 }
 
 // ingestHandoff is the shared parse+record path. Builds the ref

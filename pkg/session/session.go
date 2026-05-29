@@ -2109,6 +2109,44 @@ func (s *Session) toolErrorHint(ctx context.Context, ev extension.ToolErrorEvent
 	return strings.Join(parts, "\n\n")
 }
 
+// consultTurnFinalizeGate walks the registered
+// [extension.TurnFinalizeGate] extensions (deps.Extensions order) and
+// returns the first veto: (continuation, false). When no gate vetoes
+// — the common case, every non-mission session — it returns ("",
+// true) and the turn retires normally. Called from
+// foldAssistantAndMaybeDispatch's no-tool-call branch.
+func (s *Session) consultTurnFinalizeGate(ctx context.Context) (string, bool) {
+	if s.deps == nil {
+		return "", true
+	}
+	for _, ext := range s.deps.Extensions {
+		gate, ok := ext.(extension.TurnFinalizeGate)
+		if !ok {
+			continue
+		}
+		if cont, allow := gate.GateTurnFinalize(ctx, s); !allow {
+			return cont, false
+		}
+	}
+	return "", true
+}
+
+// injectTurnContinuation emits a SystemMessage frame carrying the
+// gate's continuation prompt so the compactor's FrameObserver folds
+// it into the owned history cache (as a user-role reminder) ahead of
+// the next model iteration. Empty continuation is a no-op — the gate
+// vetoed without supplying steer, and the re-iteration alone may
+// nudge the model to act.
+func (s *Session) injectTurnContinuation(ctx context.Context, continuation string) {
+	if strings.TrimSpace(continuation) == "" {
+		return
+	}
+	frame := protocol.NewSystemMessage(s.id, s.agent.Participant(), "turn_continuation", continuation)
+	if err := s.emit(ctx, frame); err != nil {
+		s.logger.Warn("emit turn_continuation", "err", err)
+	}
+}
+
 // truncatePayload caps a tool's raw JSON result for log lines so a
 // large file dump or query response doesn't drown the log. Returns
 // the head of the payload plus a "…(N bytes total)" suffix when

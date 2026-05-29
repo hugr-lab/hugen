@@ -59,6 +59,11 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 	// manifest.
 	if mState := FromState(mission); mState != nil {
 		mState.SetPlannerApproval(manifest.Plan.Approval)
+		// Phase 6.x — stamp the plan role so the TurnFinalizeGate can
+		// recognise the planner child session (state.Role() ==
+		// plannerRole) and hold its turn open until the plan is
+		// approved via validate_and_approve.
+		mState.SetPlannerRole(manifest.Plan.Role)
 		// Phase 5.x-followup — stash the caller's structured inputs
 		// so the researcher / planner / synthesizer prompts can
 		// surface caller-supplied params (file_path, output_format,
@@ -374,6 +379,19 @@ func (e *Extension) emitWaveComplete(mission extension.SessionState, label strin
 func buildFinalText(mission extension.SessionState, synthText string, aborted bool) string {
 	if synthText != "" {
 		return synthText
+	}
+	// Phase 6.x — user-cancelled-at-approval gets its own recap so the
+	// parent sees "you declined the plan", not a generic wave failure.
+	if m := FromState(mission); m != nil {
+		if cancelled, reason := m.CancelInfo(); cancelled {
+			var b strings.Builder
+			b.WriteString("Mission cancelled — you declined the plan at approval.")
+			if r := strings.TrimSpace(reason); r != "" {
+				b.WriteString(" Reason: ")
+				b.WriteString(r)
+			}
+			return b.String()
+		}
 	}
 	var b strings.Builder
 	if aborted {
