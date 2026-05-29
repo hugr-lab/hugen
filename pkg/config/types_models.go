@@ -42,8 +42,16 @@ type ModelsConfig struct {
 	// Configurable per-route — set inside `routes.<intent>:` to
 	// tune individual routes (e.g. checker on a small / flaky model
 	// may want a shorter deadline). The deadline tracks first batch
-	// only; inter-batch stalls / mid-stream hangs are not covered.
+	// only; mid-stream silence is covered by InterBatchDeadline.
 	FirstBatchDeadline time.Duration `mapstructure:"first_batch_deadline"`
+
+	// InterBatchDeadline caps the gap BETWEEN batches once streaming
+	// has begun — a backend that streams a few tokens then wedges
+	// (the first-batch deadline no longer applies). Zero falls back
+	// to DefaultInterBatchDeadline; negative disables. Configurable
+	// per-route. A progressing-but-slow stream is never killed (every
+	// batch restamps the watchdog); only true mid-stream silence is.
+	InterBatchDeadline time.Duration `mapstructure:"inter_batch_deadline"`
 
 	Routes map[string]ModelsConfig `mapstructure:"routes"`
 
@@ -81,4 +89,14 @@ const (
 	// quantised models but surfaces a truly stuck backend in finite
 	// time.
 	DefaultFirstBatchDeadline = 5 * time.Minute
+
+	// DefaultInterBatchDeadline is the package-wide default gap
+	// allowed between batches once a stream is flowing. A model
+	// actively generating emits batches every few seconds; two
+	// minutes of total mid-stream silence means the backend wedged
+	// (observed live: LM Studio stalling on an oversized prefill).
+	// Generous enough to absorb a thinking-model pause, short enough
+	// to beat the multi-minute HTTP timeout that otherwise hangs the
+	// session.
+	DefaultInterBatchDeadline = 2 * time.Minute
 )
