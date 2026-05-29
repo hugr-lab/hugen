@@ -266,8 +266,8 @@ tool_providers:
 #     - data_utils
 #     - data_tables_rows_count
 #   pin:
+#     - hugr-data
 #     - analyst
-#     - data_utils
 
 local_db_enabled: true
 local_db:
