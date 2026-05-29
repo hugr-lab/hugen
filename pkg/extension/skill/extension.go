@@ -169,12 +169,31 @@ type SessionSkill struct {
 }
 
 // SetAdvertiseSplit records the cached estimates for the loaded
-// vs catalogue halves of the next ReportStatus emit. Called
-// from AdvertiseSystemPrompt at the end of each render.
+// vs catalogue halves of the next ReportStatus emit.
 func (h *SessionSkill) SetAdvertiseSplit(loaded, catalog int) {
 	h.advertiseMu.Lock()
 	defer h.advertiseMu.Unlock()
 	h.loadedTokens = loaded
+	h.catalogTokens = catalog
+}
+
+// SetLoadedTokens records just the loaded-side estimate. Phase 6.x
+// split the advertise render across two capabilities — the loaded
+// half (skill bodies + meta + tag advice) renders in
+// AdvertiseSystemPrompt, the catalogue half migrated to the
+// ModelInTurnAdvisor turn_preamble — so each records its own half
+// without clobbering the other.
+func (h *SessionSkill) SetLoadedTokens(loaded int) {
+	h.advertiseMu.Lock()
+	defer h.advertiseMu.Unlock()
+	h.loadedTokens = loaded
+}
+
+// SetCatalogTokens records just the catalogue-side estimate, set by
+// the turn_preamble render. See [SessionSkill.SetLoadedTokens].
+func (h *SessionSkill) SetCatalogTokens(catalog int) {
+	h.advertiseMu.Lock()
+	defer h.advertiseMu.Unlock()
 	h.catalogTokens = catalog
 }
 

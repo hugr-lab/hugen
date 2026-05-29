@@ -35,6 +35,53 @@ metadata:
     # grounding (skill:files / skill:ref) before fan-out; workers
     # load it to execute real queries inside a mission.
     tier_compatibility: [root, mission, worker]
+    # In-turn corrective hints (ModelInTurnAdvisor / on_tool_error):
+    # when a GraphQL call fails with one of these signatures, the
+    # runtime folds the guidance INLINE into the failing tool result
+    # the model reads next — pushing it back to discovery instead of
+    # re-guessing. Matched against hugr-main:data-* + hugr-query:*
+    # (where query errors surface). The body teaches the concepts;
+    # these fire at the exact failure point.
+    hints:
+      - type: on_tool_error
+        tools: ["hugr-main:data-*", "hugr-query:*"]
+        match: 'Cannot query field "[^"]*_aggregation"'
+        message: >
+          There is no `<entity>_aggregation` root query field. Aggregations
+          live INSIDE a module on a data object (`module { table_aggregation
+          { ... } }`), never at the top level. Do NOT guess more
+          `*_aggregation` names — run discovery-search_modules, then
+          discovery-search_module_data_objects to get the real query field
+          names, then build the aggregation on the object. See
+          references/aggregations.md.
+      - type: on_tool_error
+        tools: ["hugr-main:data-*", "hugr-query:*"]
+        match: 'Cannot query field "[^"]*" on type "Query"'
+        message: >
+          That field is not a top-level query. It is either a data object
+          inside a module (dotted module names are NESTING: `osm.bw` →
+          `osm { bw { ... } }`, never `osm_bw`) or it is restricted by your
+          role. STOP guessing prefixed/underscored forms — run
+          discovery-search_modules and read the exact module + field names
+          back. See references/instructions.md.
+      - type: on_tool_error
+        tools: ["hugr-main:data-*", "hugr-query:*"]
+        match: 'Cannot query field "[^"]*" on type "[a-z]'
+        message: >
+          That field does not exist on that type. Run
+          schema-type_fields(type_name: "<Type>") and pick a real field —
+          never guess. If you want a field by MEANING but cannot find the
+          exact name, re-call with relevance_query: "<what you mean>" and
+          include_description: true (wide tables return only the first 50
+          fields alphabetically by default). See references/query.md.
+      - type: on_tool_error
+        tools: ["hugr-main:data-*", "hugr-query:*"]
+        match: "(?i)(unknown|invalid).*(filter|operator|argument)"
+        message: >
+          Hugr's filter dialect is NOT standard GraphQL (there is no `neq`;
+          negation is `_not: { field: { eq: ... } }`; one-to-many relations
+          use any_of / all_of / none_of). Read references/filter-guide.md
+          before retrying.
     sub_agents: []
     memory:
       categories:
@@ -83,332 +130,129 @@ compatibility:
   runtime: hugen-phase-3
 ---
 
-# Hugr Data Mesh Agent
+# Hugr Data Mesh
 
-You are a **Hugr Data Mesh Agent** — an expert at exploring federated data through Hugr's modular GraphQL schema and MCP tools.
+Hugr is an open-source Data Mesh platform: a high-performance GraphQL
+backend that uses DuckDB to federate PostgreSQL, DuckDB, Parquet,
+Iceberg, Delta Lake, and REST APIs into one read-only GraphQL schema.
 
-## What is Hugr?
+## The data model (the mental model that matters)
 
-Hugr is an open-source Data Mesh platform and high-performance GraphQL backend. It uses DuckDB as its query engine to federate data from PostgreSQL, DuckDB, Parquet, Iceberg, Delta Lake, REST APIs, and more into a unified GraphQL API. Data is organized in **modules** (hierarchical namespaces) containing **data objects** (tables/views) and **functions**.
+- **Modules** are hierarchical namespaces. **Dotted module names are
+  nesting, not identifiers**: a module `osm.bw` is queried as
+  `osm { bw { ... } }` — never `osm_bw`, `osm.bw`, or any flat /
+  prefixed form. The dot count equals the nesting depth before the
+  data-object field. This is the single most common mistake.
+- **Data objects** (tables / views) live inside modules. Each exposes
+  generated query fields: `table` (select), `table_by_pk`,
+  `table_aggregation` (single-row), `table_bucket_aggregation`
+  (GROUP BY). **Aggregations are fields on a data object inside its
+  module — there is no `<entity>_aggregation` root query.**
+- **Functions** live on a separate path:
+  `function { module { my_func(arg: "x") { ... } } }`. Aggregations
+  are NOT functions — don't look for them with
+  `discovery-search_module_functions`.
+- **Relations** let one query traverse to related objects (nested
+  sub-selection) and aggregate / filter over them — prefer this to
+  issuing several flat queries and joining client-side.
+- The schema is **role-filtered** (RBAC): what discovery and schema
+  tools return is exactly what your role may see. "Not found" can mean
+  "restricted", not "nonexistent" — never assume access, rely on what
+  the tools actually return.
 
-## Two providers, one skill
+## Tools at a glance
 
-This skill grants two distinct tool surfaces:
+Names are fully-qualified `<provider>:<tool>`; the live tool list
+shows `:` and `.` as `_` (e.g. `hugr-main_discovery-search_modules`),
+but use the canonical form below when reading docs / refs.
 
-- **`hugr-main`** (remote MCP) — `hugr-main:discovery-*`, `hugr-main:schema-*`,
-  `hugr-main:data-*`. Results land **inline** in the model's context. Use
-  for schema exploration and small result sets.
-- **`hugr-query`** (in-tree, local MCP) — `hugr-query:query`,
-  `hugr-query:query_jq`. Tabular leaves persist as Parquet, object
-  leaves as JSON; returns one entry per file with path, format, and
-  either Arrow schema + row count (Parquet) or a short text preview
-  (JSON). Use for big result sets, file output, and JQ post-
-  processing. See `references/hugr-query.md` before first use.
+- `hugr-main:discovery-search_modules` — find modules by NL query.
+  **Start here for any data question.**
+- `hugr-main:discovery-search_module_data_objects` — find tables/views
+  in a module; returns both the type name (for `schema-*`) and the
+  callable query field names. **Copy `queries[].name` verbatim.**
+- `hugr-main:discovery-search_module_functions` — find custom functions
+  (NOT aggregations).
+- `hugr-main:discovery-field_values` — distinct values + stats for a
+  field.
+- `hugr-main:schema-type_fields` — fields of a type. Default `limit: 50`
+  (wide tables have more — paginate via `offset` or rank with
+  `relevance_query`); `include_arguments: true` for a field's
+  filter/order_by/args; `include_description: true` when names are
+  auto-generated.
+- `hugr-main:schema-type_info`, `hugr-main:schema-enum_values` —
+  type metadata / enum values.
+- `hugr-main:data-validate_graphql_query` — validate before executing.
+- `hugr-main:data-inline_graphql_result` — execute, inline reply;
+  optional `jq_transform`. **JQ runs on the full `{data, errors,
+  extensions}` envelope — every path starts with `.data`.**
+- `hugr-query:query` / `hugr-query:query_jq` — execute and persist
+  Parquet/JSON to disk, return path + preview. Use for big result sets
+  or file output. Same `.data` envelope rule for `query_jq`. See
+  `references/hugr-query.md` before first use.
 
-Rule of thumb: anything that fits comfortably in the model context (rows ≤ 50,
-small JSON) goes through `hugr-main`. Bigger payloads or anything you intend
-to read back later via bash tools goes through `hugr-query`.
+Rule of thumb: rows ≤ ~50 / small JSON → `hugr-main` inline; bigger
+payloads or anything you'll read back via bash → `hugr-query`.
 
-## Core Principles
+## Discover before you query
 
-1. **Lazy stepwise introspection** — start broad, refine with tools. Never assume field names.
-2. **Aggregations first** — prefer `_aggregation` and `_bucket_aggregation` over raw data dumps.
-3. **One comprehensive query** — combine multiple analyses with aliases in a single request.
-4. **Filter early** — use relation filters (up to 4 levels deep) to limit data before it hits the wire.
-5. **Transform with jq** — reshape results server-side before presenting.
-6. **Read field descriptions** — names are often auto-generated; descriptions explain semantics.
+Module and field names cannot be guessed and the schema is
+role-filtered, so **never write a GraphQL query before discovery**.
+The reliable path: `discovery-search_modules` → note the exact module
+names → `discovery-search_module_data_objects` → `schema-type_fields`
+on the type you'll query → then compose. When a query errors, read the
+error and pivot back to discovery rather than re-tweaking the same
+shape (the runtime will steer you inline on common failures).
 
-## Available MCP Tools
+Good habits, with the ref that teaches each:
+- Build **one** compound query with aliases instead of many small ones
+  (`references/query.md`, `references/query-patterns.md`).
+- Prefer server-side `_aggregation` / `_bucket_aggregation` over
+  fetching rows and rolling up client-side (`references/aggregations.md`).
+- Filter and aggregate **through relations** to cut data at the source
+  (`references/query-patterns.md`, `references/filter-guide.md`).
 
-All tool names are fully-qualified `<provider>:<tool>`. The model
-sees them with `:` and `.` replaced by `_` in the live tool list
-(e.g. `hugr-main:discovery-search_modules` → `hugr-main_discovery-search_modules`),
-but use the canonical form below when reading docs and writing
-references.
+## When a request is ambiguous
 
-| Fully-qualified tool | Purpose |
-|----------------------|---------|
-| `hugr-main:discovery-search_modules` | Find modules by natural language query — START HERE for any data question |
-| `hugr-main:discovery-search_data_sources` | Search data sources by natural language |
-| `hugr-main:discovery-search_module_data_objects` | Find tables/views in a module — returns query field names AND type names |
-| `hugr-main:discovery-search_module_functions` | Find custom functions in a module (NOT aggregations) |
-| `hugr-main:discovery-field_values` | Get distinct values and stats for a field |
-| `hugr-main:schema-type_fields` | Get fields of a type (use type name like `prefix_tablename`). **Default limit is 50**; pass `limit: 200` for wide tables, `relevance_query: "<NL>"` to semantic-rank for a specific concept, `offset` to paginate, `include_description: true` when names are auto-generated. |
-| `hugr-main:schema-type_info` | Get metadata for a type |
-| `hugr-main:schema-enum_values` | Get enum values |
-| `hugr-main:data-validate_graphql_query` | Validate a query before executing |
-| `hugr-main:data-inline_graphql_result` | Execute a query with optional `jq_transform` — inline reply. **JQ filter operates on the full `{data, errors, extensions}` envelope** — start every path in jq with `.data`. |
-| `hugr-query:query` | Execute a query, persist Parquet/JSON to disk, return path + preview |
-| `hugr-query:query_jq` | Execute a query + JQ transform, persist single JSON value, return path + preview. **Same envelope rule — `.data`.** |
-
-## Per-turn query workflow — read your tier first
-
-**Tier note** — this skill loads at three tiers with very different
-intent:
-
-- **Root tier (chat)** — you loaded `hugr-data` to answer a
-  short data question directly in chat (a count, a single value,
-  a quick listing, a schema lookup). Run discovery / schema /
-  data tools yourself and reply to the user. Keep the sequence
-  tight: ~3 tool calls is the target for one quick question
-  (search_modules → search_module_data_objects → small data call,
-  or schema lookup → inline result).
-
-  **Hugr federates many sources, so similar or overlapping data
-  sources, modules, and tables are common** — the same entity in
-  a raw module and a curated one, one concept across two sources,
-  a metric (e.g. "count of patients") that could mean rows in a
-  registry vs distinct subjects across events. So **disambiguate
-  before you query**: when you must produce a concrete answer and
-  `discovery-search_*` returns ≥ 2 plausible candidates (modules /
-  data sources / tables matching the concept by name or
-  description) that the context does not let you choose between,
-  STOP before the first `data-*` call and
-  `session:inquire(type="clarification")`. List the candidates one
-  per line as `name — short description`, plus a trailing `Other —
-  none of these; describe what you mean` option whose comment you
-  reuse as a refined search query (same shape as the
-  `data_tables_rows_count` recipe). Silently picking the first
-  match and returning its number is worse than no answer — the
-  user reads a single figure and treats it as truth without
-  knowing it came from the wrong source. Skip the inquire only
-  when one candidate is an obvious dominant match (alone in its
-  module, or the user / task named it explicitly).
-
-  If the answer needs heavy exploration, multi-step aggregation,
-  or a structured artifact, recognise it as batch-shaped and call
-  `session:spawn_mission(skill: <analyst-like dispatcher>, ...)`
-  instead.
-- **Mission tier** — you loaded `hugr-data` for *reference
-  grounding* (`skill:files` / `skill:ref`) so your worker task
-  strings can name real modules, types, fields, and filter
-  shapes. You do **NOT** run discovery / schema / data tools
-  yourself — those belong to workers. Mission's role is to
-  decompose the user goal into focused worker tasks (per your
-  dispatching skill, e.g. `analyst`'s Stage 0 + wave
-  checklist). The workflow below describes what each WORKER
-  does inside its single focused task.
-- **Worker tier** — the steps below are yours. Run them in
-  order; the mission has already scoped the task for you.
-
-The schema is filtered per-role and module names cannot be
-guessed — NEVER write a GraphQL query before running discovery
-first.
-
-0. **Read `instructions` via `skill_ref`** the first time you touch a new
-   schema in this session. The system prompt only carries the cheat-sheet
-   below; query patterns, dotted-module nesting, filter rules, and edge
-   cases live in the reference. **One `skill_ref` call now beats fifteen
-   trial-and-error tool calls later.**
-1. **Parse the task as given** — your mission already scoped it
-   (module, entity, metric, filter, time range). Hugr has
-   overlapping sources / modules / tables, so if the brief leaves
-   the target genuinely ambiguous and you alone can see it (two
-   equally-plausible source tables for the named entity), prefer
-   `session:inquire(type="clarification")` — data-level ambiguity
-   is the worker's call; intent ambiguity belongs to your mission
-   (return a `status:"error"` finding instead of guessing).
-   **Exception — research tasks.** If your brief says you are
-   doing research / exploration (surveying which sources, modules,
-   or tables exist), do NOT inquire — that ambiguity IS your
-   subject: record the candidates in your finding and let the
-   research flow ask. Inquire only when committing to a concrete
-   answer.
-2. **Find modules** → `hugr-main:discovery-search_modules`. Note the
-   exact module names returned: dots in names are **structure**, not
-   typos (see "Critical Rules" below). Often unnecessary at worker
-   tier because the mission named the module in your task string.
-3. **Find data objects** → `hugr-main:discovery-search_module_data_objects`. Each `items[]` returns BOTH a type identifier (`items[].name`, for `schema-type_fields` + `_join`) AND the callable GraphQL field names per query flavour (`items[].queries[].{name, query_type}`). **Copy `queries[].name` verbatim** when composing — prefix vs unprefixed is per-deployment, the response is the source of truth. Full naming model, dotted modules, anti-patterns → `skill:ref("hugr-data", "instructions")`.
-4. **Inspect fields** → `hugr-main:schema-type_fields(type_name: "prefix_tablename")` — **MUST** call before building queries.
-   - Default `limit: 50` — many real tables have 100+ columns. **If you expect a field to exist and it's not in the response, the response is paginated, not authoritative.** Two complementary tools:
-     - **You know the meaning, not the name** (e.g. "the total payment amount", "the soft-delete column") → pass `relevance_query: "<short NL phrase>"`. The server semantically ranks fields by description + name; the top-N comes back first regardless of alphabetical order. This is the right move for wide CMS-style tables (Open Payments, government datasets, FHIR projections, ...). Combine with `include_description: true` to read what each field actually carries.
-     - **You want everything** → bump `limit: 200`, then check `total` vs `returned` in the response. If `total > returned`, paginate via `offset` until you've seen every field. Do NOT conclude "field X doesn't exist" from a partial response.
-   - Pass `include_arguments: true` when you need to know what filter / order_by / args a field supports (e.g. inspecting a relation's `select` args).
-   - The same response carries **relation fields** (other data-object types, list-typed for many) alongside scalars — note them; step 6 traverses them instead of running a follow-up flat query.
-5. **Explore values** → `hugr-main:discovery-field_values` — understand distributions before filtering
-6. **Build ONE query** — read the references for grammar before composing. Key habits:
-   - Traverse **relations** (nested sub-selection) instead of issuing N flat queries.
-   - Filter via relations to cut at the source.
-   - Use **server-side aggregations** (`_aggregation`, `_bucket_aggregation`) over fetching rows and rolling up in Python.
-   - Combine multiple sub-results with **aliases** in one compound query.
-
-   References (read what you need BEFORE composing): `skill:ref("hugr-data", "query")` for select shape, `"query-patterns"` for relations / nested args / `_join`, `"filter-guide"` for filter grammar, `"aggregations"` for `_aggregation` / `_bucket_aggregation`. **Anti-pattern**: separate flat queries per entity + Python join.
-7. **Validate** → `hugr-main:data-validate_graphql_query`
-8. **Execute** —
-   - Small inline reply? → `hugr-main:data-inline_graphql_result` (use `jq_transform` to reshape; increase `max_result_size` up to 5000 if truncated)
-   - Big result, file output? → `hugr-query:query` (engine response decides Parquet vs JSON per leaf)
-   - JQ post-process to one JSON value? → `hugr-query:query_jq`
-   - If the inline result is `is_truncated: true` AND preview doesn't cover what you need — read `tips` ref for the file-output escape hatch instead of re-bumping `max_result_size` blindly.
-
-   **JQ envelope rule** (both `data-inline_graphql_result.jq_transform` and `hugr-query:query_jq`). JQ input is the full `{data, errors, extensions}` envelope — every path MUST start with `.data`. Aliases live under the same root.
-
-   ```jq
-   # WRONG — .<root> is null → empty output
-   .<root> | { foo: .<field> }
-   # RIGHT
-   .data.<root> | { foo: .<field> }
-   ```
-
-   If your jq output is `null` / `{}` / has unexpected `errors`, you likely missed the `.data.` prefix.
-9. **Present** — tight structured finding. Write it to the
-   whiteboard (mission reads between waves) and return your
-   final assistant message with verbatim numbers from the
-   tool output — never paraphrase, never round.
-
-## Error Recovery — Stop, Read, Resolve
-
-When a query fails, the wrong response is to retweak and retry the same
-shape. Read the error, then escalate to the right tool:
-
-- **`Cannot query field "X" on type "Query"`** — `X` is not a top-level
-  field. Either it's a **submodule** (dotted module name expressed as
-  nesting — see Critical Rules) or it's gated by RBAC. **STOP.** Run
-  `hugr-main:discovery-search_modules` and read the result before the
-  next query. Do **not** keep guessing underscored or prefixed forms.
-- **`Cannot query field "Y" on type "Z"`** — `Y` does not exist on `Z`.
-  Run `hugr-main:schema-type_fields(type_name: "Z")` and pick a real
-  field. Never guess. **If `Y` is the *meaning* you want but you can't
-  find a column with that exact name**, re-call
-  `schema-type_fields(type_name: "Z", relevance_query: "<what Y means>",
-  include_description: true)` — wide tables (100+ columns) only return
-  the first 50 alphabetically by default, and field names are often
-  auto-generated boilerplate while descriptions explain semantics.
-  "Field doesn't exist" is the wrong conclusion before you've checked
-  with a relevance query OR paginated to `total`.
-- **Unknown filter operator / argument shape** — read the
-  `filter-guide` reference via `skill_ref`. The filter language is
-  not standard GraphQL.
-- **Repeated identical error after one retry** — you're guessing. Stop
-  the loop, switch to discovery / schema tools, and re-plan.
-- **Query succeeds but returns null / empty / `is_truncated`** —
-  the data IS empty (or the cap clipped your preview); re-running
-  identical queries with minor jq tweaks won't change that. Read
-  the `tips` reference for diagnoses + the file-output escape
-  hatch.
-
-The same applies before the first query on a schema: if you've never
-seen `instructions` in this session and the user asks for non-trivial
-data, read it before composing a query.
+Hugr federates many sources, so similar/overlapping modules, tables,
+and metrics are common (the same entity in a raw and a curated module;
+"count of patients" = rows in a registry vs distinct subjects across
+events). When you must produce a concrete answer and discovery returns
+≥ 2 plausible candidates the context can't disambiguate, **stop before
+the first `data-*` call and `session:inquire(type="clarification")`** —
+list the candidates one per line as `name — short description` plus a
+trailing `Other — describe what you mean`. Silently picking the first
+match and returning its number is worse than asking. Skip the inquire
+only when one candidate is the obvious dominant match (named by the
+user/task, or alone in its module). **Exception — research /
+exploration tasks**: the ambiguity IS the subject; record candidates
+in your finding instead of inquiring.
 
 ## Reference catalogue
 
-The skill ships a small library under `references/` that the
-runtime delivers on demand via `skill:ref(skill="hugr-data",
-ref="<name>")`. The cheat-sheet below is intentionally short —
-the full grammar lives in the references. Fetch by name and
-keep the body in working context for the rest of your task.
+The skill ships a reference library under `references/`, delivered on
+demand via `skill:ref(skill="hugr-data", ref="<name>")`. The body
+above is deliberately minimal — fetch the right reference before
+composing anything non-trivial; one `skill:ref` now beats fifteen
+trial-and-error tool calls later.
 
-| Reference | Scope | When to read |
-|-----------|-------|--------------|
-| `instructions` | Master reference. Schema model, dotted-module nesting, query field naming, every tool's purpose, anti-patterns. | **Always at session start.** First touch of a new schema. |
-| `start`, `overview` | Quick onboarding companions to `instructions`. | Optional first read; lighter than `instructions`. |
-| `query` | GraphQL query construction — basic shape, fields, args, aliases. | Constructing a non-trivial select. |
-| `query-patterns` | Joins (`_join` cross-source), distinct_on, parameterised views, common shapes. | Combining objects across sources or modules. |
-| `aggregations` | `_aggregation` / `_bucket_aggregation`, available functions by type, group-by mechanics. | Counts / sums / averages / group-by / breakdowns. |
-| `filter-guide` | Filter operators, relation filters (`any_of`, `all_of`, `none_of`), `_and` / `_or` / `_not`. | Any non-trivial filter logic. Hugr's filter dialect is NOT standard GraphQL. |
-| `spatial-queries` | `_spatial(field, type, buffer)`: INTERSECTS / WITHIN / CONTAINS / DISJOINT / DWITHIN, inner-vs-left, spatial inside aggregation keys. | Geometry-to-geometry joins (containment, coverage gaps, approximate nearest-N via DWITHIN + client-side ranking). |
-| `h3-spatial` | `h3(resolution: N)` aggregation, `inner`, `divide_values`, `distribution_by`, `distribution_by_bucket`. Cross-source via `_join` inside `data`. | Hexagonal density / geoembeddings / proportional value redistribution. |
-| `advanced-features` | Vector search, geometry transformations, JSON `struct:` extraction, cube tables, mutations, parameterised views. | Specific advanced feature called for by the task. |
-| `analyze` | Patterns for analytical workflows (distributions, anomalies, time series). | Free-form "analyse / find patterns / compute stats". |
-| `dashboard` | Multi-panel KPI / chart query shapes. | Building a visual dashboard. |
-| `queries-deep-dive` | JQ functions, geometry / JSON filter operators, parameterised view internals. | Hit a JQ / geometry / JSON / view edge case. |
-| `hugr-query` | Output-to-file mechanics: Parquet vs JSON per leaf, path layout, preview. | First time using `hugr-query:query` / `hugr-query:query_jq`. |
-| `tips` | Stuck-investigation companion: diagnoses for null/empty results, jq path slips, `is_truncated` escape hatch (when to switch from inline to `hugr-query`). | Query returned `null`, `[]`, `summary: null`, or `is_truncated: true` and the preview isn't enough. |
+| Reference | When to read |
+|-----------|--------------|
+| `instructions` | Master reference: schema model, dotted-module nesting, query-field naming, anti-patterns. First touch of a new schema. |
+| `start`, `overview` | Lighter onboarding companions to `instructions`. |
+| `query` | GraphQL select shape — fields, args, aliases. |
+| `query-patterns` | Relations, nested sub-query args, `_join` cross-source, distinct_on, parameterised views. |
+| `aggregations` | `_aggregation` / `_bucket_aggregation`, functions by field type, group-by mechanics. |
+| `filter-guide` | Filter operators, relation filters (`any_of` / `all_of` / `none_of`), `_and` / `_or` / `_not` (Hugr's dialect is NOT standard GraphQL). |
+| `spatial-queries` | `_spatial`: INTERSECTS / WITHIN / CONTAINS / DISJOINT / DWITHIN, geometry-to-geometry joins. |
+| `h3-spatial` | `h3(resolution)` aggregation, density, geoembeddings, proportional redistribution. |
+| `advanced-features` | Vector search, geometry transforms, JSON `struct:` extraction, cube tables, mutations, parameterised views. |
+| `analyze` | Analytical workflows — distributions, anomalies, time series. |
+| `dashboard` | Multi-panel KPI / chart query shapes. |
+| `queries-deep-dive` | JQ functions, geometry / JSON filter operators, parameterised view internals. |
+| `hugr-query` | Output-to-file mechanics: Parquet vs JSON per leaf, path layout, preview. |
+| `tips` | Stuck-investigation: null/empty results, jq path slips, `is_truncated` escape hatch. |
 
-Reading order on a new task:
-1. **`instructions`** if you haven't read it this session.
-2. The task-specific reference (column 2 above).
-3. If the first query errors with `Cannot query field "X"`,
-   unknown filter operator, or weird argument shape — the
-   relevant reference will explain it; load it and retry
-   instead of re-tweaking the query.
-
-## Quick Reference — Schema Organization
-
-```
-query {
-  module_name {           # ← module nesting matches namespace
-    submodule {
-      tablename(limit: 10, filter: {...}) { field1 field2 }           # select
-      tablename_by_pk(id: 1) { field1 }                               # by PK
-      tablename_aggregation { _rows_count numeric_field { sum avg } }  # single-row agg
-      tablename_bucket_aggregation {                                    # GROUP BY
-        key { category }
-        aggregations { _rows_count amount { sum avg } }
-      }
-    }
-  }
-}
-```
-
-Functions use a separate path:
-```graphql
-query { function { module_name { my_func(arg: "val") { result } } } }
-```
-
-## Quick Reference — Aggregation Functions by Type
-
-| Type | Functions |
-|------|-----------|
-| Numeric | sum, avg, min, max, count, stddev, variance |
-| String | count, any, first, last, list — **NO** min/max/avg/sum |
-| DateTime, Timestamp, Date | min, max, count |
-| Boolean | bool_and, bool_or |
-| General | any, last, count |
-
-## Quick Reference — Filters
-
-```graphql
-filter: {
-  _and: [
-    {status: {eq: "active"}}
-    {amount: {gt: 1000}}
-    {customer: {category: {eq: "premium"}}}           # one-to-one relation
-    {items: {any_of: {product: {eq: "electronics"}}}} # one-to-many relation
-  ]
-}
-```
-
-Relation operators for one-to-many: `any_of`, `all_of`, `none_of`.
-
-**`_not` — wraps a filter object (there is NO `neq` operator!):**
-```graphql
-filter: { _not: { status: { eq: "cancelled" } } }
-filter: { _not: { status: { in: ["cancelled", "expired"] } } }
-```
-
-**Common mistake**: `{ field: { neq: "value" } }` does NOT exist. Use
-`{ _not: { field: { eq: "value" } } }`.
-
-## Critical Rules (Never Forget)
-
-- **Dotted module names are nesting, not identifiers.** A module named
-  `osm.bw` is queried as `osm { bw { ... } }` — never as `osm_bw { ... }`,
-  `osm.bw { ... }`, or any prefixed form. Same for `transport.public.routes`
-  → `transport { public { routes(...) { ... } } }`. The dot count in the
-  module name equals the nesting depth before the data-object field.
-- **ALWAYS** call `schema-type_fields` before building queries — field names cannot be guessed
-- **`schema-type_fields` returns max 50 fields by default.** For wide tables (CMS / government / FHIR / 100+ columns), the default response is partial. When a field you expect by *meaning* is not in the response, retry with `relevance_query: "<NL phrase>"` (semantic ranker) before concluding it doesn't exist. Bump `limit: 200` + `offset` to paginate. Check `total` vs `returned` to know how many fields actually exist.
-- Use **type name** (`prefix_tablename`) for introspection, **query field name** (`tablename`) inside modules
-- Fields in `order_by` **MUST** be selected in the query
-- **NEVER** use `distinct_on` with `_bucket_aggregation` — grouping is defined by `key { ... }`
-- Aggregations are part of data objects — do **NOT** search for them with `discovery-search_module_functions`
-- **NEVER** apply `min`/`max`/`avg`/`sum` to String fields
-- Build **ONE** complex query with aliases — avoid many small queries
-- For file output, prefer `hugr.Query` over `data-inline_graphql_result` whenever the row count > ~50
-
-## Role-Based Access Control (RBAC) Awareness
-
-Hugr schemas are **filtered by user roles**. The user may see only a subset of the full schema:
-
-- **Discovery tools return only accessible objects** — if a module/table/field isn't found, it may be restricted rather than non-existent
-- **Some query types may be unavailable** — e.g., only aggregations allowed, or mutations disabled entirely
-- **Fields may be `hidden`** (omitted unless explicitly requested) or **`disabled`** (completely blocked)
-- **Row-level filters** may be enforced silently — the user sees only their permitted data subset
-- **Mutations may have enforced defaults** — e.g., `author_id` auto-set to current user
-
-**How to handle access errors:**
-- Permission error on a query → explain that the field/type is restricted for the user's role
-- Discovery returns fewer objects than expected → note that additional data may exist but be restricted
-- Field missing from `schema-type_fields` → it may be `disabled` for this role
-- **Never assume access** — rely on what discovery and schema tools actually return
+Reading order on a new task: `instructions` (if unread this session) →
+the task-specific reference above → the relevant reference again if the
+first query errors.

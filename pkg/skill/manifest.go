@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -308,6 +309,117 @@ type HugenMetadata struct {
 	// (a skill cannot auto-load where it would be forbidden
 	// manually). Phase 4.2.2 §3.
 	TierCompatibility []string `json:"tier_compatibility,omitempty" yaml:"tier_compatibility,omitempty"`
+
+	// Hints is an extensible, typed list of in-turn advisories the
+	// skill contributes while loaded. Each entry's Type selects a
+	// [extension.ModelInTurnAdvisor] variation; the first (Phase 6.x)
+	// is `on_tool_error`, which appends Message inline to a matching
+	// failing tool result. One umbrella key — future variations
+	// (e.g. pre_tool_call) add a new Type to the SAME list rather
+	// than a new top-level key. Unknown Type → validate warns + the
+	// runtime ignores it (forward-compat).
+	Hints []Hint `json:"hints,omitempty" yaml:"hints,omitempty"`
+}
+
+// HintType discriminates a [Hint] across the
+// [extension.ModelInTurnAdvisor] variations. Phase 6.x ships one.
+type HintType = string
+
+const (
+	// HintTypeOnToolError appends Message to a failing tool result
+	// inline (same turn), matched by tool-name glob + optional error
+	// text regex / structured code.
+	HintTypeOnToolError HintType = "on_tool_error"
+)
+
+// Hint is one typed in-turn advisory. The active fields depend on
+// Type; for `on_tool_error`:
+//
+//   - Tools — tool-name match: exact names and/or globs
+//     (e.g. "hugr-main:data-*"). Matching is form-insensitive — the
+//     `:` / `.` separators and the model-visible `_` form compare
+//     equal. Empty → any tool while this skill is loaded.
+//   - Match — optional Go regexp over the error text (the runtime-
+//     side message and/or the provider error-result body). Empty →
+//     any error for the named tools.
+//   - Code — optional match on the structured ToolError.Code
+//     ("io" / "not_found" / …) for runtime-side errors.
+//   - Message — the guidance appended to the failing tool result.
+type Hint struct {
+	Type    HintType `json:"type" yaml:"type"`
+	Tools   []string `json:"tools,omitempty" yaml:"tools,omitempty"`
+	Match   string   `json:"match,omitempty" yaml:"match,omitempty"`
+	Code    string   `json:"code,omitempty" yaml:"code,omitempty"`
+	Message string   `json:"message" yaml:"message"`
+
+	// re is the compiled Match, populated at parse (validateHugen).
+	// nil when Match is empty (match-any) or before compilation.
+	re *regexp.Regexp
+}
+
+// canonToolName folds a tool name to a separator-insensitive form so
+// the authored canonical spelling ("hugr-main:discovery-search") and
+// the model-visible spelling ("hugr-main_discovery-search") compare
+// equal. Both `:` and `.` collapse to `_`.
+func canonToolName(s string) string {
+	return strings.NewReplacer(":", "_", ".", "_").Replace(s)
+}
+
+// matchesTool reports whether the hint's Tools globs cover toolName.
+// Empty Tools → matches any tool (scope = this skill is loaded).
+func (h Hint) matchesTool(toolName string) bool {
+	if len(h.Tools) == 0 {
+		return true
+	}
+	cand := canonToolName(toolName)
+	for _, pat := range h.Tools {
+		if ok, _ := path.Match(canonToolName(pat), cand); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// MatchToolError returns the hint's Message when it matches a failing
+// tool result, or "" otherwise. Used by the skill extension's
+// [extension.ModelInTurnAdvisor.OnToolError]. msg is the runtime-side
+// error text (empty for the provider embedded-error path); resultText
+// is the raw provider result body (empty for runtime errors); the
+// regex, when present, matches against either. A non-on_tool_error
+// hint never matches here.
+func (h Hint) MatchToolError(toolName, code, msg, resultText string) string {
+	if h.Type != HintTypeOnToolError {
+		return ""
+	}
+	if !h.matchesTool(toolName) {
+		return ""
+	}
+	if h.Code != "" && !strings.EqualFold(h.Code, code) {
+		return ""
+	}
+	if re := h.compiled(); re != nil {
+		if !re.MatchString(msg) && !re.MatchString(resultText) {
+			return ""
+		}
+	}
+	return strings.TrimSpace(h.Message)
+}
+
+// compiled returns the parse-time-compiled regex, lazily compiling
+// Match as a cold-path fallback for Hints constructed outside Parse
+// (e.g. tests). nil when Match is empty.
+func (h Hint) compiled() *regexp.Regexp {
+	if h.re != nil {
+		return h.re
+	}
+	if strings.TrimSpace(h.Match) == "" {
+		return nil
+	}
+	re, err := regexp.Compile(h.Match)
+	if err != nil {
+		return nil // Parse rejects invalid regex; this is unreachable in prod.
+	}
+	return re
 }
 
 // AllRequires returns the merged transitive-dependency list,
@@ -1143,6 +1255,34 @@ func (m *Manifest) validateHugen() error {
 		}
 		if r.MaxIterations < 0 {
 			return fmt.Errorf("metadata.hugen.mission.research.max_iterations = %d: must be >= 0", r.MaxIterations)
+		}
+	}
+
+	// Phase 6.x — metadata.hugen.hints. Fail loud on a bad regex so
+	// a typo surfaces at hugen-skill-validate, not at the cold tool-
+	// error path. Compile here and stash the result on the stored
+	// Hint so the runtime never recompiles. An unknown Type is
+	// tolerated (forward-compat): no message text + no regex compile,
+	// the runtime's variation dispatch simply ignores it.
+	for i := range m.Hugen.Hints {
+		h := &m.Hugen.Hints[i]
+		if h.Type == "" {
+			return fmt.Errorf("metadata.hugen.hints[%d].type is required", i)
+		}
+		if h.Type != HintTypeOnToolError {
+			// Forward-compat: keep the entry, skip type-specific
+			// validation; the runtime ignores unknown variations.
+			continue
+		}
+		if strings.TrimSpace(h.Message) == "" {
+			return fmt.Errorf("metadata.hugen.hints[%d] (type=%s): message is required", i, h.Type)
+		}
+		if strings.TrimSpace(h.Match) != "" {
+			re, err := regexp.Compile(h.Match)
+			if err != nil {
+				return fmt.Errorf("metadata.hugen.hints[%d].match: invalid regexp %q: %v", i, h.Match, err)
+			}
+			h.re = re
 		}
 	}
 	return nil

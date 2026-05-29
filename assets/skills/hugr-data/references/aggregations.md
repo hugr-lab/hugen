@@ -171,3 +171,18 @@ _join(fields: ["category_id"]) {
 - `any`, `last` — arbitrary value
 - DateTime, Timestamp, Date — `min`, `max`, `count` only (NO sum/avg)
 - JSON fields support `path` parameter for nested aggregation
+
+## Functions by field type
+
+Which aggregations are valid depends on the field's type — applying a
+numeric function to a string is an error.
+
+| Field type | Valid functions |
+|------------|-----------------|
+| Numeric | `sum`, `avg`, `min`, `max`, `count`, `stddev`, `variance` |
+| String | `count`, `any`, `first`, `last`, `list` — **NO** `min` / `max` / `avg` / `sum` |
+| DateTime / Timestamp / Date | `min`, `max`, `count` |
+| Boolean | `bool_and`, `bool_or` |
+| General (any type) | `any`, `last`, `count` |
+
+Always available on the aggregation node itself: `_rows_count`.
