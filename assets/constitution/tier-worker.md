@@ -34,6 +34,14 @@ domain tools. Worker-specific notes:
   recipe instead of doing the work yourself. The recipe runs as
   its own spawn and returns a single result — don't replicate its
   internal steps beforehand.
+- **Reuse beats rebuild — search before you compose.** Before
+  building a non-trivial procedure from scratch, search the skill
+  catalogue for an existing match — even when nothing relevant is
+  advertised in `## Available skills` (only a small ranked subset
+  is). Browse by category first, then the skills inside; a proven
+  recipe is almost always cheaper and more reliable than
+  re-deriving the steps. Only compose from raw tools when the
+  search comes back empty.
 - Your role / dispatching skill may declare `autoload_skills` —
   those skills are already loaded by the runtime BEFORE your
   first turn (visible in your `## Loaded skills` block). Skip

@@ -117,6 +117,65 @@ func (m *SkillManager) Get(ctx context.Context, name string) (Skill, error) {
 	return m.store.Get(ctx, name)
 }
 
+// Search runs semantic discovery over the store when it supports it
+// (the Phase-6.2.db dynamic backend). Returns ErrNoEmbedder when the
+// store has no searchable backend or no embedder — callers fall back
+// to a keyword/substring scan over List. The result set is already
+// semantically ranked + capped at opts.Limit.
+func (m *SkillManager) Search(ctx context.Context, query string, opts SearchOpts) ([]Skill, error) {
+	if s, ok := m.store.(skillSearcher); ok {
+		return s.Search(ctx, query, opts)
+	}
+	return nil, ErrNoEmbedder
+}
+
+// skillSearcher is the optional semantic-discovery surface a store
+// backend may implement (only *Store with a dynamic backend does).
+type skillSearcher interface {
+	Search(ctx context.Context, query string, opts SearchOpts) ([]Skill, error)
+}
+
+// CatalogMembers returns the recipes inside a recipe catalog — the
+// step-2 of two-step discovery. Delegates to the store; returns
+// ErrSkillNotFound when the catalog doesn't exist, nil when the named
+// skill is not a recipe catalog, and ErrUnsupportedBackend when the
+// store can't resolve membership.
+func (m *SkillManager) CatalogMembers(ctx context.Context, name string) ([]Skill, error) {
+	c, ok := m.store.(catalogMemberLister)
+	if !ok {
+		return nil, ErrUnsupportedBackend
+	}
+	return c.CatalogMembers(ctx, name)
+}
+
+// catalogMemberLister is the optional catalog-expansion surface a
+// store backend may implement (only *Store does).
+type catalogMemberLister interface {
+	CatalogMembers(ctx context.Context, name string) ([]Skill, error)
+}
+
+// Uninstall removes a dynamic skill's bundle + index row via the
+// store (the only explicit removal path; bandit hygiene demotes but
+// never deletes). Returns ErrUnsupportedBackend when the store has no
+// dynamic backend. Bumps the generation so sessions re-resolve.
+func (m *SkillManager) Uninstall(ctx context.Context, name string) error {
+	u, ok := m.store.(skillUninstaller)
+	if !ok {
+		return ErrUnsupportedBackend
+	}
+	if err := u.Uninstall(ctx, name); err != nil {
+		return err
+	}
+	m.BumpGen()
+	return nil
+}
+
+// skillUninstaller is the optional removal surface a store backend may
+// implement (only *Store with a dynamic backend does).
+type skillUninstaller interface {
+	Uninstall(ctx context.Context, name string) error
+}
+
 // Gen returns the current agent-level generation counter — the
 // monotonic stamp [SkillManager.Refresh] / [SkillManager.Publish]
 // bumps. Per-session handles use this to compute their own

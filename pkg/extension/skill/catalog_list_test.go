@@ -163,6 +163,91 @@ func TestCatalogList_KeywordFilter(t *testing.T) {
 	}
 }
 
+func TestCatalogList_TypeFilter(t *testing.T) {
+	ext, state := newCatalogListFixture(t)
+	// change-report is task-eligible (not a recipe catalog) → "recipe".
+	got := callCatalogList(t, ext, state, `{"type":"recipe"}`)
+	if len(got.Skills) != 1 || got.Skills[0].Name != "change-report" {
+		t.Fatalf("type=recipe = %+v, want only change-report", got.Skills)
+	}
+	// plain-helper has no task block → "skill".
+	got = callCatalogList(t, ext, state, `{"type":"skill"}`)
+	if len(got.Skills) != 1 || got.Skills[0].Name != "plain-helper" {
+		t.Fatalf("type=skill = %+v, want only plain-helper", got.Skills)
+	}
+	// No recipe catalogs in this fixture.
+	got = callCatalogList(t, ext, state, `{"type":"catalog"}`)
+	if len(got.Skills) != 0 {
+		t.Fatalf("type=catalog = %+v, want empty", got.Skills)
+	}
+}
+
+// newCatalogWithinFixture adds a recipe-catalog skill (`data-catalog`)
+// whose allowed-tools name `change-report` as a member, alongside the
+// member recipe itself. No dynamic backend → CatalogMembers resolves
+// membership from the manifest (the fallback path).
+func newCatalogWithinFixture(t *testing.T) (*Extension, *fixture.TestSessionState) {
+	t.Helper()
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"change-report": []byte(`---
+name: change-report
+description: Summarise what changed in a dataset over a window.
+metadata:
+  hugen:
+    task:
+      eligible: true
+      kind: worker
+      goal_summary: Produce a change report.
+    tier_compatibility: [worker]
+---
+body
+`),
+		"data-catalog": []byte(`---
+name: data-catalog
+description: Catalog grouping data recipes.
+allowed-tools:
+  - provider: task
+    tools: [change-report]
+metadata:
+  hugen:
+    recipe_catalog: true
+    tier_compatibility: [root, mission, worker]
+---
+body
+`),
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "agent-within")
+	state := fixture.NewTestSessionState("ses-within").WithDepth(2)
+	if err := ext.InitState(context.Background(), state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	return ext, state
+}
+
+func TestCatalogList_Within(t *testing.T) {
+	ext, state := newCatalogWithinFixture(t)
+	// within=data-catalog → its one member recipe (manifest-derived
+	// fallback, no dynamic backend).
+	got := callCatalogList(t, ext, state, `{"within":"data-catalog"}`)
+	if len(got.Skills) != 1 || got.Skills[0].Name != "change-report" {
+		t.Fatalf("within=data-catalog = %+v, want only change-report", got.Skills)
+	}
+	if !got.Skills[0].TaskEligible {
+		t.Errorf("member should report task_eligible")
+	}
+	// within an unknown catalog → empty, not an error.
+	got = callCatalogList(t, ext, state, `{"within":"nope"}`)
+	if len(got.Skills) != 0 {
+		t.Fatalf("within=nope = %+v, want empty", got.Skills)
+	}
+	// within a non-catalog skill → empty (change-report isn't a catalog).
+	got = callCatalogList(t, ext, state, `{"within":"change-report"}`)
+	if len(got.Skills) != 0 {
+		t.Fatalf("within=change-report (non-catalog) = %+v, want empty", got.Skills)
+	}
+}
+
 func TestCatalogList_BadRequest(t *testing.T) {
 	ext, state := newCatalogListFixture(t)
 	_, err := ext.Call(extension.WithSessionState(context.Background(), state),

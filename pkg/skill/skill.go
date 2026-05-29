@@ -38,6 +38,13 @@ type Skill struct {
 //     deployment's Hub, fetching the per-agent-type bundle.
 //   - **local** — operator-authored skills under
 //     `${state}/skills/local/`, writable via skill:save.
+//   - **dynamic** — Phase 6.2.db: the DB-indexed writable user
+//     source. On-disk bundles (content) + a `skills` DB row
+//     (discovery index: denormalised metadata + semantic
+//     description vector + usage log). Consolidates the plain
+//     `local` dirBackend — when a querier is wired the runtime
+//     builds `dynamic` in local's slot; without one (tests) it
+//     falls back to the plain `local` dirBackend.
 //
 // `inline` is the in-memory channel used by tests and the
 // skill:save tool while a session keeps a freshly-authored
@@ -49,6 +56,11 @@ const (
 	OriginHub
 	OriginLocal
 	OriginInline
+	// OriginDynamic is the DB-indexed writable user source
+	// (Phase 6.2.db). Occupies the same priority slot as
+	// OriginLocal — it replaces the plain local dirBackend when a
+	// querier is available.
+	OriginDynamic
 )
 
 // String returns the URI-style scheme used in logs and audit
@@ -63,6 +75,8 @@ func (o Origin) String() string {
 		return "local"
 	case OriginInline:
 		return "inline"
+	case OriginDynamic:
+		return "dynamic"
 	default:
 		return "unknown"
 	}

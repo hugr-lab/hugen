@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/hugr-lab/query-engine/types"
 )
 
 // CleanRelPath validates a user-supplied relative path for use as
@@ -123,7 +125,24 @@ type Options struct {
 	HubRoot string
 	// LocalRoot is `${state}/skills/local/`, writable via
 	// skill:save. Empty disables the local backend.
+	//
+	// Phase 6.2.db: when DynamicQuerier is non-nil, LocalRoot
+	// becomes the on-disk bundle root for the DB-indexed dynamic
+	// backend (consolidating the plain local dirBackend); without a
+	// querier it stays the plain writable dirBackend (tests / no
+	// engine).
 	LocalRoot string
+	// DynamicQuerier, when non-nil, upgrades the LocalRoot backend
+	// to the Phase-6.2.db dynamic backend (dir + DB index). Requires
+	// AgentID. Nil keeps the plain local dirBackend.
+	DynamicQuerier types.Querier
+	// AgentID is the multi-tenant scope key for the dynamic index.
+	// Required when DynamicQuerier is set.
+	AgentID string
+	// EmbedderEnabled gates semantic indexing on the dynamic
+	// backend: when true, publish/reconcile pass the description as
+	// `summary:` so Hugr regenerates description_vec server-side.
+	EmbedderEnabled bool
 	// Inline is the in-memory channel used by tests and the
 	// skill:save tool while a session keeps a freshly-authored
 	// skill before flushing to local.
@@ -138,11 +157,22 @@ func NewSkillStore(opts Options) *Store {
 	if opts.SystemFS != nil {
 		s.backends = append(s.backends, &embedBackend{origin: OriginSystem, fs: opts.SystemFS})
 	}
-	if opts.HubRoot != "" {
+	dynamicWired := opts.DynamicQuerier != nil && opts.AgentID != ""
+	// Hub backend: only a standalone read-only dirBackend when there's
+	// NO dynamic backend (tests / no-engine). When dynamic is wired the
+	// hub bundles are INDEXED into `skills` (Store.SyncDynamic, bundle_
+	// path → the hub dir) so they surface through the dynamic backend —
+	// a separate hub backend would double-list them.
+	if opts.HubRoot != "" && !dynamicWired {
 		s.backends = append(s.backends, &dirBackend{origin: OriginHub, root: opts.HubRoot, writable: false})
 	}
 	if opts.LocalRoot != "" {
-		s.backends = append(s.backends, &dirBackend{origin: OriginLocal, root: opts.LocalRoot, writable: true})
+		if dynamicWired {
+			s.dynamic = newDynamicBackend(opts.LocalRoot, opts.DynamicQuerier, opts.AgentID, opts.EmbedderEnabled)
+			s.backends = append(s.backends, s.dynamic)
+		} else {
+			s.backends = append(s.backends, &dirBackend{origin: OriginLocal, root: opts.LocalRoot, writable: true})
+		}
 	}
 	if len(opts.Inline) > 0 {
 		s.backends = append(s.backends, newInlineBackend(opts.Inline))
@@ -158,6 +188,12 @@ func NewSkillStore(opts Options) *Store {
 // through Publish).
 type Store struct {
 	backends []Backend
+
+	// dynamic is the Phase-6.2.db backend when one was wired (nil
+	// otherwise). Held separately from backends so the runtime can
+	// reach Reconcile / Uninstall without a type assertion over the
+	// backend slice.
+	dynamic *dynamicBackend
 
 	cacheMu  sync.RWMutex
 	cacheGen int64
@@ -249,6 +285,112 @@ func (s *Store) Publish(ctx context.Context, m Manifest, body fs.FS, opts Publis
 		return fmt.Errorf("%s: %w", b.Origin(), err)
 	}
 	return ErrUnsupportedBackend
+}
+
+// HasDynamic reports whether a Phase-6.2.db dynamic backend is wired.
+func (s *Store) HasDynamic() bool { return s.dynamic != nil }
+
+// Search runs semantic discovery over the dynamic index — the PRIMARY
+// discovery path when an embedder is wired. Returns ErrNoEmbedder when
+// no dynamic backend is present OR the backend has no embedder, so the
+// caller can fall back to its keyword/substring path (the notepad
+// precedent). Results are semantically ranked + capped at opts.Limit.
+func (s *Store) Search(ctx context.Context, query string, opts SearchOpts) ([]Skill, error) {
+	if s.dynamic == nil {
+		return nil, ErrNoEmbedder
+	}
+	rows, err := s.dynamic.index.search(ctx, query, opts.TaskEligible, opts.Type, opts.Limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Skill, 0, len(rows))
+	for _, r := range rows {
+		sk, rerr := rowToSkill(r)
+		if rerr != nil {
+			continue
+		}
+		out = append(out, sk)
+	}
+	return out, nil
+}
+
+// Reconcile re-indexes the dynamic backend's writable (authored)
+// bundles into the DB + relinks catalogs (no-op when no dynamic
+// backend is wired). Invalidates the List cache so the next read
+// reflects the reconciled index.
+func (s *Store) Reconcile(ctx context.Context) (int, error) {
+	if s.dynamic == nil {
+		return 0, nil
+	}
+	n, err := s.dynamic.Reconcile(ctx)
+	s.Refresh()
+	return n, err
+}
+
+// SyncDynamic is the boot/refresh entry: install the hub bundles from
+// `hubDir` into the index per the install set, then reconcile the
+// writable (authored) dir + relink catalogs across the whole index.
+// Per-source dirs stay on disk (hub / local); only the index is
+// unified. No-op when no dynamic backend is wired. Returns the total
+// bundles indexed.
+func (s *Store) SyncDynamic(ctx context.Context, hubDir string, installSet []string, declared bool) (int, error) {
+	if s.dynamic == nil {
+		return 0, nil
+	}
+	installed, ierr := s.dynamic.installFromDir(ctx, hubDir, "hub", installSet, declared)
+	indexed, rerr := s.dynamic.Reconcile(ctx) // authored + relink (sees hub catalogs)
+	s.Refresh()
+	return installed + indexed, errors.Join(ierr, rerr)
+}
+
+// CatalogMembers returns the member skills of a recipe catalog — the
+// step-2 of two-step discovery (catalog → the recipes inside it).
+// Reads the persisted catalog_member edges when the catalog lives in
+// the dynamic index; otherwise derives membership from the catalog
+// manifest's `allowed-tools` task grants (covers hub catalogs not
+// indexed into the dynamic store + plain stores). Returns
+// ErrSkillNotFound when the named skill doesn't exist, nil when it
+// exists but is not a recipe catalog.
+func (s *Store) CatalogMembers(ctx context.Context, name string) ([]Skill, error) {
+	cat, err := s.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if !cat.Manifest.Hugen.RecipeCatalog {
+		return nil, nil
+	}
+	// Persisted-edge path (dynamic catalogs).
+	if s.dynamic != nil {
+		if members, err := s.dynamic.catalogMembersByName(ctx, name); err != nil {
+			return nil, err
+		} else if len(members) > 0 {
+			return members, nil
+		}
+	}
+	// Manifest-derived fallback: resolve each member recipe by name.
+	var out []Skill
+	for _, member := range catalogMemberNames(cat.Manifest) {
+		sk, gerr := s.Get(ctx, member)
+		if gerr != nil {
+			continue // a named member that isn't installed — skip
+		}
+		out = append(out, sk)
+	}
+	return out, nil
+}
+
+// Uninstall removes a dynamic skill's bundle + index row (the only
+// explicit removal path). Returns ErrUnsupportedBackend when no
+// dynamic backend is wired.
+func (s *Store) Uninstall(ctx context.Context, name string) error {
+	if s.dynamic == nil {
+		return ErrUnsupportedBackend
+	}
+	if err := s.dynamic.Uninstall(ctx, name); err != nil {
+		return err
+	}
+	s.Refresh()
+	return nil
 }
 
 // --- directory-backed backend (system / community / local) ---

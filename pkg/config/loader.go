@@ -58,6 +58,9 @@ func LoadStaticInput(raw map[string]any, localDBEnabled bool) (StaticInput, erro
 	if err := decodeKey(raw, "compactor", &in.Compactor); err != nil {
 		return in, err
 	}
+	if err := decodeKey(raw, "skills", &in.Skills); err != nil {
+		return in, err
+	}
 
 	expandEnvInPlace(&in)
 	anchorProviderCommands(in.ToolProviders)

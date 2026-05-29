@@ -119,9 +119,11 @@ func TestEnsure_v007_UpgradePath(t *testing.T) {
 		require.Equalf(t, 0, n, "drop should remove %s", table)
 	}
 
-	// Step 2: upgrade to 0.0.7 (default target).
+	// Step 2: upgrade to 0.0.7 (pinned — the default target has since
+	// advanced past 0.0.7).
 	bump := baseCfg
 	bump.Seed = nil // seed already present
+	bump.TargetVersion = "0.0.7"
 	require.NoError(t, migrate.Ensure(bump))
 
 	// Verify version row + tables.
@@ -137,6 +139,73 @@ func TestEnsure_v007_UpgradePath(t *testing.T) {
 			`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`, table,
 		).Scan(&n))
 		assert.Equalf(t, 1, n, "table %s must exist after 0.0.7 upgrade", table)
+	}
+}
+
+// TestEnsure_v008_UpgradePath provisions a DB pinned at 0.0.7 then
+// upgrades it to 0.0.8, verifying that the migration script lands the
+// dynamic-skills tables (skills + skill_log + skill_links) on an
+// existing deployment. Mirrors the v007 upgrade-path test: drop the
+// tables that schema.tmpl.sql ships unconditionally, then let the
+// migration recreate them on the version bump.
+func TestEnsure_v008_UpgradePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	baseCfg := migrate.Config{
+		Path: path, VectorSize: 384, EmbedderModel: "gemma-embedding",
+		Seed: &migrate.SeedData{
+			AgentType: migrate.SeedAgentType{ID: "hugr-data", Name: "X", Config: map[string]any{}},
+			Agent:     migrate.SeedAgent{ID: "agt_ag01", ShortID: "ag01", Name: "x"},
+		},
+	}
+
+	// Step 1: provision at 0.0.7.
+	pin := baseCfg
+	pin.TargetVersion = "0.0.7"
+	require.NoError(t, migrate.Ensure(pin))
+
+	conn, err := sql.Open("duckdb", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// Drop the 0.0.8 tables so the migration must recreate them.
+	for _, table := range []string{"skill_links", "skill_log", "skills"} {
+		_, err := conn.Exec(`DROP TABLE IF EXISTS ` + table)
+		require.NoError(t, err)
+	}
+
+	// Step 2: upgrade to 0.0.8 (default target).
+	bump := baseCfg
+	bump.Seed = nil
+	require.NoError(t, migrate.Ensure(bump))
+
+	var ver string
+	require.NoError(t, conn.QueryRow(
+		`SELECT version FROM version WHERE name = 'schema'`,
+	).Scan(&ver))
+	assert.Equal(t, "0.0.8", ver)
+
+	for _, table := range []string{"skills", "skill_log", "skill_links"} {
+		var n int
+		require.NoError(t, conn.QueryRow(
+			`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`, table,
+		).Scan(&n))
+		assert.Equalf(t, 1, n, "table %s must exist after 0.0.8 upgrade", table)
+	}
+
+	// Spot-check a representative column from each table.
+	for _, c := range []struct{ table, col string }{
+		{"skills", "description_vec"},
+		{"skills", "metadata"},
+		{"skills", "source"},
+		{"skill_log", "event"},
+		{"skill_links", "relation"},
+	} {
+		var n int
+		require.NoError(t, conn.QueryRow(
+			`SELECT count(*) FROM information_schema.columns WHERE table_name = ? AND column_name = ?`,
+			c.table, c.col,
+		).Scan(&n))
+		assert.Equalf(t, 1, n, "expected %s.%s after 0.0.8 upgrade", c.table, c.col)
 	}
 }
 
@@ -210,7 +279,7 @@ func TestEnsure_v002_AdditiveColumns(t *testing.T) {
 	require.NoError(t, conn.QueryRow(
 		`SELECT version FROM version WHERE name = 'schema'`,
 	).Scan(&ver))
-	assert.Equal(t, "0.0.7", ver)
+	assert.Equal(t, "0.0.8", ver)
 
 	// spec 008 / migration 0.0.3 — artifacts + artifact_grants tables
 	// land additively. Both must exist on a fresh DuckDB provision.

@@ -499,3 +499,88 @@ CREATE INDEX IF NOT EXISTS idx_task_log_started
     ON task_log (agent_id, created_at)
     WHERE event_type = 'started';
 {{ end }}
+
+-- ============================================================
+-- Dynamic skills (Phase 6.2.db / migration 0.0.8) — DB-backed
+-- skill source: on-disk bundle + DB index for semantic discovery,
+-- usage ranking, and package management.
+--
+--   • skills      — one index row per dynamic-skill bundle. The
+--                   `metadata` JSON carries the full metadata.hugen
+--                   projection so mission roles / task inputs_schema
+--                   are served WITHOUT a SKILL.md read; the filter
+--                   columns (type / task_eligible / task_kind /
+--                   keywords / tier_compat / has_inputs_schema) are
+--                   denormalised from it for cheap WHERE. `source`
+--                   is the reapability/provenance anchor; `pin`
+--                   bypasses the discovery bandit. UPDATEs bounded
+--                   by install / update-at-start / config-set.
+--   • skill_log   — append-only usage telemetry {shown,loaded,used}.
+--                   No mutable counters on the hot path; bandit
+--                   counts roll up off-line (db-2).
+--   • skill_links — m2m edges between skills (catalog_member /
+--                   autoload / requires / related). Mirrors
+--                   memory_links: a plain junction with two FKs to
+--                   skills.id, no parent_id self-FK on skills.
+--
+-- `shared` is a forward-compat column (cross-agent visibility) —
+-- the sharing LOGIC is deferred to db-3 (hub mode). Indexes are
+-- POSTGRES-ONLY; DuckDB stays index-free per the existing rule.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS skills (
+    id                VARCHAR PRIMARY KEY,
+    agent_id          VARCHAR NOT NULL,
+    shared            BOOLEAN NOT NULL DEFAULT FALSE,
+    name              VARCHAR NOT NULL,
+    type              VARCHAR NOT NULL DEFAULT 'skill',
+    description       VARCHAR,
+    task_eligible     BOOLEAN NOT NULL DEFAULT FALSE,
+    task_kind         VARCHAR,
+    keywords          VARCHAR[],
+    tier_compat       VARCHAR[],
+    has_inputs_schema BOOLEAN NOT NULL DEFAULT FALSE,
+    metadata          {{ if isPostgres }}JSONB{{ else }}JSON{{ end }} NOT NULL,
+    pin               BOOLEAN NOT NULL DEFAULT FALSE,
+    source            VARCHAR NOT NULL,
+    version           VARCHAR,
+    content_hash      VARCHAR,
+    bundle_path       VARCHAR,
+    owner             VARCHAR,
+    created_at        {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }} NOT NULL,
+    updated_at        {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }} NOT NULL,
+    installed_at      {{ if isPostgres }}TIMESTAMPTZ{{ else }}TIMESTAMP{{ end }}
+    {{ if gt .VectorSize 0 }},description_vec {{ if isPostgres }}vector({{ .VectorSize }}){{ else }}FLOAT[{{ .VectorSize }}]{{ end }}{{ end }}
+);
+
+CREATE TABLE IF NOT EXISTS skill_log (
+    id          VARCHAR PRIMARY KEY,
+    skill_id    VARCHAR NOT NULL,
+    agent_id    VARCHAR NOT NULL,
+    event       VARCHAR NOT NULL,
+    session_id  VARCHAR,
+    details     {{ if isPostgres }}JSONB{{ else }}JSON{{ end }},
+    created_at  {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }} NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill_links (
+    agent_id    VARCHAR NOT NULL,
+    source_id   VARCHAR NOT NULL,
+    target_id   VARCHAR NOT NULL,
+    relation    VARCHAR NOT NULL,
+    created_at  {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }} NOT NULL
+);
+
+{{ if gt .VectorSize 0 }}
+{{ if isPostgres }}CREATE INDEX IF NOT EXISTS skills_desc_vss ON skills USING hnsw (description_vec vector_cosine_ops);{{ end }}
+{{ end }}
+
+{{ if isPostgres }}
+CREATE INDEX IF NOT EXISTS idx_skills_agent       ON skills (agent_id, type);
+CREATE INDEX IF NOT EXISTS idx_skills_agent_name  ON skills (agent_id, source, name);
+CREATE INDEX IF NOT EXISTS idx_skills_task        ON skills (agent_id, task_eligible);
+CREATE INDEX IF NOT EXISTS idx_skill_log_skill    ON skill_log (skill_id, event);
+CREATE INDEX IF NOT EXISTS idx_skill_log_agent    ON skill_log (agent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_skill_links_source ON skill_links (agent_id, source_id, relation);
+CREATE INDEX IF NOT EXISTS idx_skill_links_target ON skill_links (agent_id, target_id, relation);
+{{ end }}

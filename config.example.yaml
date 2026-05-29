@@ -227,6 +227,38 @@ tool_providers:
         INSTALL spatial; LOAD spatial;
         INSTALL httpfs;  LOAD httpfs;
 
+# ── Dynamic skills (phase 6.2.db) ───────────────────────────
+# Non-system skills (the bundled hub toolkit, recipes, catalogs) are
+# indexed into the `skills` table and discovered semantically. On disk
+# they stay in per-source dirs (${state}/skills/hub for the bundled
+# toolkit, ${state}/skills/local for skill:save-authored ones); only
+# the index is unified.
+#
+# `install` is the install set — which bundled skills get indexed at
+# boot:
+#   - OMITTED (this key absent) → install ALL bundled skills (the full
+#                                 toolkit; the safe out-of-the-box
+#                                 default).
+#   - PRESENT → install EXACTLY the listed names; config is
+#               authoritative (an empty list installs nothing). Names
+#               not in the bundle are skipped.
+# Editing it re-reconciles the store (config subscription; today
+# applied at restart).
+#
+# Bundled skills available to install:
+#   analyst · hugr-data · duckdb-data · duckdb-docs · python-runner
+#   data_utils · data_tables_rows_count
+#
+# skills:
+#   install:
+#     - analyst
+#     - hugr-data
+#     - duckdb-data
+#     - duckdb-docs
+#     - python-runner
+#     - data_utils
+#     - data_tables_rows_count
+
 local_db_enabled: true
 local_db:
   db:

@@ -152,6 +152,24 @@ type CompactorView interface {
 	OnUpdate(fn func()) (cancel func())
 }
 
+// SkillsView is the operator-config surface for the Phase-6.2.db
+// dynamic-skill install set. The install reconciler reads it at boot
+// AND registers an OnUpdate callback so a future dynamic config
+// service can re-reconcile the store when the install set changes.
+type SkillsView interface {
+	// InstallSet returns the names of the dynamic skills the operator
+	// wants installed, or nil when `skills.install` was absent (the
+	// reconciler then installs every bundled skill — OOTB safety).
+	// A non-nil result is authoritative.
+	InstallSet() []string
+
+	// InstallSetDeclared distinguishes "absent" (install all bundled)
+	// from an explicit empty list (install nothing).
+	InstallSetDeclared() bool
+
+	OnUpdate(fn func()) (cancel func())
+}
+
 // CompactorConfig is the data shape NewStaticService receives via
 // StaticInput.Compactor. Absent or zero fields take the runtime
 // defaults declared in pkg/extension/compactor.DefaultConfig.
