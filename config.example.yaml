@@ -249,6 +249,13 @@ tool_providers:
 #   analyst · hugr-data · duckdb-data · duckdb-docs · python-runner
 #   data_utils · data_tables_rows_count
 #
+# `pin` is the advertise-pin set: installed skills that are ALWAYS
+# surfaced in discovery (bypass the usage bandit). Tri-state like
+# `install`: omitted → pins untouched; present → authoritative
+# (listed get pin=true, all others pin=false). The advertise BYPASS
+# behaviour lands with the ranking bandit (db-2); today the flag is
+# stored.
+#
 # skills:
 #   install:
 #     - analyst
@@ -258,6 +265,9 @@ tool_providers:
 #     - python-runner
 #     - data_utils
 #     - data_tables_rows_count
+#   pin:
+#     - analyst
+#     - data_utils
 
 local_db_enabled: true
 local_db:

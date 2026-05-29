@@ -362,6 +362,28 @@ func TestStoreSyncDynamic(t *testing.T) {
 	skills, err = st.List(ctx)
 	require.NoError(t, err)
 	assert.Len(t, skills, 3, "declared=false installs all hub bundles")
+
+	// ApplyPins is authoritative: data-catalog pinned, the rest cleared.
+	require.NoError(t, st.ApplyPins(ctx, []string{"data-catalog"}))
+	pinByName := func() map[string]bool {
+		rows, err := st.dynamic.index.listAll(ctx)
+		require.NoError(t, err)
+		out := map[string]bool{}
+		for _, r := range rows {
+			out[r.Name] = r.Pin
+		}
+		return out
+	}
+	pins := pinByName()
+	assert.True(t, pins["data-catalog"], "data-catalog should be pinned")
+	assert.False(t, pins["change-report"], "change-report should not be pinned")
+	assert.False(t, pins["plain-helper"], "plain-helper should not be pinned")
+
+	// Re-applying with a different set un-pins the old one (authoritative).
+	require.NoError(t, st.ApplyPins(ctx, []string{"change-report"}))
+	pins = pinByName()
+	assert.True(t, pins["change-report"], "change-report now pinned")
+	assert.False(t, pins["data-catalog"], "data-catalog un-pinned")
 }
 
 // TestStoreNoQuerier_FallsBackToLocal confirms the consolidation

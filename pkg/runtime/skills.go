@@ -176,6 +176,13 @@ func phaseSkillsAndPerms(ctx context.Context, core *Core) error {
 			} else {
 				core.Logger.Info("skills: dynamic index synced", "bundles", n)
 			}
+			// Apply advertise-pins after indexing (authoritative when
+			// declared; left untouched otherwise).
+			if view.PinSetDeclared() {
+				if perr := ds.ApplyPins(ctx, view.PinSet()); perr != nil {
+					core.Logger.Warn("skills: apply pins had errors", "err", perr)
+				}
+			}
 		}
 		sync()
 		cancel := core.Config.Skills().OnUpdate(sync)

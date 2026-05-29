@@ -92,6 +92,12 @@ type StaticInput struct {
 // land with the bandit advertise (db-2).
 type SkillsConfig struct {
 	Install *[]string `mapstructure:"install" yaml:"install,omitempty" json:"install,omitempty"`
+	// Pin is the advertise-pin set: installed skills that are ALWAYS
+	// surfaced (bypass the discovery bandit). Tri-state like Install:
+	// nil → leave pins untouched; non-nil → authoritative (listed get
+	// pin=true, all others pin=false). The advertise BEHAVIOUR (bypass)
+	// lands with the bandit (db-2); db-1 stores the flag.
+	Pin *[]string `mapstructure:"pin" yaml:"pin,omitempty" json:"pin,omitempty"`
 }
 
 // NewStaticService captures the input snapshot. The caller still
@@ -253,6 +259,20 @@ func (s *StaticService) InstallSet() []string {
 // the config (distinguishes "absent → install all bundled" from an
 // explicit empty list → install nothing).
 func (s *StaticService) InstallSetDeclared() bool { return s.skills.Install != nil }
+
+// PinSet returns the advertise-pin skill names, or nil when
+// `skills.pin` was absent (leave pins untouched). A non-nil result is
+// authoritative: listed skills get pin=true, all others pin=false.
+func (s *StaticService) PinSet() []string {
+	if s.skills.Pin == nil {
+		return nil
+	}
+	return append([]string(nil), *s.skills.Pin...)
+}
+
+// PinSetDeclared reports whether `skills.pin` was present in the
+// config.
+func (s *StaticService) PinSetDeclared() bool { return s.skills.Pin != nil }
 
 // --- OnUpdate (shared no-op) ---
 

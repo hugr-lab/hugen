@@ -167,6 +167,15 @@ type SkillsView interface {
 	// from an explicit empty list (install nothing).
 	InstallSetDeclared() bool
 
+	// PinSet returns the advertise-pin skill names, or nil when
+	// `skills.pin` was absent. Non-nil is authoritative (listed →
+	// pin=true, others → pin=false).
+	PinSet() []string
+
+	// PinSetDeclared distinguishes "absent" (leave pins untouched)
+	// from an explicit list (authoritative).
+	PinSetDeclared() bool
+
 	OnUpdate(fn func()) (cancel func())
 }
 

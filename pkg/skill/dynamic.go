@@ -275,6 +275,20 @@ func (x *dynamicIndex) upsert(ctx context.Context, m Manifest, source, bundlePat
 	return id, nil
 }
 
+// setPinByName sets the advertise-pin flag on a skill by name. The
+// pin column is preserved across upserts, so this is the only path
+// that flips it (config-driven, applied at sync).
+func (x *dynamicIndex) setPinByName(ctx context.Context, name string, pin bool) error {
+	return queries.RunMutation(ctx, x.querier,
+		`mutation ($agent: String!, $name: String!, $data: hub_db_skills_mut_data!) {
+			hub { db { agent {
+				update_skills(filter: {agent_id: {eq: $agent}, name: {eq: $name}}, data: $data) { affected_rows }
+			}}}
+		}`,
+		map[string]any{"agent": x.agentID, "name": name, "data": map[string]any{"pin": pin}},
+	)
+}
+
 // deleteByName removes the index row for (agent_id, name). Uninstall
 // pairs this with the on-disk bundle removal. No-op when absent.
 func (x *dynamicIndex) deleteByName(ctx context.Context, name string) error {
@@ -692,6 +706,33 @@ func (b *dynamicBackend) Publish(ctx context.Context, m Manifest, body fs.FS, op
 		return fmt.Errorf("skill: index after publish %q: %w", m.Name, err)
 	}
 	return nil
+}
+
+// applyPins reconciles the advertise-pin flag against the authoritative
+// pin set: every indexed skill whose name is in pinNames gets pin=true,
+// all others pin=false. Only writes rows whose flag actually changes.
+// Idempotent — re-running converges. Pin is a discovery signal (db-2
+// advertise bypass); db-1 just stores it.
+func (b *dynamicBackend) applyPins(ctx context.Context, pinNames []string) error {
+	want := make(map[string]struct{}, len(pinNames))
+	for _, n := range pinNames {
+		want[n] = struct{}{}
+	}
+	rows, err := b.index.listAll(ctx)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, r := range rows {
+		_, pin := want[r.Name]
+		if r.Pin == pin {
+			continue
+		}
+		if err := b.index.setPinByName(ctx, r.Name, pin); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", r.Name, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Uninstall removes both the on-disk bundle and the index row. This

@@ -379,6 +379,21 @@ func (s *Store) CatalogMembers(ctx context.Context, name string) ([]Skill, error
 	return out, nil
 }
 
+// ApplyPins reconciles the advertise-pin flag across the dynamic index
+// against the authoritative pin set (listed → pin=true, others →
+// pin=false). No-op when no dynamic backend is wired. Invalidates the
+// List cache.
+func (s *Store) ApplyPins(ctx context.Context, pinNames []string) error {
+	if s.dynamic == nil {
+		return nil
+	}
+	if err := s.dynamic.applyPins(ctx, pinNames); err != nil {
+		return err
+	}
+	s.Refresh()
+	return nil
+}
+
 // Uninstall removes a dynamic skill's bundle + index row (the only
 // explicit removal path). Returns ErrUnsupportedBackend when no
 // dynamic backend is wired.
