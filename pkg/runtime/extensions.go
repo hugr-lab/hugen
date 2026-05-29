@@ -92,7 +92,7 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		// detector's per-evaluation policy gather. Placement before
 		// mission ext keeps it adjacent to the other observability
 		// extensions; ordering is otherwise free.
-		stuckdetectorext.NewExtension(core.Logger),
+		stuckdetectorext.NewExtension(core.Agent.ID(), core.Logger),
 		mcpext.NewExtension(core.Config.ToolProviders(), core.Logger),
 		// scheduler extension (Phase 6.1b): exposes the schedule:*
 		// management surface (create / list / pause / resume / cancel).

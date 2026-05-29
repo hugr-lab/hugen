@@ -57,6 +57,14 @@ func (s *fakeState) Value(name string) (any, bool) {
 }
 func (s *fakeState) SetValue(name string, value any) { s.values.Store(name, value) }
 func (s *fakeState) Emit(_ context.Context, f protocol.Frame) error {
+	// Mirror the real session's project path, which runs
+	// protocol.Validate before persisting. An invalid frame (e.g. a
+	// nudge with an empty author ID) was silently dropped in
+	// production — surfacing the validation here makes that a test
+	// failure, not a live-only hang.
+	if err := protocol.Validate(f); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.emitted = append(s.emitted, f)
@@ -84,7 +92,7 @@ func (s *fakeState) emittedFrames() []protocol.Frame {
 
 func newTestExtension(t *testing.T) *Extension {
 	t.Helper()
-	return NewExtension(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewExtension("agt_test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 // observeCall stuffs a consolidated AgentMessage with the given
