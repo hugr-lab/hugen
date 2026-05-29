@@ -163,16 +163,31 @@ func (x *dynamicIndex) getByName(ctx context.Context, name string) (skillRow, er
 	return rows[0], nil
 }
 
-// listCatalogs returns the recipe-catalog index rows (type='catalog')
-// for the agent — the relink step's work list.
-func (x *dynamicIndex) listCatalogs(ctx context.Context) ([]skillRow, error) {
-	rows, err := queries.RunQuery[[]skillRow](ctx, x.querier,
-		`query ($agent: String!) {
+// membersOfCatalog returns a catalog's member skills in ONE query by
+// filtering to the catalog row and projecting its `outgoing_links`
+// relation (filtered to `catalog_member`) down to each edge's `target`
+// skill. Collapses the former getIDByName + listMembers two-trip path
+// into a single nested sub-query — the relation traversal the schema's
+// plain `skill_links` junction was designed for. Returns (nil, nil)
+// when the catalog isn't indexed or has no member edges.
+func (x *dynamicIndex) membersOfCatalog(ctx context.Context, name string) ([]skillRow, error) {
+	type linkTarget struct {
+		Target skillRow `json:"target"`
+	}
+	type catRow struct {
+		OutgoingLinks []linkTarget `json:"outgoing_links"`
+	}
+	rows, err := queries.RunQuery[[]catRow](ctx, x.querier,
+		`query ($agent: String!, $name: String!) {
 			hub { db { agent {
-				skills(filter: {agent_id: {eq: $agent}, type: {eq: "catalog"}}) {`+skillRowProjection+`}
+				skills(filter: {agent_id: {eq: $agent}, name: {eq: $name}, type: {eq: "catalog"}}, limit: 1) {
+					outgoing_links(filter: {relation: {eq: "catalog_member"}}) {
+						target {`+skillRowProjection+`}
+					}
+				}
 			}}}
 		}`,
-		map[string]any{"agent": x.agentID},
+		map[string]any{"agent": x.agentID, "name": name},
 		"hub.db.agent.skills",
 	)
 	if err != nil {
@@ -181,22 +196,32 @@ func (x *dynamicIndex) listCatalogs(ctx context.Context) ([]skillRow, error) {
 		}
 		return nil, err
 	}
-	return rows, nil
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	out := make([]skillRow, 0, len(rows[0].OutgoingLinks))
+	for _, l := range rows[0].OutgoingLinks {
+		if l.Target.ID != "" {
+			out = append(out, l.Target)
+		}
+	}
+	return out, nil
 }
 
-// upsert indexes a manifest: lookup by (agent_id, source, name), then
-// update-in-place (keeping the minted id) or insert a fresh row.
-// Hugr exposes no native upsert, so this is the standard
-// lookup+insert/update dance (mirrors LocalTaskStore semantics).
-// Returns the row id. When the embedder is enabled, the manifest
-// description is passed as `summary:` so Hugr regenerates the
+// upsert indexes a manifest given the PRE-FETCHED existing row for
+// (agent_id, source, name) (zero row = absent). Update-in-place when
+// existing.ID != "" (keeping the minted id), else insert a fresh row.
+// Hugr exposes no native upsert, so callers fetch `existing` via
+// getRowByName ONCE and pass it here — avoiding a second lookup the
+// caller already did for its hash-skip check (mirrors LocalTaskStore
+// semantics). Returns the row id. When the embedder is enabled, the
+// manifest description is passed as `summary:` so Hugr regenerates the
 // description_vec server-side.
-func (x *dynamicIndex) upsert(ctx context.Context, m Manifest, source, bundlePath, contentHash string) (string, error) {
-	existing, err := x.getRowByName(ctx, source, m.Name)
-	if err != nil {
-		return "", fmt.Errorf("skill: index lookup %q: %w", m.Name, err)
-	}
-
+//
+// A unique index on (agent_id, source, name) makes a concurrent
+// double-insert (the TOCTOU between the caller's fetch and this insert)
+// fail loud rather than silently duplicate.
+func (x *dynamicIndex) upsert(ctx context.Context, m Manifest, source, bundlePath, contentHash string, existing skillRow) (string, error) {
 	metaJSON, err := manifestMetadataMap(m)
 	if err != nil {
 		return "", fmt.Errorf("skill: project manifest %q: %w", m.Name, err)
@@ -276,17 +301,35 @@ func (x *dynamicIndex) upsert(ctx context.Context, m Manifest, source, bundlePat
 	return id, nil
 }
 
-// setPinByName sets the advertise-pin flag on a skill by name. The
-// pin column is preserved across upserts, so this is the only path
-// that flips it (config-driven, applied at sync).
-func (x *dynamicIndex) setPinByName(ctx context.Context, name string, pin bool) error {
+// setPinAll bulk-sets the advertise-pin flag on EVERY indexed skill
+// for the agent in one mutation (filter on agent_id only). The pin
+// column is preserved across upserts, so this config-driven path is
+// the only writer.
+func (x *dynamicIndex) setPinAll(ctx context.Context, pin bool) error {
 	return queries.RunMutation(ctx, x.querier,
-		`mutation ($agent: String!, $name: String!, $data: hub_db_skills_mut_data!) {
+		`mutation ($agent: String!, $data: hub_db_skills_mut_data!) {
 			hub { db { agent {
-				update_skills(filter: {agent_id: {eq: $agent}, name: {eq: $name}}, data: $data) { affected_rows }
+				update_skills(filter: {agent_id: {eq: $agent}}, data: $data) { affected_rows }
 			}}}
 		}`,
-		map[string]any{"agent": x.agentID, "name": name, "data": map[string]any{"pin": pin}},
+		map[string]any{"agent": x.agentID, "data": map[string]any{"pin": pin}},
+	)
+}
+
+// setPinForNames bulk-sets the pin flag on the named skills in one
+// mutation via an `in` filter (Hugr collapses the list into a single
+// statement — see filtering docs "Use IN Instead of Multiple OR").
+func (x *dynamicIndex) setPinForNames(ctx context.Context, names []string, pin bool) error {
+	if len(names) == 0 {
+		return nil
+	}
+	return queries.RunMutation(ctx, x.querier,
+		`mutation ($agent: String!, $names: [String!], $data: hub_db_skills_mut_data!) {
+			hub { db { agent {
+				update_skills(filter: {agent_id: {eq: $agent}, name: {in: $names}}, data: $data) { affected_rows }
+			}}}
+		}`,
+		map[string]any{"agent": x.agentID, "names": names, "data": map[string]any{"pin": pin}},
 	)
 }
 
@@ -389,6 +432,12 @@ func (x *dynamicIndex) replaceLinks(ctx context.Context, sourceID, relation stri
 	); err != nil {
 		return fmt.Errorf("skill: clear links %s/%s: %w", sourceID, relation, err)
 	}
+	// Insert each edge; ACCUMULATE failures and continue rather than
+	// early-return. The delete above already committed, so an early
+	// return on one bad edge would strand the catalog with FEWER
+	// members than intended until the next full sync. Inserting the
+	// rest keeps the degradation to just the failing edge(s).
+	var errs []error
 	for _, tid := range targetIDs {
 		if tid == "" || tid == sourceID {
 			continue // skip self-edges / unresolved members
@@ -404,10 +453,10 @@ func (x *dynamicIndex) replaceLinks(ctx context.Context, sourceID, relation stri
 				"relation":  relation,
 			}},
 		); err != nil {
-			return fmt.Errorf("skill: add link %s->%s/%s: %w", sourceID, tid, relation, err)
+			errs = append(errs, fmt.Errorf("skill: add link %s->%s/%s: %w", sourceID, tid, relation, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // listMembers returns the skill rows reachable from sourceID along the
@@ -656,11 +705,19 @@ func (b *dynamicBackend) IndexBundle(ctx context.Context, dir, source string) (s
 		return "", false, err
 	}
 	hash := bundleHash(dir)
-	if existing, err := b.index.getByName(ctx, sk.Manifest.Name); err == nil &&
-		existing.ID != "" && hash != "" && existing.ContentHash == hash {
+	// Match on (agent_id, source, name) — the same identity tuple
+	// upsert keys on. getByName (any source) would alias a same-named
+	// bundle from a DIFFERENT source and skip / index the wrong row,
+	// since `name` is unique only within (agent_id, source). One
+	// lookup, reused for both the hash-skip and the upsert below.
+	existing, err := b.index.getRowByName(ctx, source, sk.Manifest.Name)
+	if err != nil {
+		return "", false, err
+	}
+	if existing.ID != "" && hash != "" && existing.ContentHash == hash {
 		return existing.ID, false, nil
 	}
-	id, err := b.index.upsert(ctx, sk.Manifest, source, dir, hash)
+	id, err := b.index.upsert(ctx, sk.Manifest, source, dir, hash, existing)
 	if err != nil {
 		return "", false, err
 	}
@@ -668,18 +725,27 @@ func (b *dynamicBackend) IndexBundle(ctx context.Context, dir, source string) (s
 }
 
 // relinkCatalogs rewrites every recipe-catalog's `catalog_member`
-// edges from the index. Queries the catalog rows, derives each one's
-// member recipe names from its manifest (metadata column), resolves
-// names→ids against the index, and replaceLinks. Runs AFTER all
-// bundles (hub + local) are indexed so member ids resolve regardless
-// of which source dir a member lives in.
+// edges from the index. ONE listAll fetches the whole index; from it
+// we build a name→id map AND pick the catalog rows in Go — member
+// names (derived from each catalog's manifest via catalogMemberNames)
+// resolve against that in-memory map with NO per-member query. Runs
+// AFTER all bundles (hub + local) are indexed so every member id is
+// present. Was N+1 (one getIDByName per member per catalog); now one
+// read for the whole pass.
 func (b *dynamicBackend) relinkCatalogs(ctx context.Context) error {
-	cats, err := b.index.listCatalogs(ctx)
+	all, err := b.index.listAll(ctx)
 	if err != nil {
 		return err
 	}
+	idByName := make(map[string]string, len(all))
+	for _, r := range all {
+		idByName[r.Name] = r.ID
+	}
 	var errs []error
-	for _, c := range cats {
+	for _, c := range all {
+		if c.Type != "catalog" {
+			continue
+		}
 		m, merr := manifestFromMetadata(c.Metadata)
 		if merr != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", c.Name, merr))
@@ -688,7 +754,7 @@ func (b *dynamicBackend) relinkCatalogs(ctx context.Context) error {
 		var targetIDs []string
 		var memberNames []string
 		for _, member := range catalogMemberNames(m) {
-			if id, _ := b.index.getIDByName(ctx, member); id != "" {
+			if id := idByName[member]; id != "" {
 				targetIDs = append(targetIDs, id)
 				memberNames = append(memberNames, member)
 			}
@@ -712,7 +778,11 @@ func (b *dynamicBackend) Publish(ctx context.Context, m Manifest, body fs.FS, op
 		return err
 	}
 	dir := filepath.Join(b.dir.root, m.Name)
-	if _, err := b.index.upsert(ctx, m, "authored", dir, bundleHash(dir)); err != nil {
+	existing, err := b.index.getRowByName(ctx, "authored", m.Name)
+	if err != nil {
+		return fmt.Errorf("skill: index lookup after publish %q: %w", m.Name, err)
+	}
+	if _, err := b.index.upsert(ctx, m, "authored", dir, bundleHash(dir), existing); err != nil {
 		return fmt.Errorf("skill: index after publish %q: %w", m.Name, err)
 	}
 	return nil
@@ -724,27 +794,21 @@ func (b *dynamicBackend) Publish(ctx context.Context, m Manifest, body fs.FS, op
 // Idempotent — re-running converges. Pin is a discovery signal (db-2
 // advertise bypass); db-1 just stores it.
 func (b *dynamicBackend) applyPins(ctx context.Context, pinNames []string) error {
-	want := make(map[string]struct{}, len(pinNames))
-	for _, n := range pinNames {
-		want[n] = struct{}{}
+	// Two bulk mutations regardless of skill count: reset every row to
+	// pin=false, then set the named set to pin=true. Replaces the
+	// former read-all + per-changed-row update (N+1) — `nin` isn't a
+	// Hugr filter op, so reset-then-set expresses "exactly this set is
+	// pinned" without a not-in. Sequential at boot / on a static-config
+	// no-op OnUpdate, so the brief all-false window between the two
+	// statements is not observable.
+	if err := b.index.setPinAll(ctx, false); err != nil {
+		return fmt.Errorf("skill: reset pins: %w", err)
 	}
-	rows, err := b.index.listAll(ctx)
-	if err != nil {
-		return err
+	if err := b.index.setPinForNames(ctx, pinNames, true); err != nil {
+		return fmt.Errorf("skill: set pins: %w", err)
 	}
-	var errs []error
-	for _, r := range rows {
-		_, pin := want[r.Name]
-		if r.Pin == pin {
-			continue
-		}
-		if err := b.index.setPinByName(ctx, r.Name, pin); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", r.Name, err))
-			continue
-		}
-		b.log.Debug("skill pin: changed", "name", r.Name, "pin", pin)
-	}
-	return errors.Join(errs...)
+	b.log.Debug("skill pin: applied", "pinned", pinNames)
+	return nil
 }
 
 // Uninstall removes both the on-disk bundle and the index row. This
@@ -877,11 +941,7 @@ func (b *dynamicBackend) installFromDir(ctx context.Context, root, source string
 // then falls back to manifest-derived membership (covers hub catalogs
 // not yet indexed into the dynamic store).
 func (b *dynamicBackend) catalogMembersByName(ctx context.Context, name string) ([]Skill, error) {
-	catID, err := b.index.getIDByName(ctx, name)
-	if err != nil || catID == "" {
-		return nil, err
-	}
-	rows, err := b.index.listMembers(ctx, catID, "catalog_member")
+	rows, err := b.index.membersOfCatalog(ctx, name)
 	if err != nil || len(rows) == 0 {
 		return nil, err
 	}

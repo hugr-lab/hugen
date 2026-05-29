@@ -577,7 +577,10 @@ CREATE TABLE IF NOT EXISTS skill_links (
 
 {{ if isPostgres }}
 CREATE INDEX IF NOT EXISTS idx_skills_agent       ON skills (agent_id, type);
-CREATE INDEX IF NOT EXISTS idx_skills_agent_name  ON skills (agent_id, source, name);
+-- (agent_id, source, name) is the upsert identity tuple — UNIQUE so a
+-- TOCTOU double-insert (concurrent reconcile / publish racing the
+-- lookup) fails loud instead of silently duplicating.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_skills_agent_source_name ON skills (agent_id, source, name);
 CREATE INDEX IF NOT EXISTS idx_skills_task        ON skills (agent_id, task_eligible);
 CREATE INDEX IF NOT EXISTS idx_skill_log_skill    ON skill_log (skill_id, event);
 CREATE INDEX IF NOT EXISTS idx_skill_log_agent    ON skill_log (agent_id, created_at);
