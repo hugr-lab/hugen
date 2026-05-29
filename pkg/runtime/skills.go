@@ -61,6 +61,7 @@ func BuildSkillStack(stateDir string, log *slog.Logger, opts DynamicSkillOpts) (
 		DynamicQuerier:  opts.Querier,
 		AgentID:         opts.AgentID,
 		EmbedderEnabled: opts.EmbedderEnabled,
+		Logger:          log,
 	})
 	mgr := skill.NewSkillManager(store, log)
 	return mgr, store, nil

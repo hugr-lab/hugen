@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -143,6 +144,9 @@ type Options struct {
 	// backend: when true, publish/reconcile pass the description as
 	// `summary:` so Hugr regenerates description_vec server-side.
 	EmbedderEnabled bool
+	// Logger is used by the dynamic backend to emit Debug lines for
+	// install / pin / catalog-link actions. Nil → a discard logger.
+	Logger *slog.Logger
 	// Inline is the in-memory channel used by tests and the
 	// skill:save tool while a session keeps a freshly-authored
 	// skill before flushing to local.
@@ -168,7 +172,7 @@ func NewSkillStore(opts Options) *Store {
 	}
 	if opts.LocalRoot != "" {
 		if dynamicWired {
-			s.dynamic = newDynamicBackend(opts.LocalRoot, opts.DynamicQuerier, opts.AgentID, opts.EmbedderEnabled)
+			s.dynamic = newDynamicBackend(opts.LocalRoot, opts.DynamicQuerier, opts.AgentID, opts.EmbedderEnabled, opts.Logger)
 			s.backends = append(s.backends, s.dynamic)
 		} else {
 			s.backends = append(s.backends, &dirBackend{origin: OriginLocal, root: opts.LocalRoot, writable: true})

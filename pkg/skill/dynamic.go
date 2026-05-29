@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -585,13 +586,18 @@ func bundleHash(dir string) string {
 type dynamicBackend struct {
 	dir   *dirBackend
 	index *dynamicIndex
+	log   *slog.Logger
 }
 
 // newDynamicBackend wires the on-disk bundle root + the DB index.
-func newDynamicBackend(root string, q types.Querier, agentID string, embedderEnabled bool) *dynamicBackend {
+func newDynamicBackend(root string, q types.Querier, agentID string, embedderEnabled bool, log *slog.Logger) *dynamicBackend {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	return &dynamicBackend{
 		dir:   &dirBackend{origin: OriginDynamic, root: root, writable: true},
 		index: &dynamicIndex{querier: q, agentID: agentID, embedderEnabled: embedderEnabled},
+		log:   log,
 	}
 }
 
@@ -680,14 +686,18 @@ func (b *dynamicBackend) relinkCatalogs(ctx context.Context) error {
 			continue
 		}
 		var targetIDs []string
+		var memberNames []string
 		for _, member := range catalogMemberNames(m) {
 			if id, _ := b.index.getIDByName(ctx, member); id != "" {
 				targetIDs = append(targetIDs, id)
+				memberNames = append(memberNames, member)
 			}
 		}
 		if err := b.index.replaceLinks(ctx, c.ID, "catalog_member", targetIDs); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", c.Name, err))
+			continue
 		}
+		b.log.Debug("skill catalog: linked members", "catalog", c.Name, "members", memberNames)
 	}
 	return errors.Join(errs...)
 }
@@ -730,7 +740,9 @@ func (b *dynamicBackend) applyPins(ctx context.Context, pinNames []string) error
 		}
 		if err := b.index.setPinByName(ctx, r.Name, pin); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", r.Name, err))
+			continue
 		}
+		b.log.Debug("skill pin: changed", "name", r.Name, "pin", pin)
 	}
 	return errors.Join(errs...)
 }
@@ -834,21 +846,28 @@ func (b *dynamicBackend) installFromDir(ctx context.Context, root, source string
 		}
 	}
 
+	b.log.Debug("skill install: begin", "source", source, "root", root,
+		"declared", declared, "requested", len(want), "on_disk", len(onDisk))
 	n := 0
 	var errs []error
 	for _, name := range want {
 		if _, ok := onDisk[name]; !ok {
+			b.log.Debug("skill install: skip (not in source dir)", "name", name, "source", source)
 			continue // named in config but not present in the source dir
 		}
 		if err := ctx.Err(); err != nil {
 			return n, err
 		}
-		if _, _, err := b.IndexBundle(ctx, filepath.Join(root, name), source); err != nil {
+		id, changed, err := b.IndexBundle(ctx, filepath.Join(root, name), source)
+		if err != nil {
+			b.log.Debug("skill install: FAILED", "name", name, "source", source, "err", err)
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
+		b.log.Debug("skill install: indexed", "name", name, "source", source, "id", id, "changed", changed)
 		n++
 	}
+	b.log.Debug("skill install: done", "source", source, "indexed", n, "errors", len(errs))
 	return n, errors.Join(errs...)
 }
 

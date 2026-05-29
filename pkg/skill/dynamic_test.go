@@ -114,7 +114,7 @@ func TestDynamicBackend(t *testing.T) {
 	q, agentID := newDynamicTestEngine(t)
 	ctx := context.Background()
 	root := t.TempDir()
-	b := newDynamicBackend(root, q, agentID, false /* embedderEnabled */)
+	b := newDynamicBackend(root, q, agentID, false /* embedderEnabled */, nil)
 
 	t.Run("Publish writes dir + index row", func(t *testing.T) {
 		m := mustParse(t, changeReportSKILL)
