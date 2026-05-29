@@ -2044,11 +2044,18 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 			if err := s.emit(emitCtx, resultFrame); err != nil {
 				s.logger.Warn("emit tool_result", "err", err)
 			}
-			// Return the RAW result to the dispatch loop: the hint is
-			// for the model (it reads the emitted frame via the history
-			// owner); the returned string feeds stuck-detection, which
-			// must hash the unmodified tool output.
-			return string(result), false
+			// Return the ENRICHED result so every consumer of the
+			// returned value sees the hint, consistently with the
+			// emitted frame. The async turn loop ignores this return
+			// (it reads the emitted frame via the history owner), but
+			// the sync close-turn path (close_turn_sync.go) builds its
+			// RoleTool message directly from it — returning raw there
+			// would silently drop the hint. Stuck-detection is
+			// unaffected either way: it hashes the tool CALL
+			// (LocalToolHash(name,args)), never the result body, and
+			// reads errCode only when the frame's IsError=true (this
+			// provider-embedded-error frame is IsError=false, as before).
+			return enriched, false
 		}
 	}
 
