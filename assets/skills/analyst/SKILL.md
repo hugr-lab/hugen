@@ -54,6 +54,7 @@ metadata:
 
     sub_agents:
       - name: planner
+        timeout: 15m
         description: >
           Mission planner. You are a coordinator, not an analyst —
           you decide WHICH wave runs next and hand each worker a
@@ -271,6 +272,7 @@ metadata:
             tools: [get_handoff, validate_and_approve]
 
       - name: researcher
+        timeout: 30m
         description: >
           Mission research — the runtime spawns you ONCE, BEFORE
           the planner, on every mission this skill runs. You are
@@ -417,6 +419,7 @@ metadata:
             max_turns: 5
 
       - name: data-analyst
+        timeout: 1h
         description: >
           End-to-end data worker. Discovers what it needs,
           composes the query, validates it, executes, persists
@@ -454,6 +457,14 @@ metadata:
                for the columns you'll touch. Default limit 50;
                for wide tables retry with `relevance_query`
                (semantic ranker) before paginating.
+             - For the query GRAMMAR of your core operations —
+               aggregations, filters, relation joins, spatial ops —
+               READ the matching hugr-data reference via `skill:ref`
+               FIRST: `aggregations`, `filter-guide`, `query-patterns`,
+               `spatial-queries` (each listed with its purpose in your
+               loaded hugr-data skill). Do NOT reverse-engineer the
+               grammar by `schema-type_fields`-ing `*Aggregation` /
+               wrapper types — the reference is faster and correct.
           3. Compose ONE compound query with aliases. Flavour:
              `<t>_aggregation` (counts / sums / top-N),
              `<t>_bucket_aggregation` (group-by),
@@ -668,6 +679,7 @@ metadata:
             max_turns: 4
 
       - name: schema-explorer
+        timeout: 1h
         description: >
           For tasks where the SCHEMA MAP is the deliverable —
           inventory, data dictionary, entity-relationship
@@ -764,6 +776,7 @@ metadata:
             max_turns: 5
 
       - name: report-builder
+        timeout: 1h
         description: >
           Composes the user-facing HTML (or markdown / prose)
           deliverable from prior-wave handoff bodies. Default
@@ -826,6 +839,7 @@ metadata:
             tools: [get_handoff, get_research]
 
       - name: checker
+        timeout: 20m
         description: >
           Verdict-emitting role spawned after a Do wave when
           the planner did NOT set `skip_check: true` on that
@@ -862,6 +876,7 @@ metadata:
             tools: [get_handoff, get_research]
 
       - name: synthesizer
+        timeout: 20m
         description: >
           Mission's final assistant — runs ONCE after
           plan_complete OR `decision: finish`. Reads [Plan
