@@ -28,7 +28,7 @@ metadata:
     intents: [data_query, file_analysis, spatial_analysis]
 compatibility:
   model: any
-  runtime: hugen-phase-3.5
+  runtime: hugen
 ---
 
 # DuckDB Data

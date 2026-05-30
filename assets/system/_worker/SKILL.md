@@ -34,7 +34,7 @@ metadata:
           skip_if_idle: true
 compatibility:
   model: any
-  runtime: hugen-phase-4
+  runtime: hugen
 ---
 
 # `_worker` skill
@@ -56,13 +56,14 @@ its own contract.
 
 ## Tool surface (granted by this skill)
 
-- `session:inquire` — narrow data-level ambiguity only. Intent
+- `session:inquire` — narrow execution-level ambiguity only
+  (something only YOU can see while doing the work). Intent
   ambiguity belongs to your caller; ad-hoc workers should report
   the ambiguity via their normal result channel, mission-spawned
   workers via a `status: "error"` handoff.
-- `notepad:read` / `notepad:search` — cross-mission findings
-  (`schema-finding` / `data-source` / `query-pattern` /
-  `data-quality-issue`). Always check before re-discovering.
+- `notepad:read` / `notepad:search` — cross-mission findings left
+  by prior runs (the categories come from the loaded skill's
+  tags). Always check before re-discovering.
 
 Granted by `_system` (always present): shell (`bash-mcp:*`),
 skill catalogue (`skill:load` / `unload` / `ref` / `files`),

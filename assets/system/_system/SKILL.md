@@ -40,7 +40,7 @@ metadata:
     tier_compatibility: [root, mission, worker]
 compatibility:
   model: any
-  runtime: hugen-phase-3
+  runtime: hugen
 ---
 
 # _system skill
@@ -157,7 +157,7 @@ keeping `bash.run`. The `_system` skill itself is never unloaded.
 If a tool you expect is missing, it has been denied by policy;
 do not retry, surface the constraint to the user.
 
-## HITL approval (phase 5.1)
+## HITL approval
 
 `bash.run`, `bash.shell`, and `bash.write_file` carry
 `requires_approval: true` in the manifest. The runtime intercepts

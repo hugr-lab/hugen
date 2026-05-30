@@ -18,7 +18,7 @@ metadata:
     intents: [documentation]
 compatibility:
   model: any
-  runtime: hugen-phase-3.5
+  runtime: hugen
 ---
 
 # DuckDB Docs

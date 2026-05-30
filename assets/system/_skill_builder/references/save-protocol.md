@@ -3,9 +3,9 @@
 Triggered by an explicit user request to crystallise current session
 work as a reusable local skill. Phrases that fire the protocol:
 
-- "сохрани это как скилл / save this as a skill"
-- "давай сделаем скилл что бы ... / let's make a skill that ..."
-- "запомни этот процесс / remember this procedure"
+- "save this as a skill"
+- "let's make a skill that ..."
+- "remember this procedure"
 
 Run the steps in order. Skipping the post-save validation is not
 allowed — a skill that hasn't been validated end-to-end is not done.
@@ -18,11 +18,11 @@ Before composing the bundle, ask the user:
   (e.g. `material-movement-report`); confirm with the user.
 - **Distinctive description** — used by future-you to decide
   whether to load this skill via `available_in_skills`. Make it
-  specific. "PDF-отчёт о движении материала в модуле логистики" —
-  good. "отчёт" — bad.
+  specific. "PDF report of material movement in the logistics
+  module" — good. "a report" — bad.
 - **What to parameterise** — example:
-    user: «движение материала AB-1234 в логистике»
-    you:  «Параметризуем по material code? Или ещё по дате?»
+    user: "material movement for AB-1234 in logistics"
+    you:  "Parameterise by material code? And by date too?"
 - **Which session artefacts** (scripts, query templates, render
   templates) to bundle alongside the procedure body.
 

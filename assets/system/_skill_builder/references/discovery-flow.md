@@ -49,12 +49,12 @@ Skip discovery for:
 ## Worked example — material movement report
 
 Session N: user asked for movement of material AB-1234, agent ran
-queries + rendered PDF, user said "сохрани". Saved as
-`material-movement-report` with `description: "PDF-отчёт о
-движении материала в модуле логистики"`.
+queries + rendered PDF, user said "save this". Saved as
+`material-movement-report` with `description: "PDF report of
+material movement in the logistics module"`.
 
-Session N+1 (fresh): user asks "хочу movement по материалу
-XYZ-9999, как в прошлый раз".
+Session N+1 (fresh): user asks "I want movement for material
+XYZ-9999, like last time".
 
 Your flow:
 

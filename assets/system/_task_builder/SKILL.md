@@ -31,7 +31,7 @@ metadata:
         already matches (check the catalogue first). This mission
         CREATES the task; binding it to a schedule is a separate
         step the caller does afterwards.
-      keywords: [task, recipe, automate, automation, recurring, periodic, reusable, build a task, create a task, make a task, запланируй, задача, регулярно]
+      keywords: [task, recipe, automate, automation, recurring, periodic, reusable, build a task, create a task, make a task, schedule]
 
       capabilities:
         notepad: true
@@ -534,7 +534,7 @@ metadata:
 
 compatibility:
   model: any
-  runtime: hugen-phase-6
+  runtime: hugen
 ---
 
 # _task_builder

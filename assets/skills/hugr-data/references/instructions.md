@@ -15,8 +15,12 @@ Principles:
 Data is organized in **modules** — hierarchical namespaces that can be nested.
 Each module contains **data objects** (tables/views) and **functions**.
 
-Type names are globally unique with catalog prefix (e.g. `prefix_tablename`).
-You query them via **module fields** — the unprefixed name inside the module namespace.
+Type names are globally unique. They MAY carry a catalog prefix (e.g.
+`prefix_tablename`) — but only when the source defines one; otherwise the
+type name is unprefixed (e.g. `tablename`). Don't assume a prefix — use the
+exact type name returned by `discovery-search_module_data_objects`.
+You query data objects via **module fields** — the unprefixed query-field
+name inside the module namespace (NOT the type name).
 
 Modules map to nested fields in queries:
 ```graphql

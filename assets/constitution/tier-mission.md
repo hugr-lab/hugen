@@ -92,9 +92,9 @@ directly.
 ### When a worker raises an inquiry
 
 The inquiry bubbles automatically from worker → mission → root
-via the existing pkg/session inquiry machinery (phase 5.1). The
-runtime routes it; you do not need to handle it. The user's
-answer cascades back to the inquiring worker.
+via the runtime's inquiry machinery. The runtime routes it; you
+do not need to handle it. The user's answer cascades back to the
+inquiring worker.
 
 ### Cancellation
 

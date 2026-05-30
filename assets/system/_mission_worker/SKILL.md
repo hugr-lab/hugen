@@ -16,7 +16,7 @@ metadata:
     tier_compatibility: [worker]
 compatibility:
   model: any
-  runtime: hugen-phase-6
+  runtime: hugen
 ---
 
 # `_mission_worker` skill

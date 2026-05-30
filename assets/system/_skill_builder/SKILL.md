@@ -15,7 +15,7 @@ metadata:
     tier_compatibility: [root, mission, worker]
 compatibility:
   model: any
-  runtime: hugen-phase-4
+  runtime: hugen
 ---
 
 # _skill_builder
@@ -65,9 +65,9 @@ worked examples.
 Do **not** propose this yourself — the user owns this decision. The
 save action is triggered by phrases like:
 
-- "сохрани это как скилл / save this as a skill"
-- "давай сделаем скилл что бы ... / let's make a skill that ..."
-- "запомни этот процесс / remember this procedure"
+- "save this as a skill"
+- "let's make a skill that ..."
+- "remember this procedure"
 
 When you see one of these triggers, read
 `references/save-protocol.md` via `skill:ref` and follow the steps

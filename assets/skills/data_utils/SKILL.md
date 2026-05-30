@@ -19,7 +19,7 @@ metadata:
     tier_compatibility: [root, mission, worker]
 compatibility:
   model: any
-  runtime: hugen-phase-6
+  runtime: hugen
 ---
 
 # `data_utils` category

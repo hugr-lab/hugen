@@ -45,43 +45,79 @@ metadata:
     hints:
       - type: on_tool_error
         tools: ["hugr-main:data-*", "hugr-query:*"]
-        match: 'Cannot query field "[^"]*_aggregation"'
+        match: 'Cannot query field "[^"]*" on type "(Query|_module)'
         message: >
-          There is no `<entity>_aggregation` root query field. Aggregations
-          live INSIDE a module on a data object (`module { table_aggregation
-          { ... } }`), never at the top level. Do NOT guess more
-          `*_aggregation` names — run discovery-search_modules, then
-          discovery-search_module_data_objects to get the real query field
-          names, then build the aggregation on the object. See
-          references/aggregations.md.
-      - type: on_tool_error
-        tools: ["hugr-main:data-*", "hugr-query:*"]
-        match: 'Cannot query field "[^"]*" on type "Query"'
-        message: >
-          That field is not a top-level query. It is either a data object
-          inside a module (dotted module names are NESTING: `osm.bw` →
-          `osm { bw { ... } }`, never `osm_bw`) or it is restricted by your
-          role. STOP guessing prefixed/underscored forms — run
-          discovery-search_modules and read the exact module + field names
-          back. See references/instructions.md.
+          MODULE-HIERARCHY error — the name is not a real field at this
+          level. Hugr modules are HIERARCHICAL: a dotted module path is
+          NESTING, not one identifier — `module.submodule` is queried
+          `module { submodule { ... } }`, never `module_submodule` or a flat
+          dotted field. INSIDE the (sub)module you select a data object's
+          generated query field; get its EXACT name from
+          discovery-search_module_data_objects (`queries[].name`, copy
+          verbatim) — never invent it. Aggregations are query fields ON that
+          object (e.g. `<query_field>_aggregation { ... }`), not root
+          queries. FUNCTIONS live on a SEPARATE root: `function { module {
+          submodule { func(args) { ... } } } }` (find via
+          discovery-search_module_functions). A miss on type "Query" means
+          you flattened a nested module, named a module that doesn't exist,
+          or lack the role. Map the REAL hierarchy: discovery-search_modules
+          → discovery-search_module_data_objects, then READ
+          skill:ref(name: "hugr-data", ref: "instructions").
       - type: on_tool_error
         tools: ["hugr-main:data-*", "hugr-query:*"]
         match: 'Cannot query field "[^"]*" on type "[a-z]'
         message: >
-          That field does not exist on that type. Run
+          That field does not exist on that object type. Use the EXACT type
+          name from discovery-search_module_data_objects (it MAY carry a
+          source/catalog prefix or none — don't assume one), then run
           schema-type_fields(type_name: "<Type>") and pick a real field —
-          never guess. If you want a field by MEANING but cannot find the
-          exact name, re-call with relevance_query: "<what you mean>" and
-          include_description: true (wide tables return only the first 50
-          fields alphabetically by default). See references/query.md.
+          never guess. For a field by MEANING, re-call with
+          relevance_query: "<what you mean>" + include_description: true (wide
+          tables return only the first 50 fields by default). READ
+          skill:ref(name: "hugr-data", ref: "query") for the field + query
+          shape before retrying.
+      - type: on_tool_error
+        tools: ["hugr-main:data-*", "hugr-query:*"]
+        match: "Expected Name|Syntax Error|must have a selection"
+        message: >
+          GraphQL SYNTAX error — the query did not parse. The #1 cause:
+          FLATTENING a module path into one field — a dotted or underscored
+          name like `module.submodule.<field>` / `module_submodule_<field>`.
+          Hugr modules NEST: each dot is a level —
+          `module { submodule { <query_field>(...) { ... } } }`, with the
+          query-field name taken verbatim from discovery
+          (`queries[].name`). Functions nest under a `function` root:
+          `function { module { submodule { func(...) { ... } } } }`.
+          ("must have a selection" instead means you stopped at an
+          object/aggregation without selecting its sub-fields.) Rebuild with
+          proper nesting and READ skill:ref(name: "hugr-data",
+          ref: "instructions").
       - type: on_tool_error
         tools: ["hugr-main:data-*", "hugr-query:*"]
         match: "(?i)(unknown|invalid).*(filter|operator|argument)"
         message: >
           Hugr's filter dialect is NOT standard GraphQL (there is no `neq`;
           negation is `_not: { field: { eq: ... } }`; one-to-many relations
-          use any_of / all_of / none_of). Read references/filter-guide.md
-          before retrying.
+          use any_of / all_of / none_of). READ the reference before retrying:
+          skill:ref(name: "hugr-data", ref: "filter-guide").
+      # Success-path nudge: an inline result that came back TRUNCATED.
+      # is_truncated:true is NOT an error, so on_tool_error never sees it —
+      # this on_tool_result hint fires on the (successful) result body and
+      # steers to file output instead of a bigger inline cap.
+      - type: on_tool_result
+        tools: ["hugr-main:data-inline_graphql_result"]
+        match: '(?i)"?is_truncated"?\s*:\s*true'
+        message: >
+          TRUNCATED inline result — the full result set is larger than the
+          inline cap. Do NOT just re-bump max_result_size for a big set: the
+          right move is to PUSH MORE WORK INTO THE QUERY or WRITE A FILE.
+          First, can GraphQL shrink it? Aggregate / group / filter at the
+          source (`<obj>_aggregation`, `<obj>_bucket_aggregation`, relation
+          filters) so you fetch the answer, not the raw rows. If you genuinely
+          need the rows, switch to hugr-query:query / hugr-query:query_jq —
+          they persist the full result to a Parquet/JSON FILE and return the
+          path + preview; read it back from the file (or jq over the file)
+          instead of inlining. See skill:ref(name: "hugr-data", ref: "tips").
     sub_agents: []
     memory:
       categories:
@@ -127,7 +163,7 @@ metadata:
         discard: [greetings, repeated_tool_calls, verbose_raw_output, reasoning]
 compatibility:
   model: any
-  runtime: hugen-phase-3
+  runtime: hugen
 ---
 
 # Hugr Data Mesh

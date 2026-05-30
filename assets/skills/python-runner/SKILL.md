@@ -27,7 +27,7 @@ metadata:
     sub_agents: []
 compatibility:
   model: any
-  runtime: hugen-phase-3
+  runtime: hugen
 ---
 
 # Python Runner
