@@ -228,11 +228,17 @@ func projectRoleCapabilities(roles []skillpkg.SubAgentRole) map[string]missionex
 		if r.Name == "" {
 			continue
 		}
-		if r.Capabilities.PlanContext == "" {
+		// Validated at manifest parse, so the error is unreachable
+		// here; default to 0 (DefaultWaveTimeout) on the off chance.
+		timeout, _ := r.TimeoutDuration()
+		// Skip roles that declare neither a plan_context capability
+		// nor a timeout — they fall through to role-class defaults.
+		if r.Capabilities.PlanContext == "" && timeout == 0 {
 			continue
 		}
 		out[r.Name] = missionext.RoleCapabilities{
 			PlanContextAccess: r.Capabilities.PlanContext,
+			Timeout:           timeout,
 		}
 	}
 	if len(out) == 0 {

@@ -107,7 +107,8 @@ func (e *Extension) driveMissionPlanner(mission extension.SessionState, spawner 
 
 	var synthText string
 	if !aborted && manifest.Synthesis.Role != "" && missionHasHandoffs(mission) {
-		text, synthErr := e.runSynthesis(ctx, executor, mission, manifest.Synthesis.Role, missionSkill, goal)
+		text, synthErr := e.runSynthesis(ctx, executor, mission, manifest.Synthesis.Role, missionSkill, goal,
+			manifest.TimeoutForRole(manifest.Synthesis.Role))
 		if synthErr != nil {
 			e.logger.Warn("mission: driveMissionPlanner: synthesis failed",
 				"mission_session", mission.SessionID(), "err", synthErr)
@@ -233,7 +234,8 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 				"mission_session", mission.SessionID(), "iteration", iteration, "err", decorateErr)
 			return true, decorateErr
 		}
-		status, _, runErr := executor.RunWave(ctx, mission, decorated, RunWaveOptions{})
+		status, _, runErr := executor.RunWave(ctx, mission, decorated,
+			RunWaveOptions{Timeout: manifest.TimeoutForRoles(waveRoles(decorated))})
 		e.emitWaveComplete(mission, plan.NextWave.Label, status, runErr)
 		if runErr != nil || status == WaveStatusFailed {
 			consecutiveErrors++
@@ -412,7 +414,8 @@ func (e *Extension) spawnAndAwaitPlanner(ctx context.Context, executor *Executor
 			Task:  task,
 		}},
 	}
-	status, _, runErr := executor.RunWave(ctx, mission, wave, RunWaveOptions{})
+	status, _, runErr := executor.RunWave(ctx, mission, wave,
+		RunWaveOptions{Timeout: manifest.TimeoutForRole(manifest.Plan.Role)})
 	e.emitWaveComplete(mission, waveLabel, status, runErr)
 	if runErr != nil {
 		return nil, &PlannerError{Iteration: iteration, Reason: "planner wave run", Err: runErr}
@@ -526,7 +529,8 @@ func (e *Extension) spawnAndAwaitChecker(ctx context.Context, executor *Executor
 			Task:  task,
 		}},
 	}
-	status, _, runErr := executor.RunWave(ctx, mission, wave, RunWaveOptions{})
+	status, _, runErr := executor.RunWave(ctx, mission, wave,
+		RunWaveOptions{Timeout: manifest.TimeoutForRole(manifest.Control.Role)})
 	e.emitWaveComplete(mission, waveLabel, status, runErr)
 	if runErr != nil {
 		return Verdict{}, &PlannerError{Iteration: iteration, Reason: "checker wave run", Err: runErr}

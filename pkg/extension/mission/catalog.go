@@ -1,6 +1,9 @@
 package mission
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Catalog is the narrow interface mission ext uses to inspect the
 // skill catalogue without importing pkg/skill directly. Production
@@ -116,6 +119,13 @@ type RoleCapabilities struct {
 	// PlanContextAccess: "off" | "read". Empty inherits the
 	// role-class default at resolution time.
 	PlanContextAccess string
+
+	// Timeout caps the per-spawn wall-clock for this role's wave
+	// (projected from the skill manifest's `sub_agents[].timeout`).
+	// Zero means "no override" — the executor applies
+	// DefaultWaveTimeout. A wave with several roles uses the MAX of
+	// its subagents' timeouts.
+	Timeout time.Duration
 }
 
 // PlanContext access modes.
@@ -217,6 +227,41 @@ const (
 	DefaultMaxWaves           = 10
 	MaxMaxWaves               = 50
 )
+
+// DefaultWaveTimeout is the per-wave wall-clock budget the executor
+// applies when no role in the wave declares a `sub_agents[].timeout`.
+// It is the no-hang backstop: a stuck / never-returning subagent fails
+// its wave at this deadline instead of wedging the mission forever.
+// Generous so it never kills legitimately slow work — skills that want
+// tighter (or looser) budgets set per-role timeouts.
+const DefaultWaveTimeout = 60 * time.Minute
+
+// TimeoutForRole returns the wall-clock budget for a single-role wave
+// (planner / checker / researcher / synthesizer), falling back to
+// DefaultWaveTimeout when the role declared none.
+func (m MissionManifest) TimeoutForRole(role string) time.Duration {
+	if rc, ok := m.Roles[role]; ok && rc.Timeout > 0 {
+		return rc.Timeout
+	}
+	return DefaultWaveTimeout
+}
+
+// TimeoutForRoles returns the MAX declared timeout across a set of
+// roles (a Do wave runs several workers in parallel, so the wave must
+// outlast its slowest role). Falls back to DefaultWaveTimeout when none
+// of the roles declared one.
+func (m MissionManifest) TimeoutForRoles(roles []string) time.Duration {
+	var max time.Duration
+	for _, role := range roles {
+		if rc, ok := m.Roles[role]; ok && rc.Timeout > max {
+			max = rc.Timeout
+		}
+	}
+	if max <= 0 {
+		return DefaultWaveTimeout
+	}
+	return max
+}
 
 // NormalizePlanApproval fills empty fields with their spec
 // defaults. Unknown values pass through unchanged so the executor

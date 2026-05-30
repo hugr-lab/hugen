@@ -79,7 +79,8 @@ func (e *Extension) runResearchStage(ctx context.Context, executor *Executor, mi
 				Task:  task,
 			}},
 		}
-		status, _, runErr := executor.RunWave(ctx, mission, wave, RunWaveOptions{})
+		status, _, runErr := executor.RunWave(ctx, mission, wave,
+			RunWaveOptions{Timeout: manifest.TimeoutForRole(manifest.Research.Role)})
 		e.emitWaveComplete(mission, waveLabel, status, runErr)
 		if runErr != nil {
 			return true, fmt.Errorf("mission: research: wave run: %w", runErr)

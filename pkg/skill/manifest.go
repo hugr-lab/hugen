@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/oasdiff/yaml"
 )
@@ -608,6 +609,16 @@ type SubAgentRole struct {
 	// when this field is set.
 	Intent string `json:"intent,omitempty" yaml:"intent,omitempty"`
 
+	// Timeout caps this role's per-spawn wall-clock. The mission
+	// executor runs the role's wave under a context with this
+	// deadline, so a stuck / runaway / never-returning subagent
+	// fails the wave (and the planner replans / the mission ends)
+	// instead of wedging the executor's wait forever. A Go duration
+	// string ("1h", "30m", "20m"); empty inherits the runtime's
+	// DefaultWaveTimeout. Validated at parse (fail loud on a bad
+	// duration).
+	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+
 	// OnClose configures the deterministic pre-teardown turn the
 	// runtime fires for this role's worker sessions before
 	// emitting SessionTerminated. Phase 4.2.3 ε — gives a narrow
@@ -699,6 +710,17 @@ func (r SubAgentRole) CanSpawnEffective() bool {
 		return true
 	}
 	return *r.CanSpawn
+}
+
+// TimeoutDuration parses the role's Timeout string into a duration.
+// Empty → (0, nil): no per-role override, the runtime applies its
+// DefaultWaveTimeout. A malformed string returns the parse error
+// (surfaced at manifest validation).
+func (r SubAgentRole) TimeoutDuration() (time.Duration, error) {
+	if strings.TrimSpace(r.Timeout) == "" {
+		return 0, nil
+	}
+	return time.ParseDuration(strings.TrimSpace(r.Timeout))
 }
 
 // MemoryCategory ports the legacy memory.yaml shape.
@@ -1270,6 +1292,10 @@ func (m *Manifest) validateHugen() error {
 		default:
 			return fmt.Errorf("metadata.hugen.sub_agents[%d].capabilities.plan_context = %q: must be one of [\"\", \"off\", \"read\"]",
 				i, r.Capabilities.PlanContext)
+		}
+		if _, err := r.TimeoutDuration(); err != nil {
+			return fmt.Errorf("metadata.hugen.sub_agents[%d].timeout = %q: invalid duration: %v",
+				i, r.Timeout, err)
 		}
 	}
 

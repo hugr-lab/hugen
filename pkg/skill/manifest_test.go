@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParse_HappyPath(t *testing.T) {
@@ -638,6 +639,63 @@ metadata:
 		}
 		if !strings.Contains(err.Error(), "plan_context") {
 			t.Errorf("err should mention plan_context: %v", err)
+		}
+	})
+}
+
+func TestParse_SubAgentTimeout(t *testing.T) {
+	t.Run("parses a valid duration", func(t *testing.T) {
+		src := `---
+name: to-skill
+description: per-role timeout.
+license: MIT
+metadata:
+  hugen:
+    sub_agents:
+      - name: data-analyst
+        description: worker
+        timeout: 1h
+      - name: checker
+        description: checker
+        timeout: 20m
+      - name: no-timeout
+        description: inherits default
+---
+`
+		m, err := Parse([]byte(src))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if d, _ := m.Hugen.SubAgents[0].TimeoutDuration(); d != time.Hour {
+			t.Errorf("data-analyst timeout = %v, want 1h", d)
+		}
+		if d, _ := m.Hugen.SubAgents[1].TimeoutDuration(); d != 20*time.Minute {
+			t.Errorf("checker timeout = %v, want 20m", d)
+		}
+		// Empty → (0, nil): runtime applies its default.
+		if d, err := m.Hugen.SubAgents[2].TimeoutDuration(); d != 0 || err != nil {
+			t.Errorf("no-timeout = (%v, %v), want (0, nil)", d, err)
+		}
+	})
+	t.Run("rejects a malformed duration", func(t *testing.T) {
+		src := `---
+name: to-bad
+description: bad duration fails parse.
+license: MIT
+metadata:
+  hugen:
+    sub_agents:
+      - name: worker
+        description: worker
+        timeout: 1 hour
+---
+`
+		_, err := Parse([]byte(src))
+		if err == nil || !errors.Is(err, ErrManifestInvalid) {
+			t.Fatalf("Parse: err = %v, want ErrManifestInvalid", err)
+		}
+		if !strings.Contains(err.Error(), "timeout") {
+			t.Errorf("err should mention timeout: %v", err)
 		}
 	})
 }
