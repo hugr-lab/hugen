@@ -22,7 +22,7 @@ type fakeFinalizeGate struct {
 
 func (g *fakeFinalizeGate) Name() string { return "fake-gate" }
 
-func (g *fakeFinalizeGate) GateTurnFinalize(_ context.Context, _ extension.SessionState) (string, bool) {
+func (g *fakeFinalizeGate) GateTurnFinalize(_ context.Context, _ extension.SessionState, _ string) (string, bool) {
 	g.consults++
 	if g.consults <= g.blockTimes {
 		return g.continuation, false

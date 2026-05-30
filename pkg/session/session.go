@@ -2149,7 +2149,7 @@ func (s *Session) toolResultHint(ctx context.Context, ev extension.ToolResultEve
 // — the common case, every non-mission session — it returns ("",
 // true) and the turn retires normally. Called from
 // foldAssistantAndMaybeDispatch's no-tool-call branch.
-func (s *Session) consultTurnFinalizeGate(ctx context.Context) (string, bool) {
+func (s *Session) consultTurnFinalizeGate(ctx context.Context, finalText string) (string, bool) {
 	if s.deps == nil {
 		return "", true
 	}
@@ -2158,7 +2158,7 @@ func (s *Session) consultTurnFinalizeGate(ctx context.Context) (string, bool) {
 		if !ok {
 			continue
 		}
-		if cont, allow := gate.GateTurnFinalize(ctx, s); !allow {
+		if cont, allow := gate.GateTurnFinalize(ctx, s, finalText); !allow {
 			return cont, false
 		}
 	}

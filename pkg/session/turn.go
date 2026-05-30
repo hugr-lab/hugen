@@ -595,7 +595,7 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 	gateBlocks := false
 	var continuation string
 	if !hasToolCalls && st.finalizeGateRetries < maxFinalizeGateRetries {
-		if cont, allow := s.consultTurnFinalizeGate(runCtx); !allow {
+		if cont, allow := s.consultTurnFinalizeGate(runCtx, st.finalText); !allow {
 			gateBlocks = true
 			continuation = cont
 		}

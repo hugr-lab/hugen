@@ -169,11 +169,16 @@ func (e *Extension) OnChildFrame(_ context.Context, parent extension.SessionStat
 			return
 		}
 		if f.Payload.Result == "" {
-			// Nothing to parse — leave the cursor open for now.
-			// Phase A keeps it minimal: a worker that closes
-			// without a Result and without a prior final
-			// AgentMessage is treated as "no handoff produced"
-			// and the executor will time out / move on.
+			// The worker closed without any terminal output — no
+			// fence to parse (e.g. it exhausted the finalize-gate
+			// retries without ever emitting one, or a thinking-model
+			// left empty content). Record a FAILED handoff so the
+			// executor's waitForRefs resolves and the wave fails
+			// cleanly, instead of polling the missing ref forever.
+			// (The handoff finalize-gate re-prompts in-session first;
+			// this is the backstop for when that cap is exhausted.)
+			e.recordError(m, childSessionID, cur, wave, "no_handoff",
+				"worker closed without emitting a terminal handoff")
 			return
 		}
 		e.ingestHandoff(m, childSessionID, cur, wave, f.Payload.Result, f.Payload.Reason)

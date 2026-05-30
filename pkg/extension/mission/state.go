@@ -323,6 +323,25 @@ func (m *MissionState) LookupWorker(sessionID string) (workerCursor, bool) {
 	return cur, ok
 }
 
+// WorkerTask returns the original task text of the active wave's
+// subagent with the given name. The finalize-gate re-injects it so a
+// worker that lost its brief over a long turn (e.g. to compaction)
+// still knows what it was asked to do when nudged for its handoff.
+// Empty when the name isn't in the active wave.
+func (m *MissionState) WorkerTask(name string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Plan.Active == nil {
+		return ""
+	}
+	for _, s := range m.Plan.Active.Subagents {
+		if s.Name == name {
+			return s.Task
+		}
+	}
+	return ""
+}
+
 // MarkInquired records that the child at sessionID emitted at
 // least one *protocol.InquiryRequest frame. Idempotent — repeated
 // inquiry frames on the same session collapse to a single bit.

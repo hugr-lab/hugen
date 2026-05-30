@@ -639,7 +639,18 @@ type ModelInTurnAdvisor interface {
 // has submitted a plan the user approved via
 // `mission:validate_and_approve`, while keeping the planner's
 // in-session context (a re-plan-from-scratch respawn would discard
-// it).
+// it). The same primitive holds a Do worker / checker / synthesizer
+// from ending its turn without a parseable terminal `handoff` fence —
+// a weak model that "thought" its answer but never wrote the fence
+// (e.g. a thinking-model whose tokens all went to reasoning) gets
+// re-prompted in-session to emit it, instead of wedging the mission's
+// waitForRefs forever.
+//
+// finalText is the assistant's just-assembled final message for this
+// iteration (empty when the model produced no visible content) — a
+// gate that decides by message CONTENT (the worker handoff gate)
+// inspects it; a gate that decides by tool-call STATE (the planner's
+// validate_and_approve submission) ignores it.
 //
 // Distinct from [ModelInTurnAdvisor]: that capability is pull-pure
 // (it returns text the session decides where to place), whereas this
@@ -664,5 +675,5 @@ type ModelInTurnAdvisor interface {
 // allow=true and arms its own teardown via state — the gate does not
 // own session lifecycle.
 type TurnFinalizeGate interface {
-	GateTurnFinalize(ctx context.Context, state SessionState) (continuation string, allow bool)
+	GateTurnFinalize(ctx context.Context, state SessionState, finalText string) (continuation string, allow bool)
 }

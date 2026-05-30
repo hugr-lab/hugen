@@ -8,51 +8,71 @@ import (
 )
 
 // GateTurnFinalize implements [extension.TurnFinalizeGate] for the
-// mission planner. It holds the planner's turn open until the plan is
-// submitted-and-approved through mission:validate_and_approve (the
-// single submission channel, Phase 6.x) — replacing the old terminal
-// ```plan``` fence and the post-close approval check that let a
-// planner end its turn with a valid:false plan.
+// mission. It holds a mission subagent's turn open until it has
+// produced what its role owes — replacing the old terminal fences and
+// post-close checks that let a subagent end its turn empty.
 //
-// The gate governs ONLY the active planner child session — recognised
-// by state.Role() == the parent mission's plan.role. Every other
-// session (workers, checker, synthesizer, root, non-mission) returns
-// allow=true and retires normally.
+// Two governed roles:
 //
-// Verdict (read from the staged validate_and_approve outcome on the
-// parent MissionState):
+//   - Planner — submission-gated: the turn may retire only once the
+//     plan is submitted-and-approved through mission:validate_and_approve
+//     (the single channel, Phase 6.x). Verdict read from the staged
+//     outcome on the parent MissionState — approved / aborted → allow;
+//     refine / invalid / never-submitted → block with the matching
+//     continuation.
+//   - Do worker / checker / synthesizer — fence-gated: the turn may
+//     retire only once the final text carries a parseable terminal
+//     ```handoff``` block. A model that ended WITHOUT it (forgot, or a
+//     thinking-model whose tokens all went to reasoning leaving empty
+//     content) is re-prompted IN-SESSION to emit it, instead of wedging
+//     the executor's waitForRefs on a ref that never lands.
 //
-//	approved (incl. plan_complete / silent / policy-skip) → allow=true
-//	  → the turn retires; spawnAndAwaitPlanner reads the staged plan.
-//	user aborted the approval modal                       → allow=true
-//	  → the turn retires; the planner loop ends the mission as
-//	    user_cancel (it reads submission.aborted), NOT a generic abort.
-//	user asked to refine                                  → block, the
-//	  continuation is the refine text; the planner reworks in-session.
-//	validate returned valid:false                         → block, the
-//	  continuation is the exact validation errors; the planner fixes
-//	  the body and re-calls.
-//	never called this turn (or a stale prior submission)  → block, the
-//	  continuation demands a validate_and_approve call.
-//
-// Blocking is bounded by the session's maxFinalizeGateRetries backstop
-// (the runtime stops consulting the gate past the cap and retires the
-// turn) so a planner that never produces an approved plan falls
-// through to the planner loop's own consecutive-error abort path.
-func (e *Extension) GateTurnFinalize(_ context.Context, state extension.SessionState) (string, bool) {
+// Every other session (root, non-mission) returns allow=true. Blocking
+// is bounded by the runtime's maxFinalizeGateRetries backstop (past the
+// cap the turn retires regardless); a subagent that still produced no
+// handoff is then recorded as a failed wave outcome (OnChildFrame) so
+// the mission fails cleanly rather than hanging.
+func (e *Extension) GateTurnFinalize(_ context.Context, state extension.SessionState, finalText string) (string, bool) {
 	parent, ok := state.Parent()
 	if !ok || parent == nil {
-		return "", true // root / non-child — not a planner
+		return "", true // root / non-child — not a mission subagent
 	}
 	mState := FromState(parent)
 	if mState == nil {
 		return "", true
 	}
-	role := mState.PlannerRole()
-	if role == "" || state.Role() != role {
-		return "", true // not the mission's planner session
+	// Planner branch — submission-gated via validate_and_approve.
+	if role := mState.PlannerRole(); role != "" && state.Role() == role {
+		return e.gatePlannerFinalize(parent, mState, state)
 	}
+	// Worker / checker / synthesizer branch — fence-gated. Only a
+	// registered mission subagent owes a terminal handoff.
+	cur, known := mState.LookupWorker(state.SessionID())
+	if !known {
+		return "", true
+	}
+	if strings.TrimSpace(finalText) != "" {
+		if _, err := ParseHandoff(finalText); err == nil {
+			return "", true // a parseable handoff fence — let it retire
+		}
+	}
+	// Re-inject the original task alongside the handoff shape: a worker
+	// that did the work but lost its brief over a long turn (compaction)
+	// needs both reminders to report instead of re-deriving.
+	view := gateHandoffMissingView{Task: mState.WorkerTask(cur.Name)}
+	return e.renderGate(parent, "mission/handoff_missing", view), false
+}
 
+// gateHandoffMissingView feeds the worker's original task back into the
+// handoff_missing nudge.
+type gateHandoffMissingView struct{ Task string }
+
+// gatePlannerFinalize is the planner half of the gate: it reads the
+// staged validate_and_approve outcome on the mission state and decides
+// whether the planner's turn may retire (approved / aborted) or must
+// re-iterate (refine / invalid / never-submitted), feeding the matching
+// continuation template back into the session.
+func (e *Extension) gatePlannerFinalize(parent extension.SessionState, mState *MissionState, state extension.SessionState) (string, bool) {
 	sub := mState.PlannerSubmission()
 	// Freshness: the staged outcome must belong to THIS planner turn.
 	// A submission from a prior iteration (or none yet) is not fresh —
@@ -68,54 +88,49 @@ func (e *Extension) GateTurnFinalize(_ context.Context, state extension.SessionS
 		// Approved (or plan_complete) — the runtime has a plan to run.
 		return "", true
 	case fresh && sub.refineText != "":
-		return refineContinuation(sub.refineText), false
+		view := gateRefineView{Feedback: strings.TrimSpace(sub.refineText)}
+		return e.renderGate(parent, "mission/planner_refine", view), false
 	case fresh && !sub.valid:
-		return invalidPlanContinuation(sub.errs), false
+		view := gateInvalidPlanView{Errors: cleanErrs(sub.errs)}
+		return e.renderGate(parent, "mission/planner_invalid_plan", view), false
 	default:
-		return neverSubmittedContinuation(), false
+		return e.renderGate(parent, "mission/planner_no_plan", nil), false
 	}
 }
 
-// neverSubmittedContinuation is the gate's nudge when the planner
-// tried to end its turn without ever calling validate_and_approve
-// (this turn). Keeps the planner from closing on a bare "done".
-func neverSubmittedContinuation() string {
-	return "You have not submitted a plan yet. Do not end your turn. " +
-		"Build the plan and submit it by calling mission:validate_and_approve(body=<the plan object>). " +
-		"While it returns valid:false, fix the listed errors and call it again. " +
-		"Once it returns valid:true (and, when approval is required, the user approves), end your turn with `done`."
-}
+// gateRefineView feeds the user's refine guidance into planner_refine.
+type gateRefineView struct{ Feedback string }
 
-// invalidPlanContinuation feeds the exact validation errors from the
-// last validate_and_approve verdict back to the planner so it fixes
-// the body and re-calls — instead of closing on an invalid plan.
-func invalidPlanContinuation(errs []string) string {
-	var b strings.Builder
-	b.WriteString("Your last mission:validate_and_approve call returned valid:false. ")
-	b.WriteString("Do not end your turn. Fix these errors in the plan body and call mission:validate_and_approve again until it returns valid:true:")
-	if len(errs) == 0 {
-		b.WriteString("\n- (no error detail was returned — re-check the plan body against the output contract)")
-		return b.String()
-	}
+// gateInvalidPlanView feeds the validate_and_approve errors into
+// planner_invalid_plan.
+type gateInvalidPlanView struct{ Errors []string }
+
+// cleanErrs trims and drops empty entries so the invalid-plan template
+// renders a tidy bullet list (or the "no detail" fallback when empty).
+func cleanErrs(errs []string) []string {
+	out := make([]string, 0, len(errs))
 	for _, e := range errs {
-		e = strings.TrimSpace(e)
-		if e == "" {
-			continue
+		if e = strings.TrimSpace(e); e != "" {
+			out = append(out, e)
 		}
-		b.WriteString("\n- ")
-		b.WriteString(e)
 	}
-	return b.String()
+	return out
 }
 
-// refineContinuation feeds the user's refine guidance back to the
-// planner so it revises the plan in-session and re-submits.
-func refineContinuation(refine string) string {
-	refine = strings.TrimSpace(refine)
-	msg := "The user reviewed your plan and asked you to refine it. Do not end your turn. " +
-		"Revise the plan to address their feedback, then call mission:validate_and_approve again."
-	if refine != "" {
-		msg += "\n\nUser feedback: " + refine
+// renderGate renders a gate-continuation template against the mission
+// session's prompts renderer. A missing renderer or render error logs
+// and returns "" — the gate still blocks finalization; the bare
+// re-iteration alone may nudge the model even without steer text.
+func (e *Extension) renderGate(mission extension.SessionState, name string, data any) string {
+	r := mission.Prompts()
+	if r == nil {
+		e.logger.Warn("mission: gate: no prompts renderer", "template", name)
+		return ""
 	}
-	return msg
+	out, err := r.Render(name, data)
+	if err != nil {
+		e.logger.Warn("mission: gate: render failed", "template", name, "err", err)
+		return ""
+	}
+	return out
 }

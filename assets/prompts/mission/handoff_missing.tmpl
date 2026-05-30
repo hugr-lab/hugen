@@ -1,0 +1,24 @@
+You ended your turn without a terminal handoff. The runtime reads ONLY
+a fenced ```handoff``` block — narration or reasoning without it does
+NOT count as a result, and your work is LOST without it.
+
+Stop running tools to "double-check". If you already have the answer
+(or you know you cannot get it), report it NOW and end your turn.
+{{- if .Task }}
+
+Your task was:
+{{ .Task }}
+{{- end }}
+
+Emit EXACTLY ONE fenced block, in this shape:
+
+```handoff
+{"status":"ok","body":<your result — a string, or a structured object; for large / per-row data write a file and put {"path":"…", plus summary numbers} here>,"memory_summary":"<one line>"}
+```
+
+If the task could not be completed, that is itself a valid result —
+report it, do not keep retrying:
+
+```handoff
+{"status":"error","reason":"<one sentence: what blocked you>","memory_summary":"<one line>"}
+```

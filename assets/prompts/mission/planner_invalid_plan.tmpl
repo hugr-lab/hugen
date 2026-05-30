@@ -1,0 +1,10 @@
+Your last `mission:validate_and_approve` call returned valid:false.
+Do not end your turn. Fix these errors in the plan body and call
+`mission:validate_and_approve` again until it returns valid:true:
+{{- if .Errors }}
+{{- range .Errors }}
+- {{ . }}
+{{- end }}
+{{- else }}
+- (no error detail was returned — re-check the plan body against the output contract)
+{{- end }}

@@ -1,0 +1,7 @@
+The user reviewed your plan and asked you to refine it. Do not end
+your turn. Revise the plan to address their feedback, then call
+`mission:validate_and_approve` again.
+{{- if .Feedback }}
+
+User feedback: {{ .Feedback }}
+{{- end }}
