@@ -88,7 +88,9 @@ func TestValidateAndApprove_PlanComplete(t *testing.T) {
 	}
 }
 
-func TestValidateAndApprove_MissingRoadmap(t *testing.T) {
+func TestValidateAndApprove_AbsentRoadmapIsValid(t *testing.T) {
+	// roadmap is optional (dogfood 2026-05-29 — required-but-emptyable
+	// was pure friction). A plan without it must validate.
 	body := `{
         "mission_goal": "test",
         "mission_acceptance_criteria": ["x"],
@@ -99,11 +101,8 @@ func TestValidateAndApprove_MissingRoadmap(t *testing.T) {
         "rationale": "no roadmap"
     }`
 	res := callValidateForBody(t, body)
-	if res.Valid {
-		t.Fatal("want invalid for missing roadmap")
-	}
-	if !containsAny(res.Errors, "roadmap") {
-		t.Errorf("errors do not mention roadmap: %v", res.Errors)
+	if !res.Valid {
+		t.Fatalf("want valid with absent roadmap, got errors: %v", res.Errors)
 	}
 }
 
@@ -124,17 +123,16 @@ func TestValidateAndApprove_EmptySubagents(t *testing.T) {
 	}
 }
 
-func TestValidateAndApprove_MissingRationale(t *testing.T) {
+func TestValidateAndApprove_AbsentRationaleIsValid(t *testing.T) {
+	// rationale is optional (dogfood 2026-05-29). A plan_complete body
+	// without it must validate.
 	body := `{
         "next_wave": null,
         "roadmap": []
     }`
 	res := callValidateForBody(t, body)
-	if res.Valid {
-		t.Fatal("want invalid for missing rationale")
-	}
-	if !containsAny(res.Errors, "rationale") {
-		t.Errorf("errors do not mention rationale: %v", res.Errors)
+	if !res.Valid {
+		t.Fatalf("want valid with absent rationale, got errors: %v", res.Errors)
 	}
 }
 

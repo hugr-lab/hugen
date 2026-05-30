@@ -208,17 +208,20 @@ func validateRequired(kind OutputContractKind, h Handoff, raw map[string]any) er
 	case KindPlan:
 		body, _ := raw["body"].(map[string]any)
 		if body == nil {
-			return &ParseError{Reason: "kind=plan requires a body object with next_wave, roadmap, rationale"}
+			return &ParseError{Reason: "kind=plan requires a body object with next_wave"}
 		}
 		if _, ok := body["next_wave"]; !ok {
 			return &ParseError{Reason: "kind=plan requires body.next_wave (use null to signal plan_complete)"}
 		}
-		if _, ok := body["roadmap"]; !ok {
-			return &ParseError{Reason: "kind=plan requires body.roadmap (empty array allowed)"}
-		}
-		if _, ok := body["rationale"]; !ok {
-			return &ParseError{Reason: "kind=plan requires body.rationale"}
-		}
+		// roadmap and rationale are OPTIONAL — absent roadmap means "no
+		// plan-ahead" (empty); absent rationale just means no modal
+		// context line. Neither absence is a real error, so the hard
+		// contract no longer requires them: they were
+		// required-but-emptyable / soft, which was pure friction (weak
+		// models burned many validate_and_approve retries re-omitting
+		// fields whose empty value the contract already tolerated —
+		// dogfood 2026-05-29). They stay RECOMMENDED in the planner
+		// prose (planner_task.tmpl), where guidance belongs.
 		// next_wave may be null (plan_complete) or a wave object.
 		if nw := body["next_wave"]; nw != nil {
 			wave, ok := nw.(map[string]any)
@@ -270,85 +273,19 @@ func validateRequired(kind OutputContractKind, h Handoff, raw map[string]any) er
 		if body == nil {
 			return &ParseError{Reason: "kind=research requires a body object"}
 		}
-		// `done` is required so the runtime can decide whether to
-		// re-fire the research role or move to the planner. Empty
-		// `clarifications` + `done: false` is legitimate (the role
-		// asks for one more turn to process prior_answers before
-		// finalising findings).
-		if _, ok := body["done"]; !ok {
-			return &ParseError{Reason: "kind=research requires body.done (boolean)"}
-		}
-		if v, ok := body["done"].(bool); !ok {
-			return &ParseError{Reason: fmt.Sprintf("kind=research: body.done must be a boolean, got %T", body["done"])}
-		} else if !v {
-			// done=false REQUIRES at least one clarification — the
-			// only sensible reason to re-fire research is to ask
-			// the user something. Without clarifications it would
-			// loop forever.
-			cl, _ := body["clarifications"].([]any)
-			if len(cl) == 0 {
-				return &ParseError{Reason: "kind=research: body.done=false requires at least one entry in body.clarifications"}
-			}
-		}
-		// When done=true the role MUST emit `findings` (free-form
-		// summary the planner reads). Empty findings on done=true
-		// is a misbehaving role — the runtime fails loud so the
-		// retry path engages.
-		if done, _ := body["done"].(bool); done {
-			findings, _ := body["findings"].(string)
-			if strings.TrimSpace(findings) == "" {
-				return &ParseError{Reason: "kind=research: body.findings is required when body.done=true (one-paragraph summary of what was learned)"}
-			}
-		}
-		if cl, ok := body["clarifications"]; ok {
-			arr, isArr := cl.([]any)
-			if !isArr {
-				return &ParseError{Reason: "kind=research: body.clarifications must be an array of objects"}
-			}
-			if len(arr) > researchMaxClarificationsPerBatch {
-				return &ParseError{Reason: fmt.Sprintf("kind=research: body.clarifications has %d entries; max %d per batch", len(arr), researchMaxClarificationsPerBatch)}
-			}
-			seen := make(map[string]struct{}, len(arr))
-			for i, e := range arr {
-				entry, ok := e.(map[string]any)
-				if !ok {
-					return &ParseError{Reason: fmt.Sprintf("kind=research: body.clarifications[%d] must be an object", i)}
-				}
-				q, _ := entry["question"].(string)
-				if strings.TrimSpace(q) == "" {
-					return &ParseError{Reason: fmt.Sprintf("kind=research: body.clarifications[%d].question is required", i)}
-				}
-				id, _ := entry["id"].(string)
-				if id == "" {
-					// Soft recovery — auto-assign q1/q2/... isn't done
-					// here (we'd mutate raw); the runtime fills it in
-					// after parsing. We only reject duplicates that
-					// the role itself emitted.
-					continue
-				}
-				if _, dup := seen[id]; dup {
-					return &ParseError{Reason: fmt.Sprintf("kind=research: body.clarifications[%d].id = %q duplicates an earlier entry", i, id)}
-				}
-				seen[id] = struct{}{}
-				if k, _ := entry["kind"].(string); k != "" {
-					switch k {
-					case "required", "optional", "comment":
-					default:
-						return &ParseError{Reason: fmt.Sprintf("kind=research: body.clarifications[%d].kind = %q: must be one of [required, optional, comment]", i, k)}
-					}
-				}
-			}
+		// The research role runs once and emits one terminal result.
+		// It resolves ambiguity by asking the user directly
+		// (session:inquire) mid-turn, so the only required field is
+		// `findings` — the concrete brief the planner reads. Empty
+		// findings means the role produced nothing useful; the
+		// runtime fails loud so the retry path engages.
+		findings, _ := body["findings"].(string)
+		if strings.TrimSpace(findings) == "" {
+			return &ParseError{Reason: "kind=research: body.findings is required (a concrete brief of what was learned — sources, key tables/fields, resolved ambiguities)"}
 		}
 	}
 	return nil
 }
-
-// researchMaxClarificationsPerBatch caps the number of questions
-// one research output can emit. Mirrors spec §2.7 cap (default 8).
-// Above the cap the runtime treats it as a contract violation and
-// fails the parse — the retry path then prompts the role to
-// narrow its batch.
-const researchMaxClarificationsPerBatch = 8
 
 // VerdictDecision is the typed enum the checker emits to direct
 // the planner loop. Phase C — four-valued: continue, amend,

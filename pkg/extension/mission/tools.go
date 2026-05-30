@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
@@ -383,7 +384,40 @@ func (e *Extension) callGetHandoff(ctx context.Context, args json.RawMessage) (j
 	}
 	h, ok := m.Handoffs.Get(in.Ref)
 	if !ok {
-		return toolErr("not_found", fmt.Sprintf("handoff %q not in store", in.Ref))
+		// List the refs that DO exist so the caller (a worker, or the
+		// planner on amend) corrects a wrong/invented ref instead of
+		// flailing (the dogfood failure: a planner invented
+		// `module-fetcher@fetch-modules`, the worker then hunted the
+		// filesystem for it). Internal planner/checker/synth refs
+		// (`@_plan-*` / `@_check-*` / …) are hidden — they're not data
+		// handoffs a worker should read.
+		avail := availableDataRefs(m)
+		msg := fmt.Sprintf("handoff %q not in store", in.Ref)
+		if len(avail) > 0 {
+			msg += "; available refs: " + strings.Join(avail, ", ")
+		} else {
+			msg += "; no wave handoffs have been produced yet"
+		}
+		return toolErr("not_found", msg)
 	}
 	return json.Marshal(h)
+}
+
+// availableDataRefs returns the sorted, data-only handoff refs in the
+// mission store — runtime-internal refs (planner / checker / synth
+// waves, labelled `_plan-*` / `_check-*` / …) are excluded since a
+// worker reads worker outputs, not control handoffs.
+func availableDataRefs(m *MissionState) []string {
+	if m == nil {
+		return nil
+	}
+	var refs []string
+	for _, h := range m.Handoffs.List() {
+		if h.Ref == "" || strings.Contains(h.Ref, "@_") {
+			continue
+		}
+		refs = append(refs, h.Ref)
+	}
+	sort.Strings(refs)
+	return refs
 }

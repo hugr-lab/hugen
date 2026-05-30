@@ -42,18 +42,20 @@ func TestParseHandoff_Kind(t *testing.T) {
 			wantErr: "next_wave",
 		},
 		{
-			name: "plan kind requires roadmap key",
+			// roadmap is optional (absent → empty plan-ahead).
+			name: "plan kind allows absent roadmap",
 			raw: "```plan\n" +
 				`{"status":"ok","body":{"next_wave":null,"rationale":"r"}}` +
 				"\n```",
-			wantErr: "roadmap",
+			wantOk: true,
 		},
 		{
-			name: "plan kind requires rationale key",
+			// rationale is optional (absent → no modal context line).
+			name: "plan kind allows absent rationale",
 			raw: "```plan\n" +
 				`{"status":"ok","body":{"next_wave":null,"roadmap":[]}}` +
 				"\n```",
-			wantErr: "rationale",
+			wantOk: true,
 		},
 		{
 			name: "plan kind accepts next_wave: null (plan_complete signal)",

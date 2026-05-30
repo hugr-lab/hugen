@@ -46,11 +46,15 @@ goal explicitly demands them.
 [Research findings]
 {{.ResearchFindings}}
 
-These are the research role's done-state notes. Read them BEFORE
-drafting your plan — your `mission_goal` + `mission_acceptance_criteria`
-MUST reflect what was discovered. If the findings resolved an
-ambiguity the user originally had, surface that explicitly in
-your AC.
+These are CONFIRMED — the research role already resolved every
+ambiguity and verified the schema. Read them BEFORE drafting your
+plan: your `mission_goal` + `mission_acceptance_criteria` MUST
+reflect what was discovered, and where the findings name a concrete
+source / type / field / join-key a worker needs, WRITE THAT NAME
+into the worker's `task` so it composes its query directly instead
+of re-discovering. Do not schedule a wave to re-find what is
+already stated here. If the findings resolved an ambiguity the user
+originally had, surface that explicitly in your AC.
 {{end}}{{if .SpawnInputs}}
 [Inputs from caller — propagate VERBATIM to worker `inputs`]
 {{range .SpawnInputs}}- {{.Key}}: {{.Value}}
@@ -97,15 +101,29 @@ ONLY the `_worker` autoload (no domain tools), which means it
 cannot do real work. If no listed role fits the task, the task
 is mis-shaped — submit `next_wave` with a role you DO have or
 ask a clarifying inquiry; do not invent a role name.
+{{end}}{{if .Roadmap}}
+[Roadmap — what you planned across this mission]
+{{range .Roadmap}}- {{if .Done}}[done] {{else}}[pending] {{end}}{{.Label}}{{if .Description}} — {{.Description}}{{end}}
+{{end}}
+This is the roadmap from your most recent plan. Keep following it —
+pick the next `[pending]` step as your `next_wave` unless new findings
+change the plan; don't re-derive a fresh plan from scratch each
+iteration. When every step is `[done]` and the mission goal is met,
+signal plan_complete (next_wave: null).
 {{end}}{{if .Recent}}
-[Recent waves]
+[Completed waves — their handoff refs]
 {{range .Recent}}- {{.Wave}}: {{.Status}}{{if .Refs}}; refs: {{range $i, $r := .Refs}}{{if $i}}, {{end}}{{$r}}{{end}}{{end}}
 {{end}}
-Use the `refs:` values above as `depends_on` entries when a later
-subagent needs to read a prior wave's handoff body. Refs have the
-form `<subagent_name>@<wave_label>`; bare wave labels do NOT
-resolve and will fail the wave with `depends_on: ref ... not in
-handoffs store`.
+When a subagent needs the output of an EARLIER wave (any of the ones
+above — not only the most recent), pass that wave's ref in the
+subagent's structured `depends_on` field. Copy a ref VERBATIM from a
+`refs:` line above — refs have the form `<subagent_name>@<wave_label>`.
+NEVER invent, guess, or paraphrase a ref name (e.g. naming it after
+what the worker does): an unknown ref fails with `depends_on: ref ...
+not in handoffs store`, and a ref mentioned only in a worker's task
+PROSE (not in `depends_on`) is NOT resolved — the worker will not find
+it. If you need data no listed wave produced, run a wave to produce it
+first.
 {{end}}{{with .RecentVerdict}}
 [Recent verdict]
 decision: {{.Decision}}
@@ -263,23 +281,28 @@ The JSON must parse. Required keys when `next_wave` is non-null:
 - `body.next_wave` — the wave to run next. Carries `label`
   (kebab-case, unique per mission) and one or more `subagents`
   (each with `name`, `role`, `task`).
-- `body.next_wave.acceptance_criteria` (OPTIONAL) — wave-level
-  exit conditions. When set, the checker emits per-criterion
+
+Recommended (not required — omitting them never fails validation,
+but they improve the plan and the user's approval view):
+
+- `body.next_wave.acceptance_criteria` — wave-level exit
+  conditions. When set, the checker emits per-criterion
   satisfaction in the verdict and feeds it back to you on the
   next iteration. Use to narrow what "this wave succeeded"
   means when the wave produces a non-obvious artefact.
-- `body.roadmap` — array of anticipated future waves (may be
-  empty). Each entry is an object with `label` (kebab-case) AND
-  `description` (one short sentence — what the wave will do).
-  The approval inquire renders this list verbatim so the user
-  sees the full plan beyond `next_wave`. Hint only; the runtime
-  does not auto-run roadmap waves.
-- `body.rationale` — one paragraph explaining why this is the next
-  wave.
+- `body.roadmap` — array of anticipated future waves. Each entry
+  is an object with `label` (kebab-case) AND `description` (one
+  short sentence — what the wave will do). The approval inquire
+  renders this list verbatim so the user sees the full plan beyond
+  `next_wave`. Hint only; the runtime does not auto-run roadmap
+  waves. Omit (or `[]`) when there is no plan-ahead.
+- `body.rationale` — one or two sentences on why this wave next;
+  shown to the user as the approval modal's context.
 
-For `next_wave: null` (mission complete) — only `roadmap` and
-`rationale` are required; mission_goal / AC diff fields are
-ignored on this branch (the existing mission frame stands).
+For `next_wave: null` (mission complete) — nothing else is
+required; a one-line `rationale` is recommended so the recap notes
+why the mission is done. mission_goal / AC diff fields are ignored
+on this branch (the existing mission frame stands).
 
 Acceptance criteria — diff channels (B11):
 

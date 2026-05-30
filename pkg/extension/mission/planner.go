@@ -728,6 +728,13 @@ type plannerTaskView struct {
 	// the authority — proposals are input only (§3.2.1). Phase
 	// 5.x — B15.
 	ResearchACProposals []researchACProposalView
+	// Roadmap is the roadmap the planner committed to in its most
+	// recent plan — every entry, each flagged Done when a wave with
+	// that label already ran. Surfaced in [Roadmap] so the planner
+	// sees its own plan-ahead (what it intended next) and doesn't lose
+	// the thread across iterations or re-derive a fresh plan each
+	// turn. Empty before the first plan or when no roadmap was set.
+	Roadmap []plannerRoadmapView
 	// MissionAC is the current acceptance-criteria roster (with
 	// identity) rendered into [Mission acceptance criteria]. Rows
 	// stay visible across the lifecycle — dropped entries surface
@@ -852,6 +859,7 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		// doesn't invent values from goal prose.
 		view.SpawnInputs = projectResolvedInputsForTemplate(m.SpawnInputs())
 	}
+	view.Roadmap = collectRoadmap(mission)
 	if recentVerdict != nil {
 		view.RecentVerdict = &plannerVerdictView{
 			Decision: string(recentVerdict.Decision),
@@ -932,12 +940,14 @@ type checkerTaskView struct {
 	PendingRoadmap []plannerRoadmapView
 }
 
-// plannerRoadmapView projects one un-executed roadmap entry from
-// the most recent planner handoff, used by the checker's
-// completeness gate.
+// plannerRoadmapView projects one roadmap entry from the most recent
+// planner handoff. Used by the checker's completeness gate (pending
+// entries only) and by the planner's own [Roadmap] section (all
+// entries, with Done marking which labels already ran).
 type plannerRoadmapView struct {
 	Label       string
 	Description string
+	Done        bool
 }
 
 // buildCheckerTask renders the checker subagent's first message
@@ -1023,6 +1033,55 @@ func collectPendingRoadmap(mission extension.SessionState) []plannerRoadmapView 
 			continue
 		}
 		out = append(out, plannerRoadmapView{Label: r.Label, Description: r.Description})
+	}
+	return out
+}
+
+// collectRoadmap projects the most recent planner handoff's roadmap
+// into the planner's [Roadmap] view — EVERY entry, each flagged Done
+// when a wave with that label already ran (PlanState.Done or the
+// latest plan's next_wave). Mirrors collectPendingRoadmap's source
+// (the latest planner@ handoff) but keeps satisfied entries so the
+// planner sees the full plan-ahead it committed to, not just the
+// remainder. Empty when no plan carries a roadmap.
+func collectRoadmap(mission extension.SessionState) []plannerRoadmapView {
+	m := FromState(mission)
+	if m == nil {
+		return nil
+	}
+	var latestPlan *Plan
+	for _, h := range m.Handoffs.List() {
+		if !strings.HasPrefix(h.Ref, "planner@") {
+			continue
+		}
+		if p, err := DecodePlan(h); err == nil && p != nil {
+			latestPlan = p
+		}
+	}
+	if latestPlan == nil || len(latestPlan.Roadmap) == 0 {
+		return nil
+	}
+	done := map[string]bool{}
+	m.mu.Lock()
+	for _, dw := range m.Plan.Done {
+		if dw.Label != "" {
+			done[dw.Label] = true
+		}
+	}
+	m.mu.Unlock()
+	if latestPlan.NextWave.Label != "" {
+		done[latestPlan.NextWave.Label] = true
+	}
+	out := make([]plannerRoadmapView, 0, len(latestPlan.Roadmap))
+	for _, r := range latestPlan.Roadmap {
+		if r.Label == "" {
+			continue
+		}
+		out = append(out, plannerRoadmapView{
+			Label:       r.Label,
+			Description: r.Description,
+			Done:        done[r.Label],
+		})
 	}
 	return out
 }
@@ -1120,6 +1179,13 @@ func approvalRequiredForIteration(policy PlanApproval, _ int, _ *MissionState) b
 // non-empty). Phase F.
 type workerContractView struct {
 	PlanContext []plannerContextEntry
+	// ResearchAvailable is true when the mission carries a non-empty
+	// research findings projection (m.ResearchOutput()). Gates the
+	// proximate `[Research]` pull-pointer in the contract template so
+	// workers in a researched mission are told — in their first
+	// message, not just the distal constitution — to read the
+	// verified findings via mission:get_research before re-deriving.
+	ResearchAvailable bool
 }
 
 // decorateWaveTasks appends the bundled mission/worker_contract
@@ -1145,11 +1211,17 @@ func decorateWaveTasks(mission extension.SessionState, manifest MissionManifest,
 		return Wave{}, fmt.Errorf("mission: decorateWaveTasks: no prompts renderer on session")
 	}
 	planCtx := collectPlanContext(mission)
+	researchAvailable := false
+	if m := FromState(mission); m != nil {
+		if findings, _, _ := m.ResearchOutput(); strings.TrimSpace(findings) != "" {
+			researchAvailable = true
+		}
+	}
 	out := wave
 	out.Subagents = make([]SubagentSpec, len(wave.Subagents))
 	copy(out.Subagents, wave.Subagents)
 	for i := range out.Subagents {
-		view := workerContractView{}
+		view := workerContractView{ResearchAvailable: researchAvailable}
 		if ResolvePlanContextAccess(manifest, out.Subagents[i].Role) == PlanContextRead {
 			view.PlanContext = planCtx
 		}

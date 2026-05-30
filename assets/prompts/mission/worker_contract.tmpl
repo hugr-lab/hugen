@@ -17,6 +17,18 @@ NOT background prose:
   you have been handed. The whole point of `depends_on` is to
   skip that work. Re-running the discovery wastes ~1 minute and
   blows your context.
+{{- if .ResearchAvailable }}
+- **Mission research already ran and CONFIRMED the schema for this
+  mission.** The concrete names you need — sources, type / field
+  names, join keys — are usually written straight into your task
+  above (the planner lifted them from the research findings). Use
+  them as-is. For the full research detail call
+  `mission:get_research` (and `notepad:search` for the mission's
+  working memory), and read it BEFORE you reach for discovery. Do
+  NOT call `discovery-*` / `schema-*` to re-derive what research
+  has already verified — that is the single most common worker
+  failure, and it burns time and context.
+{{- end }}
 - `[Inputs from parent]` — structured arguments from the spawner
   (data source name, output path, time range). Take them at
   face value.
@@ -84,3 +96,13 @@ Notes:
 - The `body` may be a plain string or a structured JSON object;
   pick whichever shape best carries the result. `body` MUST be
   present on `status: "ok"`.
+- **Large or per-row results go to a FILE, not into the handoff.**
+  The handoff is a JSON string bounded by your output budget — a
+  long row list (one row per item, many rows) or a multi-MB payload
+  overflows it, truncates mid-JSON, and the whole handoff fails to
+  parse even when the work was correct. When the result is big,
+  write it to a file in your working directory and put the file
+  `path` plus a short summary (counts / totals / shape) in the
+  `body`. Your working directory is SHARED by every worker in this
+  mission, so a later worker reads your file straight from that
+  path. Keep inline `body` for scalars and small summaries.
