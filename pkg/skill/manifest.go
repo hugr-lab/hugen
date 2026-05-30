@@ -330,6 +330,13 @@ const (
 	// inline (same turn), matched by tool-name glob + optional error
 	// text regex / structured code.
 	HintTypeOnToolError HintType = "on_tool_error"
+
+	// HintTypeOnToolResult appends Message to a SUCCESSFUL tool result
+	// inline (same turn), matched by tool-name glob + optional regex
+	// over the result body. For results that aren't failures but
+	// warrant a nudge (canonical case: an inline query returning
+	// `is_truncated: true` → switch to file output).
+	HintTypeOnToolResult HintType = "on_tool_result"
 )
 
 // Hint is one typed in-turn advisory. The active fields depend on
@@ -399,6 +406,26 @@ func (h Hint) MatchToolError(toolName, code, msg, resultText string) string {
 	}
 	if re := h.compiled(); re != nil {
 		if !re.MatchString(msg) && !re.MatchString(resultText) {
+			return ""
+		}
+	}
+	return strings.TrimSpace(h.Message)
+}
+
+// MatchToolResult returns the hint's Message when it matches a
+// SUCCESSFUL tool result, or "" otherwise. Used by the skill
+// extension's [extension.ModelInTurnAdvisor.OnToolResult]. resultText
+// is the raw successful result body; the regex, when present, matches
+// against it. A non-on_tool_result hint never matches here.
+func (h Hint) MatchToolResult(toolName, resultText string) string {
+	if h.Type != HintTypeOnToolResult {
+		return ""
+	}
+	if !h.matchesTool(toolName) {
+		return ""
+	}
+	if re := h.compiled(); re != nil {
+		if !re.MatchString(resultText) {
 			return ""
 		}
 	}
@@ -1269,7 +1296,7 @@ func (m *Manifest) validateHugen() error {
 		if h.Type == "" {
 			return fmt.Errorf("metadata.hugen.hints[%d].type is required", i)
 		}
-		if h.Type != HintTypeOnToolError {
+		if h.Type != HintTypeOnToolError && h.Type != HintTypeOnToolResult {
 			// Forward-compat: keep the entry, skip type-specific
 			// validation; the runtime ignores unknown variations.
 			continue

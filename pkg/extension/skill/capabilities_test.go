@@ -14,11 +14,11 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
-// Manifest carrying an on_tool_error hint, used by the OnToolError
-// advisor tests.
+// Manifest carrying an on_tool_error hint AND an on_tool_result hint,
+// used by the OnToolError / OnToolResult advisor tests.
 const inlineHintManifest = `---
 name: hinted
-description: A skill with an in-turn tool-error hint.
+description: A skill with in-turn tool hints.
 license: MIT
 metadata:
   hugen:
@@ -28,6 +28,10 @@ metadata:
         tools: ["hugr-main:data-*"]
         match: "Cannot query field .*_aggregation"
         message: "Enumerate modules via discovery-search_modules first."
+      - type: on_tool_result
+        tools: ["hugr-main:data-inline_graphql_result"]
+        match: 'is_truncated"?\s*:\s*true'
+        message: "Truncated — switch to hugr-query file output."
 ---
 hinted body
 `
@@ -717,7 +721,7 @@ func TestAdvertise_LoadedSkillsMeta_SkippedWhenNoneLoaded(t *testing.T) {
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
-	out := ext.AdvertiseSystemPrompt(ctx, state)
+	out := ext.TurnPreamble(ctx, state)
 	if strings.Contains(out, "## Loaded skill bundles") {
 		t.Errorf("loaded-skills meta block surfaced with no skills loaded:\n%s", out)
 	}
@@ -738,7 +742,7 @@ func TestAdvertise_LoadedSkillsMeta_InlineSkill_HeaderOnly(t *testing.T) {
 	if err := FromState(state).Load(ctx, "alpha"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	out := ext.AdvertiseSystemPrompt(ctx, state)
+	out := ext.TurnPreamble(ctx, state)
 	if !strings.Contains(out, "## Loaded skill bundles") {
 		t.Errorf("meta block missing for loaded inline skill:\n%s", out)
 	}
@@ -783,7 +787,7 @@ delta body
 	if err := FromState(state).Load(ctx, "delta"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	out := ext.AdvertiseSystemPrompt(ctx, state)
+	out := ext.TurnPreamble(ctx, state)
 
 	checks := []string{
 		"Loaded skill: `delta`",
@@ -837,7 +841,7 @@ license: MIT
 	if err := FromState(state).Load(ctx, "scripts-only"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	out := ext.AdvertiseSystemPrompt(ctx, state)
+	out := ext.TurnPreamble(ctx, state)
 
 	if !strings.Contains(out, "  scripts:") {
 		t.Errorf("expected scripts: section:\n%s", out)
@@ -876,7 +880,7 @@ license: MIT
 			t.Fatalf("Load %s: %v", n, err)
 		}
 	}
-	out := ext.AdvertiseSystemPrompt(ctx, state)
+	out := ext.TurnPreamble(ctx, state)
 	// Sorted by name → beta, iota, zeta.
 	idxBeta := strings.Index(out, "Loaded skill: `beta`")
 	idxIota := strings.Index(out, "Loaded skill: `iota`")
@@ -1201,5 +1205,55 @@ func TestOnToolError_MatchesLoadedHint(t *testing.T) {
 	}
 	if got := ext.OnToolError(ctx, state, embedded); !strings.Contains(got, "discovery-search_modules") {
 		t.Errorf("provider embedded-error hint did not fire: %q", got)
+	}
+}
+
+// TestOnToolResult_MatchesLoadedHint verifies the success-path twin:
+// a LOADED skill's on_tool_result hint fires on a truncated (but
+// successful) result body, stays silent when unloaded, and does not
+// fire on a non-matching result.
+func TestOnToolResult_MatchesLoadedHint(t *testing.T) {
+	ctx := context.Background()
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"hinted": []byte(inlineHintManifest),
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a1")
+	state := fixture.NewTestSessionState("ses-hint-result").WithDepth(2)
+	if err := ext.InitState(ctx, state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+
+	ev := extension.ToolResultEvent{
+		Tool:       "hugr-main:data-inline_graphql_result",
+		ResultText: `{"data":{"rows":[1,2,3]},"is_truncated":true}`,
+	}
+
+	// Installed but not loaded → no contribution.
+	if got := ext.OnToolResult(ctx, state, ev); got != "" {
+		t.Errorf("unloaded skill result-hint fired: %q", got)
+	}
+
+	// Load it → hint fires on the truncated body.
+	if err := FromState(state).Load(ctx, "hinted"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := ext.OnToolResult(ctx, state, ev); !strings.Contains(got, "hugr-query file output") {
+		t.Errorf("loaded result-hint did not fire: %q", got)
+	}
+
+	// Non-truncated success → no contribution.
+	noMatch := extension.ToolResultEvent{
+		Tool:       "hugr-main:data-inline_graphql_result",
+		ResultText: `{"data":{"rows":[1]},"is_truncated":false}`,
+	}
+	if got := ext.OnToolResult(ctx, state, noMatch); got != "" {
+		t.Errorf("non-truncated result produced a hint: %q", got)
+	}
+
+	// A different tool → no contribution (tool glob).
+	otherTool := extension.ToolResultEvent{Tool: "hugr-query:query", ResultText: `{"is_truncated":true}`}
+	if got := ext.OnToolResult(ctx, state, otherTool); got != "" {
+		t.Errorf("non-matching tool produced a hint: %q", got)
 	}
 }

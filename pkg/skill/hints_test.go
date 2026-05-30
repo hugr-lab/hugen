@@ -181,3 +181,95 @@ func TestHint_MatchToolError(t *testing.T) {
 		})
 	}
 }
+
+func TestParse_Hint_OnToolResult_RoundTrips(t *testing.T) {
+	src := hintManifest(`      - type: on_tool_result
+        tools: ["hugr-main:data-inline_graphql_result"]
+        match: 'is_truncated"?\s*:\s*true'
+        message: "switch to file output"`)
+	m, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(m.Hugen.Hints) != 1 {
+		t.Fatalf("hints = %d, want 1", len(m.Hugen.Hints))
+	}
+	h := m.Hugen.Hints[0]
+	if h.Type != HintTypeOnToolResult {
+		t.Errorf("type = %q, want %q", h.Type, HintTypeOnToolResult)
+	}
+	// Compiled at parse — must match a truncated success body.
+	if msg := h.MatchToolResult("hugr-main:data-inline_graphql_result",
+		`{"data":{...},"is_truncated":true}`); msg != "switch to file output" {
+		t.Errorf("MatchToolResult = %q, want guidance", msg)
+	}
+}
+
+func TestParse_Hint_OnToolResult_MissingMessage_FailsLoud(t *testing.T) {
+	src := hintManifest(`      - type: on_tool_result
+        tools: ["x:y"]`)
+	if _, err := Parse([]byte(src)); err == nil {
+		t.Fatal("on_tool_result without message must fail validation")
+	}
+}
+
+func TestHint_MatchToolResult(t *testing.T) {
+	const guidance = "switch to hugr-query file output"
+	base := Hint{
+		Type:    HintTypeOnToolResult,
+		Tools:   []string{"hugr-main:data-inline_graphql_result"},
+		Match:   `is_truncated"?\s*:\s*true`,
+		Message: guidance,
+	}
+	cases := []struct {
+		name       string
+		hint       Hint
+		tool       string
+		resultText string
+		want       string
+	}{
+		{
+			name:       "match on truncated success body",
+			hint:       base,
+			tool:       "hugr-main:data-inline_graphql_result",
+			resultText: `{"data":{"x":1},"is_truncated":true}`,
+			want:       guidance,
+		},
+		{
+			name:       "underscore tool form matches",
+			hint:       base,
+			tool:       "hugr-main_data-inline_graphql_result",
+			resultText: `{"is_truncated": true}`,
+			want:       guidance,
+		},
+		{
+			name:       "non-truncated success does not match",
+			hint:       base,
+			tool:       "hugr-main:data-inline_graphql_result",
+			resultText: `{"data":{"x":1},"is_truncated":false}`,
+			want:       "",
+		},
+		{
+			name:       "tool glob excludes other tools",
+			hint:       base,
+			tool:       "hugr-query:query",
+			resultText: `{"is_truncated":true}`,
+			want:       "",
+		},
+		{
+			name:       "on_tool_error hint never matches a result consult",
+			hint:       Hint{Type: HintTypeOnToolError, Match: "is_truncated", Message: guidance},
+			tool:       "hugr-main:data-inline_graphql_result",
+			resultText: `{"is_truncated":true}`,
+			want:       "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.hint.MatchToolResult(tc.tool, tc.resultText)
+			if got != tc.want {
+				t.Errorf("MatchToolResult = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

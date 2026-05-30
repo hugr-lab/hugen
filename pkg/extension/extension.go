@@ -565,6 +565,22 @@ type ToolErrorEvent struct {
 	ResultText string
 }
 
+// ToolResultEvent describes a SUCCESSFUL tool result handed to
+// [ModelInTurnAdvisor.OnToolResult] so an advisor can append in-turn
+// steer keyed off the result content — not a failure, but a shape
+// that warrants a nudge (the canonical case: an inline query returned
+// `is_truncated: true`, so the model should switch to file output
+// instead of re-bumping the size cap). Distinct from [ToolErrorEvent]:
+// this fires on the success path, where no error producer runs.
+type ToolResultEvent struct {
+	// Tool is the fully-qualified tool name as dispatched
+	// (e.g. "hugr-main:data-inline_graphql_result").
+	Tool string
+	// ResultText is the raw successful tool result JSON. An advisor
+	// matches its on_tool_result hints' regex against it.
+	ResultText string
+}
+
 // ModelInTurnAdvisor is the umbrella capability for an extension that
 // contributes content INTO the active turn — near the model's
 // decision point, ephemerally (render-time, not a persisted frame) —
@@ -590,11 +606,17 @@ type ToolErrorEvent struct {
 //     [ToolErrorEvent] for the two error producers; the session folds
 //     the returned text into the result content the model reads, with
 //     no separate emitted frame.
+//   - OnToolResult — guidance appended inline to a SUCCESSFUL tool
+//     result whose content matches a hint (manifest hints of type
+//     on_tool_result). Same inline-fold mechanism as OnToolError, but
+//     fires on the success path — for results that are fine but
+//     warrant a nudge (e.g. truncated inline query → switch to file
+//     output). See [ToolResultEvent].
 //
 // Contract: implementations are consulted in deps.Extensions order.
-// TurnPreamble contributions are joined; OnToolError contributions are
-// joined (the session de-dupes / caps). Both are pure — the session
-// owns where the text lands.
+// TurnPreamble contributions are joined; OnToolError / OnToolResult
+// contributions are joined (the session de-dupes / caps). All are pure
+// — the session owns where the text lands.
 type ModelInTurnAdvisor interface {
 	// TurnPreamble returns the ephemeral block to inject before the
 	// last user message this turn, or "" for nothing.
@@ -602,6 +624,10 @@ type ModelInTurnAdvisor interface {
 	// OnToolError returns guidance to append to a failing tool
 	// result, or "" for nothing.
 	OnToolError(ctx context.Context, state SessionState, ev ToolErrorEvent) string
+	// OnToolResult returns guidance to append to a SUCCESSFUL tool
+	// result whose content matched an on_tool_result hint, or "" for
+	// nothing.
+	OnToolResult(ctx context.Context, state SessionState, ev ToolResultEvent) string
 }
 
 // TurnFinalizeGate lets an extension veto a session's turn

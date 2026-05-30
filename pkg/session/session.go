@@ -2027,15 +2027,17 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 		"session", s.id, "tool", tc.Name,
 		"result", truncatePayload(result, 2048))
 
-	// Phase 6.x — provider embedded-error path. A "successful"
-	// dispatch can still carry a tool error in its JSON body (the MCP
-	// provider marshals failures as {"is_error":true,"text":…}; a
-	// GraphQL validation error like `Cannot query field
-	// "X_aggregation"` lands here, NOT in emitToolError). When the
-	// body looks like an error, consult the ModelInTurnAdvisor
-	// extensions for a corrective hint and fold it inline into the
-	// result the model reads. Pre-filtered on a cheap substring so the
-	// hot success path never runs the advisors / their regexes.
+	// Phase 6.x — in-turn advisory fold. A "successful" dispatch can
+	// still carry a tool error in its JSON body (the MCP provider
+	// marshals failures as {"is_error":true,"text":…}; a GraphQL
+	// validation error like `Cannot query field "X_aggregation"` lands
+	// here, NOT in emitToolError) — those consult the on_tool_error
+	// advisors. A genuinely clean result instead consults the
+	// on_tool_result advisors — a success that still warrants steer
+	// (canonical case: an inline query returned `is_truncated: true`,
+	// so the model should switch to file output rather than re-bump the
+	// size cap). Either way the matched hint is folded inline into the
+	// result the model reads, with no separate emitted frame.
 	if looksLikeToolErrorResult(result) {
 		if hint := s.toolErrorHint(emitCtx, extension.ToolErrorEvent{Tool: tc.Name, ResultText: string(result)}); hint != "" {
 			enriched := string(result) + hintSuffix(hint)
@@ -2057,6 +2059,16 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 			// provider-embedded-error frame is IsError=false, as before).
 			return enriched, false
 		}
+	} else if hint := s.toolResultHint(emitCtx, extension.ToolResultEvent{Tool: tc.Name, ResultText: string(result)}); hint != "" {
+		enriched := string(result) + hintSuffix(hint)
+		resultFrame := protocol.NewToolResult(s.id, s.agent.Participant(),
+			tc.ID, enriched, false)
+		if err := s.emit(emitCtx, resultFrame); err != nil {
+			s.logger.Warn("emit tool_result", "err", err)
+		}
+		// Enriched return for the same sync-close-turn reason as the
+		// error path above; the frame stays IsError=false.
+		return enriched, false
 	}
 
 	resultFrame := protocol.NewToolResult(s.id, s.agent.Participant(),
@@ -2103,6 +2115,28 @@ func (s *Session) toolErrorHint(ctx context.Context, ev extension.ToolErrorEvent
 			continue
 		}
 		if h := adv.OnToolError(ctx, s, ev); h != "" {
+			parts = append(parts, h)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// toolResultHint consults the registered [extension.ModelInTurnAdvisor]
+// extensions (deps.Extensions order) for guidance on a SUCCESSFUL tool
+// result, returning the joined non-empty contributions. The
+// success-path twin of toolErrorHint — fed only on the clean (non
+// embedded-error) result path. Empty when no advisor matches.
+func (s *Session) toolResultHint(ctx context.Context, ev extension.ToolResultEvent) string {
+	if s.deps == nil {
+		return ""
+	}
+	var parts []string
+	for _, ext := range s.deps.Extensions {
+		adv, ok := ext.(extension.ModelInTurnAdvisor)
+		if !ok {
+			continue
+		}
+		if h := adv.OnToolResult(ctx, s, ev); h != "" {
 			parts = append(parts, h)
 		}
 	}
