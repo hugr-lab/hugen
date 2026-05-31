@@ -285,7 +285,7 @@ Auto-generated fields with arguments (hugr_type=`extra_field`, `arguments_count 
 - **Vector** → `_<field>_distance(vector: [...], distance: Cosine)` — Cosine, L2, Inner
 - **JSON** → `field(struct: {"name": "string", "age": "int"})` — typed extraction
 
-Use `schema-type_fields(include_arguments: true)` to discover available arguments.
+`schema-type_fields` lists these fields with their `arguments_count`; to get the exact arguments of the specific ones you'll parameterise, call `schema-describe_fields(type_name, fields: [...])`. (This replaces the old `schema-type_fields(include_arguments: true)` dump — list with `type_fields`, then `describe_fields` the few fields you name.)
 
 ### `schema-type_fields` — parameters that matter on wide tables
 
@@ -305,8 +305,8 @@ The default response returns max **50 fields**, alphabetically ordered. Many rea
 
 1. **Parse user intent** — identify entities, metrics, filters, time ranges.
 2. **Find modules**: `discovery-search_modules` — semantic search by NL query.
-3. **Find data objects**: `discovery-search_module_data_objects` — returns query field names (select, aggregation, bucket_aggregation) per table/view.
-4. **Inspect fields**: `schema-type_fields(type_name: "prefix_tablename")` — MUST call before building queries. Use the **type name** (e.g. `synthea_patients`), NOT the module name.
+3. **Find data objects**: `discovery-search_module_data_objects` — a lean candidate list: `object_type` (table/view), `parameterized`, `has_geometry`, `module` + `catalog`, `fields_count`, and the query field names (select, aggregation, bucket_aggregation) each with its `return_type`. For the full per-query arguments — a parameterized view's params especially — call `discovery-describe_data_objects(names: [...])`.
+4. **Inspect fields**: `schema-type_fields(type_name: "prefix_tablename")` — MUST call before building queries. Use the **type name** (e.g. `synthea_patients`), NOT the module name. It LISTS fields; for a field's exact arguments call `schema-describe_fields(type_name, fields: [...])`.
    - First call: bare `type_name` for a quick head of the schema.
    - **Looking for a specific field by meaning?** Re-call with `relevance_query: "<short NL phrase>"` + `include_description: true`. Don't conclude "missing" from the bare call.
    - **Need the full inventory?** Bump `limit: 200`; check `total` vs `returned`; paginate via `offset` if needed.
@@ -316,8 +316,10 @@ The default response returns max **50 fields**, alphabetically ordered. Many rea
 8. **Execute**: `data-inline_graphql_result` (supports jq transforms). If result is truncated (`is_truncated: true`), retry with higher `max_result_size` (up to 5000) or use jq to reduce output.
 9. **Present** — use jq to reshape, present tables/charts if relevant.
 
-Additional tools: `discovery-search_data_sources`, `discovery-search_module_functions`,
-`schema-type_info`, `schema-enum_values`
+Additional tools: `discovery-search_data_sources`, `discovery-search_module_functions`
+(+ `discovery-describe_functions(module, names: [...])` for a function's full
+signature — arguments + return-type fields), `discovery-describe_data_objects`,
+`schema-describe_fields`, `schema-type_info`, `schema-enum_values`
 
 ## Critical Rules
 

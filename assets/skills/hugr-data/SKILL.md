@@ -205,17 +205,32 @@ but use the canonical form below when reading docs / refs.
 - `hugr-main:discovery-search_modules` — find modules by NL query.
   **Start here for any data question.**
 - `hugr-main:discovery-search_module_data_objects` — find tables/views
-  in a module; returns both the type name (for `schema-*`) and the
-  callable query field names. **Copy `queries[].name` verbatim.**
+  in a module (a LEAN candidate list). Per object: the type name (for
+  `schema-*`), `object_type` (table/view), `parameterized` (the view
+  takes query params), `has_geometry`, `module` + `catalog` (data
+  source), `fields_count`, and `queries[]` with each query's
+  `return_type`. **Copy `queries[].name` verbatim** to call it; the
+  `module` is REQUIRED to nest the query.
+- `hugr-main:discovery-describe_data_objects` — full record for
+  EXACT-name objects (BATCHED — pass `names: [...]`). Adds, per query,
+  the `query_root` + a parameterized view's `args` parameters. Use once
+  you know which objects you'll query.
 - `hugr-main:discovery-search_module_functions` — find custom functions
-  (NOT aggregations).
+  (NOT aggregations) — LEAN: name, `return_type`, `arguments_count`.
+- `hugr-main:discovery-describe_functions` — full signature (argument
+  names/types + the return type's fields) for named functions
+  (BATCHED — `module` + `names: [...]`). Call after the search.
 - `hugr-main:discovery-field_values` — distinct values + stats for a
   field.
-- `hugr-main:schema-type_fields` — fields of a type. Default `limit: 50`
-  (wide tables have more — paginate via `offset` or rank with
-  `relevance_query`); `include_arguments: true` for a field's
-  filter/order_by/args; `include_description: true` when names are
-  auto-generated.
+- `hugr-main:schema-type_fields` — LIST a type's fields, no per-field
+  argument trees. Default `limit: 50` (wide tables have more —
+  paginate via `offset` or rank with `relevance_query`);
+  `include_description: true` when names are auto-generated. `hugr_type`
+  + `arguments_count` per field tell you which fields take arguments.
+- `hugr-main:schema-describe_fields` — full arguments + description for
+  SPECIFIC named fields (`fields: [...]`). Call AFTER `type_fields`
+  when you need a field's exact filter / bucket / function arguments —
+  this REPLACES the old `include_arguments` dump.
 - `hugr-main:schema-type_info`, `hugr-main:schema-enum_values` —
   type metadata / enum values.
 - `hugr-main:data-validate_graphql_query` — validate before executing.
@@ -241,9 +256,14 @@ a mission's `research/data-model.md` (read it by path), or a prior
 `query_template` / `schema` memory entry. Lift those verbatim and run
 discovery only on the GAPS they leave. When nothing trusted covers
 it, the reliable path is: `discovery-search_modules` → note the exact
-module names → `discovery-search_module_data_objects` →
-`schema-type_fields` on the type you'll query → then compose. When a
-query errors, read the error and pivot back to discovery rather than
+module names → `discovery-search_module_data_objects` (lean candidates)
+→ `schema-type_fields` on the type you'll query (its field list) →
+`schema-describe_fields` only for the specific field(s) whose exact
+arguments you need (filter inputs, bucket/function args) → then
+compose. List tools hand you candidates; the matching `describe_*`
+tool (`describe_fields` / `describe_data_objects` / `describe_functions`)
+returns the full detail for the few items you name. When a query
+errors, read the error and pivot back to discovery rather than
 re-tweaking the same shape (the runtime will steer you inline on
 common failures).
 
