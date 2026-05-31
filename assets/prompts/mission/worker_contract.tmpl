@@ -18,16 +18,28 @@ NOT background prose:
   skip that work. Re-running the discovery wastes ~1 minute and
   blows your context.
 {{- if .ResearchAvailable }}
-- **Mission research already ran and CONFIRMED the schema for this
-  mission.** The concrete names you need — sources, type / field
-  names, join keys — are usually written straight into your task
-  above (the planner lifted them from the research findings). Use
-  them as-is. For the full research detail call
-  `mission:get_research` (and `notepad:search` for the mission's
-  working memory), and read it BEFORE you reach for discovery. Do
-  NOT call `discovery-*` / `schema-*` to re-derive what research
-  has already verified — that is the single most common worker
-  failure, and it burns time and context.
+- **Mission research already ran and wrote its artifacts under your
+  shared workspace: `research/data-model.md` (schema contract),
+  `research/research.md` (decisions), `research/queries.md` (a
+  verified starter / verification query when one was useful), and
+  `spec.md` (the mission's acceptance criteria).** The concrete names
+  you need — sources, type / field names, join keys — are usually
+  written straight into your task above (the planner lifted them from
+  research). Use them as-is. Before you reach for `discovery-*` /
+  `schema-*` or hand-roll a query from scratch, READ the relevant
+  research file with your file tool (python `open()` /
+  `bash.read_file`):
+  - `research/data-model.md` — the schema (exact type / field / join
+    names). Lift them verbatim; this REPLACES `discovery-*` /
+    `schema-type_fields` for the tables it covers.
+  - `research/queries.md` — if it carries a starter query for your
+    task, ADAPT it instead of composing one from zero.
+
+  `mission:get_research` returns the researcher's summary plus these
+  file paths; `notepad:search` has the cross-mission working memory.
+  Re-deriving via discovery — or re-composing a query research already
+  wrote — is the single most common worker waste: it burns time and
+  context.
 {{- end }}
 - `[Inputs from parent]` — structured arguments from the spawner
   (data source name, output path, time range). Take them at

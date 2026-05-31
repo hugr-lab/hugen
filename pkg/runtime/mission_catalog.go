@@ -38,7 +38,7 @@ func (c *skillManagerMissionCatalog) LookupMission(ctx context.Context, name str
 		if sk.Manifest.Name != name {
 			continue
 		}
-		return projectMissionManifest(sk.Manifest), nil
+		return projectMissionManifest(sk.Manifest, sk.Root), nil
 	}
 	return nil, nil
 }
@@ -95,14 +95,15 @@ func isPdcaMission(m skillpkg.Manifest) bool {
 // Both inline AND role-driven manifests carry these defaults so a
 // future v2 that lets inline plans request approval doesn't have
 // to special-case projection.
-func projectMissionManifest(m skillpkg.Manifest) *missionext.MissionManifest {
+func projectMissionManifest(m skillpkg.Manifest, skillDir string) *missionext.MissionManifest {
 	if !isPdcaMission(m) {
 		return nil
 	}
 	mb := m.Hugen.Mission
 	out := &missionext.MissionManifest{
-		Name:    m.Name,
-		Summary: mb.Summary,
+		Name:     m.Name,
+		Summary:  mb.Summary,
+		SkillDir: skillDir,
 	}
 	if mb.Summary == "" {
 		out.Summary = m.Description
@@ -164,7 +165,34 @@ func projectMissionManifest(m skillpkg.Manifest) *missionext.MissionManifest {
 	if len(mb.InputsSchema) > 0 {
 		out.InputsSchema = mb.InputsSchema
 	}
+	// Phase 6.x — research→files. Project the per-stage lifecycle
+	// hooks. The skill manifest's freeform shape maps 1:1 onto
+	// mission ext's typed StageHooks.
+	out.Stages = projectMissionStages(mb.Stages)
 	return out
+}
+
+// projectMissionStages maps the skill manifest's mission.stages
+// block onto mission ext's typed StageHooks. A declared hook with
+// an empty tool projects to nil (no-op) so a malformed entry can't
+// wedge the stage. Phase 6.x.
+func projectMissionStages(in skillpkg.MissionStages) missionext.MissionStages {
+	return missionext.MissionStages{
+		Research: missionext.StageHooks{
+			Before: projectMissionHook(in.Research.Before),
+			Check:  projectMissionHook(in.Research.Check),
+		},
+	}
+}
+
+func projectMissionHook(in *skillpkg.MissionStageHook) *missionext.MissionHook {
+	if in == nil || strings.TrimSpace(in.Tool) == "" {
+		return nil
+	}
+	return &missionext.MissionHook{
+		Tool: in.Tool,
+		Args: in.Args,
+	}
 }
 
 // projectDoWorkers filters the skill's sub_agents down to the

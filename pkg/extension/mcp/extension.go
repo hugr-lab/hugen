@@ -116,6 +116,7 @@ func (e *Extension) InitState(ctx context.Context, state extension.SessionState)
 	}
 	sessDir := ws.Dir()
 	root := ws.Root()
+	tier := ws.Tier()
 
 	h := &sessionMCP{tm: tm}
 	state.SetValue(StateKey, h)
@@ -130,10 +131,7 @@ func (e *Extension) InitState(ctx context.Context, state extension.SessionState)
 				state.SessionID(), cfg.Name)
 		}
 
-		env := make(map[string]string, len(cfg.Env)+2)
-		maps.Copy(env, cfg.Env)
-		env["SESSION_DIR"] = sessDir
-		env["WORKSPACES_ROOT"] = root
+		env := perSessionMCPEnv(cfg.Env, sessDir, root, tier)
 
 		spec := mcpprov.Spec{
 			Name:        cfg.Name,
@@ -168,6 +166,32 @@ func (e *Extension) InitState(ctx context.Context, state extension.SessionState)
 		h.mu.Unlock()
 	}
 	return nil
+}
+
+// perSessionMCPEnv assembles the env handed to a per_session MCP
+// spawn: the provider's configured env plus the session scratch dir
+// (SESSION_DIR), the workspaces root (WORKSPACES_ROOT), and — on
+// mission-tier sessions — MISSION_DIR.
+//
+// On a mission or worker session the per-session scratch dir IS the
+// shared mission directory (the workspace ext nests the mission under
+// <root>/<mission_id>/ and every worker inherits that same dir
+// verbatim), so MISSION_DIR == sessDir there. Exported so the model's
+// own bash calls can address mission artifacts (`cat $MISSION_DIR/
+// spec.md`) without the worker prompt plumbing the path. Root chat
+// sessions are not a mission, so MISSION_DIR is omitted there.
+// Runtime-fired stage hooks get the path via arg templating, so this
+// env is purely a convenience for the model. Phase 6.x —
+// research→files.
+func perSessionMCPEnv(cfgEnv map[string]string, sessDir, root string, tier wsext.Tier) map[string]string {
+	env := make(map[string]string, len(cfgEnv)+3)
+	maps.Copy(env, cfgEnv)
+	env["SESSION_DIR"] = sessDir
+	env["WORKSPACES_ROOT"] = root
+	if tier == wsext.TierMission || tier == wsext.TierWorker {
+		env["MISSION_DIR"] = sessDir
+	}
+	return env
 }
 
 // CloseSession implements [extension.Closer]. Closes every

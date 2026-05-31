@@ -99,6 +99,37 @@ type MissionManifest struct {
 	// keys to pass without guessing. nil / empty → schema absent;
 	// the prompt block falls back to the bare summary. Phase 6.1d.
 	InputsSchema map[string]any
+
+	// Stages carries the optional per-stage lifecycle hooks projected
+	// from the skill manifest's `mission.stages` block. Zero value =
+	// no hooks. Phase 6.x — research→files.
+	Stages MissionStages
+
+	// SkillDir is the absolute on-disk path of the dispatching
+	// skill's bundle directory (skill.Root). Empty for inline /
+	// embed-only skills with no disk presence. The runtime templates
+	// it into stage-hook args as {{.MissionSkill}} so a scaffold hook
+	// can copy the skill's bundled template files into the mission
+	// dir. Phase 6.x — research→files.
+	SkillDir string
+}
+
+// MissionStages groups the per-stage lifecycle hooks mission ext
+// honours. v1 surface is the research stage's before/check pair;
+// later phases extend to do/control/synthesis. Phase 6.x.
+type MissionStages struct {
+	Research StageHooks
+}
+
+// StageHooks is the before/check hook pair for one stage. A nil
+// hook is a no-op for that edge. Phase 6.x.
+type StageHooks struct {
+	// Before fires before the stage's wave spawns (e.g. scaffold
+	// template files into the mission dir).
+	Before *MissionHook
+	// Check fires after the stage produces its handoff — a gate
+	// whose failed outcome re-prompts the role. Phase 6.x.
+	Check *MissionHook
 }
 
 // MissionCapabilities is the mission-tier capability projection.

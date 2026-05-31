@@ -43,18 +43,27 @@ submit plan_complete (next_wave: null) on the very next iteration.
 Do NOT add verification, cleanup, or follow-up waves unless the
 goal explicitly demands them.
 {{if .ResearchFindings}}
-[Research findings]
+[Research findings — distilled summary]
 {{.ResearchFindings}}
 
-These are CONFIRMED — the research role already resolved every
-ambiguity and verified the schema. Read them BEFORE drafting your
-plan: your `mission_goal` + `mission_acceptance_criteria` MUST
-reflect what was discovered, and where the findings name a concrete
-source / type / field / join-key a worker needs, WRITE THAT NAME
-into the worker's `task` so it composes its query directly instead
-of re-discovering. Do not schedule a wave to re-find what is
-already stated here. If the findings resolved an ambiguity the user
-originally had, surface that explicitly in your AC.
+This is the research role's SUMMARY, and it is CONFIRMED — research
+already resolved every ambiguity and verified the schema. The FULL
+detail lives in the mission's `research/` files. READ
+`research/research.md` with `bash.read_file` BEFORE drafting — it
+carries the scope decisions, the alternatives weighed, the proposed
+acceptance criteria, and the wave-shape recipe. Build your
+`mission_goal` + AC on those decisions instead of re-deriving them.
+The schema itself (`research/data-model.md` — exact sources / types /
+fields / join keys) is what WORKERS read by path, so you do NOT need
+to copy the whole schema into every task — name the key identifiers a
+worker needs and let its contract pull the rest from
+`research/data-model.md`.
+
+Do not schedule a wave to re-find what research already settled. If
+`research/research.md` names a wave-shape recipe (single fetch /
+cross-source / report deliverable / schema inventory), use it to pick
+the SMALLEST plan that hits the goal. If research resolved an
+ambiguity the user originally had, surface that explicitly in your AC.
 {{end}}{{if .SpawnInputs}}
 [Inputs from caller — propagate VERBATIM to worker `inputs`]
 {{range .SpawnInputs}}- {{.Key}}: {{.Value}}

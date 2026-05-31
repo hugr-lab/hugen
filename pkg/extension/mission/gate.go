@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 )
 
 // GateTurnFinalize implements [extension.TurnFinalizeGate] for the
@@ -32,7 +33,7 @@ import (
 // cap the turn retires regardless); a subagent that still produced no
 // handoff is then recorded as a failed wave outcome (OnChildFrame) so
 // the mission fails cleanly rather than hanging.
-func (e *Extension) GateTurnFinalize(_ context.Context, state extension.SessionState, finalText string) (string, bool) {
+func (e *Extension) GateTurnFinalize(ctx context.Context, state extension.SessionState, finalText string) (string, bool) {
 	parent, ok := state.Parent()
 	if !ok || parent == nil {
 		return "", true // root / non-child — not a mission subagent
@@ -44,6 +45,14 @@ func (e *Extension) GateTurnFinalize(_ context.Context, state extension.SessionS
 	// Planner branch — submission-gated via validate_and_approve.
 	if role := mState.PlannerRole(); role != "" && state.Role() == role {
 		return e.gatePlannerFinalize(parent, mState, state)
+	}
+	// Researcher branch — fence-gated AND file-gated (Phase 6.x —
+	// research→files). The research role owes both a parseable research
+	// fence AND filled artifact files; the check hook validates the
+	// files IN-SESSION so the researcher fixes them without losing its
+	// discovery context (Option B), never re-spawned from scratch.
+	if role := mState.ResearchRole(); role != "" && state.Role() == role {
+		return e.gateResearchFinalize(ctx, parent, state, finalText)
 	}
 	// Worker / checker / synthesizer branch — fence-gated. Only a
 	// registered mission subagent owes a terminal handoff.
@@ -66,6 +75,54 @@ func (e *Extension) GateTurnFinalize(_ context.Context, state extension.SessionS
 // gateHandoffMissingView feeds the worker's original task back into the
 // handoff_missing nudge.
 type gateHandoffMissingView struct{ Task string }
+
+// gateResearchFinalize is the researcher half of the gate (Phase 6.x —
+// research→files). It holds the researcher's turn open until BOTH a
+// parseable terminal fence AND a passing research check hook — the
+// check validates the research/*.md artifact files the role wrote.
+// On a failed check it re-prompts IN-SESSION with the hook's feedback
+// so the researcher fixes the files without losing the discovery
+// context a fresh re-spawn would throw away (Option B). It fails OPEN
+// when the check hook can't run (misconfigured tool / no catalog) so a
+// broken gate degrades to "proceed" rather than wedging the mission;
+// the runtime's maxFinalizeGateRetries backstop caps the retries.
+func (e *Extension) gateResearchFinalize(ctx context.Context, parent, state extension.SessionState, finalText string) (string, bool) {
+	// 1. Require a parseable terminal fence first — a researcher that
+	//    ended WITHOUT its research block is re-prompted to emit it.
+	if trimmed := strings.TrimSpace(finalText); trimmed == "" {
+		return e.renderGate(parent, "mission/handoff_missing", gateHandoffMissingView{}), false
+	} else if _, err := ParseHandoff(trimmed); err != nil {
+		return e.renderGate(parent, "mission/handoff_missing", gateHandoffMissingView{}), false
+	}
+	// 2. Run the research check hook against the files. No catalog /
+	//    no check declared → nothing to validate, allow.
+	manifest, err := e.catalog.LookupMission(ctx, state.Skill())
+	if err != nil || manifest == nil || manifest.Stages.Research.Check == nil {
+		return "", true
+	}
+	view := hookView{MissionSkill: manifest.SkillDir}
+	if ws := wsext.FromState(state); ws != nil {
+		view.MissionDir = ws.Dir()
+	}
+	out, herr := runMissionHook(ctx, state, *manifest.Stages.Research.Check, view)
+	if herr != nil {
+		e.logger.Warn("mission: research gate: check hook could not run; allowing finalize",
+			"session", state.SessionID(), "err", herr)
+		return "", true // fail-open
+	}
+	if out.Failed {
+		e.emitMissionOp(parent, "research_check_failed",
+			map[string]any{"session": state.SessionID(), "reason": out.Reason})
+		return e.renderGate(parent, "mission/research_check_failed",
+			gateResearchCheckView{Reason: strings.TrimSpace(out.Reason)}), false
+	}
+	return "", true
+}
+
+// gateResearchCheckView feeds the check hook's failure detail back
+// into the research_check_failed nudge so the researcher knows which
+// file / section to fix.
+type gateResearchCheckView struct{ Reason string }
 
 // gatePlannerFinalize is the planner half of the gate: it reads the
 // staged validate_and_approve outcome on the mission state and decides

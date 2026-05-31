@@ -163,6 +163,19 @@ type MissionState struct {
 	// Phase 5.x — §4.6.
 	autoApproveTools bool
 
+	// autoApproveResearch is a RUNTIME-set (not user-set) auto-approve
+	// flag scoped to the pre-planner research stage. The research
+	// stage flips it true around the researcher wave and back to false
+	// on exit, so the researcher's `bash.write_file` calls (it writes
+	// the research/*.md artifacts into the mission workspace — benign,
+	// internal, never a user path) don't open an approval modal the
+	// user would have to click through before the plan even exists.
+	// MaybeAutoApprove honours it exactly like autoApproveTools. It is
+	// distinct from the user's §4.6 pick so a runtime convenience never
+	// masquerades as user consent on the Do waves. Phase 6.x —
+	// research→files.
+	autoApproveResearch bool
+
 	// spawnInputs captures the structured `inputs` map the caller
 	// passed to `session:spawn_mission` (root → mission). The runtime
 	// stamps the map here at RunMission time so downstream stages
@@ -202,6 +215,17 @@ type MissionState struct {
 	// unset (inline pipelines without a planner LLM) — the gate then
 	// governs nothing. Phase 6.x.
 	plannerRole string
+
+	// researchRole is the manifest's `research.role` name, stamped at
+	// mission setup when a research block is declared. The
+	// TurnFinalizeGate reads it to recognise the researcher child
+	// session and run the research check hook IN-SESSION before the
+	// turn retires — so a researcher that left the artifact files
+	// incomplete is nudged to fix them WITHOUT losing its discovery
+	// context (Option B), instead of being re-spawned from scratch.
+	// Empty when no research block is declared. Phase 6.x —
+	// research→files.
+	researchRole string
 
 	// submission stages the active planner's most recent
 	// mission:validate_and_approve outcome — the single plan-
@@ -404,6 +428,24 @@ func (m *MissionState) PlannerRole() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.plannerRole
+}
+
+// SetResearchRole stamps the manifest's research.role so the
+// TurnFinalizeGate can recognise the researcher child session and
+// gate it on the research check hook. Called at mission setup when a
+// research block is declared. Phase 6.x — research→files.
+func (m *MissionState) SetResearchRole(role string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.researchRole = role
+}
+
+// ResearchRole returns the stamped research.role, empty when no
+// research block is declared. Phase 6.x — research→files.
+func (m *MissionState) ResearchRole() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.researchRole
 }
 
 // ResetPlannerSubmission clears the staged validate_and_approve
@@ -625,6 +667,25 @@ func (m *MissionState) AutoApproveTools() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.autoApproveTools
+}
+
+// SetAutoApproveResearch toggles the research-stage auto-approve
+// flag. The runtime sets it true before spawning the researcher and
+// false on research-stage exit. Phase 6.x — research→files.
+func (m *MissionState) SetAutoApproveResearch(v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.autoApproveResearch = v
+}
+
+// AutoApproveResearch reports the research-stage auto-approve flag.
+// MaybeAutoApprove honours it alongside AutoApproveTools so the
+// researcher's workspace-internal file writes don't open a modal.
+// Phase 6.x — research→files.
+func (m *MissionState) AutoApproveResearch() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.autoApproveResearch
 }
 
 // SetResearchOutput stashes the research role's done=true result

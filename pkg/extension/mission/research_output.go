@@ -12,11 +12,18 @@ import (
 // session:inquire mid-turn when it hit an ambiguity), so the
 // handoff carries only the distilled outcome.
 //
-//   - Findings — required. The concrete brief the planner reads:
-//     what sources / tables / fields the mission hinges on (exact
-//     names), which join keys were confirmed, and how each
-//     ambiguity was resolved. Specific enough that downstream
-//     workers lift names verbatim instead of re-discovering them.
+//   - Findings — required. A LEAN brief the planner reads inline:
+//     the headline scope decisions + a pointer to the detail. Phase
+//     6.x — research→files moves the bulk (full schema, sample
+//     queries, alternatives weighed) into artifact files the role
+//     writes under the mission dir; Findings stays a summary so the
+//     planner's prompt doesn't carry the whole brief. Downstream
+//     workers lift exact names from the files, not this string.
+//   - FileRefs (optional) — relative paths (under the mission dir)
+//     of the artifact files the role wrote (research/data-model.md,
+//     research/research.md, research/queries.md, …). Informational:
+//     the planner + workers read these by path via bash; the runtime
+//     surfaces them in telemetry. Phase 6.x — research→files.
 //   - ResolvedUserInputs (optional) — the key/value answers the
 //     role pulled from the user; the planner lifts them into
 //     workers' `inputs`.
@@ -32,6 +39,7 @@ import (
 type ResearchOutput struct {
 	ResolvedUserInputs map[string]any       `json:"resolved_user_inputs,omitempty"`
 	Findings           string               `json:"findings,omitempty"`
+	FileRefs           []string             `json:"file_refs,omitempty"`
 	ACProposals        []ResearchACProposal `json:"ac_proposals,omitempty"`
 	MemorySummary      string               `json:"memory_summary,omitempty"`
 }

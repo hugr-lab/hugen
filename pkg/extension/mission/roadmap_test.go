@@ -73,10 +73,10 @@ func TestRoadmapReaders_EmptyWhenNoRoadmap(t *testing.T) {
 // plan, so it must leave the prior roadmap untouched.
 func TestStageAndEmit_PersistsRoadmapOnApprove(t *testing.T) {
 	e := newPlannerExtension()
-	_, m := missionStateForRoadmap(t)
+	mission, m := missionStateForRoadmap(t)
 
 	plan := &Plan{Roadmap: []RoadmapEntry{{Label: "ph2", Description: "analyse"}}}
-	if _, err := e.stageAndEmit(m, "ses-planner", plan, validateResult{Approved: true}); err != nil {
+	if _, err := e.stageAndEmit(mission, m, "ses-planner", plan, validateResult{Approved: true}); err != nil {
 		t.Fatalf("stageAndEmit approve: %v", err)
 	}
 	if got := m.Plan.Roadmap; len(got) != 1 || got[0].Label != "ph2" {
@@ -84,7 +84,7 @@ func TestStageAndEmit_PersistsRoadmapOnApprove(t *testing.T) {
 	}
 
 	// A subsequent refine (no plan) must NOT wipe the persisted roadmap.
-	if _, err := e.stageAndEmit(m, "ses-planner", nil, validateResult{RefineText: "narrow it"}); err != nil {
+	if _, err := e.stageAndEmit(mission, m, "ses-planner", nil, validateResult{RefineText: "narrow it"}); err != nil {
 		t.Fatalf("stageAndEmit refine: %v", err)
 	}
 	if got := m.Plan.Roadmap; len(got) != 1 || got[0].Label != "ph2" {

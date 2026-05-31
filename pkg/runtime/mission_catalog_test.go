@@ -1,11 +1,53 @@
 package runtime
 
 import (
+	"io/fs"
+	"strings"
 	"testing"
 
+	"github.com/hugr-lab/hugen/assets"
 	missionext "github.com/hugr-lab/hugen/pkg/extension/mission"
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 )
+
+// TestProjectMissionManifest_AnalystStagesEndToEnd parses the
+// embedded analyst SKILL.md and projects it, asserting the real
+// research-stage hooks reach the typed projection. Guards against
+// drift between the shipped manifest and the runtime that fires the
+// hooks. Phase 6.x — research→files.
+func TestProjectMissionManifest_AnalystStagesEndToEnd(t *testing.T) {
+	raw, err := fs.ReadFile(assets.SkillsFS, "skills/analyst/SKILL.md")
+	if err != nil {
+		t.Fatalf("read embedded analyst SKILL.md: %v", err)
+	}
+	m, err := skillpkg.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse analyst manifest: %v", err)
+	}
+	out := projectMissionManifest(m, "/skills/hub/analyst")
+	if out == nil {
+		t.Fatal("analyst is not projected as a mission")
+	}
+
+	before := out.Stages.Research.Before
+	if before == nil || before.Tool != "bash-mcp:bash.shell" {
+		t.Fatalf("research before hook = %+v, want bash-mcp:bash.shell", before)
+	}
+	cmd, _ := before.Args["cmd"].(string)
+	if !strings.Contains(cmd, "{{.MissionSkill}}/templates/research") ||
+		!strings.Contains(cmd, "{{.MissionDir}}/research") {
+		t.Errorf("scaffold cmd missing templated paths: %q", cmd)
+	}
+
+	check := out.Stages.Research.Check
+	if check == nil || check.Tool != "bash-mcp:bash.shell" {
+		t.Fatalf("research check hook = %+v, want bash-mcp:bash.shell", check)
+	}
+	ccmd, _ := check.Args["cmd"].(string)
+	if !strings.Contains(ccmd, "check_research.py") || !strings.Contains(ccmd, "{{.MissionDir}}") {
+		t.Errorf("check cmd missing script/path: %q", ccmd)
+	}
+}
 
 // TestProjectMissionManifest_CapabilitiesFlowsThrough verifies that
 // Phase-F manifest knobs land on the typed mission projection the
@@ -50,7 +92,7 @@ func TestProjectMissionManifest_CapabilitiesFlowsThrough(t *testing.T) {
 		},
 	}
 
-	out := projectMissionManifest(m)
+	out := projectMissionManifest(m, "")
 	if out == nil {
 		t.Fatalf("projectMissionManifest returned nil — Plan.Role should make it eligible")
 	}
@@ -118,7 +160,7 @@ func TestProjectMissionManifest_InputsSchemaFlowsThrough(t *testing.T) {
 			},
 		},
 	}
-	out := projectMissionManifest(m)
+	out := projectMissionManifest(m, "")
 	if out == nil {
 		t.Fatal("projectMissionManifest returned nil")
 	}
@@ -146,11 +188,81 @@ func TestProjectMissionManifest_InputsSchemaAbsent(t *testing.T) {
 			},
 		},
 	}
-	out := projectMissionManifest(m)
+	out := projectMissionManifest(m, "")
 	if out == nil {
 		t.Fatal("projectMissionManifest returned nil")
 	}
 	if out.InputsSchema != nil {
 		t.Errorf("InputsSchema = %v, want nil", out.InputsSchema)
+	}
+}
+
+// TestProjectMissionManifest_StagesAndSkillDir verifies the research
+// stage's before/check hooks + the skill's on-disk dir reach the
+// typed projection so the runtime can fire scaffold + gate hooks.
+// Phase 6.x — research→files.
+func TestProjectMissionManifest_StagesAndSkillDir(t *testing.T) {
+	m := skillpkg.Manifest{
+		Name: "_test_stages",
+		Hugen: skillpkg.HugenMetadata{
+			Mission: skillpkg.MissionBlock{
+				Summary: "Stages round-trip fixture.",
+				Plan:    skillpkg.MissionPlanBlock{Role: "planner"},
+				Stages: skillpkg.MissionStages{
+					Research: skillpkg.MissionStageHooks{
+						Before: &skillpkg.MissionStageHook{
+							Tool: "bash:run",
+							Args: map[string]any{"command": "scaffold {{.MissionDir}}"},
+						},
+						Check: &skillpkg.MissionStageHook{
+							Tool: "python:run_script",
+							Args: map[string]any{"path": "check.py"},
+						},
+					},
+				},
+			},
+		},
+	}
+	out := projectMissionManifest(m, "/skills/hub/analyst")
+	if out == nil {
+		t.Fatal("projectMissionManifest returned nil")
+	}
+	if out.SkillDir != "/skills/hub/analyst" {
+		t.Errorf("SkillDir = %q, want /skills/hub/analyst", out.SkillDir)
+	}
+	if out.Stages.Research.Before == nil || out.Stages.Research.Before.Tool != "bash:run" {
+		t.Fatalf("research before hook = %+v, want bash:run", out.Stages.Research.Before)
+	}
+	if got, _ := out.Stages.Research.Before.Args["command"].(string); got != "scaffold {{.MissionDir}}" {
+		t.Errorf("before hook command = %q, want the raw template (rendered at fire time)", got)
+	}
+	if out.Stages.Research.Check == nil || out.Stages.Research.Check.Tool != "python:run_script" {
+		t.Fatalf("research check hook = %+v, want python:run_script", out.Stages.Research.Check)
+	}
+}
+
+// TestProjectMissionManifest_EmptyToolHookDropped verifies a hook
+// with a blank tool projects to nil (no-op) rather than a hook that
+// would fail at dispatch. Phase 6.x.
+func TestProjectMissionManifest_EmptyToolHookDropped(t *testing.T) {
+	m := skillpkg.Manifest{
+		Name: "_test_empty_hook",
+		Hugen: skillpkg.HugenMetadata{
+			Mission: skillpkg.MissionBlock{
+				Plan: skillpkg.MissionPlanBlock{Role: "planner"},
+				Stages: skillpkg.MissionStages{
+					Research: skillpkg.MissionStageHooks{
+						Before: &skillpkg.MissionStageHook{Tool: "  "},
+					},
+				},
+			},
+		},
+	}
+	out := projectMissionManifest(m, "")
+	if out == nil {
+		t.Fatal("projectMissionManifest returned nil")
+	}
+	if out.Stages.Research.Before != nil {
+		t.Errorf("blank-tool hook = %+v, want nil", out.Stages.Research.Before)
 	}
 }

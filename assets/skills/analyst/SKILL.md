@@ -39,6 +39,26 @@ metadata:
       research:
         role: researcher
 
+      # Research-stage lifecycle hooks (Phase 6.x — research→files).
+      # before: scaffold the artifact skeletons into the mission dir
+      # so the researcher fills files instead of dumping everything
+      # into the handoff. check: gate the researcher on having filled
+      # the load-bearing files (re-prompts within the research retry
+      # budget on failure). {{.MissionDir}} / {{.MissionSkill}} are
+      # rendered by the runtime before dispatch.
+      stages:
+        research:
+          before:
+            tool: bash-mcp:bash.shell
+            args:
+              cmd: >-
+                mkdir -p {{.MissionDir}}/research &&
+                cp {{.MissionSkill}}/templates/research/*.md {{.MissionDir}}/research/
+          check:
+            tool: bash-mcp:bash.shell
+            args:
+              cmd: python3 {{.MissionSkill}}/scripts/check_research.py {{.MissionDir}}
+
       plan:
         role: planner
         max_waves: 10
@@ -270,9 +290,15 @@ metadata:
             tools: [read, search]
           - provider: mission
             tools: [get_handoff, validate_and_approve]
+          # Phase 6.x — research→files. Read the researcher's decision
+          # file (research/research.md — scope decisions, alternatives,
+          # proposed AC, recipe signal) directly when building the plan.
+          # read_file is not approval-gated.
+          - provider: bash-mcp
+            tools: [bash.read_file]
 
       - name: researcher
-        timeout: 30m
+        timeout: 1h
         description: >
           Mission research — the runtime spawns you ONCE, BEFORE
           the planner, on every mission this skill runs. You are
@@ -335,32 +361,34 @@ metadata:
           Do NOT field-by-field map wide tables, compose GraphQL,
           or run data queries (`data-*` is not in your surface).
 
-          Your findings are what stop the downstream workers from
-          re-deriving the schema. Make them CONCRETE: name the
-          exact type / field / join-key names you confirmed, and
-          state how each ambiguity resolved. A vague findings
-          paragraph forces every worker to redo your discovery —
-          that is the failure you exist to prevent.
+          Your research FILES are what stop the downstream workers
+          from re-deriving the schema. You write them — the runtime
+          scaffolds the skeletons under `research/`, you fill them with
+          `bash.write_file`: `research/data-model.md` carries the exact
+          type / field / join-key names you confirmed;
+          `research/research.md` carries the scope decisions,
+          rationale, and your proposed acceptance criteria. Be
+          CONCRETE — a vague data-model.md forces every worker to redo
+          your discovery, the failure you exist to prevent.
 
-          Output: end your turn with exactly ONE fenced
-          ```research``` block. The full schema is in the [How to
+          Output: write the files FIRST, then end your turn with
+          exactly ONE fenced ```research``` block — a LEAN summary plus
+          `file_refs` pointing at the files, NOT the whole schema
+          repeated inline. The full handoff schema is in the [How to
           respond] section of your first message. Required:
-          `body.findings`. Optional: `resolved_user_inputs`,
-          `ac_proposals` (the PLANNER is the authority — proposals
-          are input only), `memory_summary`.
+          `body.findings` (the summary) + the filled files. Optional:
+          `file_refs`, `resolved_user_inputs`, `ac_proposals` (the
+          PLANNER is the authority — proposals are input only; mirror
+          research.md's «Proposed acceptance criteria»),
+          `memory_summary`.
 
-          Where confirmed facts go: everything you verified — exact
-          type / field names, join keys, resolved scope choices —
-          belongs in your `findings` (your work product). That is
-          precisely what downstream workers trust instead of
-          re-deriving, so be concrete and complete there. Your
-          on_close additionally records STABLE structural facts
-          (`schema-finding`, `data-source`) to the notepad for
-          future missions. The one thing you do NOT author is a
+          Your on_close additionally records STABLE structural facts
+          (`schema-finding`, `data-source`) to the notepad for future
+          missions. The one thing you do NOT author is a
           `query-pattern` notepad entry — that records a runnable,
-          validated query, and only the worker that actually
-          executes one produces it. And you do NOT build the plan /
-          next_wave — that's the planner's job.
+          validated query, and only the worker that actually executes
+          one produces it. And you do NOT build the plan / next_wave —
+          that's the planner's job.
         intent: reasoning
         can_spawn: false
         autoload_skills: [_mission_worker, hugr-data]
@@ -394,6 +422,11 @@ metadata:
             tools: [inquire]
           - provider: mission
             tools: [get_handoff]
+          # Phase 6.x — research→files. The researcher fills the
+          # scaffolded research/*.md artifacts; write_file composes the
+          # full file, read_file lets it re-read a skeleton/own draft.
+          - provider: bash-mcp
+            tools: [bash.write_file, bash.read_file]
         on_close:
           notepad:
             prompt: |
@@ -443,14 +476,28 @@ metadata:
           Workflow (read `instructions` via skill:ref the first
           time you touch a schema):
 
-          1. Read mission state first per the worker constitution
-             (`[Resolved depends_on]`, then `mission:get_research`
-             when the brief signals research ran, then
-             `notepad:search`). A schema-explorer handoff (when
-             present) provides `module`, table names,
-             `queries[].name`, and `fields[].name + field_type` —
-             lift names verbatim and skip your own discovery.
-          2. Otherwise discover only what you need:
+          1. Read mission state FIRST. When research ran, the schema
+             you need is ALREADY written to `research/data-model.md`
+             — `bash.read_file` it BEFORE any discovery call and lift
+             the type names, query fields, field names + types, and
+             join keys VERBATIM. That file REPLACES `discovery-*` /
+             `schema-type_fields` for every table it covers; do NOT
+             re-run them to "confirm" what it already states —
+             re-deriving the schema research already wrote is the #1
+             worker waste (it burns ~10 tool calls + your context).
+             Then `bash.read_file research/queries.md` — when research
+             left a STARTER query for your task there, ADAPT it
+             instead of composing one from zero (it already has the
+             right module nesting / `_spatial` / `_aggregation`
+             shape). Then read `[Resolved depends_on]` (upstream
+             handoffs) and `notepad:search` (cross-mission patterns).
+             A schema-explorer handoff, when present, similarly
+             carries `module`, table names, `queries[].name`, and
+             `fields[].name + field_type` — lift verbatim.
+             `mission:get_research` returns the researcher's summary +
+             the file paths if you need orientation.
+          2. Discover ONLY the gaps the file / handoff leave — a table
+             or field that `data-model.md` does NOT cover:
              - `discovery-search_module_data_objects(module, query)`
                for table list + query field names.
              - `schema-type_fields(type_name, include_description: true)`
@@ -636,6 +683,12 @@ metadata:
             tools: ['*']
           - provider: mission
             tools: [get_handoff, get_research]
+          # Phase 6.x — research→files. Read the researcher's schema
+          # contract (research/data-model.md) + spec.md directly,
+          # instead of re-running discovery. read_file is not
+          # approval-gated.
+          - provider: bash-mcp
+            tools: [bash.read_file]
         on_close:
           notepad:
             prompt: |
@@ -689,10 +742,15 @@ metadata:
           duplicate the same wide scan.
 
           Tool sequence (read `instructions` via skill:ref the
-          first time you touch a schema). Apply the worker
-          constitution's "Reading mission state" discipline first
-          — when research ran, lift the researcher's table list
-          and skip straight to `schema-type_fields` per step 2.
+          first time you touch a schema). FIRST apply the worker
+          constitution's "Reading mission state" discipline: when
+          research ran, `bash.read_file research/data-model.md` — it
+          already carries the type names, fields, and join keys, so
+          lift them VERBATIM into your handoff and run discovery ONLY
+          for tables / columns that file does NOT cover. Do not
+          re-scan from scratch what research already mapped. The
+          numbered steps below are for the from-scratch / gap-fill
+          case:
             1. `discovery-search_module_data_objects` → list
                matching tables (capture `items[].name`,
                `description`, `queries[]` verbatim).
@@ -743,6 +801,11 @@ metadata:
             tools: ['*']
           - provider: mission
             tools: [get_handoff, get_research]
+          # Phase 6.x — research→files. Read research/data-model.md
+          # directly to lift what research already mapped instead of
+          # re-scanning. read_file is not approval-gated.
+          - provider: bash-mcp
+            tools: [bash.read_file]
         on_close:
           notepad:
             prompt: |
@@ -784,6 +847,16 @@ metadata:
           CDN-loaded JS chart library — Plotly.js / Chart.js /
           inline SVG), write it via `bash-mcp:bash.write_file`.
           Python only when the dataset is too large to inline.
+
+          When you fetch your OWN data (the self-contained path —
+          you loaded `hugr-data` and query it directly, with no
+          data-analyst upstream): if mission research ran,
+          `bash.read_file research/data-model.md` FIRST and lift the
+          type / field / join names VERBATIM — do NOT re-run
+          `discovery-*` / `schema-type_fields` for what it already
+          maps. Also `bash.read_file research/queries.md` — if it has
+          a starter query for your task, ADAPT it instead of composing
+          from zero. Same anti-rework rule the data-analyst follows.
 
           File path discipline:
 

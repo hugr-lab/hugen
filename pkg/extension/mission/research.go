@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -51,6 +52,39 @@ func (e *Extension) runResearchStage(ctx context.Context, executor *Executor, mi
 	// counts as "research ran" so callGetResearch can disambiguate
 	// "no research configured" from "tried and failed".
 	m.MarkResearchAttempted()
+
+	// Phase 6.x — research→files. Auto-approve the researcher's tool
+	// calls for the duration of the research stage. The researcher's
+	// only approval-gated tool is bash.write_file, which it uses to
+	// write the research/*.md artifacts into the mission workspace —
+	// internal, benign, never a user path. Without this the user has
+	// to click an approval modal per file write BEFORE the plan even
+	// exists (the §4.6 auto-approve pick only lands at the planner
+	// modal, which runs AFTER research). Reset on exit so Do-wave
+	// workers (which CAN write user-deliverable files) stay gated.
+	m.SetAutoApproveResearch(true)
+	defer m.SetAutoApproveResearch(false)
+
+	// Phase 6.x — research→files. The hook view is stable across
+	// attempts (goal / inputs / roles / mission paths don't change),
+	// so build it once and reuse it for the scaffold + gate hooks.
+	view := buildResearchHookView(mission, manifest, goal)
+
+	// T4 — research scaffold. Fire the before-hook ONCE (idempotent
+	// cp of the skill's template files into the mission dir) so the
+	// researcher inherits the artifact skeleton to fill in. A
+	// scaffold failure is fatal: without the skeleton the role
+	// cannot produce the file contract the planner + workers read.
+	if hook := manifest.Stages.Research.Before; hook != nil {
+		out, hErr := runMissionHook(ctx, mission, *hook, view)
+		if hErr != nil {
+			return true, fmt.Errorf("mission: research: scaffold hook: %w", hErr)
+		}
+		if out.Failed {
+			return true, fmt.Errorf("mission: research: scaffold hook failed: %s", out.Reason)
+		}
+		e.emitMissionOp(mission, "research_scaffold", map[string]any{"tool": hook.Tool})
+	}
 
 	// The research role runs ONCE: it does its own discovery and asks
 	// the user directly (session:inquire) when it hits an ambiguity,
@@ -117,6 +151,15 @@ func (e *Extension) runResearchStage(ctx context.Context, executor *Executor, mi
 			continue
 		}
 
+		// Phase 6.x — research→files. The research CHECK hook (artifact
+		// file validation) is NOT run here anymore — the researcher's
+		// TurnFinalizeGate (gateResearchFinalize) runs it IN-SESSION
+		// before the turn retires, so the role fixes incomplete files
+		// without losing its discovery context (Option B). By the time
+		// RunWave returns with a valid handoff, the files have already
+		// passed the gate (or the maxFinalizeGateRetries backstop let
+		// the turn through). The before-hook scaffold above still fires
+		// from the mission session.
 		if strings.TrimSpace(out.MemorySummary) != "" {
 			m.PlanContext.Append(PlanContextEntry{
 				Iteration: 0, // research runs BEFORE iteration 1
@@ -132,6 +175,57 @@ func (e *Extension) runResearchStage(ctx context.Context, executor *Executor, mi
 		return false, nil
 	}
 	return true, errors.New("mission: research: exhausted retry budget without a valid handoff")
+}
+
+// buildResearchHookView assembles the template context the research
+// stage's before/check hooks render their args against: the shared
+// mission dir + the dispatching skill's bundle dir (so a scaffold
+// hook can cp template files), plus runtime state (goal, resolved
+// spawn inputs, worker role names) a check script can reason over.
+// Phase 6.x — research→files.
+func buildResearchHookView(mission extension.SessionState, manifest MissionManifest, goal string) hookView {
+	view := hookView{
+		Goal:         goal,
+		MissionSkill: manifest.SkillDir,
+		Roles:        workerRoleNames(manifest),
+	}
+	if ws := wsext.FromState(mission); ws != nil {
+		view.MissionDir = ws.Dir()
+	}
+	if m := FromState(mission); m != nil {
+		view.Inputs = stringifyInputs(m.SpawnInputs())
+	}
+	return view
+}
+
+// workerRoleNames projects the manifest's Do-worker catalogue to a
+// plain role-name slice for the hook view's {{.Roles}}.
+func workerRoleNames(manifest MissionManifest) []string {
+	if len(manifest.Workers) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(manifest.Workers))
+	for _, w := range manifest.Workers {
+		if w.Role != "" {
+			out = append(out, w.Role)
+		}
+	}
+	return out
+}
+
+// stringifyInputs flattens the typed spawn-inputs map to
+// map[string]string for the hook view. Mirrors the research_task
+// template's projection — fine for the strings/numbers/bools the
+// research stage resolves.
+func stringifyInputs(m map[string]any) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = fmt.Sprintf("%v", v)
+	}
+	return out
 }
 
 // researchValidationRetryCap is the shape-glitch retry budget for
@@ -269,11 +363,13 @@ func (e *Extension) emitResearchComplete(mission extension.SessionState, iter in
 		Iterations        int      `json:"iterations"`
 		ResolvedInputKeys []string `json:"resolved_input_keys,omitempty"`
 		ACProposals       int      `json:"ac_proposals,omitempty"`
+		FileRefs          []string `json:"file_refs,omitempty"`
 		Findings          string   `json:"findings,omitempty"`
 	}{
 		Iterations:        iter,
 		ResolvedInputKeys: resolvedKeys,
 		ACProposals:       len(out.ACProposals),
+		FileRefs:          out.FileRefs,
 		Findings:          out.Findings,
 	}
 	e.emitMissionOp(mission, "research_complete", payload)

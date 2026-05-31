@@ -21,8 +21,13 @@ import (
 type fakeState struct {
 	id     string
 	role   string
+	skill  string
 	values sync.Map
 	parent extension.SessionState
+	// tools is the per-session ToolManager. nil for the executor
+	// tests that never dispatch; hook tests set it to a real manager
+	// with a registered fake provider.
+	tools *tool.ToolManager
 }
 
 func newFakeState(id string) *fakeState {
@@ -32,7 +37,7 @@ func newFakeState(id string) *fakeState {
 func (s *fakeState) SessionID() string                  { return s.id }
 func (s *fakeState) SubagentName() string               { return "" }
 func (s *fakeState) Role() string                       { return s.role }
-func (s *fakeState) Skill() string                      { return "" }
+func (s *fakeState) Skill() string                      { return s.skill }
 func (s *fakeState) Depth() int                         { return 0 }
 func (s *fakeState) Tier() string                       { return "root" }
 func (s *fakeState) Parent() (extension.SessionState, bool) {
@@ -42,7 +47,7 @@ func (s *fakeState) Parent() (extension.SessionState, bool) {
 	return s.parent, true
 }
 func (s *fakeState) Children() []extension.SessionState { return nil }
-func (s *fakeState) Tools() *tool.ToolManager           { return nil }
+func (s *fakeState) Tools() *tool.ToolManager           { return s.tools }
 func (s *fakeState) Prompts() *prompts.Renderer         { return nil }
 func (s *fakeState) Value(name string) (any, bool) {
 	v, ok := s.values.Load(name)

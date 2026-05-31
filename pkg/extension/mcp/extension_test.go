@@ -126,6 +126,46 @@ func TestInitState_MissingTools_Errors(t *testing.T) {
 	}
 }
 
+// TestPerSessionMCPEnv_MissionDirGating verifies MISSION_DIR is
+// exported only on mission / worker sessions (where the scratch dir
+// is the shared mission dir) and omitted on the root chat session.
+// SESSION_DIR + WORKSPACES_ROOT always present; configured env is
+// merged. Phase 6.x — research→files.
+func TestPerSessionMCPEnv_MissionDirGating(t *testing.T) {
+	cfgEnv := map[string]string{"FOO": "bar"}
+
+	for _, tc := range []struct {
+		name       string
+		tier       wsext.Tier
+		wantMisDir bool
+	}{
+		{"root chat", wsext.TierRoot, false},
+		{"mission", wsext.TierMission, true},
+		{"worker", wsext.TierWorker, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := perSessionMCPEnv(cfgEnv, "/ws/root/mis", "/ws", tc.tier)
+			if env["SESSION_DIR"] != "/ws/root/mis" {
+				t.Errorf("SESSION_DIR = %q, want /ws/root/mis", env["SESSION_DIR"])
+			}
+			if env["WORKSPACES_ROOT"] != "/ws" {
+				t.Errorf("WORKSPACES_ROOT = %q, want /ws", env["WORKSPACES_ROOT"])
+			}
+			if env["FOO"] != "bar" {
+				t.Errorf("configured env FOO dropped: %q", env["FOO"])
+			}
+			got, ok := env["MISSION_DIR"]
+			if tc.wantMisDir {
+				if !ok || got != "/ws/root/mis" {
+					t.Errorf("MISSION_DIR = %q (present=%v), want /ws/root/mis", got, ok)
+				}
+			} else if ok {
+				t.Errorf("MISSION_DIR present on root session: %q", got)
+			}
+		})
+	}
+}
+
 // TestCloseSession_NoOp_WhenNoState exercises the "session never
 // inited" path — extensions register CloseSession unconditionally,
 // and the hook must be a clean no-op when InitState wasn't run.

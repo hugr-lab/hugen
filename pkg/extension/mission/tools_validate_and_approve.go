@@ -81,7 +81,7 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 	// kind=handoff).
 	var raw any
 	if err := json.Unmarshal(in.Body, &raw); err != nil {
-		return e.stageAndEmit(mState, plannerSessionID, nil, validateResult{Errors: []string{
+		return e.stageAndEmit(parent, mState, plannerSessionID, nil, validateResult{Errors: []string{
 			fmt.Sprintf("body is not valid JSON: %v", err),
 		}})
 	}
@@ -101,7 +101,7 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 		errs = append(errs, decodeErr.Error())
 	}
 	if len(errs) > 0 {
-		return e.stageAndEmit(mState, plannerSessionID, nil, validateResult{Errors: errs})
+		return e.stageAndEmit(parent, mState, plannerSessionID, nil, validateResult{Errors: errs})
 	}
 	// Note: plan == nil is legitimate — it's the plan_complete shape
 	// (next_wave=null). plan_complete bypasses the modal entirely
@@ -121,14 +121,14 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 		}
 		mState.MarkPlanApproved()
 		e.emitPlanApproved(parent, planApprovedPayload{Trigger: "policy_skip"})
-		return e.stageAndEmit(mState, plannerSessionID, plan, validateResult{Approved: true})
+		return e.stageAndEmit(parent, mState, plannerSessionID, plan, validateResult{Approved: true})
 	}
 
 	// plan_complete bypasses the modal — finish is AC-gated
 	// downstream, not approval-gated here. The mission's prior
 	// approval still stands.
 	if plan == nil {
-		return e.stageAndEmit(mState, plannerSessionID, nil, validateResult{Approved: true})
+		return e.stageAndEmit(parent, mState, plannerSessionID, nil, validateResult{Approved: true})
 	}
 
 	// Decide modal up front so the diff merge knows which path to
@@ -139,7 +139,7 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 		if err := applyPlanACSilent(mState, *plan); err != nil {
 			return toolErr("internal", "apply ac diff (silent): "+err.Error())
 		}
-		return e.stageAndEmit(mState, plannerSessionID, plan, validateResult{Approved: true})
+		return e.stageAndEmit(parent, mState, plannerSessionID, plan, validateResult{Approved: true})
 	}
 
 	// Modal needed. Stage the diff so the renderer can overlay the
@@ -209,13 +209,13 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 			mState.SetAutoApproveTools(true)
 		}
 		e.emitPlanApproved(parent, planApprovedPayload{Trigger: "user_modal", Reason: reason})
-		return e.stageAndEmit(mState, plannerSessionID, plan, validateResult{
+		return e.stageAndEmit(parent, mState, plannerSessionID, plan, validateResult{
 			Approved: true,
 			Reason:   reason,
 		})
 	}
 	mState.DiscardStagedDiff()
-	return e.stageAndEmit(mState, plannerSessionID, nil, validateResult{
+	return e.stageAndEmit(parent, mState, plannerSessionID, nil, validateResult{
 		Approved:   false,
 		Aborted:    aborted,
 		RefineText: refine,
@@ -230,7 +230,7 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 // pre-decode failure, or refine/abort — there's no plan to run). The
 // staged `valid` bit derives from the absence of validation errors,
 // matching emitValidateResult's own Valid computation. Phase 6.x.
-func (e *Extension) stageAndEmit(mState *MissionState, plannerSessionID string, plan *Plan, r validateResult) (json.RawMessage, error) {
+func (e *Extension) stageAndEmit(mission extension.SessionState, mState *MissionState, plannerSessionID string, plan *Plan, r validateResult) (json.RawMessage, error) {
 	mState.setPlannerSubmission(plannerSubmission{
 		sessionID:  plannerSessionID,
 		called:     true,
@@ -250,6 +250,13 @@ func (e *Extension) stageAndEmit(mState *MissionState, plannerSessionID string, 
 	// plan==nil); plan_complete (nil plan) leaves the prior roadmap.
 	if r.Approved && plan != nil {
 		mState.SetRoadmap(plan.Roadmap)
+	}
+	// Phase 6.x — research→files. Project the committed contract (goal
+	// + AC roster) into <mission_dir>/spec.md on every approve so
+	// workers + the checker read a durable contract file. plan_complete
+	// (nil plan) still re-projects the current AC. Best-effort.
+	if r.Approved {
+		e.writeSpecContract(mission, mState, plan)
 	}
 	return emitValidateResult(r)
 }
