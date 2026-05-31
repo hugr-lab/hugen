@@ -997,42 +997,49 @@ func buildCheckerTask(mission extension.SessionState, _ MissionManifest, goal st
 	return renderer.Render("mission/checker_task", view)
 }
 
-// collectPendingRoadmap walks the most recent planner handoff's
-// roadmap and filters out entries whose `label` already appears
-// as a Done wave label in PlanState — what's left is "the planner
-// promised this and the mission hasn't done it yet". The checker
-// sees this list and refuses `finish` when it isn't empty.
-func collectPendingRoadmap(mission extension.SessionState) []plannerRoadmapView {
-	m := FromState(mission)
-	if m == nil {
-		return nil
-	}
-	// Find the most recent planner handoff and its roadmap.
-	var latestPlan *Plan
-	for _, h := range m.Handoffs.List() {
-		if !strings.HasPrefix(h.Ref, "planner@") {
-			continue
-		}
-		p, err := DecodePlan(h)
-		if err != nil {
-			continue
-		}
-		latestPlan = p
-	}
-	if latestPlan == nil || len(latestPlan.Roadmap) == 0 {
-		return nil
-	}
-	done := map[string]bool{}
+// roadmapAndDone snapshots the persisted PlanState.Roadmap plus the
+// set of wave labels already run, under a single lock. "Already run"
+// = every Done wave label plus the in-flight Active wave's label
+// (which covers the just-launched wave before it lands in Done — the
+// same role the old code's `latestPlan.NextWave.Label` played).
+//
+// Phase 6.x — the roadmap source moved off the planner handoff: the
+// fence-less planner has a body-less completion marker, so DecodePlan
+// can no longer recover its roadmap. validate_and_approve writes the
+// approved plan's roadmap to PlanState.Roadmap (SetRoadmap) and both
+// roadmap readers snapshot it here.
+func roadmapAndDone(m *MissionState) ([]RoadmapEntry, map[string]bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	roadmap := append([]RoadmapEntry(nil), m.Plan.Roadmap...)
+	done := make(map[string]bool, len(m.Plan.Done)+1)
 	for _, dw := range m.Plan.Done {
 		if dw.Label != "" {
 			done[dw.Label] = true
 		}
 	}
-	if latestPlan.NextWave.Label != "" {
-		done[latestPlan.NextWave.Label] = true
+	if m.Plan.Active != nil && m.Plan.Active.Label != "" {
+		done[m.Plan.Active.Label] = true
 	}
-	out := make([]plannerRoadmapView, 0, len(latestPlan.Roadmap))
-	for _, r := range latestPlan.Roadmap {
+	return roadmap, done
+}
+
+// collectPendingRoadmap reads the planner's latest committed roadmap
+// (PlanState.Roadmap) and filters out entries whose `label` already
+// ran — what's left is "the planner promised this and the mission
+// hasn't done it yet". The checker sees this list and refuses
+// `finish` when it isn't empty.
+func collectPendingRoadmap(mission extension.SessionState) []plannerRoadmapView {
+	m := FromState(mission)
+	if m == nil {
+		return nil
+	}
+	roadmap, done := roadmapAndDone(m)
+	if len(roadmap) == 0 {
+		return nil
+	}
+	out := make([]plannerRoadmapView, 0, len(roadmap))
+	for _, r := range roadmap {
 		if r.Label == "" || done[r.Label] {
 			continue
 		}
@@ -1041,43 +1048,23 @@ func collectPendingRoadmap(mission extension.SessionState) []plannerRoadmapView 
 	return out
 }
 
-// collectRoadmap projects the most recent planner handoff's roadmap
-// into the planner's [Roadmap] view — EVERY entry, each flagged Done
-// when a wave with that label already ran (PlanState.Done or the
-// latest plan's next_wave). Mirrors collectPendingRoadmap's source
-// (the latest planner@ handoff) but keeps satisfied entries so the
-// planner sees the full plan-ahead it committed to, not just the
-// remainder. Empty when no plan carries a roadmap.
+// collectRoadmap projects the planner's latest committed roadmap
+// (PlanState.Roadmap) into the planner's [Roadmap] view — EVERY
+// entry, each flagged Done when a wave with that label already ran.
+// Mirrors collectPendingRoadmap's source but keeps satisfied entries
+// so the planner sees the full plan-ahead it committed to, not just
+// the remainder. Empty when no approved plan carries a roadmap.
 func collectRoadmap(mission extension.SessionState) []plannerRoadmapView {
 	m := FromState(mission)
 	if m == nil {
 		return nil
 	}
-	var latestPlan *Plan
-	for _, h := range m.Handoffs.List() {
-		if !strings.HasPrefix(h.Ref, "planner@") {
-			continue
-		}
-		if p, err := DecodePlan(h); err == nil && p != nil {
-			latestPlan = p
-		}
-	}
-	if latestPlan == nil || len(latestPlan.Roadmap) == 0 {
+	roadmap, done := roadmapAndDone(m)
+	if len(roadmap) == 0 {
 		return nil
 	}
-	done := map[string]bool{}
-	m.mu.Lock()
-	for _, dw := range m.Plan.Done {
-		if dw.Label != "" {
-			done[dw.Label] = true
-		}
-	}
-	m.mu.Unlock()
-	if latestPlan.NextWave.Label != "" {
-		done[latestPlan.NextWave.Label] = true
-	}
-	out := make([]plannerRoadmapView, 0, len(latestPlan.Roadmap))
-	for _, r := range latestPlan.Roadmap {
+	out := make([]plannerRoadmapView, 0, len(roadmap))
+	for _, r := range roadmap {
 		if r.Label == "" {
 			continue
 		}

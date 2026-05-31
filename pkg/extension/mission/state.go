@@ -523,6 +523,23 @@ func (m *MissionState) SetGoalAndWaveAC(goal string, wave []string) {
 	m.currentWaveAC = append(m.currentWaveAC[:0:0], wave...)
 }
 
+// SetRoadmap overwrites PlanState.Roadmap with the approved plan's
+// forecast (label + one-line description per upcoming wave). Called
+// from callValidateAndApprove on every approve path so the roadmap
+// the planner committed to is persisted on the mission projection —
+// the Phase 6.x planner no longer emits a ```plan``` fence, so the
+// roadmap can't be recovered by DecodePlan-ing the (now body-less)
+// planner handoff. collectRoadmap (planner [Roadmap]) and
+// collectPendingRoadmap (checker completeness gate) read it from here.
+// Overwrite semantics match PlanState.Roadmap's doc ("overwritten on
+// every planner iteration") — an approved plan that dropped its
+// roadmap clears the prior one. Phase 6.x.
+func (m *MissionState) SetRoadmap(roadmap []RoadmapEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Plan.Roadmap = append(roadmap[:0:0], roadmap...)
+}
+
 // MissionFrame returns (goal, mission-AC statements, wave-AC). The
 // mission-AC slice is a fresh projection of state.AC: rows whose
 // status != dropped, in insertion order, with statement-only

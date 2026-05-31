@@ -242,6 +242,15 @@ func (e *Extension) stageAndEmit(mState *MissionState, plannerSessionID string, 
 		reason:     r.Reason,
 		plan:       plan,
 	})
+	// Phase 6.x — persist the approved plan's roadmap onto the mission
+	// projection. The fence-less planner can't have its roadmap
+	// recovered via DecodePlan(planner handoff) anymore; collectRoadmap
+	// / collectPendingRoadmap read PlanState.Roadmap instead. Only an
+	// approve carries an executable plan (refine / abort / invalid →
+	// plan==nil); plan_complete (nil plan) leaves the prior roadmap.
+	if r.Approved && plan != nil {
+		mState.SetRoadmap(plan.Roadmap)
+	}
 	return emitValidateResult(r)
 }
 
