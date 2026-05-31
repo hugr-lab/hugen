@@ -40,6 +40,36 @@ func TestMaybeAutoApprove_GrantsWhenAncestorHasFlag(t *testing.T) {
 	}
 }
 
+// TestMaybeAutoApprove_GrantsOnResearchFlag covers the Phase 6.x
+// research-stage path: the runtime sets AutoApproveResearch=true
+// around the researcher wave so its workspace-internal bash.write_file
+// calls don't open a modal. MaybeAutoApprove must honour it exactly
+// like the user's AutoApproveTools pick.
+func TestMaybeAutoApprove_GrantsOnResearchFlag(t *testing.T) {
+	ext := newPlannerExtension()
+	mission := newRenderedFakeState("mis-research", productionRenderer(t))
+	installMissionState(&mission.fakeState)
+	mState := FromState(mission)
+	mState.SetAutoApproveResearch(true) // research stage active; AutoApproveTools stays false
+
+	researcher := newRenderedFakeState("researcher-1", productionRenderer(t))
+	researcher.fakeState.parent = mission
+
+	gotMission, ok := ext.MaybeAutoApprove(context.Background(), researcher, "bash-mcp:bash.write_file")
+	if !ok {
+		t.Fatalf("MaybeAutoApprove ok=false; want true under research auto-approve")
+	}
+	if gotMission != "mis-research" {
+		t.Errorf("granted mission id = %q, want mis-research", gotMission)
+	}
+
+	// And once research exits (flag cleared) the same call is gated again.
+	mState.SetAutoApproveResearch(false)
+	if _, ok := ext.MaybeAutoApprove(context.Background(), researcher, "bash-mcp:bash.write_file"); ok {
+		t.Errorf("MaybeAutoApprove granted after research flag cleared; want gated")
+	}
+}
+
 // TestMaybeAutoApprove_NoGrantWhenFlagOff covers the negative path:
 // the flag was never set (or was reset by a subsequent modal). The
 // hook returns (zero, false) so the runtime falls through to the

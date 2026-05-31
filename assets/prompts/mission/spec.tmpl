@@ -1,0 +1,18 @@
+# Mission spec
+
+This file is the mission contract. It is written by the runtime when the
+plan is approved and reflects the committed goal + acceptance criteria.
+Workers read it to learn what "done" means; the checker verifies each
+criterion by its `ac-N` id. Do not redefine the criteria here — propose
+changes through the plan.
+
+## Goal
+
+{{.Goal}}
+
+## Acceptance criteria
+{{if .AC}}
+{{range .AC}}- `{{.ID}}` — {{.Statement}} _(status: {{.Status}})_
+{{end}}{{else}}
+_No acceptance criteria committed yet._
+{{end}}

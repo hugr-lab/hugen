@@ -233,12 +233,19 @@ payloads or anything you'll read back via bash → `hugr-query`.
 ## Discover before you query
 
 Module and field names cannot be guessed and the schema is
-role-filtered, so **never write a GraphQL query before discovery**.
-The reliable path: `discovery-search_modules` → note the exact module
-names → `discovery-search_module_data_objects` → `schema-type_fields`
-on the type you'll query → then compose. When a query errors, read the
-error and pivot back to discovery rather than re-tweaking the same
-shape (the runtime will steer you inline on common failures).
+role-filtered, so **never write a GraphQL query against names you
+have not confirmed**. But check what you have ALREADY been handed
+BEFORE you discover — confirmed schema often arrives with the task:
+names written into your brief, an upstream handoff's resolved fields,
+a mission's `research/data-model.md` (read it by path), or a prior
+`query_template` / `schema` memory entry. Lift those verbatim and run
+discovery only on the GAPS they leave. When nothing trusted covers
+it, the reliable path is: `discovery-search_modules` → note the exact
+module names → `discovery-search_module_data_objects` →
+`schema-type_fields` on the type you'll query → then compose. When a
+query errors, read the error and pivot back to discovery rather than
+re-tweaking the same shape (the runtime will steer you inline on
+common failures).
 
 Good habits, with the ref that teaches each:
 - Build **one** compound query with aliases instead of many small ones

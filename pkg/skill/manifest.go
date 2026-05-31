@@ -817,6 +817,48 @@ type MissionBlock struct {
 	// Distinct from `task.inputs_schema` — that one fires at
 	// `schedule:create`. Phase 6.1d.
 	InputsSchema map[string]any `json:"inputs_schema,omitempty" yaml:"inputs_schema,omitempty"`
+
+	// Stages declares optional lifecycle hooks the runtime fires
+	// around mission stages — skill-defined behaviour via MCP tool
+	// invocations already wired into the mission session (bash:run,
+	// python:run_script, …), no new exec surface. Phase 6.x —
+	// research→files. Today only the research stage's before/check
+	// hooks are honoured; the schema extends to do/control/synthesis
+	// as later phases need them. Absent → no hooks (the default
+	// research stage runs without scaffold or gate).
+	Stages MissionStages `json:"stages,omitempty" yaml:"stages,omitempty"`
+}
+
+// MissionStages groups the per-stage lifecycle-hook declarations.
+// Each stage may declare a `before` hook (fired before the stage's
+// wave spawns — e.g. scaffold the skill's template files into the
+// mission dir) and a `check` hook (fired after the stage produces
+// its handoff — a gate that re-prompts the role when the hook
+// reports failure). Phase 6.x — research→files.
+type MissionStages struct {
+	// Research carries the pre-planner research stage's hooks.
+	Research MissionStageHooks `json:"research,omitempty" yaml:"research,omitempty"`
+}
+
+// MissionStageHooks is the before/check hook pair for one stage.
+// Either or both may be nil — an absent hook is a no-op for that
+// edge of the stage.
+type MissionStageHooks struct {
+	Before *MissionStageHook `json:"before,omitempty" yaml:"before,omitempty"`
+	Check  *MissionStageHook `json:"check,omitempty"  yaml:"check,omitempty"`
+}
+
+// MissionStageHook is one lifecycle hook: an invocation of an MCP
+// tool already wired into the mission session. Tool is the
+// fully-qualified tool name ("bash:run", "python:run_script", …).
+// Args is handed to the tool verbatim except that every string
+// value (recursively, inside arrays + nested objects too) is
+// Go-template-rendered by the runtime against mission paths
+// ({{.MissionDir}}, {{.MissionSkill}}) and runtime state
+// ({{.Goal}}, {{.Roles}}, {{.Inputs.key}}) before dispatch.
+type MissionStageHook struct {
+	Tool string         `json:"tool"            yaml:"tool"`
+	Args map[string]any `json:"args,omitempty"  yaml:"args,omitempty"`
 }
 
 // Task kind constants — used both by manifest authors (yaml value)

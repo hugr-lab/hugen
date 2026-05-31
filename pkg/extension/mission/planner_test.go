@@ -260,6 +260,17 @@ func newPlannerExtension() *Extension {
 	return NewExtension(Config{AgentID: "a1", Logger: slog.New(slog.NewTextHandler(noopWriter{}, &slog.HandlerOptions{Level: slog.LevelError}))})
 }
 
+// newPlannerExtensionWithCatalog mirrors newPlannerExtension but wires
+// a catalog so gate paths that look up a mission manifest (e.g.
+// gateResearchFinalize) can resolve it. Phase 6.x.
+func newPlannerExtensionWithCatalog(cat Catalog) *Extension {
+	return NewExtension(Config{
+		AgentID: "a1",
+		Logger:  slog.New(slog.NewTextHandler(noopWriter{}, &slog.HandlerOptions{Level: slog.LevelError})),
+		Catalog: cat,
+	})
+}
+
 type noopWriter struct{}
 
 func (noopWriter) Write(p []byte) (int, error) { return len(p), nil }

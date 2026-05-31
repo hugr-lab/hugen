@@ -464,6 +464,17 @@ func (t *tab) dispatchApprovalChoiceKey(pend *inquiryState, k tea.KeyMsg) (handl
 			pend.approvalHighlight = (pend.approvalHighlight - 1 + n) % n
 		}
 		return true, nil
+	case "pgup", "ctrl+u":
+		// Scroll the plan/AC body up; the choices + hint stay pinned.
+		// Render clamps the offset against the real content height.
+		pend.bodyScroll -= modalScrollStep
+		if pend.bodyScroll < 0 {
+			pend.bodyScroll = 0
+		}
+		return true, nil
+	case "pgdown", "ctrl+d":
+		pend.bodyScroll += modalScrollStep // upper bound clamped at render
+		return true, nil
 	case "1", "2", "3", "4":
 		idx := int(k.String()[0]-'0') - 1
 		if idx >= 0 && idx < len(pend.approvalChoices) {
@@ -1010,11 +1021,22 @@ func isTextareaMutation(k tea.KeyMsg) bool {
 	return false
 }
 
+// minChatRowsWithModal is the slice of chat kept visible above an
+// open modal — enough recent context to orient the operator without
+// starving the modal of vertical room.
+const minChatRowsWithModal = 3
+
+// modalScrollStep is how many lines one PgUp/PgDn moves the modal's
+// scrollable body.
+const modalScrollStep = 5
+
 // renderBody returns the tab's body: chat + optional sidebar above
 // the input strip. Width is the chat width (sidebar excluded);
 // totalWidth is for footer alignment; sidebarShown decides whether
-// to compose the sidebar.
-func (t *tab) renderBody(chatWidth, totalWidth int, sidebarShown bool) string {
+// to compose the sidebar; availHeight is the total rows this body
+// may occupy (terminal height minus the tab bar) so an open modal
+// can be height-bounded instead of overflowing the screen.
+func (t *tab) renderBody(chatWidth, totalWidth int, sidebarShown bool, availHeight int) string {
 	chat := t.viewport.View()
 	top := chat
 	if sidebarShown {
@@ -1028,17 +1050,26 @@ func (t *tab) renderBody(chatWidth, totalWidth int, sidebarShown bool) string {
 			Render(renderSidebar(t.sidebarStatus, contentW))
 		top = lipgloss.JoinHorizontal(lipgloss.Top, chat, side)
 	}
+	footer := t.renderFooter(totalWidth)
 	if t.pendingInquiry != nil {
 		modalW := chatWidth
 		if modalW < 30 {
 			modalW = 30
 		}
-		modal := renderInquiryModal(t.pendingInquiry, modalW)
+		// Cap the modal to the rows left after the footer + a sliver of
+		// chat, then trim the chat display to whatever remains so the
+		// chat / modal / footer stack never spills past the terminal.
+		// The modal scrolls its own body within this cap.
+		maxModal := availHeight - lipgloss.Height(footer) - minChatRowsWithModal
+		if maxModal < 6 {
+			maxModal = 6
+		}
+		modal := renderInquiryModal(t.pendingInquiry, modalW, maxModal)
 		bottom := modal
 		if t.pendingInquiry.replyMode {
 			bottom = lipgloss.JoinVertical(lipgloss.Left, modal, t.textarea.View())
 		}
-		return lipgloss.JoinVertical(lipgloss.Left, top, bottom, t.renderFooter(totalWidth))
+		return joinBodyWithModal(top, bottom, footer, availHeight)
 	}
 	if t.pendingMissionModal != nil {
 		modalW := chatWidth
@@ -1046,8 +1077,33 @@ func (t *tab) renderBody(chatWidth, totalWidth int, sidebarShown bool) string {
 			modalW = 40
 		}
 		modal := renderMissionModal(t.pendingMissionModal, modalW)
-		return lipgloss.JoinVertical(lipgloss.Left, top, modal, t.renderFooter(totalWidth))
+		return joinBodyWithModal(top, modal, footer, availHeight)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left,
-		top, t.textarea.View(), t.renderFooter(totalWidth))
+	return lipgloss.JoinVertical(lipgloss.Left, top, t.textarea.View(), footer)
+}
+
+// joinBodyWithModal stacks chat (trimmed to its recent tail) above
+// the modal + footer, sized so the whole block fits availHeight. The
+// chat is trimmed rather than the modal so the modal — the thing the
+// operator must act on — is never the part that overflows.
+func joinBodyWithModal(top, modal, footer string, availHeight int) string {
+	topH := availHeight - lipgloss.Height(modal) - lipgloss.Height(footer)
+	if topH <= 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, modal, footer)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, lastLines(top, topH), modal, footer)
+}
+
+// lastLines keeps the final n lines of s (the most recent chat), so
+// trimming chat to make room for a modal drops the oldest scrollback
+// rather than the part nearest the modal. n <= 0 yields "".
+func lastLines(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
 }

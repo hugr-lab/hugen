@@ -64,6 +64,12 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 		// plannerRole) and hold its turn open until the plan is
 		// approved via validate_and_approve.
 		mState.SetPlannerRole(manifest.Plan.Role)
+		// Phase 6.x — research→files. Stamp the research role so the
+		// TurnFinalizeGate can gate the researcher's turn on the check
+		// hook (Option B: fix files in-session, never re-discover).
+		if manifest.Research != nil {
+			mState.SetResearchRole(manifest.Research.Role)
+		}
 		// Phase 5.x-followup — stash the caller's structured inputs
 		// so the researcher / planner / synthesizer prompts can
 		// surface caller-supplied params (file_path, output_format,

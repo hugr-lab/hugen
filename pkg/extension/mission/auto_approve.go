@@ -35,7 +35,10 @@ func (e *Extension) MaybeAutoApprove(ctx context.Context, caller extension.Sessi
 	// the flag lives on whichever ancestor approved the plan.
 	for s := caller; s != nil; {
 		if v, ok := s.Value(StateKey); ok {
-			if m, _ := v.(*MissionState); m != nil && m.AutoApproveTools() {
+			// AutoApproveTools is the user's §4.6 pick; AutoApproveResearch
+			// is the runtime's pre-planner research-stage grant (Phase
+			// 6.x — research→files). Either one skips the modal.
+			if m, _ := v.(*MissionState); m != nil && (m.AutoApproveTools() || m.AutoApproveResearch()) {
 				missionID := s.SessionID()
 				e.emitToolApprovalAutoGranted(s, toolApprovalAutoGrantedPayload{
 					Tool:                      tool,
