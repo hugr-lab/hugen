@@ -228,7 +228,7 @@ func TestApprovalModalV2_RendererMarksHighlightedRow(t *testing.T) {
 	// row 2 (reject) to make the test deterministic across any
 	// future default-highlight tweaks.
 	state.approvalHighlight = 2
-	out := renderInquiryModal(state, 80)
+	out := renderInquiryModal(state, 80, 0)
 	if !strings.Contains(out, "▸ [n]") {
 		t.Errorf("expected highlight marker `▸ [n]` on reject row; got:\n%s", out)
 	}

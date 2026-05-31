@@ -37,7 +37,7 @@ func clarificationInquiry() *protocol.InquiryRequest {
 
 func TestRenderInquiryModal_ApprovalContainsHintAndQuestion(t *testing.T) {
 	state := newInquiryState(approvalInquiry())
-	out := renderInquiryModal(state, 80)
+	out := renderInquiryModal(state, 80, 0)
 	// Phase 5.x §4.6 — four-option approval modal. The renderer
 	// must surface all four labels + the keystroke shortcuts so
 	// the operator sees every available choice without scrolling.
@@ -65,7 +65,7 @@ func TestRenderInquiryModal_ClarificationStartsInReplyMode(t *testing.T) {
 	if !state.replyMode {
 		t.Fatal("clarification should auto-enter reply mode (textarea is the only input path)")
 	}
-	out := renderInquiryModal(state, 60)
+	out := renderInquiryModal(state, 60, 0)
 	if !strings.Contains(out, "Clarification needed") {
 		t.Errorf("missing title in clarification modal: %s", out)
 	}

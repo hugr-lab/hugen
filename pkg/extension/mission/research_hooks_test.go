@@ -68,11 +68,9 @@ const (
 	hookFail = `{"exit_code":2,"stdout":"","stderr":"data-model.md missing the Joins section"}`
 )
 
-// TestRunResearchStage_BeforeAndCheckHooks — the scaffold (before)
-// hook fires once ahead of the loop; the gate (check) hook fires
-// after each handoff and re-prompts the role on failure within the
-// scaffold fires ONCE from the research stage; the CHECK hook is no
-// longer called here (Phase 6.x moved it to the researcher's
+// TestRunResearchStage_ScaffoldFiresCheckMovedToGate — the scaffold
+// (before) hook fires ONCE from the research stage; the CHECK hook is
+// no longer called here (Phase 6.x moved it to the researcher's
 // TurnFinalizeGate — gateResearchFinalize — so the file validation
 // runs in-session). The researcher runs once and findings are stamped.
 func TestRunResearchStage_ScaffoldFiresCheckMovedToGate(t *testing.T) {

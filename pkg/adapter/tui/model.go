@@ -425,7 +425,9 @@ func (m model) View() string {
 		chatWidth = m.width - sidebarWidth
 	}
 	bar := renderTabBar(m.tabs, m.active, m.width)
-	body := cur.renderBody(chatWidth, m.width, m.sidebarShown)
+	// The body owns every row below the tab bar; hand it that budget
+	// so an open modal can bound itself to the screen.
+	body := cur.renderBody(chatWidth, m.width, m.sidebarShown, m.height-tabBarHeight)
 	return lipgloss.JoinVertical(lipgloss.Left, bar, body)
 }
 

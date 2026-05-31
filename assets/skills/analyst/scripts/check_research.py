@@ -2,16 +2,17 @@
 """Research-stage gate for the analyst mission.
 
 Fired by the runtime as the `mission.stages.research.check` hook
-(bash:run -> python3 <this> $MISSION_DIR). Validates that the
-researcher actually FILLED the scaffolded artifact files rather than
-leaving the skeletons untouched. A non-zero exit + a stderr message
-re-prompts the researcher (within the research retry budget); exit 0
-lets the planner run.
+(bash-mcp:bash.shell -> python3 <this> <MISSION_DIR>). Validates that
+the researcher actually FILLED the scaffolded artifact files rather
+than leaving the skeletons untouched. A non-zero exit + a stderr
+message re-prompts the researcher (the researcher's TurnFinalizeGate
+holds the turn open in-session); exit 0 lets the planner run.
 
 Deliberately LENIENT: it checks that the two load-bearing files exist,
 that their distinctive placeholders were replaced, and that they carry
-real content — plus that research.md kept its "Proposed acceptance
-criteria" section. It does NOT enforce table-by-table structure;
+real content. It is language-agnostic — it does NOT grep for any
+English section header, and it does NOT enforce table-by-table
+structure;
 over-strict gates loop weak models. Stdlib only; no venv required.
 """
 import os

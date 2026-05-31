@@ -40,6 +40,17 @@ type inquiryState struct {
 	approvalChoices   []approvalChoice
 	approvalHighlight int
 
+	// bodyScroll is the vertical scroll offset (in rendered lines)
+	// of the modal's readable body — the plan / AC text on an
+	// approval modal. It only bites when the body is taller than the
+	// height budget the renderer is handed; the approval choices +
+	// action hint stay pinned below the scroll window so the keys are
+	// never scrolled off. Driven by PgUp/PgDn and clamped at render
+	// time (the key handler can't know the content height). Phase 6.x
+	// review follow-up — large plan modals were overflowing the
+	// terminal with no way to read past the fold.
+	bodyScroll int
+
 	// Phase 5.x — B15. Tab-style batched-research state. The
 	// modal walks the operator through clarifications one at a
 	// time, with three panels per question (value / comment /
@@ -384,9 +395,13 @@ func (s *inquiryState) title() string {
 }
 
 // renderInquiryModal returns the rendered modal block sized to
-// width. Height is determined by content; callers JoinVertical the
-// result over chat. Caller must guarantee state != nil.
-func renderInquiryModal(state *inquiryState, width int) string {
+// width. maxHeight bounds the rendered height (rows, border
+// included): when the body is taller, it scrolls within the budget
+// with the action footer pinned — see [composeModalInner]. A
+// maxHeight <= 0 means "unbounded" (full content); the production
+// caller passes the terminal-derived budget, unit tests pass 0.
+// Caller must guarantee state != nil.
+func renderInquiryModal(state *inquiryState, width, maxHeight int) string {
 	if width < 30 {
 		width = 30
 	}
@@ -400,43 +415,101 @@ func renderInquiryModal(state *inquiryState, width int) string {
 	// + per-question comment phase (toggled via Tab). Phase 5.x
 	// — B15.
 	if state.isBatched() {
-		return renderBatchedInquiryModal(state, width, contentW)
+		return renderBatchedInquiryModal(state, width, contentW, maxHeight)
 	}
 
-	var sb strings.Builder
-	sb.WriteString(inquiryTitleStyle.Render(state.title()))
-	sb.WriteString("\n\n")
+	// Body = everything the operator READS (scrollable). Footer =
+	// the action surface (approval choices + hint) that must stay
+	// visible, so it is pinned below the scroll window.
+	var body strings.Builder
+	body.WriteString(inquiryTitleStyle.Render(state.title()))
+	body.WriteString("\n\n")
 	if q := strings.TrimSpace(state.req.Question); q != "" {
-		sb.WriteString(wrap(q, contentW))
-		sb.WriteString("\n")
+		body.WriteString(wrap(q, contentW))
+		body.WriteString("\n")
 	}
 	if c := strings.TrimSpace(state.req.Context); c != "" {
-		sb.WriteString("\n")
-		sb.WriteString(inquiryFaintStyle.Render(wrap("Context: "+c, contentW)))
-		sb.WriteString("\n")
+		body.WriteString("\n")
+		body.WriteString(inquiryFaintStyle.Render(wrap("Context: "+c, contentW)))
+		body.WriteString("\n")
 	}
 	if len(state.req.Options) > 0 {
-		sb.WriteString("\n")
-		sb.WriteString(inquiryFaintStyle.Render("Options:"))
-		sb.WriteString("\n")
+		body.WriteString("\n")
+		body.WriteString(inquiryFaintStyle.Render("Options:"))
+		body.WriteString("\n")
 		for _, opt := range state.req.Options {
-			sb.WriteString("  - ")
-			sb.WriteString(truncate(opt, contentW-4))
-			sb.WriteString("\n")
+			body.WriteString("  - ")
+			body.WriteString(truncate(opt, contentW-4))
+			body.WriteString("\n")
 		}
 	}
+
+	var footer strings.Builder
 	// Phase 5.x §4.6 — render the four-option list for approval
 	// modals when no reason textarea is active. replyMode (set when
 	// the user picks `reject`/`refine`) falls through to the
 	// hint-only line so the textarea below has room to breathe.
 	if state.req.Type == protocol.InquiryTypeApproval && !state.replyMode && len(state.approvalChoices) > 0 {
-		sb.WriteString("\n")
-		sb.WriteString(renderApprovalChoices(state, contentW))
+		footer.WriteString(renderApprovalChoices(state, contentW))
 	}
-	sb.WriteString("\n")
-	sb.WriteString(inquiryHintStyle.Render(actionHint(state)))
+	// Pre-wrap the hint to contentW so its line count is known here —
+	// otherwise lipgloss re-wraps a too-wide hint inside the box and
+	// the height accounting (which pins this footer) is off by a row.
+	footer.WriteString(inquiryHintStyle.Render(wrap(actionHint(state), contentW)))
 
-	return inquiryBoxStyle.Width(width - 2).Render(sb.String())
+	inner := composeModalInner(state, body.String(), footer.String(), maxHeight, contentW)
+	return inquiryBoxStyle.Width(width - 2).Render(inner)
+}
+
+// composeModalInner stacks the scrollable body above the pinned
+// footer and clamps the result to maxHeight (border-adjusted). When
+// the body fits, it renders whole and bodyScroll is reset to 0. When
+// it does not, the body is windowed at state.bodyScroll (clamped
+// here — this is the single clamp point, since the key handler can't
+// know the content height) and a faint "↕ lines x–y of N" indicator
+// is inserted between the window and the never-scrolled footer.
+// maxHeight <= 0 disables clamping. Phase 6.x review follow-up.
+func composeModalInner(state *inquiryState, body, footer string, maxHeight, contentW int) string {
+	bodyLines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	var footerLines []string
+	if f := strings.TrimRight(footer, "\n"); f != "" {
+		footerLines = strings.Split(f, "\n")
+	}
+
+	innerBudget := maxHeight - 2 // top + bottom border rows
+	if maxHeight <= 0 || len(bodyLines)+len(footerLines) <= innerBudget {
+		state.bodyScroll = 0
+		return strings.Join(append(bodyLines, footerLines...), "\n")
+	}
+
+	// Body must scroll. Reserve the footer + one indicator row.
+	bodyBudget := innerBudget - len(footerLines) - 1
+	if bodyBudget < 1 {
+		bodyBudget = 1
+	}
+	maxScroll := len(bodyLines) - bodyBudget
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if state.bodyScroll > maxScroll {
+		state.bodyScroll = maxScroll
+	}
+	if state.bodyScroll < 0 {
+		state.bodyScroll = 0
+	}
+	start := state.bodyScroll
+	end := start + bodyBudget
+	if end > len(bodyLines) {
+		end = len(bodyLines)
+	}
+
+	out := make([]string, 0, bodyBudget+1+len(footerLines))
+	out = append(out, bodyLines[start:end]...)
+	out = append(out, inquiryFaintStyle.Render(truncate(
+		fmt.Sprintf("↕ lines %d–%d of %d · PgUp/PgDn to scroll", start+1, end, len(bodyLines)),
+		contentW)))
+	out = append(out, footerLines...)
+	return strings.Join(out, "\n")
 }
 
 // renderApprovalChoices draws the four-option list with the
@@ -472,30 +545,34 @@ func renderApprovalChoices(state *inquiryState, contentW int) string {
 // screen at currentIdx == N renders the accumulated answers + a
 // Submit hint. The top of the modal carries a panel tab-bar
 // showing which panel has focus.
-func renderBatchedInquiryModal(state *inquiryState, width, contentW int) string {
+func renderBatchedInquiryModal(state *inquiryState, width, contentW, maxHeight int) string {
 	total := len(state.req.Clarifications)
 
-	var sb strings.Builder
+	var body strings.Builder
 	title := batchedTitle(state, total)
-	sb.WriteString(inquiryTitleStyle.Render(title))
-	sb.WriteString("\n")
-	sb.WriteString(renderBatchedTabBar(state))
-	sb.WriteString("\n\n")
+	body.WriteString(inquiryTitleStyle.Render(title))
+	body.WriteString("\n")
+	body.WriteString(renderBatchedTabBar(state))
+	body.WriteString("\n\n")
 
 	if c := strings.TrimSpace(state.req.Context); c != "" {
-		sb.WriteString(inquiryFaintStyle.Render(wrap("Context: "+c, contentW)))
-		sb.WriteString("\n\n")
+		body.WriteString(inquiryFaintStyle.Render(wrap("Context: "+c, contentW)))
+		body.WriteString("\n\n")
 	}
 
 	if state.onReview() {
-		renderBatchedReviewBody(&sb, state, contentW)
+		renderBatchedReviewBody(&body, state, contentW)
 	} else {
-		renderBatchedQuestionBody(&sb, state, contentW)
+		renderBatchedQuestionBody(&body, state, contentW)
 	}
 
-	sb.WriteString("\n")
-	sb.WriteString(inquiryHintStyle.Render(batchedHint(state)))
-	return inquiryBoxStyle.Width(width - 2).Render(sb.String())
+	// The hint stays pinned; the question/review body scrolls when a
+	// big review screen or option list overruns the height budget.
+	// Pre-wrap so the box doesn't re-wrap a too-wide hint and skew the
+	// pinned-footer row count.
+	footer := inquiryHintStyle.Render(wrap(batchedHint(state), contentW))
+	inner := composeModalInner(state, body.String(), footer, maxHeight, contentW)
+	return inquiryBoxStyle.Width(width - 2).Render(inner)
 }
 
 // batchedTitle produces the modal header line. On per-question
@@ -759,7 +836,7 @@ func actionHint(s *inquiryState) string {
 				return fmt.Sprintf("[type reason, Enter to /%s | esc to cancel]", s.replyVerb)
 			}
 		}
-		return "[j/k or ↑/↓ to move | Enter commit | 1-4 jump | a/A/n/r direct | esc dismiss]"
+		return "[j/k or ↑/↓ move | Enter commit | 1-4 jump | a/A/n/r direct | PgUp/PgDn scroll | esc dismiss]"
 	case protocol.InquiryTypeClarification:
 		return "[type answer, Enter to submit | esc to dismiss]"
 	case protocol.InquiryTypeResearchBatch:
