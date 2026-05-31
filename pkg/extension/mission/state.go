@@ -193,6 +193,74 @@ type MissionState struct {
 	// that research was tried but yielded nothing — the worker
 	// should NOT assume scope was researched.
 	researchAttempted bool
+
+	// plannerRole is the manifest's `plan.role` name, stamped at
+	// mission setup. The TurnFinalizeGate reads it to recognise the
+	// planner child session (state.Role() == plannerRole) so it
+	// only governs the planner's turn finalization, never a worker /
+	// checker / synthesizer. Empty for missions whose plan role is
+	// unset (inline pipelines without a planner LLM) — the gate then
+	// governs nothing. Phase 6.x.
+	plannerRole string
+
+	// submission stages the active planner's most recent
+	// mission:validate_and_approve outcome — the single plan-
+	// submission channel (Phase 6.x replaces the terminal ```plan```
+	// fence). spawnAndAwaitPlanner reads the staged plan instead of
+	// parsing a fence; the TurnFinalizeGate reads the verdict to hold
+	// the planner's turn open until the plan is approved. Reset at the
+	// top of each planner spawn via ResetPlannerSubmission so a stale
+	// outcome from a prior iteration can't satisfy the gate.
+	submission plannerSubmission
+
+	// cancelled is set when the user aborted the approval modal — the
+	// planner loop ends the mission with the cancellation recap rather
+	// than the generic wave-failure abort. cancelReason carries the
+	// user's free-text reason (if any). Phase 6.x.
+	cancelled    bool
+	cancelReason string
+}
+
+// plannerSubmission captures the outcome of one
+// mission:validate_and_approve call so the runtime reads the plan
+// from the tool (not a fence) and the TurnFinalizeGate can veto the
+// planner's turn finalization until the plan is approved or the user
+// aborts. All fields are valid only when sessionID matches the
+// calling planner — ResetPlannerSubmission stamps the active
+// planner's id and clears the rest at spawn time. Phase 6.x.
+type plannerSubmission struct {
+	// sessionID is the planner child session this submission belongs
+	// to — the gate's discriminator (it governs only the session
+	// whose id matches, i.e. the active planner).
+	sessionID string
+	// called is true once the planner invoked validate_and_approve at
+	// least once this iteration. Distinguishes "never submitted" from
+	// "submitted but invalid" for the gate's continuation choice.
+	called bool
+	// valid mirrors the last verdict's output_contract result.
+	valid bool
+	// errs is the last verdict's validation error list (when !valid),
+	// fed back to the planner as the gate continuation so it can fix
+	// the exact issues.
+	errs []string
+	// approved is true once the plan cleared validation AND the user
+	// approved (explicit modal-approve, silent status-only, policy
+	// skip, or plan_complete). The runtime may execute `plan`.
+	approved bool
+	// aborted is true when the user aborted the approval modal — the
+	// mission terminates as user_cancel rather than a generic abort.
+	aborted bool
+	// refineText carries the user's refine guidance; the gate feeds it
+	// back as the continuation so the planner reworks in-session.
+	refineText string
+	// reason carries the user's free-text reason from the approval
+	// modal (abort / approve-with-reason). Surfaced in the mission's
+	// cancellation recap on the abort path.
+	reason string
+	// plan is the validated plan staged on approve (nil for the
+	// plan_complete shape — next_wave=null). spawnAndAwaitPlanner
+	// reads it as the executed plan.
+	plan *Plan
 }
 
 // workerCursor names a spawned worker so ChildFrameObserver can
@@ -255,6 +323,25 @@ func (m *MissionState) LookupWorker(sessionID string) (workerCursor, bool) {
 	return cur, ok
 }
 
+// WorkerTask returns the original task text of the active wave's
+// subagent with the given name. The finalize-gate re-injects it so a
+// worker that lost its brief over a long turn (e.g. to compaction)
+// still knows what it was asked to do when nudged for its handoff.
+// Empty when the name isn't in the active wave.
+func (m *MissionState) WorkerTask(name string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Plan.Active == nil {
+		return ""
+	}
+	for _, s := range m.Plan.Active.Subagents {
+		if s.Name == name {
+			return s.Task
+		}
+	}
+	return ""
+}
+
 // MarkInquired records that the child at sessionID emitted at
 // least one *protocol.InquiryRequest frame. Idempotent — repeated
 // inquiry frames on the same session collapse to a single bit.
@@ -301,6 +388,72 @@ func (m *MissionState) PlannerApproval() PlanApproval {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.plannerApproval
+}
+
+// SetPlannerRole stamps the manifest's plan.role so the
+// TurnFinalizeGate can recognise the planner child session. Called at
+// mission setup alongside SetPlannerApproval. Phase 6.x.
+func (m *MissionState) SetPlannerRole(role string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.plannerRole = role
+}
+
+// PlannerRole returns the stamped plan.role, empty when unset.
+func (m *MissionState) PlannerRole() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.plannerRole
+}
+
+// ResetPlannerSubmission clears the staged validate_and_approve
+// outcome. Called by spawnAndAwaitPlanner before each planner spawn
+// so a prior iteration's approve can't satisfy the gate for the new
+// turn. The planner's session id is unknown until it actually calls
+// validate_and_approve (the child spawns inside RunWave); the tool
+// call stamps the id, and both the gate and the runtime plan-read
+// confirm freshness by matching submission.sessionID against the
+// live planner session. Phase 6.x.
+func (m *MissionState) ResetPlannerSubmission() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.submission = plannerSubmission{}
+}
+
+// setPlannerSubmission records a validate_and_approve outcome for the
+// planner at sessionID. Overwrites the prior outcome (the planner may
+// call validate_and_approve several times in one turn — the last call
+// wins). Phase 6.x.
+func (m *MissionState) setPlannerSubmission(sub plannerSubmission) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.submission = sub
+}
+
+// PlannerSubmission returns a snapshot of the staged outcome. The
+// returned struct is a copy (the errs slice is shared but treated
+// read-only); the plan pointer aliases the staged plan. Phase 6.x.
+func (m *MissionState) PlannerSubmission() plannerSubmission {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.submission
+}
+
+// MarkCancelled records that the user aborted the plan during
+// approval. reason is the user's free-text (may be empty). Phase 6.x.
+func (m *MissionState) MarkCancelled(reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cancelled = true
+	m.cancelReason = reason
+}
+
+// CancelInfo reports whether the mission was user-cancelled at the
+// approval gate and the recorded reason. Phase 6.x.
+func (m *MissionState) CancelInfo() (bool, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cancelled, m.cancelReason
 }
 
 // MarkPlanApproved flips firstPlanApproved on and clears any
@@ -368,6 +521,23 @@ func (m *MissionState) SetGoalAndWaveAC(goal string, wave []string) {
 	defer m.mu.Unlock()
 	m.currentMissionGoal = strings.TrimSpace(goal)
 	m.currentWaveAC = append(m.currentWaveAC[:0:0], wave...)
+}
+
+// SetRoadmap overwrites PlanState.Roadmap with the approved plan's
+// forecast (label + one-line description per upcoming wave). Called
+// from callValidateAndApprove on every approve path so the roadmap
+// the planner committed to is persisted on the mission projection —
+// the Phase 6.x planner no longer emits a ```plan``` fence, so the
+// roadmap can't be recovered by DecodePlan-ing the (now body-less)
+// planner handoff. collectRoadmap (planner [Roadmap]) and
+// collectPendingRoadmap (checker completeness gate) read it from here.
+// Overwrite semantics match PlanState.Roadmap's doc ("overwritten on
+// every planner iteration") — an approved plan that dropped its
+// roadmap clears the prior one. Phase 6.x.
+func (m *MissionState) SetRoadmap(roadmap []RoadmapEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Plan.Roadmap = append(roadmap[:0:0], roadmap...)
 }
 
 // MissionFrame returns (goal, mission-AC statements, wave-AC). The

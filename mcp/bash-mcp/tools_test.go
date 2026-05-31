@@ -88,6 +88,34 @@ func TestTools_ReadFile_NotFound(t *testing.T) {
 	}
 }
 
+// TestTools_PathExpandsEnv verifies a file-tool `path` arg that
+// embeds an environment variable ($SESSION_DIR) is expanded — weak
+// models routinely pass `$SESSION_DIR/out.html` as a path, which the
+// shell would expand for bash.run but the file tools must handle
+// themselves.
+func TestTools_PathExpandsEnv(t *testing.T) {
+	tools, _ := newTools(t)
+	cwd, _ := os.Getwd()
+	t.Setenv("SESSION_DIR", cwd)
+
+	if _, res := callJSON(t, tools.writeFile, map[string]any{
+		"path":    "$SESSION_DIR/env.txt",
+		"content": "hi",
+	}); res.IsError {
+		t.Fatalf("write via $SESSION_DIR path errored")
+	}
+	if _, err := os.Stat(filepath.Join(cwd, "env.txt")); err != nil {
+		t.Fatalf("file not written to expanded path: %v", err)
+	}
+	out, res := callJSON(t, tools.readFile, map[string]any{"path": "$SESSION_DIR/env.txt"})
+	if res.IsError {
+		t.Fatalf("read via $SESSION_DIR path errored: %v", out)
+	}
+	if out["content"] != "hi" {
+		t.Errorf("content = %v, want hi", out["content"])
+	}
+}
+
 func TestTools_ListDir(t *testing.T) {
 	tools, _ := newTools(t)
 	cwd, _ := os.Getwd()

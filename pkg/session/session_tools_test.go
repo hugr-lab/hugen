@@ -18,11 +18,13 @@ import (
 )
 
 // fakeInTurnAdvisor is a minimal [extension.ModelInTurnAdvisor] for
-// the on_tool_error session test: it appends a fixed hint to any
-// failing result from tools matching toolPrefix.
+// the on_tool_error / on_tool_result session tests: it appends a fixed
+// hint to any failing result (hint) — or, when resultHint is set, to
+// any SUCCESSFUL result — from tools matching toolPrefix.
 type fakeInTurnAdvisor struct {
 	toolPrefix string
 	hint       string
+	resultHint string
 }
 
 func (f *fakeInTurnAdvisor) Name() string { return "fake-advisor" }
@@ -32,6 +34,12 @@ func (f *fakeInTurnAdvisor) TurnPreamble(context.Context, extension.SessionState
 func (f *fakeInTurnAdvisor) OnToolError(_ context.Context, _ extension.SessionState, ev extension.ToolErrorEvent) string {
 	if strings.HasPrefix(ev.Tool, f.toolPrefix) {
 		return f.hint
+	}
+	return ""
+}
+func (f *fakeInTurnAdvisor) OnToolResult(_ context.Context, _ extension.SessionState, ev extension.ToolResultEvent) string {
+	if f.resultHint != "" && strings.HasPrefix(ev.Tool, f.toolPrefix) {
+		return f.resultHint
 	}
 	return ""
 }
@@ -209,6 +217,61 @@ func TestSession_ToolError_InlineHint(t *testing.T) {
 	}
 	if !hintLanded {
 		t.Errorf("hint not folded inline into the tool_result: %v", kindNames(frames))
+	}
+}
+
+// TestSession_ToolResult_InlineHint verifies the on_tool_result twin:
+// a genuinely SUCCESSFUL dispatch (no is_error / errors in the body)
+// whose content matches an on_tool_result advisor gets the hint folded
+// INLINE into the same tool_result, with NO separate frame and
+// IsError=false.
+func TestSession_ToolResult_InlineHint(t *testing.T) {
+	const hint = "Truncated — switch to hugr-query file output."
+	mdl := &scriptedToolModel{
+		turns: [][]model.Chunk{
+			{{ToolCall: &model.ChunkToolCall{ID: "tc1", Name: "fake:data-q"}}},
+			{{Content: ptr("done"), Final: true}},
+		},
+	}
+	provider := &stubProvider{
+		tools:  []tool.Tool{{Name: "fake:data-q", Provider: "fake", PermissionObject: "hugen:tool:fake"}},
+		result: `{"data":{"rows":[1,2,3]},"is_truncated":true}`,
+	}
+	// resultHint set (not hint) → contributes only on the success path.
+	adv := &fakeInTurnAdvisor{toolPrefix: "fake:data-", resultHint: hint}
+	sess, cancel := newToolSessionWithExts(t, mdl, permsAllow{}, []extension.Extension{adv}, provider)
+	defer cancel()
+
+	user := protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}
+	sess.Inbox() <- protocol.NewUserMessage("s1", user, "go")
+
+	frames := collectFrames(t, sess, func(seen []protocol.Frame) bool {
+		am, ok := seen[len(seen)-1].(*protocol.AgentMessage)
+		return ok && am.Payload.Final
+	}, 3*time.Second)
+
+	var toolResults int
+	var hintLanded bool
+	for _, f := range frames {
+		if tr, ok := f.(*protocol.ToolResult); ok {
+			toolResults++
+			body, _ := json.Marshal(tr.Payload.Result)
+			if strings.Contains(string(body), hint) && strings.Contains(string(body), "[hint]") {
+				hintLanded = true
+			}
+			if tr.Payload.IsError {
+				t.Errorf("successful tool_result should keep IsError=false")
+			}
+		}
+		if sm, ok := f.(*protocol.SystemMessage); ok && strings.Contains(sm.Payload.Content, hint) {
+			t.Errorf("hint leaked as a separate system_message frame: %q", sm.Payload.Content)
+		}
+	}
+	if toolResults != 1 {
+		t.Errorf("want exactly 1 tool_result frame, got %d (%v)", toolResults, kindNames(frames))
+	}
+	if !hintLanded {
+		t.Errorf("on_tool_result hint not folded inline into the tool_result: %v", kindNames(frames))
 	}
 }
 

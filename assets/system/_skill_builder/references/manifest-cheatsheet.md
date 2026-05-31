@@ -111,7 +111,7 @@ A typical `skill:save` manifest looks like:
 ```yaml
 ---
 name: material-movement-report
-description: PDF-отчёт о движении материала в модуле логистики (parameter material_code).
+description: PDF report of material movement in the logistics module (parameter material_code).
 license: Apache-2.0
 allowed-tools:
   - hugr-main:discovery-list_collections

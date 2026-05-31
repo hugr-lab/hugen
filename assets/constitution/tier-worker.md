@@ -53,25 +53,28 @@ domain tools. Worker-specific notes:
 
 Re-discovering what's already known is the most common worker
 failure mode — and it inflates context fast. Read first;
-discover second.
+discover second. And once you HAVE read a fact there — a
+structure, a name, a pattern — TRUST it and use it as-is; do not
+turn around and re-derive it with fresh discovery "to be sure".
+Reading first only pays off if you then rely on what you read.
 
 - **`notepad:search(query=<key concept>)`** — every worker has
-  it. Prior missions may have left `schema-finding` /
-  `query-pattern` / `data-source` / domain-equivalent entries
-  that lift verbatim into your work. Free escape from re-running
-  discovery you've already done in a past mission.
+  it. Prior missions may have left reusable entries (the
+  categories depend on the loaded skill's tags) that lift verbatim
+  into your work. Free escape from re-running discovery you've
+  already done in a past mission.
 - **Mission-spawned only** — additional upstream-state read
   paths (`[Resolved depends_on]`, `mission:get_handoff`,
   `mission:get_research`) are documented in `_mission_worker`'s
   body. The order they come in is: depends_on (already in your
   prompt — no tool call), then get_research (single cheap tool
   call), then notepad:search, and only THEN spend tool calls on
-  fresh discovery against the underlying data sources.
+  fresh discovery against the source.
 
 ### Doing the work
 
-- Stay narrow. Your task is one entity, one query, one
-  computation. If it's drifting wider, that's the caller's job to
+- Stay narrow. Your task is one focused unit of work — one
+  thing, one step, one computation. If it's drifting wider, that's the caller's job to
   scope better — report the gap rather than expanding scope
   yourself.
 - Use the per-session plan (your own, isolated) when the work
@@ -82,8 +85,8 @@ discover second.
   references usually cover the syntax pitfall), and retry. Two
   retries before reporting failure.
 - Cross-iteration findings: if your task surfaces a fact a future
-  worker would re-discover (a schema-finding, a query-pattern, a
-  data-quality issue), append it to the notepad in your on_close
+  worker would re-discover (a structural finding, a reusable
+  pattern, a quality issue), append it to the notepad in your on_close
   turn — your role's `on_close.notepad.prompt` (when set in the
   manifest) renders the right category + shape automatically.
 
@@ -122,11 +125,12 @@ line describing what this turn LEARNED, not what it produced.
 ### When you need user input
 
 `session:inquire(type="clarification")` is granted to you for a
-narrow case: **data-level ambiguity that you alone can see**.
-Example — your task names one entity but you discover two
-equally-plausible candidates of that entity in the underlying
-source. Your caller cannot disambiguate without seeing the same
-information you have, so escalating to it would just push the
+narrow case: **execution-level ambiguity only YOU can see** —
+something you uncovered WHILE doing the work that your caller had
+no way to anticipate. Example — your task names one thing, but in
+the material you are working with you find two equally-plausible
+matches for it; your caller cannot tell them apart without the
+information you now have, so escalating would just push the
 decision back. Inquire directly.
 
 Do NOT use inquire for:

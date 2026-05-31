@@ -28,7 +28,7 @@ const inquireSchema = `{
     "options":    {"type": "array", "items": {"type": "string"}, "description": "Optional pre-defined answers for clarification questions (single-question mode)."},
     "clarifications": {
       "type": "array",
-      "description": "Optional batched-clarification array. When non-empty, the modal renders one question at a time with arrow-key option selection (the same rich UI the research stage uses) and the response carries an Answers map keyed by Clarification.ID. The top-level 'question' field becomes optional in this mode — the first clarification's question is used as the modal title if 'question' is absent.",
+      "description": "Optional batched-clarification array. PASS A REAL JSON ARRAY OF OBJECTS here ([{...}, {...}]) — NOT a JSON-encoded string (\"[{...}]\"); a stringified array is the wrong shape. When non-empty, the modal renders one question at a time with arrow-key option selection (the same rich UI the research stage uses) and the response carries an Answers map keyed by Clarification.ID. Prefer this batched form over the flat single-question 'options' field when you want the user to pick from choices — the flat form renders plainer. The top-level 'question' field becomes optional in this mode — the first clarification's question is used as the modal title if 'question' is absent.",
       "items": {
         "type": "object",
         "properties": {
@@ -55,6 +55,48 @@ type inquireInput struct {
 	Options        []string                `json:"options,omitempty"`
 	Clarifications []protocol.Clarification `json:"clarifications,omitempty"`
 	TimeoutMs      int                     `json:"timeout_ms,omitempty"`
+}
+
+// recoverStringifiedClarifications salvages the one weak-model
+// mis-shape that fails the strict inquireInput unmarshal: the
+// `clarifications` array passed as a JSON-encoded STRING
+// ("[{\"id\":...}]") instead of a real array ([{...}]). It re-parses
+// with clarifications held as raw JSON, unwraps the string layer, and
+// decodes the inner array. Returns ok=false for any other shape so the
+// caller falls through to the original bad_request. Mirrors the
+// tolerant fix-ups in callInquire (missing type, empty question).
+func recoverStringifiedClarifications(args json.RawMessage) (inquireInput, bool) {
+	var lenient struct {
+		Type           string          `json:"type"`
+		Question       string          `json:"question"`
+		Context        string          `json:"context"`
+		Options        []string        `json:"options"`
+		Clarifications json.RawMessage `json:"clarifications"`
+		TimeoutMs      int             `json:"timeout_ms"`
+	}
+	if err := json.Unmarshal(args, &lenient); err != nil {
+		return inquireInput{}, false
+	}
+	raw := strings.TrimSpace(string(lenient.Clarifications))
+	if raw == "" || raw[0] != '"' {
+		return inquireInput{}, false // not the stringified-array case
+	}
+	var inner string
+	if err := json.Unmarshal([]byte(raw), &inner); err != nil {
+		return inquireInput{}, false
+	}
+	var cl []protocol.Clarification
+	if err := json.Unmarshal([]byte(strings.TrimSpace(inner)), &cl); err != nil {
+		return inquireInput{}, false
+	}
+	return inquireInput{
+		Type:           lenient.Type,
+		Question:       lenient.Question,
+		Context:        lenient.Context,
+		Options:        lenient.Options,
+		Clarifications: cl,
+		TimeoutMs:      lenient.TimeoutMs,
+	}, true
 }
 
 type approvalResult struct {
@@ -93,7 +135,20 @@ func (s *Session) callInquire(ctx context.Context, args json.RawMessage) (json.R
 	}
 	var in inquireInput
 	if err := json.Unmarshal(args, &in); err != nil {
-		return toolErr("bad_request", fmt.Sprintf("invalid inquire args: %v", err))
+		// Weak models routinely double-encode the clarifications array
+		// as a JSON STRING ("[{...}]") instead of a real array
+		// ([{...}]) — the unmarshal then fails on the whole payload and
+		// the model falls back to the plainer single-question `options`
+		// shape (losing the rich arrow-key pick). Recover that one
+		// mis-shape before rejecting, consistent with the type/question
+		// fix-ups below.
+		if recovered, ok := recoverStringifiedClarifications(args); ok {
+			s.logger.Warn("session: inquire clarifications arrived JSON-string-encoded — recovered to array",
+				"session", s.id)
+			in = recovered
+		} else {
+			return toolErr("bad_request", fmt.Sprintf("invalid inquire args: %v", err))
+		}
 	}
 	// Schema requires `type` but Gemma / smaller models routinely
 	// omit it despite the `required: ["type", ...]` + enum on

@@ -62,7 +62,7 @@ metadata:
           hint: An open thread the user surfaced but is not asking about right now. Capture it so a later turn can resume it without re-prompting.
 compatibility:
   model: any
-  runtime: hugen-phase-4
+  runtime: hugen
 ---
 
 # _root skill
@@ -114,25 +114,30 @@ Lazy via `skill:load`: data tools per the loaded skill (the
 ## Knob 1 — when to delegate (mission triggers)
 
 The tier-root manual already says "default-answer-directly /
-spawn for batch work". The triggers that justify a spawn:
+spawn for multi-step, batch, or artifact work" — of ANY domain,
+not just data. The triggers that justify a spawn:
 
-- Combines results from **multiple sources / tables / modules**
-  with joins, group-by, aggregation, or cross-entity
-  comparison.
+- The work needs SEVERAL coordinated sub-tasks / steps / waves, or
+  combines multiple sources gathered in SEPARATE steps — NOT
+  merely because a single operation is internally rich (it
+  combines / filters / computes in one call — that stays in chat).
+- It is BATCH — the same operation over many items / a large set.
 - The user explicitly asked for an **investigation, audit,
-  dashboard, comparison study, or comprehensive report**.
+  dashboard, comparison study, or comprehensive report / artifact**.
 - The user typed `/mission <name>` or named one from the
   catalogue ("run the X mission").
 - The `## Available missions` keyword matcher fires hard.
 
 NOT a mission trigger:
 
-- "list / show / count" against a single source;
+- a request a loaded (or one-`skill:load`-away) skill answers in a
+  handful of calls — a lookup, a listing, ONE operation (however
+  rich internally), one conversion, one formatting pass;
+- a single ad-hoc number / fact / lookup;
 - "format / convert / dump / save to file" of a result you can
   produce in one query + one formatting pass;
-- a single ad-hoc number / fact / lookup;
-- writing an output file when the work behind the file is
-  trivial — the artefact is not the threshold.
+- writing an output file when the work behind it is trivial — the
+  artefact is not the threshold.
 
 When in doubt, answer in chat. If the chat reply ends up
 inadequate, the user will say "go deeper" — *that's* the cue
@@ -203,15 +208,33 @@ Otherwise: async (the default). Cost is one extra turn boundary
 when the result arrives; benefit is root stays responsive to
 follow-ups in the meantime.
 
-## Knob 6 — followup target check
+## Knob 6 — follow up an in-flight mission via `mission:notify`
 
-Before calling `mission:notify`, scan your recent prompt for a
-`[system: subagent_result]` block carrying the same id /
-session_id. If the block is there, the mission is gone — you
-cannot notify it. Either answer the user from the visible result
-or spawn a fresh mission folding the context in.
+When the user refines, extends, or redirects work an in-flight
+mission ALREADY owns, do NOT spawn a duplicate — route the
+follow-up into that mission:
 
-`mission:notify` against a completed id returns `not_found`.
+```
+mission:notify({ name: "<name or session_id>", text: "<directive>" })
+```
+
+TRANSLATE the user's message into a fully-scoped directive in the
+mission's own terms — a short anaphoric phrase ("and those too")
+becomes an explicit, self-contained instruction; do NOT quote
+verbatim. The note lands in the mission's plan_context journal;
+the NEXT planner spawn reads it and replans. You do not drive the
+mission's supervisor turn directly.
+
+- Spawn a FRESH mission (not notify) only for genuinely
+  independent new work.
+- Cancel + respawn (`session:subagent_cancel` then spawn) only
+  when the follow-up FUNDAMENTALLY invalidates the running goal.
+
+Target check: before notify, scan your recent prompt for a
+`[system: subagent_result]` block with the same id / session_id.
+If present, the mission is already gone — `mission:notify` returns
+`not_found`. Answer from the visible result or spawn fresh,
+folding the context in.
 
 ## Knob 7 — recipes (`task:*`) and schedules (`schedule:*`)
 
@@ -303,8 +326,8 @@ available — run it ad-hoc (Path A) or bind it to a schedule
 (Path B) per what the user originally asked.
 
 Use this when the work is worth keeping (the user said "every…",
-"regularly", "make a task that…", "запланируй…") — not for a single
-one-off, which is just a mission (or chat).
+"regularly", "make a task that…") — not for a single one-off,
+which is just a mission (or chat).
 
 ### Decision tree (apply in order)
 

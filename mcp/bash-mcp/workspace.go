@@ -57,6 +57,19 @@ func (w *Workspace) Resolve(input string, write bool) (Resolution, error) {
 	if input == "" {
 		return Resolution{}, fmt.Errorf("%w: empty path", ErrPathEscape)
 	}
+	// Expand environment variables ($SESSION_DIR, $HOME, …) and a
+	// leading ~ in the path argument. The shell does this for bash.run
+	// / bash.shell commands, but the file tools (read/write/list/sed)
+	// take the path directly — without this, a weak model that writes
+	// `$SESSION_DIR/out.html` or `~/Downloads/x` as the `path` arg gets
+	// a literal, unresolvable path. The cross-session confine below
+	// still runs on the EXPANDED canonical path, so this can't widen
+	// reach. SESSION_DIR / WORKSPACES_ROOT are set on this process's
+	// env by the runtime (pkg/extension/mcp).
+	input = expandPath(input)
+	if input == "" {
+		return Resolution{}, fmt.Errorf("%w: path expanded to empty", ErrPathEscape)
+	}
 	clean := filepath.Clean(input)
 	canonical, err := canonicalise(clean)
 	if err != nil {
@@ -68,6 +81,27 @@ func (w *Workspace) Resolve(input string, write bool) (Resolution, error) {
 		}
 	}
 	return Resolution{Canonical: canonical, Logical: clean}, nil
+}
+
+// expandPath resolves shell-style placeholders in a file-tool path
+// argument: environment variables via os.ExpandEnv ($SESSION_DIR,
+// $HOME, ${VAR}) and a leading ~ / ~/ to the user's home directory.
+// Unset variables expand to "" (os.ExpandEnv semantics) — the caller
+// treats a fully-empty result as an error. Only a LEADING ~ is
+// special (mid-path ~ is a legal filename character).
+func expandPath(input string) string {
+	s := os.ExpandEnv(input)
+	switch {
+	case s == "~":
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+	case strings.HasPrefix(s, "~/"):
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, s[2:])
+		}
+	}
+	return s
 }
 
 // underHostDir reports whether `child` is the same path as or a

@@ -107,7 +107,8 @@ func (e *Extension) driveMissionPlanner(mission extension.SessionState, spawner 
 
 	var synthText string
 	if !aborted && manifest.Synthesis.Role != "" && missionHasHandoffs(mission) {
-		text, synthErr := e.runSynthesis(ctx, executor, mission, manifest.Synthesis.Role, missionSkill, goal)
+		text, synthErr := e.runSynthesis(ctx, executor, mission, manifest.Synthesis.Role, missionSkill, goal,
+			manifest.TimeoutForRole(manifest.Synthesis.Role))
 		if synthErr != nil {
 			e.logger.Warn("mission: driveMissionPlanner: synthesis failed",
 				"mission_session", mission.SessionID(), "err", synthErr)
@@ -166,6 +167,15 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 		// 1. Spawn the planner subagent.
 		plan, plannerErr := e.spawnAndAwaitPlanner(ctx, executor, mission, manifest, missionSkill, goal, iteration, recentVerdict)
 		if plannerErr != nil {
+			// Phase 6.x — user cancelled the plan at the approval modal.
+			// End the mission as a cancellation (MissionState.cancelled
+			// already stamped); synthesis is skipped via aborted=true and
+			// buildFinalText renders the cancellation recap.
+			if errors.Is(plannerErr, errPlannerAborted) {
+				e.logger.Info("mission: planner loop: user cancelled the plan at approval",
+					"mission_session", mission.SessionID(), "iteration", iteration)
+				return true, nil
+			}
 			consecutiveErrors++
 			e.logger.Warn("mission: planner loop: planner closed with an invalid plan — handing back to planner for amend",
 				"mission_session", mission.SessionID(),
@@ -224,7 +234,8 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 				"mission_session", mission.SessionID(), "iteration", iteration, "err", decorateErr)
 			return true, decorateErr
 		}
-		status, _, runErr := executor.RunWave(ctx, mission, decorated, RunWaveOptions{})
+		status, _, runErr := executor.RunWave(ctx, mission, decorated,
+			RunWaveOptions{Timeout: manifest.TimeoutForRoles(waveRoles(decorated))})
 		e.emitWaveComplete(mission, plan.NextWave.Label, status, runErr)
 		if runErr != nil || status == WaveStatusFailed {
 			consecutiveErrors++
@@ -381,10 +392,18 @@ func (e *Extension) spawnAndAwaitPlanner(ctx context.Context, executor *Executor
 	if manifest.Plan.Role == "" {
 		return nil, &PlannerError{Iteration: iteration, Reason: "manifest.plan.role is empty"}
 	}
+	m := FromState(mission)
+	if m == nil {
+		return nil, &PlannerError{Iteration: iteration, Reason: "no MissionState on session"}
+	}
 	task, err := buildPlannerTask(mission, manifest, goal, iteration, recentVerdict)
 	if err != nil {
 		return nil, &PlannerError{Iteration: iteration, Reason: "build planner task", Err: err}
 	}
+	// Phase 6.x — clear any prior iteration's staged validate_and_approve
+	// outcome so the TurnFinalizeGate and the plan-read below see only
+	// THIS planner's submission, never a stale approve.
+	m.ResetPlannerSubmission()
 	waveLabel := plannerWaveLabelPrefix + strconv.Itoa(iteration)
 	wave := Wave{
 		Label: waveLabel,
@@ -395,81 +414,62 @@ func (e *Extension) spawnAndAwaitPlanner(ctx context.Context, executor *Executor
 			Task:  task,
 		}},
 	}
-	status, _, runErr := executor.RunWave(ctx, mission, wave, RunWaveOptions{})
+	status, _, runErr := executor.RunWave(ctx, mission, wave,
+		RunWaveOptions{Timeout: manifest.TimeoutForRole(manifest.Plan.Role)})
 	e.emitWaveComplete(mission, waveLabel, status, runErr)
 	if runErr != nil {
 		return nil, &PlannerError{Iteration: iteration, Reason: "planner wave run", Err: runErr}
 	}
-	if status == WaveStatusFailed {
-		return nil, &PlannerError{Iteration: iteration, Reason: "planner wave failed"}
+
+	// Phase 6.x — the plan is submitted via the single channel
+	// mission:validate_and_approve and staged on MissionState; read it
+	// here instead of parsing a terminal ```plan``` fence. The
+	// TurnFinalizeGate held the planner's turn open until its
+	// validate_and_approve reached a terminal verdict (approve / abort)
+	// or the gate's retry cap was hit. ingestPlannerCompletion records
+	// the wave's OK/error handoff from that staged verdict, so a failed
+	// wave status here means the planner closed without an approved or
+	// aborted plan.
+	sub := m.PlannerSubmission()
+	if sub.aborted {
+		// User declined the plan at the approval modal — terminate the
+		// mission as a cancellation, not a generic failure.
+		m.MarkCancelled(sub.reason)
+		return nil, errPlannerAborted
+	}
+	if status == WaveStatusFailed || !sub.approved {
+		reason := "planner closed without submitting an approved plan via mission:validate_and_approve"
+		switch {
+		case sub.called && !sub.valid && len(sub.errs) > 0:
+			reason = "planner closed with an invalid plan: " + strings.Join(sub.errs, "; ")
+		case !sub.called:
+			reason = "planner never called mission:validate_and_approve"
+		}
+		return nil, &PlannerError{Iteration: iteration, Reason: reason}
 	}
 
-	// Recover the planner's handoff.
-	ref, refErr := MakeRef("planner", waveLabel)
-	if refErr != nil {
-		return nil, &PlannerError{Iteration: iteration, Reason: "ref planner@" + waveLabel, Err: refErr}
-	}
-	m := FromState(mission)
-	if m == nil {
-		return nil, &PlannerError{Iteration: iteration, Reason: "no MissionState on session"}
-	}
-	h, ok := m.Handoffs.Get(ref)
-	if !ok {
-		return nil, &PlannerError{Iteration: iteration, Reason: "no handoff under " + ref}
-	}
-	if h.Status != "ok" {
-		return nil, &PlannerError{Iteration: iteration, Reason: "planner handoff status=" + h.Status, Err: errors.New(h.Reason)}
-	}
-	if h.Kind != KindPlan {
-		return nil, &PlannerError{Iteration: iteration, Reason: fmt.Sprintf("expected kind=plan, got %q", h.Kind)}
-	}
-	// Decode the typed plan from the handoff. plan_complete
-	// (next_wave=null) returns nil here; the caller treats that
-	// as the mission's done-signal.
-	plan, decodeErr := DecodePlan(h)
-	if decodeErr != nil {
-		return nil, &PlannerError{Iteration: iteration, Reason: "decode plan", Err: decodeErr}
-	}
-
-	// Phase 5.x — B13. Skill-agnostic approval gate. The mission
-	// carries a single bit: has the user ever approved a plan in
-	// this mission? When approval is required by policy AND the
-	// planner emitted a plan handoff without that bit being set
-	// (or after a worker re-invalidated it without the planner
-	// re-running the modal), reject the handoff so the synthetic
-	// verdict-amend path re-spawns the planner with the gap surfaced
-	// under [Recent verdict]. Missions whose policy opts out
-	// (Initial=skip) skip the gate entirely.
-	if approvalRequiredForIteration(manifest.Plan.Approval, iteration, m) {
-		if !m.IsPlanApproved() {
-			return nil, &PlannerError{
-				Iteration: iteration,
-				Reason:    "planner emitted a plan handoff without a recorded approval; call mission:validate_and_approve with the body you intend to emit before shipping the fence",
-			}
-		}
-		if pending, reason := m.PendingReapproval(); pending {
-			msg := "a worker handoff invalidated the prior plan approval; call mission:validate_and_approve again (this iteration MUST re-open the modal)"
-			if reason != "" {
-				msg = msg + " — worker reason: " + reason
-			}
-			return nil, &PlannerError{Iteration: iteration, Reason: msg}
-		}
-	}
-	// Phase 5.x — B11 §3.2: every AC mutation funnels through
+	// Approved. plan_complete (nil plan, next_wave=null) is the
+	// mission's done-signal — the caller treats a nil plan as such.
+	plan := sub.plan
+	// Phase 5.x — B11 §3.2: every AC mutation already funnelled through
 	// callValidateAndApprove (stage / commit / apply-status-only) at
-	// modal time. The planner's fence carries the same diff as the
-	// validated body, so by the time we get here the AC state has
-	// already been reconciled. We only stamp the goal restatement +
-	// per-wave AC slot — both are non-load-bearing across approval
-	// gates (the contract part of `[Mission acceptance criteria]` is
-	// the structured state.AC, which validate_and_approve committed).
-	// plan_complete (nil plan) preserves the existing frame as the
-	// synthesizer's reference.
+	// modal time, so the AC state is reconciled. We only stamp the goal
+	// restatement + per-wave AC slot — both non-load-bearing across
+	// approval gates (the contract part of `[Mission acceptance
+	// criteria]` is the structured state.AC validate_and_approve
+	// committed).
 	if plan != nil && plan.NextWave.Label != "" {
 		m.SetGoalAndWaveAC(plan.MissionGoal, plan.NextWave.AcceptanceCriteria)
 	}
 	return plan, nil
 }
+
+// errPlannerAborted is the sentinel spawnAndAwaitPlanner returns when
+// the user aborted the plan at the approval modal. runPlannerLoop
+// detects it (errors.Is) and ends the mission as a cancellation
+// rather than routing through the generic wave-failure abort. Phase
+// 6.x.
+var errPlannerAborted = errors.New("mission: planner aborted by user at approval")
 
 // unsatisfiedMissionAC reads state.AC and returns one
 // "<id>: <statement>" entry per row whose status is still
@@ -529,7 +529,8 @@ func (e *Extension) spawnAndAwaitChecker(ctx context.Context, executor *Executor
 			Task:  task,
 		}},
 	}
-	status, _, runErr := executor.RunWave(ctx, mission, wave, RunWaveOptions{})
+	status, _, runErr := executor.RunWave(ctx, mission, wave,
+		RunWaveOptions{Timeout: manifest.TimeoutForRole(manifest.Control.Role)})
 	e.emitWaveComplete(mission, waveLabel, status, runErr)
 	if runErr != nil {
 		return Verdict{}, &PlannerError{Iteration: iteration, Reason: "checker wave run", Err: runErr}
@@ -731,6 +732,13 @@ type plannerTaskView struct {
 	// the authority — proposals are input only (§3.2.1). Phase
 	// 5.x — B15.
 	ResearchACProposals []researchACProposalView
+	// Roadmap is the roadmap the planner committed to in its most
+	// recent plan — every entry, each flagged Done when a wave with
+	// that label already ran. Surfaced in [Roadmap] so the planner
+	// sees its own plan-ahead (what it intended next) and doesn't lose
+	// the thread across iterations or re-derive a fresh plan each
+	// turn. Empty before the first plan or when no roadmap was set.
+	Roadmap []plannerRoadmapView
 	// MissionAC is the current acceptance-criteria roster (with
 	// identity) rendered into [Mission acceptance criteria]. Rows
 	// stay visible across the lifecycle — dropped entries surface
@@ -855,6 +863,7 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		// doesn't invent values from goal prose.
 		view.SpawnInputs = projectResolvedInputsForTemplate(m.SpawnInputs())
 	}
+	view.Roadmap = collectRoadmap(mission)
 	if recentVerdict != nil {
 		view.RecentVerdict = &plannerVerdictView{
 			Decision: string(recentVerdict.Decision),
@@ -935,12 +944,14 @@ type checkerTaskView struct {
 	PendingRoadmap []plannerRoadmapView
 }
 
-// plannerRoadmapView projects one un-executed roadmap entry from
-// the most recent planner handoff, used by the checker's
-// completeness gate.
+// plannerRoadmapView projects one roadmap entry from the most recent
+// planner handoff. Used by the checker's completeness gate (pending
+// entries only) and by the planner's own [Roadmap] section (all
+// entries, with Done marking which labels already ran).
 type plannerRoadmapView struct {
 	Label       string
 	Description string
+	Done        bool
 }
 
 // buildCheckerTask renders the checker subagent's first message
@@ -986,46 +997,82 @@ func buildCheckerTask(mission extension.SessionState, _ MissionManifest, goal st
 	return renderer.Render("mission/checker_task", view)
 }
 
-// collectPendingRoadmap walks the most recent planner handoff's
-// roadmap and filters out entries whose `label` already appears
-// as a Done wave label in PlanState — what's left is "the planner
-// promised this and the mission hasn't done it yet". The checker
-// sees this list and refuses `finish` when it isn't empty.
-func collectPendingRoadmap(mission extension.SessionState) []plannerRoadmapView {
-	m := FromState(mission)
-	if m == nil {
-		return nil
-	}
-	// Find the most recent planner handoff and its roadmap.
-	var latestPlan *Plan
-	for _, h := range m.Handoffs.List() {
-		if !strings.HasPrefix(h.Ref, "planner@") {
-			continue
-		}
-		p, err := DecodePlan(h)
-		if err != nil {
-			continue
-		}
-		latestPlan = p
-	}
-	if latestPlan == nil || len(latestPlan.Roadmap) == 0 {
-		return nil
-	}
-	done := map[string]bool{}
+// roadmapAndDone snapshots the persisted PlanState.Roadmap plus the
+// set of wave labels already run, under a single lock. "Already run"
+// = every Done wave label plus the in-flight Active wave's label
+// (which covers the just-launched wave before it lands in Done — the
+// same role the old code's `latestPlan.NextWave.Label` played).
+//
+// Phase 6.x — the roadmap source moved off the planner handoff: the
+// fence-less planner has a body-less completion marker, so DecodePlan
+// can no longer recover its roadmap. validate_and_approve writes the
+// approved plan's roadmap to PlanState.Roadmap (SetRoadmap) and both
+// roadmap readers snapshot it here.
+func roadmapAndDone(m *MissionState) ([]RoadmapEntry, map[string]bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	roadmap := append([]RoadmapEntry(nil), m.Plan.Roadmap...)
+	done := make(map[string]bool, len(m.Plan.Done)+1)
 	for _, dw := range m.Plan.Done {
 		if dw.Label != "" {
 			done[dw.Label] = true
 		}
 	}
-	if latestPlan.NextWave.Label != "" {
-		done[latestPlan.NextWave.Label] = true
+	if m.Plan.Active != nil && m.Plan.Active.Label != "" {
+		done[m.Plan.Active.Label] = true
 	}
-	out := make([]plannerRoadmapView, 0, len(latestPlan.Roadmap))
-	for _, r := range latestPlan.Roadmap {
+	return roadmap, done
+}
+
+// collectPendingRoadmap reads the planner's latest committed roadmap
+// (PlanState.Roadmap) and filters out entries whose `label` already
+// ran — what's left is "the planner promised this and the mission
+// hasn't done it yet". The checker sees this list and refuses
+// `finish` when it isn't empty.
+func collectPendingRoadmap(mission extension.SessionState) []plannerRoadmapView {
+	m := FromState(mission)
+	if m == nil {
+		return nil
+	}
+	roadmap, done := roadmapAndDone(m)
+	if len(roadmap) == 0 {
+		return nil
+	}
+	out := make([]plannerRoadmapView, 0, len(roadmap))
+	for _, r := range roadmap {
 		if r.Label == "" || done[r.Label] {
 			continue
 		}
 		out = append(out, plannerRoadmapView{Label: r.Label, Description: r.Description})
+	}
+	return out
+}
+
+// collectRoadmap projects the planner's latest committed roadmap
+// (PlanState.Roadmap) into the planner's [Roadmap] view — EVERY
+// entry, each flagged Done when a wave with that label already ran.
+// Mirrors collectPendingRoadmap's source but keeps satisfied entries
+// so the planner sees the full plan-ahead it committed to, not just
+// the remainder. Empty when no approved plan carries a roadmap.
+func collectRoadmap(mission extension.SessionState) []plannerRoadmapView {
+	m := FromState(mission)
+	if m == nil {
+		return nil
+	}
+	roadmap, done := roadmapAndDone(m)
+	if len(roadmap) == 0 {
+		return nil
+	}
+	out := make([]plannerRoadmapView, 0, len(roadmap))
+	for _, r := range roadmap {
+		if r.Label == "" {
+			continue
+		}
+		out = append(out, plannerRoadmapView{
+			Label:       r.Label,
+			Description: r.Description,
+			Done:        done[r.Label],
+		})
 	}
 	return out
 }
@@ -1123,6 +1170,13 @@ func approvalRequiredForIteration(policy PlanApproval, _ int, _ *MissionState) b
 // non-empty). Phase F.
 type workerContractView struct {
 	PlanContext []plannerContextEntry
+	// ResearchAvailable is true when the mission carries a non-empty
+	// research findings projection (m.ResearchOutput()). Gates the
+	// proximate `[Research]` pull-pointer in the contract template so
+	// workers in a researched mission are told — in their first
+	// message, not just the distal constitution — to read the
+	// verified findings via mission:get_research before re-deriving.
+	ResearchAvailable bool
 }
 
 // decorateWaveTasks appends the bundled mission/worker_contract
@@ -1148,11 +1202,17 @@ func decorateWaveTasks(mission extension.SessionState, manifest MissionManifest,
 		return Wave{}, fmt.Errorf("mission: decorateWaveTasks: no prompts renderer on session")
 	}
 	planCtx := collectPlanContext(mission)
+	researchAvailable := false
+	if m := FromState(mission); m != nil {
+		if findings, _, _ := m.ResearchOutput(); strings.TrimSpace(findings) != "" {
+			researchAvailable = true
+		}
+	}
 	out := wave
 	out.Subagents = make([]SubagentSpec, len(wave.Subagents))
 	copy(out.Subagents, wave.Subagents)
 	for i := range out.Subagents {
-		view := workerContractView{}
+		view := workerContractView{ResearchAvailable: researchAvailable}
 		if ResolvePlanContextAccess(manifest, out.Subagents[i].Role) == PlanContextRead {
 			view.PlanContext = planCtx
 		}

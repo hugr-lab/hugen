@@ -3,53 +3,37 @@ package mission
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 // ResearchOutput is the typed projection of a kind=research
-// handoff body. Phase 5.x — B15. Roles emit one of two shapes:
+// handoff body. The research role runs ONCE before the planner and
+// emits a single terminal result: the mission's open questions are
+// already resolved (the role asked the user directly via
+// session:inquire mid-turn when it hit an ambiguity), so the
+// handoff carries only the distilled outcome.
 //
-//   - `done: false` with Clarifications populated — the runtime
-//     batches the clarifications into a single user-facing
-//     `session:inquire` modal, collects answers, and re-fires the
-//     research role with PriorAnswers / PriorComments folded into
-//     its context. Re-fires capped by manifest's MaxIterations.
-//   - `done: true` with Findings + (optional) ResolvedUserInputs
-//     + (optional) ACProposals — the runtime stamps these on
-//     MissionState and proceeds to spawn the planner. The
-//     planner sees Findings under [Plan context] /
-//     plan_context.research_findings.
+//   - Findings — required. The concrete brief the planner reads:
+//     what sources / tables / fields the mission hinges on (exact
+//     names), which join keys were confirmed, and how each
+//     ambiguity was resolved. Specific enough that downstream
+//     workers lift names verbatim instead of re-discovering them.
+//   - ResolvedUserInputs (optional) — the key/value answers the
+//     role pulled from the user; the planner lifts them into
+//     workers' `inputs`.
+//   - ACProposals (optional) — acceptance criteria the role
+//     suggests; the planner is the authority.
+//   - MemorySummary (optional) — one line carried into PlanContext
+//     as the research stage's `phase=research` entry.
 //
-// MemorySummary is carried into PlanContext as the research
-// stage's `phase=research` entry — short summary the planner sees
-// alongside Findings + ResolvedUserInputs.
+// The runtime stamps Findings + ResolvedUserInputs + ACProposals
+// on MissionState via SetResearchOutput and proceeds to the
+// planner spawn — there is no clarification re-fire loop; the role
+// owns its own HITL.
 type ResearchOutput struct {
-	Clarifications     []ResearchClarification `json:"clarifications,omitempty"`
-	ResolvedUserInputs map[string]any          `json:"resolved_user_inputs,omitempty"`
-	Done               bool                    `json:"done"`
-	Findings           string                  `json:"findings,omitempty"`
-	ACProposals        []ResearchACProposal    `json:"ac_proposals,omitempty"`
-	MemorySummary      string                  `json:"memory_summary,omitempty"`
-}
-
-// ResearchClarification mirrors protocol.Clarification on the
-// research-output side. The runtime hands this through to
-// session:inquire verbatim once parsed.
-type ResearchClarification struct {
-	ID           string   `json:"id,omitempty"`
-	Question     string   `json:"question"`
-	Kind         string   `json:"kind,omitempty"`
-	Options      []string `json:"options,omitempty"`
-	Default      string   `json:"default,omitempty"`
-	AllowComment *bool    `json:"allow_comment,omitempty"`
-	// Multi, when true on a question with non-empty Options,
-	// renders as a checkbox multi-select in the adapter modal
-	// (TUI: Space toggles each option in/out of the selection
-	// set). The answer is the comma-joined set of picked option
-	// strings. Mirrors protocol.Clarification.Multi — the runtime
-	// passes the value through to the session:inquire payload
-	// verbatim. Phase 5.x — B15 follow-up.
-	Multi bool `json:"multi,omitempty"`
+	ResolvedUserInputs map[string]any       `json:"resolved_user_inputs,omitempty"`
+	Findings           string               `json:"findings,omitempty"`
+	ACProposals        []ResearchACProposal `json:"ac_proposals,omitempty"`
+	MemorySummary      string               `json:"memory_summary,omitempty"`
 }
 
 // ResearchACProposal is one proposed acceptance criterion the
@@ -66,15 +50,10 @@ type ResearchACProposal struct {
 // DecodeResearchOutput re-marshals a parsed kind=research body
 // into the typed ResearchOutput. Pre-condition: h.Kind ==
 // KindResearch and ParseHandoff succeeded (so validateRequired
-// passed the basic shape check). Returns an error when the body
-// type is unexpected or the decode fails — both are runtime bugs
-// (parser should have rejected them), but the function fails
+// confirmed body.findings is present). Returns an error when the
+// body type is unexpected or the decode fails — both are runtime
+// bugs (parser should have rejected them), but the function fails
 // loud so the caller can route to the retry path.
-//
-// Soft recovery: clarifications missing an `id` get auto-assigned
-// `q1`, `q2`, ... in order. Logged warning is the caller's
-// responsibility — this function returns the typed value with
-// ids filled in.
 func DecodeResearchOutput(h Handoff) (*ResearchOutput, error) {
 	if h.Kind != KindResearch {
 		return nil, fmt.Errorf("mission: DecodeResearchOutput: handoff kind=%q, want research", h.Kind)
@@ -90,21 +69,6 @@ func DecodeResearchOutput(h Handoff) (*ResearchOutput, error) {
 	var out ResearchOutput
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("mission: DecodeResearchOutput: unmarshal: %w", err)
-	}
-	// Soft recovery — auto-assign ids to clarifications the role
-	// didn't id. Skipping this would force the runtime's batched
-	// inquire to invent ids itself, which the role wouldn't be
-	// able to reference on the next turn.
-	for i := range out.Clarifications {
-		if strings.TrimSpace(out.Clarifications[i].ID) == "" {
-			out.Clarifications[i].ID = fmt.Sprintf("q%d", i+1)
-		}
-		// Default kind to required so missing kind doesn't slip
-		// through as the empty string (which downstream treats
-		// permissively).
-		if out.Clarifications[i].Kind == "" {
-			out.Clarifications[i].Kind = "required"
-		}
 	}
 	return &out, nil
 }

@@ -221,20 +221,19 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	// Phase 6.x — the catalogue half migrated to the
 	// ModelInTurnAdvisor turn_preamble (rendered by [TurnPreamble]
 	// and injected before the last user message for recency +
-	// prompt-cache). This method now keeps only the LOADED-side
-	// contributions, which belong in the stable/cacheable system
-	// prompt: loaded-skills meta, rendered skill bodies, and the
-	// recommended-tags advice.
+	// prompt-cache). This method now keeps only the rendered skill
+	// bodies + recommended-tags advice. The loaded-skill bundle
+	// listing (references / scripts / assets) ALSO moved to
+	// turn_preamble (dogfood: roles never loaded refs when the
+	// listing sat atop a long system prompt) so it rides next to the
+	// catalogue with the "load the references you need" directive,
+	// near the model's decision point.
 	var (
 		parts        []string
 		loadedTokens int
 	)
 	// Available missions — moved to pkg/extension/mission's
 	// Advertiser. Mission-PDCA (design 003).
-	if meta := renderLoadedSkillsMeta(h); meta != "" {
-		parts = append(parts, meta)
-		loadedTokens += extension.EstimateTokens(meta)
-	}
 	if b, err := h.Bindings(ctx); err == nil && b.Instructions != "" {
 		parts = append(parts, b.Instructions)
 		loadedTokens += extension.EstimateTokens(b.Instructions)
@@ -280,8 +279,23 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 	} else {
 		cat = renderCatalogue(ctx, renderer, h)
 	}
-	h.SetCatalogTokens(extension.EstimateTokens(cat))
-	return cat
+	// Phase 6.x dogfood follow-up — the loaded-skill bundle listing
+	// (references + scripts + assets) rides here, right after the
+	// catalogue, carrying the directive to `skill:ref` the references
+	// the model needs. Co-locating it with the catalogue near the
+	// user ask (vs buried atop the system prompt) is what gets weak
+	// models to actually open the docs instead of guessing query /
+	// filter syntax.
+	parts := make([]string, 0, 2)
+	if cat != "" {
+		parts = append(parts, cat)
+	}
+	if meta := renderLoadedSkillsMeta(h); meta != "" {
+		parts = append(parts, meta)
+	}
+	out := strings.Join(parts, "\n\n")
+	h.SetCatalogTokens(extension.EstimateTokens(out))
+	return out
 }
 
 // OnToolError implements [extension.ModelInTurnAdvisor]: it walks the
@@ -337,9 +351,58 @@ func (e *Extension) OnToolError(ctx context.Context, state extension.SessionStat
 	return strings.Join(out, "\n\n")
 }
 
+// OnToolResult implements [extension.ModelInTurnAdvisor]: the
+// success-path twin of OnToolError. It walks the session's LOADED
+// skills, gathers their `metadata.hugen.hints` of type
+// on_tool_result, matches each against the successful tool (name glob
+// + result-body regex), and returns the matching messages joined — the
+// session folds them inline into the result the model reads next. Only
+// LOADED skills contribute; matches compose, de-duped and capped.
+func (e *Extension) OnToolResult(ctx context.Context, state extension.SessionState, ev extension.ToolResultEvent) string {
+	h := FromState(state)
+	if h == nil {
+		return ""
+	}
+	h.mu.RLock()
+	names := make([]string, 0, len(h.loaded))
+	for n := range h.loaded {
+		names = append(names, n)
+	}
+	skills := make(map[string]skillpkg.Skill, len(h.loaded))
+	for n, sk := range h.loaded {
+		skills[n] = sk
+	}
+	h.mu.RUnlock()
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names) // stable contribution order
+	var (
+		out  []string
+		seen = map[string]struct{}{}
+	)
+	for _, n := range names {
+		for _, hint := range skills[n].Manifest.Hugen.Hints {
+			msg := hint.MatchToolResult(ev.Tool, ev.ResultText)
+			if msg == "" {
+				continue
+			}
+			if _, dup := seen[msg]; dup {
+				continue
+			}
+			seen[msg] = struct{}{}
+			out = append(out, msg)
+			if len(out) >= maxToolErrorHints {
+				return strings.Join(out, "\n\n")
+			}
+		}
+	}
+	return strings.Join(out, "\n\n")
+}
+
 // maxToolErrorHints caps how many distinct hint messages a single
-// failing tool result can carry, so a session with many loaded skills
-// can't balloon one error into a wall of steer. Open Q3 in the spec.
+// tool result (failing OR successful) can carry, so a session with
+// many loaded skills can't balloon one result into a wall of steer.
 const maxToolErrorHints = 3
 
 // renderLoadedSkillsMeta produces the per-loaded-skill metadata
@@ -422,6 +485,12 @@ func renderLoadedSkillsMeta(h *SessionSkill) string {
 
 	var b strings.Builder
 	b.WriteString("## Loaded skill bundles\n\n")
+	b.WriteString("These skills are loaded. Any reference docs and files they " +
+		"bundle are listed below. When you need a loaded skill's detail, LOAD " +
+		"the relevant reference with `skill:ref` (args: `name`=<the skill>, " +
+		"`ref`=<a path shown under references/ below, without the `.md`>) and " +
+		"read it before relying on assumptions. Files under `scripts/` run via " +
+		"the bundled execution tools at the `directory` path shown.\n\n")
 	for _, n := range names {
 		sk := h.loaded[n]
 		b.WriteString("Loaded skill: `")

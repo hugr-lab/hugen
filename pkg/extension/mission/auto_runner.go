@@ -59,6 +59,11 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 	// manifest.
 	if mState := FromState(mission); mState != nil {
 		mState.SetPlannerApproval(manifest.Plan.Approval)
+		// Phase 6.x — stamp the plan role so the TurnFinalizeGate can
+		// recognise the planner child session (state.Role() ==
+		// plannerRole) and hold its turn open until the plan is
+		// approved via validate_and_approve.
+		mState.SetPlannerRole(manifest.Plan.Role)
 		// Phase 5.x-followup — stash the caller's structured inputs
 		// so the researcher / planner / synthesizer prompts can
 		// surface caller-supplied params (file_path, output_format,
@@ -147,7 +152,8 @@ func (e *Extension) driveMission(mission extension.SessionState, spawner extensi
 	// the partial run can produce.
 	aborted := false
 	for _, waveDecl := range renderedInline.Waves {
-		status, _, err := executor.RunWave(ctx, mission, waveDecl, RunWaveOptions{})
+		status, _, err := executor.RunWave(ctx, mission, waveDecl,
+			RunWaveOptions{Timeout: manifest.TimeoutForRoles(waveRoles(waveDecl))})
 		e.emitWaveComplete(mission, waveDecl.Label, status, err)
 		if err != nil || status == WaveStatusFailed {
 			e.logger.Warn("mission: driveMission: wave failed",
@@ -163,7 +169,8 @@ func (e *Extension) driveMission(mission extension.SessionState, spawner extensi
 	// pipeline. Its handoff body becomes the mission's terminal text.
 	var synthText string
 	if !aborted && manifest.Synthesis.Role != "" {
-		text, err := e.runSynthesis(ctx, executor, mission, manifest.Synthesis.Role, missionSkill, goal)
+		text, err := e.runSynthesis(ctx, executor, mission, manifest.Synthesis.Role, missionSkill, goal,
+			manifest.TimeoutForRole(manifest.Synthesis.Role))
 		if err != nil {
 			e.logger.Warn("mission: driveMission: synthesis failed",
 				"mission_session", mission.SessionID(), "err", err)
@@ -211,7 +218,7 @@ func (e *Extension) renderInlineForMission(mission extension.SessionState, manif
 // the manifest's synthesis.role; its handoff body is the synthesis
 // result. The synthesis worker loads its prompt + tools from the
 // mission's own skill (same convention as a regular wave subagent).
-func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, mission extension.SessionState, role, missionSkill, goal string) (string, error) {
+func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, mission extension.SessionState, role, missionSkill, goal string, timeout time.Duration) (string, error) {
 	task, err := buildSynthesisTask(mission, goal)
 	if err != nil {
 		return "", fmt.Errorf("synthesis: build task: %w", err)
@@ -227,10 +234,9 @@ func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, missio
 	}
 	// Hard cap the synthesis wave — a confused synthesizer that
 	// never emits its kind=synthesis fence would otherwise wedge
-	// the mission until the parent's hard ceiling fires. 5
-	// minutes covers gemma-class weak models comfortably; faster
-	// models settle in seconds.
-	status, _, err := executor.RunWave(ctx, mission, wave, RunWaveOptions{Timeout: 5 * time.Minute})
+	// the mission. Budget comes from the synthesizer role's
+	// `timeout` (DefaultWaveTimeout when unset).
+	status, _, err := executor.RunWave(ctx, mission, wave, RunWaveOptions{Timeout: timeout})
 	e.emitWaveComplete(mission, synthesisWaveLabel, status, err)
 	if err != nil {
 		return "", err
@@ -374,6 +380,19 @@ func (e *Extension) emitWaveComplete(mission extension.SessionState, label strin
 func buildFinalText(mission extension.SessionState, synthText string, aborted bool) string {
 	if synthText != "" {
 		return synthText
+	}
+	// Phase 6.x — user-cancelled-at-approval gets its own recap so the
+	// parent sees "you declined the plan", not a generic wave failure.
+	if m := FromState(mission); m != nil {
+		if cancelled, reason := m.CancelInfo(); cancelled {
+			var b strings.Builder
+			b.WriteString("Mission cancelled — you declined the plan at approval.")
+			if r := strings.TrimSpace(reason); r != "" {
+				b.WriteString(" Reason: ")
+				b.WriteString(r)
+			}
+			return b.String()
+		}
 	}
 	var b strings.Builder
 	if aborted {

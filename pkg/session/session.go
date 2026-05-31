@@ -2027,15 +2027,17 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 		"session", s.id, "tool", tc.Name,
 		"result", truncatePayload(result, 2048))
 
-	// Phase 6.x — provider embedded-error path. A "successful"
-	// dispatch can still carry a tool error in its JSON body (the MCP
-	// provider marshals failures as {"is_error":true,"text":…}; a
-	// GraphQL validation error like `Cannot query field
-	// "X_aggregation"` lands here, NOT in emitToolError). When the
-	// body looks like an error, consult the ModelInTurnAdvisor
-	// extensions for a corrective hint and fold it inline into the
-	// result the model reads. Pre-filtered on a cheap substring so the
-	// hot success path never runs the advisors / their regexes.
+	// Phase 6.x — in-turn advisory fold. A "successful" dispatch can
+	// still carry a tool error in its JSON body (the MCP provider
+	// marshals failures as {"is_error":true,"text":…}; a GraphQL
+	// validation error like `Cannot query field "X_aggregation"` lands
+	// here, NOT in emitToolError) — those consult the on_tool_error
+	// advisors. A genuinely clean result instead consults the
+	// on_tool_result advisors — a success that still warrants steer
+	// (canonical case: an inline query returned `is_truncated: true`,
+	// so the model should switch to file output rather than re-bump the
+	// size cap). Either way the matched hint is folded inline into the
+	// result the model reads, with no separate emitted frame.
 	if looksLikeToolErrorResult(result) {
 		if hint := s.toolErrorHint(emitCtx, extension.ToolErrorEvent{Tool: tc.Name, ResultText: string(result)}); hint != "" {
 			enriched := string(result) + hintSuffix(hint)
@@ -2057,6 +2059,16 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 			// provider-embedded-error frame is IsError=false, as before).
 			return enriched, false
 		}
+	} else if hint := s.toolResultHint(emitCtx, extension.ToolResultEvent{Tool: tc.Name, ResultText: string(result)}); hint != "" {
+		enriched := string(result) + hintSuffix(hint)
+		resultFrame := protocol.NewToolResult(s.id, s.agent.Participant(),
+			tc.ID, enriched, false)
+		if err := s.emit(emitCtx, resultFrame); err != nil {
+			s.logger.Warn("emit tool_result", "err", err)
+		}
+		// Enriched return for the same sync-close-turn reason as the
+		// error path above; the frame stays IsError=false.
+		return enriched, false
 	}
 
 	resultFrame := protocol.NewToolResult(s.id, s.agent.Participant(),
@@ -2107,6 +2119,66 @@ func (s *Session) toolErrorHint(ctx context.Context, ev extension.ToolErrorEvent
 		}
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// toolResultHint consults the registered [extension.ModelInTurnAdvisor]
+// extensions (deps.Extensions order) for guidance on a SUCCESSFUL tool
+// result, returning the joined non-empty contributions. The
+// success-path twin of toolErrorHint — fed only on the clean (non
+// embedded-error) result path. Empty when no advisor matches.
+func (s *Session) toolResultHint(ctx context.Context, ev extension.ToolResultEvent) string {
+	if s.deps == nil {
+		return ""
+	}
+	var parts []string
+	for _, ext := range s.deps.Extensions {
+		adv, ok := ext.(extension.ModelInTurnAdvisor)
+		if !ok {
+			continue
+		}
+		if h := adv.OnToolResult(ctx, s, ev); h != "" {
+			parts = append(parts, h)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// consultTurnFinalizeGate walks the registered
+// [extension.TurnFinalizeGate] extensions (deps.Extensions order) and
+// returns the first veto: (continuation, false). When no gate vetoes
+// — the common case, every non-mission session — it returns ("",
+// true) and the turn retires normally. Called from
+// foldAssistantAndMaybeDispatch's no-tool-call branch.
+func (s *Session) consultTurnFinalizeGate(ctx context.Context, finalText string) (string, bool) {
+	if s.deps == nil {
+		return "", true
+	}
+	for _, ext := range s.deps.Extensions {
+		gate, ok := ext.(extension.TurnFinalizeGate)
+		if !ok {
+			continue
+		}
+		if cont, allow := gate.GateTurnFinalize(ctx, s, finalText); !allow {
+			return cont, false
+		}
+	}
+	return "", true
+}
+
+// injectTurnContinuation emits a SystemMessage frame carrying the
+// gate's continuation prompt so the compactor's FrameObserver folds
+// it into the owned history cache (as a user-role reminder) ahead of
+// the next model iteration. Empty continuation is a no-op — the gate
+// vetoed without supplying steer, and the re-iteration alone may
+// nudge the model to act.
+func (s *Session) injectTurnContinuation(ctx context.Context, continuation string) {
+	if strings.TrimSpace(continuation) == "" {
+		return
+	}
+	frame := protocol.NewSystemMessage(s.id, s.agent.Participant(), "turn_continuation", continuation)
+	if err := s.emit(ctx, frame); err != nil {
+		s.logger.Warn("emit turn_continuation", "err", err)
+	}
 }
 
 // truncatePayload caps a tool's raw JSON result for log lines so a

@@ -158,11 +158,37 @@ _join(fields: ["category_id"]) {
 }
 ```
 
+## Count semantics — read this before introspecting aggregation types
+
+Two different counts, and the difference matters:
+
+- `_rows_count` — number of ROWS in the (filtered) group. Total records.
+- `<field> { count }` — number of **DISTINCT (unique)** non-null values
+  of that field. This is COUNT(DISTINCT field), NOT a row count.
+
+So to count the unique entities behind many rows, put `count` on the
+entity's id field — no `distinct_on`, no sub-query. One example covers
+the common "how many roads, how long in total" shape over a parts table
+(many parts per road):
+
+```graphql
+tf_road_parts_aggregation(field: "geom") {
+  road_id { count }   # distinct roads
+  len { sum }         # total length
+  _rows_count         # total road-part rows (only if you also want it)
+}
+```
+
+You do NOT need `schema-type_fields` on `BigIntAggregation` /
+`FloatAggregation` / `_spatial_aggregation` to find this — every field
+exposes the functions valid for its type (below), invoked as
+`field { fn }`.
+
 ## Available Functions
 
-- `_rows_count` — row count
+- `_rows_count` — total rows in the group
+- `<field> { count }` — DISTINCT (unique) non-null values of that field
 - `sum`, `avg`, `min`, `max` — numeric
-- `count`, `count(distinct)` — count
 - `stddev`, `variance` — statistical
 - `string_agg` — string concatenation
 - `list` — collect into array

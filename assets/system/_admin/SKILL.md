@@ -35,7 +35,7 @@ metadata:
     tier_compatibility: [root]
 compatibility:
   model: any
-  runtime: hugen-phase-6
+  runtime: hugen
 ---
 
 # `_admin` skill
@@ -75,9 +75,9 @@ Load only when the user explicitly asks for an admin action.
 
 ## Notes
 
-- These tools are unloaded by default — the recipe-child path
-  (Phase 6.1d sealed session) cannot reach them even via
-  `skill:load` unless the recipe manifest explicitly lists
-  `_admin` in `allowed_skills` (which no recipe should).
+- These tools are unloaded by default — the sealed recipe-child
+  session cannot reach them even via `skill:load` unless the
+  recipe manifest explicitly lists `_admin` in `allowed_skills`
+  (which no recipe should).
 - `_admin` itself is not autoloaded for any tier; loading is an
   explicit user-initiated step.

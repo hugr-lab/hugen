@@ -50,7 +50,7 @@ metadata:
             description: "Optional module to narrow the query search."
 compatibility:
   model: any
-  runtime: hugen-phase-6
+  runtime: hugen
 ---
 
 # data_tables_rows_count

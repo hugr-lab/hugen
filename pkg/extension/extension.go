@@ -565,6 +565,22 @@ type ToolErrorEvent struct {
 	ResultText string
 }
 
+// ToolResultEvent describes a SUCCESSFUL tool result handed to
+// [ModelInTurnAdvisor.OnToolResult] so an advisor can append in-turn
+// steer keyed off the result content — not a failure, but a shape
+// that warrants a nudge (the canonical case: an inline query returned
+// `is_truncated: true`, so the model should switch to file output
+// instead of re-bumping the size cap). Distinct from [ToolErrorEvent]:
+// this fires on the success path, where no error producer runs.
+type ToolResultEvent struct {
+	// Tool is the fully-qualified tool name as dispatched
+	// (e.g. "hugr-main:data-inline_graphql_result").
+	Tool string
+	// ResultText is the raw successful tool result JSON. An advisor
+	// matches its on_tool_result hints' regex against it.
+	ResultText string
+}
+
 // ModelInTurnAdvisor is the umbrella capability for an extension that
 // contributes content INTO the active turn — near the model's
 // decision point, ephemerally (render-time, not a persisted frame) —
@@ -590,11 +606,17 @@ type ToolErrorEvent struct {
 //     [ToolErrorEvent] for the two error producers; the session folds
 //     the returned text into the result content the model reads, with
 //     no separate emitted frame.
+//   - OnToolResult — guidance appended inline to a SUCCESSFUL tool
+//     result whose content matches a hint (manifest hints of type
+//     on_tool_result). Same inline-fold mechanism as OnToolError, but
+//     fires on the success path — for results that are fine but
+//     warrant a nudge (e.g. truncated inline query → switch to file
+//     output). See [ToolResultEvent].
 //
 // Contract: implementations are consulted in deps.Extensions order.
-// TurnPreamble contributions are joined; OnToolError contributions are
-// joined (the session de-dupes / caps). Both are pure — the session
-// owns where the text lands.
+// TurnPreamble contributions are joined; OnToolError / OnToolResult
+// contributions are joined (the session de-dupes / caps). All are pure
+// — the session owns where the text lands.
 type ModelInTurnAdvisor interface {
 	// TurnPreamble returns the ephemeral block to inject before the
 	// last user message this turn, or "" for nothing.
@@ -602,4 +624,56 @@ type ModelInTurnAdvisor interface {
 	// OnToolError returns guidance to append to a failing tool
 	// result, or "" for nothing.
 	OnToolError(ctx context.Context, state SessionState, ev ToolErrorEvent) string
+	// OnToolResult returns guidance to append to a SUCCESSFUL tool
+	// result whose content matched an on_tool_result hint, or "" for
+	// nothing.
+	OnToolResult(ctx context.Context, state SessionState, ev ToolResultEvent) string
+}
+
+// TurnFinalizeGate lets an extension veto a session's turn
+// finalization — the model emitted a final message with no tool
+// call, so the turn would normally retire — and supply a
+// continuation prompt the runtime injects before re-iterating the
+// SAME session. This is the planner-gate primitive (Phase 6.x): the
+// mission ext implements it so a planner cannot end its turn until it
+// has submitted a plan the user approved via
+// `mission:validate_and_approve`, while keeping the planner's
+// in-session context (a re-plan-from-scratch respawn would discard
+// it). The same primitive holds a Do worker / checker / synthesizer
+// from ending its turn without a parseable terminal `handoff` fence —
+// a weak model that "thought" its answer but never wrote the fence
+// (e.g. a thinking-model whose tokens all went to reasoning) gets
+// re-prompted in-session to emit it, instead of wedging the mission's
+// waitForRefs forever.
+//
+// finalText is the assistant's just-assembled final message for this
+// iteration (empty when the model produced no visible content) — a
+// gate that decides by message CONTENT (the worker handoff gate)
+// inspects it; a gate that decides by tool-call STATE (the planner's
+// validate_and_approve submission) ignores it.
+//
+// Distinct from [ModelInTurnAdvisor]: that capability is pull-pure
+// (it returns text the session decides where to place), whereas this
+// one is MUTATING / flow-controlling — its verdict changes whether
+// the turn retires or loops. The two were deliberately split rather
+// than bending the "advisor" contract.
+//
+// Contract:
+//   - allow=true (the default for any session without a declared
+//     finalize condition) lets the turn retire normally; continuation
+//     is ignored. Every non-gated session — workers, root chat,
+//     non-mission sessions — returns allow=true.
+//   - allow=false vetoes finalize: the runtime injects continuation
+//     as a system reminder into the SAME session's history and starts
+//     a fresh model iteration instead of retiring. The session enforces
+//     a hard retry backstop so a gate that never allows can't loop
+//     forever — past the cap the turn retires regardless.
+//
+// Implementations are consulted in deps.Extensions order; the first
+// to veto wins (continuation taken from it). A gate that wants to
+// terminate the session (e.g. the user aborted the plan) returns
+// allow=true and arms its own teardown via state — the gate does not
+// own session lifecycle.
+type TurnFinalizeGate interface {
+	GateTurnFinalize(ctx context.Context, state SessionState, finalText string) (continuation string, allow bool)
 }

@@ -217,6 +217,17 @@ func (e *Executor) RunWave(ctx context.Context, state extension.SessionState, wa
 	return status, outcomes, nil
 }
 
+// waveRoles returns the role name of every subagent in a wave —
+// the input to MissionManifest.TimeoutForRoles so a Do wave's
+// wall-clock budget is the MAX of its parallel workers' timeouts.
+func waveRoles(w Wave) []string {
+	roles := make([]string, 0, len(w.Subagents))
+	for _, s := range w.Subagents {
+		roles = append(roles, s.Role)
+	}
+	return roles
+}
+
 // waitForRefs polls the store until every ref in refs is present
 // or ctx fires. Phase A's simplest possible wakeup; phase B
 // replaces it with a completion-channel.

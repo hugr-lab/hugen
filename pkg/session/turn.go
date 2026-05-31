@@ -72,6 +72,16 @@ type turnState struct {
 	// re-dispatch the same tool calls in a tight loop. Reset to false
 	// at the top of each iteration via resetModelAccumulator.
 	assistantFolded bool
+
+	// finalizeGateRetries counts how many times a
+	// [extension.TurnFinalizeGate] has vetoed this turn's
+	// finalization and the runtime re-iterated the same session
+	// instead of retiring. Bounded by maxFinalizeGateRetries — past
+	// the cap the gate is skipped and the turn retires regardless, so
+	// a gate that never allows (e.g. a planner that never produces an
+	// approved plan) can't loop forever. NOT reset per iteration —
+	// it's a per-turn backstop.
+	finalizeGateRetries int
 }
 
 // modelChunkEvent is the single union the Run loop reads from
@@ -126,6 +136,17 @@ type ToolFeed struct {
 	// branched on.
 	BlockingReason string
 }
+
+// maxFinalizeGateRetries bounds how many times a
+// [extension.TurnFinalizeGate] may veto a single turn's finalization
+// before the runtime retires the turn regardless. The backstop keeps
+// a gate that never allows (e.g. a planner that keeps producing an
+// invalid / unapproved plan) from looping forever — past the cap the
+// turn ends and the mission's own planner-loop error path takes over.
+// 6 leaves a weak model ample room to fix a validate_and_approve body
+// (the dogfood failures cleared within 2-3 corrections) without
+// burning unbounded model calls.
+const maxFinalizeGateRetries = 6
 
 // startTurn moves the Session from idle to "model goroutine running".
 // Called from the inbound branch of Run when a UserMessage arrives and
@@ -561,17 +582,41 @@ func (s *Session) advanceOrFinish(runCtx context.Context) {
 func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 	st := s.turnState
 	hasToolCalls := len(st.toolCalls) > 0
+
+	// Phase 6.x — TurnFinalizeGate. Consult the gate BEFORE emitting
+	// the consolidated assistant message, because a vetoed finalize
+	// must emit a NON-terminal (Final=false) message: the subagent
+	// executor keys wave-completion off the Final+Consolidated frame
+	// (mission OnChildFrame → ingestHandoff → waitForRefs), so emitting
+	// Final=true on a blocked iteration would falsely signal the
+	// planner is done while the gate is still re-driving it. The gate
+	// is skipped past the retry cap (turn retires) and for every
+	// session without a declared finalize condition (allow).
+	gateBlocks := false
+	var continuation string
+	if !hasToolCalls && st.finalizeGateRetries < maxFinalizeGateRetries {
+		if cont, allow := s.consultTurnFinalizeGate(runCtx, st.finalText); !allow {
+			gateBlocks = true
+			continuation = cont
+		}
+	}
+	// final marks the turn boundary: no tool calls AND the gate let
+	// finalization through. A gate-blocked iteration is Final=false so
+	// it folds into history (the planner sees its own prior text) but
+	// does not trip the executor's wave-completion detection.
+	final := !hasToolCalls && !gateBlocks
+
 	// Persist one consolidated AgentMessage per model iteration: full
 	// assembled text + tool calls + reasoning state. Streaming chunks
 	// stayed outbox-only — this row is the canonical assistant
 	// iteration record that replay reads. Final=true marks the turn
-	// boundary (no tool calls; turn retires after this); Final=false
-	// is a tool-iteration that hands off to the dispatcher and
-	// expects another model iteration after results return. Skipped
-	// when the iteration produced nothing.
+	// boundary (no tool calls, not gate-blocked; turn retires after
+	// this); Final=false is a tool-iteration (hands off to the
+	// dispatcher) or a gate-blocked iteration (re-iterates the same
+	// session). Skipped when the iteration produced nothing.
 	if st.agentSeq > 0 || hasToolCalls || st.finalText != "" {
 		consolidated := protocol.NewAgentMessageConsolidated(s.id, s.agent.Participant(),
-			st.finalText, st.agentSeq, !hasToolCalls,
+			st.finalText, st.agentSeq, final,
 			toolCallPayloads(st.toolCalls),
 			st.thinking, st.thoughtSignature)
 		// Phase 5.2 (context-budget observability) — stamp turn
@@ -580,13 +625,25 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 		// session counter was already folded eagerly in
 		// applyChunk on every iter's Final chunk; this stamp is
 		// outbox-only.
-		if !hasToolCalls && (st.turnUsage.PromptTokens > 0 || st.turnUsage.CompletionTokens > 0) {
+		if final && (st.turnUsage.PromptTokens > 0 || st.turnUsage.CompletionTokens > 0) {
 			snap := st.turnUsage
 			consolidated.Payload.Usage = &snap
 		}
 		_ = s.emit(runCtx, consolidated)
 	}
 	st.assistantFolded = true
+
+	if gateBlocks {
+		// Re-iterate the SAME session: inject the gate's continuation
+		// as a system reminder (folded into history), then start a
+		// fresh model iteration. resetModelAccumulator (in
+		// startModelIteration) clears assistantFolded + the per-iter
+		// accumulators. finalizeGateRetries is the per-turn backstop.
+		st.finalizeGateRetries++
+		s.injectTurnContinuation(runCtx, continuation)
+		s.startModelIteration(runCtx)
+		return
+	}
 
 	if !hasToolCalls {
 		s.drainPendingInbound(runCtx)

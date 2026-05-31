@@ -20,6 +20,7 @@ import (
 // zero values.
 type fakeState struct {
 	id     string
+	role   string
 	values sync.Map
 	parent extension.SessionState
 }
@@ -30,7 +31,7 @@ func newFakeState(id string) *fakeState {
 
 func (s *fakeState) SessionID() string                  { return s.id }
 func (s *fakeState) SubagentName() string               { return "" }
-func (s *fakeState) Role() string                       { return "" }
+func (s *fakeState) Role() string                       { return s.role }
 func (s *fakeState) Skill() string                      { return "" }
 func (s *fakeState) Depth() int                         { return 0 }
 func (s *fakeState) Tier() string                       { return "root" }

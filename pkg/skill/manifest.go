@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/oasdiff/yaml"
 )
@@ -330,6 +331,13 @@ const (
 	// inline (same turn), matched by tool-name glob + optional error
 	// text regex / structured code.
 	HintTypeOnToolError HintType = "on_tool_error"
+
+	// HintTypeOnToolResult appends Message to a SUCCESSFUL tool result
+	// inline (same turn), matched by tool-name glob + optional regex
+	// over the result body. For results that aren't failures but
+	// warrant a nudge (canonical case: an inline query returning
+	// `is_truncated: true` → switch to file output).
+	HintTypeOnToolResult HintType = "on_tool_result"
 )
 
 // Hint is one typed in-turn advisory. The active fields depend on
@@ -399,6 +407,26 @@ func (h Hint) MatchToolError(toolName, code, msg, resultText string) string {
 	}
 	if re := h.compiled(); re != nil {
 		if !re.MatchString(msg) && !re.MatchString(resultText) {
+			return ""
+		}
+	}
+	return strings.TrimSpace(h.Message)
+}
+
+// MatchToolResult returns the hint's Message when it matches a
+// SUCCESSFUL tool result, or "" otherwise. Used by the skill
+// extension's [extension.ModelInTurnAdvisor.OnToolResult]. resultText
+// is the raw successful result body; the regex, when present, matches
+// against it. A non-on_tool_result hint never matches here.
+func (h Hint) MatchToolResult(toolName, resultText string) string {
+	if h.Type != HintTypeOnToolResult {
+		return ""
+	}
+	if !h.matchesTool(toolName) {
+		return ""
+	}
+	if re := h.compiled(); re != nil {
+		if !re.MatchString(resultText) {
 			return ""
 		}
 	}
@@ -581,6 +609,16 @@ type SubAgentRole struct {
 	// when this field is set.
 	Intent string `json:"intent,omitempty" yaml:"intent,omitempty"`
 
+	// Timeout caps this role's per-spawn wall-clock. The mission
+	// executor runs the role's wave under a context with this
+	// deadline, so a stuck / runaway / never-returning subagent
+	// fails the wave (and the planner replans / the mission ends)
+	// instead of wedging the executor's wait forever. A Go duration
+	// string ("1h", "30m", "20m"); empty inherits the runtime's
+	// DefaultWaveTimeout. Validated at parse (fail loud on a bad
+	// duration).
+	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+
 	// OnClose configures the deterministic pre-teardown turn the
 	// runtime fires for this role's worker sessions before
 	// emitting SessionTerminated. Phase 4.2.3 ε — gives a narrow
@@ -672,6 +710,17 @@ func (r SubAgentRole) CanSpawnEffective() bool {
 		return true
 	}
 	return *r.CanSpawn
+}
+
+// TimeoutDuration parses the role's Timeout string into a duration.
+// Empty → (0, nil): no per-role override, the runtime applies its
+// DefaultWaveTimeout. A malformed string returns the parse error
+// (surfaced at manifest validation).
+func (r SubAgentRole) TimeoutDuration() (time.Duration, error) {
+	if strings.TrimSpace(r.Timeout) == "" {
+		return 0, nil
+	}
+	return time.ParseDuration(strings.TrimSpace(r.Timeout))
 }
 
 // MemoryCategory ports the legacy memory.yaml shape.
@@ -1244,6 +1293,10 @@ func (m *Manifest) validateHugen() error {
 			return fmt.Errorf("metadata.hugen.sub_agents[%d].capabilities.plan_context = %q: must be one of [\"\", \"off\", \"read\"]",
 				i, r.Capabilities.PlanContext)
 		}
+		if _, err := r.TimeoutDuration(); err != nil {
+			return fmt.Errorf("metadata.hugen.sub_agents[%d].timeout = %q: invalid duration: %v",
+				i, r.Timeout, err)
+		}
 	}
 
 	// Phase 5.x — B15 — mission.research block validation. Fail
@@ -1269,7 +1322,7 @@ func (m *Manifest) validateHugen() error {
 		if h.Type == "" {
 			return fmt.Errorf("metadata.hugen.hints[%d].type is required", i)
 		}
-		if h.Type != HintTypeOnToolError {
+		if h.Type != HintTypeOnToolError && h.Type != HintTypeOnToolResult {
 			// Forward-compat: keep the entry, skip type-specific
 			// validation; the runtime ignores unknown variations.
 			continue

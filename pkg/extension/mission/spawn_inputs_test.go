@@ -149,9 +149,9 @@ func TestBuildResearchTask_RendersSpawnInputs(t *testing.T) {
 
 	manifest := MissionManifest{
 		Name:     "spawn-inputs-research",
-		Research: &ResearchManifest{MaxIterations: 3},
+		Research: &ResearchManifest{Role: "researcher"},
 	}
-	task, err := buildResearchTask(state, manifest, "do research", 1, nil, nil, nil)
+	task, err := buildResearchTask(state, manifest, "do research", nil)
 	if err != nil {
 		t.Fatalf("buildResearchTask: %v", err)
 	}
@@ -176,9 +176,9 @@ func TestBuildResearchTask_OmitsSpawnInputsBlockWhenEmpty(t *testing.T) {
 
 	manifest := MissionManifest{
 		Name:     "no-spawn-inputs",
-		Research: &ResearchManifest{MaxIterations: 3},
+		Research: &ResearchManifest{Role: "researcher"},
 	}
-	task, err := buildResearchTask(state, manifest, "go", 1, nil, nil, nil)
+	task, err := buildResearchTask(state, manifest, "go", nil)
 	if err != nil {
 		t.Fatalf("buildResearchTask: %v", err)
 	}
