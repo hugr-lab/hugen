@@ -554,8 +554,8 @@ metadata:
                otherwise `python-runner` for transforms /
                charts / formatting.
 
-          Dotted modules are GraphQL nesting (`osm.bw` →
-          `osm { bw { ... } }`), not identifiers. Field names
+          Dotted modules are GraphQL nesting (`module.submodule` →
+          `module { submodule { ... } }`), not identifiers. Field names
           are case-sensitive — quote verbatim.
 
           Handoff body shape — pick by SIZE (see step 5). The

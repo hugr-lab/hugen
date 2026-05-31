@@ -10,7 +10,7 @@ allowed-tools:
     tools:
       - discovery-search_modules
       - discovery-search_module_data_objects
-      - discovery-describe_data_object
+      - discovery-describe_data_objects
       - data-inline_graphql_result
   - provider: session
     tools:
@@ -28,7 +28,7 @@ metadata:
     task:
       eligible: true
       kind: worker
-      # ,bintent: reasoning
+      # intent: reasoning
       goal_summary: >
         Count rows in one Hugr data object via the aggregation
         GraphQL field. Resolves the target by exact name (fast path)
@@ -55,8 +55,17 @@ compatibility:
 
 # data_tables_rows_count
 
-Count rows in one Hugr data object. The four tools you need are in
-your catalogue — don't load anything else.
+Count rows in one Hugr data object. The tools you need are in your
+catalogue — don't load anything else.
+
+**Output discipline — read this first.** Your ONLY deliverable is the
+terminal `handoff` block (step 4): a single integer in `body.count`.
+Do NOT write files, do NOT run shell, do NOT call `bash` / `python` /
+`hugr-query` — the answer is one number and it lives in the handoff,
+nowhere else. Even if those tools appear in your surface, this task
+never needs them: use ONLY the pipeline's
+search / describe / `data-inline_graphql_result` / `inquire` tools.
+Counting one table is a 3–4 tool job, not a data-analysis exercise.
 
 ## Pipeline
 
@@ -97,18 +106,20 @@ type name describe needs.
 
 ### 2. Describe the table
 
-`describe_data_object(name)`.
+`describe_data_objects(names: [name])` — pass the single type name as a
+one-element array; read the one record back as `items[0]` (call it `O`).
 
-- `not_found` AND you got here from the input `name` (first time) →
-  set `query := name`, drop `name`, restart step 1. One fallback only.
-- `not_found` after a search round → handoff `not_found`. Stop.
-- From `queries[]`, pick the entry with `query_type == "aggregate"`
+- error / `not_found` AND you got here from the input `name` (first
+  time) → set `query := name`, drop `name`, restart step 1. One
+  fallback only.
+- error / `not_found` after a search round → handoff `not_found`. Stop.
+- From `O.queries[]`, pick the entry with `query_type == "aggregate"`
   (NOT `bucket_agg`). No such entry → handoff `no_aggregation`. Stop.
 
 Bind two variables for step 3:
 
-- `M` = the `module` string from the response (may be empty, may contain dots).
-- `Q` = the aggregate query name from `queries[]` (copy verbatim).
+- `M` = `O.module` (may be empty, may contain dots).
+- `Q` = the aggregate query name from `O.queries[]` (copy verbatim).
 
 ### 3. Build the GraphQL query
 

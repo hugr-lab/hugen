@@ -89,9 +89,21 @@ PATH, so the heavy detail goes HERE, not in your handoff:
   criteria, Recipe signal) with: how each ambiguity resolved, your
   rationale, the alternatives ruled out, the proposed criteria, and
   the wave-shape recipe when the goal matches one.
-- `research/queries.md` — OPTIONAL. A verified starter query or a
-  verification query the checker can recompute. Skip it (leave the
-  skeleton or write "none") if you have nothing runnable to hand down.
+- `research/queries.md` — OPTIONAL. A starter / verification query the
+  worker or checker can reuse. Write a query here ONLY when you are
+  CONFIDENT of its grammar — and you earn that confidence by READING
+  the hugr-data references for the capabilities + exact syntax you need
+  BEFORE composing it: `skill:ref(skill="hugr-data", ref="…")` for
+  `spatial-queries` (the `_spatial` filter shape), `aggregations`
+  (`_aggregation` / `_bucket_aggregation`, `group_by`, the
+  `_rows_count` / sum / etc. fields), `filter-guide`, `query-patterns`.
+  Module nesting (`tf { gis { … } }`, never flat `gis`), the `_spatial`
+  filter form, bucket `group_by`, and the aggregation field names
+  CANNOT be inferred from the schema in `data-model.md` — they are
+  query grammar and live in the references. Do NOT guess them. If you
+  have not read the relevant reference and cannot write the query with
+  confidence, leave this file empty (or write "none"): a guessed,
+  wrong-syntax shape only misleads the worker — worse than nothing.
 
 Write CONCRETE files: a vague data-model.md forces every worker to
 redo your discovery — exactly the failure you exist to prevent. The
