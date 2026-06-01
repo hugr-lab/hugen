@@ -90,8 +90,12 @@ metadata:
           `function { module { submodule { func(...) { ... } } } }`.
           ("must have a selection" instead means you stopped at an
           object/aggregation without selecting its sub-fields.) Rebuild with
-          proper nesting and READ skill:ref(name: "hugr-data",
-          ref: "instructions").
+          proper nesting. And on ANY query-syntax error, if you have NOT
+          already read the `skill:ref` reference for the query shape you are
+          composing (spatial join, aggregation, filter, nested relation —
+          pick the matching one from the reference catalogue in your loaded
+          skill), READ it before retrying: the grammar is not guessable from
+          field names.
       - type: on_tool_error
         tools: ["hugr-main:data-*", "hugr-query:*"]
         match: "(?i)(unknown|invalid).*(filter|operator|argument)"
