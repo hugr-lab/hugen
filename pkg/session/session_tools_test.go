@@ -19,8 +19,10 @@ import (
 
 // fakeInTurnAdvisor is a minimal [extension.ModelInTurnAdvisor] for
 // the on_tool_error / on_tool_result session tests: it appends a fixed
-// hint to any failing result (hint) — or, when resultHint is set, to
-// any SUCCESSFUL result — from tools matching toolPrefix.
+// hint to any result from tools matching toolPrefix. The two fields
+// just let a test name which kind of body it is exercising — both feed
+// the single OnToolResult advisor (the runtime no longer splits
+// error-vs-success): resultHint wins when set, else hint.
 type fakeInTurnAdvisor struct {
 	toolPrefix string
 	hint       string
@@ -31,17 +33,14 @@ func (f *fakeInTurnAdvisor) Name() string { return "fake-advisor" }
 func (f *fakeInTurnAdvisor) TurnPreamble(context.Context, extension.SessionState) string {
 	return ""
 }
-func (f *fakeInTurnAdvisor) OnToolError(_ context.Context, _ extension.SessionState, ev extension.ToolErrorEvent) string {
-	if strings.HasPrefix(ev.Tool, f.toolPrefix) {
-		return f.hint
-	}
-	return ""
-}
 func (f *fakeInTurnAdvisor) OnToolResult(_ context.Context, _ extension.SessionState, ev extension.ToolResultEvent) string {
-	if f.resultHint != "" && strings.HasPrefix(ev.Tool, f.toolPrefix) {
+	if !strings.HasPrefix(ev.Tool, f.toolPrefix) {
+		return ""
+	}
+	if f.resultHint != "" {
 		return f.resultHint
 	}
-	return ""
+	return f.hint
 }
 
 // scriptedToolModel emits tool calls on its first N invocations
@@ -164,10 +163,12 @@ func newToolSessionWithExts(t *testing.T, mdl model.Model, perms perm.Service, e
 }
 
 // TestSession_ToolError_InlineHint verifies the Phase 6.x
-// ModelInTurnAdvisor on_tool_error provider path: a "successful"
-// dispatch whose body carries {"is_error":true,…} gets the advisor's
+// ModelInTurnAdvisor body-error path: a "successful" dispatch whose
+// body carries {"is_error":true,…} gets the advisor's on_tool_result
 // hint folded INLINE into the same tool_result the model reads — with
-// NO separate frame emitted.
+// NO separate frame emitted, IsError staying false. (The runtime no
+// longer pre-classifies this as an error: the body is just text the
+// hint regex — here the fake's prefix match — fires on.)
 func TestSession_ToolError_InlineHint(t *testing.T) {
 	const hint = "Enumerate modules via discovery-search_modules first."
 	mdl := &scriptedToolModel{

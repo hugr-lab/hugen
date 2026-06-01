@@ -646,7 +646,7 @@ metadata:
           Emit `status: "error"` with a sentence describing the
           blocker if validation cannot pass or required fields
           are missing — the planner amends.
-        intent: default # reasoning
+        intent: worker # dedicated worker intent → its own context budget (phase 5.2)
         can_spawn: false
         autoload_skills: [_mission_worker, hugr-data]
         compactor:
@@ -781,7 +781,7 @@ metadata:
           `items[].queries[].name`, one per query flavour:
           select / aggregate / bucket_agg). Both go in the
           handoff.
-        intent: default # reasoning
+        intent: worker # dedicated worker intent → its own context budget (phase 5.2)
         can_spawn: false
         autoload_skills: [_mission_worker, hugr-data]
         compactor:
@@ -891,7 +891,7 @@ metadata:
             absolute file you VERIFIED exists at the user's
             destination — synthesizer / root surface it
             verbatim.
-        intent: default # reasoning
+        intent: worker # dedicated worker intent → its own context budget (phase 5.2)
         can_spawn: false
         autoload_skills: [_mission_worker, python-runner]
         compactor:

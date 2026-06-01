@@ -80,7 +80,7 @@ func TestIngestHandoff_SatisfiesAppliedToACState(t *testing.T) {
 	text := "```handoff\n" +
 		`{"status":"ok","body":"output","memory_summary":"summary","satisfies":["ac-1","ac-3","ac-999"]}` +
 		"\n```"
-	ext.ingestHandoff(m, "child-1", cur, "extract", text, "")
+	ext.ingestHandoff(m, "child-1", cur, "extract", text, "", false)
 
 	rows := indexByID(m.ACSnapshot())
 	if rows["ac-1"].Status != ACSatisfied {
@@ -123,7 +123,7 @@ func TestIngestHandoff_SatisfiesDoesNotOverrideAlreadySatisfied(t *testing.T) {
 	text := "```handoff\n" +
 		`{"status":"ok","body":"output","satisfies":["ac-1"]}` +
 		"\n```"
-	ext.ingestHandoff(m, "child-2", cur, "rerun", text, "")
+	ext.ingestHandoff(m, "child-2", cur, "rerun", text, "", false)
 	rows := indexByID(m.ACSnapshot())
 	if !strings.Contains(rows["ac-1"].LastEvidence, "checker iter-1") {
 		t.Errorf("worker overwrote checker evidence: %q", rows["ac-1"].LastEvidence)

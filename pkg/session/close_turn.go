@@ -155,6 +155,7 @@ func closeTurnSkipReason(reason string) bool {
 		protocol.TerminationCancelCascade,
 		"parent_cascade",
 		"hard_ceiling",
+		protocol.TerminationContextBudget,
 		"restart_died",
 		"abnormal_close":
 		return true

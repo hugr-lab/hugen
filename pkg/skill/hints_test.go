@@ -23,7 +23,11 @@ body
 `
 }
 
-func TestParse_Hint_OnToolError_RoundTrips(t *testing.T) {
+// TestParse_Hint_OnToolError_AliasNormalizes pins the deprecated alias:
+// a manifest declaring the legacy `on_tool_error` type parses and is
+// normalised to the single canonical `on_tool_result` type (so the
+// runtime's one advisor sees it), with the regex compiled at parse.
+func TestParse_Hint_OnToolError_AliasNormalizes(t *testing.T) {
 	src := hintManifest(`      - type: on_tool_error
         tools: ["hugr-main:data-*"]
         match: "Cannot query field .*_aggregation"
@@ -36,8 +40,8 @@ func TestParse_Hint_OnToolError_RoundTrips(t *testing.T) {
 		t.Fatalf("want 1 hint, got %d", len(m.Hugen.Hints))
 	}
 	h := m.Hugen.Hints[0]
-	if h.Type != HintTypeOnToolError {
-		t.Errorf("type = %q, want %q", h.Type, HintTypeOnToolError)
+	if h.Type != HintTypeOnToolResult {
+		t.Errorf("type = %q, want it normalised to %q", h.Type, HintTypeOnToolResult)
 	}
 	if h.re == nil {
 		t.Errorf("match regex should be compiled at parse")
@@ -45,7 +49,7 @@ func TestParse_Hint_OnToolError_RoundTrips(t *testing.T) {
 }
 
 func TestParse_Hint_InvalidRegex_FailsLoud(t *testing.T) {
-	src := hintManifest(`      - type: on_tool_error
+	src := hintManifest(`      - type: on_tool_result
         match: "Cannot query field ([unclosed"
         message: "x"`)
 	_, err := Parse([]byte(src))
@@ -67,11 +71,11 @@ func TestParse_Hint_MissingType_FailsLoud(t *testing.T) {
 	}
 }
 
-func TestParse_Hint_OnToolError_MissingMessage_FailsLoud(t *testing.T) {
-	src := hintManifest(`      - type: on_tool_error
+func TestParse_Hint_MissingMessage_FailsLoud(t *testing.T) {
+	src := hintManifest(`      - type: on_tool_result
         match: "x"`)
 	if _, err := Parse([]byte(src)); err == nil {
-		t.Fatalf("Parse should reject an on_tool_error hint with no message")
+		t.Fatalf("Parse should reject an on_tool_result hint with no message")
 	}
 }
 
@@ -85,98 +89,139 @@ func TestParse_Hint_UnknownType_ToleratedForwardCompat(t *testing.T) {
 	if len(m.Hugen.Hints) != 1 {
 		t.Fatalf("unknown-type hint should be kept, got %d", len(m.Hugen.Hints))
 	}
-	// And it never matches an on_tool_error consult.
-	if msg := m.Hugen.Hints[0].MatchToolError("any:tool", "", "boom", ""); msg != "" {
-		t.Errorf("unknown-type hint matched on_tool_error: %q", msg)
+	// And it never matches a result consult.
+	if msg := m.Hugen.Hints[0].MatchToolResult("any:tool", "", "boom"); msg != "" {
+		t.Errorf("unknown-type hint matched a result consult: %q", msg)
 	}
 }
 
-func TestHint_MatchToolError(t *testing.T) {
+// TestHint_MatchToolResult exercises the single match path on every
+// shape the runtime feeds it: a runtime error message (code set), a
+// success-envelope failure body (code empty), a truncated-but-clean
+// body, and structured-code matching. The runtime never pre-classifies;
+// the hint's tool glob + Code + regex over ResultText do all the work.
+func TestHint_MatchToolResult(t *testing.T) {
 	const guidance = "Enumerate modules via discovery-search_modules first."
-	base := Hint{
-		Type:    HintTypeOnToolError,
+	errHint := Hint{
+		Type:    HintTypeOnToolResult,
 		Tools:   []string{"hugr-main:data-*"},
 		Match:   "Cannot query field .*_aggregation",
 		Message: guidance,
 	}
+	const truncGuidance = "switch to hugr-query file output"
+	truncHint := Hint{
+		Type:    HintTypeOnToolResult,
+		Tools:   []string{"hugr-main:data-inline_graphql_result"},
+		Match:   `is_truncated"?\s*:\s*true`,
+		Message: truncGuidance,
+	}
+
 	cases := []struct {
 		name             string
 		hint             Hint
-		tool, code, msg  string
-		resultText       string
+		tool, code, text string
 		want             string
 	}{
 		{
-			name: "match on runtime message",
-			hint: base,
+			name: "match on runtime error message (code set)",
+			hint: errHint,
 			tool: "hugr-main:data-inline_graphql_result",
-			msg:  `Cannot query field "core_modules_aggregation" on type "Query"`,
+			code: "validation",
+			text: `Cannot query field "core_modules_aggregation" on type "Query"`,
 			want: guidance,
 		},
 		{
-			name:       "match on provider result body",
-			hint:       base,
-			tool:       "hugr-main:data-inline_graphql_result",
-			resultText: `{"is_error":true,"text":"Cannot query field \"x_aggregation\""}`,
-			want:       guidance,
+			name: "match on success-envelope failure body (no code)",
+			hint: errHint,
+			tool: "hugr-main:data-inline_graphql_result",
+			text: `{"is_error":true,"text":"Cannot query field \"x_aggregation\""}`,
+			want: guidance,
 		},
 		{
 			name: "match against model-visible underscore tool form",
-			hint: base,
+			hint: errHint,
 			tool: "hugr-main_data-inline_graphql_result",
-			msg:  `Cannot query field "y_aggregation"`,
+			text: `Cannot query field "y_aggregation"`,
 			want: guidance,
 		},
 		{
 			name: "tool glob excludes other providers",
-			hint: base,
+			hint: errHint,
 			tool: "bash:run",
-			msg:  `Cannot query field "z_aggregation"`,
+			text: `Cannot query field "z_aggregation"`,
 			want: "",
 		},
 		{
 			name: "text regex excludes non-matching error",
-			hint: base,
+			hint: errHint,
 			tool: "hugr-main:data-inline_graphql_result",
-			msg:  `unknown filter operator`,
+			text: `unknown filter operator`,
 			want: "",
 		},
 		{
 			name: "empty tools matches any tool",
-			hint: Hint{Type: HintTypeOnToolError, Match: "boom", Message: guidance},
+			hint: Hint{Type: HintTypeOnToolResult, Match: "boom", Message: guidance},
 			tool: "anything:at-all",
-			msg:  "boom happened",
+			text: "boom happened",
 			want: guidance,
 		},
 		{
-			name: "empty match matches any error for the tool",
-			hint: Hint{Type: HintTypeOnToolError, Tools: []string{"bash:*"}, Message: guidance},
+			name: "empty match matches any result for the tool",
+			hint: Hint{Type: HintTypeOnToolResult, Tools: []string{"bash:*"}, Message: guidance},
 			tool: "bash:run",
-			msg:  "exit status 1",
+			text: "exit status 1",
 			want: guidance,
 		},
 		{
 			name: "code match",
-			hint: Hint{Type: HintTypeOnToolError, Code: "not_found", Message: guidance},
+			hint: Hint{Type: HintTypeOnToolResult, Code: "not_found", Message: guidance},
 			tool: "x:y",
 			code: "not_found",
-			msg:  "tool not in snapshot",
+			text: "tool not in snapshot",
 			want: guidance,
 		},
 		{
 			name: "code mismatch",
-			hint: Hint{Type: HintTypeOnToolError, Code: "not_found", Message: guidance},
+			hint: Hint{Type: HintTypeOnToolResult, Code: "not_found", Message: guidance},
 			tool: "x:y",
 			code: "io",
-			msg:  "boom",
+			text: "boom",
+			want: "",
+		},
+		{
+			name: "code-bearing hint does not fire on a successful dispatch (empty code)",
+			hint: Hint{Type: HintTypeOnToolResult, Code: "not_found", Message: guidance},
+			tool: "x:y",
+			text: "not_found appears in the data",
+			want: "",
+		},
+		{
+			name: "truncated success body matches the truncation hint",
+			hint: truncHint,
+			tool: "hugr-main:data-inline_graphql_result",
+			text: `{"data":{"x":1},"is_truncated":true}`,
+			want: truncGuidance,
+		},
+		{
+			name: "non-truncated success does not match",
+			hint: truncHint,
+			tool: "hugr-main:data-inline_graphql_result",
+			text: `{"data":{"x":1},"is_truncated":false}`,
+			want: "",
+		},
+		{
+			name: "un-normalised legacy on_tool_error literal never matches",
+			hint: Hint{Type: HintTypeOnToolError, Match: "is_truncated", Message: guidance},
+			tool: "hugr-main:data-inline_graphql_result",
+			text: `{"is_truncated":true}`,
 			want: "",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := tc.hint.MatchToolError(tc.tool, tc.code, tc.msg, tc.resultText)
+			got := tc.hint.MatchToolResult(tc.tool, tc.code, tc.text)
 			if got != tc.want {
-				t.Errorf("MatchToolError = %q, want %q", got, tc.want)
+				t.Errorf("MatchToolResult = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -199,77 +244,8 @@ func TestParse_Hint_OnToolResult_RoundTrips(t *testing.T) {
 		t.Errorf("type = %q, want %q", h.Type, HintTypeOnToolResult)
 	}
 	// Compiled at parse — must match a truncated success body.
-	if msg := h.MatchToolResult("hugr-main:data-inline_graphql_result",
+	if msg := h.MatchToolResult("hugr-main:data-inline_graphql_result", "",
 		`{"data":{...},"is_truncated":true}`); msg != "switch to file output" {
 		t.Errorf("MatchToolResult = %q, want guidance", msg)
-	}
-}
-
-func TestParse_Hint_OnToolResult_MissingMessage_FailsLoud(t *testing.T) {
-	src := hintManifest(`      - type: on_tool_result
-        tools: ["x:y"]`)
-	if _, err := Parse([]byte(src)); err == nil {
-		t.Fatal("on_tool_result without message must fail validation")
-	}
-}
-
-func TestHint_MatchToolResult(t *testing.T) {
-	const guidance = "switch to hugr-query file output"
-	base := Hint{
-		Type:    HintTypeOnToolResult,
-		Tools:   []string{"hugr-main:data-inline_graphql_result"},
-		Match:   `is_truncated"?\s*:\s*true`,
-		Message: guidance,
-	}
-	cases := []struct {
-		name       string
-		hint       Hint
-		tool       string
-		resultText string
-		want       string
-	}{
-		{
-			name:       "match on truncated success body",
-			hint:       base,
-			tool:       "hugr-main:data-inline_graphql_result",
-			resultText: `{"data":{"x":1},"is_truncated":true}`,
-			want:       guidance,
-		},
-		{
-			name:       "underscore tool form matches",
-			hint:       base,
-			tool:       "hugr-main_data-inline_graphql_result",
-			resultText: `{"is_truncated": true}`,
-			want:       guidance,
-		},
-		{
-			name:       "non-truncated success does not match",
-			hint:       base,
-			tool:       "hugr-main:data-inline_graphql_result",
-			resultText: `{"data":{"x":1},"is_truncated":false}`,
-			want:       "",
-		},
-		{
-			name:       "tool glob excludes other tools",
-			hint:       base,
-			tool:       "hugr-query:query",
-			resultText: `{"is_truncated":true}`,
-			want:       "",
-		},
-		{
-			name:       "on_tool_error hint never matches a result consult",
-			hint:       Hint{Type: HintTypeOnToolError, Match: "is_truncated", Message: guidance},
-			tool:       "hugr-main:data-inline_graphql_result",
-			resultText: `{"is_truncated":true}`,
-			want:       "",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := tc.hint.MatchToolResult(tc.tool, tc.resultText)
-			if got != tc.want {
-				t.Errorf("MatchToolResult = %q, want %q", got, tc.want)
-			}
-		})
 	}
 }

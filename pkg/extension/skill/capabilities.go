@@ -298,66 +298,19 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 	return out
 }
 
-// OnToolError implements [extension.ModelInTurnAdvisor]: it walks the
+// OnToolResult implements [extension.ModelInTurnAdvisor]: it walks the
 // session's LOADED skills, gathers their `metadata.hugen.hints` of
-// type on_tool_error, matches each against the failing tool (name
-// glob + error text regex / code), and returns the matching hint
-// messages joined — the session folds them inline into the tool
-// result the model reads next, with no separate emitted frame.
+// type on_tool_result, matches each against the tool result (name glob
+// + optional structured Code + optional result-text regex), and
+// returns the matching hint messages joined — the session folds them
+// inline into the result the model reads next, with no separate emitted
+// frame. Fed EVERY tool result (runtime error and successful dispatch
+// alike); the hint's Code / regex do the discriminating, so the runtime
+// never pre-classifies error-vs-success from the body.
 //
-// Phase 6.x Deliverable 2. Only LOADED skills contribute (a hint is
-// guidance for a skill the model is actively using); merely-installed
-// skills stay silent. Multiple matches across loaded skills compose,
-// de-duped and capped.
-func (e *Extension) OnToolError(ctx context.Context, state extension.SessionState, ev extension.ToolErrorEvent) string {
-	h := FromState(state)
-	if h == nil {
-		return ""
-	}
-	h.mu.RLock()
-	names := make([]string, 0, len(h.loaded))
-	for n := range h.loaded {
-		names = append(names, n)
-	}
-	skills := make(map[string]skillpkg.Skill, len(h.loaded))
-	for n, sk := range h.loaded {
-		skills[n] = sk
-	}
-	h.mu.RUnlock()
-	if len(names) == 0 {
-		return ""
-	}
-	sort.Strings(names) // stable contribution order
-	var (
-		out  []string
-		seen = map[string]struct{}{}
-	)
-	for _, n := range names {
-		for _, hint := range skills[n].Manifest.Hugen.Hints {
-			msg := hint.MatchToolError(ev.Tool, ev.Code, ev.Message, ev.ResultText)
-			if msg == "" {
-				continue
-			}
-			if _, dup := seen[msg]; dup {
-				continue
-			}
-			seen[msg] = struct{}{}
-			out = append(out, msg)
-			if len(out) >= maxToolErrorHints {
-				return strings.Join(out, "\n\n")
-			}
-		}
-	}
-	return strings.Join(out, "\n\n")
-}
-
-// OnToolResult implements [extension.ModelInTurnAdvisor]: the
-// success-path twin of OnToolError. It walks the session's LOADED
-// skills, gathers their `metadata.hugen.hints` of type
-// on_tool_result, matches each against the successful tool (name glob
-// + result-body regex), and returns the matching messages joined — the
-// session folds them inline into the result the model reads next. Only
-// LOADED skills contribute; matches compose, de-duped and capped.
+// Only LOADED skills contribute (a hint is guidance for a skill the
+// model is actively using); merely-installed skills stay silent.
+// Multiple matches across loaded skills compose, de-duped and capped.
 func (e *Extension) OnToolResult(ctx context.Context, state extension.SessionState, ev extension.ToolResultEvent) string {
 	h := FromState(state)
 	if h == nil {
@@ -383,7 +336,7 @@ func (e *Extension) OnToolResult(ctx context.Context, state extension.SessionSta
 	)
 	for _, n := range names {
 		for _, hint := range skills[n].Manifest.Hugen.Hints {
-			msg := hint.MatchToolResult(ev.Tool, ev.ResultText)
+			msg := hint.MatchToolResult(ev.Tool, ev.Code, ev.ResultText)
 			if msg == "" {
 				continue
 			}
@@ -392,7 +345,7 @@ func (e *Extension) OnToolResult(ctx context.Context, state extension.SessionSta
 			}
 			seen[msg] = struct{}{}
 			out = append(out, msg)
-			if len(out) >= maxToolErrorHints {
+			if len(out) >= maxToolResultHints {
 				return strings.Join(out, "\n\n")
 			}
 		}
@@ -400,10 +353,10 @@ func (e *Extension) OnToolResult(ctx context.Context, state extension.SessionSta
 	return strings.Join(out, "\n\n")
 }
 
-// maxToolErrorHints caps how many distinct hint messages a single
-// tool result (failing OR successful) can carry, so a session with
-// many loaded skills can't balloon one result into a wall of steer.
-const maxToolErrorHints = 3
+// maxToolResultHints caps how many distinct hint messages a single
+// tool result can carry, so a session with many loaded skills can't
+// balloon one result into a wall of steer.
+const maxToolResultHints = 3
 
 // renderLoadedSkillsMeta produces the per-loaded-skill metadata
 // block: directory path + bundled files listing (scripts /

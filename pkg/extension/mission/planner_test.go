@@ -470,7 +470,7 @@ func TestPlannerLoop_RetriesOnDecodeFailureUntilCap(t *testing.T) {
 		Plan: MissionPlanManifest{
 			Role:     "planner",
 			Approval: NormalizePlanApproval(PlanApproval{Initial: ApprovalInitialSkip}),
-			MaxWaves: 3,
+			MaxWaves: maxConsecutiveErrors + 1,
 		},
 	}
 
@@ -711,53 +711,35 @@ func TestPlannerLoop_ApprovalGate_RejectsSkippedTool(t *testing.T) {
 		Plan: MissionPlanManifest{
 			Role:     "planner",
 			Approval: PlanApproval{Initial: ApprovalInitialRequired, Iteration: ApprovalIterationInitOnly},
-			MaxWaves: 3,
+			MaxWaves: maxConsecutiveErrors + 1,
 		},
 	}
 
 	spawner := &plannerFakeSpawner{state: state}
-	// Phase 6.x — every iteration's planner closes without an approved
-	// validate_and_approve submission (the gate's retry cap was hit).
-	spawner.plannerNotApprovedIters = map[int]bool{1: true, 2: true, 3: true}
-	spawner.onPlannerSpawn = func(iteration int) Handoff {
-		switch iteration {
-		case 1:
-			// No approved submission → runtime rejects.
-			return Handoff{
-				Kind:   KindPlan,
-				Status: "ok",
-				Body: map[string]any{
-					"mission_goal":                "fixture",
-					"mission_acceptance_criteria": []any{"fixture"},
-					"next_wave": map[string]any{
-						"label":     "wave-1",
-						"subagents": []any{map[string]any{"name": "w", "role": "echo", "task": "t"}},
-					},
-					"roadmap":   []any{},
-					"rationale": "skipped approval",
+	// Phase 6.x — EVERY iteration's planner closes without an approved
+	// validate_and_approve submission, so each is rejected until the
+	// consecutive-error cap fires. (Covers iters past the cap so the
+	// test tracks maxConsecutiveErrors rather than a hard-coded count.)
+	spawner.plannerNotApprovedIters = map[int]bool{}
+	for i := 1; i <= maxConsecutiveErrors; i++ {
+		spawner.plannerNotApprovedIters[i] = true
+	}
+	spawner.onPlannerSpawn = func(_ int) Handoff {
+		// Always a valid (non-complete) plan — it's the missing approval
+		// that fails the gate, never the plan shape.
+		return Handoff{
+			Kind:   KindPlan,
+			Status: "ok",
+			Body: map[string]any{
+				"mission_goal":                "fixture",
+				"mission_acceptance_criteria": []any{"fixture"},
+				"next_wave": map[string]any{
+					"label":     "wave-1",
+					"subagents": []any{map[string]any{"name": "w", "role": "echo", "task": "t"}},
 				},
-			}
-		case 2:
-			return Handoff{
-				Kind:   KindPlan,
-				Status: "ok",
-				Body: map[string]any{
-					"mission_goal":                "fixture",
-					"mission_acceptance_criteria": []any{"fixture"},
-					"next_wave": map[string]any{
-						"label":     "wave-2",
-						"subagents": []any{map[string]any{"name": "w", "role": "echo", "task": "t"}},
-					},
-					"roadmap":   []any{},
-					"rationale": "post-amend",
-				},
-			}
-		default:
-			return Handoff{
-				Kind:   KindPlan,
-				Status: "ok",
-				Body:   map[string]any{"next_wave": nil, "roadmap": []any{}, "rationale": "done"},
-			}
+				"roadmap":   []any{},
+				"rationale": "skipped approval",
+			},
 		}
 	}
 	spawner.onWorkerSpawn = func(_ SpawnRequest) Handoff {
@@ -1188,7 +1170,7 @@ func TestPlannerLoop_Checker_InquireRejectedWithoutInquiry(t *testing.T) {
 		Plan: MissionPlanManifest{
 			Role:     "planner",
 			Approval: NormalizePlanApproval(PlanApproval{Initial: ApprovalInitialSkip}),
-			MaxWaves: 3,
+			MaxWaves: maxConsecutiveErrors + 1,
 		},
 		Control: ControlManifest{Role: "checker"},
 	}

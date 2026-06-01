@@ -86,34 +86,25 @@ func (e *Extension) compactWithConfig(ctx context.Context, state extension.Sessi
 	prior := s.Digest()
 
 	// Compute the cutoff seq: the seq just before the k-th-
-	// from-end user_message, where k = PreservedRecentTurns.
-	// shouldCompact already gated either on BoundaryCount or on
-	// the token-budget tripping (the worker-mode fallback path).
+	// from-end user_message, where k = PreservedRecentTurns. The cut
+	// always lands on a turn boundary (a user_message), so the
+	// preserved tail begins on a whole turn and a tool_call ↔
+	// tool_result pair is never split — including a single assistant
+	// message bearing N parallel tool_calls (its results live inside
+	// the same turn). See phase-5.2-budget-termination.md §Part 1.
 	count := s.BoundaryCount()
 	idx := count - cfg.PreservedRecentTurns - 1
-
-	var newCutoff int64
-	if idx >= 0 {
-		kthUserSeq := s.BoundaryAt(idx)
-		newCutoff = kthUserSeq - 1
-	} else if cfg.MaxTokens > 0 && s.EstimatedPromptTokens() > cfg.MaxTokens {
-		// Worker-mode fallback: not enough turn boundaries to
-		// satisfy preserved_recent_turns, but the token budget
-		// has tripped. Walk history backwards from the end and
-		// pick the cutoff at the seq where the accumulated
-		// recent-token weight crosses preserved_recent_tokens
-		// (heuristic: MaxTokens / 3 — leaves room to grow before
-		// the next trigger fires without compacting away the
-		// active query-refinement window). Returns 0 when the
-		// history is too small for a useful cutoff; we
-		// short-circuit cleanly in that case.
-		newCutoff = positionBasedCutoff(s, cfg)
-		if newCutoff <= 0 {
-			return nil
-		}
-	} else {
+	if idx < 0 {
+		// Too few turn boundaries to preserve the recent window AND
+		// compact anything older. A single-turn mission worker that
+		// outgrows its budget is handled by context-budget termination
+		// (phase-5.2-budget-termination.md §Part 2), not by cutting the
+		// live turn — so there is nothing to do here. A manual
+		// `/compactor compact` on such a session is a clean no-op.
 		return nil
 	}
+	kthUserSeq := s.BoundaryAt(idx)
+	newCutoff := kthUserSeq - 1
 
 	priorCutoff := int64(0)
 	if prior != nil {
@@ -609,55 +600,3 @@ func agentParticipant(agentID string) protocol.ParticipantInfo {
 	return protocol.ParticipantInfo{ID: agentID, Kind: protocol.ParticipantAgent, Name: "hugen"}
 }
 
-// positionBasedCutoff is the worker-mode fallback used when
-// BoundaryCount is too small to satisfy PreservedRecentTurns but
-// the token-budget limb has tripped (e.g. data-analyst with a
-// single user_message and a long tool_call → tool_result chain).
-// Walks the projected history from newest to oldest accumulating
-// estimated message tokens; stops at the entry where the
-// accumulated weight first exceeds (MaxTokens / 3). Returns the
-// SEQ just before that entry — everything older becomes the
-// compaction range, everything from that entry onward stays
-// verbatim.
-//
-// The MaxTokens/3 heuristic balances two pressures: keeping
-// enough recent context for the model to follow its current
-// reasoning, and leaving headroom before the next trigger fires
-// (a 50% preserved tail would re-trigger almost immediately
-// after one compaction; 33% gives the worker 2-3 compactable
-// cycles before the next fire).
-//
-// Returns 0 when the history is too small to yield a meaningful
-// cutoff (single message, or total weight under the preserved
-// budget). Callers short-circuit on 0 — no compaction this turn.
-func positionBasedCutoff(s *CompactorState, cfg Config) int64 {
-	if cfg.MaxTokens <= 0 {
-		return 0
-	}
-	entries := s.historySnapshot()
-	if len(entries) < 2 {
-		return 0
-	}
-	preservedBudget := cfg.MaxTokens / 3
-	if preservedBudget <= 0 {
-		return 0
-	}
-	accumulated := 0
-	// Walk backwards; once we've collected enough recent weight,
-	// cutoff falls at the seq just before the current entry —
-	// that entry plus everything newer survives the cut.
-	for i := len(entries) - 1; i >= 0; i-- {
-		accumulated += estimateMessageTokens(entries[i].Message)
-		if accumulated >= preservedBudget {
-			cut := entries[i].Seq - 1
-			if cut <= 0 {
-				return 0
-			}
-			return cut
-		}
-	}
-	// Whole history fits under the preserved budget — nothing
-	// useful to compact yet, the trigger fired on advertised
-	// (system-prompt / tools) tokens rather than history bloat.
-	return 0
-}

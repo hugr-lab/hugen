@@ -173,18 +173,10 @@ func (e *Extension) driveMission(mission extension.SessionState, spawner extensi
 	// Synthesis worker (optional). Phase A treats it as a one-worker
 	// "_synthesis" wave so it reuses the executor's spawn + handoff
 	// pipeline. Its handoff body becomes the mission's terminal text.
-	var synthText string
-	if !aborted && manifest.Synthesis.Role != "" {
-		text, err := e.runSynthesis(ctx, executor, mission, manifest.Synthesis.Role, missionSkill, goal,
-			manifest.TimeoutForRole(manifest.Synthesis.Role))
-		if err != nil {
-			e.logger.Warn("mission: driveMission: synthesis failed",
-				"mission_session", mission.SessionID(), "err", err)
-		} else {
-			synthText = text
-		}
-	}
-
+	// On an abort it still runs (with the incomplete reason) so the
+	// parent gets a coherent "what happened" message — see
+	// maybeSynthesize.
+	synthText := e.maybeSynthesize(ctx, executor, mission, manifest, missionSkill, goal, aborted)
 	final := buildFinalText(mission, synthText, aborted)
 	e.finishMission(ctx, mission, final)
 }
@@ -224,8 +216,11 @@ func (e *Extension) renderInlineForMission(mission extension.SessionState, manif
 // the manifest's synthesis.role; its handoff body is the synthesis
 // result. The synthesis worker loads its prompt + tools from the
 // mission's own skill (same convention as a regular wave subagent).
-func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, mission extension.SessionState, role, missionSkill, goal string, timeout time.Duration) (string, error) {
-	task, err := buildSynthesisTask(mission, goal)
+// incomplete, when non-empty, marks the mission as aborted/unfinished:
+// the synthesizer is asked to report what happened + summarise partial
+// findings rather than claim success. Empty for a clean completion.
+func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, mission extension.SessionState, role, missionSkill, goal string, timeout time.Duration, incomplete string) (string, error) {
+	task, err := buildSynthesisTask(mission, goal, incomplete)
 	if err != nil {
 		return "", fmt.Errorf("synthesis: build task: %w", err)
 	}
@@ -276,6 +271,53 @@ func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, missio
 	}
 }
 
+// maybeSynthesize runs the synthesizer role and returns its text, or
+// "" when synthesis is skipped or fails. Shared by both mission
+// drivers. Synthesis runs on a clean completion (when there are
+// handoffs to summarise) AND on an abort (regardless of handoffs) — on
+// an abort it is handed the incomplete reason so it reports what
+// happened + summarises partial findings, giving the parent a coherent
+// "normal path" message instead of a terse failure recap it might
+// silently re-attempt. Skipped for a user-cancelled plan (that has its
+// own recap) and when no synthesizer role is declared. Phase 5.2.
+func (e *Extension) maybeSynthesize(ctx context.Context, executor *Executor, mission extension.SessionState, manifest MissionManifest, missionSkill, goal string, aborted bool) string {
+	if manifest.Synthesis.Role == "" {
+		return ""
+	}
+	if m := FromState(mission); m != nil {
+		if cancelled, _ := m.CancelInfo(); cancelled {
+			return ""
+		}
+	}
+	if !aborted && !missionHasHandoffs(mission) {
+		return ""
+	}
+	incomplete := ""
+	if aborted {
+		incomplete = missionIncompleteReason(mission)
+	}
+	text, err := e.runSynthesis(ctx, executor, mission, manifest.Synthesis.Role, missionSkill, goal,
+		manifest.TimeoutForRole(manifest.Synthesis.Role), incomplete)
+	if err != nil {
+		e.logger.Warn("mission: synthesis failed",
+			"mission_session", mission.SessionID(), "err", err, "aborted", aborted)
+		return ""
+	}
+	return text
+}
+
+// missionIncompleteReason renders the one-line "what happened" the
+// synthesizer reports on an aborted mission. Budget aborts name the
+// role + cause; everything else is a generic stage failure. Phase 5.2.
+func missionIncompleteReason(mission extension.SessionState) string {
+	if m := FromState(mission); m != nil {
+		if role, ok := m.BudgetAbortInfo(); ok {
+			return fmt.Sprintf("the %s ran out of its context budget before the mission could finish", role)
+		}
+	}
+	return "a stage failed before the mission could produce a final result"
+}
+
 // synthesisHandoffView is the per-handoff projection the
 // mission/synthesis_task template iterates. Mirrors the fields the
 // runtime stores on a Handoff but drops the SubagentRef envelope
@@ -299,12 +341,13 @@ type synthesisHandoffView struct {
 // skill-specific prompt. Returns an error when the prompts renderer
 // is unavailable or the template fails — there is no inline fallback
 // by design ([[feedback-prompts-in-assets]]).
-func buildSynthesisTask(mission extension.SessionState, goal string) (string, error) {
+func buildSynthesisTask(mission extension.SessionState, goal, incomplete string) (string, error) {
 	data := struct {
-		Goal      string
-		Handoffs  []synthesisHandoffView
-		MissionAC []plannerACView
-	}{Goal: goal}
+		Goal       string
+		Incomplete string
+		Handoffs   []synthesisHandoffView
+		MissionAC  []plannerACView
+	}{Goal: goal, Incomplete: incomplete}
 	if m := FromState(mission); m != nil {
 		for _, h := range m.Handoffs.List() {
 			data.Handoffs = append(data.Handoffs, synthesisHandoffView{
@@ -397,6 +440,16 @@ func buildFinalText(mission extension.SessionState, synthText string, aborted bo
 				b.WriteString(" Reason: ")
 				b.WriteString(r)
 			}
+			return b.String()
+		}
+		// Phase 5.2 — an orchestration role exhausted the context
+		// budget. Distinct recap so the user knows it was a capacity
+		// limit (not a logic failure) and that the work so far is on
+		// disk to resume from.
+		if role, ok := m.BudgetAbortInfo(); ok {
+			var b strings.Builder
+			fmt.Fprintf(&b, "Mission aborted — the %s exceeded its context budget. ", role)
+			b.WriteString("Findings gathered so far are preserved in the mission files; start a new mission to continue from them.")
 			return b.String()
 		}
 	}

@@ -218,6 +218,25 @@ type AgentMessagePayload struct {
 	// this as "this turn cost N→M tokens" next to the assistant
 	// message. Phase 5.2 (context-budget observability).
 	Usage *TokenUsage `json:"usage,omitempty"`
+
+	// CallUsage holds the token spend of THIS single LLM response
+	// (the one model iteration this Consolidated frame records), as
+	// reported by the provider's finish event. Stamped on EVERY
+	// consolidated iteration (not just the turn-final), so per-call
+	// prompt size — the context-fit signal the budget guard checks —
+	// is analyzable straight from the event log. PromptTokens is the
+	// input-context occupancy of that call; the turn total is the sum
+	// across a turn's CallUsage frames (and is mirrored once in
+	// [Usage] on the final frame). Phase 5.2 budget-termination.
+	CallUsage *TokenUsage `json:"call_usage,omitempty"`
+
+	// BudgetExceeded is stamped by the runtime on a Final consolidated
+	// frame when the session crossed its context budget — the model
+	// produced this handoff under a tools-disabled finalize. The
+	// mission reads it to FORCE the recorded handoff to status:error
+	// (reason context_budget) regardless of what the model claimed, so
+	// an out-of-budget role can never report success. Phase 5.2.
+	BudgetExceeded bool `json:"budget_exceeded,omitempty"`
 }
 
 type ReasoningPayload struct {
@@ -317,8 +336,9 @@ const (
 
 // Phase-3 tool_error codes. Returned as the "code" field inside
 // a ToolResult{IsError:true}.Result map (or a typed ToolError
-// payload — wire-compatible). Tools that abort dispatch use these
-// codes so the LLM can react predictably and audit can categorise.
+// payload — wire-compatible). These are the RUNTIME-generated codes;
+// MCP providers emit their own codes as raw strings (a universal agent
+// does not enumerate provider-specific error vocabularies here).
 const (
 	ToolErrorPermissionDenied = "permission_denied"
 	ToolErrorTimeout          = "timeout"
@@ -328,11 +348,11 @@ const (
 	ToolErrorProviderCrashed  = "provider_crashed"
 	ToolErrorProviderRemoved  = "provider_removed"
 	ToolErrorOutputTruncated  = "output_truncated"
-	ToolErrorHugrError        = "hugr_error"
 	ToolErrorAuth             = "auth"
-	ToolErrorIO               = "io"
-	ToolErrorJQError          = "jq_error"
-	ToolErrorArgValidation    = "arg_validation"
+	// ToolErrorContextBudget is returned for EVERY tool call once the
+	// session has crossed its context budget — tools are disabled and
+	// the role must summarise + hand off. Phase 5.2 budget-termination.
+	ToolErrorContextBudget = "context_budget"
 
 	// skill:save typed codes (phase 4.2). These give the LLM
 	// distinct signals it can map to specific recovery flows
@@ -632,6 +652,14 @@ const (
 	// TerminationPanicPrefix is concatenated with the recovered
 	// panic message: "panic: <msg>".
 	TerminationPanicPrefix = "panic: "
+	// TerminationContextBudget marks a SessionClose forced because the
+	// session's prompt crossed the hard context-budget ratio. For a
+	// mission worker the parent's no-handoff outcome re-plans the wave
+	// (the work-so-far lives in the worker's artifact files); for an
+	// orchestration role (research / planner / checker / synthesizer)
+	// the mission ext aborts cleanly with findings preserved. Phase 5.2
+	// budget-termination (see phase-5.2-budget-termination.md §Part 2).
+	TerminationContextBudget = "context_budget"
 )
 
 // Concrete phase-4 Frame variants.

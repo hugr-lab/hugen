@@ -243,6 +243,16 @@ type MissionState struct {
 	// user's free-text reason (if any). Phase 6.x.
 	cancelled    bool
 	cancelReason string
+
+	// budgetAbortRole is set (to the failing role name) when an
+	// ORCHESTRATION role subagent (research / planner / checker /
+	// synthesizer) terminated because it crossed the hard context
+	// budget. The planner loop aborts the mission immediately with a
+	// distinct recap instead of burning the consecutive-error retry
+	// budget. Worker budget terminations do NOT set this — they
+	// re-plan via the normal partial-wave path. Phase 5.2
+	// budget-termination.
+	budgetAbortRole string
 }
 
 // plannerSubmission captures the outcome of one
@@ -496,6 +506,26 @@ func (m *MissionState) CancelInfo() (bool, string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.cancelled, m.cancelReason
+}
+
+// MarkBudgetAbort records that an orchestration role crossed its hard
+// context budget; the planner driver aborts the mission cleanly. First
+// writer wins (a later role's failure does not overwrite the original
+// cause). Phase 5.2 budget-termination.
+func (m *MissionState) MarkBudgetAbort(role string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.budgetAbortRole == "" {
+		m.budgetAbortRole = role
+	}
+}
+
+// BudgetAbortInfo reports whether an orchestration role budget-aborted
+// and the role name. Phase 5.2 budget-termination.
+func (m *MissionState) BudgetAbortInfo() (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.budgetAbortRole, m.budgetAbortRole != ""
 }
 
 // MarkPlanApproved flips firstPlanApproved on and clears any

@@ -350,20 +350,76 @@ func (s *CompactorState) historySnapshot() []HistoryEntry {
 	return out
 }
 
-// pruneWindow keeps the most-recent `limit` entries. Used by
-// [StrategyWindow]; called from [Extension.OnFrameEmit] after
-// every append.
+// snapToPairSafeHead returns the largest index ≤ head at which the
+// preserved tail can begin without orphaning a tool_result from its
+// tool_call. A model that emits N parallel tool_calls in one
+// assistant message (Gemini does this) produces a CONTIGUOUS run of
+// N RoleTool entries right after it (SubagentStarted is not projected,
+// so nothing interleaves — see history.go); walking back over that
+// run lands on the owning assistant, so the whole [assistant][N
+// results] group stays on one side of the cut. Strict providers
+// reject a function_response that does not follow its function_call,
+// so this is load-bearing, not cosmetic.
+//
+// The head < len guard keeps a degenerate empty-tail head (== len)
+// safe: an empty preserved tail has no pair to split.
+func snapToPairSafeHead(entries []HistoryEntry, head int) int {
+	for head > 0 && head < len(entries) && entries[head].Message.Role == model.RoleTool {
+		head--
+	}
+	return head
+}
+
+// firstUserMessageIndex returns the index of the first RoleUser entry
+// (the turn's task brief), or -1 when none is present. Used to pin
+// the brief ahead of a window prune so a long worker turn never loses
+// what it was asked to do.
+func firstUserMessageIndex(entries []HistoryEntry) int {
+	for i := range entries {
+		if entries[i].Message.Role == model.RoleUser {
+			return i
+		}
+	}
+	return -1
+}
+
+// pruneWindow keeps the most-recent entries (≈ `limit`). Used by
+// [StrategyWindow]; called from [Extension.OnFrameEmit] after every
+// append. Two invariants beyond the raw FIFO:
+//
+//   - The window head is snapped pair-safe so the model-visible
+//     history never begins on a tool_result orphaned from its
+//     tool_call (the window may float a few entries above `limit` to
+//     keep a tool group whole — never below).
+//   - The first user_message (task brief) is pinned ahead of the
+//     window so a long single-turn worker never loses its task +
+//     handoff contract. The window otherwise carries the most-recent
+//     `limit-1` entries, so the total stays ≈ `limit`.
 func (s *CompactorState) pruneWindow(limit int) {
 	if limit <= 0 {
 		return
 	}
 	s.historyMu.Lock()
 	defer s.historyMu.Unlock()
-	if len(s.history) <= limit {
+	n := len(s.history)
+	if n <= limit {
 		return
 	}
-	keep := make([]HistoryEntry, limit)
-	copy(keep, s.history[len(s.history)-limit:])
+	// Leave one slot for the pinned brief, then snap the head back
+	// over any trailing tool_result run.
+	head := snapToPairSafeHead(s.history, n-(limit-1))
+	pin := firstUserMessageIndex(s.history)
+	var keep []HistoryEntry
+	if pin >= 0 && pin < head {
+		keep = make([]HistoryEntry, 0, 1+(n-head))
+		keep = append(keep, s.history[pin])
+		keep = append(keep, s.history[head:]...)
+	} else {
+		// Brief already inside the window (or none recorded) — the
+		// snapped tail is the whole kept slice.
+		keep = make([]HistoryEntry, n-head)
+		copy(keep, s.history[head:])
+	}
 	s.history = keep
 }
 

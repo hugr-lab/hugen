@@ -85,6 +85,47 @@ func TestCodec_RoundTrip(t *testing.T) {
 // TestCodec_RoundTrip_EnvelopeAdditions asserts the phase-4 BaseFrame
 // fields (FromSession, FromParticipant, RequestID) round-trip cleanly
 // when set and remain absent (omitempty) when empty.
+// TestCodec_AgentMessage_CallUsage pins the phase-5.2 per-response
+// usage stamp: CallUsage round-trips and lands in the persisted
+// payload (= the session_events.metadata) as call_usage, distinct
+// from the turn-cumulative usage, so per-call prompt size is
+// analyzable straight from the event log.
+func TestCodec_AgentMessage_CallUsage(t *testing.T) {
+	codec := NewCodec()
+	in := NewAgentMessageConsolidated("s1", testAgent, "done", 0, true, nil, "", "")
+	in.Payload.CallUsage = &TokenUsage{PromptTokens: 12345, CompletionTokens: 67}
+	in.Payload.Usage = &TokenUsage{PromptTokens: 50000, CompletionTokens: 300}
+
+	data, err := codec.EncodeFrame(in)
+	if err != nil {
+		t.Fatalf("EncodeFrame: %v", err)
+	}
+	out, err := codec.DecodeFrame(data)
+	if err != nil {
+		t.Fatalf("DecodeFrame: %v", err)
+	}
+	am, ok := out.(*AgentMessage)
+	if !ok {
+		t.Fatalf("decoded type = %T, want *AgentMessage", out)
+	}
+	if am.Payload.CallUsage == nil || am.Payload.CallUsage.PromptTokens != 12345 || am.Payload.CallUsage.CompletionTokens != 67 {
+		t.Fatalf("CallUsage not preserved: %+v", am.Payload.CallUsage)
+	}
+	if am.Payload.Usage == nil || am.Payload.Usage.PromptTokens != 50000 {
+		t.Fatalf("turn Usage not preserved alongside CallUsage: %+v", am.Payload.Usage)
+	}
+
+	// The persisted metadata (EncodePayload) carries call_usage so the
+	// DB row is queryable by per-call prompt tokens.
+	pl, err := codec.EncodePayload(in)
+	if err != nil {
+		t.Fatalf("EncodePayload: %v", err)
+	}
+	if !strings.Contains(string(pl), "call_usage") || !strings.Contains(string(pl), "12345") {
+		t.Fatalf("persisted payload missing call_usage: %s", pl)
+	}
+}
+
 func TestCodec_RoundTrip_EnvelopeAdditions(t *testing.T) {
 	codec := NewCodec()
 	t.Run("set", func(t *testing.T) {

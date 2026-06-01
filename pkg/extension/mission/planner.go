@@ -35,7 +35,7 @@ const checkerWaveLabelPrefix = "_check-"
 // to recover (planner-amend-on-invalid-handoff usually clears on
 // retry-1 or retry-2) without letting a genuinely-stuck wave
 // monopolise the rest of the budget.
-const maxConsecutiveErrors = 3
+const maxConsecutiveErrors = 5
 
 // PlannerError flags a non-recoverable failure inside the planner
 // loop — a planner wave that never produced a handoff, an output
@@ -87,36 +87,31 @@ func (e *Extension) driveMissionPlanner(mission extension.SessionState, spawner 
 	// state before the planner spawn so iter-1 plans see
 	// resolved inputs (not "is it markdown or html?" left for the
 	// planner to ask later via a researcher wave).
-	if researchAborted, researchErr := e.runResearchStage(ctx, executor, mission, manifest, missionSkill, goal); researchErr != nil {
+	researchAborted, researchErr := e.runResearchStage(ctx, executor, mission, manifest, missionSkill, goal)
+	if researchErr != nil {
 		e.logger.Warn("mission: driveMissionPlanner: research stage failed",
 			"mission_session", mission.SessionID(),
 			"err", researchErr, "aborted", researchAborted)
-		if researchAborted {
-			final := buildFinalText(mission, "", true)
-			e.finishMission(ctx, mission, final)
-			return
+	}
+
+	// A research abort (infeasible / no usable handoff / researcher
+	// budget) ends the mission — there's no plan to run. Otherwise run
+	// the planner loop. Either way the mission flows to synthesis below:
+	// on an abort the synthesizer reports what happened + summarises
+	// partial findings (the "normal path"), so the parent gets a
+	// coherent message rather than a terse failure recap it might
+	// silently re-attempt. Phase 5.2.
+	aborted := researchAborted
+	if !aborted {
+		var err error
+		aborted, err = e.runPlannerLoop(ctx, executor, mission, manifest, missionSkill, goal)
+		if err != nil {
+			e.logger.Warn("mission: driveMissionPlanner: planner loop failed",
+				"mission_session", mission.SessionID(), "err", err)
 		}
 	}
 
-	aborted, err := e.runPlannerLoop(ctx, executor, mission, manifest, missionSkill, goal)
-	if err != nil {
-		e.logger.Warn("mission: driveMissionPlanner: planner loop failed",
-			"mission_session", mission.SessionID(),
-			"err", err)
-	}
-
-	var synthText string
-	if !aborted && manifest.Synthesis.Role != "" && missionHasHandoffs(mission) {
-		text, synthErr := e.runSynthesis(ctx, executor, mission, manifest.Synthesis.Role, missionSkill, goal,
-			manifest.TimeoutForRole(manifest.Synthesis.Role))
-		if synthErr != nil {
-			e.logger.Warn("mission: driveMissionPlanner: synthesis failed",
-				"mission_session", mission.SessionID(), "err", synthErr)
-		} else {
-			synthText = text
-		}
-	}
-
+	synthText := e.maybeSynthesize(ctx, executor, mission, manifest, missionSkill, goal, aborted)
 	final := buildFinalText(mission, synthText, aborted)
 	e.finishMission(ctx, mission, final)
 }
@@ -158,6 +153,15 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 		// tags plan_context entries with the right number even
 		// when the handoff arrives between iterations.
 		if m := FromState(mission); m != nil {
+			// Phase 5.2 — a planner / checker from a PRIOR iteration
+			// crossed its context budget. Abort cleanly now instead of
+			// re-spawning into the same shortfall (or burning the
+			// consecutive-error retry budget).
+			if _, ok := m.BudgetAbortInfo(); ok {
+				e.logger.Warn("mission: planner loop: aborting — orchestration role exceeded context budget",
+					"mission_session", mission.SessionID(), "iteration", iteration)
+				return true, nil
+			}
 			m.mu.Lock()
 			m.IterationCounter = iteration
 			m.mu.Unlock()
@@ -1126,7 +1130,14 @@ func collectWaveFailureIssues(mission extension.SessionState, waveLabel string, 
 			}
 			for _, s := range w.Subagents {
 				if s.Status == "error" && s.Error != "" {
-					issues = append(issues, fmt.Sprintf("%s (role %s): %s", s.Name, s.Role, s.Error))
+					ref := s.Ref
+					if ref == "" {
+						ref, _ = MakeRef(s.Name, waveLabel)
+					}
+					// Point the planner at the failed worker's handoff so it
+					// can mission:get_handoff(ref) for WHAT IT ACCOMPLISHED
+					// before deciding how to amend.
+					issues = append(issues, fmt.Sprintf("%s (role %s) failed: %s — mission:get_handoff(%q) for its partial output", s.Name, s.Role, s.Error, ref))
 				}
 			}
 			break
