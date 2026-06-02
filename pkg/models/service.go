@@ -71,12 +71,30 @@ func (s *Service) rebuild() {
 	}
 	routes := make(map[Intent]model.Model, len(cfg.Routes))
 	for intentStr, route := range cfg.Routes {
-		routes[Intent(intentStr)] = newRouteModel(s.local, s.remote, route, s.opts)
+		routes[Intent(intentStr)] = newRouteModel(s.local, s.remote, inheritDeadlines(route, cfg), s.opts)
 	}
 	s.mu.Lock()
 	s.defaultModel = newRouteModel(s.local, s.remote, cfg, s.opts)
 	s.routes = routes
 	s.mu.Unlock()
+}
+
+// inheritDeadlines fills a named route's UNSET batch deadlines from the
+// top-level base, so models.{first,inter}_batch_deadline act as the base
+// every route OVERRIDES (the documented per-route contract). Without it
+// a route that only picks a model silently falls to the package default
+// (2m / 5m) and ignores the operator's top-level setting — e.g. a slow
+// backend on the `reasoning` route stalling at the hardcoded 2m though
+// the operator raised the global to 4m. Only a zero (unset) field
+// inherits; an explicit negative (disable) or positive value is kept.
+func inheritDeadlines(route, base config.ModelsConfig) config.ModelsConfig {
+	if route.FirstBatchDeadline == 0 {
+		route.FirstBatchDeadline = base.FirstBatchDeadline
+	}
+	if route.InterBatchDeadline == 0 {
+		route.InterBatchDeadline = base.InterBatchDeadline
+	}
+	return route
 }
 
 func newRouteModel(local, remote types.Querier, cfg config.ModelsConfig, opts []Option) model.Model {
