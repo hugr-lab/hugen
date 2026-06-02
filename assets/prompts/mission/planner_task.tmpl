@@ -47,22 +47,16 @@ goal explicitly demands them.
 {{.ResearchFindings}}
 
 This is the research role's SUMMARY, and it is CONFIRMED — research
-already resolved every ambiguity and verified the schema. The FULL
-detail lives in the mission's `research/` files. READ
-`research/research.md` with `bash.read_file` BEFORE drafting — it
-carries the scope decisions, the alternatives weighed, the proposed
-acceptance criteria, and the wave-shape recipe. Build your
-`mission_goal` + AC on those decisions instead of re-deriving them.
-The schema itself (`research/data-model.md` — exact sources / types /
-fields / join keys) is what WORKERS read by path, so you do NOT need
-to copy the whole schema into every task — name the key identifiers a
-worker needs and let its contract pull the rest from
-`research/data-model.md`.
+already resolved every ambiguity and verified feasibility. The FULL
+detail lives in the mission's research artifacts, which the WORKERS
+read BY PATH — so you do NOT need to copy that detail into every
+task; name the key identifiers a worker needs and let its contract
+pull the rest. Build your `mission_goal` + AC on the research
+decisions instead of re-deriving them.
 
 Do not schedule a wave to re-find what research already settled. If
-`research/research.md` names a wave-shape recipe (single fetch /
-cross-source / report deliverable / schema inventory), use it to pick
-the SMALLEST plan that hits the goal. If research resolved an
+research named a wave-shape recipe for this kind of goal, use it to
+pick the SMALLEST plan that hits the goal. If research resolved an
 ambiguity the user originally had, surface that explicitly in your AC.
 {{end}}{{if .SpawnInputs}}
 [Inputs from caller — propagate VERBATIM to worker `inputs`]

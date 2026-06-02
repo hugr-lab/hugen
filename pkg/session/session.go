@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1874,6 +1873,17 @@ const defaultMaxToolIterations = 40
 //     landing even if the user is mid-cancellation; emit's own ctx
 //     is the session's run ctx, never cancelled until process shutdown.
 func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.ChunkToolCall) (string, bool) {
+	// Phase 5.2 budget-termination — once the session has crossed its
+	// context budget, EVERY tool call is short-circuited to a
+	// budget-error (never dispatched), so the role cannot keep doing
+	// tool work and is pushed to summarise + emit its handoff. The
+	// finalize instruction rides the natural tool-result channel.
+	if st := s.turnState; st != nil && st.budgetExceeded {
+		const msg = "context budget exceeded — tools are now disabled for this session. " +
+			"Summarise what you have accomplished and emit your handoff / final answer NOW; do not call any more tools."
+		s.emitToolError(emitCtx, tc.ID, tc.Name, protocol.ToolErrorContextBudget, msg, "")
+		return msg, true
+	}
 	if s.tools == nil {
 		s.emitToolError(emitCtx, tc.ID, tc.Name, protocol.ToolErrorNotFound,
 			"tool dispatch not configured for this session", "")
@@ -2027,47 +2037,31 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 		"session", s.id, "tool", tc.Name,
 		"result", truncatePayload(result, 2048))
 
-	// Phase 6.x — in-turn advisory fold. A "successful" dispatch can
-	// still carry a tool error in its JSON body (the MCP provider
-	// marshals failures as {"is_error":true,"text":…}; a GraphQL
-	// validation error like `Cannot query field "X_aggregation"` lands
-	// here, NOT in emitToolError) — those consult the on_tool_error
-	// advisors. A genuinely clean result instead consults the
-	// on_tool_result advisors — a success that still warrants steer
-	// (canonical case: an inline query returned `is_truncated: true`,
-	// so the model should switch to file output rather than re-bump the
-	// size cap). Either way the matched hint is folded inline into the
-	// result the model reads, with no separate emitted frame.
-	if looksLikeToolErrorResult(result) {
-		if hint := s.toolErrorHint(emitCtx, extension.ToolErrorEvent{Tool: tc.Name, ResultText: string(result)}); hint != "" {
-			enriched := string(result) + hintSuffix(hint)
-			resultFrame := protocol.NewToolResult(s.id, s.agent.Participant(),
-				tc.ID, enriched, false)
-			if err := s.emit(emitCtx, resultFrame); err != nil {
-				s.logger.Warn("emit tool_result", "err", err)
-			}
-			// Return the ENRICHED result so every consumer of the
-			// returned value sees the hint, consistently with the
-			// emitted frame. The async turn loop ignores this return
-			// (it reads the emitted frame via the history owner), but
-			// the sync close-turn path (close_turn_sync.go) builds its
-			// RoleTool message directly from it — returning raw there
-			// would silently drop the hint. Stuck-detection is
-			// unaffected either way: it hashes the tool CALL
-			// (LocalToolHash(name,args)), never the result body, and
-			// reads errCode only when the frame's IsError=true (this
-			// provider-embedded-error frame is IsError=false, as before).
-			return enriched, false
-		}
-	} else if hint := s.toolResultHint(emitCtx, extension.ToolResultEvent{Tool: tc.Name, ResultText: string(result)}); hint != "" {
+	// Phase 6.x — in-turn advisory fold. Every successful dispatch
+	// result is offered to the on_tool_result advisors; a hint's
+	// (tool-glob + optional regex) decides whether to fold steer inline.
+	// The runtime no longer body-scans to classify error-vs-success: the
+	// same path serves a clean result that still warrants a nudge
+	// (canonical case: an inline query returned `is_truncated: true`, so
+	// switch to file output) AND a provider success-envelope failure (a
+	// GraphQL `Cannot query field "X"`, a Hugr `{"error":…,"ok":false}`
+	// query rejection) — both are just bodies a hint regex matches. Code
+	// is empty here; a genuine runtime error went through emitToolError.
+	if hint := s.toolResultHint(emitCtx, extension.ToolResultEvent{Tool: tc.Name, ResultText: string(result)}); hint != "" {
 		enriched := string(result) + hintSuffix(hint)
 		resultFrame := protocol.NewToolResult(s.id, s.agent.Participant(),
 			tc.ID, enriched, false)
 		if err := s.emit(emitCtx, resultFrame); err != nil {
 			s.logger.Warn("emit tool_result", "err", err)
 		}
-		// Enriched return for the same sync-close-turn reason as the
-		// error path above; the frame stays IsError=false.
+		// Return the ENRICHED result so every consumer of the returned
+		// value sees the hint, consistently with the emitted frame. The
+		// async turn loop ignores this return (it reads the emitted frame
+		// via the history owner), but the sync close-turn path
+		// (close_turn_sync.go) builds its RoleTool message directly from
+		// it — returning raw there would silently drop the hint. The
+		// frame stays IsError=false; stuck-detection hashes the tool CALL
+		// (LocalToolHash(name,args)), never the result body.
 		return enriched, false
 	}
 
@@ -2079,19 +2073,6 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 	return string(result), false
 }
 
-// looksLikeToolErrorResult is the cheap pre-filter gating the
-// provider embedded-error advisor consult: a "successful" tool
-// dispatch whose JSON body actually carries a failure. Covers the MCP
-// provider's {"is_error":true,…} shape and a GraphQL `{…,"errors":[…]}`
-// envelope (some validation errors surface as a 200-with-errors
-// payload). A false positive only triggers a (harmless) advisor call
-// that finds no matching hint.
-func looksLikeToolErrorResult(b []byte) bool {
-	return bytes.Contains(b, []byte(`"is_error":true`)) ||
-		bytes.Contains(b, []byte(`"isError":true`)) ||
-		bytes.Contains(b, []byte(`"errors":`))
-}
-
 // hintSuffix formats an in-turn advisory for inline append to a tool
 // result, set off so the model reads it as guidance distinct from the
 // tool's own output.
@@ -2099,33 +2080,13 @@ func hintSuffix(hint string) string {
 	return "\n\n[hint] " + hint
 }
 
-// toolErrorHint consults the registered [extension.ModelInTurnAdvisor]
-// extensions (deps.Extensions order) for guidance on a failing tool
-// result, returning the joined non-empty contributions. Both error
-// producers feed it: emitToolError (Code+Message) and the provider
-// embedded-error path (ResultText). Empty when no advisor matches.
-func (s *Session) toolErrorHint(ctx context.Context, ev extension.ToolErrorEvent) string {
-	if s.deps == nil {
-		return ""
-	}
-	var parts []string
-	for _, ext := range s.deps.Extensions {
-		adv, ok := ext.(extension.ModelInTurnAdvisor)
-		if !ok {
-			continue
-		}
-		if h := adv.OnToolError(ctx, s, ev); h != "" {
-			parts = append(parts, h)
-		}
-	}
-	return strings.Join(parts, "\n\n")
-}
-
 // toolResultHint consults the registered [extension.ModelInTurnAdvisor]
-// extensions (deps.Extensions order) for guidance on a SUCCESSFUL tool
-// result, returning the joined non-empty contributions. The
-// success-path twin of toolErrorHint — fed only on the clean (non
-// embedded-error) result path. Empty when no advisor matches.
+// extensions (deps.Extensions order) for guidance on a tool result,
+// returning the joined non-empty contributions. It is fed EVERY tool
+// result — both producers: emitToolError (Code + message in ResultText)
+// and the successful-dispatch path (raw body in ResultText, Code
+// empty). The advisors' hint regex / Code do the matching; the runtime
+// does not pre-classify error-vs-success. Empty when no advisor matches.
 func (s *Session) toolResultHint(ctx context.Context, ev extension.ToolResultEvent) string {
 	if s.deps == nil {
 		return ""
@@ -2194,13 +2155,14 @@ func truncatePayload(b []byte, max int) string {
 }
 
 func (s *Session) emitToolError(ctx context.Context, toolID, name, code, msg, tier string) {
-	// Phase 6.x — fold any ModelInTurnAdvisor on_tool_error hint into
+	// Phase 6.x — fold any ModelInTurnAdvisor on_tool_result hint into
 	// the error Message so the model reads the corrective steer inside
 	// the very tool_result it's already looking at, with no separate
-	// frame. Matching is hint-specific (tool glob + regex / code), so
-	// runtime errors a skill didn't author a hint for pass through
-	// unchanged.
-	if hint := s.toolErrorHint(ctx, extension.ToolErrorEvent{Tool: name, Code: code, Message: msg}); hint != "" {
+	// frame. The error's structured Code + its text (passed as
+	// ResultText) are matched hint-specifically (tool glob + Code /
+	// regex), so a runtime error a skill didn't author a hint for passes
+	// through unchanged.
+	if hint := s.toolResultHint(ctx, extension.ToolResultEvent{Tool: name, Code: code, ResultText: msg}); hint != "" {
 		msg += hintSuffix(hint)
 	}
 	payload := protocol.ToolError{Code: code, Message: msg, Tier: tier}

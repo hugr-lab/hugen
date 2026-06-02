@@ -10,37 +10,12 @@ sections you may see there are authoritative input — they are
 NOT background prose:
 
 - `[Resolved depends_on]` — handoff bodies from earlier waves,
-  resolved by the runtime and inlined for you. If the task asks
-  for a query against a schema that's already mapped there,
-  USE THOSE FIELD NAMES VERBATIM — do NOT call
-  `discovery-*` / `schema-*` / similar tools to re-derive what
-  you have been handed. The whole point of `depends_on` is to
-  skip that work. Re-running the discovery wastes ~1 minute and
-  blows your context.
-{{- if .ResearchAvailable }}
-- **Mission research already ran and wrote its artifacts under your
-  shared workspace: `research/data-model.md` (schema contract),
-  `research/research.md` (decisions), `research/queries.md` (a
-  verified starter / verification query when one was useful), and
-  `spec.md` (the mission's acceptance criteria).** The concrete names
-  you need — sources, type / field names, join keys — are usually
-  written straight into your task above (the planner lifted them from
-  research). Use them as-is. Before you reach for `discovery-*` /
-  `schema-*` or hand-roll a query from scratch, READ the relevant
-  research file with your file tool (python `open()` /
-  `bash.read_file`):
-  - `research/data-model.md` — the schema (exact type / field / join
-    names). Lift them verbatim; this REPLACES `discovery-*` /
-    `schema-type_fields` for the tables it covers.
-  - `research/queries.md` — if it carries a starter query for your
-    task, ADAPT it instead of composing one from zero.
-
-  `mission:get_research` returns the researcher's summary plus these
-  file paths; `notepad:search` has the cross-mission working memory.
-  Re-deriving via discovery — or re-composing a query research already
-  wrote — is the single most common worker waste: it burns time and
-  context.
-{{- end }}
+  resolved by the runtime and inlined for you. If what you need is
+  already in there, USE IT VERBATIM — do NOT re-derive (re-discover /
+  re-fetch) what you have been handed; if it names a file `path`,
+  READ that file (it holds the dataset — the handoff carries only
+  the path + a summary). The whole point of `depends_on` is to skip
+  that work; re-deriving it wastes time and blows your context.
 - `[Inputs from parent]` — structured arguments from the spawner
   (data source name, output path, time range). Take them at
   face value.
@@ -54,11 +29,10 @@ Your job is to accomplish the task above and end your turn with
 exactly ONE fenced `handoff` block reporting the result. Use any
 tools your role grants — your role's manifest entry (or your
 `## Loaded skills` block) declares what is available. Treat tool
-calls as the LAST resort after you have used the resolved
-context above. If the task needs a query and the relevant
-schema is already in `[Resolved depends_on]`, compose the query
-straight from those fields and run it; only call discovery / schema
-tools when the resolved context is genuinely insufficient.
+calls as the LAST resort after you have used the resolved context
+above: when the resolved context already carries what you need,
+work straight from it; only reach for tools when it is genuinely
+insufficient.
 
 If a tool returns the same error twice in a row on an identical
 payload, the third retry will not help — switch tactics (call a
@@ -108,13 +82,17 @@ Notes:
 - The `body` may be a plain string or a structured JSON object;
   pick whichever shape best carries the result. `body` MUST be
   present on `status: "ok"`.
-- **Large or per-row results go to a FILE, not into the handoff.**
-  The handoff is a JSON string bounded by your output budget — a
-  long row list (one row per item, many rows) or a multi-MB payload
-  overflows it, truncates mid-JSON, and the whole handoff fails to
-  parse even when the work was correct. When the result is big,
-  write it to a file in your working directory and put the file
-  `path` plus a short summary (counts / totals / shape) in the
-  `body`. Your working directory is SHARED by every worker in this
-  mission, so a later worker reads your file straight from that
-  path. Keep inline `body` for scalars and small summaries.
+- **Every FILE you wrote → report its `path` in the handoff.**
+  The runtime INLINES your handoff into the next wave's `[Resolved
+  depends_on]`, so the `path` is HOW a downstream worker finds your
+  file — a file you wrote but did NOT name in the handoff is
+  **invisible** to the next wave. Put the workspace / absolute
+  `path` (one, or a list of paths) plus a short summary (counts /
+  totals / shape) in the `body`; the rows themselves stay in the
+  file. Your working directory is SHARED by every worker in the
+  mission, so the consumer reads your file straight from that path.
+  (Large or per-row results MUST go to a file regardless — a long
+  row list or multi-MB payload inline overflows the handoff's
+  output budget, truncates mid-JSON, and the whole handoff fails to
+  parse even when the work was correct. Keep inline `body` for
+  scalars + small summaries.)

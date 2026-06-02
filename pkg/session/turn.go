@@ -55,6 +55,22 @@ type turnState struct {
 	// (context-budget observability).
 	turnUsage protocol.TokenUsage
 
+	// Context-budget pre-emption (Phase 5.2 budget-termination).
+	// lastCallUsage is the token spend the provider reported for the
+	// MOST RECENT model iteration — lastCallUsage.PromptTokens is the
+	// current context occupancy (NOT the cumulative turnUsage sum,
+	// which is meaningless for a per-call fit check). Also stamped on
+	// each consolidated frame as CallUsage for per-response analysis.
+	// budgetThreshold is the single absolute token threshold resolved
+	// once at startTurn from the session's intent (ratio ×
+	// MaxPromptTokens); 0 disables the check (root sessions, or no
+	// budget configured). budgetExceeded latches once the per-call
+	// prompt crosses it: from then on tool calls are short-circuited to
+	// budget-errors and the role is pushed to summarise + hand off.
+	lastCallUsage  protocol.TokenUsage
+	budgetThreshold int
+	budgetExceeded  bool
+
 	// Tool-result tracking for the current iteration. Pending = call
 	// dispatched but result not yet seen on toolResults; len==0 means
 	// "all tool_results matched" and the loop can build the next prompt.
@@ -218,7 +234,27 @@ func (s *Session) startTurn(runCtx context.Context, f *protocol.UserMessage) {
 		mdl:              mdl,
 		pendingToolCalls: map[string]model.ChunkToolCall{},
 	}
+	s.applyContextBudget()
 	s.startModelIteration(runCtx)
+}
+
+// applyContextBudget samples the per-turn context-budget thresholds
+// (absolute prompt-token counts) for the current turnState from the
+// session's resolved intent. Left at 0 (check disabled) for root
+// sessions (parent == nil) — root growth is the compactor's job;
+// budget pre-emption is a mission sub-agent guardrail — and when the
+// router reports no budget. Phase 5.2 budget-termination.
+func (s *Session) applyContextBudget() {
+	st := s.turnState
+	if st == nil || s.parent == nil || s.models == nil {
+		return
+	}
+	intent := s.DefaultIntent()
+	budget := s.models.MaxPromptTokens(intent)
+	if budget <= 0 {
+		return
+	}
+	st.budgetThreshold = int(s.models.ContextBudgetRatio(intent) * float64(budget))
 }
 
 // startModelIteration kicks off one model.Generate goroutine for the
@@ -263,6 +299,10 @@ func (s *Session) resetModelAccumulator() {
 	st.reasoningSeq = 0
 	st.streamErr = nil
 	st.assistantFolded = false
+	// Per-call usage is per-iteration — clear it so a stream that ends
+	// without a usage-bearing finish event doesn't carry the prior
+	// iteration's spend onto this frame or into the budget check.
+	st.lastCallUsage = protocol.TokenUsage{}
 }
 
 // runModelGoroutine streams a model.Generate response into ch. Closes
@@ -386,10 +426,15 @@ func (s *Session) applyChunk(runCtx context.Context, chunk model.Chunk) {
 		if chunk.Usage != nil {
 			st.turnUsage.PromptTokens += chunk.Usage.PromptTokens
 			st.turnUsage.CompletionTokens += chunk.Usage.CompletionTokens
-			s.foldSessionUsage(protocol.TokenUsage{
+			// This iteration's per-call usage — PromptTokens is the
+			// current context occupancy for the per-call budget check,
+			// and the whole pair is persisted on the consolidated frame
+			// (CallUsage) for per-response analysis.
+			st.lastCallUsage = protocol.TokenUsage{
 				PromptTokens:     chunk.Usage.PromptTokens,
 				CompletionTokens: chunk.Usage.CompletionTokens,
-			})
+			}
+			s.foldSessionUsage(st.lastCallUsage)
 		}
 	}
 }
@@ -557,6 +602,11 @@ func (s *Session) advanceOrFinish(runCtx context.Context) {
 		return
 	}
 
+	// Context-budget enforcement is NOT here — it rides the tool-
+	// dispatch path (foldAssistantAndMaybeDispatch latches budgetExceeded
+	// and dispatchToolCall short-circuits blocked tools to budget-errors,
+	// pushing the role to summarise + hand off). Phase 5.2.
+
 	// Drain pendingInbound BEFORE injecting the soft warning / stuck
 	// nudges so any runtime-buffered Frames (subagent_result, …) land
 	// in the owned history cache first; then layer the local nudges
@@ -606,6 +656,15 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 	// does not trip the executor's wave-completion detection.
 	final := !hasToolCalls && !gateBlocks
 
+	// Context-budget latch (Phase 5.2). Once this iteration's per-call
+	// prompt crosses the threshold the session is out of budget: latch
+	// it so every subsequent tool call is short-circuited to a
+	// budget-error in dispatchToolCall, forcing the role to summarise +
+	// hand off. Subagents only (budgetThreshold stays 0 for root).
+	if st.budgetThreshold > 0 && st.lastCallUsage.PromptTokens >= st.budgetThreshold {
+		st.budgetExceeded = true
+	}
+
 	// Persist one consolidated AgentMessage per model iteration: full
 	// assembled text + tool calls + reasoning state. Streaming chunks
 	// stayed outbox-only — this row is the canonical assistant
@@ -619,10 +678,23 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 			st.finalText, st.agentSeq, final,
 			toolCallPayloads(st.toolCalls),
 			st.thinking, st.thoughtSignature)
-		// Phase 5.2 (context-budget observability) — stamp turn
-		// usage on the Final=true Consolidated frame so the
-		// outbox carries the cost number. The cumulative
-		// session counter was already folded eagerly in
+		// Phase 5.2 (context-budget observability) — stamp this
+		// iteration's per-call usage on EVERY consolidated frame so
+		// per-response prompt/completion tokens are analyzable from the
+		// event log (the per-call prompt is the context-fit signal).
+		if st.lastCallUsage.PromptTokens > 0 || st.lastCallUsage.CompletionTokens > 0 {
+			cu := st.lastCallUsage
+			consolidated.Payload.CallUsage = &cu
+		}
+		// Phase 5.2 — mark the budget-finalize handoff so the mission
+		// FORCES status:error (reason context_budget) on ingest; the
+		// model only supplies the summary body, never the success claim.
+		if final && st.budgetExceeded {
+			consolidated.Payload.BudgetExceeded = true
+		}
+		// The turn's aggregated cost is mirrored once on the Final=true
+		// Consolidated frame (the existing "turn cost" surface). The
+		// cumulative session counter was already folded eagerly in
 		// applyChunk on every iter's Final chunk; this stamp is
 		// outbox-only.
 		if final && (st.turnUsage.PromptTokens > 0 || st.turnUsage.CompletionTokens > 0) {
@@ -646,8 +718,18 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 	}
 
 	if !hasToolCalls {
+		budgetDone := st.budgetExceeded
 		s.drainPendingInbound(runCtx)
 		s.retireTurn()
+		// Phase 5.2 — the role just emitted its budget-finalize summary
+		// (tools were blocked). It's out of budget and its task is done,
+		// so terminate the session: the handoff (marked BudgetExceeded)
+		// is already in flight to the parent, which forces status:error
+		// and routes it (worker → re-plan, orchestration → synthesis).
+		if budgetDone {
+			s.triggerContextBudgetTermination(runCtx)
+			return
+		}
 		// Lifecycle: turn closed cleanly. Mark idle iff fully
 		// quiescent — subagents still running keep the session
 		// active (idle requires len(s.children) == 0). retireTurn

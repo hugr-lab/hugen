@@ -35,15 +35,19 @@ metadata:
     # grounding (skill:files / skill:ref) before fan-out; workers
     # load it to execute real queries inside a mission.
     tier_compatibility: [root, mission, worker]
-    # In-turn corrective hints (ModelInTurnAdvisor / on_tool_error):
-    # when a GraphQL call fails with one of these signatures, the
-    # runtime folds the guidance INLINE into the failing tool result
-    # the model reads next — pushing it back to discovery instead of
-    # re-guessing. Matched against hugr-main:data-* + hugr-query:*
-    # (where query errors surface). The body teaches the concepts;
-    # these fire at the exact failure point.
+    # In-turn corrective hints (ModelInTurnAdvisor / on_tool_result):
+    # these fire on EVERY result of the named tools — the hint's regex
+    # matches the error signature wherever it surfaces, whether the
+    # runtime flagged a tool_error OR the failure rode back inside a
+    # "successful" success-envelope body (Hugr query rejections come as
+    # `{"error":…,"ok":false}`, IsError=false). On a match the runtime
+    # folds the guidance INLINE into the result the model reads next —
+    # pushing it back to discovery instead of re-guessing. Matched
+    # against hugr-main:data-* + hugr-query:* (where query errors
+    # surface). The body teaches the concepts; these fire at the exact
+    # failure point.
     hints:
-      - type: on_tool_error
+      - type: on_tool_result
         tools: ["hugr-main:data-*", "hugr-query:*"]
         match: 'Cannot query field "[^"]*" on type "(Query|_module)'
         message: >
@@ -63,7 +67,7 @@ metadata:
           or lack the role. Map the REAL hierarchy: discovery-search_modules
           → discovery-search_module_data_objects, then READ
           skill:ref(name: "hugr-data", ref: "instructions").
-      - type: on_tool_error
+      - type: on_tool_result
         tools: ["hugr-main:data-*", "hugr-query:*"]
         match: 'Cannot query field "[^"]*" on type "[a-z]'
         message: >
@@ -76,7 +80,7 @@ metadata:
           tables return only the first 50 fields by default). READ
           skill:ref(name: "hugr-data", ref: "query") for the field + query
           shape before retrying.
-      - type: on_tool_error
+      - type: on_tool_result
         tools: ["hugr-main:data-*", "hugr-query:*"]
         match: "Expected Name|Syntax Error|must have a selection"
         message: >
@@ -96,7 +100,7 @@ metadata:
           pick the matching one from the reference catalogue in your loaded
           skill), READ it before retrying: the grammar is not guessable from
           field names.
-      - type: on_tool_error
+      - type: on_tool_result
         tools: ["hugr-main:data-*", "hugr-query:*"]
         match: "(?i)(unknown|invalid).*(filter|operator|argument)"
         message: >
@@ -105,9 +109,10 @@ metadata:
           use any_of / all_of / none_of). READ the reference before retrying:
           skill:ref(name: "hugr-data", ref: "filter-guide").
       # Success-path nudge: an inline result that came back TRUNCATED.
-      # is_truncated:true is NOT an error, so on_tool_error never sees it —
-      # this on_tool_result hint fires on the (successful) result body and
-      # steers to file output instead of a bigger inline cap.
+      # is_truncated:true is NOT an error — this hint fires on the
+      # (successful) result body and steers to file output instead of a
+      # bigger inline cap. Same on_tool_result mechanism as the error
+      # signatures above; the regex is what scopes it to truncation.
       - type: on_tool_result
         tools: ["hugr-main:data-inline_graphql_result"]
         match: '(?i)"?is_truncated"?\s*:\s*true'
@@ -175,6 +180,18 @@ compatibility:
 Hugr is an open-source Data Mesh platform: a high-performance GraphQL
 backend that uses DuckDB to federate PostgreSQL, DuckDB, Parquet,
 Iceberg, Delta Lake, and REST APIs into one read-only GraphQL schema.
+
+**It is GraphQL, but it is NOT Hasura / PostGraphile.** The query
+grammar — aggregations, group-by, filters, joins, spatial — DIFFERS
+from every other GraphQL backend you have seen, so a query written
+from your GraphQL prior will have WRONG syntax. For example there is
+NO `group_by:` argument: grouping is `key { <field> }` with the
+aggregates nested under `aggregations { _rows_count … }` inside
+`*_bucket_aggregation`. So do NOT guess — `skill:ref(name: "hugr-data",
+ref: "…")` the matching reference for the exact grammar
+(`aggregations`, `filter-guide`, `query-patterns`, `spatial-queries`)
+before composing, and `data-validate_graphql_query` before you trust a
+query.
 
 ## The data model (the mental model that matters)
 

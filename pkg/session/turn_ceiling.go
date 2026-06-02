@@ -152,3 +152,14 @@ func softWarningText(r *prompts.Renderer, role, task string, turns int, canSpawn
 func (s *Session) triggerHardCeiling(runCtx context.Context) {
 	s.requestClose(runCtx, protocol.TerminationHardCeiling)
 }
+
+// triggerContextBudgetTermination forces a SessionClose with
+// reason=context_budget when the running prompt crossed the hard
+// budget ratio. Same teardown path as triggerHardCeiling; the distinct
+// reason lets the mission ext tell a budget pre-emption from a generic
+// failure (orchestration roles → clean mission abort) and skips the
+// doomed findings-recording close turn (the over-budget context can't
+// fit another turn — see closeTurnSkipReason). Phase 5.2.
+func (s *Session) triggerContextBudgetTermination(runCtx context.Context) {
+	s.requestClose(runCtx, protocol.TerminationContextBudget)
+}

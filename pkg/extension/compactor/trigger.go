@@ -68,40 +68,21 @@ func (e *Extension) shouldCompact(state extension.SessionState, cfg Config) bool
 	if s == nil {
 		return false
 	}
-	// Not enough completed user-turns past the preserved
-	// window to compact anything yet — UNLESS the token-budget
-	// limb has tripped. Worker sessions typically have a single
-	// user_message (the task brief) followed by a long
-	// agent_message → tool_call → tool_result chain, so
-	// BoundaryCount stays at 1 and the preserved-window gate
-	// would block compaction forever on sessions that genuinely
-	// need it. When MaxTokens is configured and the running
-	// estimate has crossed it, fall through to the limb checks;
-	// [compactWithConfig] uses a position-based cutoff fallback
-	// when boundary-based cutoff math is unavailable.
-	tokenBudgetTripped := cfg.MaxTokens > 0 && s.EstimatedPromptTokens() > cfg.MaxTokens
-	if s.BoundaryCount() <= cfg.PreservedRecentTurns && !tokenBudgetTripped {
+	// Not enough completed user-turns past the preserved window to
+	// compact anything yet. A single-turn mission worker
+	// (BoundaryCount == 1) never crosses this gate: its over-budget
+	// turn is handled by context-budget termination, NOT by mid-turn
+	// compaction (see phase-5.2-budget-termination.md). Only
+	// multi-turn sessions (root / chat) reach the limbs below, where
+	// the cut always lands on a user_message boundary and never
+	// splits a tool_call ↔ tool_result pair.
+	if s.BoundaryCount() <= cfg.PreservedRecentTurns {
 		return false
 	}
-	// Anti-thrash gate: require MinTurnGap completed turns
-	// since the last fire. Skipped when the token-budget path
-	// is the only reason we're here — turn-gap math is
-	// meaningless on a session that lives inside a single
-	// user-turn.
-	//
-	// Note on the worker-mode bypass: workers typically have
-	// BoundaryCount=1 (one user_message at task start) and the
-	// trigger runs at OnTurnBoundary. So in practice there is
-	// only ONE trigger event per worker lifetime — no second
-	// boundary to thrash against. The "anti-thrash skipped
-	// when worker-mode" branch is a stylistic guard, not a
-	// correctness hole: by the time a worker could re-trigger,
-	// a new user_message must have arrived (which is unusual
-	// for worker sessions but legal). If that ever happens,
-	// the token-budget path will fire again and pos-cutoff
-	// will re-compact — that's the intended behaviour for a
-	// genuinely long-running worker.
-	if prior := s.Digest(); prior != nil && s.BoundaryCount() > cfg.PreservedRecentTurns {
+	// Anti-thrash gate: require MinTurnGap completed turns since the
+	// last fire. (BoundaryCount > PreservedRecentTurns is guaranteed
+	// above, so the prior cut has advanced past the preserved window.)
+	if prior := s.Digest(); prior != nil {
 		completedSinceLast := 0
 		for i := s.BoundaryCount() - 1; i >= 0; i-- {
 			if s.BoundaryAt(i) <= prior.CompactedAtSeq {

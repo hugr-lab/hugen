@@ -9,11 +9,14 @@ import "time"
 // Routes is intent-name → per-route config; unmatched intents fall
 // back to the default model (Model field).
 //
-// ContextWindows + DefaultBudget declare each model's input-context
-// capacity in tokens. Lookup precedence at the consumer:
-//  1. ContextWindows[<resolved model name>]
-//  2. DefaultBudget (when > 0)
-//  3. Hard-coded floor (128 000) with one-shot INFO log per intent
+// ContextWindows + DefaultBudget declare a model's input-context
+// budget in tokens for the Phase 5.2 budget guard. Lookup precedence at
+// the consumer:
+//  1. routes.<intent>.default_budget (per-intent override)
+//  2. ContextWindows[<resolved model name>]
+//  3. DefaultBudget (global, when > 0)
+//  4. otherwise 0 — UNCONFIGURED means UNLIMITED: the budget guard is
+//     off and the runtime never budget-terminates. Fully opt-in.
 //
 // RetryMaxAttempts + RetryInitialBackoff control transient-error
 // retries the subscription pump performs before any chunk reaches
@@ -22,14 +25,21 @@ import "time"
 // DefaultRetryMaxAttempts (10) and DefaultRetryInitialBackoff
 // (500ms). Backoff doubles per attempt up to a 30s ceiling.
 type ModelsConfig struct {
-	Model               string                  `mapstructure:"model"`
-	MaxTokens           int                     `mapstructure:"max_tokens"`
-	Temperature         float32                 `mapstructure:"temperature"`
-	ContextWindows      map[string]int          `mapstructure:"context_windows"`
-	DefaultBudget       int                     `mapstructure:"default_budget"`
-	Mode                string                  `mapstructure:"mode"`
-	RetryMaxAttempts    int                     `mapstructure:"retry_max_attempts"`
-	RetryInitialBackoff time.Duration           `mapstructure:"retry_initial_backoff"`
+	Model          string         `mapstructure:"model"`
+	MaxTokens      int            `mapstructure:"max_tokens"`
+	Temperature    float32        `mapstructure:"temperature"`
+	ContextWindows map[string]int `mapstructure:"context_windows"`
+	DefaultBudget  int            `mapstructure:"default_budget"`
+	// ContextBudgetRatio is the single fraction of a model's context
+	// window at which the runtime blocks further tool work and makes a
+	// subagent summarise + hand off (budget-termination). Set per route
+	// (`routes.<intent>.context_budget_ratio`) to tune a specific
+	// intent; 0 / absent inherits the package default
+	// (model.DefaultContextBudgetRatio, 0.85). Phase 5.2.
+	ContextBudgetRatio  float64       `mapstructure:"context_budget_ratio"`
+	Mode                string        `mapstructure:"mode"`
+	RetryMaxAttempts    int           `mapstructure:"retry_max_attempts"`
+	RetryInitialBackoff time.Duration `mapstructure:"retry_initial_backoff"`
 
 	// FirstBatchDeadline caps how long the subscription pump waits
 	// for the FIRST batch of tokens from the model server before

@@ -313,46 +313,57 @@ type HugenMetadata struct {
 
 	// Hints is an extensible, typed list of in-turn advisories the
 	// skill contributes while loaded. Each entry's Type selects a
-	// [extension.ModelInTurnAdvisor] variation; the first (Phase 6.x)
-	// is `on_tool_error`, which appends Message inline to a matching
-	// failing tool result. One umbrella key — future variations
-	// (e.g. pre_tool_call) add a new Type to the SAME list rather
-	// than a new top-level key. Unknown Type → validate warns + the
-	// runtime ignores it (forward-compat).
+	// [extension.ModelInTurnAdvisor] variation; the active one is
+	// `on_tool_result`, which appends Message inline to a matching tool
+	// result (error or success alike — see [HintTypeOnToolResult]). The
+	// legacy `on_tool_error` parses as a deprecated alias of it. One
+	// umbrella key — future variations (e.g. pre_tool_call) add a new
+	// Type to the SAME list rather than a new top-level key. Unknown
+	// Type → validate warns + the runtime ignores it (forward-compat).
 	Hints []Hint `json:"hints,omitempty" yaml:"hints,omitempty"`
 }
 
 // HintType discriminates a [Hint] across the
-// [extension.ModelInTurnAdvisor] variations. Phase 6.x ships one.
+// [extension.ModelInTurnAdvisor] variations.
 type HintType = string
 
 const (
-	// HintTypeOnToolError appends Message to a failing tool result
-	// inline (same turn), matched by tool-name glob + optional error
-	// text regex / structured code.
-	HintTypeOnToolError HintType = "on_tool_error"
-
-	// HintTypeOnToolResult appends Message to a SUCCESSFUL tool result
-	// inline (same turn), matched by tool-name glob + optional regex
-	// over the result body. For results that aren't failures but
-	// warrant a nudge (canonical case: an inline query returning
-	// `is_truncated: true` → switch to file output).
+	// HintTypeOnToolResult appends Message inline (same turn) to a
+	// tool result whose content matches the hint, matched by tool-name
+	// glob + optional structured Code + optional regex over the result
+	// body. It is the single in-turn corrective-hint type: it fires on
+	// EVERY tool result — runtime error and successful dispatch alike —
+	// because the runtime no longer guesses error-vs-success from the
+	// body (a clean result can carry "is_error":true / "ok":false in
+	// its data; "errors":null is a success). The hint's regex / Code do
+	// the discriminating. Covers both a runtime error a skill wants to
+	// steer (match by Code) and a success-envelope failure or nudge
+	// (match by regex: a GraphQL `Cannot query field` / a Hugr
+	// `{"ok":false}` rejection / an `is_truncated:true` → file output).
 	HintTypeOnToolResult HintType = "on_tool_result"
+
+	// HintTypeOnToolError is the deprecated former split: a hint that
+	// fired only on results the runtime body-classified as failures.
+	// Kept as a parse-time alias (Parse normalises it to
+	// HintTypeOnToolResult) so existing manifests keep working; new
+	// manifests should use on_tool_result.
+	HintTypeOnToolError HintType = "on_tool_error"
 )
 
-// Hint is one typed in-turn advisory. The active fields depend on
-// Type; for `on_tool_error`:
+// Hint is one typed in-turn advisory. For `on_tool_result` (the only
+// active type):
 //
 //   - Tools — tool-name match: exact names and/or globs
 //     (e.g. "hugr-main:data-*"). Matching is form-insensitive — the
 //     `:` / `.` separators and the model-visible `_` form compare
 //     equal. Empty → any tool while this skill is loaded.
-//   - Match — optional Go regexp over the error text (the runtime-
-//     side message and/or the provider error-result body). Empty →
-//     any error for the named tools.
+//   - Match — optional Go regexp over the result text (a runtime
+//     error message, or a successful dispatch's raw result body).
+//     Empty → any result for the named tools.
 //   - Code — optional match on the structured ToolError.Code
-//     ("io" / "not_found" / …) for runtime-side errors.
-//   - Message — the guidance appended to the failing tool result.
+//     ("not_found" / "timeout" / …) for a runtime-side error; never
+//     matches a successful dispatch (its Code is empty).
+//   - Message — the guidance appended inline to the matching result.
 type Hint struct {
 	Type    HintType `json:"type" yaml:"type"`
 	Tools   []string `json:"tools,omitempty" yaml:"tools,omitempty"`
@@ -388,41 +399,25 @@ func (h Hint) matchesTool(toolName string) bool {
 	return false
 }
 
-// MatchToolError returns the hint's Message when it matches a failing
-// tool result, or "" otherwise. Used by the skill extension's
-// [extension.ModelInTurnAdvisor.OnToolError]. msg is the runtime-side
-// error text (empty for the provider embedded-error path); resultText
-// is the raw provider result body (empty for runtime errors); the
-// regex, when present, matches against either. A non-on_tool_error
-// hint never matches here.
-func (h Hint) MatchToolError(toolName, code, msg, resultText string) string {
-	if h.Type != HintTypeOnToolError {
+// MatchToolResult returns the hint's Message when it matches a tool
+// result, or "" otherwise. Used by the skill extension's
+// [extension.ModelInTurnAdvisor.OnToolResult], which feeds it EVERY
+// tool result — runtime error and successful dispatch alike. The
+// runtime does not pre-classify error-vs-success; the discriminating is
+// here: code is the structured ToolError.Code (empty for a successful
+// dispatch) and resultText is the runtime error message OR the raw
+// result body. A non-on_tool_result hint never matches. A Code-bearing
+// hint only fires on a runtime error (a successful dispatch's empty
+// code can't equal a non-empty Code); a regex-only hint fires wherever
+// the body matches.
+func (h Hint) MatchToolResult(toolName, code, resultText string) string {
+	if h.Type != HintTypeOnToolResult {
 		return ""
 	}
 	if !h.matchesTool(toolName) {
 		return ""
 	}
 	if h.Code != "" && !strings.EqualFold(h.Code, code) {
-		return ""
-	}
-	if re := h.compiled(); re != nil {
-		if !re.MatchString(msg) && !re.MatchString(resultText) {
-			return ""
-		}
-	}
-	return strings.TrimSpace(h.Message)
-}
-
-// MatchToolResult returns the hint's Message when it matches a
-// SUCCESSFUL tool result, or "" otherwise. Used by the skill
-// extension's [extension.ModelInTurnAdvisor.OnToolResult]. resultText
-// is the raw successful result body; the regex, when present, matches
-// against it. A non-on_tool_result hint never matches here.
-func (h Hint) MatchToolResult(toolName, resultText string) string {
-	if h.Type != HintTypeOnToolResult {
-		return ""
-	}
-	if !h.matchesTool(toolName) {
 		return ""
 	}
 	if re := h.compiled(); re != nil {
@@ -1364,7 +1359,13 @@ func (m *Manifest) validateHugen() error {
 		if h.Type == "" {
 			return fmt.Errorf("metadata.hugen.hints[%d].type is required", i)
 		}
-		if h.Type != HintTypeOnToolError && h.Type != HintTypeOnToolResult {
+		// Deprecated alias: the former error/result split collapsed into
+		// one on_tool_result type that fires on every result. Normalise
+		// so the stored Hint carries the canonical type and Match works.
+		if h.Type == HintTypeOnToolError {
+			h.Type = HintTypeOnToolResult
+		}
+		if h.Type != HintTypeOnToolResult {
 			// Forward-compat: keep the entry, skip type-specific
 			// validation; the runtime ignores unknown variations.
 			continue

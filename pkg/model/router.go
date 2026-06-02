@@ -22,7 +22,23 @@ type ModelRouter struct {
 	mu       sync.RWMutex
 	defaults map[Intent]ModelSpec
 	models   map[ModelSpec]Model
+
+	// Context-budget metadata (Phase 5.2 budget-termination), wired
+	// once at boot via [ModelRouter.SetContextBudgets]. Zero/nil maps
+	// are tolerated — the accessors fall back to the floor / default
+	// ratio so a router built without budgets stays correct.
+	budgets       map[ModelSpec]int  // input-context capacity per model (tokens)
+	defaultBudget int                // fallback capacity when a spec has none
+	ratios        map[Intent]float64 // per-intent soft context-budget ratio
+	intentBudgets map[Intent]int     // per-intent budget override (routes.<intent>.default_budget)
 }
+
+// DefaultContextBudgetRatio is the single fraction of the configured
+// context budget at which the runtime blocks further tool work and
+// makes a subagent summarise + hand off (budget-termination). The 0.85
+// default leaves headroom for the finalize turn before the real context
+// limit. Phase 5.2.
+const DefaultContextBudgetRatio = 0.85
 
 // NewModelRouter validates that defaults["default"] is set and that
 // every ModelSpec listed in defaults is present in models.
@@ -111,6 +127,65 @@ func (r *ModelRouter) Has(spec ModelSpec) bool {
 	defer r.mu.RUnlock()
 	_, ok := r.models[spec]
 	return ok
+}
+
+// SetContextBudgets wires the per-model context windows, per-intent
+// soft ratios, and per-intent budget overrides resolved from operator
+// config. Called once at boot, after [NewModelRouter]. nil maps are
+// tolerated.
+func (r *ModelRouter) SetContextBudgets(budgets map[ModelSpec]int, defaultBudget int, ratios map[Intent]float64, intentBudgets map[Intent]int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.budgets = budgets
+	r.defaultBudget = defaultBudget
+	r.ratios = ratios
+	r.intentBudgets = intentBudgets
+}
+
+// MaxPromptTokens returns the configured context budget (tokens) for
+// intent, or 0 when none is configured — 0 means UNLIMITED: the budget
+// guard is OFF for that intent. The feature is fully opt-in; with
+// nothing configured the runtime never budget-terminates. Precedence:
+// per-intent override (routes.<intent>.default_budget) → the intent's
+// model ContextWindow → the global DefaultBudget. The per-intent
+// override lets a dedicated worker intent carry a tighter budget than
+// the model it shares with the orchestration roles. Resolution uses the
+// runtime-default spec for the intent (not per-session / per-skill
+// overrides) — the budget is an approximate ceiling.
+func (r *ModelRouter) MaxPromptTokens(intent Intent) int {
+	if intent == "" {
+		intent = IntentDefault
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if b, ok := r.intentBudgets[intent]; ok && b > 0 {
+		return b
+	}
+	spec, ok := r.defaults[intent]
+	if !ok {
+		spec = r.defaults[IntentDefault]
+	}
+	if b, ok := r.budgets[spec]; ok && b > 0 {
+		return b
+	}
+	return r.defaultBudget // 0 when unset → unlimited (budget off)
+}
+
+// ContextBudgetRatio returns the single budget fraction of
+// [ModelRouter.MaxPromptTokens] for intent — the per-call prompt point
+// at which the runtime blocks tools + makes the subagent summarise.
+// Defaults to [DefaultContextBudgetRatio]; operator-overridable per
+// route (models.routes.<intent>.context_budget_ratio).
+func (r *ModelRouter) ContextBudgetRatio(intent Intent) float64 {
+	if intent == "" {
+		intent = IntentDefault
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if v, ok := r.ratios[intent]; ok && v > 0 {
+		return v
+	}
+	return DefaultContextBudgetRatio
 }
 
 func (r *ModelRouter) lookup(spec ModelSpec) (Model, ModelSpec, error) {

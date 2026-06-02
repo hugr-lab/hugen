@@ -14,8 +14,9 @@ import (
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
-// Manifest carrying an on_tool_error hint AND an on_tool_result hint,
-// used by the OnToolError / OnToolResult advisor tests.
+// Manifest carrying a legacy on_tool_error hint (parse normalises it to
+// on_tool_result) AND a native on_tool_result hint, used by the
+// OnToolResult advisor tests.
 const inlineHintManifest = `---
 name: hinted
 description: A skill with in-turn tool hints.
@@ -1157,10 +1158,13 @@ func TestAdvertiseSystemPrompt_EmptyStore(t *testing.T) {
 }
 
 // TestOnToolError_MatchesLoadedHint verifies the ModelInTurnAdvisor
-// on_tool_error variation: a LOADED skill's hint fires when its tool
-// glob + error regex match the failing tool, and an installed-but-not-
-// loaded skill's hint stays silent (a hint is guidance for a skill the
-// model is actively using).
+// error-shaped match through the single OnToolResult variation: a
+// LOADED skill's hint fires when its tool glob + regex match a result
+// carrying the error text — whether that text rode in as a runtime
+// error message (Code+ResultText) or inside a "successful" provider
+// body (ResultText only). An installed-but-not-loaded skill stays
+// silent. The inline manifest declares the hint as `on_tool_error`,
+// exercising the parse-time alias to on_tool_result.
 func TestOnToolError_MatchesLoadedHint(t *testing.T) {
 	ctx := context.Background()
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
@@ -1173,13 +1177,15 @@ func TestOnToolError_MatchesLoadedHint(t *testing.T) {
 		t.Fatalf("InitState: %v", err)
 	}
 
-	ev := extension.ToolErrorEvent{
-		Tool:    "hugr-main:data-inline_graphql_result",
-		Message: `Cannot query field "core_modules_aggregation" on type "Query"`,
+	// Runtime-error shape: the message travels in ResultText, Code set.
+	ev := extension.ToolResultEvent{
+		Tool:       "hugr-main:data-inline_graphql_result",
+		Code:       "validation",
+		ResultText: `Cannot query field "core_modules_aggregation" on type "Query"`,
 	}
 
 	// Installed but not loaded → no contribution.
-	if got := ext.OnToolError(ctx, state, ev); got != "" {
+	if got := ext.OnToolResult(ctx, state, ev); got != "" {
 		t.Errorf("unloaded skill hint fired: %q", got)
 	}
 
@@ -1187,24 +1193,24 @@ func TestOnToolError_MatchesLoadedHint(t *testing.T) {
 	if err := FromState(state).Load(ctx, "hinted"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	got := ext.OnToolError(ctx, state, ev)
+	got := ext.OnToolResult(ctx, state, ev)
 	if !strings.Contains(got, "discovery-search_modules") {
 		t.Errorf("loaded hint did not fire: %q", got)
 	}
 
 	// Non-matching error → no contribution even when loaded.
-	noMatch := extension.ToolErrorEvent{Tool: "hugr-main:data-inline_graphql_result", Message: "unknown filter operator"}
-	if got := ext.OnToolError(ctx, state, noMatch); got != "" {
+	noMatch := extension.ToolResultEvent{Tool: "hugr-main:data-inline_graphql_result", ResultText: "unknown filter operator"}
+	if got := ext.OnToolResult(ctx, state, noMatch); got != "" {
 		t.Errorf("non-matching error produced a hint: %q", got)
 	}
 
-	// Provider embedded-error path (ResultText) matches too.
-	embedded := extension.ToolErrorEvent{
+	// Success-envelope failure (body only, no Code) matches the same hint.
+	embedded := extension.ToolResultEvent{
 		Tool:       "hugr-main:data-inline_graphql_result",
 		ResultText: `{"is_error":true,"text":"Cannot query field \"x_aggregation\""}`,
 	}
-	if got := ext.OnToolError(ctx, state, embedded); !strings.Contains(got, "discovery-search_modules") {
-		t.Errorf("provider embedded-error hint did not fire: %q", got)
+	if got := ext.OnToolResult(ctx, state, embedded); !strings.Contains(got, "discovery-search_modules") {
+		t.Errorf("success-envelope failure hint did not fire: %q", got)
 	}
 }
 

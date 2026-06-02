@@ -41,7 +41,44 @@ models:
   #     slow-but-progressing stream is never killed.
   #first_batch_deadline: 5m
   #inter_batch_deadline: 2m
+  # ── Context-budget termination (phase 5.2) ──────────────────
+  # When a mission sub-agent's per-call prompt crosses ONE threshold
+  # (context_budget_ratio × its model's input window), the runtime
+  # DISABLES its tools — every further tool call returns a budget-error
+  # ("summarise + hand off now") — so the role can only wrap up. Its
+  # handoff is force-stamped status:error by the runtime (the model
+  # can't claim success). Then: a worker error re-plans the next wave
+  # (its files carry the partial); an orchestration role (researcher /
+  # planner / checker / synthesizer) routes straight to the synthesizer,
+  # which summarises the partials into the user answer. Root / chat
+  # sessions are NEVER budget-terminated.
+  #
+  # Budget (input window, tokens) resolves per intent:
+  #   routes.<intent>.default_budget        (per-intent override)
+  #   → context_windows[<model name>]       (per-model window)
+  #   → default_budget                      (global fallback)
+  #   → otherwise 0 = UNLIMITED (budget guard off).
+  # The feature is fully OPT-IN: with nothing set here NO sub-agent is
+  # ever budget-terminated. context_budget_ratio is the single threshold
+  # fraction (default 0.85 — leaves headroom for the finalize turn).
+  # Both default_budget and context_budget_ratio can be set per route —
+  # the recommended pattern is a dedicated "worker" intent (see
+  # routes.worker below + sub_agents intent: worker in a mission skill)
+  # so heavy workers carry a tighter budget than the orchestration roles.
+  #context_windows:
+  #  gemma4-26b: 128000
+  #  gemini-pro-3-1: 200000
+  #default_budget: 128000
+  #context_budget_ratio: 0.85
   routes:
+    # A dedicated worker intent: same model as default, but its own
+    # (tighter) context budget. Mission worker roles set intent: worker
+    # in the skill manifest's sub_agents; orchestration roles stay on
+    # default / reasoning and keep the floor.
+    #worker:
+    #  model: gemma4-26b
+    #  default_budget: 60000       # worker context budget (tokens)
+    #  context_budget_ratio: 0.85  # tools blocked at 0.85 × budget
     # Required by phase-1 ModelRouter — the "cheap" intent slot is
     # reserved for the Compactor (phase 5) and Reviewer (phase 7);
     # phase 1 only validates that it exists at boot.

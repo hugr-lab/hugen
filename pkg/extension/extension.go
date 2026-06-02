@@ -537,47 +537,36 @@ type InquiryPolicy interface {
 	MaybeDenyInquiry(ctx context.Context, caller SessionState) (reason string, deny bool)
 }
 
-// ToolErrorEvent describes a tool result the runtime considers a
-// failure, handed to [ModelInTurnAdvisor.OnToolError] so an advisor
-// can append corrective steer the model reads inline.
-//
-// Two producers feed it (see the OnToolError doc): runtime-side
-// errors carry Code+Message (ResultText empty); the provider/MCP
-// path — a "successful" dispatch whose JSON body embeds
-// "is_error":true (e.g. a GraphQL error like
-// `Cannot query field "X_aggregation"`) — carries the raw result in
-// ResultText with Code+Message empty. An advisor matches against
-// whichever fields are populated.
-type ToolErrorEvent struct {
-	// Tool is the fully-qualified tool name as dispatched
-	// (e.g. "hugr-main:data-inline_graphql_result").
-	Tool string
-	// Code is the structured ToolError.Code for runtime-side
-	// errors ("not_found" / "io" / …); empty for the provider
-	// embedded-error path.
-	Code string
-	// Message is the runtime-side error text; empty for the
-	// provider embedded-error path.
-	Message string
-	// ResultText is the raw tool result JSON for the provider
-	// embedded-error path; empty for runtime-side errors. The
-	// human-readable error sits inside it.
-	ResultText string
-}
-
-// ToolResultEvent describes a SUCCESSFUL tool result handed to
+// ToolResultEvent describes a tool result handed to
 // [ModelInTurnAdvisor.OnToolResult] so an advisor can append in-turn
-// steer keyed off the result content — not a failure, but a shape
-// that warrants a nudge (the canonical case: an inline query returned
-// `is_truncated: true`, so the model should switch to file output
-// instead of re-bumping the size cap). Distinct from [ToolErrorEvent]:
-// this fires on the success path, where no error producer runs.
+// corrective steer the model reads inline, with no separate emitted
+// frame. It fires on EVERY tool result — the runtime does NOT scan the
+// body to decide "is this an error" (that guessing was removed: a
+// clean result can legitimately carry "is_error":true / "ok":false in
+// its DATA, and "errors":null is a success). The authoritative signals
+// travel as fields; the matching is the hint's job:
+//
+//   - a runtime-side error (emitToolError) carries the structured Code
+//     plus its text in ResultText;
+//   - a successful dispatch carries its raw JSON body in ResultText
+//     with Code empty — INCLUDING a provider success-envelope failure
+//     (e.g. a GraphQL `Cannot query field "X"` or a Hugr
+//     `{"error":…,"ok":false}` query rejection), which is just a body
+//     a hint's regex matches.
+//
+// A hint matches via tool-name glob + optional structured Code +
+// optional regex over ResultText — see [skill.Hint].
 type ToolResultEvent struct {
 	// Tool is the fully-qualified tool name as dispatched
 	// (e.g. "hugr-main:data-inline_graphql_result").
 	Tool string
-	// ResultText is the raw successful tool result JSON. An advisor
-	// matches its on_tool_result hints' regex against it.
+	// Code is the structured ToolError.Code for a runtime-side error
+	// ("not_found" / "timeout" / "context_budget" / …); empty for a
+	// successful dispatch (where the body is in ResultText).
+	Code string
+	// ResultText is the tool result text the hint regex matches: the
+	// runtime error message for a runtime-side error, or the raw
+	// result JSON for a successful dispatch.
 	ResultText string
 }
 
@@ -601,32 +590,26 @@ type ToolResultEvent struct {
 //     attend near the ask, not the top of a long system prompt) and
 //     prompt cache (the system prompt stays stable/cacheable while the
 //     volatile advertise rides after the cache boundary).
-//   - OnToolError — guidance appended inline to a failing tool result
-//     (manifest `metadata.hugen.hints` of type on_tool_error). See
-//     [ToolErrorEvent] for the two error producers; the session folds
-//     the returned text into the result content the model reads, with
-//     no separate emitted frame.
-//   - OnToolResult — guidance appended inline to a SUCCESSFUL tool
-//     result whose content matches a hint (manifest hints of type
-//     on_tool_result). Same inline-fold mechanism as OnToolError, but
-//     fires on the success path — for results that are fine but
-//     warrant a nudge (e.g. truncated inline query → switch to file
-//     output). See [ToolResultEvent].
+//   - OnToolResult — guidance appended inline to a tool result whose
+//     content matches a hint (manifest `metadata.hugen.hints` of type
+//     on_tool_result). It fires on EVERY result — success or failure
+//     alike — and the hint's tool glob + optional Code + optional regex
+//     over [ToolResultEvent.ResultText] decide the match; the runtime
+//     no longer pre-classifies error-vs-success from the body. The
+//     session folds the returned text into the result content the model
+//     reads, with no separate emitted frame.
 //
 // Contract: implementations are consulted in deps.Extensions order.
-// TurnPreamble contributions are joined; OnToolError / OnToolResult
-// contributions are joined (the session de-dupes / caps). All are pure
-// — the session owns where the text lands.
+// TurnPreamble contributions are joined; OnToolResult contributions are
+// joined (the session de-dupes / caps). All are pure — the session owns
+// where the text lands.
 type ModelInTurnAdvisor interface {
 	// TurnPreamble returns the ephemeral block to inject before the
 	// last user message this turn, or "" for nothing.
 	TurnPreamble(ctx context.Context, state SessionState) string
-	// OnToolError returns guidance to append to a failing tool
-	// result, or "" for nothing.
-	OnToolError(ctx context.Context, state SessionState, ev ToolErrorEvent) string
-	// OnToolResult returns guidance to append to a SUCCESSFUL tool
-	// result whose content matched an on_tool_result hint, or "" for
-	// nothing.
+	// OnToolResult returns guidance to append to a tool result whose
+	// content matched an on_tool_result hint, or "" for nothing. Fed
+	// every tool result — runtime error and successful dispatch alike.
 	OnToolResult(ctx context.Context, state SessionState, ev ToolResultEvent) string
 }
 

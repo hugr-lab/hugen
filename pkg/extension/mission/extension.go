@@ -148,6 +148,19 @@ func (e *Extension) OnChildFrame(_ context.Context, parent extension.SessionStat
 		if !(f.Payload.Final && f.Payload.Consolidated) {
 			return
 		}
+		// Phase 5.2 — budget-finalize handoff: the runtime stamped this
+		// frame (tools were disabled, the role summarised what it had).
+		// Record it with the model's summary body but FORCE status:error
+		// (context_budget), and flag an orchestration abort. Checked
+		// BEFORE the planner special-case so a budget-finalized planner
+		// routes to synthesis, not a normal plan completion.
+		if f.Payload.BudgetExceeded {
+			if isOrchestrationWave(wave) {
+				m.MarkBudgetAbort(cur.Role)
+			}
+			e.ingestHandoff(m, childSessionID, cur, wave, f.Payload.Text, "context_budget", true)
+			return
+		}
 		// Phase 6.x — the planner submits its plan via the single
 		// channel mission:validate_and_approve (no terminal ```plan```
 		// fence); its final message is just "done". Record the planner
@@ -159,8 +172,25 @@ func (e *Extension) OnChildFrame(_ context.Context, parent extension.SessionStat
 			e.ingestPlannerCompletion(m, childSessionID, cur, wave)
 			return
 		}
-		e.ingestHandoff(m, childSessionID, cur, wave, f.Payload.Text, "")
+		e.ingestHandoff(m, childSessionID, cur, wave, f.Payload.Text, "", false)
 	case *protocol.SessionTerminated:
+		// Phase 5.2 budget-termination — the child crossed its hard
+		// context budget and was force-closed (no handoff: the soft
+		// nudge's chance to hand off cleanly was not taken). Checked
+		// BEFORE the planner-wave special-case so a budget-terminated
+		// planner aborts the mission rather than re-spawning into the
+		// same shortfall. Record a clearly-reasoned failed handoff so
+		// waitForRefs resolves; for an ORCHESTRATION role flag the
+		// mission for an immediate clean abort (a worker just re-plans
+		// via the partial wave — its artifact files carry the work).
+		if f.Payload.Reason == protocol.TerminationContextBudget {
+			e.recordError(m, childSessionID, cur, wave, "context_budget",
+				"role hit the context budget; partial work preserved in the mission files")
+			if isOrchestrationWave(wave) {
+				m.MarkBudgetAbort(cur.Role)
+			}
+			return
+		}
 		// Phase 6.x — planner wave: complete from the staged submission
 		// (same as the AgentMessage path) regardless of any Result text,
 		// so a fence-less planner close still resolves the wave.
@@ -181,10 +211,23 @@ func (e *Extension) OnChildFrame(_ context.Context, parent extension.SessionStat
 				"worker closed without emitting a terminal handoff")
 			return
 		}
-		e.ingestHandoff(m, childSessionID, cur, wave, f.Payload.Result, f.Payload.Reason)
+		e.ingestHandoff(m, childSessionID, cur, wave, f.Payload.Result, f.Payload.Reason, false)
 	case *protocol.Error:
 		e.recordError(m, childSessionID, cur, wave, f.Payload.Code, f.Payload.Message)
 	}
+}
+
+// isOrchestrationWave reports whether a wave label belongs to a
+// runtime-driven orchestration stage (research / planner / checker /
+// synthesis) rather than a planner-chosen worker ("Do") wave. Used to
+// decide whether a context-budget termination aborts the whole mission
+// (orchestration role can't fit → no point retrying) or just re-plans
+// (a worker → the next wave continues from its files). Phase 5.2.
+func isOrchestrationWave(wave string) bool {
+	return strings.HasPrefix(wave, plannerWaveLabelPrefix) ||
+		strings.HasPrefix(wave, checkerWaveLabelPrefix) ||
+		strings.HasPrefix(wave, researchWaveLabelPrefix) ||
+		wave == synthesisWaveLabel
 }
 
 // ingestPlannerCompletion records the planner wave's terminal handoff
@@ -248,7 +291,12 @@ func (e *Extension) ingestPlannerCompletion(m *MissionState, childSessionID stri
 // ingestHandoff is the shared parse+record path. Builds the ref
 // from (cur.Name, wave), parses the worker's text, stamps the
 // Subagent + Ref fields, stores in Handoffs.
-func (e *Extension) ingestHandoff(m *MissionState, childSessionID string, cur workerCursor, wave, text, fallbackReason string) {
+// budgetExceeded (Phase 5.2) is set when the runtime stamped the
+// child's finalize handoff frame with BudgetExceeded — the role
+// produced this summary under a tools-disabled context-budget cut. We
+// keep the model's summary body but FORCE status:error (reason
+// context_budget) so an out-of-budget role can never report success.
+func (e *Extension) ingestHandoff(m *MissionState, childSessionID string, cur workerCursor, wave, text, fallbackReason string, budgetExceeded bool) {
 	ref, err := MakeRef(cur.Name, wave)
 	if err != nil {
 		e.logger.Warn("mission: ingestHandoff: bad ref",
@@ -278,6 +326,11 @@ func (e *Extension) ingestHandoff(m *MissionState, childSessionID string, cur wo
 			Kind:   KindHandoff,
 			Status: "error",
 			Reason: reason,
+			// Preserve the role's raw output as the body so the planner
+			// can mission:get_handoff(ref) to see WHAT IT ACCOMPLISHED —
+			// even when the summary didn't parse as a clean fenced
+			// handoff (e.g. a budget-cut role's free-text wrap-up).
+			Body: text,
 			Subagent: SubagentRef{
 				SessionID: childSessionID,
 				Name:      cur.Name,
@@ -296,6 +349,17 @@ func (e *Extension) ingestHandoff(m *MissionState, childSessionID string, cur wo
 		Skill:     cur.Skill,
 	}
 	h.CreatedAt = nowFn()
+	// Phase 5.2 — the runtime caught the context budget: keep the
+	// model's summary body but FORCE status:error so the role cannot
+	// claim success on an out-of-budget, tools-disabled finalize.
+	if budgetExceeded {
+		h.Status = "error"
+		if h.Reason == "" {
+			h.Reason = "context_budget: ran out of context budget — output is incomplete"
+		} else {
+			h.Reason = "context_budget: " + h.Reason
+		}
+	}
 	m.Handoffs.Put(h)
 	// Phase D — auto-extract memory_summary into the plan_context
 	// journal. AppendHandoff is a no-op when MemorySummary is

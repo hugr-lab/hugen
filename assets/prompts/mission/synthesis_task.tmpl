@@ -2,6 +2,12 @@ Synthesize the mission's results.
 {{if .Goal}}
 Mission goal:
 {{.Goal}}
+{{end}}{{if .Incomplete}}
+The mission did NOT complete: {{.Incomplete}}. Do NOT claim the goal
+was achieved or invent results. Summarise honestly what WAS gathered
+(the handoffs / acceptance criteria below, plus any research files in
+the mission directory), state plainly that the result is INCOMPLETE
+and why, and tell the user they can resume by launching a new mission.
 {{end}}{{if .MissionAC}}
 Acceptance criteria and evidence trail:
 {{range .MissionAC}}- `{{.ID}}` [{{.Status}}{{if .Dropped}}: {{.DropReason}}{{end}}] {{.Statement}}{{if .LastEvidence}}

@@ -3,12 +3,23 @@
 > Filled in by the researcher. Workers read this file FIRST and lift
 > names verbatim — they must not re-discover what is recorded here.
 > One subsection per table the mission touches. Use EXACT
-> introspection names (never guessed/pluralised forms).
+> introspection names (never guessed/pluralised forms). External input
+> files the mission analyses are recorded under their own section below.
 
 ## Sources & modules
 
 <!-- Which Hugr data source / module backs each domain in the goal.
      One line each: <module> — what it tracks. -->
+
+## Input data files
+
+<!-- External data files the caller passed in (paths in [Inputs from
+     caller]) for the mission to ANALYSE — a CSV / parquet / JSON the
+     user already has, or data a prior step collected. One line each:
+     <abs/path> — format + what it holds (+ key columns if known). The
+     worker loads these via duckdb-data / python-runner; do NOT plan a
+     wave to re-fetch them. "none" when the mission has no external
+     input. -->
 
 ## Tables
 
