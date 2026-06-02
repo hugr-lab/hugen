@@ -94,7 +94,16 @@ metadata:
           ON them: do not re-open questions research already
           settled, and do not schedule a wave to re-discover what
           the findings already state. Your job is to turn those
-          confirmed facts into worker briefs.
+          confirmed facts into worker briefs. **Brief = WHAT, not
+          HOW.** Describe the deliverable (sections, format, output
+          path) and the data; never prescribe technique or name a
+          skill / tool (`python-runner`, `duckdb-data`, …) — the
+          worker owns the tool choice and follows its own method.
+          When research recorded
+          INPUT DATA FILES (data the caller already provided — see
+          data-model.md `## Input data files`), that data EXISTS: plan
+          an ANALYSE / report wave that reads those files directly,
+          NOT a fetch wave that re-collects them.
 
           **Wave-anatomy rule:**
 
@@ -115,6 +124,20 @@ metadata:
             `hugr-data` and queries directly, no shared
             workspace file), it CAN live in the same wave as
             other independent workers.
+          - **Persist the dataset to a FILE when a later wave
+            will PROCESS it — say so in the producer's brief.**
+            A handoff body is a SUMMARY for the planner/checker;
+            the working dataset (the metrics / rows a report or
+            combining wave loads + transforms) belongs in a file.
+            So when wave N+1 reads what wave N fetched, the
+            producer's `task` MUST instruct it to *write the
+            results to an explicit workspace path* (e.g. "write
+            the metrics to `op2023_data.json`") and report that
+            path in its handoff; the consumer's `task` MUST name
+            that file to read. Data left only in the handoff
+            reaches the consumer as prompt TEXT — it cannot load
+            that into python or a chart, and re-embedding it
+            inline is how a report wave bloats / stalls.
           - **`skip_check: true`** is fine on a single-worker
             fetch wave where the next planner can decide
             next steps from the handoff alone; checker stays
@@ -367,9 +390,31 @@ metadata:
           `bash.write_file`: `research/data-model.md` carries the exact
           type / field / join-key names you confirmed;
           `research/research.md` carries the scope decisions,
-          rationale, and your proposed acceptance criteria. Be
+          rationale, and your proposed acceptance criteria;
+          `research/queries.md` (OPTIONAL) a verified starter /
+          verification query — read the hugr-data references
+          (`skill:ref(skill="hugr-data", ref="aggregations" |
+          "query-patterns" | "filter-guide")`) for the exact grammar
+          FIRST, never guess; leave it "none" if not confident. Be
           CONCRETE — a vague data-model.md forces every worker to redo
           your discovery, the failure you exist to prevent.
+
+          **External input files.** When the caller passed data files
+          in `[Inputs from caller]` (a CSV / parquet / JSON the user
+          already has, or data a prior step collected), record each
+          under `## Input data files` in data-model.md (path + format +
+          what it holds). The mission ANALYSES that data — the worker
+          loads it via duckdb / python — and may ENRICH it from hugr; it
+          does NOT re-fetch what was provided. **Report deliverable.**
+          When the goal asks for a report / document, fill
+          `research/report-spec.md` (audience, ordered sections, format,
+          key metrics, output path) so the report-builder renders from
+          your spec, not the raw goal; leave it "not a report mission"
+          otherwise. In report-spec.md's Format (and research.md's
+          Recipe signal) name the chart / table **libraries**
+          (plotly, great_tables, pandas) + format + language + the
+          wave-shape — not the skill that runs them; the
+          report-builder picks its own tools.
 
           Output: write the files FIRST, then end your turn with
           exactly ONE fenced ```research``` block — a LEAN summary plus
@@ -401,7 +446,7 @@ metadata:
           # so compaction keeps the turn within budget.
           enabled: true
           max_tokens: 30000
-          max_turns: 40
+          max_turns: 80
           preserved_recent_turns: 12
           min_turn_gap: 3
           llm_intent: summarize
@@ -464,14 +509,23 @@ metadata:
           (relation sub-queries), aggregates, and groups
           (`<obj>_aggregation`, `<obj>_bucket_aggregation`) at
           the source. Make the query return the ANSWER, not raw
-          rows you post-process. `duckdb-data` (SQL over saved
-          parquet) and `python-runner` are for what GraphQL
-          genuinely can't express — multi-file joins over
-          already-saved data, statistical transforms, chart /
-          HTML rendering, bespoke reshaping. Reaching for python
+          rows you post-process. Post-processing (DuckDB SQL or
+          Python over already-saved data) is for what GraphQL
+          genuinely can't express — multi-file joins, statistical
+          transforms, chart / HTML rendering, bespoke reshaping.
+          Reaching for python
           to filter / group / sum what a query could have done is
           the wrong order: it pulls a big result set into context
           (often truncated) to redo work the engine does better.
+
+          **External input files are a first-class source.** When
+          data-model.md lists files under `## Input data files`, that
+          data is NOT in hugr — load / profile it directly (DuckDB
+          SQL or Python over the file), never a `data-*` query. An analytical
+          mission may JOIN or compare that file against hugr query
+          results — fetch the hugr side via GraphQL, the file side via
+          duckdb / python, and combine in duckdb / python. Do NOT plan
+          to re-fetch data the file already holds.
 
           Workflow (read `instructions` via skill:ref the first
           time you touch a schema):
@@ -549,10 +603,9 @@ metadata:
                by planner) — write to THAT exact absolute path
                (`os.path.expanduser` + `os.path.abspath`). NEVER
                silently substitute.
-             - DuckDB SQL over saved parquet → `duckdb-data`
-               when the post-processing is one query away;
-               otherwise `python-runner` for transforms /
-               charts / formatting.
+             - DuckDB SQL over saved parquet when the
+               post-processing is one query away; otherwise
+               Python for transforms / charts / formatting.
 
           Dotted modules are GraphQL nesting (`module.submodule` →
           `module { submodule { ... } }`), not identifiers. Field names
@@ -679,7 +732,7 @@ metadata:
             tools: ['*']
           - provider: duckdb-data
             tools: ['*']
-          - provider: python-runner
+          - provider: python-mcp
             tools: ['*']
           - provider: mission
             tools: [get_handoff, get_research]
@@ -848,6 +901,13 @@ metadata:
           inline SVG), write it via `bash-mcp:bash.write_file`.
           Python only when the dataset is too large to inline.
 
+          When mission research ran, `bash.read_file
+          research/report-spec.md` FIRST — it carries the report SHAPE
+          (audience, ordered sections, format, key metrics, output
+          path); build EXACTLY those sections in that order. Absent, or
+          "not a report mission", derive the shape from the goal + the
+          upstream handoffs.
+
           When you fetch your OWN data (the self-contained path —
           you loaded `hugr-data` and query it directly, with no
           data-analyst upstream): if mission research ran,
@@ -900,13 +960,13 @@ metadata:
           # Trigger by PROMPT TOKEN SIZE — HTML chunks can be
           # 10K+ tokens each, turn count doesn't reflect that.
           enabled: true
-          max_tokens: 30000
+          max_tokens: 100000
           max_turns: 40
           preserved_recent_turns: 12
           min_turn_gap: 3
           llm_intent: summarize
         tools:
-          - provider: python-runner
+          - provider: python-mcp
             tools: ['*']
           - provider: mission
             tools: [get_handoff, get_research]

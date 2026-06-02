@@ -154,6 +154,12 @@ Useful keys (use only those the user actually named):
 
 - `file_path` — the output destination the user typed
   (`"~/Downloads/report.html"`).
+- `data_files` — absolute path(s) to data the mission should USE
+  rather than fetch: data YOU already collected this run (a file
+  you wrote, an artifact), OR an external file the user gave to
+  analyse (a CSV / parquet / JSON named in their goal). Pass them
+  so the mission builds ON / analyses them — without this the
+  planner derives a collect wave and redoes (or ignores) the data.
 - `data_source` / `module` / `tables` — when the user named
   the source verbatim. Skip when the user spoke in generic
   terms — the planner discovers it.

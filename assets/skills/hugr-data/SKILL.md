@@ -181,6 +181,18 @@ Hugr is an open-source Data Mesh platform: a high-performance GraphQL
 backend that uses DuckDB to federate PostgreSQL, DuckDB, Parquet,
 Iceberg, Delta Lake, and REST APIs into one read-only GraphQL schema.
 
+**It is GraphQL, but it is NOT Hasura / PostGraphile.** The query
+grammar — aggregations, group-by, filters, joins, spatial — DIFFERS
+from every other GraphQL backend you have seen, so a query written
+from your GraphQL prior will have WRONG syntax. For example there is
+NO `group_by:` argument: grouping is `key { <field> }` with the
+aggregates nested under `aggregations { _rows_count … }` inside
+`*_bucket_aggregation`. So do NOT guess — `skill:ref(name: "hugr-data",
+ref: "…")` the matching reference for the exact grammar
+(`aggregations`, `filter-guide`, `query-patterns`, `spatial-queries`)
+before composing, and `data-validate_graphql_query` before you trust a
+query.
+
 ## The data model (the mental model that matters)
 
 - **Modules** are hierarchical namespaces. **Dotted module names are
