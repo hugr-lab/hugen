@@ -78,7 +78,8 @@ func (e *PlannerError) Unwrap() error { return e.Err }
 // Returns when the mission session has emitted its final
 // AgentMessage; the caller (RunMission) drives nothing further.
 func (e *Extension) driveMissionPlanner(mission extension.SessionState, spawner extension.SessionSpawner, manifest MissionManifest, missionSkill, goal string, inputs any) {
-	executor := NewExecutor(e.makeSpawnerCallback(mission, spawner, missionSkill), e.logger)
+	executor := NewExecutor(e.makeSpawnerCallback(mission, spawner, missionSkill), e.logger).
+		WithTerminator(e.makeTerminatorCallback(spawner))
 	ctx := context.Background()
 	_ = inputs
 
@@ -239,7 +240,7 @@ func (e *Extension) runPlannerLoop(ctx context.Context, executor *Executor, miss
 			return true, decorateErr
 		}
 		status, _, runErr := executor.RunWave(ctx, mission, decorated,
-			RunWaveOptions{Timeout: manifest.TimeoutForRoles(waveRoles(decorated))})
+			RunWaveOptions{RoleTimeout: manifest.TimeoutForRole})
 		e.emitWaveComplete(mission, plan.NextWave.Label, status, runErr)
 		if runErr != nil || status == WaveStatusFailed {
 			consecutiveErrors++
@@ -419,7 +420,7 @@ func (e *Extension) spawnAndAwaitPlanner(ctx context.Context, executor *Executor
 		}},
 	}
 	status, _, runErr := executor.RunWave(ctx, mission, wave,
-		RunWaveOptions{Timeout: manifest.TimeoutForRole(manifest.Plan.Role)})
+		RunWaveOptions{RoleTimeout: manifest.TimeoutForRole})
 	e.emitWaveComplete(mission, waveLabel, status, runErr)
 	if runErr != nil {
 		return nil, &PlannerError{Iteration: iteration, Reason: "planner wave run", Err: runErr}
@@ -534,7 +535,7 @@ func (e *Extension) spawnAndAwaitChecker(ctx context.Context, executor *Executor
 		}},
 	}
 	status, _, runErr := executor.RunWave(ctx, mission, wave,
-		RunWaveOptions{Timeout: manifest.TimeoutForRole(manifest.Control.Role)})
+		RunWaveOptions{RoleTimeout: manifest.TimeoutForRole})
 	e.emitWaveComplete(mission, waveLabel, status, runErr)
 	if runErr != nil {
 		return Verdict{}, &PlannerError{Iteration: iteration, Reason: "checker wave run", Err: runErr}
@@ -666,6 +667,20 @@ func (e *Extension) makeSpawnerCallback(mission extension.SessionState, spawner 
 		first := protocol.NewUserMessage(child.SessionID(), agentParticipant(mission, e.agentID), body)
 		settled := child.Submit(context.Background(), first)
 		return SpawnResult{SessionID: child.SessionID(), Settled: settled}, nil
+	}
+}
+
+// makeTerminatorCallback returns the [Terminator] the executor uses to
+// cancel a worker that overran its per-role time budget. It delegates
+// to the parent (mission) session's CancelChild — the workers are this
+// session's children, so cancelling them stops the detached worker
+// turn instead of letting it run on orphaned. The bool from CancelChild
+// (false = no live child) is not load-bearing for the executor, which
+// only needs "did the cancel error".
+func (e *Extension) makeTerminatorCallback(spawner extension.SessionSpawner) Terminator {
+	return func(ctx context.Context, sessionID, reason string) error {
+		_, err := spawner.CancelChild(ctx, sessionID, reason)
+		return err
 	}
 }
 
@@ -1129,7 +1144,15 @@ func collectWaveFailureIssues(mission extension.SessionState, waveLabel string, 
 				continue
 			}
 			for _, s := range w.Subagents {
-				if s.Status == "error" && s.Error != "" {
+				switch {
+				case s.TimedOut || s.Status == "timeout":
+					// Distinct TIMEOUT signal — the worker overran its
+					// time budget and was cancelled (it did not fail on
+					// the work). The planner reacts by SPLITTING the task
+					// into smaller parallel workers / sequential waves, or
+					// REDOING it whole if it was nearly done.
+					issues = append(issues, fmt.Sprintf("%s (role %s) TIMED OUT — it exceeded its time budget and was cancelled. SPLIT the task into smaller parallel workers or sequential waves so each fits its budget; only REDO it whole if it was nearly finished.", s.Name, s.Role))
+				case s.Status == "error" && s.Error != "":
 					ref := s.Ref
 					if ref == "" {
 						ref, _ = MakeRef(s.Name, waveLabel)

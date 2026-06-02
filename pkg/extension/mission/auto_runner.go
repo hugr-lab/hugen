@@ -116,7 +116,8 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 // completion is published as a mission:wave_complete ExtensionFrame
 // on the mission session for observability / recovery.
 func (e *Extension) driveMission(mission extension.SessionState, spawner extension.SessionSpawner, manifest MissionManifest, missionSkill, goal string, inputs any) {
-	executor := NewExecutor(e.makeSpawnerCallback(mission, spawner, missionSkill), e.logger)
+	executor := NewExecutor(e.makeSpawnerCallback(mission, spawner, missionSkill), e.logger).
+		WithTerminator(e.makeTerminatorCallback(spawner))
 
 	ctx := context.Background()
 	_ = inputs
@@ -159,7 +160,7 @@ func (e *Extension) driveMission(mission extension.SessionState, spawner extensi
 	aborted := false
 	for _, waveDecl := range renderedInline.Waves {
 		status, _, err := executor.RunWave(ctx, mission, waveDecl,
-			RunWaveOptions{Timeout: manifest.TimeoutForRoles(waveRoles(waveDecl))})
+			RunWaveOptions{RoleTimeout: manifest.TimeoutForRole})
 		e.emitWaveComplete(mission, waveDecl.Label, status, err)
 		if err != nil || status == WaveStatusFailed {
 			e.logger.Warn("mission: driveMission: wave failed",
@@ -237,7 +238,8 @@ func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, missio
 	// never emits its kind=synthesis fence would otherwise wedge
 	// the mission. Budget comes from the synthesizer role's
 	// `timeout` (DefaultWaveTimeout when unset).
-	status, _, err := executor.RunWave(ctx, mission, wave, RunWaveOptions{Timeout: timeout})
+	status, _, err := executor.RunWave(ctx, mission, wave,
+		RunWaveOptions{RoleTimeout: func(string) time.Duration { return timeout }})
 	e.emitWaveComplete(mission, synthesisWaveLabel, status, err)
 	if err != nil {
 		return "", err

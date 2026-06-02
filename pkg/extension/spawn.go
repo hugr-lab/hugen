@@ -43,6 +43,15 @@ type SpawnSpec struct {
 // is atomic per pkg/session contracts).
 type SessionSpawner interface {
 	SpawnChild(ctx context.Context, spec SpawnSpec) (SessionState, error)
+
+	// CancelChild requests cancellation of a previously-spawned
+	// child by its session id. Used by the mission ext executor to
+	// stop a worker that overran its per-role time budget — without
+	// it a timed-out worker runs detached to completion (its result
+	// orphaned). Returns (true, nil) when a live child was signalled,
+	// (false, nil) when no such live child exists (already closed /
+	// unknown id). reason is a short audit string.
+	CancelChild(ctx context.Context, childID, reason string) (bool, error)
 }
 
 // MissionAutoRunner is the capability the mission ext implements

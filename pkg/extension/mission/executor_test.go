@@ -22,6 +22,7 @@ type fakeState struct {
 	id     string
 	role   string
 	skill  string
+	tier   string // empty defaults to "root"
 	values sync.Map
 	parent extension.SessionState
 	// tools is the per-session ToolManager. nil for the executor
@@ -39,7 +40,12 @@ func (s *fakeState) SubagentName() string               { return "" }
 func (s *fakeState) Role() string                       { return s.role }
 func (s *fakeState) Skill() string                      { return s.skill }
 func (s *fakeState) Depth() int                         { return 0 }
-func (s *fakeState) Tier() string                       { return "root" }
+func (s *fakeState) Tier() string {
+	if s.tier != "" {
+		return s.tier
+	}
+	return "root"
+}
 func (s *fakeState) Parent() (extension.SessionState, bool) {
 	if s.parent == nil {
 		return nil, false
@@ -280,6 +286,146 @@ func TestExecutor_RunWave_Timeout(t *testing.T) {
 	}
 	if status != WaveStatusFailed {
 		t.Errorf("status = %q, want failed", status)
+	}
+}
+
+// recordingTerminator captures the session ids RunWave asks to cancel.
+type recordingTerminator struct {
+	mu        sync.Mutex
+	cancelled []string
+}
+
+func (t *recordingTerminator) terminate(_ context.Context, sessionID, _ string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cancelled = append(t.cancelled, sessionID)
+	return nil
+}
+
+func (t *recordingTerminator) ids() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.cancelled...)
+}
+
+// TestExecutor_RunWave_PerWorkerTimeout verifies the per-role timeout
+// semantics: a worker that overruns ITS budget is cancelled (via the
+// terminator) and recorded `timeout`, while a sibling that lands in
+// time succeeds — the wave is partial, not abandoned. (B20-followup /
+// op2023 dogfood: the old single wave-level timeout failed the whole
+// wave on the slowest worker and never cancelled it.)
+func TestExecutor_RunWave_PerWorkerTimeout(t *testing.T) {
+	state := newFakeState("mis-pw")
+	m := installMissionState(state)
+
+	var slowMu sync.Mutex
+	var slowID string
+
+	spawner := &fakeSpawner{}
+	spawner.ingestion = func(req SpawnRequest, sessionID string) {
+		switch req.Name {
+		case "fast":
+			ref, _ := MakeRef("fast", "w1")
+			m.Handoffs.Put(Handoff{
+				Ref: ref, Kind: KindHandoff, Status: "ok",
+				Body: "done", CreatedAt: time.Now(),
+			})
+		case "slow":
+			// Never lands a handoff — must time out + be cancelled.
+			slowMu.Lock()
+			slowID = sessionID
+			slowMu.Unlock()
+		}
+	}
+
+	term := &recordingTerminator{}
+	exec := NewExecutor(spawner.spawn, nil).WithTerminator(term.terminate)
+
+	wave := Wave{
+		Label: "w1",
+		Subagents: []SubagentSpec{
+			{Name: "fast", Role: "fast", Task: "t"},
+			{Name: "slow", Role: "slow", Task: "t"},
+		},
+	}
+	roleTimeout := func(role string) time.Duration {
+		if role == "slow" {
+			return 30 * time.Millisecond
+		}
+		return 10 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	status, outcomes, err := exec.RunWave(ctx, state, wave,
+		RunWaveOptions{RoleTimeout: roleTimeout})
+	if err != nil {
+		t.Fatalf("RunWave: unexpected err: %v", err)
+	}
+	if status != WaveStatusPartial {
+		t.Errorf("status = %q, want partial", status)
+	}
+
+	byName := map[string]DoneWorker{}
+	for _, o := range outcomes {
+		byName[o.Name] = o
+	}
+	if byName["fast"].Status != "ok" {
+		t.Errorf("fast status = %q, want ok", byName["fast"].Status)
+	}
+	if byName["slow"].Status != "timeout" || !byName["slow"].TimedOut {
+		t.Errorf("slow outcome = %+v, want status=timeout TimedOut=true", byName["slow"])
+	}
+
+	slowMu.Lock()
+	wantID := slowID
+	slowMu.Unlock()
+	if got := term.ids(); len(got) != 1 || got[0] != wantID {
+		t.Errorf("terminator cancelled = %v, want [%s]", got, wantID)
+	}
+}
+
+// TestExtension_InitState_WorkerInheritsMissionState verifies the
+// shadowing fix: a worker-tier child does NOT get its own MissionState
+// (which would hide the mission's), so FromState — and thus
+// mission:get_research / get_handoff — resolves the MISSION's state.
+// The mission-tier dispatcher still owns its own (covers nested
+// missions).
+func TestExtension_InitState_WorkerInheritsMissionState(t *testing.T) {
+	ext := &Extension{}
+	ctx := context.Background()
+
+	mission := &fakeState{id: "mis", tier: "mission"}
+	if err := ext.InitState(ctx, mission); err != nil {
+		t.Fatalf("InitState(mission): %v", err)
+	}
+	mMission := FromState(mission)
+	if mMission == nil {
+		t.Fatal("mission-tier session must own a MissionState")
+	}
+	mMission.SetResearchOutput("findings here", nil, nil)
+
+	worker := &fakeState{id: "w", tier: "worker", parent: mission}
+	if err := ext.InitState(ctx, worker); err != nil {
+		t.Fatalf("InitState(worker): %v", err)
+	}
+	if _, ok := worker.Value(StateKey); ok {
+		t.Error("worker must NOT install its own MissionState (would shadow the mission's)")
+	}
+	if FromState(worker) != mMission {
+		t.Error("FromState(worker) must resolve to the mission's MissionState")
+	}
+	if findings, _, _ := FromState(worker).ResearchOutput(); findings != "findings here" {
+		t.Errorf("worker sees research findings = %q, want 'findings here'", findings)
+	}
+
+	// A nested mission-tier child still owns its own (no sharing).
+	nested := &fakeState{id: "nest", tier: "mission", parent: worker}
+	if err := ext.InitState(ctx, nested); err != nil {
+		t.Fatalf("InitState(nested): %v", err)
+	}
+	if FromState(nested) == mMission {
+		t.Error("nested mission-tier session must own a SEPARATE MissionState")
 	}
 }
 

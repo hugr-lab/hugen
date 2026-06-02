@@ -77,6 +77,61 @@ func TestTools_WriteThenRead(t *testing.T) {
 	}
 }
 
+// TestTools_WriteAppend_SizeTotal verifies that mode:"append" adds to
+// the file rather than truncating, and that size_total reports the
+// file's full size after each write — the durable offset a chunked
+// report-builder fallback resumes from after a stall (B20).
+func TestTools_WriteAppend_SizeTotal(t *testing.T) {
+	tools, _ := newTools(t)
+
+	// First chunk: a fresh write reports bytes_written == size_total.
+	out, res := callJSON(t, tools.writeFile, map[string]any{
+		"path":    "doc.html",
+		"content": "<h1>part1</h1>",
+	})
+	if res.IsError {
+		t.Fatalf("write chunk 1 IsError: %v", out)
+	}
+	if int(out["bytes_written"].(float64)) != 14 {
+		t.Errorf("chunk 1 bytes_written = %v, want 14", out["bytes_written"])
+	}
+	if int(out["size_total"].(float64)) != 14 {
+		t.Errorf("chunk 1 size_total = %v, want 14", out["size_total"])
+	}
+
+	// Second chunk appended: size_total is the cumulative size, but
+	// bytes_written is just this chunk.
+	out2, res2 := callJSON(t, tools.writeFile, map[string]any{
+		"path":    "doc.html",
+		"content": "<h2>part2</h2>",
+		"mode":    "append",
+	})
+	if res2.IsError {
+		t.Fatalf("write chunk 2 IsError: %v", out2)
+	}
+	if int(out2["bytes_written"].(float64)) != 14 {
+		t.Errorf("chunk 2 bytes_written = %v, want 14", out2["bytes_written"])
+	}
+	if int(out2["size_total"].(float64)) != 28 {
+		t.Errorf("chunk 2 size_total = %v, want 28 (cumulative)", out2["size_total"])
+	}
+
+	// Both chunks are durable on disk in order.
+	rd, _ := callJSON(t, tools.readFile, map[string]any{"path": "doc.html"})
+	if rd["content"] != "<h1>part1</h1><h2>part2</h2>" {
+		t.Errorf("appended content = %q", rd["content"])
+	}
+
+	// A default (non-append) write truncates: size_total resets.
+	out3, _ := callJSON(t, tools.writeFile, map[string]any{
+		"path":    "doc.html",
+		"content": "fresh",
+	})
+	if int(out3["size_total"].(float64)) != 5 {
+		t.Errorf("truncate size_total = %v, want 5", out3["size_total"])
+	}
+}
+
 func TestTools_ReadFile_NotFound(t *testing.T) {
 	tools, _ := newTools(t)
 	out, res := callJSON(t, tools.readFile, map[string]any{"path": "missing.txt"})

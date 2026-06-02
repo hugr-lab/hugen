@@ -59,10 +59,10 @@ func (t *Tools) Register(srv mcpToolRegistrar) {
 		mcp.WithNumber("length"),
 	), t.readFile)
 	srv.AddTool(mcp.NewTool("bash.write_file",
-		mcp.WithDescription("Write a file by path. Refuses /readonly/."),
+		mcp.WithDescription("Write a file by path. Refuses /readonly/. Returns {bytes_written, size_total, path} — size_total is the file's full size after the write, the durable offset to resume an append sequence from."),
 		mcp.WithString("path", mcp.Required()),
 		mcp.WithString("content"),
-		mcp.WithString("mode"),
+		mcp.WithString("mode", mcp.Description(`"append" to add to the file (each call is a durable append — chunk a large document so a stall loses only the current chunk); anything else (default) truncates and overwrites.`)),
 		mcp.WithBoolean("mkdir_parents"),
 	), t.writeFile)
 	srv.AddTool(mcp.NewTool("bash.list_dir",
@@ -306,6 +306,14 @@ func (t *Tools) writeFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 	body := map[string]any{
 		"bytes_written": n,
 		"path":          res.Logical,
+	}
+	// size_total is the file's full size AFTER this write — for a
+	// chunked `mode:"append"` sequence it is the durable offset the
+	// model resumes from, so a stall mid-document doesn't force a
+	// re-read to learn how much already landed. Best-effort: omit it
+	// if the stat fails rather than report a misleading zero.
+	if fi, statErr := f.Stat(); statErr == nil {
+		body["size_total"] = fi.Size()
 	}
 	return jsonResult(body), nil
 }
