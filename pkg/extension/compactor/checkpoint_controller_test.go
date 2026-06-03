@@ -8,23 +8,28 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 )
 
 // subagentState is a fakeState that reports a non-root tier so the
-// checkpoint controller arms (root-off tier gate).
+// checkpoint controller arms (root-off tier gate), with a real prompts
+// renderer so the template-backed nudge/advisory render.
 type subagentState struct {
 	*fakeState
-	depth int
+	depth    int
+	renderer *prompts.Renderer
 }
 
-func (s *subagentState) Depth() int   { return s.depth }
-func (s *subagentState) Tier() string { return "worker" }
+func (s *subagentState) Depth() int                 { return s.depth }
+func (s *subagentState) Tier() string               { return "worker" }
+func (s *subagentState) Prompts() *prompts.Renderer { return s.renderer }
 
-func newSubagentState(id string, depth int) (*subagentState, *CompactorState) {
+func newSubagentState(t *testing.T, id string, depth int) (*subagentState, *CompactorState) {
+	t.Helper()
 	base := newFakeState(id)
 	cs := &CompactorState{}
 	base.SetValue(StateKey, cs)
-	return &subagentState{fakeState: base, depth: depth}, cs
+	return &subagentState{fakeState: base, depth: depth, renderer: productionRendererForCompactor(t)}, cs
 }
 
 // overWindow fills the current segment past the default 10K window.
@@ -52,7 +57,7 @@ func TestEvaluateContext_RootIsInert(t *testing.T) {
 
 func TestEvaluateContext_SegmentWindowBlocks(t *testing.T) {
 	ext := newTestExtension(t)
-	st, cs := newSubagentState("ses-seg", 1)
+	st, cs := newSubagentState(t, "ses-seg", 1)
 	overWindow(cs)
 
 	dec := ext.EvaluateContext(context.Background(), st, extension.ContextInput{})
@@ -76,7 +81,7 @@ func TestEvaluateContext_SegmentWindowBlocks(t *testing.T) {
 
 func TestEvaluateContext_BudgetBandBlocks(t *testing.T) {
 	ext := newTestExtension(t)
-	st, cs := newSubagentState("ses-band", 1)
+	st, cs := newSubagentState(t, "ses-band", 1)
 	appendEntry(cs, 1, model.RoleAssistant, "small") // segment under window
 	cs.AddCheckpoint("seg")                          // give the advisory a segment to list
 
@@ -115,7 +120,7 @@ func TestFillSummary(t *testing.T) {
 
 func TestEvaluateContext_StampsOccupancy(t *testing.T) {
 	ext := newTestExtension(t)
-	st, cs := newSubagentState("ses-occ", 1)
+	st, cs := newSubagentState(t, "ses-occ", 1)
 	appendEntry(cs, 1, model.RoleAssistant, "x")
 	ext.EvaluateContext(context.Background(), st, extension.ContextInput{
 		RealPromptTokens: 36000, Budget: 100000,
@@ -130,7 +135,7 @@ func TestEvaluateContext_DisabledConfigInert(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.CheckpointsEnabled = false
 	ext := NewExtensionWithConfig(slog.Default(), cfg, Deps{})
-	st, cs := newSubagentState("ses-off", 1)
+	st, cs := newSubagentState(t, "ses-off", 1)
 	overWindow(cs)
 
 	dec := ext.EvaluateContext(context.Background(), st, extension.ContextInput{

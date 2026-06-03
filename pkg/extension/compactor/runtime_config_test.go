@@ -88,7 +88,7 @@ func TestBuildCompactorConfig_CheckpointKnobs(t *testing.T) {
 	built := BuildConfig(in, slog.Default())
 	ext := NewExtensionWithConfig(slog.Default(), built, Deps{})
 
-	st, _ := newSubagentState("ses-cfg", 1) // Tier() == "worker"
+	st, _ := newSubagentState(t, "ses-cfg", 1) // Tier() == "worker"
 	cfg := ext.resolveTierConfig(context.Background(), st)
 	if cfg.CheckpointWindowTokens != 5000 || cfg.ContextHideRatio != 0.60 {
 		t.Fatalf("worker-tier resolved checkpoint config: window=%d ratio=%v, want 5000 / 0.60",

@@ -18,7 +18,6 @@ package compactor
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
@@ -75,67 +74,86 @@ func (e *Extension) EvaluateContext(ctx context.Context, state extension.Session
 	// checkpoint nudge when both fire.
 	switch {
 	case dec.ContextFull:
-		dec.Inject = e.renderContextFullAdvisory(s, in)
+		dec.Inject = e.renderContextFullAdvisory(s, state, in)
 	case dec.CheckpointRequired:
-		dec.Inject = e.renderCheckpointNudge(s, in, seg, window, hideThreshold)
+		dec.Inject = e.renderCheckpointNudge(s, state, in, seg, window, hideThreshold)
 	}
 	return dec
+}
+
+// checkpointNudgeInput binds `assets/prompts/compactor/checkpoint_nudge.tmpl`.
+type checkpointNudgeInput struct {
+	SegmentK  int
+	WindowK   int
+	Fill      string // metric line; "" when occupancy unknown
+	NearBand  bool
+	HasClosed bool
+}
+
+// cpListItem is one row of the shed menu in the context_full advisory.
+type cpListItem struct {
+	ID      string
+	TokensK int
+	Desc    string
+}
+
+// contextFullInput binds `assets/prompts/compactor/context_full.tmpl`.
+type contextFullInput struct {
+	UsedK   int
+	BudgetK int
+	Closed  []cpListItem
 }
 
 // renderCheckpointNudge is the trigger-1 system message: the segment is
 // over the window, close it before continuing. It surfaces the real
 // context fill so the model only sheds when actually filling — not
 // blindly on every checkpoint (the dogfood failure where it hid early
-// and lost an instruction).
-func (e *Extension) renderCheckpointNudge(s *CompactorState, in extension.ContextInput, seg, window, hideThreshold int) string {
-	var b strings.Builder
-	fmt.Fprintf(&b,
-		"Context note: the current work segment is ~%dK tokens, over the ~%dK window. "+
-			"Call context:checkpoint(description=\"…\") to close it before any further tool calls — "+
-			"tool calls are blocked until you do.",
-		kTokens(seg), kTokens(window))
-	if fill := fillSummary(in.RealPromptTokens, in.Budget, hideThreshold); fill != "" {
-		fmt.Fprintf(&b, " %s.", fill)
-		// Suggest shedding only within ~80% of the band, and only if
-		// there is a closed segment to shed; otherwise reassure there is
-		// headroom so the model doesn't hide prematurely.
-		nearBand := hideThreshold > 0 && in.RealPromptTokens >= hideThreshold*8/10
-		if nearBand && closedVisibleCount(s) > 0 {
-			b.WriteString(" Context is getting full — consider context:hide(cp_id) on an earlier closed segment (its detail is summarised into a placeholder, so the takeaway survives).")
-		} else {
-			b.WriteString(" Plenty of headroom — no need to hide yet; just keep checkpointing.")
-		}
+// and lost an instruction). Prose lives in the template; this builds the
+// binding. Returns "" with no renderer / on render error (the dispatch
+// block still applies via the turn flags).
+func (e *Extension) renderCheckpointNudge(s *CompactorState, state extension.SessionState, in extension.ContextInput, seg, window, hideThreshold int) string {
+	renderer := state.Prompts()
+	if renderer == nil {
+		return ""
 	}
-	return b.String()
+	out, err := renderer.Render("compactor/checkpoint_nudge", checkpointNudgeInput{
+		SegmentK:  kTokens(seg),
+		WindowK:   kTokens(window),
+		Fill:      fillSummary(in.RealPromptTokens, in.Budget, hideThreshold),
+		NearBand:  hideThreshold > 0 && in.RealPromptTokens >= hideThreshold*8/10,
+		HasClosed: closedVisibleCount(s) > 0,
+	})
+	if err != nil {
+		e.logger.Warn("compactor: render checkpoint_nudge", "session", state.SessionID(), "err", err)
+		return ""
+	}
+	return strings.TrimSpace(out)
 }
 
 // renderContextFullAdvisory is the trigger-2 system message: occupancy
 // crossed the hide band; shed context (hide / rollback) to continue.
-func (e *Extension) renderContextFullAdvisory(s *CompactorState, in extension.ContextInput) string {
-	var b strings.Builder
-	fmt.Fprintf(&b,
-		"Context is filling: prompt is ~%dK of the ~%dK budget, over the shed band. "+
-			"Tool calls are blocked until you free context.",
-		kTokens(in.RealPromptTokens), kTokens(in.Budget))
-	list := renderCheckpointList(s)
-	if list != "" {
-		b.WriteString("\nClosed segments you can shed:\n")
-		b.WriteString(list)
-		b.WriteString("\nCall context:hide(cp_id=\"cp-N\") to collapse a closed segment, " +
-			"or context:rollback(cp_id=\"cp-N\", note=\"…\") to drop a bad branch wholesale.")
-	} else {
-		b.WriteString(" No closed segments yet — call context:checkpoint(description=\"…\") to " +
-			"close the current work so it becomes hideable, then context:hide it.")
+func (e *Extension) renderContextFullAdvisory(s *CompactorState, state extension.SessionState, in extension.ContextInput) string {
+	renderer := state.Prompts()
+	if renderer == nil {
+		return ""
 	}
-	return b.String()
+	out, err := renderer.Render("compactor/context_full", contextFullInput{
+		UsedK:   kTokens(in.RealPromptTokens),
+		BudgetK: kTokens(in.Budget),
+		Closed:  visibleClosedItems(s),
+	})
+	if err != nil {
+		e.logger.Warn("compactor: render context_full", "session", state.SessionID(), "err", err)
+		return ""
+	}
+	return strings.TrimSpace(out)
 }
 
-// renderCheckpointList renders the visible closed segments as a compact
-// menu (hidden ones are omitted — they're already shed). Empty when
-// there is nothing to hide.
-func renderCheckpointList(s *CompactorState) string {
+// visibleClosedItems lists the shed-able (closed, not hidden) checkpoints
+// as template rows. Hidden ones are omitted — they're already shed.
+func visibleClosedItems(s *CompactorState) []cpListItem {
 	cps := s.Checkpoints()
-	var b strings.Builder
+	var out []cpListItem
 	for _, cp := range cps {
 		if cp.Hidden {
 			continue
@@ -144,9 +162,9 @@ func renderCheckpointList(s *CompactorState) string {
 		if desc == "" {
 			desc = "(unlabelled)"
 		}
-		fmt.Fprintf(&b, "  - %s (~%dK tok): %s\n", cp.ID, kTokens(cp.Tokens), desc)
+		out = append(out, cpListItem{ID: cp.ID, TokensK: kTokens(cp.Tokens), Desc: desc})
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return out
 }
 
 // closedVisibleCount counts checkpoints that are currently visible
