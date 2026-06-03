@@ -354,6 +354,24 @@ const (
 	// the role must summarise + hand off. Phase 5.2 budget-termination.
 	ToolErrorContextBudget = "context_budget"
 
+	// ToolErrorCheckpointRequired is returned for every non-context tool
+	// call once the current checkpoint-segment has blown the segment
+	// window (L3 trigger 1): the model must call context:checkpoint to
+	// close the segment before any further tool work. Unlike
+	// ToolErrorContextBudget this is NOT a one-way kill — it clears the
+	// moment a checkpoint resets the segment counter. The context:*
+	// tools are exempt so the model can always recover. Stage 2 (L3).
+	ToolErrorCheckpointRequired = "checkpoint_required"
+
+	// ToolErrorContextFull is returned for every non-context tool call
+	// once the real prompt occupancy crosses the soft hide band (L3
+	// trigger 2, 0.80 × budget, below the 0.85 hard kill): the model
+	// must shed context (context:hide / context:rollback) before
+	// continuing. Re-evaluated against real usage each iteration — a
+	// hide that drops occupancy back under the band clears it. The
+	// context:* tools are exempt. Stage 2 (L3).
+	ToolErrorContextFull = "context_full"
+
 	// skill:save typed codes (phase 4.2). These give the LLM
 	// distinct signals it can map to specific recovery flows
 	// instead of treating every tool error as generic IO. The

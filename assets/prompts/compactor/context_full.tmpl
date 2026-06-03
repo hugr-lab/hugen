@@ -1,0 +1,4 @@
+Context is filling: prompt is ~{{.UsedK}}K of the ~{{.BudgetK}}K budget, over the shed band. Tool calls are blocked until you free context.{{if .Closed}}
+Closed segments you can shed:
+{{range .Closed}}  - {{.ID}} (~{{.TokensK}}K tok): {{.Desc}}
+{{end}}Call context:hide(cp_id="cp-N") to collapse a closed segment, or context:rollback(cp_id="cp-N", note="…") to drop a bad branch wholesale.{{else}} No closed segments yet — call context:checkpoint(description="…") to close the current work so it becomes hideable, then context:hide it.{{end}}

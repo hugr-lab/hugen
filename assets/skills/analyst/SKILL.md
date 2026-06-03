@@ -731,11 +731,11 @@ metadata:
           # crosses 30K tokens. Leaves room for the
           # preserved-recent tail (~5-10K) plus tools + skill
           # prose without blowing past the upstream window.
-          max_tokens: 30000
+          max_tokens: 100000
           # Secondary backstop: many empty / short turns still
           # warrant compaction after a long stretch, even
           # without crossing the token threshold.
-          max_turns: 40
+          max_turns: 120
           # Keep the last 12 turns verbatim past the cutoff —
           # enough live tail to follow a multi-step query
           # refinement without losing the most recent attempts.
@@ -859,8 +859,8 @@ metadata:
           # tables; without compaction one schema worker can
           # accumulate 50K+ history fast.
           enabled: true
-          max_tokens: 30000
-          max_turns: 40
+          max_tokens: 100000
+          max_turns: 120
           preserved_recent_turns: 12
           min_turn_gap: 3
           llm_intent: summarize
@@ -980,8 +980,8 @@ metadata:
           # worker; the value below does not gate normal single-turn
           # runs.
           enabled: true
-          max_tokens: 80000
-          max_turns: 40
+          max_tokens: 100000
+          max_turns: 120
           preserved_recent_turns: 12
           min_turn_gap: 3
           llm_intent: summarize

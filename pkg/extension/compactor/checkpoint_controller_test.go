@@ -1,0 +1,170 @@
+package compactor
+
+import (
+	"context"
+	"log/slog"
+	"strings"
+	"testing"
+
+	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/model"
+)
+
+// subagentState is a fakeState that reports a non-root tier so the
+// checkpoint controller arms (root-off tier gate). The renderer for the
+// template-backed nudge/advisory now lives on the Extension (Deps), not
+// the state, so this needs no renderer.
+type subagentState struct {
+	*fakeState
+	depth int
+}
+
+func (s *subagentState) Depth() int   { return s.depth }
+func (s *subagentState) Tier() string { return "worker" }
+
+func newSubagentState(t *testing.T, id string, depth int) (*subagentState, *CompactorState) {
+	t.Helper()
+	base := newFakeState(id)
+	cs := &CompactorState{}
+	base.SetValue(StateKey, cs)
+	return &subagentState{fakeState: base, depth: depth}, cs
+}
+
+// overWindow fills the current segment past the default 10K window.
+func overWindow(cs *CompactorState) {
+	appendEntry(cs, 1, model.RoleAssistant, "ask")
+	cs.appendHistory(HistoryEntry{Seq: 2, Message: model.Message{
+		Role: model.RoleTool, ToolCallID: "c1", Content: bigContent(11_000),
+	}})
+}
+
+func TestEvaluateContext_RootIsInert(t *testing.T) {
+	ext := newTestExtension(t)
+	st := newFakeState("ses-root") // Depth()==0
+	cs := &CompactorState{}
+	st.SetValue(StateKey, cs)
+	overWindow(cs)
+
+	dec := ext.EvaluateContext(context.Background(), st, extension.ContextInput{
+		RealPromptTokens: 99_000, Budget: 100_000,
+	})
+	if dec.CheckpointRequired || dec.ContextFull || dec.Inject != "" {
+		t.Fatalf("root session must be inert; got %+v", dec)
+	}
+}
+
+func TestEvaluateContext_SegmentWindowBlocks(t *testing.T) {
+	ext := newTestExtension(t)
+	st, cs := newSubagentState(t, "ses-seg", 1)
+	overWindow(cs)
+
+	dec := ext.EvaluateContext(context.Background(), st, extension.ContextInput{})
+	if !dec.CheckpointRequired {
+		t.Fatalf("over-window segment must set CheckpointRequired; got %+v", dec)
+	}
+	if dec.ContextFull {
+		t.Fatalf("no budget → ContextFull must stay false; got %+v", dec)
+	}
+	if !strings.Contains(dec.Inject, "context:checkpoint") {
+		t.Fatalf("checkpoint advisory missing the tool name: %q", dec.Inject)
+	}
+
+	// After a checkpoint closes the segment, the block clears.
+	cs.AddCheckpoint("closed it")
+	dec2 := ext.EvaluateContext(context.Background(), st, extension.ContextInput{})
+	if dec2.CheckpointRequired {
+		t.Fatalf("checkpoint must clear the block; got %+v", dec2)
+	}
+}
+
+func TestEvaluateContext_BudgetBandBlocks(t *testing.T) {
+	ext := newTestExtension(t)
+	st, cs := newSubagentState(t, "ses-band", 1)
+	appendEntry(cs, 1, model.RoleAssistant, "small") // segment under window
+	cs.AddCheckpoint("seg")                          // give the advisory a segment to list
+
+	// 85K of a 100K budget is over the 0.80 band (80K).
+	dec := ext.EvaluateContext(context.Background(), st, extension.ContextInput{
+		RealPromptTokens: 85_000, Budget: 100_000,
+	})
+	if !dec.ContextFull {
+		t.Fatalf("occupancy over the 0.80 band must set ContextFull; got %+v", dec)
+	}
+	if !strings.Contains(dec.Inject, "context:hide") {
+		t.Fatalf("context_full advisory missing hide guidance: %q", dec.Inject)
+	}
+
+	// Under the band → clears.
+	dec2 := ext.EvaluateContext(context.Background(), st, extension.ContextInput{
+		RealPromptTokens: 70_000, Budget: 100_000,
+	})
+	if dec2.ContextFull {
+		t.Fatalf("occupancy under the band must clear ContextFull; got %+v", dec2)
+	}
+}
+
+func TestFillSummary(t *testing.T) {
+	if fillSummary(0, 100000, 80000) != "" {
+		t.Fatalf("no real occupancy → empty fill")
+	}
+	if fillSummary(36000, 0, 0) != "" {
+		t.Fatalf("no budget → empty fill")
+	}
+	got := fillSummary(36000, 100000, 80000)
+	if !strings.Contains(got, "36%") || !strings.Contains(got, "shed band") {
+		t.Fatalf("fill = %q, want 36%% + shed band", got)
+	}
+}
+
+func TestEvaluateContext_StampsOccupancy(t *testing.T) {
+	ext := newTestExtension(t)
+	st, cs := newSubagentState(t, "ses-occ", 1)
+	appendEntry(cs, 1, model.RoleAssistant, "x")
+	ext.EvaluateContext(context.Background(), st, extension.ContextInput{
+		RealPromptTokens: 36000, Budget: 100000,
+	})
+	real, budget, thr := cs.Occupancy()
+	if real != 36000 || budget != 100000 || thr != 80000 {
+		t.Fatalf("occupancy = %d/%d/%d, want 36000/100000/80000 (0.80 band)", real, budget, thr)
+	}
+}
+
+func TestStampOccupancy(t *testing.T) {
+	ext := newTestExtension(t)
+	st, cs := newSubagentState(t, "ses-stamp", 1)
+	// Fresh stamp (e.g. before a late context:hide) records the current
+	// prompt — independent of any EvaluateContext boundary.
+	ext.StampOccupancy(context.Background(), st, extension.ContextInput{
+		RealPromptTokens: 50000, Budget: 100000,
+	})
+	real, budget, thr := cs.Occupancy()
+	if real != 50000 || budget != 100000 || thr != 80000 {
+		t.Fatalf("StampOccupancy = %d/%d/%d, want 50000/100000/80000", real, budget, thr)
+	}
+
+	// Root is inert (matches the EvaluateContext gate).
+	rootSt := newFakeState("ses-root-stamp")
+	rcs := &CompactorState{}
+	rootSt.SetValue(StateKey, rcs)
+	ext.StampOccupancy(context.Background(), rootSt, extension.ContextInput{
+		RealPromptTokens: 99000, Budget: 100000,
+	})
+	if r, _, _ := rcs.Occupancy(); r != 0 {
+		t.Fatalf("root StampOccupancy should be inert; got real=%d", r)
+	}
+}
+
+func TestEvaluateContext_DisabledConfigInert(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.CheckpointsEnabled = false
+	ext := NewExtensionWithConfig(slog.Default(), cfg, Deps{})
+	st, cs := newSubagentState(t, "ses-off", 1)
+	overWindow(cs)
+
+	dec := ext.EvaluateContext(context.Background(), st, extension.ContextInput{
+		RealPromptTokens: 99_000, Budget: 100_000,
+	})
+	if dec.CheckpointRequired || dec.ContextFull {
+		t.Fatalf("disabled config must be inert; got %+v", dec)
+	}
+}

@@ -52,7 +52,9 @@ func (s *fakeState) RequestInquiry(_ context.Context, _ protocol.InquiryRequestP
 
 func newTestExtension(t *testing.T) *Extension {
 	t.Helper()
-	return NewExtensionWithConfig(slog.Default(), DefaultConfig(), Deps{})
+	return NewExtensionWithConfig(slog.Default(), DefaultConfig(), Deps{
+		Prompts: productionRendererForCompactor(t),
+	})
 }
 
 // --- state.go ---

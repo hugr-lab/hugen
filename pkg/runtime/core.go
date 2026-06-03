@@ -12,9 +12,10 @@ import (
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	schedstore "github.com/hugr-lab/hugen/pkg/scheduler/store"
 	"github.com/hugr-lab/hugen/pkg/scheduler/runner"
+	schedstore "github.com/hugr-lab/hugen/pkg/scheduler/store"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/manager"
 	"github.com/hugr-lab/hugen/pkg/skill"
@@ -37,6 +38,14 @@ import (
 type Core struct {
 	Cfg    Config
 	Logger *slog.Logger
+
+	// Prompts is the agent-level template renderer. It depends only on
+	// the embedded templates + Logger, so it has no phase-ordering
+	// constraint — built lazily by [Core.PromptRenderer] on first use
+	// (phaseExtensions for the compactor, phaseSessionManager for
+	// sessions) and shared. Inject agent-level constants like this via
+	// constructor; per-session state still flows through SessionState.
+	Prompts *prompts.Renderer
 
 	// Phase 2 (http_auth).
 	HTTPSrv *stdhttp.Server

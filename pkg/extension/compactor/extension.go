@@ -9,6 +9,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
@@ -185,6 +186,30 @@ type Config struct {
 	// time — resolveTierConfig clones the relevant overlay into
 	// a fresh Config copy before applying skill / role overrides.
 	Tiers map[string]TierOverride
+
+	// --- Stage 2 (L3) in-turn checkpoints ---------------------------
+
+	// CheckpointsEnabled is the L3 master toggle. Combined with the
+	// root-off tier gate in [Extension.EvaluateContext] (triggers
+	// never fire on a depth-0 root session) it yields the spec
+	// default: subagents on, root off. Operators kill the mechanism
+	// wholesale by setting this false. Distinct from [Config.Enabled]
+	// (the turn-boundary summariser switch) — checkpoints and the
+	// summariser are independent.
+	CheckpointsEnabled bool
+
+	// CheckpointWindowTokens is the L3 trigger-1 segment window: once
+	// the current segment's estimated size crosses this, the model is
+	// pushed to call context:checkpoint before further tool work.
+	// 0 falls back to [defaultCheckpointWindowTokens].
+	CheckpointWindowTokens int
+
+	// ContextHideRatio is the L3 trigger-2 soft band, a fraction of
+	// the tier's context budget below [model.ContextBudgetRatio]
+	// (0.85 hard kill). Once real prompt occupancy crosses it the
+	// model must shed context (hide / rollback) before continuing.
+	// 0 falls back to [defaultContextHideRatio].
+	ContextHideRatio float64
 }
 
 // TierOverride is the per-tier overlay shape used during config
@@ -204,6 +229,10 @@ type TierOverride struct {
 	LLMTimeout           *time.Duration
 	LLMIntent            *model.Intent
 	TokenBudgetRatio     *float64
+
+	CheckpointsEnabled     *bool
+	CheckpointWindowTokens *int
+	ContextHideRatio       *float64
 }
 
 // Deps bundles the agent-level dependencies the β pipeline
@@ -223,6 +252,13 @@ type Deps struct {
 	Store        StoreReader
 	AgentID      string
 	SkillCatalog SkillCatalog
+	// Prompts is the agent-level renderer, injected at construction
+	// (Stage 2) — a system constant that doesn't depend on session
+	// state, so it belongs in the constructor rather than pulled from
+	// SessionState.Prompts() each call. Used by the hide-time summariser
+	// + the checkpoint nudge / context_full advisory. nil in fixtures
+	// that don't render (those paths return "" / a graceful error).
+	Prompts *prompts.Renderer
 }
 
 // SkillCatalog is the narrow lookup surface the per-tier
@@ -277,20 +313,36 @@ type StoreReader interface {
 // γ replaces this with a per-tier resolver.
 func DefaultConfig() Config {
 	return Config{
-		Strategy:             StrategySummarize,
-		WindowSize:           50,
-		Enabled:              true,
-		MaxTurns:             50,
-		MaxTokens:            80_000,
-		PreservedRecentTurns: 10,
-		DigestMaxTokens:      4_000,
-		KeptVerbatimMax:      40,
-		MinTurnGap:           3,
-		LLMTimeout:           30 * time.Second,
-		LLMIntent:            model.IntentSummarize,
-		UIMarkerEnabled:      true,
+		Strategy:               StrategySummarize,
+		WindowSize:             50,
+		Enabled:                true,
+		MaxTurns:               50,
+		MaxTokens:              80_000,
+		PreservedRecentTurns:   10,
+		DigestMaxTokens:        4_000,
+		KeptVerbatimMax:        40,
+		MinTurnGap:             3,
+		LLMTimeout:             30 * time.Second,
+		LLMIntent:              model.IntentSummarize,
+		UIMarkerEnabled:        true,
+		CheckpointsEnabled:     true,
+		CheckpointWindowTokens: defaultCheckpointWindowTokens,
+		ContextHideRatio:       defaultContextHideRatio,
 	}
 }
+
+// L3 checkpoint defaults — applied by [DefaultConfig] and as a local
+// floor in [Extension.EvaluateContext] so a Config built outside
+// DefaultConfig (or a view that predates these keys) still resolves
+// to a sane trigger.
+const (
+	// defaultCheckpointWindowTokens is the trigger-1 segment window —
+	// ~10K estimated tokens of work before the model must checkpoint.
+	defaultCheckpointWindowTokens = 10_000
+	// defaultContextHideRatio is the trigger-2 soft band, below the
+	// 0.85 hard kill. Crossing it forces hide / rollback.
+	defaultContextHideRatio = 0.80
+)
 
 // NewExtension constructs the compactor extension wired to a
 // [config.CompactorView]. logger may be nil — defaults to
@@ -344,14 +396,15 @@ func (e *Extension) baseConfig() Config {
 // extension claims to satisfy gets a compile-time check so a
 // future signature change surfaces here rather than at runtime.
 var (
-	_ extension.Extension        = (*Extension)(nil)
-	_ extension.StateInitializer = (*Extension)(nil)
-	_ extension.Recovery         = (*Extension)(nil)
-	_ extension.Advertiser       = (*Extension)(nil)
-	_ extension.FrameObserver    = (*Extension)(nil)
-	_ extension.TurnBoundaryHook = (*Extension)(nil)
-	_ extension.StatusReporter   = (*Extension)(nil)
-	_ extension.HistoryOwner     = (*Extension)(nil)
+	_ extension.Extension         = (*Extension)(nil)
+	_ extension.StateInitializer  = (*Extension)(nil)
+	_ extension.Recovery          = (*Extension)(nil)
+	_ extension.Advertiser        = (*Extension)(nil)
+	_ extension.FrameObserver     = (*Extension)(nil)
+	_ extension.TurnBoundaryHook  = (*Extension)(nil)
+	_ extension.StatusReporter    = (*Extension)(nil)
+	_ extension.HistoryOwner      = (*Extension)(nil)
+	_ extension.ContextController = (*Extension)(nil)
 )
 
 // Name implements [extension.Extension].

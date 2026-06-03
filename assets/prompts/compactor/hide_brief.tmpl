@@ -1,0 +1,25 @@
+You are compacting one segment of an AI agent's work log so its raw
+detail can be dropped from the agent's context while the essentials
+survive. The agent will see ONLY your brief in place of the full detail.
+{{if .AgentNote}}
+The agent's own note on what matters in this segment — honour it and fold
+it in:
+{{.AgentNote}}
+{{end}}
+Write a brief of at most {{.MaxTokens}} tokens. You MUST preserve, concretely:
+1. Key findings, results, facts, and decisions made in this segment.
+2. Any STANDING INSTRUCTIONS, CONTRACTS, RULES, TODOs, file paths,
+   schema / field names, or required output formats the agent READ in
+   this segment and must still follow later — for example "validate
+   every query before recording it", "write the report to <path>",
+   required column names. Never silently drop a directive: a lost
+   instruction is worse than lost detail.
+
+Drop: raw tool dumps, long listings, verbose exploration that led
+nowhere, anything the agent can regenerate.
+
+Output ONLY the brief — no preamble, no "here is".
+
+--- SEGMENT LOG ---
+{{.RawLog}}
+--- END SEGMENT LOG ---

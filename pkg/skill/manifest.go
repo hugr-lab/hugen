@@ -1244,7 +1244,7 @@ func Parse(content []byte) (Manifest, error) {
 	if len(front) == 0 {
 		return m, fmt.Errorf("%w: empty frontmatter", ErrManifestInvalid)
 	}
-	if err := yaml.Unmarshal(front, &m); err != nil {
+	if _, err := yaml.Unmarshal(front, &m, yaml.DecodeOpts{}); err != nil {
 		return m, fmt.Errorf("%w: yaml: %v", ErrManifestInvalid, err)
 	}
 
@@ -1472,7 +1472,7 @@ func extractHugen(meta map[string]any) (HugenMetadata, error) {
 	if err != nil {
 		return out, fmt.Errorf("metadata.hugen: marshal: %v", err)
 	}
-	if err := yaml.Unmarshal(encoded, &out); err != nil {
+	if _, err := yaml.Unmarshal(encoded, &out, yaml.DecodeOpts{}); err != nil {
 		return out, fmt.Errorf("metadata.hugen: unmarshal: %v", err)
 	}
 	return out, nil

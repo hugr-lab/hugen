@@ -484,6 +484,72 @@ type HistoryOwner interface {
 	RollbackTo(ctx context.Context, state SessionState, seq int64)
 }
 
+// ContextProviderName is the tool.ToolProvider name hosting the
+// synthetic context:* in-turn checkpoint tools (Stage 2 / L3). It
+// lives here — in the interface package both pkg/session and the
+// compactor import — so the tool-loop can identify context:* calls as
+// block-exempt without importing the concrete compactor package.
+const ContextProviderName = "context"
+
+// ContextInput carries the per-iteration signals the session feeds the
+// [ContextController] so it can decide whether the upcoming tool
+// dispatch should be blocked. Both are read at the iteration boundary
+// (between a tool round and the next model call).
+type ContextInput struct {
+	// RealPromptTokens is the prompt occupancy the provider reported
+	// for the MOST RECENT model iteration (lastCallUsage.PromptTokens)
+	// — the trigger-2 (budget-band) signal. 0 when no call has reported
+	// yet, which keeps trigger 2 inert until real usage is known.
+	RealPromptTokens int
+	// Budget is the tier's MaxPromptTokens (0 when none is configured —
+	// trigger 2 is inert, trigger 1 / manual hide still work).
+	Budget int
+}
+
+// ContextDecision is the [ContextController]'s per-iteration verdict.
+// Re-evaluated every iteration (NOT latched, unlike the 0.85 budget
+// kill): CheckpointRequired clears the moment a checkpoint resets the
+// segment counter; ContextFull clears the moment a hide drops real
+// occupancy back under the band.
+type ContextDecision struct {
+	// CheckpointRequired blocks non-context tools until a checkpoint
+	// closes the over-window segment (L3 trigger 1).
+	CheckpointRequired bool
+	// ContextFull blocks non-context tools until the model sheds
+	// context back under the 0.80 hide band (L3 trigger 2).
+	ContextFull bool
+	// Inject is the system message the session folds into history on
+	// the RISING edge of either block (the session owns edge-tracking
+	// to avoid per-iteration spam), or "" for nothing.
+	Inject string
+}
+
+// ContextController is the L3 in-turn checkpoint capability. The
+// session calls EvaluateContext once per model-iteration boundary; the
+// controller — the compactor, which owns the history + checkpoint
+// state + config — decides whether the upcoming tool dispatch should
+// be blocked (segment window blown, or real occupancy over the hide
+// band) and supplies an advisory to inject. The session applies the
+// verdict (sets the per-turn block flags read by dispatchToolCall) and
+// injects on the rising edge.
+//
+// The context:* tools themselves are EXEMPT from the resulting blocks
+// (the session checks [ContextProviderName]) so the model can always
+// recover. Root-off / disabled is the controller's own concern — it
+// returns a zero ContextDecision when checkpoints are not enabled for
+// the calling session's tier.
+type ContextController interface {
+	EvaluateContext(ctx context.Context, state SessionState, in ContextInput) ContextDecision
+	// StampOccupancy records the CURRENT real occupancy + budget so a
+	// context:* tool result shows the model its up-to-date fill. The
+	// boundary EvaluateContext stamps the iteration that just ran; the
+	// prompt then grows before the iteration's tools dispatch, so a
+	// context:hide called late would otherwise display a stale fill.
+	// The session calls this right before dispatching a context:* tool,
+	// with the freshest lastCallUsage. No decision, no inject.
+	StampOccupancy(ctx context.Context, state SessionState, in ContextInput)
+}
+
 // ToolApprovalPolicy lets an extension pre-empt a runtime-initiated
 // tool-approval inquiry on the caller's behalf — answering
 // "approved" immediately so the user never sees the modal. The
