@@ -11,6 +11,8 @@ allowed-tools:
       - bash.write_file
       - bash.list_dir
       - bash.sed
+      - bash.grep
+      - bash.edit_file
     requires_approval:
       - bash.run
       - bash.shell
@@ -101,6 +103,12 @@ shell tools and file tools see exactly the same paths.
 - All shell binaries on the host PATH are available — `du`,
   `find`, `grep`, `sed`, `awk`, `python`, `git`, etc. Use them
   freely; bash-mcp does not restrict them.
+- To edit a few values in an existing file, prefer not to read it
+  whole: `bash.grep(path, pattern)` to locate the anchor you
+  already know, then `bash.edit_file(path, old, new)` on the
+  minimal changed text. Reading a large file just to edit it
+  wastes context. (`bash.read_file` truncates large files anyway;
+  page with `start`, or load the file in python for data.)
 - When the user asks "what files do you see", check both your
   scratch dir and `$SHARED_DIR` before reporting "empty".
 

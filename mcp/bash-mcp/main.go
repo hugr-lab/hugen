@@ -31,6 +31,12 @@ const (
 	defaultOutputMaxBytes   = 32 * 1024
 	defaultReadMaxBytes     = 1024 * 1024
 	defaultDefaultTimeoutMS = 30_000
+	// defaultReadContextMaxBytes is the soft cap on how much a single
+	// read_file returns into the model's context — distinct from the
+	// 1 MB IO ceiling. A read with no explicit length, or one asking
+	// for more than this, is truncated to it with paging offsets so a
+	// large file never dumps whole into context.
+	defaultReadContextMaxBytes = 16000
 )
 
 func main() {
@@ -70,10 +76,11 @@ func run(log *slog.Logger) error {
 	tools := &Tools{
 		WS: ws,
 		Limits: Limits{
-			OutputMaxBytes:   cfg.OutputMaxBytes,
-			ReadMaxBytes:     cfg.ReadMaxBytes,
-			DefaultTimeoutMS: cfg.DefaultTimeoutMS,
-			MemMB:            cfg.MemMB,
+			OutputMaxBytes:      cfg.OutputMaxBytes,
+			ReadMaxBytes:        cfg.ReadMaxBytes,
+			ReadContextMaxBytes: cfg.ReadContextMaxBytes,
+			DefaultTimeoutMS:    cfg.DefaultTimeoutMS,
+			MemMB:               cfg.MemMB,
 		},
 	}
 	srv := server.NewMCPServer(
@@ -101,18 +108,20 @@ func (a *serverAdapter) AddTool(tool mcp.Tool, handler func(ctx context.Context,
 }
 
 type bashConfig struct {
-	OutputMaxBytes   int
-	ReadMaxBytes     int
-	DefaultTimeoutMS int
-	MemMB            int
+	OutputMaxBytes      int
+	ReadMaxBytes        int
+	ReadContextMaxBytes int
+	DefaultTimeoutMS    int
+	MemMB               int
 }
 
 func loadConfigFromEnv() bashConfig {
 	return bashConfig{
-		OutputMaxBytes:   intEnv("BASH_MCP_OUTPUT_MAX_BYTES", defaultOutputMaxBytes),
-		ReadMaxBytes:     intEnv("BASH_MCP_READ_MAX_BYTES", defaultReadMaxBytes),
-		DefaultTimeoutMS: intEnv("BASH_MCP_DEFAULT_TIMEOUT_MS", defaultDefaultTimeoutMS),
-		MemMB:            intEnv("BASH_MCP_MEM_MB", 256),
+		OutputMaxBytes:      intEnv("BASH_MCP_OUTPUT_MAX_BYTES", defaultOutputMaxBytes),
+		ReadMaxBytes:        intEnv("BASH_MCP_READ_MAX_BYTES", defaultReadMaxBytes),
+		ReadContextMaxBytes: intEnv("BASH_MCP_READ_CONTEXT_MAX_BYTES", defaultReadContextMaxBytes),
+		DefaultTimeoutMS:    intEnv("BASH_MCP_DEFAULT_TIMEOUT_MS", defaultDefaultTimeoutMS),
+		MemMB:               intEnv("BASH_MCP_MEM_MB", 256),
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -19,10 +20,17 @@ import (
 
 // Limits is the runtime knobs Tools needs.
 type Limits struct {
-	OutputMaxBytes   int
-	ReadMaxBytes     int
-	DefaultTimeoutMS int
-	MemMB            int
+	OutputMaxBytes int
+	// ReadMaxBytes is the hard IO ceiling for a single read (default
+	// 1 MB) — a memory bound, not a context bound.
+	ReadMaxBytes int
+	// ReadContextMaxBytes is the soft context cap: a read with no
+	// explicit length, or one over this size, is truncated to it with
+	// paging offsets so a large file never dumps whole into context.
+	// Zero disables the soft cap (only the IO ceiling applies).
+	ReadContextMaxBytes int
+	DefaultTimeoutMS    int
+	MemMB               int
 }
 
 // Tools wires the bash.* tool set to a Workspace + Limits. All
@@ -53,11 +61,27 @@ func (t *Tools) Register(srv mcpToolRegistrar) {
 		mcp.WithObject("env"),
 	), t.shell)
 	srv.AddTool(mcp.NewTool("bash.read_file",
-		mcp.WithDescription("Read a file by path (resolved against the session workspace)."),
+		mcp.WithDescription("Read a file by path (resolved against the session workspace). A large file is truncated to a context-safe window (~16 KB) and the result carries truncated/next_start/bytes_total — pass start=next_start to page on, or use bash.grep to find just the part you need, or load it in python. Do NOT read a whole large file into context just to edit it."),
 		mcp.WithString("path", mcp.Required()),
 		mcp.WithNumber("start"),
 		mcp.WithNumber("length"),
 	), t.readFile)
+	srv.AddTool(mcp.NewTool("bash.grep",
+		mcp.WithDescription("Locate text in a file WITHOUT reading the whole file into context. Returns matching lines with line numbers and a few lines of surrounding context — enough to build the exact `old` string for bash.edit_file. Literal substring by default (no shell quoting); set regex=true for a Go regexp. Use this to find an anchor you already know (a label, a value, a heading) instead of read_file on a big file."),
+		mcp.WithString("path", mcp.Required()),
+		mcp.WithString("pattern", mcp.Required(), mcp.Description("Literal substring to find (or a Go regexp when regex=true).")),
+		mcp.WithBoolean("regex", mcp.Description("Treat pattern as a Go regular expression. Default false (literal).")),
+		mcp.WithNumber("context", mcp.Description("Lines of context to include around each match. Default 2.")),
+		mcp.WithNumber("max_matches", mcp.Description("Cap on returned matches. Default 20.")),
+	), t.grep)
+	srv.AddTool(mcp.NewTool("bash.edit_file",
+		mcp.WithDescription("Replace exact text in a file on disk WITHOUT pulling the file through context. Supply `old` (the minimal text being changed — e.g. just the value `$1,234,567.8`, not the whole line) and `new`. `old` must match exactly and must be unique unless replace_all=true or a `line` scope is given. The file content never enters context — you provide only the small strings you are changing. Errors: not_found (no match), ambiguous (>1 match without replace_all/line)."),
+		mcp.WithString("path", mcp.Required()),
+		mcp.WithString("old", mcp.Required(), mcp.Description("Exact text to replace — keep it minimal (just the changed token), not the whole line.")),
+		mcp.WithString("new", mcp.Required(), mcp.Description("Replacement text.")),
+		mcp.WithBoolean("replace_all", mcp.Description("Replace every occurrence. Default false (the match must be unique).")),
+		mcp.WithNumber("line", mcp.Description("Optional 1-based line number (from bash.grep) to scope the match to a single line.")),
+	), t.editFile)
 	srv.AddTool(mcp.NewTool("bash.write_file",
 		mcp.WithDescription("Write a file by path. Refuses /readonly/. MAX 10000 bytes of content per call — for more, write in chunks: one call, then more with mode=\"append\" (each ≤10000 bytes). Returns {bytes_written, size_total, path} — size_total is the file's full size after the write, the durable offset to resume an append sequence from."),
 		mcp.WithString("path", mcp.Required()),
@@ -234,29 +258,69 @@ func (t *Tools) readFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 		return errResult("io", err.Error()), nil
 	}
 	defer f.Close()
+	var fileSize int64 = -1
+	if fi, statErr := f.Stat(); statErr == nil {
+		fileSize = fi.Size()
+	}
 	if a.Start > 0 {
 		if _, err := f.Seek(a.Start, io.SeekStart); err != nil {
 			return errResult("io", err.Error()), nil
 		}
 	}
-	max := a.Length
-	if max <= 0 {
-		max = int64(t.Limits.ReadMaxBytes)
+	// Two distinct caps. ReadMaxBytes is the hard IO ceiling (memory
+	// bound). ReadContextMaxBytes is the soft context cap: a read with
+	// no explicit length, or an explicit length above the cap, is
+	// truncated to it so a large file never dumps whole into context.
+	// An explicit length at or under the cap is honoured as-is
+	// (deliberate windowing).
+	readCap := a.Length
+	if readCap <= 0 {
+		readCap = int64(t.Limits.ReadMaxBytes)
 	}
-	buf := make([]byte, max)
+	cappedByCtx := false
+	if ctxCap := int64(t.Limits.ReadContextMaxBytes); ctxCap > 0 && readCap > ctxCap {
+		readCap = ctxCap
+		cappedByCtx = true
+	}
+	if rm := int64(t.Limits.ReadMaxBytes); rm > 0 && readCap > rm {
+		readCap = rm
+	}
+	buf := make([]byte, readCap)
 	n, err := io.ReadFull(f, buf)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		return errResult("io", err.Error()), nil
 	}
 	buf = buf[:n]
+	atEOF := errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || int64(n) < readCap
 	body := map[string]any{
 		"bytes_read": n,
-		"eof":        errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || int64(n) < max,
+		"eof":        atEOF,
 	}
 	if utf8.Valid(buf) {
 		body["content"] = string(buf)
 	} else {
 		body["content_b64"] = encodeB64(buf)
+	}
+	// Soft-truncation marker: only when the context cap clipped the
+	// read AND there is more file past what we returned.
+	hasMore := !atEOF
+	if fileSize >= 0 {
+		hasMore = a.Start+int64(n) < fileSize
+	}
+	if cappedByCtx && hasMore {
+		nextStart := a.Start + int64(n)
+		body["truncated"] = true
+		body["next_start"] = nextStart
+		if fileSize >= 0 {
+			body["bytes_total"] = fileSize - a.Start
+		}
+		note := fmt.Sprintf("showing %d bytes from offset %d", n, a.Start)
+		if fileSize >= 0 {
+			note = fmt.Sprintf("showing %d of %d bytes from offset %d", n, fileSize-a.Start, a.Start)
+		}
+		note += fmt.Sprintf("; pass start=%d to continue, or bash.grep to find the part you need, or load it in python — do not read the whole file into context.", nextStart)
+		body["note"] = note
+		return jsonResultNote(body, note), nil
 	}
 	return jsonResult(body), nil
 }
@@ -470,6 +534,235 @@ func (t *Tools) sed(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 	return jsonResult(body), nil
 }
 
+// ----- bash.grep -----
+
+type grepArgs struct {
+	Path       string `json:"path"`
+	Pattern    string `json:"pattern"`
+	Regex      bool   `json:"regex,omitempty"`
+	Context    *int   `json:"context,omitempty"`
+	MaxMatches int    `json:"max_matches,omitempty"`
+}
+
+// maxGrepLineBytes bounds how much of any single emitted line grep
+// returns. A minified file can hold the whole document on one line; the
+// matched line is clipped to a window centred on the match so grep stays
+// useful (and context-cheap) even then.
+const maxGrepLineBytes = 400
+
+func (t *Tools) grep(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var a grepArgs
+	if err := req.BindArguments(&a); err != nil {
+		return errResult("arg_validation", err.Error()), nil
+	}
+	if a.Path == "" || a.Pattern == "" {
+		return errResult("arg_validation", "path and pattern required"), nil
+	}
+	res, err := t.WS.Resolve(a.Path, false)
+	if err != nil {
+		return errResult(errCode(err), err.Error()), nil
+	}
+	data, err := os.ReadFile(res.Canonical)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return errResult("not_found", res.Logical), nil
+		}
+		return errResult("io", err.Error()), nil
+	}
+	cw := 2
+	if a.Context != nil {
+		cw = *a.Context
+		if cw < 0 {
+			cw = 0
+		}
+	}
+	maxM := a.MaxMatches
+	if maxM <= 0 {
+		maxM = 20
+	}
+	var re *regexp.Regexp
+	if a.Regex {
+		re, err = regexp.Compile(a.Pattern)
+		if err != nil {
+			return errResult("arg_validation", "invalid regex: "+err.Error()), nil
+		}
+	}
+	lines := strings.Split(string(data), "\n")
+	type grepMatch struct {
+		LineNo int    `json:"line_no"`
+		Text   string `json:"text"`
+	}
+	var matches []grepMatch
+	truncated := false
+	outBytes := 0
+	for i, line := range lines {
+		off := -1
+		if a.Regex {
+			if loc := re.FindStringIndex(line); loc != nil {
+				off = loc[0]
+			}
+		} else {
+			off = strings.Index(line, a.Pattern)
+		}
+		if off < 0 {
+			continue
+		}
+		if len(matches) >= maxM {
+			truncated = true
+			break
+		}
+		lo := i - cw
+		if lo < 0 {
+			lo = 0
+		}
+		hi := i + cw
+		if hi >= len(lines) {
+			hi = len(lines) - 1
+		}
+		// Clip each line in the window; centre the matched line on the
+		// hit so the anchor is always visible.
+		parts := make([]string, 0, hi-lo+1)
+		for j := lo; j <= hi; j++ {
+			if j == i {
+				parts = append(parts, clipLine(lines[j], off, maxGrepLineBytes))
+			} else {
+				parts = append(parts, clipLine(lines[j], -1, maxGrepLineBytes))
+			}
+		}
+		text := strings.Join(parts, "\n")
+		if t.Limits.OutputMaxBytes > 0 && outBytes+len(text) > t.Limits.OutputMaxBytes {
+			truncated = true
+			break
+		}
+		outBytes += len(text)
+		matches = append(matches, grepMatch{LineNo: i + 1, Text: text})
+	}
+	body := map[string]any{
+		"matches":     matches,
+		"match_count": len(matches),
+		"truncated":   truncated,
+	}
+	return jsonResult(body), nil
+}
+
+// clipLine bounds a line to cap bytes. When off >= 0 (the matched line)
+// the window is centred on the match so the anchor stays visible;
+// otherwise the head is kept. Ellipses mark where content was dropped.
+func clipLine(line string, off, limit int) string {
+	if len(line) <= limit {
+		return line
+	}
+	if off < 0 {
+		return line[:limit] + "…"
+	}
+	start := off - limit/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + limit
+	if end > len(line) {
+		end = len(line)
+		start = end - limit
+		if start < 0 {
+			start = 0
+		}
+	}
+	s := line[start:end]
+	if start > 0 {
+		s = "…" + s
+	}
+	if end < len(line) {
+		s += "…"
+	}
+	return s
+}
+
+// ----- bash.edit_file -----
+
+type editArgs struct {
+	Path       string `json:"path"`
+	Old        string `json:"old"`
+	New        string `json:"new"`
+	ReplaceAll bool   `json:"replace_all,omitempty"`
+	Line       *int   `json:"line,omitempty"`
+}
+
+func (t *Tools) editFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var a editArgs
+	if err := req.BindArguments(&a); err != nil {
+		return errResult("arg_validation", err.Error()), nil
+	}
+	if a.Path == "" {
+		return errResult("arg_validation", "path required"), nil
+	}
+	if a.Old == "" {
+		return errResult("arg_validation", "old required (the exact text to replace)"), nil
+	}
+	if a.Old == a.New {
+		return errResult("arg_validation", "old and new are identical — nothing to change"), nil
+	}
+	res, err := t.WS.Resolve(a.Path, true)
+	if err != nil {
+		return errResult(errCode(err), err.Error()), nil
+	}
+	data, err := os.ReadFile(res.Canonical)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return errResult("not_found", res.Logical), nil
+		}
+		return errResult("io", err.Error()), nil
+	}
+	content := string(data)
+
+	var newContent string
+	var replacements int
+	if a.Line != nil {
+		lines := strings.Split(content, "\n")
+		idx := *a.Line - 1
+		if idx < 0 || idx >= len(lines) {
+			return errResult("arg_validation", fmt.Sprintf("line %d out of range (file has %d lines)", *a.Line, len(lines))), nil
+		}
+		count := strings.Count(lines[idx], a.Old)
+		if count == 0 {
+			return errResult("not_found", fmt.Sprintf("old not found on line %d", *a.Line)), nil
+		}
+		if count > 1 && !a.ReplaceAll {
+			return errResult("ambiguous", fmt.Sprintf("old matches %d times on line %d; pass replace_all=true", count, *a.Line)), nil
+		}
+		if a.ReplaceAll {
+			lines[idx] = strings.ReplaceAll(lines[idx], a.Old, a.New)
+			replacements = count
+		} else {
+			lines[idx] = strings.Replace(lines[idx], a.Old, a.New, 1)
+			replacements = 1
+		}
+		newContent = strings.Join(lines, "\n")
+	} else {
+		count := strings.Count(content, a.Old)
+		if count == 0 {
+			return errResult("not_found", "old not found"), nil
+		}
+		if count > 1 && !a.ReplaceAll {
+			return errResult("ambiguous", fmt.Sprintf("old matches %d times; pass replace_all=true, a more specific old, or a line scope", count)), nil
+		}
+		if a.ReplaceAll {
+			newContent = strings.ReplaceAll(content, a.Old, a.New)
+			replacements = count
+		} else {
+			newContent = strings.Replace(content, a.Old, a.New, 1)
+			replacements = 1
+		}
+	}
+	if err := os.WriteFile(res.Canonical, []byte(newContent), 0o644); err != nil {
+		return errResult("io", err.Error()), nil
+	}
+	body := map[string]any{
+		"replacements": replacements,
+		"path":         res.Logical,
+	}
+	return jsonResult(body), nil
+}
+
 // ----- helpers -----
 
 func errCode(err error) string {
@@ -495,6 +788,16 @@ func errResult(code, msg string) *mcp.CallToolResult {
 func jsonResult(body any) *mcp.CallToolResult {
 	enc, _ := json.Marshal(body)
 	res := mcp.NewToolResultText(string(enc))
+	res.StructuredContent = body
+	return res
+}
+
+// jsonResultNote is jsonResult with a human-readable note led in front
+// of the JSON text, so a model reading the text content sees the
+// guidance first. StructuredContent stays the raw body.
+func jsonResultNote(body any, note string) *mcp.CallToolResult {
+	enc, _ := json.Marshal(body)
+	res := mcp.NewToolResultText(note + "\n" + string(enc))
 	res.StructuredContent = body
 	return res
 }
