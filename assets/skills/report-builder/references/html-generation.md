@@ -107,6 +107,27 @@ disk. Each append returns `size_total` (the file's full size so far),
 so on retry you know exactly how much landed and re-issue only the
 missing tail. This is a fallback, not the plan — prefer the script.
 
+## Hard limits: 10000 bytes per write_file / run_code call
+
+Both `bash.write_file` (content) and `python:run_code` (code) cap a
+single call at **10000 bytes** — a longer single generation is
+wedge-prone (the model streams it token-by-token and can stall mid-
+stream). So:
+
+- **Never embed a large dataset / full schema as a literal** in a
+  `run_code` script. If the script would exceed 10 KB because it
+  carries the data inline, you have the wrong shape: write the data to
+  a file (it is usually already one — load it with `pd.read_*`), so
+  the script stays a small `load → build → write`.
+- **A genuinely large script** (lots of figures/sections) → write the
+  `.py` to the workspace with `bash.write_file` in ≤10 KB **append**
+  chunks, then run it with `run_script` — execution streams nothing.
+- **A large inline document** → the chunked `mode="append"` writes
+  above (≤10 KB each).
+
+The cap is the runtime forcing the discipline; the goal is the same as
+everywhere — keep the data in files, keep each generation short.
+
 ## Common failure modes
 
 - **You loaded the data into the prompt instead of the file.** If your

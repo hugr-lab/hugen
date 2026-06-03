@@ -966,14 +966,21 @@ metadata:
         can_spawn: false
         autoload_skills: [_mission_worker, report-builder]
         compactor:
-          # report-builder (python-first) iterates on SHORT scripts +
-          # their stdout, not multi-KB inline HTML — the skill tells it
-          # to print length checks, not document bodies. So the 30K
-          # PROMPT-TOKEN trip matches the sibling workers; the old 100K
-          # budget was a band-aid for the inline-HTML path this pivot
-          # removed.
+          # NOTE: largely a no-op for this role. report-builder is a
+          # single-turn worker (one task user_message + the on_close
+          # one), and the compactor SKIPS when boundary count <=
+          # preserved_recent_turns (commands.go) and can only cut on a
+          # user_message boundary (compactor.go) — a worker has none to
+          # cut on. The real intra-task token cap is the per-turn
+          # context budget (config.yaml compactor.default_budget *
+          # context_budget_ratio, ~85K), which TERMINATES the turn if
+          # the tool-result accumulation runs away. op2023 dogfood:
+          # ~37K for a 4-table comprehensive report — well under 85K.
+          # Kept enabled as a harmless backstop for the rare multi-turn
+          # worker; the value below does not gate normal single-turn
+          # runs.
           enabled: true
-          max_tokens: 30000
+          max_tokens: 80000
           max_turns: 40
           preserved_recent_turns: 12
           min_turn_gap: 3

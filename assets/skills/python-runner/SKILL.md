@@ -51,11 +51,16 @@ its own working directory under `${SESSION_DIR}` that bash-mcp shares.
 ## Two tools
 
 - **`python-mcp:run_code`** — execute a snippet. Args: `code` (string),
-  `timeout_ms` (optional). Inline use, ad-hoc exploration.
+  `timeout_ms` (optional). Inline use, ad-hoc exploration. **Capped at
+  10000 bytes of code** — a longer inline script is a wedge-prone
+  generation; past the cap, write the `.py` to the workspace
+  (`bash.write_file`, ≤10000-byte `append` chunks) and use `run_script`.
 - **`python-mcp:run_script`** — execute a `.py` file from the session
   workspace. Args: `path` (relative inside `${SESSION_DIR}`; absolute paths
   and `..` rejected), `timeout_ms` (optional). Multi-line work, anything you
-  want to re-run.
+  want to re-run. The right home for any non-trivial script. **Never
+  embed a large dataset as a literal** to fit a script — load it from a
+  file with `pd.read_*`, so the script stays small.
 
 Both return the same JSON envelope:
 

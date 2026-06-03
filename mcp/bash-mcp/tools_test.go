@@ -132,6 +132,31 @@ func TestTools_WriteAppend_SizeTotal(t *testing.T) {
 	}
 }
 
+// TestTools_WriteFile_SizeCap verifies write_file rejects content over
+// the per-call byte cap (forcing chunked append) but accepts content
+// exactly at the cap.
+func TestTools_WriteFile_SizeCap(t *testing.T) {
+	tools, _ := newTools(t)
+
+	big := strings.Repeat("x", maxWriteChunkBytes+1)
+	out, res := callJSON(t, tools.writeFile, map[string]any{"path": "big.txt", "content": big})
+	if !res.IsError {
+		t.Fatal("oversized content should be rejected")
+	}
+	if out["code"] != "arg_validation" {
+		t.Errorf("code = %v, want arg_validation", out["code"])
+	}
+
+	atCap := strings.Repeat("y", maxWriteChunkBytes)
+	out2, res2 := callJSON(t, tools.writeFile, map[string]any{"path": "ok.txt", "content": atCap})
+	if res2.IsError {
+		t.Fatalf("at-cap write should succeed: %v", out2)
+	}
+	if int(out2["bytes_written"].(float64)) != maxWriteChunkBytes {
+		t.Errorf("bytes_written = %v, want %d", out2["bytes_written"], maxWriteChunkBytes)
+	}
+}
+
 func TestTools_ReadFile_NotFound(t *testing.T) {
 	tools, _ := newTools(t)
 	out, res := callJSON(t, tools.readFile, map[string]any{"path": "missing.txt"})

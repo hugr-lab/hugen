@@ -59,7 +59,7 @@ func (t *Tools) Register(srv mcpToolRegistrar) {
 		mcp.WithNumber("length"),
 	), t.readFile)
 	srv.AddTool(mcp.NewTool("bash.write_file",
-		mcp.WithDescription("Write a file by path. Refuses /readonly/. Returns {bytes_written, size_total, path} — size_total is the file's full size after the write, the durable offset to resume an append sequence from."),
+		mcp.WithDescription("Write a file by path. Refuses /readonly/. MAX 10000 bytes of content per call — for more, write in chunks: one call, then more with mode=\"append\" (each ≤10000 bytes). Returns {bytes_written, size_total, path} — size_total is the file's full size after the write, the durable offset to resume an append sequence from."),
 		mcp.WithString("path", mcp.Required()),
 		mcp.WithString("content"),
 		mcp.WithString("mode", mcp.Description(`"append" to add to the file (each call is a durable append — chunk a large document so a stall loses only the current chunk); anything else (default) truncates and overwrites.`)),
@@ -270,6 +270,13 @@ type writeArgs struct {
 	MkdirParents bool   `json:"mkdir_parents,omitempty"`
 }
 
+// maxWriteChunkBytes caps how much a single write_file call may emit.
+// The model generates the `content` token-by-token, so a multi-KB
+// write is a long, wedge-prone stream — capping it forces large output
+// into several short, resumable append calls (a stall loses only the
+// current chunk; size_total tracks the durable offset).
+const maxWriteChunkBytes = 10000
+
 func (t *Tools) writeFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var a writeArgs
 	if err := req.BindArguments(&a); err != nil {
@@ -277,6 +284,11 @@ func (t *Tools) writeFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 	}
 	if a.Path == "" {
 		return errResult("arg_validation", "path required"), nil
+	}
+	if len(a.Content) > maxWriteChunkBytes {
+		return errResult("arg_validation", fmt.Sprintf(
+			"content is %d bytes; the per-call limit is %d. Write large output in chunks: one write_file, then more with mode=\"append\" (each ≤ %d bytes). For a big generated document or script, prefer python (write the file from inside run_script) so the data never streams through the model.",
+			len(a.Content), maxWriteChunkBytes, maxWriteChunkBytes)), nil
 	}
 	res, err := t.WS.Resolve(a.Path, true)
 	if err != nil {
