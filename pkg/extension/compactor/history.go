@@ -91,16 +91,22 @@ func (e *Extension) ProvideHistory(_ context.Context, state extension.SessionSta
 	return out
 }
 
-// hiddenSegmentNote renders the one-line placeholder shown in place of
-// a collapsed checkpoint-segment: what it was + how to bring it back.
+// hiddenSegmentNote renders the placeholder shown in place of a
+// collapsed checkpoint-segment: the model's carry-forward (the hide-time
+// summary if it wrote one, else the checkpoint label) + how to bring the
+// raw detail back. The summary is the load-bearing part — it's what lets
+// the model keep its conclusions after shedding the underlying tool dumps.
 func hiddenSegmentNote(cp Checkpoint) string {
-	desc := strings.TrimSpace(cp.Description)
-	if desc == "" {
-		desc = "(no description)"
+	body := strings.TrimSpace(cp.Note)
+	if body == "" {
+		body = strings.TrimSpace(cp.Description)
+	}
+	if body == "" {
+		body = "(no description)"
 	}
 	return fmt.Sprintf(
-		"[context: checkpoint %s hidden — %s. ~%d tokens collapsed; call context:expand(cp_id=%q) to restore the detail]",
-		cp.ID, desc, cp.Tokens, cp.ID)
+		"[context: checkpoint %s hidden — %s. ~%d tokens of raw detail collapsed; call context:expand(cp_id=%q) to restore it]",
+		cp.ID, body, cp.Tokens, cp.ID)
 }
 
 // shrinkHiddenEntry returns the stub a hidden entry projects to, plus

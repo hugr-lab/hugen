@@ -63,6 +63,10 @@ const (
     "cp_id": {
       "type": "string",
       "description": "The checkpoint id whose segment to collapse (e.g. \"cp-1\"), from the checkpoint list. Reversible with context:expand."
+    },
+    "note": {
+      "type": "string",
+      "description": "Optional note on what matters in this segment — findings AND any instructions/contracts you must still follow (e.g. \"validate queries before recording\", \"write report to ~/x.html\"). The runtime auto-summarises the segment into the placeholder; your note seeds and steers that summary so nothing important is dropped."
     }
   },
   "required": ["cp_id"]
@@ -88,19 +92,28 @@ const (
     },
     "note": {
       "type": "string",
-      "description": "One line recording why you rolled back, kept in place of the dropped work."
+      "description": "REQUIRED. Record what was PHYSICALLY DONE since this checkpoint — files written, data mutated, anything with a side effect. Rollback drops the context of that work but does NOT undo it on disk, so this note is your only memory of what already happened (don't redo it). Also note why you rolled back."
     }
   },
-  "required": ["cp_id"]
+  "required": ["cp_id", "note"]
 }`
 )
 
-// ContextProvider is the stateless host for the context:* tools.
-type ContextProvider struct{}
+// ContextProvider hosts the context:* tools. It carries no per-session
+// state (every Call resolves the session from the dispatch context);
+// the only dependency is the segment summariser used at hide time to
+// auto-generate the placeholder brief. summarizer may be nil — hide
+// then falls back to the agent note / checkpoint label.
+type ContextProvider struct {
+	summarizer SegmentSummarizer
+}
 
-// NewContextProvider constructs the provider. It carries no state —
-// every Call resolves the session from the dispatch context.
-func NewContextProvider() *ContextProvider { return &ContextProvider{} }
+// NewContextProvider constructs the provider wired to a segment
+// summariser (the compactor extension). Pass nil to disable hide-time
+// auto-summarisation (fixtures / tests without a model router).
+func NewContextProvider(summarizer SegmentSummarizer) *ContextProvider {
+	return &ContextProvider{summarizer: summarizer}
+}
 
 // compile-time assertion.
 var _ tool.ToolProvider = (*ContextProvider)(nil)
@@ -131,7 +144,7 @@ func (p *ContextProvider) List(_ context.Context) ([]tool.Tool, error) {
 		},
 		{
 			Name:             ContextProviderName + ":hide",
-			Description:      "Collapse a closed checkpoint-segment to a one-line placeholder, shedding its tokens from your context. Reversible with context:expand. Use it when context is filling and an earlier segment's detail is no longer needed.",
+			Description:      "Collapse a closed checkpoint-segment, shedding its raw tokens from your context. The runtime auto-summarises the segment into a placeholder brief (findings + any instructions it contained); pass an optional `note` to steer what's kept. Reversible with context:expand. Use it when context is filling and a segment's raw detail is no longer needed.",
 			Provider:         ContextProviderName,
 			PermissionObject: PermContextHide,
 			ArgSchema:        json.RawMessage(contextHideSchema),
@@ -168,7 +181,7 @@ func (p *ContextProvider) Call(ctx context.Context, name string, args json.RawMe
 	case "checkpoint":
 		return p.callCheckpoint(s, args)
 	case "hide":
-		return p.callHide(s, args)
+		return p.callHide(ctx, state, s, args)
 	case "expand":
 		return p.callExpand(s, args)
 	case "rollback":
@@ -184,6 +197,11 @@ type checkpointInput struct {
 
 type cpIDInput struct {
 	CpID string `json:"cp_id"`
+}
+
+type hideInput struct {
+	CpID string `json:"cp_id"`
+	Note string `json:"note"`
 }
 
 type rollbackInput struct {
@@ -208,8 +226,8 @@ func (p *ContextProvider) callCheckpoint(s *CompactorState, args json.RawMessage
 	})
 }
 
-func (p *ContextProvider) callHide(s *CompactorState, args json.RawMessage) (json.RawMessage, error) {
-	var in cpIDInput
+func (p *ContextProvider) callHide(ctx context.Context, state extension.SessionState, s *CompactorState, args json.RawMessage) (json.RawMessage, error) {
+	var in hideInput
 	if err := json.Unmarshal(args, &in); err != nil {
 		return ctxToolErr("bad_request", fmt.Sprintf("invalid context:hide args: %v", err))
 	}
@@ -217,14 +235,34 @@ func (p *ContextProvider) callHide(s *CompactorState, args json.RawMessage) (jso
 	if id == "" {
 		return ctxToolErr("bad_request", "cp_id is required")
 	}
-	cp, ok := s.SetCheckpointHidden(id, true)
+	note := strings.TrimSpace(in.Note)
+
+	// Auto-summarise the segment into the placeholder brief (cheap LLM),
+	// seeded by the agent's note. The brief preserves findings AND any
+	// standing instructions the agent read in the segment, so a hide
+	// can't silently drop a directive. On any failure the note is used
+	// verbatim; an empty note then falls back to the checkpoint label in
+	// the placeholder. Best-effort: hide never fails on a summary error.
+	brief := note
+	if p.summarizer != nil {
+		if entries := s.SegmentEntries(id); len(entries) > 0 {
+			if b, err := p.summarizer.SummarizeSegment(ctx, state, entries, note); err == nil {
+				if tb := strings.TrimSpace(b); tb != "" {
+					brief = tb
+				}
+			}
+		}
+	}
+
+	cp, ok := s.SetCheckpointHidden(id, true, brief)
 	if !ok {
 		return ctxToolErr("not_found", fmt.Sprintf("no checkpoint %q; %s", id, knownCheckpointIDs(s)))
 	}
 	return checkpointListResponse(s, map[string]any{
 		"ok":      true,
 		"hidden":  cp.ID,
-		"message": fmt.Sprintf("%s collapsed (~%d tokens shed next iteration). context:expand(cp_id=%q) to restore.", cp.ID, cp.Tokens, cp.ID),
+		"note":    cp.Note,
+		"message": fmt.Sprintf("%s collapsed (~%d tokens shed next iteration); placeholder brief kept. context:expand(cp_id=%q) to restore.", cp.ID, cp.Tokens, cp.ID),
 	})
 }
 
@@ -242,7 +280,7 @@ func (p *ContextProvider) callExpand(s *CompactorState, args json.RawMessage) (j
 	// trigger 2 fires again next iteration and the model sheds another
 	// segment — a self-correcting loop, one extra round-trip. The
 	// precise post-expand guard (§6.5) is a follow-up.
-	cp, ok := s.SetCheckpointHidden(id, false)
+	cp, ok := s.SetCheckpointHidden(id, false, "")
 	if !ok {
 		return ctxToolErr("not_found", fmt.Sprintf("no checkpoint %q; %s", id, knownCheckpointIDs(s)))
 	}
@@ -262,20 +300,19 @@ func (p *ContextProvider) callRollback(s *CompactorState, args json.RawMessage) 
 	if id == "" {
 		return ctxToolErr("bad_request", "cp_id is required")
 	}
+	note := strings.TrimSpace(in.Note)
+	if note == "" {
+		return ctxToolErr("bad_request", "note is required — record what was PHYSICALLY done since this checkpoint (files written, data mutated); rollback drops the context but not the side effects, so this is your only memory of them")
+	}
 	dropped, ok := s.rollbackFrom(id)
 	if !ok {
 		return ctxToolErr("not_found", fmt.Sprintf("no checkpoint %q; %s", id, knownCheckpointIDs(s)))
-	}
-	note := strings.TrimSpace(in.Note)
-	msg := fmt.Sprintf("rolled back to %s; %d entries dropped.", id, dropped)
-	if note != "" {
-		msg += " note: " + note
 	}
 	return checkpointListResponse(s, map[string]any{
 		"ok":              true,
 		"rolled_back_to":  id,
 		"entries_dropped": dropped,
-		"message":         msg,
+		"message":         fmt.Sprintf("rolled back to %s; %d entries dropped. Physical work done (NOT undone): %s", id, dropped, note),
 	})
 }
 

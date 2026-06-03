@@ -47,26 +47,27 @@ func phaseExtensions(_ context.Context, core *Core) error {
 	// SESSION_DIR / WORKSPACES_ROOT. Skill / notepad have no
 	// inter-extension state reads at InitState; their order is
 	// purely aesthetic.
+	// Compactor lands AFTER notepad so its Advertiser Block C composes
+	// after notepad's Block B. γ wires the operator config as a
+	// CompactorView — the resolver re-reads each fire so a future
+	// hot-reload propagates without re-creating the extension.
+	// SkillCatalog gives the per-tier resolver mission + per-role
+	// manifest overrides. Held as a var so the context:* provider below
+	// can use it as the hide-time segment summariser. Phase 5.2 / Stage 2.
+	compactorExt := compactorext.NewExtension(
+		core.Logger,
+		core.Config.Compactor(),
+		compactorext.Deps{
+			Router:       core.Models,
+			Store:        core.Store,
+			AgentID:      core.Agent.ID(),
+			SkillCatalog: compactorext.NewSkillManagerCatalog(core.Skills),
+		},
+	)
 	exts := []extension.Extension{
 		wsext.NewExtension(core.Cfg.Workspace.Dir, core.Logger),
 		notepadext.NewExtension(core.Store, core.Agent.ID(), notepadext.Config{}),
-		// Compactor lands AFTER notepad so its Advertiser
-		// Block C composes after notepad's Block B. γ wires
-		// the operator config as a CompactorView — the resolver
-		// re-reads each fire so a future hot-reload propagates
-		// without re-creating the extension. SkillCatalog gives
-		// the per-tier resolver mission + per-role manifest
-		// overrides. Phase 5.2.
-		compactorext.NewExtension(
-			core.Logger,
-			core.Config.Compactor(),
-			compactorext.Deps{
-				Router:       core.Models,
-				Store:        core.Store,
-				AgentID:      core.Agent.ID(),
-				SkillCatalog: compactorext.NewSkillManagerCatalog(core.Skills),
-			},
-		),
+		compactorExt,
 		planext.NewExtension(core.Agent.ID()),
 		wbext.NewExtension(core.Agent.ID()),
 		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()),
@@ -121,10 +122,12 @@ func phaseExtensions(_ context.Context, core *Core) error {
 	// standalone provider named "context" (the compactor extension's
 	// provider name is "compactor", which would reject context-prefixed
 	// tool names). Stateless: every Call recovers the calling session's
-	// CompactorState from the dispatch ctx. Registered alongside the
-	// compactor so the checkpoint state owner + its tool surface ship
-	// together.
-	if err := core.Tools.AddProvider(compactorext.NewContextProvider()); err != nil {
+	// CompactorState from the dispatch ctx. The compactor extension is
+	// passed as the hide-time segment summariser (it owns the model
+	// router) so a hide auto-distils the segment into the placeholder
+	// brief. Registered alongside the compactor so the checkpoint state
+	// owner + its tool surface ship together.
+	if err := core.Tools.AddProvider(compactorext.NewContextProvider(compactorExt)); err != nil {
 		return fmt.Errorf("register context checkpoint provider: %w", err)
 	}
 

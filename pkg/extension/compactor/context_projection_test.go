@@ -50,7 +50,7 @@ func TestProvideHistory_HiddenSegmentCollapses(t *testing.T) {
 	cs.AddCheckpoint("read the report")                           // cp-1 @ seq3, range (0,3]
 	appendToolPair(cs, 4, "call-2", "edit_file", "ok")            // visible, after the checkpoint
 
-	cs.SetCheckpointHidden("cp-1", true)
+	cs.SetCheckpointHidden("cp-1", true, "")
 	out := ext.ProvideHistory(context.Background(), st)
 
 	// Expected: [brief(visible)] [note] [assistant stub call-1]
@@ -115,7 +115,7 @@ func TestPreambleFloor_ProtectsBriefAndSegmentCount(t *testing.T) {
 
 	// Hiding the segment must NOT collapse the brief/setup/plan.
 	cs.AddCheckpoint("read data") // cp-1 @ seq5
-	cs.SetCheckpointHidden("cp-1", true)
+	cs.SetCheckpointHidden("cp-1", true, "")
 	ext := newTestExtension(t)
 	out := ext.ProvideHistory(context.Background(), st)
 	for _, m := range out {

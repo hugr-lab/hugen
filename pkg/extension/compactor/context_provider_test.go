@@ -3,6 +3,7 @@ package compactor
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
@@ -52,7 +53,7 @@ func TestContextProvider_ListAdvertisesFourTools(t *testing.T) {
 }
 
 func TestContextProvider_CheckpointHideExpand(t *testing.T) {
-	p := NewContextProvider()
+	p := NewContextProvider(nil)
 	st, cs := stateWithCheckpoints("ses-prov")
 	ctx := ctxWith(st)
 	appendEntry(cs, 1, model.RoleAssistant, bigContent(50))
@@ -83,8 +84,46 @@ func TestContextProvider_CheckpointHideExpand(t *testing.T) {
 	}
 }
 
+// TestContextProvider_HideNoteFallback pins that with no summariser
+// wired (nil), the agent's `note` is used verbatim as the placeholder
+// brief (the fallback), taking precedence over the checkpoint label.
+// The auto-summary path itself is covered by TestSummarizeSegment + the
+// hide_summary unit; here we pin the note fallback + the rename.
+func TestContextProvider_HideNoteFallback(t *testing.T) {
+	p := NewContextProvider(nil)
+	st, cs := stateWithCheckpoints("ses-note")
+	ctx := ctxWith(st)
+	appendEntry(cs, 1, model.RoleUser, "task")
+	appendToolPair(cs, 2, "c1", "read_file", bigContent(50))
+	cs.AddCheckpoint("raw discovery") // cp-1, label = "raw discovery"
+
+	callContext(t, p, ctx, "context:hide",
+		`{"cp_id":"cp-1","note":"op2023: 4 tables, key field Total_Amount_USD"}`)
+
+	cp, _ := cs.FindCheckpoint("cp-1")
+	if cp.Note != "op2023: 4 tables, key field Total_Amount_USD" {
+		t.Fatalf("hide note not stored on checkpoint: %q", cp.Note)
+	}
+
+	// The placeholder must carry the note, not the checkpoint label.
+	ext := newTestExtension(t)
+	out := ext.ProvideHistory(context.Background(), st)
+	gotNote := false
+	for _, m := range out {
+		if strings.Contains(m.Content, "op2023: 4 tables") {
+			gotNote = true
+		}
+		if strings.Contains(m.Content, "raw discovery") {
+			t.Fatalf("placeholder used the checkpoint label instead of the note: %q", m.Content)
+		}
+	}
+	if !gotNote {
+		t.Fatalf("placeholder did not carry the hide note; got %+v", out)
+	}
+}
+
 func TestContextProvider_Rollback(t *testing.T) {
-	p := NewContextProvider()
+	p := NewContextProvider(nil)
 	st, cs := stateWithCheckpoints("ses-rb")
 	ctx := ctxWith(st)
 	appendEntry(cs, 1, model.RoleUser, "task")
@@ -103,8 +142,32 @@ func TestContextProvider_Rollback(t *testing.T) {
 	}
 }
 
+// TestContextProvider_RollbackRequiresNote pins the side-effect contract:
+// rollback without a note is rejected (the note is the model's only
+// memory of physical work that rollback drops the context of but does
+// NOT undo).
+func TestContextProvider_RollbackRequiresNote(t *testing.T) {
+	p := NewContextProvider(nil)
+	st, cs := stateWithCheckpoints("ses-rbn")
+	ctx := ctxWith(st)
+	appendEntry(cs, 1, model.RoleUser, "task")
+	appendEntry(cs, 2, model.RoleTool, "a")
+	cs.AddCheckpoint("seg1")
+	appendEntry(cs, 3, model.RoleAssistant, "work")
+
+	res := callContext(t, p, ctx, "context:rollback", `{"cp_id":"cp-1"}`)
+	errObj, _ := res["error"].(map[string]any)
+	if errObj == nil || errObj["code"] != "bad_request" {
+		t.Fatalf("rollback without note = %+v, want error.code=bad_request", res)
+	}
+	// And nothing was dropped (rejected before mutation).
+	if cs.LastCheckpointSeq() != 2 || len(cs.historySnapshot()) != 3 {
+		t.Fatalf("rejected rollback must not mutate state")
+	}
+}
+
 func TestContextProvider_NotFoundAndSessionGone(t *testing.T) {
-	p := NewContextProvider()
+	p := NewContextProvider(nil)
 	st, _ := stateWithCheckpoints("ses-err")
 
 	// Unknown checkpoint → structured not_found.

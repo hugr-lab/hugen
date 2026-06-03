@@ -74,7 +74,7 @@ func TestSegmentTokens_HideImmune(t *testing.T) {
 	appendEntry(s, 4, model.RoleTool, bigContent(120))
 
 	before := s.SegmentTokens()
-	if _, ok := s.SetCheckpointHidden("cp-1", true); !ok {
+	if _, ok := s.SetCheckpointHidden("cp-1", true, ""); !ok {
 		t.Fatalf("hide cp-1 failed")
 	}
 	after := s.SegmentTokens()
@@ -87,13 +87,13 @@ func TestSetCheckpointHidden_ToggleAndMissing(t *testing.T) {
 	s := &CompactorState{}
 	appendEntry(s, 1, model.RoleTool, bigContent(10))
 	s.AddCheckpoint("a")
-	if cp, ok := s.SetCheckpointHidden("cp-1", true); !ok || !cp.Hidden {
+	if cp, ok := s.SetCheckpointHidden("cp-1", true, ""); !ok || !cp.Hidden {
 		t.Fatalf("hide cp-1: ok=%v hidden=%v", ok, cp.Hidden)
 	}
-	if cp, ok := s.SetCheckpointHidden("cp-1", false); !ok || cp.Hidden {
+	if cp, ok := s.SetCheckpointHidden("cp-1", false, ""); !ok || cp.Hidden {
 		t.Fatalf("expand cp-1: ok=%v hidden=%v", ok, cp.Hidden)
 	}
-	if _, ok := s.SetCheckpointHidden("cp-99", true); ok {
+	if _, ok := s.SetCheckpointHidden("cp-99", true, ""); ok {
 		t.Fatalf("hiding unknown checkpoint reported ok")
 	}
 }
@@ -108,7 +108,7 @@ func TestHiddenRanges(t *testing.T) {
 	s.AddCheckpoint("seg2") // cp-2 @ seq4, range (2,4]
 
 	// Only cp-2 hidden → one range (2,4].
-	s.SetCheckpointHidden("cp-2", true)
+	s.SetCheckpointHidden("cp-2", true, "")
 	ranges := s.hiddenRanges()
 	if len(ranges) != 1 {
 		t.Fatalf("hiddenRanges len = %d, want 1", len(ranges))

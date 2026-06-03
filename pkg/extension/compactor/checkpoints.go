@@ -37,6 +37,13 @@ type Checkpoint struct {
 	Description string `json:"description"`
 	Tokens      int    `json:"tokens"`
 	Hidden      bool   `json:"hidden"`
+	// Note is the brief shown in the placeholder once the segment is
+	// hidden — what to carry forward after the raw detail is collapsed.
+	// Set at hide time: primarily the cheap-LLM auto-summary of the
+	// segment (findings + any standing instructions / contracts / TODOs
+	// the agent read there), seeded by the agent's own `note`. Makes
+	// hide a "summarise-and-shed". Empty falls back to Description.
+	Note string `json:"note,omitempty"`
 }
 
 // hiddenRange is the [low, high] seq window of one hidden segment,
@@ -182,17 +189,57 @@ func (s *CompactorState) AddCheckpoint(description string) Checkpoint {
 
 // SetCheckpointHidden flips the Hidden flag on the checkpoint with the
 // given id and returns the updated checkpoint + ok. ok=false when no
-// checkpoint carries that id.
-func (s *CompactorState) SetCheckpointHidden(id string, hidden bool) (Checkpoint, bool) {
+// checkpoint carries that id. A non-empty note (only meaningful when
+// hidden=true) is stored as the placeholder carry-forward; passing ""
+// leaves any prior note untouched so an expand→re-hide keeps the brief.
+func (s *CompactorState) SetCheckpointHidden(id string, hidden bool, note string) (Checkpoint, bool) {
 	s.cpMu.Lock()
 	defer s.cpMu.Unlock()
 	for i := range s.checkpoints {
 		if s.checkpoints[i].ID == id {
 			s.checkpoints[i].Hidden = hidden
+			if hidden && note != "" {
+				s.checkpoints[i].Note = note
+			}
 			return s.checkpoints[i], true
 		}
 	}
 	return Checkpoint{}, false
+}
+
+// SegmentEntries returns the cached history entries that make up the
+// hideable portion of the named checkpoint's segment — those with
+// max(prevCheckpoint.Seq, preambleFloor) < Seq <= cp.Seq. This is
+// exactly what context:hide collapses, so it is the input the hide-time
+// summariser distils into the placeholder note. Returns nil for an
+// unknown id or an empty segment.
+func (s *CompactorState) SegmentEntries(cpID string) []HistoryEntry {
+	s.cpMu.Lock()
+	var cpSeq int64 = -1
+	var prevSeq int64
+	for i := range s.checkpoints {
+		if s.checkpoints[i].ID == cpID {
+			cpSeq = s.checkpoints[i].Seq
+			break
+		}
+		prevSeq = s.checkpoints[i].Seq
+	}
+	s.cpMu.Unlock()
+	if cpSeq < 0 {
+		return nil
+	}
+	entries := s.historySnapshot()
+	low := prevSeq
+	if f := s.preambleFloor(entries); f > low {
+		low = f
+	}
+	var out []HistoryEntry
+	for _, e := range entries {
+		if e.Seq > low && e.Seq <= cpSeq {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // FindCheckpoint returns a copy of the checkpoint with the given id.
