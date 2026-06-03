@@ -204,6 +204,19 @@ type CompactorState struct {
 	// cpCounter mints stable "cp-N" ids — monotonic across the session
 	// so a rolled-back / hidden id never reappears with new content.
 	cpCounter int
+	// preambleFloorVal is the seq boundary between the task PREAMBLE
+	// (the worker's first user_message + handoff contract + any system
+	// setup + the model's pre-tool planning) and the model-generated
+	// WORK that follows. Entries at or below it are NEVER collapsed by a
+	// hide and never counted toward the segment window — only work after
+	// the first tool call is sheddable. Computed once (the boundary is
+	// fixed — preamble entries never roll back) and cached. Guards
+	// against hide swallowing the task definition (the dogfood failure:
+	// a researcher hid cp-1, lost "fill research.md / data-model.md",
+	// and submitted empty stubs). preambleFloorSet flips on first
+	// computation; 0 with set=false means "no tool work yet".
+	preambleFloorVal int64
+	preambleFloorSet bool
 }
 
 // SetAdvertiseTokens records the cached estimate. Called from

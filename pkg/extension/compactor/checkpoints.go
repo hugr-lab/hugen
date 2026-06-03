@@ -21,6 +21,8 @@ package compactor
 import (
 	"fmt"
 	"sort"
+
+	"github.com/hugr-lab/hugen/pkg/model"
 )
 
 // Checkpoint is one model-authored segment marker. ID is a stable
@@ -87,15 +89,17 @@ func (s *CompactorState) historyMaxSeq() int64 {
 
 // SegmentTokens returns the estimated token size of the CURRENT (open)
 // segment — Σ estimateMessageTokens over cached entries with Seq >
-// lastCheckpointSeq. Measured locally from the segment's own entries
-// (not realPrompt − baseline) so it is hide-immune by the §6.2
-// invariant: a hidden older segment never overlaps Seq >
-// lastCheckpointSeq, so this sum is unaffected. This is the L3
-// trigger-1 signal — available between model calls without waiting on
-// a usage report.
+// max(lastCheckpointSeq, preambleFloor). Measured locally from the
+// segment's own entries (not realPrompt − baseline) so it is
+// hide-immune by the §6.2 invariant. The preamble floor keeps the task
+// brief out of the first segment so the window measures only the
+// model's work, not the (often multi-KB) handoff contract.
 func (s *CompactorState) SegmentTokens() int {
-	cutoff := s.LastCheckpointSeq()
 	entries := s.historySnapshot()
+	cutoff := s.LastCheckpointSeq()
+	if f := s.preambleFloor(entries); f > cutoff {
+		cutoff = f
+	}
 	total := 0
 	for _, ent := range entries {
 		if ent.Seq > cutoff {
@@ -103,6 +107,53 @@ func (s *CompactorState) SegmentTokens() int {
 		}
 	}
 	return total
+}
+
+// computePreambleFloor returns the seq of the last entry BEFORE the
+// first tool-bearing assistant message — the boundary between the task
+// preamble (brief + contract + system setup + pre-tool planning) and
+// the model-generated work. Returns -1 when no tool call has happened
+// yet (nothing is sheddable, so there is no floor to fix).
+func computePreambleFloor(entries []HistoryEntry) int64 {
+	for i := range entries {
+		m := entries[i].Message
+		if m.Role == model.RoleAssistant && len(m.ToolCalls) > 0 {
+			if i == 0 {
+				return 0
+			}
+			return entries[i-1].Seq
+		}
+	}
+	return -1
+}
+
+// preambleFloor returns the cached preamble boundary, computing it once
+// from the given entries when the first tool-bearing assistant first
+// appears. Entries at or below it are never hidden and never counted
+// toward the segment window. Returns 0 (no protection needed) until the
+// first tool call establishes the boundary — there is nothing hideable
+// before then.
+func (s *CompactorState) preambleFloor(entries []HistoryEntry) int64 {
+	s.cpMu.Lock()
+	if s.preambleFloorSet {
+		v := s.preambleFloorVal
+		s.cpMu.Unlock()
+		return v
+	}
+	s.cpMu.Unlock()
+
+	f := computePreambleFloor(entries)
+	if f < 0 {
+		return 0
+	}
+	s.cpMu.Lock()
+	if !s.preambleFloorSet {
+		s.preambleFloorVal = f
+		s.preambleFloorSet = true
+	}
+	v := s.preambleFloorVal
+	s.cpMu.Unlock()
+	return v
 }
 
 // AddCheckpoint stamps a checkpoint at the current history head with

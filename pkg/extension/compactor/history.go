@@ -56,11 +56,17 @@ func (e *Extension) ProvideHistory(_ context.Context, state extension.SessionSta
 		}
 		return out
 	}
+	// The task preamble (brief + handoff contract + system setup, all
+	// at or below this floor) is NEVER collapsed — hiding it would drop
+	// the task definition (the dogfood failure where a researcher hid
+	// cp-1 and lost "fill research.md / data-model.md"). Only model-
+	// generated work after the first tool call is sheddable.
+	floor := s.preambleFloor(entries)
 	out := make([]model.Message, 0, len(entries))
 	noted := make(map[string]bool, len(ranges))
 	for _, ent := range entries {
 		r := matchHiddenRange(ranges, ent.Seq)
-		if r == nil {
+		if r == nil || ent.Seq <= floor {
 			out = append(out, ent.Message)
 			continue
 		}
