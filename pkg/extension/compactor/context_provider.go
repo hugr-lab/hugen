@@ -222,7 +222,7 @@ func (p *ContextProvider) callCheckpoint(s *CompactorState, args json.RawMessage
 	return checkpointListResponse(s, map[string]any{
 		"ok":         true,
 		"checkpoint": cp.ID,
-		"message":    fmt.Sprintf("segment closed as %s; counter reset. Hide closed segments with context:hide(cp_id) when context fills.", cp.ID),
+		"message":    fmt.Sprintf("segment closed as %s; counter reset. Check context_fill below — only context:hide a closed segment when context is actually filling.", cp.ID),
 	})
 }
 
@@ -322,13 +322,21 @@ func (p *ContextProvider) callRollback(s *CompactorState, args json.RawMessage) 
 // expand / roll back.
 func checkpointListResponse(s *CompactorState, extra map[string]any) (json.RawMessage, error) {
 	cps := s.Checkpoints()
-	out := make(map[string]any, len(extra)+3)
+	real, budget, hideThr := s.Occupancy()
+	out := make(map[string]any, len(extra)+6)
 	for k, v := range extra {
 		out[k] = v
 	}
 	out["checkpoints"] = cps
 	out["current_segment_tokens"] = s.SegmentTokens()
 	out["hidden_tokens"] = s.HiddenSegmentTokens()
+	// Show the model how full its context is — it has no token counter
+	// otherwise, so this is what makes a hide decision rational.
+	if fill := fillSummary(real, budget, hideThr); fill != "" {
+		out["context_fill"] = fill
+		out["context_used_tokens"] = real
+		out["context_budget_tokens"] = budget
+	}
 	return json.Marshal(out)
 }
 

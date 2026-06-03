@@ -122,6 +122,25 @@ func TestContextProvider_HideNoteFallback(t *testing.T) {
 	}
 }
 
+// TestCheckpointResult_ShowsFill pins that context:* results surface the
+// real context-fill so the model decides hide rationally.
+func TestCheckpointResult_ShowsFill(t *testing.T) {
+	p := NewContextProvider(nil)
+	st, cs := stateWithCheckpoints("ses-fill")
+	cs.SetOccupancy(36000, 100000, 80000) // as the controller would stamp
+	ctx := ctxWith(st)
+	appendEntry(cs, 1, model.RoleAssistant, "x")
+
+	res := callContext(t, p, ctx, "context:checkpoint", `{"description":"d"}`)
+	fill, _ := res["context_fill"].(string)
+	if !strings.Contains(fill, "36%") {
+		t.Fatalf("checkpoint result context_fill = %q, want a fill%%", res["context_fill"])
+	}
+	if u, _ := res["context_used_tokens"].(float64); u != 36000 {
+		t.Fatalf("context_used_tokens = %v, want 36000", res["context_used_tokens"])
+	}
+}
+
 func TestContextProvider_Rollback(t *testing.T) {
 	p := NewContextProvider(nil)
 	st, cs := stateWithCheckpoints("ses-rb")

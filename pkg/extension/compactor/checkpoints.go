@@ -57,6 +57,36 @@ type hiddenRange struct {
 	cp   Checkpoint
 }
 
+// SetOccupancy records the latest real context occupancy + tier budget
+// + hide threshold (tokens). Called by the controller each iteration so
+// the context:* tools can show the model how full its context is.
+func (s *CompactorState) SetOccupancy(real, budget, hideThreshold int) {
+	s.occReal.Store(int64(real))
+	s.occBudget.Store(int64(budget))
+	s.occHideThreshold.Store(int64(hideThreshold))
+}
+
+// Occupancy returns the cached real occupancy / budget / hide threshold
+// (tokens). Zeroes until the first EvaluateContext stamps them.
+func (s *CompactorState) Occupancy() (real, budget, hideThreshold int) {
+	return int(s.occReal.Load()), int(s.occBudget.Load()), int(s.occHideThreshold.Load())
+}
+
+// fillSummary renders the context-fill one-liner the model reads to
+// decide whether to shed: "~36K / 100K tokens (36% full); shed band
+// ~80K". Empty when occupancy / budget is unknown (e.g. root, or before
+// the first usage report).
+func fillSummary(real, budget, hideThreshold int) string {
+	if real <= 0 || budget <= 0 {
+		return ""
+	}
+	out := fmt.Sprintf("context ~%dK / %dK tokens (%d%% full)", kTokens(real), kTokens(budget), real*100/budget)
+	if hideThreshold > 0 {
+		out += fmt.Sprintf("; shed band at ~%dK", kTokens(hideThreshold))
+	}
+	return out
+}
+
 // LastCheckpointSeq returns the Seq of the most recent checkpoint, or
 // 0 when none has been stamped. The current (open) segment is every
 // cached entry with Seq greater than this.

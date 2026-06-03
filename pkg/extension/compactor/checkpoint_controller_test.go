@@ -100,6 +100,32 @@ func TestEvaluateContext_BudgetBandBlocks(t *testing.T) {
 	}
 }
 
+func TestFillSummary(t *testing.T) {
+	if fillSummary(0, 100000, 80000) != "" {
+		t.Fatalf("no real occupancy → empty fill")
+	}
+	if fillSummary(36000, 0, 0) != "" {
+		t.Fatalf("no budget → empty fill")
+	}
+	got := fillSummary(36000, 100000, 80000)
+	if !strings.Contains(got, "36%") || !strings.Contains(got, "shed band") {
+		t.Fatalf("fill = %q, want 36%% + shed band", got)
+	}
+}
+
+func TestEvaluateContext_StampsOccupancy(t *testing.T) {
+	ext := newTestExtension(t)
+	st, cs := newSubagentState("ses-occ", 1)
+	appendEntry(cs, 1, model.RoleAssistant, "x")
+	ext.EvaluateContext(context.Background(), st, extension.ContextInput{
+		RealPromptTokens: 36000, Budget: 100000,
+	})
+	real, budget, thr := cs.Occupancy()
+	if real != 36000 || budget != 100000 || thr != 80000 {
+		t.Fatalf("occupancy = %d/%d/%d, want 36000/100000/80000 (0.80 band)", real, budget, thr)
+	}
+}
+
 func TestEvaluateContext_DisabledConfigInert(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.CheckpointsEnabled = false

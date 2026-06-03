@@ -19,6 +19,7 @@ package compactor
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/model"
@@ -204,6 +205,17 @@ type CompactorState struct {
 	// cpCounter mints stable "cp-N" ids — monotonic across the session
 	// so a rolled-back / hidden id never reappears with new content.
 	cpCounter int
+	// occReal / occBudget / occHideThreshold cache the latest REAL
+	// context occupancy (lastCallUsage.PromptTokens), the tier budget,
+	// and the 0.80 hide threshold — stamped by the controller every
+	// EvaluateContext. The model has no token counter of its own, so
+	// the context:* tool results + nudges surface these to make a
+	// hide/checkpoint decision rational (low fill → don't hide; near the
+	// band → shed). Atomics: written + read on the Run goroutine,
+	// lock-free keeps the hot read path off cpMu.
+	occReal          atomic.Int64
+	occBudget        atomic.Int64
+	occHideThreshold atomic.Int64
 	// preambleFloorVal is the seq boundary between the task PREAMBLE
 	// (the worker's first user_message + handoff contract + any system
 	// setup + the model's pre-tool planning) and the model-generated

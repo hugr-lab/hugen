@@ -56,13 +56,20 @@ func (e *Extension) EvaluateContext(ctx context.Context, state extension.Session
 	}
 
 	// Trigger 2 — budget band (real occupancy). Inert without a tier
-	// budget or before the first usage report.
-	if in.Budget > 0 && in.RealPromptTokens > 0 {
-		hideThreshold := int(hideRatio * float64(in.Budget))
-		if in.RealPromptTokens >= hideThreshold {
+	// budget or before the first usage report. hideThreshold is computed
+	// regardless (0 when no budget) so it can be surfaced to the model.
+	hideThreshold := 0
+	if in.Budget > 0 {
+		hideThreshold = int(hideRatio * float64(in.Budget))
+		if in.RealPromptTokens > 0 && in.RealPromptTokens >= hideThreshold {
 			dec.ContextFull = true
 		}
 	}
+
+	// Stamp the occupancy so the context:* tool results can show the
+	// model how full its context is (it has no token counter of its own
+	// — without this it hides blind).
+	s.SetOccupancy(in.RealPromptTokens, in.Budget, hideThreshold)
 
 	// Advisory — context_full (shedding) supersedes the softer
 	// checkpoint nudge when both fire.
@@ -70,22 +77,34 @@ func (e *Extension) EvaluateContext(ctx context.Context, state extension.Session
 	case dec.ContextFull:
 		dec.Inject = e.renderContextFullAdvisory(s, in)
 	case dec.CheckpointRequired:
-		dec.Inject = e.renderCheckpointNudge(s, seg, window)
+		dec.Inject = e.renderCheckpointNudge(s, in, seg, window, hideThreshold)
 	}
 	return dec
 }
 
-// renderCheckpointNudge is the trigger-1 system message: the segment
-// is over the window, close it before continuing.
-func (e *Extension) renderCheckpointNudge(s *CompactorState, seg, window int) string {
+// renderCheckpointNudge is the trigger-1 system message: the segment is
+// over the window, close it before continuing. It surfaces the real
+// context fill so the model only sheds when actually filling — not
+// blindly on every checkpoint (the dogfood failure where it hid early
+// and lost an instruction).
+func (e *Extension) renderCheckpointNudge(s *CompactorState, in extension.ContextInput, seg, window, hideThreshold int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b,
 		"Context note: the current work segment is ~%dK tokens, over the ~%dK window. "+
 			"Call context:checkpoint(description=\"…\") to close it before any further tool calls — "+
 			"tool calls are blocked until you do.",
 		kTokens(seg), kTokens(window))
-	if hideable := closedVisibleCount(s); hideable > 0 {
-		fmt.Fprintf(&b, " You also have %d earlier closed segment(s) you can shed with context:hide(cp_id) if context is filling.", hideable)
+	if fill := fillSummary(in.RealPromptTokens, in.Budget, hideThreshold); fill != "" {
+		fmt.Fprintf(&b, " %s.", fill)
+		// Suggest shedding only within ~80% of the band, and only if
+		// there is a closed segment to shed; otherwise reassure there is
+		// headroom so the model doesn't hide prematurely.
+		nearBand := hideThreshold > 0 && in.RealPromptTokens >= hideThreshold*8/10
+		if nearBand && closedVisibleCount(s) > 0 {
+			b.WriteString(" Context is getting full — consider context:hide(cp_id) on an earlier closed segment (its detail is summarised into a placeholder, so the takeaway survives).")
+		} else {
+			b.WriteString(" Plenty of headroom — no need to hide yet; just keep checkpointing.")
+		}
 	}
 	return b.String()
 }
