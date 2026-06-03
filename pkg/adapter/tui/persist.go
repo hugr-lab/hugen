@@ -74,7 +74,7 @@ func loadSettings() (*tuiSettings, error) {
 		return &tuiSettings{}, fmt.Errorf("tui: read settings: %w", err)
 	}
 	var s tuiSettings
-	if err := yaml.Unmarshal(raw, &s); err != nil {
+	if _, err := yaml.Unmarshal(raw, &s, yaml.DecodeOpts{}); err != nil {
 		return &tuiSettings{}, fmt.Errorf("tui: parse settings: %w", err)
 	}
 	return &s, nil

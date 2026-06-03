@@ -42,7 +42,7 @@ func loadLocalConfig(path string) (map[string]any, error) {
 		return nil, err
 	}
 	var config map[string]any
-	if err := yaml.Unmarshal(f, &config); err != nil {
+	if _, err := yaml.Unmarshal(f, &config, yaml.DecodeOpts{}); err != nil {
 		return nil, err
 	}
 
