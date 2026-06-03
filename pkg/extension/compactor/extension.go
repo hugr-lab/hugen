@@ -228,6 +228,10 @@ type TierOverride struct {
 	LLMTimeout           *time.Duration
 	LLMIntent            *model.Intent
 	TokenBudgetRatio     *float64
+
+	CheckpointsEnabled     *bool
+	CheckpointWindowTokens *int
+	ContextHideRatio       *float64
 }
 
 // Deps bundles the agent-level dependencies the β pipeline

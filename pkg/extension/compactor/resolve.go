@@ -109,6 +109,15 @@ func applyTierOverride(cfg *Config, t TierOverride) {
 	if t.TokenBudgetRatio != nil {
 		cfg.TokenBudgetRatio = *t.TokenBudgetRatio
 	}
+	if t.CheckpointsEnabled != nil {
+		cfg.CheckpointsEnabled = *t.CheckpointsEnabled
+	}
+	if t.CheckpointWindowTokens != nil {
+		cfg.CheckpointWindowTokens = *t.CheckpointWindowTokens
+	}
+	if t.ContextHideRatio != nil {
+		cfg.ContextHideRatio = *t.ContextHideRatio
+	}
 }
 
 // applyOverrideSpec is the skill-manifest variant of

@@ -62,6 +62,43 @@ func TestBuildCompactorConfig_UIMarkerEnabled(t *testing.T) {
 	}
 }
 
+// TestBuildCompactorConfig_CheckpointKnobs verifies the Stage 2 L3
+// knobs wire from YAML through BuildConfig + the per-tier resolver:
+// defaults when absent, top-level override, and a worker-tier overlay
+// (the config.yaml dogfood shape — lower window + band on workers).
+func TestBuildCompactorConfig_CheckpointKnobs(t *testing.T) {
+	// Absent → DefaultConfig values.
+	def := BuildConfig(config.CompactorConfig{}, slog.Default())
+	if !def.CheckpointsEnabled || def.CheckpointWindowTokens != defaultCheckpointWindowTokens ||
+		def.ContextHideRatio != defaultContextHideRatio {
+		t.Fatalf("absent checkpoint config: got enabled=%v window=%d ratio=%v, want defaults",
+			def.CheckpointsEnabled, def.CheckpointWindowTokens, def.ContextHideRatio)
+	}
+
+	// Top-level enabled + a worker-tier overlay lowering window + band.
+	in := config.CompactorConfig{
+		CheckpointsEnabled: ptrBool(true),
+		Tiers: map[string]config.CompactorTier{
+			"worker": {
+				CheckpointWindowTokens: ptrInt(5000),
+				ContextHideRatio:       ptrFloat(0.60),
+			},
+		},
+	}
+	built := BuildConfig(in, slog.Default())
+	ext := NewExtensionWithConfig(slog.Default(), built, Deps{})
+
+	st, _ := newSubagentState("ses-cfg", 1) // Tier() == "worker"
+	cfg := ext.resolveTierConfig(context.Background(), st)
+	if cfg.CheckpointWindowTokens != 5000 || cfg.ContextHideRatio != 0.60 {
+		t.Fatalf("worker-tier resolved checkpoint config: window=%d ratio=%v, want 5000 / 0.60",
+			cfg.CheckpointWindowTokens, cfg.ContextHideRatio)
+	}
+	if !cfg.CheckpointsEnabled {
+		t.Fatalf("worker-tier CheckpointsEnabled = false, want true (inherited from top-level)")
+	}
+}
+
 // TestBuildCompactorConfig_OperatorYAMLLaysOverDefaults verifies
 // that explicit YAML values land on top of DefaultConfig.
 func TestBuildCompactorConfig_OperatorYAMLLaysOverDefaults(t *testing.T) {

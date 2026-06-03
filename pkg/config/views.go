@@ -258,6 +258,23 @@ type CompactorConfig struct {
 	// land alongside without breaking the YAML schema.
 	UIMarker CompactorUIMarker `mapstructure:"ui_marker" yaml:"ui_marker,omitempty"`
 
+	// CheckpointsEnabled is the L3 in-turn-checkpoint master toggle
+	// (Stage 2). nil = inherit runtime default (true); &false disables.
+	// Combined with the root-off tier gate it yields the spec default:
+	// subagents on, root off. Independent of Enabled (the summariser).
+	CheckpointsEnabled *bool `mapstructure:"checkpoints_enabled" yaml:"checkpoints_enabled,omitempty"`
+
+	// CheckpointWindowTokens is the L3 trigger-1 segment window — once
+	// the current segment's estimated size crosses it the model is
+	// pushed to call context:checkpoint. 0 / absent ⇒ runtime default
+	// (10000). Lower it to force frequent checkpointing for dogfood.
+	CheckpointWindowTokens int `mapstructure:"checkpoint_window_tokens" yaml:"checkpoint_window_tokens,omitempty"`
+
+	// ContextHideRatio is the L3 trigger-2 soft band, a fraction of the
+	// tier budget below the 0.85 hard kill. 0 / absent ⇒ runtime
+	// default (0.80). Crossing it forces hide / rollback.
+	ContextHideRatio float64 `mapstructure:"context_hide_ratio" yaml:"context_hide_ratio,omitempty"`
+
 	// Tiers carries per-tier overrides (root | mission | worker).
 	// Each entry's non-zero fields override the corresponding
 	// top-level field for sessions in that tier; absent or empty
@@ -298,6 +315,10 @@ type CompactorTier struct {
 	LLMTimeoutMs         *int     `mapstructure:"llm_timeout_ms"        yaml:"llm_timeout_ms,omitempty"`
 	LLMIntent            *string  `mapstructure:"llm_intent"            yaml:"llm_intent,omitempty"`
 	TokenBudgetRatio     *float64 `mapstructure:"token_budget_ratio"    yaml:"token_budget_ratio,omitempty"`
+
+	CheckpointsEnabled     *bool    `mapstructure:"checkpoints_enabled"      yaml:"checkpoints_enabled,omitempty"`
+	CheckpointWindowTokens *int     `mapstructure:"checkpoint_window_tokens" yaml:"checkpoint_window_tokens,omitempty"`
+	ContextHideRatio       *float64 `mapstructure:"context_hide_ratio"       yaml:"context_hide_ratio,omitempty"`
 }
 
 // HitlView is the operator-config surface for the phase-5.1 HITL

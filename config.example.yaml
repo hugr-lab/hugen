@@ -97,6 +97,43 @@ models:
       temperature: 0.8
 
 
+# ── History compactor (phase 5.2) ───────────────────────────
+# Content-aware history management. Two independent mechanisms:
+#  1. Turn-boundary SUMMARISER (`enabled`/`strategy`) — for long
+#     multi-turn / root sessions: once a turn boundary crosses the
+#     turn-count or token budget, summarise older turns into a digest
+#     while keeping the recent tail verbatim.
+#  2. L3 in-turn CHECKPOINTS (`checkpoints_*`, Stage 2) — for a
+#     single-turn subagent that bloats its own context (e.g. reads a
+#     large file): lets it SHED context mid-turn via context:checkpoint
+#     / hide / rollback instead of only dying at the 0.85 hard kill.
+# Both default ON; the whole block is optional (omit → runtime
+# defaults from compactor.DefaultConfig).
+#
+# compactor:
+#   enabled: true              # turn-boundary summariser kill-switch
+#   max_tokens: 80000          # summariser budget limb
+#   max_turns: 50              # summariser turn-count limb
+#   preserved_recent_turns: 10 # live tail kept verbatim past the cutoff
+#   min_turn_gap: 3            # anti-thrash gate
+#   llm_intent: summarize      # model-router intent for summariser calls
+#
+#   # --- L3 in-turn checkpoints ---
+#   checkpoints_enabled: true        # L3 master toggle (root-off is
+#                                    # enforced by the tier gate, not here)
+#   checkpoint_window_tokens: 10000  # trigger 1: segment size that forces
+#                                    # a context:checkpoint before more tools
+#   context_hide_ratio: 0.80         # trigger 2: fraction of the tier budget
+#                                    # (below the 0.85 kill) that forces a
+#                                    # hide / rollback
+#   tiers:
+#     worker:
+#       enabled: false               # summariser off for short workers…
+#       # …but L3 checkpoints stay armed. Lower the window / band per
+#       # tier to make a bloat-prone worker checkpoint + shed sooner:
+#       # checkpoint_window_tokens: 5000
+#       # context_hide_ratio: 0.60
+
 # ── Auth providers ──────────────────────────────────────────
 # The hugr connection uses the .env-driven primary source by default.
 # Add more named entries here only when you wire additional providers

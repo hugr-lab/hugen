@@ -72,6 +72,15 @@ func BuildConfig(in config.CompactorConfig, logger *slog.Logger) Config {
 	if in.UIMarker.Enabled != nil {
 		cfg.UIMarkerEnabled = *in.UIMarker.Enabled
 	}
+	if in.CheckpointsEnabled != nil {
+		cfg.CheckpointsEnabled = *in.CheckpointsEnabled
+	}
+	if in.CheckpointWindowTokens > 0 {
+		cfg.CheckpointWindowTokens = in.CheckpointWindowTokens
+	}
+	if in.ContextHideRatio > 0 {
+		cfg.ContextHideRatio = in.ContextHideRatio
+	}
 
 	if len(in.Tiers) > 0 {
 		cfg.Tiers = make(map[string]TierOverride, len(in.Tiers))
@@ -123,15 +132,18 @@ func resolveCompactorIntent(s string, logger *slog.Logger) model.Intent {
 // unknown intent emits the same warn shape.
 func projectTierOverride(t config.CompactorTier, logger *slog.Logger) TierOverride {
 	out := TierOverride{
-		Enabled:              t.Enabled,
-		MaxTurns:             t.MaxTurns,
-		MaxTokens:            t.MaxTokens,
-		PreservedRecentTurns: t.PreservedRecentTurns,
-		DigestMaxTokens:      t.DigestMaxTokens,
-		KeptVerbatimMax:      t.KeptVerbatimMax,
-		MinTurnGap:           t.MinTurnGap,
-		TokenBudgetRatio:     t.TokenBudgetRatio,
-		WindowSize:           t.WindowSize,
+		Enabled:                t.Enabled,
+		MaxTurns:               t.MaxTurns,
+		MaxTokens:              t.MaxTokens,
+		PreservedRecentTurns:   t.PreservedRecentTurns,
+		DigestMaxTokens:        t.DigestMaxTokens,
+		KeptVerbatimMax:        t.KeptVerbatimMax,
+		MinTurnGap:             t.MinTurnGap,
+		TokenBudgetRatio:       t.TokenBudgetRatio,
+		WindowSize:             t.WindowSize,
+		CheckpointsEnabled:     t.CheckpointsEnabled,
+		CheckpointWindowTokens: t.CheckpointWindowTokens,
+		ContextHideRatio:       t.ContextHideRatio,
 	}
 	if t.Strategy != nil {
 		s := resolveStrategy(*t.Strategy, logger)
