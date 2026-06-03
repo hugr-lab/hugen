@@ -185,6 +185,25 @@ type CompactorState struct {
 	// [Extension.ReportStatus] can surface the number without
 	// re-running the renderer. Phase 5.2 (context-budget β).
 	advertiseTokens int
+
+	// cpMu guards the L3 in-turn checkpoint state below. Held briefly
+	// during checkpoint/hide/expand/rollback ops + segment reads —
+	// never across LLM / I/O. Separate from historyMu so a segment-
+	// token read (which snapshots history under historyMu) doesn't
+	// contend with a checkpoint list read.
+	cpMu sync.Mutex
+	// checkpoints is the ordered list of model-authored segment markers
+	// (oldest → newest). Each closes the segment ending at its Seq; the
+	// range (prev.Seq, this.Seq] is the segment it can hide / roll back.
+	checkpoints []Checkpoint
+	// lastCheckpointSeq is the Seq of the most recent checkpoint (0 when
+	// none). The current (open) segment is every cached history entry
+	// with Seq > lastCheckpointSeq — always fully visible (§6.2), which
+	// is what makes the segment counter hide-immune (§6.3).
+	lastCheckpointSeq int64
+	// cpCounter mints stable "cp-N" ids — monotonic across the session
+	// so a rolled-back / hidden id never reappears with new content.
+	cpCounter int
 }
 
 // SetAdvertiseTokens records the cached estimate. Called from
@@ -468,4 +487,3 @@ func (s *CompactorState) pruneToCutoff(cutoff int64) {
 	copy(out, keep)
 	s.history = out
 }
-

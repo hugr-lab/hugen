@@ -1884,6 +1884,27 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 		s.emitToolError(emitCtx, tc.ID, tc.Name, protocol.ToolErrorContextBudget, msg, "")
 		return msg, true
 	}
+	// L3 in-turn checkpoint blocks (Stage 2). When the current segment
+	// blew the window (checkpoint_required) or real occupancy crossed
+	// the 0.80 hide band (context_full), every NON-context tool is
+	// short-circuited to the matching error until the model sheds /
+	// checkpoints. The context:* tools are exempt — they are the only
+	// way out of the block. Re-evaluated each iteration boundary
+	// (evaluateContextCheckpoints), so the block clears on the next
+	// dispatch after a checkpoint / hide. The 0.85 budget kill above
+	// still supersedes (terminal).
+	if st := s.turnState; st != nil && (st.checkpointRequired || st.contextFull) && !isContextTool(tc.Name) {
+		code := protocol.ToolErrorCheckpointRequired
+		msg := "the current work segment exceeded the checkpoint window — call " +
+			"context:checkpoint(description=\"…\") before any other tool. context:* tools are still allowed."
+		if st.contextFull {
+			code = protocol.ToolErrorContextFull
+			msg = "context is over the shed band — free context first with context:hide(cp_id) " +
+				"or context:rollback(cp_id, note) before any other tool. context:* tools are still allowed."
+		}
+		s.emitToolError(emitCtx, tc.ID, tc.Name, code, msg, "")
+		return msg, true
+	}
 	if s.tools == nil {
 		s.emitToolError(emitCtx, tc.ID, tc.Name, protocol.ToolErrorNotFound,
 			"tool dispatch not configured for this session", "")
@@ -2078,6 +2099,27 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 // tool's own output.
 func hintSuffix(hint string) string {
 	return "\n\n[hint] " + hint
+}
+
+// isContextTool reports whether name is one of the synthetic context:*
+// in-turn checkpoint tools, which are EXEMPT from the L3
+// checkpoint_required / context_full dispatch blocks (otherwise the
+// model could never recover — it must be able to checkpoint / hide /
+// rollback while blocked). The model echoes back the LLM-sanitized
+// form ("context_checkpoint"), so both separators are matched. The
+// suffix allow-list keeps an unrelated provider tool named
+// "context_*" from being granted the exemption.
+func isContextTool(name string) bool {
+	for _, sep := range []string{":", "_"} {
+		prefix := extension.ContextProviderName + sep
+		if rest, ok := strings.CutPrefix(name, prefix); ok {
+			switch rest {
+			case "checkpoint", "hide", "expand", "rollback":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // toolResultHint consults the registered [extension.ModelInTurnAdvisor]

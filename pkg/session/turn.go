@@ -105,6 +105,26 @@ type turnState struct {
 	// maxEmptyRetries. NOT reset per iteration — a per-turn backstop,
 	// like finalizeGateRetries.
 	emptyRetries int
+
+	// L3 in-turn context-checkpoint block state (Stage 2). Both flags
+	// are RE-EVALUATED every iteration boundary by
+	// [Session.evaluateContextCheckpoints] from the
+	// [extension.ContextController] verdict — NOT latched like
+	// budgetExceeded. While either is set, dispatchToolCall short-
+	// circuits every NON-context tool to the matching tool-error;
+	// context:* tools are exempt so the model can always recover.
+	//   - checkpointRequired: the current segment blew the window
+	//     (trigger 1) — clears when context:checkpoint resets it.
+	//   - contextFull: real occupancy crossed the 0.80 hide band
+	//     (trigger 2) — clears when a hide drops it back under.
+	checkpointRequired bool
+	contextFull        bool
+	// Rising-edge guards: the advisory system message is injected once
+	// per false→true transition of each condition (the per-call tool
+	// errors carry the persistent signal). Reset to the current state
+	// each evaluation so a later re-cross re-nudges.
+	checkpointNudged  bool
+	contextFullNudged bool
 }
 
 // modelChunkEvent is the single union the Run loop reads from
@@ -647,7 +667,61 @@ func (s *Session) advanceOrFinish(runCtx context.Context) {
 	// FrameObserver and emits nudges synchronously on transition.
 	// Nothing to do here.
 
+	// L3 in-turn checkpoints (Stage 2) — re-evaluate the segment /
+	// budget-band triggers from the just-folded history + the prior
+	// call's real occupancy, set the per-turn block flags, and inject
+	// the advisory on the rising edge. Runs at the tool→model boundary
+	// where the prior iteration's assistant + tool results are folded,
+	// so the segment counter is current. No-op on root / when no
+	// ContextController is wired.
+	s.evaluateContextCheckpoints(runCtx)
+
 	s.startModelIteration(runCtx)
+}
+
+// evaluateContextCheckpoints consults the singular
+// [extension.ContextController] (the compactor) once per iteration
+// boundary and applies its verdict to the turn's L3 block flags. The
+// advisory is injected only on the rising edge of each condition (the
+// controller renders it; the session owns edge-tracking to avoid
+// per-iteration spam). The block flags are read by dispatchToolCall on
+// the upcoming iteration's tool calls. Re-evaluated (not latched) so a
+// checkpoint / hide that frees context clears the block.
+func (s *Session) evaluateContextCheckpoints(runCtx context.Context) {
+	st := s.turnState
+	if st == nil || s.deps == nil {
+		return
+	}
+	var ctrl extension.ContextController
+	for _, ext := range s.deps.Extensions {
+		if c, ok := ext.(extension.ContextController); ok {
+			ctrl = c
+			break
+		}
+	}
+	if ctrl == nil {
+		return
+	}
+	budget := 0
+	if s.models != nil {
+		budget = s.models.MaxPromptTokens(s.DefaultIntent())
+	}
+	dec := ctrl.EvaluateContext(runCtx, s, extension.ContextInput{
+		RealPromptTokens: st.lastCallUsage.PromptTokens,
+		Budget:           budget,
+	})
+	st.checkpointRequired = dec.CheckpointRequired
+	st.contextFull = dec.ContextFull
+	if dec.Inject != "" {
+		switch {
+		case dec.ContextFull && !st.contextFullNudged:
+			s.injectTurnContinuation(runCtx, dec.Inject)
+		case dec.CheckpointRequired && !dec.ContextFull && !st.checkpointNudged:
+			s.injectTurnContinuation(runCtx, dec.Inject)
+		}
+	}
+	st.contextFullNudged = dec.ContextFull
+	st.checkpointNudged = dec.CheckpointRequired
 }
 
 // foldAssistantAndMaybeDispatch emits the consolidated assistant

@@ -29,11 +29,16 @@ import (
 // fresh copy of the projected entries as []model.Message — the
 // caller may append to it without affecting owner-internal state.
 //
-// η.1 returns the full projection regardless of [Config.Strategy];
-// η.2 wires per-strategy pruning. Callers that flip the
-// Session-side read path before η.2 are still safe: the
-// projection mirrors the legacy `s.history` slice byte-for-byte
-// for every persisted frame the live appenders + drain produced.
+// Stage 2 (L3) — when the model has hidden checkpoint-segments, the
+// entries inside those segments are COLLAPSED into placeholders here:
+// the full entries stay in [CompactorState.history] (lossless —
+// context:expand flips them back), but ProvideHistory emits a tiny
+// stand-in so the model's next prompt build sheds the tokens. The
+// collapse preserves pair integrity (every assistant tool_call and
+// every tool_result keeps its role + id; only the bodies shrink), so
+// strict providers (Gemini) never see an orphaned function_response.
+// When nothing is hidden the projection is the full, unmodified
+// history — byte-for-byte the legacy slice.
 func (e *Extension) ProvideHistory(_ context.Context, state extension.SessionState) []model.Message {
 	s := FromState(state)
 	if s == nil {
@@ -43,11 +48,92 @@ func (e *Extension) ProvideHistory(_ context.Context, state extension.SessionSta
 	if len(entries) == 0 {
 		return nil
 	}
-	out := make([]model.Message, len(entries))
-	for i, ent := range entries {
-		out[i] = ent.Message
+	ranges := s.hiddenRanges()
+	if len(ranges) == 0 {
+		out := make([]model.Message, len(entries))
+		for i, ent := range entries {
+			out[i] = ent.Message
+		}
+		return out
+	}
+	out := make([]model.Message, 0, len(entries))
+	noted := make(map[string]bool, len(ranges))
+	for _, ent := range entries {
+		r := matchHiddenRange(ranges, ent.Seq)
+		if r == nil {
+			out = append(out, ent.Message)
+			continue
+		}
+		// First entry of this hidden segment carries the expand note as
+		// a leading placeholder; the note appears exactly once per
+		// hidden checkpoint regardless of how many entries it spans.
+		if !noted[r.cp.ID] {
+			noted[r.cp.ID] = true
+			out = append(out, model.Message{
+				Role:    model.RoleUser,
+				Content: hiddenSegmentNote(r.cp),
+			})
+		}
+		// Pair-integrity-bearing entries (assistant tool_calls, tool
+		// results) stay as shrunk stubs that keep their role + ids;
+		// everything else (plain assistant text, user / system filler)
+		// is dropped — the note already stands in for it.
+		if stub, keep := shrinkHiddenEntry(ent.Message); keep {
+			out = append(out, stub)
+		}
 	}
 	return out
+}
+
+// hiddenSegmentNote renders the one-line placeholder shown in place of
+// a collapsed checkpoint-segment: what it was + how to bring it back.
+func hiddenSegmentNote(cp Checkpoint) string {
+	desc := strings.TrimSpace(cp.Description)
+	if desc == "" {
+		desc = "(no description)"
+	}
+	return fmt.Sprintf(
+		"[context: checkpoint %s hidden — %s. ~%d tokens collapsed; call context:expand(cp_id=%q) to restore the detail]",
+		cp.ID, desc, cp.Tokens, cp.ID)
+}
+
+// shrinkHiddenEntry returns the stub a hidden entry projects to, plus
+// keep=true when the stub must be emitted to preserve pair integrity.
+// keep=false means the entry is pure filler inside a hidden segment
+// (plain assistant text, user / system message) and is dropped — the
+// segment's leading note already represents it.
+//
+//   - assistant WITH tool_calls → keep role + each call's id + name,
+//     blank the args (replayed history never re-validates args) and
+//     clear content / reasoning. The following tool_result still finds
+//     its matching call by id.
+//   - tool result → keep role + tool_call_id, replace the (possibly
+//     huge) body with a tiny marker.
+//   - anything else → dropped.
+func shrinkHiddenEntry(msg model.Message) (model.Message, bool) {
+	switch msg.Role {
+	case model.RoleAssistant:
+		if len(msg.ToolCalls) == 0 {
+			return model.Message{}, false
+		}
+		calls := make([]model.ChunkToolCall, len(msg.ToolCalls))
+		for i, tc := range msg.ToolCalls {
+			calls[i] = model.ChunkToolCall{
+				ID:   tc.ID,
+				Name: tc.Name,
+				Args: map[string]any{},
+			}
+		}
+		return model.Message{Role: model.RoleAssistant, ToolCalls: calls}, true
+	case model.RoleTool:
+		return model.Message{
+			Role:       model.RoleTool,
+			ToolCallID: msg.ToolCallID,
+			Content:    "(hidden — context:expand to restore)",
+		}, true
+	default:
+		return model.Message{}, false
+	}
 }
 
 // RollbackTo implements [extension.HistoryOwner]. Delegates to

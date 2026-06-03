@@ -14,8 +14,8 @@ import (
 	planext "github.com/hugr-lab/hugen/pkg/extension/plan"
 	schedext "github.com/hugr-lab/hugen/pkg/extension/scheduler"
 	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
-	taskext "github.com/hugr-lab/hugen/pkg/extension/task"
 	stuckdetectorext "github.com/hugr-lab/hugen/pkg/extension/stuckdetector"
+	taskext "github.com/hugr-lab/hugen/pkg/extension/task"
 	wbext "github.com/hugr-lab/hugen/pkg/extension/whiteboard"
 	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/protocol"
@@ -115,6 +115,17 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		// its ReportStatus iterates the slice above when assembling
 		// its emit payload. Phase 5.1b §"Wire-up".
 		liveviewext.New(core.Logger),
+	}
+
+	// Stage 2 (L3) — the context:* in-turn checkpoint tools live on a
+	// standalone provider named "context" (the compactor extension's
+	// provider name is "compactor", which would reject context-prefixed
+	// tool names). Stateless: every Call recovers the calling session's
+	// CompactorState from the dispatch ctx. Registered alongside the
+	// compactor so the checkpoint state owner + its tool surface ship
+	// together.
+	if err := core.Tools.AddProvider(compactorext.NewContextProvider()); err != nil {
+		return fmt.Errorf("register context checkpoint provider: %w", err)
 	}
 
 	for _, ext := range exts {

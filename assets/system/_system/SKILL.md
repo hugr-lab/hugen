@@ -26,6 +26,18 @@ allowed-tools:
   - provider: notepad
     tools:
       - append
+  # Stage 2 (L3) in-turn context checkpoints. Granted on every tier so
+  # any spawned worker can always shed context to recover; the triggers
+  # only ARM on subagents (root-off tier gate in the compactor), and the
+  # tools are advertised in prose only when context is actually filling,
+  # so root carries the four tiny-schema tools without noise. Ungated
+  # (no approval) — they only reshape what the model sees, never the host.
+  - provider: context
+    tools:
+      - checkpoint
+      - hide
+      - expand
+      - rollback
   # Phase 6.1d — admin-tier tools (policy:* / tool:provider_* /
   # runtime:reload) moved out of the baseline autoload into the
   # `_admin` lazy-load skill. Most sessions never use them; keeping
