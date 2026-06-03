@@ -540,6 +540,14 @@ type ContextDecision struct {
 // the calling session's tier.
 type ContextController interface {
 	EvaluateContext(ctx context.Context, state SessionState, in ContextInput) ContextDecision
+	// StampOccupancy records the CURRENT real occupancy + budget so a
+	// context:* tool result shows the model its up-to-date fill. The
+	// boundary EvaluateContext stamps the iteration that just ran; the
+	// prompt then grows before the iteration's tools dispatch, so a
+	// context:hide called late would otherwise display a stale fill.
+	// The session calls this right before dispatching a context:* tool,
+	// with the freshest lastCallUsage. No decision, no inject.
+	StampOccupancy(ctx context.Context, state SessionState, in ContextInput)
 }
 
 // ToolApprovalPolicy lets an extension pre-empt a runtime-initiated

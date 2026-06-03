@@ -129,6 +129,31 @@ func TestEvaluateContext_StampsOccupancy(t *testing.T) {
 	}
 }
 
+func TestStampOccupancy(t *testing.T) {
+	ext := newTestExtension(t)
+	st, cs := newSubagentState(t, "ses-stamp", 1)
+	// Fresh stamp (e.g. before a late context:hide) records the current
+	// prompt — independent of any EvaluateContext boundary.
+	ext.StampOccupancy(context.Background(), st, extension.ContextInput{
+		RealPromptTokens: 50000, Budget: 100000,
+	})
+	real, budget, thr := cs.Occupancy()
+	if real != 50000 || budget != 100000 || thr != 80000 {
+		t.Fatalf("StampOccupancy = %d/%d/%d, want 50000/100000/80000", real, budget, thr)
+	}
+
+	// Root is inert (matches the EvaluateContext gate).
+	rootSt := newFakeState("ses-root-stamp")
+	rcs := &CompactorState{}
+	rootSt.SetValue(StateKey, rcs)
+	ext.StampOccupancy(context.Background(), rootSt, extension.ContextInput{
+		RealPromptTokens: 99000, Budget: 100000,
+	})
+	if r, _, _ := rcs.Occupancy(); r != 0 {
+		t.Fatalf("root StampOccupancy should be inert; got real=%d", r)
+	}
+}
+
 func TestEvaluateContext_DisabledConfigInert(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.CheckpointsEnabled = false

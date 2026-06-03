@@ -67,7 +67,9 @@ func (e *Extension) EvaluateContext(ctx context.Context, state extension.Session
 
 	// Stamp the occupancy so the context:* tool results can show the
 	// model how full its context is (it has no token counter of its own
-	// — without this it hides blind).
+	// — without this it hides blind). Re-stamped fresh right before a
+	// context:* tool dispatches (StampOccupancy) so the displayed fill
+	// reflects the current prompt, not this boundary's.
 	s.SetOccupancy(in.RealPromptTokens, in.Budget, hideThreshold)
 
 	// Advisory — context_full (shedding) supersedes the softer
@@ -102,6 +104,30 @@ type contextFullInput struct {
 	UsedK   int
 	BudgetK int
 	Closed  []cpListItem
+}
+
+// StampOccupancy implements [extension.ContextController]. Records the
+// occupancy without computing a decision — called right before a
+// context:* tool dispatches so its displayed fill is current. Inert on
+// root / when checkpoints are disabled (matches EvaluateContext's gate).
+func (e *Extension) StampOccupancy(ctx context.Context, state extension.SessionState, in extension.ContextInput) {
+	s := FromState(state)
+	if s == nil {
+		return
+	}
+	cfg := e.resolveTierConfig(ctx, state)
+	if !cfg.CheckpointsEnabled || state.Depth() == 0 {
+		return
+	}
+	hideRatio := cfg.ContextHideRatio
+	if hideRatio <= 0 {
+		hideRatio = defaultContextHideRatio
+	}
+	hideThreshold := 0
+	if in.Budget > 0 {
+		hideThreshold = int(hideRatio * float64(in.Budget))
+	}
+	s.SetOccupancy(in.RealPromptTokens, in.Budget, hideThreshold)
 }
 
 // renderCheckpointNudge is the trigger-1 system message: the segment is

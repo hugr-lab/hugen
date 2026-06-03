@@ -724,6 +724,37 @@ func (s *Session) evaluateContextCheckpoints(runCtx context.Context) {
 	st.checkpointNudged = dec.CheckpointRequired
 }
 
+// stampContextOccupancy refreshes the L3 occupancy stamp from the
+// CURRENT iteration's real prompt usage, so a context:* tool's displayed
+// fill reflects the prompt the model is actually carrying — not the
+// (stale) value from the previous iteration boundary. Called right
+// before a context:* tool dispatches. No decision, no inject; just the
+// display number.
+func (s *Session) stampContextOccupancy(runCtx context.Context) {
+	st := s.turnState
+	if st == nil || s.deps == nil {
+		return
+	}
+	var ctrl extension.ContextController
+	for _, ext := range s.deps.Extensions {
+		if c, ok := ext.(extension.ContextController); ok {
+			ctrl = c
+			break
+		}
+	}
+	if ctrl == nil {
+		return
+	}
+	budget := 0
+	if s.models != nil {
+		budget = s.models.MaxPromptTokens(s.DefaultIntent())
+	}
+	ctrl.StampOccupancy(runCtx, s, extension.ContextInput{
+		RealPromptTokens: st.lastCallUsage.PromptTokens,
+		Budget:           budget,
+	})
+}
+
 // foldAssistantAndMaybeDispatch emits the consolidated assistant
 // message (FrameObserver routes it into the owned history cache)
 // and decides whether the turn ends here (no tool calls) or hands

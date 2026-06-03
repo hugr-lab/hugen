@@ -1884,6 +1884,14 @@ func (s *Session) dispatchToolCall(turnCtx, emitCtx context.Context, tc model.Ch
 		s.emitToolError(emitCtx, tc.ID, tc.Name, protocol.ToolErrorContextBudget, msg, "")
 		return msg, true
 	}
+	// Refresh the L3 occupancy stamp from THIS iteration's real prompt
+	// before a context:* tool reads it — the boundary stamp is from the
+	// previous iteration, and the prompt grows in between, so a late
+	// context:hide would otherwise display a stale fill. Only context:*
+	// tools consume the stamp, so only refresh for them.
+	if isContextTool(tc.Name) {
+		s.stampContextOccupancy(emitCtx)
+	}
 	// L3 in-turn checkpoint blocks (Stage 2). When the current segment
 	// blew the window (checkpoint_required) or real occupancy crossed
 	// the 0.80 hide band (context_full), every NON-context tool is
