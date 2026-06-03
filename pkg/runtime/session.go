@@ -17,7 +17,7 @@ import (
 // extensions (workspace, mcp) in stages 5c / 5b — Manager
 // construction no longer wires Resources / Lifecycle.
 func phaseSessionManager(_ context.Context, core *Core) error {
-	renderer, err := buildPromptRenderer(core)
+	renderer, err := core.PromptRenderer()
 	if err != nil {
 		return err
 	}
@@ -60,6 +60,24 @@ func phaseSessionManager(_ context.Context, core *Core) error {
 		mgr.Stop(shutdownCtx)
 	})
 	return nil
+}
+
+// PromptRenderer returns the agent-level renderer, building it on first
+// use and caching on Core. It depends only on the embedded templates +
+// Logger (see buildPromptRenderer), so it is safe to call from ANY
+// phase — there is no ordering constraint. phaseExtensions calls it to
+// inject the renderer into the compactor's constructor; later phases
+// (phaseSessionManager) get the same cached instance.
+func (c *Core) PromptRenderer() (*prompts.Renderer, error) {
+	if c.Prompts != nil {
+		return c.Prompts, nil
+	}
+	r, err := buildPromptRenderer(c)
+	if err != nil {
+		return nil, err
+	}
+	c.Prompts = r
+	return r, nil
 }
 
 // buildPromptRenderer constructs the agent-level prompts.Renderer

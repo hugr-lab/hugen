@@ -9,6 +9,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
+	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
@@ -251,6 +252,13 @@ type Deps struct {
 	Store        StoreReader
 	AgentID      string
 	SkillCatalog SkillCatalog
+	// Prompts is the agent-level renderer, injected at construction
+	// (Stage 2) — a system constant that doesn't depend on session
+	// state, so it belongs in the constructor rather than pulled from
+	// SessionState.Prompts() each call. Used by the hide-time summariser
+	// + the checkpoint nudge / context_full advisory. nil in fixtures
+	// that don't render (those paths return "" / a graceful error).
+	Prompts *prompts.Renderer
 }
 
 // SkillCatalog is the narrow lookup surface the per-tier

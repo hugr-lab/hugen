@@ -71,13 +71,13 @@ func (e *Extension) SummarizeSegment(ctx context.Context, state extension.Sessio
 	if e.deps.Router == nil {
 		return "", fmt.Errorf("hide summary: no model router")
 	}
-	if state == nil || state.Prompts() == nil {
+	if e.deps.Prompts == nil {
 		return "", fmt.Errorf("hide summary: no prompts renderer")
 	}
 	if len(entries) == 0 {
 		return "", fmt.Errorf("hide summary: empty segment")
 	}
-	renderer := state.Prompts()
+	renderer := e.deps.Prompts
 
 	// Input budget tracks the checkpoint window (× overshoot factor),
 	// not a hardcoded figure — a small window means small segments and a

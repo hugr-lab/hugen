@@ -74,9 +74,9 @@ func (e *Extension) EvaluateContext(ctx context.Context, state extension.Session
 	// checkpoint nudge when both fire.
 	switch {
 	case dec.ContextFull:
-		dec.Inject = e.renderContextFullAdvisory(s, state, in)
+		dec.Inject = e.renderContextFullAdvisory(s, in)
 	case dec.CheckpointRequired:
-		dec.Inject = e.renderCheckpointNudge(s, state, in, seg, window, hideThreshold)
+		dec.Inject = e.renderCheckpointNudge(s, in, seg, window, hideThreshold)
 	}
 	return dec
 }
@@ -111,12 +111,11 @@ type contextFullInput struct {
 // and lost an instruction). Prose lives in the template; this builds the
 // binding. Returns "" with no renderer / on render error (the dispatch
 // block still applies via the turn flags).
-func (e *Extension) renderCheckpointNudge(s *CompactorState, state extension.SessionState, in extension.ContextInput, seg, window, hideThreshold int) string {
-	renderer := state.Prompts()
-	if renderer == nil {
+func (e *Extension) renderCheckpointNudge(s *CompactorState, in extension.ContextInput, seg, window, hideThreshold int) string {
+	if e.deps.Prompts == nil {
 		return ""
 	}
-	out, err := renderer.Render("compactor/checkpoint_nudge", checkpointNudgeInput{
+	out, err := e.deps.Prompts.Render("compactor/checkpoint_nudge", checkpointNudgeInput{
 		SegmentK:  kTokens(seg),
 		WindowK:   kTokens(window),
 		Fill:      fillSummary(in.RealPromptTokens, in.Budget, hideThreshold),
@@ -124,7 +123,7 @@ func (e *Extension) renderCheckpointNudge(s *CompactorState, state extension.Ses
 		HasClosed: closedVisibleCount(s) > 0,
 	})
 	if err != nil {
-		e.logger.Warn("compactor: render checkpoint_nudge", "session", state.SessionID(), "err", err)
+		e.logger.Warn("compactor: render checkpoint_nudge", "err", err)
 		return ""
 	}
 	return strings.TrimSpace(out)
@@ -132,18 +131,17 @@ func (e *Extension) renderCheckpointNudge(s *CompactorState, state extension.Ses
 
 // renderContextFullAdvisory is the trigger-2 system message: occupancy
 // crossed the hide band; shed context (hide / rollback) to continue.
-func (e *Extension) renderContextFullAdvisory(s *CompactorState, state extension.SessionState, in extension.ContextInput) string {
-	renderer := state.Prompts()
-	if renderer == nil {
+func (e *Extension) renderContextFullAdvisory(s *CompactorState, in extension.ContextInput) string {
+	if e.deps.Prompts == nil {
 		return ""
 	}
-	out, err := renderer.Render("compactor/context_full", contextFullInput{
+	out, err := e.deps.Prompts.Render("compactor/context_full", contextFullInput{
 		UsedK:   kTokens(in.RealPromptTokens),
 		BudgetK: kTokens(in.Budget),
 		Closed:  visibleClosedItems(s),
 	})
 	if err != nil {
-		e.logger.Warn("compactor: render context_full", "session", state.SessionID(), "err", err)
+		e.logger.Warn("compactor: render context_full", "err", err)
 		return ""
 	}
 	return strings.TrimSpace(out)

@@ -47,6 +47,15 @@ func phaseExtensions(_ context.Context, core *Core) error {
 	// SESSION_DIR / WORKSPACES_ROOT. Skill / notepad have no
 	// inter-extension state reads at InitState; their order is
 	// purely aesthetic.
+	// Agent-level prompt renderer — injected into the compactor's
+	// constructor (it's a system constant that depends only on the
+	// embedded templates + logger, NOT on session state). Built lazily;
+	// phaseSessionManager reuses the same cached instance.
+	renderer, err := core.PromptRenderer()
+	if err != nil {
+		return fmt.Errorf("build prompt renderer: %w", err)
+	}
+
 	// Compactor lands AFTER notepad so its Advertiser Block C composes
 	// after notepad's Block B. γ wires the operator config as a
 	// CompactorView — the resolver re-reads each fire so a future
@@ -62,6 +71,7 @@ func phaseExtensions(_ context.Context, core *Core) error {
 			Store:        core.Store,
 			AgentID:      core.Agent.ID(),
 			SkillCatalog: compactorext.NewSkillManagerCatalog(core.Skills),
+			Prompts:      renderer,
 		},
 	)
 	exts := []extension.Extension{

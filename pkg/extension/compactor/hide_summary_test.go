@@ -9,18 +9,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
-	"github.com/hugr-lab/hugen/pkg/prompts"
 )
-
-// rendererState is a fakeState that returns a real prompts renderer —
-// SummarizeSegment reads it via state.Prompts() and resolves the
-// checkpoint window via state's tier.
-type rendererState struct {
-	*fakeState
-	renderer *prompts.Renderer
-}
-
-func (s *rendererState) Prompts() *prompts.Renderer { return s.renderer }
 
 // TestSummarizeSegment exercises the hide-time summariser plumbing:
 // resolve the cheap model, render compactor/hide_brief, stream the
@@ -29,8 +18,10 @@ func (s *rendererState) Prompts() *prompts.Renderer { return s.renderer }
 func TestSummarizeSegment(t *testing.T) {
 	mdl := &stubModel{summary: "op2023: 4 tables. RULE: validate every query before recording."}
 	router := newStubRouter(t, mdl)
-	ext := NewExtensionWithConfig(slog.Default(), DefaultConfig(), Deps{Router: router})
-	st := &rendererState{fakeState: newFakeState("ses-sum"), renderer: productionRendererForCompactor(t)}
+	ext := NewExtensionWithConfig(slog.Default(), DefaultConfig(), Deps{
+		Router: router, Prompts: productionRendererForCompactor(t),
+	})
+	st := newFakeState("ses-sum")
 
 	entries := []HistoryEntry{
 		{Seq: 5, Message: model.Message{Role: model.RoleTool,
@@ -51,8 +42,8 @@ func TestSummarizeSegment(t *testing.T) {
 }
 
 func TestSummarizeSegment_NoRouterErrors(t *testing.T) {
-	ext := NewExtensionWithConfig(slog.Default(), DefaultConfig(), Deps{}) // nil Router
-	st := &rendererState{fakeState: newFakeState("ses-nr"), renderer: productionRendererForCompactor(t)}
+	ext := NewExtensionWithConfig(slog.Default(), DefaultConfig(), Deps{}) // nil Router + nil Prompts
+	st := newFakeState("ses-nr")
 	if _, err := ext.SummarizeSegment(context.Background(), st,
 		[]HistoryEntry{{Seq: 1, Message: model.Message{Role: model.RoleTool, Content: "x"}}}, ""); err == nil {
 		t.Fatalf("SummarizeSegment with nil router should error (caller falls back)")

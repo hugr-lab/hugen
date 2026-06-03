@@ -8,28 +8,26 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
-	"github.com/hugr-lab/hugen/pkg/prompts"
 )
 
 // subagentState is a fakeState that reports a non-root tier so the
-// checkpoint controller arms (root-off tier gate), with a real prompts
-// renderer so the template-backed nudge/advisory render.
+// checkpoint controller arms (root-off tier gate). The renderer for the
+// template-backed nudge/advisory now lives on the Extension (Deps), not
+// the state, so this needs no renderer.
 type subagentState struct {
 	*fakeState
-	depth    int
-	renderer *prompts.Renderer
+	depth int
 }
 
-func (s *subagentState) Depth() int                 { return s.depth }
-func (s *subagentState) Tier() string               { return "worker" }
-func (s *subagentState) Prompts() *prompts.Renderer { return s.renderer }
+func (s *subagentState) Depth() int   { return s.depth }
+func (s *subagentState) Tier() string { return "worker" }
 
 func newSubagentState(t *testing.T, id string, depth int) (*subagentState, *CompactorState) {
 	t.Helper()
 	base := newFakeState(id)
 	cs := &CompactorState{}
 	base.SetValue(StateKey, cs)
-	return &subagentState{fakeState: base, depth: depth, renderer: productionRendererForCompactor(t)}, cs
+	return &subagentState{fakeState: base, depth: depth}, cs
 }
 
 // overWindow fills the current segment past the default 10K window.
