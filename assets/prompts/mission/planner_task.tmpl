@@ -133,7 +133,7 @@ decision: {{.Decision}}
 {{if .Reason}}reason: {{.Reason}}
 {{end}}{{if .Issues}}issues:
 {{range .Issues}}- {{.}}
-{{end}}{{end}}{{if eq .Decision "amend"}}Use the issues above to revise the plan — the prior wave produced output that the checker flagged. Spawn a wave that directly addresses the issues; do not repeat the prior wave's mistake.
+{{end}}{{end}}{{if eq .Decision "amend"}}Use the issues above to revise the plan — the prior wave produced output that the checker flagged. Spawn a wave that directly addresses the issues; do not repeat the prior wave's mistake. If an issue says a worker TIMED OUT, it did NOT fail on the work — its task was too big for its time budget. React by SPLITTING that task: break it into smaller parallel workers (one per source / table / section) or sequential waves so each fits its budget. Re-run the same task unchanged ONLY if it was nearly finished; never re-issue the identical over-budget task and expect a different result.
 {{end}}{{end}}{{if .ApprovalRequired}}
 [approval_required]
 This iteration's plan needs user sign-off on the mission

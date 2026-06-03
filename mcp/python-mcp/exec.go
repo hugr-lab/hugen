@@ -69,8 +69,8 @@ const (
 
 func registerTools(srv *server.MCPServer, deps *execDeps) {
 	srv.AddTool(mcp.NewTool("run_code",
-		mcp.WithDescription(`Execute Python source in the per-session venv. Returns {stdout, stderr, exit_code, elapsed_ms}. Non-zero exit_code is normal; only spawn / IO / timeout / bootstrap failures surface as tool errors.`),
-		mcp.WithString("code", mcp.Required(), mcp.Description("Python source to execute. Multi-line allowed.")),
+		mcp.WithDescription(`Execute Python source in the per-session venv. Returns {stdout, stderr, exit_code, elapsed_ms}. Non-zero exit_code is normal; only spawn / IO / timeout / bootstrap failures surface as tool errors. MAX 10000 bytes of code — for a bigger script write it to a .py file (bash.write_file, ≤10000-byte append chunks) and use run_script.`),
+		mcp.WithString("code", mcp.Required(), mcp.Description("Python source to execute. Multi-line allowed. Max 10000 bytes; larger → write a file + run_script.")),
 		mcp.WithNumber("timeout_ms", mcp.Description("Per-call deadline in ms. Default 300_000 (5 min); clamped to 7_200_000 (2 h) max.")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return handleRun(ctx, req, deps, runRequest{kind: "run_code"})
@@ -126,12 +126,24 @@ func handleRun(ctx context.Context, req mcp.CallToolRequest, deps *execDeps, bas
 	return okResult(out)
 }
 
+// maxRunCodeBytes caps inline run_code source. The model generates
+// `code` token-by-token, so a multi-KB inline script is a long,
+// wedge-prone stream. Past this, write the script to a .py file
+// (bash.write_file in ≤10000-byte append chunks) and run_script it —
+// the execution itself streams nothing.
+const maxRunCodeBytes = 10000
+
 func parseRunArgs(req mcp.CallToolRequest, r *runRequest) error {
 	args := req.GetArguments()
 	if r.kind == "run_code" {
 		c, ok := args["code"].(string)
 		if !ok || c == "" {
 			return &toolError{Code: "arg_validation", Msg: "code is required"}
+		}
+		if len(c) > maxRunCodeBytes {
+			return &toolError{Code: "arg_validation", Msg: fmt.Sprintf(
+				"code is %d bytes; the run_code per-call limit is %d. For a larger script, write it to a .py file (bash.write_file in ≤%d-byte chunks with mode=\"append\") and execute it with run_script — a long inline generation is wedge-prone.",
+				len(c), maxRunCodeBytes, maxRunCodeBytes)}
 		}
 		r.code = c
 	} else {

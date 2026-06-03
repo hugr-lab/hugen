@@ -143,29 +143,44 @@ metadata:
             next steps from the handoff alone; checker stays
             on for combining / report-building waves.
 
-          **Wave-shape recipes** (pick smallest that hits the
-          goal):
+          **Wave-shape recipes — pick by DELIVERABLE, smallest
+          that hits the goal.** First decide WHAT the deliverable
+          is: a PRESENTATION of existing data (overview, dashboard,
+          "show me what's in X"), or an INSIGHT that needs analysis
+          (anomalies, drivers, comparisons, calculations). That
+          decides whether a `data-analyst` is needed AT ALL.
 
-          - Trivial single-source ask → ONE `data-analyst`,
-            `skip_check: true`, plan_complete next iter.
-          - Cross-table / cross-source analysis → ONE wave
-            with parallel `data-analyst` workers (one per
-            source). Optional follow-up combining wave.
-          - HTML / dashboard / chart / report deliverable →
-            usually **wave 1** `data-analyst` (persist JSON
-            to workspace) → **wave 2** `report-builder` with
-            `depends_on: ["<analyst>@<wave-1>"]`.
-            `skip_check: true` on wave 1 only. Alternative
-            for self-contained reports: ONE wave with a
-            `report-builder` that loads `hugr-data` itself
-            and queries inline (smaller missions, no
-            intermediate JSON file).
-          - Schema inventory only → ONE `schema-explorer`,
+          - **Overview / dashboard / report of existing data** →
+            the researcher already confirmed the schema + wrote
+            validated queries. Plan ONE wave: a `report-builder`
+            that reads `research/report-spec.md` + `research/
+            queries.md`, runs those (ready) aggregation queries
+            itself, and renders. **NO separate data-collector** —
+            "fetching" is just running ready aggregations (Hugr
+            returns the ANSWER, not raw rows); that is part of the
+            renderer's job, not a wave of its own. Bake the required
+            sections / metrics from the report spec into its brief
+            so it gathers ENOUGH (a fast model otherwise under-
+            gathers). (op2023→HTML is this shape — a data-collector
+            here is wasted work.)
+          - **Insight / analysis / discovery** (anomalies, drivers,
+            cross-source calculations, statistical work) → **wave 1**
+            `data-analyst` does the COMPLEX analytics (the value a
+            single query can't express), writes its results to
+            workspace file(s) + a manifest → **wave 2**
+            `report-builder` renders from those files with
+            `depends_on: ["<analyst>@<wave-1>"]`. `data-analyst` is
+            for ANALYSIS, never plain ETL — fetching cross-table
+            data is ONE standard GraphQL query (relation joins /
+            aggregations), not analyst work.
+          - **Trivial single-value ask** (a count, one number) →
+            shouldn't be a mission; if it reached here, ONE
+            `report-builder`, `skip_check: true`, plan_complete.
+          - **Schema inventory only** → ONE `schema-explorer`,
             plan_complete next iter.
-          - Audit / anomaly / "investigate" → ONE
-            `data-analyst` at the broadest slice; let
-            `checker(amend)` drive the next narrower wave.
-            Do NOT pre-emit 4 speculative waves.
+          - **Audit / anomaly / "investigate"** → ONE `data-analyst`
+            at the broadest slice; let `checker(amend)` drive the
+            next narrower wave. Do NOT pre-emit speculative waves.
 
           **Inputs propagation.** Lift every entry from
           `[Resolved user inputs]` into the relevant worker's
@@ -497,7 +512,7 @@ metadata:
             max_turns: 5
 
       - name: data-analyst
-        timeout: 1h
+        timeout: 2h
         description: >
           End-to-end data worker. Discovers what it needs,
           composes the query, validates it, executes, persists
@@ -785,7 +800,7 @@ metadata:
             max_turns: 4
 
       - name: schema-explorer
-        timeout: 1h
+        timeout: 2h
         description: >
           For tasks where the SCHEMA MAP is the deliverable —
           inventory, data dictionary, entity-relationship
@@ -892,82 +907,88 @@ metadata:
             max_turns: 5
 
       - name: report-builder
-        timeout: 1h
+        timeout: 2h
         description: >
-          Composes the user-facing HTML (or markdown / prose)
-          deliverable from prior-wave handoff bodies. Default
-          path: build the HTML in your turn (inline JSON + a
-          CDN-loaded JS chart library — Plotly.js / Chart.js /
-          inline SVG), write it via `bash-mcp:bash.write_file`.
-          Python only when the dataset is too large to inline.
+          Builds the user-facing report / document (HTML / Markdown /
+          PDF) from already-collected data. You autoload the
+          `report-builder` skill — read it (and `skill:ref` its
+          `html-generation` / `charts` references) and follow its
+          method; the SKILL owns the render technique, this entry
+          carries only the mission-side discipline.
 
-          When mission research ran, `bash.read_file
-          research/report-spec.md` FIRST — it carries the report SHAPE
-          (audience, ordered sections, format, key metrics, output
-          path); build EXACTLY those sections in that order. Absent, or
-          "not a report mission", derive the shape from the goal + the
-          upstream handoffs.
+          **Python-first.** The skill's default is a SHORT script that
+          loads the data file, builds the figures, assembles the
+          document, and writes it — NOT streaming the whole document
+          inline. A long inline document generation stalls and is
+          un-retryable on a slow backend; that is the failure the
+          python-first method exists to avoid. Follow it.
 
-          When you fetch your OWN data (the self-contained path —
-          you loaded `hugr-data` and query it directly, with no
-          data-analyst upstream): if mission research ran,
-          `bash.read_file research/data-model.md` FIRST and lift the
-          type / field / join names VERBATIM — do NOT re-run
-          `discovery-*` / `schema-type_fields` for what it already
-          maps. Also `bash.read_file research/queries.md` — if it has
-          a starter query for your task, ADAPT it instead of composing
-          from zero. Same anti-rework rule the data-analyst follows.
+          **Normalize your data so python can load it — your job, not
+          the upstream wave's.** You do NOT depend on the producer
+          having written a file. Read `[Resolved depends_on]` and
+          handle whatever shape arrived: a `path` → `python`-load it
+          (pandas / duckdb); SMALL inline `numbers` / `series` /
+          `tables` → use directly, values VERBATIM, never round; LARGE
+          inline data → write it to a workspace file FIRST
+          (`bash.write_file`, `mode="append"` to chunk a big one) and
+          then load that file. The render must read files / small
+          literals, never re-emit a large dataset. When you fetch your
+          OWN data (the self-contained path — no data-analyst upstream,
+          you `skill:load hugr-data` and query directly): the
+          research-reading discipline is the data-analyst's —
+          `bash.read_file research/data-model.md` + `research/queries.md`
+          FIRST, lift the type / field / join names VERBATIM, do NOT
+          re-run `discovery-*` for what they already map.
 
-          File path discipline:
+          **Report shape.** When mission research ran, `bash.read_file
+          research/report-spec.md` FIRST — build EXACTLY those sections
+          in that order. Absent / "not a report mission" → derive the
+          shape from the goal + the upstream handoffs.
 
-          - If `inputs.file_path` is set, it is LITERAL
-            (planner lifted it from the user's goal /
-            `[Inputs from parent]`). Resolve to ABSOLUTE
-            via `os.path.expanduser` + `os.path.abspath`
-            and write THERE — never substitute.
-          - If `inputs.file_path` is absent, write to a
-            sensible default under the workspace
-            (`<workspace>/<short-name>.html`) and quote
-            the absolute path you used in the handoff.
-            Do NOT prompt the user.
-          - After write: file exists AND `size > 0` before
-            handoff. NEVER claim a copy/move you didn't
-            actually run.
-
-          Inline-first contract:
-
-          - Prefer the data-analyst handoff's inline `numbers`
-            / `series` / `tables` fields — embed verbatim in
-            `<script type="application/json">` blocks. Quote
-            values; never paraphrase / round (formatting is a
-            browser concern).
-          - Open a persisted parquet / JSON file ONLY when
-            the handoff routed you to one via `path` + size
-            confirms it's too large to inline.
+          **File-path discipline.** If `inputs.file_path` is set it is
+          LITERAL (planner lifted it from the user's goal /
+          `[Inputs from parent]`) — resolve to ABSOLUTE via
+          `os.path.expanduser` + `os.path.abspath` and write THERE,
+          never substitute. Absent → a sensible default under the
+          workspace (`<workspace>/<short-name>.<ext>`); quote the
+          absolute path. After the write the file MUST exist AND
+          `size > 0` before you hand off — never claim a file you
+          didn't verify on disk.
 
           Handoff body shape:
-            `{ path: "<absolute-path>", bytes_written,
-              memory_summary: "<one line>" }`. `path` is the
-            absolute file you VERIFIED exists at the user's
-            destination — synthesizer / root surface it
-            verbatim.
+            `{ path: "<absolute path you VERIFIED exists>",
+              bytes_written, format, sections: [...],
+              memory_summary: "<one line>" }`. The synthesizer / root
+          surface `path` verbatim. Emit `status: "error"` with one
+          sentence if a dependency data file is missing / empty or the
+          spec is unusable — the planner amends.
         intent: worker # dedicated worker intent → its own context budget (phase 5.2)
         can_spawn: false
-        autoload_skills: [_mission_worker, python-runner]
+        autoload_skills: [_mission_worker, report-builder]
         compactor:
-          # report-builder iterates on python-runner code +
-          # bash_write_file with HTML payloads (can be large).
-          # Trigger by PROMPT TOKEN SIZE — HTML chunks can be
-          # 10K+ tokens each, turn count doesn't reflect that.
+          # NOTE: largely a no-op for this role. report-builder is a
+          # single-turn worker (one task user_message + the on_close
+          # one), and the compactor SKIPS when boundary count <=
+          # preserved_recent_turns (commands.go) and can only cut on a
+          # user_message boundary (compactor.go) — a worker has none to
+          # cut on. The real intra-task token cap is the per-turn
+          # context budget (config.yaml compactor.default_budget *
+          # context_budget_ratio, ~85K), which TERMINATES the turn if
+          # the tool-result accumulation runs away. op2023 dogfood:
+          # ~37K for a 4-table comprehensive report — well under 85K.
+          # Kept enabled as a harmless backstop for the rare multi-turn
+          # worker; the value below does not gate normal single-turn
+          # runs.
           enabled: true
-          max_tokens: 100000
+          max_tokens: 80000
           max_turns: 40
           preserved_recent_turns: 12
           min_turn_gap: 3
           llm_intent: summarize
         tools:
-          - provider: python-mcp
-            tools: ['*']
+          # python (run_code/run_script) + bash (write_file/read_file/
+          # list_dir) come from the autoloaded report-builder skill;
+          # the role grants only the mission read tools.
           - provider: mission
             tools: [get_handoff, get_research]
 

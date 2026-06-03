@@ -46,6 +46,15 @@ type SpawnResult struct {
 // Returning an error halts the wave with WaveStatus=failed.
 type Spawner func(ctx context.Context, parent extension.SessionState, req SpawnRequest) (SpawnResult, error)
 
+// Terminator stops a worker sub-session by its id. The mission ext
+// wires it to the parent session's CancelChild. RunWave calls it when
+// a worker overruns its per-role time budget — without it a worker
+// runs DETACHED (context.WithoutCancel) to completion and its result
+// is orphaned (the wave already moved on). Optional: a nil terminator
+// logs and skips cancellation (the worker still gets a `timeout`
+// outcome, it just isn't actually stopped).
+type Terminator func(ctx context.Context, sessionID, reason string) error
+
 // Executor is the Plan Executor primitive — Phase A exposes only
 // RunWave (one parallel batch + wait + parse). Iteration over a
 // full Plan is the planner's job (Phase B).
@@ -53,12 +62,14 @@ type Spawner func(ctx context.Context, parent extension.SessionState, req SpawnR
 // Executor is stateless across waves; per-mission state lives on
 // the [*MissionState] handle reachable via state.Value(StateKey).
 type Executor struct {
-	spawner Spawner
-	logger  loggerLike
+	spawner    Spawner
+	terminator Terminator
+	logger     loggerLike
 }
 
 // NewExecutor constructs an Executor backed by spawner. logger may
-// be nil; the executor falls back to a no-op logger.
+// be nil; the executor falls back to a no-op logger. The worker-cancel
+// terminator is optional — set it via [Executor.WithTerminator].
 func NewExecutor(spawner Spawner, logger loggerLike) *Executor {
 	if logger == nil {
 		logger = noopLogger{}
@@ -66,14 +77,27 @@ func NewExecutor(spawner Spawner, logger loggerLike) *Executor {
 	return &Executor{spawner: spawner, logger: logger}
 }
 
-// RunWaveOptions tunes per-wave executor behaviour. Phase A keeps
-// the surface minimal — Timeout caps total wave wall-time;
-// RenderMode overrides the executor's per-worker default of
-// "silent" (rarely needed outside debugging).
+// WithTerminator sets the worker-cancel callback RunWave uses to stop
+// a worker that overran its per-role time budget. Returns the executor
+// for chaining. Same-package prod wiring sets this; tests may leave it
+// nil (a timed-out worker then gets a `timeout` outcome but is not
+// actually cancelled).
+func (e *Executor) WithTerminator(t Terminator) *Executor {
+	e.terminator = t
+	return e
+}
+
+// RunWaveOptions tunes per-wave executor behaviour.
 type RunWaveOptions struct {
-	// Timeout caps the wave's total wall-clock budget. Zero means
-	// "use ctx's own deadline / no extra cap".
-	Timeout time.Duration
+	// RoleTimeout returns the wall-clock budget for a worker of the
+	// given role. RunWave gives EACH worker its OWN deadline from
+	// this — a worker that overruns is cancelled (via the executor's
+	// terminator) and marked `timeout`, while its siblings keep
+	// running and the wave collects partial results. This replaces
+	// the old single wave-level timeout (= max across roles) that
+	// abandoned the whole wave on the slowest worker's budget. Nil
+	// falls back to DefaultWaveTimeout for every worker.
+	RoleTimeout func(role string) time.Duration
 
 	// RenderMode overrides the executor's per-worker default of
 	// protocol.SubagentRenderSilent. Set to "" to keep the default.
@@ -133,10 +157,12 @@ func (e *Executor) RunWave(ctx context.Context, state extension.SessionState, wa
 		renderMode = "silent"
 	}
 
-	if opts.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
-		defer cancel()
+	// Each worker gets its OWN wall-clock budget by role (NOT one
+	// wave-level deadline). A worker that overruns is cancelled +
+	// marked `timeout` below; its siblings keep running.
+	roleTimeout := opts.RoleTimeout
+	if roleTimeout == nil {
+		roleTimeout = func(string) time.Duration { return DefaultWaveTimeout }
 	}
 
 	// Spawn every worker. Naming is the responsibility of the
@@ -170,29 +196,37 @@ func (e *Executor) RunWave(ctx context.Context, state extension.SessionState, wa
 		})
 	}
 
-	// Wait for every spawned worker's handoff to land. The
-	// observer puts handoffs into m.Handoffs keyed by the
-	// canonical ref; the executor polls for ref-presence under a
-	// short backoff. Channel-based wakeup would be cleaner — phase
-	// B replaces this poll loop with an internal completion channel
-	// driven by the observer.
-	expected := make([]string, 0, len(wave.Subagents))
-	subagentByRef := make(map[string]SubagentSpec, len(wave.Subagents))
+	// Wait for every spawned worker, each under its OWN per-role
+	// deadline. The observer puts handoffs into m.Handoffs keyed by
+	// the canonical ref; the executor polls for ref-presence under a
+	// short backoff. A worker that passes its deadline without a
+	// handoff is cancelled (terminator) and recorded as `timeout`,
+	// while its siblings keep being awaited — so one slow worker no
+	// longer abandons the whole wave.
+	deadlineBase := nowFn()
+	pending := make([]pendingWorker, 0, len(wave.Subagents))
 	for _, rec := range records {
 		if rec.err != nil {
 			continue
 		}
 		ref, _ := MakeRef(rec.spec.Name, wave.Label)
-		expected = append(expected, ref)
-		subagentByRef[ref] = rec.spec
+		pending = append(pending, pendingWorker{
+			ref:       ref,
+			sessionID: rec.res.SessionID,
+			deadline:  deadlineBase.Add(roleTimeout(rec.spec.Role)),
+		})
 	}
 
-	if err := waitForRefs(ctx, m.Handoffs, expected); err != nil {
-		return WaveStatusFailed, collectOutcomes(records, wave.Label, m.Handoffs), err
+	timedOut, waitErr := e.waitForWorkers(ctx, m.Handoffs, pending)
+	if waitErr != nil {
+		// Parent ctx fired (mission-level cancel / shutdown) — return
+		// what we have; the timeout map still flags any worker we
+		// terminated before the ctx cut us off.
+		return WaveStatusFailed, collectOutcomes(records, wave.Label, m.Handoffs, timedOut), waitErr
 	}
 
 	// Aggregate outcomes + status.
-	outcomes := collectOutcomes(records, wave.Label, m.Handoffs)
+	outcomes := collectOutcomes(records, wave.Label, m.Handoffs, timedOut)
 	status := aggregateStatus(outcomes, records)
 
 	// Record the wave under Done on PlanState.
@@ -217,42 +251,77 @@ func (e *Executor) RunWave(ctx context.Context, state extension.SessionState, wa
 	return status, outcomes, nil
 }
 
-// waveRoles returns the role name of every subagent in a wave —
-// the input to MissionManifest.TimeoutForRoles so a Do wave's
-// wall-clock budget is the MAX of its parallel workers' timeouts.
-func waveRoles(w Wave) []string {
-	roles := make([]string, 0, len(w.Subagents))
-	for _, s := range w.Subagents {
-		roles = append(roles, s.Role)
-	}
-	return roles
+// pendingWorker is one in-flight worker the wait loop tracks: its
+// canonical handoff ref, its session id (for cancellation), and its
+// own per-role deadline.
+type pendingWorker struct {
+	ref       string
+	sessionID string
+	deadline  time.Time
 }
 
-// waitForRefs polls the store until every ref in refs is present
-// or ctx fires. Phase A's simplest possible wakeup; phase B
-// replaces it with a completion-channel.
-func waitForRefs(ctx context.Context, store *Handoffs, refs []string) error {
-	if len(refs) == 0 {
-		return nil
+// waitForWorkers polls the store until every pending worker is either
+// DONE (its handoff ref landed) or TIMED OUT (its own deadline passed
+// → it is cancelled via the executor's terminator). When one worker
+// times out the others keep being awaited — a slow worker no longer
+// abandons the whole wave. Returns the set of refs that timed out. The
+// only early exit is the parent ctx firing (mission-level cancel /
+// shutdown), which returns ctx.Err() alongside whatever timed out so
+// far. Phase B will replace the poll with an observer completion
+// channel.
+func (e *Executor) waitForWorkers(ctx context.Context, store *Handoffs, workers []pendingWorker) (map[string]bool, error) {
+	timedOut := make(map[string]bool)
+	if len(workers) == 0 {
+		return timedOut, nil
 	}
+	done := make(map[string]bool)
 	const pollEvery = 50 * time.Millisecond
 	ticker := time.NewTicker(pollEvery)
 	defer ticker.Stop()
 	for {
-		ready := 0
-		for _, r := range refs {
-			if _, ok := store.Get(r); ok {
-				ready++
+		remaining := 0
+		now := nowFn()
+		for _, w := range workers {
+			if done[w.ref] || timedOut[w.ref] {
+				continue
 			}
+			if _, ok := store.Get(w.ref); ok {
+				done[w.ref] = true
+				continue
+			}
+			if now.After(w.deadline) {
+				timedOut[w.ref] = true
+				e.cancelTimedOutWorker(ctx, w)
+				continue
+			}
+			remaining++
 		}
-		if ready == len(refs) {
-			return nil
+		if remaining == 0 {
+			return timedOut, nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return timedOut, ctx.Err()
 		case <-ticker.C:
 		}
+	}
+}
+
+// cancelTimedOutWorker stops a worker that overran its budget. Workers
+// run detached (context.WithoutCancel), so cancellation MUST go through
+// the explicit terminator — without one the worker runs to completion
+// and orphans its result. We still mark it timed out either way.
+func (e *Executor) cancelTimedOutWorker(ctx context.Context, w pendingWorker) {
+	if e.terminator == nil || w.sessionID == "" {
+		e.logger.Warn("mission: RunWave: worker exceeded its time budget but was NOT cancelled (no terminator) — it runs detached, result orphaned",
+			"ref", w.ref, "session", w.sessionID)
+		return
+	}
+	e.logger.Warn("mission: RunWave: worker exceeded its per-role time budget — cancelling",
+		"ref", w.ref, "session", w.sessionID)
+	if err := e.terminator(ctx, w.sessionID, "mission: worker exceeded its per-role time budget"); err != nil {
+		e.logger.Warn("mission: RunWave: cancel of timed-out worker failed",
+			"ref", w.ref, "session", w.sessionID, "err", err)
 	}
 }
 
@@ -264,7 +333,12 @@ type spawnRecord struct {
 	err  error
 }
 
-func collectOutcomes(records []spawnRecord, waveLabel string, store *Handoffs) []DoneWorker {
+// collectOutcomes maps each spawn record to a DoneWorker. timedOut
+// carries the refs the wait loop cancelled for overrunning their
+// budget — they surface as Status "timeout" / TimedOut so the planner
+// can react (split vs redo) distinctly from a generic failure. A real
+// handoff that landed despite a timeout race still wins.
+func collectOutcomes(records []spawnRecord, waveLabel string, store *Handoffs, timedOut map[string]bool) []DoneWorker {
 	out := make([]DoneWorker, 0, len(records))
 	for _, rec := range records {
 		entry := DoneWorker{
@@ -280,16 +354,19 @@ func collectOutcomes(records []spawnRecord, waveLabel string, store *Handoffs) [
 		}
 		ref, _ := MakeRef(rec.spec.Name, waveLabel)
 		entry.Ref = ref
-		h, ok := store.Get(ref)
-		if !ok {
+		switch h, ok := store.Get(ref); {
+		case ok:
+			entry.Status = h.Status
+			if h.Status != "ok" {
+				entry.Error = h.Reason
+			}
+		case timedOut[ref]:
+			entry.Status = "timeout"
+			entry.TimedOut = true
+			entry.Error = "worker exceeded its per-role time budget"
+		default:
 			entry.Status = "error"
 			entry.Error = "no handoff produced before wave ctx expired"
-			out = append(out, entry)
-			continue
-		}
-		entry.Status = h.Status
-		if h.Status != "ok" {
-			entry.Error = h.Reason
 		}
 		out = append(out, entry)
 	}

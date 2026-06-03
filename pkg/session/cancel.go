@@ -86,6 +86,15 @@ func (s *Session) RequestChildCancel(ctx context.Context, childID, reason string
 	return true, nil
 }
 
+// CancelChild implements [extension.SessionSpawner.CancelChild] by
+// delegating to [RequestChildCancel]. The mission ext executor calls
+// it to stop a worker that overran its per-role time budget; without
+// it a timed-out worker runs detached to completion and its result is
+// orphaned (the wave already moved on).
+func (s *Session) CancelChild(ctx context.Context, childID, reason string) (bool, error) {
+	return s.RequestChildCancel(ctx, childID, reason)
+}
+
 // RequestAllChildrenCancel snapshots the live children map and
 // dispatches RequestChildCancel against each. Returns the ids it
 // submitted cancels for (a child terminating between the snapshot

@@ -277,23 +277,6 @@ func (m MissionManifest) TimeoutForRole(role string) time.Duration {
 	return DefaultWaveTimeout
 }
 
-// TimeoutForRoles returns the MAX declared timeout across a set of
-// roles (a Do wave runs several workers in parallel, so the wave must
-// outlast its slowest role). Falls back to DefaultWaveTimeout when none
-// of the roles declared one.
-func (m MissionManifest) TimeoutForRoles(roles []string) time.Duration {
-	var max time.Duration
-	for _, role := range roles {
-		if rc, ok := m.Roles[role]; ok && rc.Timeout > max {
-			max = rc.Timeout
-		}
-	}
-	if max <= 0 {
-		return DefaultWaveTimeout
-	}
-	return max
-}
-
 // NormalizePlanApproval fills empty fields with their spec
 // defaults. Unknown values pass through unchanged so the executor
 // can fail-loud at first use — the runtime projection rejects

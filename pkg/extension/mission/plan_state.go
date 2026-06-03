@@ -50,8 +50,8 @@ type DoneWave struct {
 }
 
 // DoneWorker is the per-worker terminal record within a Done wave.
-// Status is one of {ok, error, cancelled}; Ref points into the
-// Handoffs store for ok workers.
+// Status is one of {ok, error, timeout, cancelled}; Ref points into
+// the Handoffs store for ok workers.
 type DoneWorker struct {
 	Name   string `json:"name"`
 	Role   string `json:"role,omitempty"`
@@ -59,6 +59,11 @@ type DoneWorker struct {
 	Status string `json:"status"`
 	Ref    string `json:"ref,omitempty"`
 	Error  string `json:"error,omitempty"`
+	// TimedOut marks a worker the executor cancelled for overrunning
+	// its per-role time budget — distinct from a generic error so the
+	// planner can react (split the work vs redo whole) on a timeout
+	// specifically. Status is "timeout" when this is set.
+	TimedOut bool `json:"timed_out,omitempty"`
 }
 
 // WaveStatus is the aggregate outcome of a wave. Phase A only ever

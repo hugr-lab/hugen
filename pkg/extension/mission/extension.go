@@ -8,6 +8,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -91,12 +92,26 @@ func (e *Extension) Name() string { return providerName }
 // plan / notepad / whiteboard extensions' pattern.
 func (e *Extension) Lifetime() tool.Lifetime { return tool.LifetimePerAgent }
 
-// InitState implements [extension.StateInitializer]. Allocates a
-// fresh [*MissionState] handle for the calling session. Phase A
-// allocates for every session; future phases (F) may gate on
-// "mission-eligible" sessions only to keep the state map empty on
-// pure root chats — for now the zero-state handle is cheap.
+// InitState implements [extension.StateInitializer]. Allocates the
+// per-mission [*MissionState] — but ONLY on the mission-tier
+// dispatcher session that actually runs the research + Do waves.
+//
+// A worker / role child (researcher, planner, every Do worker — all
+// tier=worker) must reach the MISSION's state (its research output +
+// handoff store) via [FromState]'s parent walk. Installing a fresh
+// empty MissionState on each of them SHADOWS the mission's: FromState
+// finds the worker's own (empty) handle first and never walks up, so
+// `mission:get_research` / `mission:get_handoff` always returned
+// `available:false` from a worker — the worker then re-discovered the
+// schema research had already mapped. The tier check keeps nested
+// missions correct: a mission-tier child still owns its own state.
 func (e *Extension) InitState(_ context.Context, state extension.SessionState) error {
+	if state.Tier() != skill.TierMission {
+		if parent, ok := state.Parent(); ok && FromState(parent) != nil {
+			// Inherit the nearest ancestor mission's state.
+			return nil
+		}
+	}
 	state.SetValue(StateKey, NewMissionState())
 	return nil
 }

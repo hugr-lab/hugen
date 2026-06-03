@@ -326,6 +326,31 @@ func buildScriptRequest(t *testing.T, args map[string]any) mcp.CallToolRequest {
 	return req
 }
 
+// TestParseRunArgs_RunCodeSizeCap verifies inline run_code source over
+// the byte cap is rejected (pointing the model to write a file +
+// run_script), while at-cap source parses.
+func TestParseRunArgs_RunCodeSizeCap(t *testing.T) {
+	t.Run("over cap rejected", func(t *testing.T) {
+		req := buildScriptRequest(t, map[string]any{"code": strings.Repeat("x", maxRunCodeBytes+1)})
+		r := runRequest{kind: "run_code"}
+		err := parseRunArgs(req, &r)
+		te, ok := err.(*toolError)
+		if !ok || te.Code != "arg_validation" {
+			t.Fatalf("expected arg_validation toolError, got %v", err)
+		}
+		if !strings.Contains(te.Msg, "run_script") {
+			t.Errorf("err should point to run_script, got %q", te.Msg)
+		}
+	})
+	t.Run("at cap ok", func(t *testing.T) {
+		req := buildScriptRequest(t, map[string]any{"code": strings.Repeat("y", maxRunCodeBytes)})
+		r := runRequest{kind: "run_code"}
+		if err := parseRunArgs(req, &r); err != nil {
+			t.Fatalf("at-cap code should parse: %v", err)
+		}
+	})
+}
+
 func TestParseRunArgs_Kwargs(t *testing.T) {
 	t.Run("happy", func(t *testing.T) {
 		req := buildScriptRequest(t, map[string]any{
