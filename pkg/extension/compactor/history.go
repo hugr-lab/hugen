@@ -70,10 +70,17 @@ func (e *Extension) ProvideHistory(_ context.Context, state extension.SessionSta
 			out = append(out, ent.Message)
 			continue
 		}
-		// First entry of this hidden segment carries the expand note as
-		// a leading placeholder; the note appears exactly once per
-		// hidden checkpoint regardless of how many entries it spans.
-		if !noted[r.cp.ID] {
+		// The segment note is a RoleUser message; emitting it before a
+		// tool_result would split that result from its assistant
+		// tool_call — the prior checkpoint's call, which sits in the
+		// preceding (possibly still-visible) segment — and strict APIs
+		// (Anthropic/OpenAI) reject the orphaned pair. So emit the note
+		// before the first NON-tool entry of the segment, after any
+		// leading backward-pairing tool_result stubs. Every closed
+		// segment ends with its own context:checkpoint assistant call,
+		// so a non-tool entry (and thus the note) always lands. Appears
+		// exactly once per hidden checkpoint (the noted gate).
+		if !noted[r.cp.ID] && ent.Message.Role != model.RoleTool {
 			noted[r.cp.ID] = true
 			out = append(out, model.Message{
 				Role:    model.RoleUser,
