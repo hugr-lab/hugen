@@ -67,7 +67,7 @@ type turnState struct {
 	// budget configured). budgetExceeded latches once the per-call
 	// prompt crosses it: from then on tool calls are short-circuited to
 	// budget-errors and the role is pushed to summarise + hand off.
-	lastCallUsage  protocol.TokenUsage
+	lastCallUsage   protocol.TokenUsage
 	budgetThreshold int
 	budgetExceeded  bool
 
@@ -98,6 +98,13 @@ type turnState struct {
 	// approved plan) can't loop forever. NOT reset per iteration —
 	// it's a per-turn backstop.
 	finalizeGateRetries int
+
+	// emptyRetries counts how many times this turn produced a fully
+	// empty model iteration (no content, no tool call) and the runtime
+	// re-prompted instead of retiring silently. Bounded by
+	// maxEmptyRetries. NOT reset per iteration — a per-turn backstop,
+	// like finalizeGateRetries.
+	emptyRetries int
 }
 
 // modelChunkEvent is the single union the Run loop reads from
@@ -163,6 +170,25 @@ type ToolFeed struct {
 // (the dogfood failures cleared within 2-3 corrections) without
 // burning unbounded model calls.
 const maxFinalizeGateRetries = 6
+
+// maxEmptyRetries bounds how many times the runtime re-prompts a turn
+// that produced a fully empty model iteration (no content, no tool
+// call) before retiring it. Observed deterministically on qwen3.6 in
+// llama.cpp: after a tool_call+tool_result is in history and the tools
+// carry large parameter schemas, the constrained sampler collapses to
+// an immediate finish_reason=stop with one token and nothing usable —
+// a silent dead turn that delivers nothing. 2 is enough: the injected
+// continuation perturbs the prompt and breaks the deterministic stop on
+// the first retry; the cap stops a model that genuinely has nothing to
+// say from looping.
+const maxEmptyRetries = 2
+
+// emptyIterationNudge is the continuation injected when an iteration
+// comes back empty. It steers the model to either report or continue —
+// the recovery the dead turn skipped.
+const emptyIterationNudge = "The previous step produced no output. " +
+	"If the task is already complete, reply to the user with a brief result now. " +
+	"Otherwise continue — call the next tool you need."
 
 // startTurn moves the Session from idle to "model goroutine running".
 // Called from the inbound branch of Run when a UserMessage arrives and
@@ -713,6 +739,27 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 		// accumulators. finalizeGateRetries is the per-turn backstop.
 		st.finalizeGateRetries++
 		s.injectTurnContinuation(runCtx, continuation)
+		s.startModelIteration(runCtx)
+		return
+	}
+
+	// Empty-iteration guard (weak-model dead-turn backstop). The
+	// iteration produced nothing — no content, no tool call (the same
+	// "produced nothing" condition that skipped the consolidated emit
+	// above), so retiring here delivers nothing to the user. Observed
+	// deterministically on qwen3.6 in llama.cpp once a tool_call +
+	// tool_result is in history and the tools carry large parameter
+	// schemas. Re-prompt once instead of retiring silently: the injected
+	// continuation perturbs the prompt enough to break the deterministic
+	// stop, and the model reports the result or continues. Bounded by
+	// maxEmptyRetries; model-agnostic. Gate-blocked iterations already
+	// returned above, so this only fires when the turn would otherwise
+	// retire with an empty hand.
+	if !hasToolCalls && st.agentSeq == 0 && st.finalText == "" && st.emptyRetries < maxEmptyRetries {
+		st.emptyRetries++
+		s.logger.Debug("session: empty model iteration, re-prompting",
+			"session", s.id, "retry", st.emptyRetries)
+		s.injectTurnContinuation(runCtx, emptyIterationNudge)
 		s.startModelIteration(runCtx)
 		return
 	}
