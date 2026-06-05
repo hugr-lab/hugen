@@ -79,7 +79,8 @@ func (e *PlannerError) Unwrap() error { return e.Err }
 // AgentMessage; the caller (RunMission) drives nothing further.
 func (e *Extension) driveMissionPlanner(mission extension.SessionState, spawner extension.SessionSpawner, manifest MissionManifest, missionSkill, goal string, inputs any) {
 	executor := NewExecutor(e.makeSpawnerCallback(mission, spawner, missionSkill), e.logger).
-		WithTerminator(e.makeTerminatorCallback(spawner))
+		WithTerminator(e.makeTerminatorCallback(spawner)).
+		WithWaveHook(e.snapshotSpec)
 	ctx := context.Background()
 	_ = inputs
 
@@ -574,6 +575,10 @@ func (e *Extension) spawnAndAwaitChecker(ctx context.Context, executor *Executor
 		if err := m.ApplyStatusOnly(verdict.ACUpdate, iteration, evidenceSource); err != nil {
 			return Verdict{}, &PlannerError{Iteration: iteration, Reason: "apply checker ac_update", Err: err}
 		}
+		// Re-project spec.md so on-disk AC statuses reflect the
+		// checker's verification — the wave hook fired earlier, before
+		// the verdict was decoded and applied. Phase B39.
+		e.writeSpecContract(mission, m, nil)
 	}
 	// When the checker emits decision=inquire, require that it
 	// actually called session:inquire during its turn (parallel
@@ -694,6 +699,11 @@ type plannerTaskView struct {
 	Iteration        int
 	MaxWaves         int
 	ApprovalRequired bool
+	// RoleProse is the planner role's behavioral brief
+	// (`sub_agents[].prompt`), rendered into the template's
+	// `[Your role]` slot. Empty → the bare universal template.
+	// Phase B34.
+	RoleProse string
 	// FirstPlanGate signals "no plan has been approved yet on this
 	// mission". Drives the long-form [STOP — pre-flight checklist]
 	// rendering on the planner's first gate-bearing turn so the
@@ -859,6 +869,7 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		DoRoles:          doRoles,
 		Recent:           collectRecentWaves(mission),
 		PlanContext:      collectPlanContext(mission),
+		RoleProse:        renderRoleProse(mission, manifest.RolePrompts[manifest.Plan.Role]),
 	}
 	if m := FromState(mission); m != nil {
 		// FirstPlanGate: planner has never gotten an approve yet.
@@ -961,6 +972,11 @@ type checkerTaskView struct {
 	Handoffs       []synthesisHandoffView
 	PlanContext    []plannerContextEntry
 	PendingRoadmap []plannerRoadmapView
+	// RoleProse is the control (checker) role's behavioral brief
+	// (`sub_agents[].prompt`), rendered into the template's
+	// `[Your role]` slot. Empty → the bare universal template.
+	// Phase B34.
+	RoleProse string
 }
 
 // plannerRoadmapView projects one roadmap entry from the most recent
@@ -980,12 +996,13 @@ type plannerRoadmapView struct {
 // plus the plan_context journal for cross-iteration awareness,
 // the user goal, and any roadmap entries the planner committed to
 // but the runtime hasn't executed yet.
-func buildCheckerTask(mission extension.SessionState, _ MissionManifest, goal string, iteration int) (string, error) {
+func buildCheckerTask(mission extension.SessionState, manifest MissionManifest, goal string, iteration int) (string, error) {
 	view := checkerTaskView{
 		Goal:           goal,
 		Iteration:      iteration,
 		PlanContext:    collectPlanContext(mission),
 		PendingRoadmap: collectPendingRoadmap(mission),
+		RoleProse:      renderRoleProse(mission, manifest.RolePrompts[manifest.Control.Role]),
 	}
 	if m := FromState(mission); m != nil {
 		// PlannerGoal + WaveAC pull from MissionFrame (which projects
@@ -1211,6 +1228,13 @@ type workerContractView struct {
 	// message, not just the distal constitution — to read the
 	// verified findings via mission:get_research before re-deriving.
 	ResearchAvailable bool
+	// RoleProse is the worker role's behavioral brief
+	// (`sub_agents[].prompt`), rendered into the template's
+	// `[Your role]` slot. Looked up by role name in the mission
+	// skill's RolePrompts; a cross-skill recipe worker (Skill ≠
+	// mission skill) resolves empty → bare universal template.
+	// Phase B34.
+	RoleProse string
 }
 
 // decorateWaveTasks appends the bundled mission/worker_contract
@@ -1246,7 +1270,10 @@ func decorateWaveTasks(mission extension.SessionState, manifest MissionManifest,
 	out.Subagents = make([]SubagentSpec, len(wave.Subagents))
 	copy(out.Subagents, wave.Subagents)
 	for i := range out.Subagents {
-		view := workerContractView{ResearchAvailable: researchAvailable}
+		view := workerContractView{
+			ResearchAvailable: researchAvailable,
+			RoleProse:         renderRoleProse(mission, manifest.RolePrompts[out.Subagents[i].Role]),
+		}
 		if ResolvePlanContextAccess(manifest, out.Subagents[i].Role) == PlanContextRead {
 			view.PlanContext = planCtx
 		}

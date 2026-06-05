@@ -73,7 +73,7 @@ func TestIngestHandoff_SatisfiesAppliedToACState(t *testing.T) {
 	}
 	m.SeedAC([]ACAddSpec{{Statement: "ac-1"}, {Statement: "ac-2"}, {Statement: "ac-3"}}, OriginManifest)
 	m.IterationCounter = 2
-	m.BeginWave("extract")
+	m.BeginWave(Wave{Label: "extract"})
 	cur := workerCursor{Name: "wkr", Role: "data-analyst", Skill: "analyst"}
 	m.RegisterWorker("child-1", cur)
 
@@ -117,7 +117,7 @@ func TestIngestHandoff_SatisfiesDoesNotOverrideAlreadySatisfied(t *testing.T) {
 		t.Fatalf("ApplyStatusOnly: %v", err)
 	}
 	m.IterationCounter = 2
-	m.BeginWave("rerun")
+	m.BeginWave(Wave{Label: "rerun"})
 	cur := workerCursor{Name: "wkr", Role: "x", Skill: "y"}
 	m.RegisterWorker("child-2", cur)
 	text := "```handoff\n" +

@@ -327,12 +327,37 @@ func (m *MissionState) CurrentWave() string {
 
 // BeginWave marks wave as currently active and clears the
 // per-wave worker tracking. Called by the executor at the top of
-// RunWave.
-func (m *MissionState) BeginWave(label string) {
+// RunWave. Also stamps PlanState.Active with a copy of the wave so
+// observers + the spec.md snapshot can show the wave that is
+// currently "doing" (RunWave clears it back to nil on completion).
+func (m *MissionState) BeginWave(wave Wave) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.currentWave = label
+	m.currentWave = wave.Label
+	active := wave
+	m.Plan.Active = &active
 	m.workersInWave = make(map[string]workerCursor)
+}
+
+// PlanSnapshot returns a lock-safe copy of the PlanState progress
+// (Done / Active / Roadmap / Iteration) for projection into spec.md.
+// Inner slices on DoneWave (Refs / Subagents) are shared by reference
+// — callers must treat the snapshot as read-only. Phase B39.
+func (m *MissionState) PlanSnapshot() PlanState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := PlanState{Iteration: m.Plan.Iteration}
+	if len(m.Plan.Done) > 0 {
+		cp.Done = append(cp.Done, m.Plan.Done...)
+	}
+	if m.Plan.Active != nil {
+		a := *m.Plan.Active
+		cp.Active = &a
+	}
+	if len(m.Plan.Roadmap) > 0 {
+		cp.Roadmap = append(cp.Roadmap, m.Plan.Roadmap...)
+	}
+	return cp
 }
 
 // RegisterWorker records the (sessionID → cursor) mapping the

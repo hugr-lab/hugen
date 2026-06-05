@@ -587,6 +587,17 @@ type SubAgentRole struct {
 	Description string      `json:"description,omitempty"`
 	Tools       []ToolGrant `json:"tools,omitempty"`
 
+	// Prompt is the role's behavioral brief — the domain / mission-
+	// specific instructions the runtime renders INTO the spawned
+	// subagent's first message, via the universal mission task
+	// templates' `[Your role]` slot. Distinct from Description, which
+	// stays SHORT (the one-line catalogue text the planner / root read
+	// to PICK this role). The universal templates carry only PDCA
+	// mechanics; everything role- / domain-specific (which refs to
+	// read, query grammar, output discipline) lives here. Empty → the
+	// subagent runs on the bare universal template. Phase B34.
+	Prompt string `json:"prompt,omitempty" yaml:"prompt,omitempty"`
+
 	// CanSpawn controls whether this role itself may call
 	// spawn_subagent (phase-4-spec §3 step 8 + §4.4). Default true:
 	// nil means "not specified, use default", &false explicitly

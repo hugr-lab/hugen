@@ -117,7 +117,8 @@ func (e *Extension) RunMission(ctx context.Context, mission extension.SessionSta
 // on the mission session for observability / recovery.
 func (e *Extension) driveMission(mission extension.SessionState, spawner extension.SessionSpawner, manifest MissionManifest, missionSkill, goal string, inputs any) {
 	executor := NewExecutor(e.makeSpawnerCallback(mission, spawner, missionSkill), e.logger).
-		WithTerminator(e.makeTerminatorCallback(spawner))
+		WithTerminator(e.makeTerminatorCallback(spawner)).
+		WithWaveHook(e.snapshotSpec)
 
 	ctx := context.Background()
 	_ = inputs
@@ -220,8 +221,8 @@ func (e *Extension) renderInlineForMission(mission extension.SessionState, manif
 // incomplete, when non-empty, marks the mission as aborted/unfinished:
 // the synthesizer is asked to report what happened + summarise partial
 // findings rather than claim success. Empty for a clean completion.
-func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, mission extension.SessionState, role, missionSkill, goal string, timeout time.Duration, incomplete string) (string, error) {
-	task, err := buildSynthesisTask(mission, goal, incomplete)
+func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, mission extension.SessionState, role, missionSkill, goal string, timeout time.Duration, incomplete, roleProse string) (string, error) {
+	task, err := buildSynthesisTask(mission, goal, incomplete, roleProse)
 	if err != nil {
 		return "", fmt.Errorf("synthesis: build task: %w", err)
 	}
@@ -299,7 +300,8 @@ func (e *Extension) maybeSynthesize(ctx context.Context, executor *Executor, mis
 		incomplete = missionIncompleteReason(mission)
 	}
 	text, err := e.runSynthesis(ctx, executor, mission, manifest.Synthesis.Role, missionSkill, goal,
-		manifest.TimeoutForRole(manifest.Synthesis.Role), incomplete)
+		manifest.TimeoutForRole(manifest.Synthesis.Role), incomplete,
+		renderRoleProse(mission, manifest.RolePrompts[manifest.Synthesis.Role]))
 	if err != nil {
 		e.logger.Warn("mission: synthesis failed",
 			"mission_session", mission.SessionID(), "err", err, "aborted", aborted)
@@ -343,13 +345,14 @@ type synthesisHandoffView struct {
 // skill-specific prompt. Returns an error when the prompts renderer
 // is unavailable or the template fails — there is no inline fallback
 // by design ([[feedback-prompts-in-assets]]).
-func buildSynthesisTask(mission extension.SessionState, goal, incomplete string) (string, error) {
+func buildSynthesisTask(mission extension.SessionState, goal, incomplete, roleProse string) (string, error) {
 	data := struct {
 		Goal       string
 		Incomplete string
 		Handoffs   []synthesisHandoffView
 		MissionAC  []plannerACView
-	}{Goal: goal, Incomplete: incomplete}
+		RoleProse  string
+	}{Goal: goal, Incomplete: incomplete, RoleProse: roleProse}
 	if m := FromState(mission); m != nil {
 		for _, h := range m.Handoffs.List() {
 			data.Handoffs = append(data.Handoffs, synthesisHandoffView{

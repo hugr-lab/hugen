@@ -110,7 +110,7 @@ func TestExtension_OnChildFrame_HandoffIngest(t *testing.T) {
 	ext.InitState(context.Background(), state) // skipcq
 
 	m := FromState(state)
-	m.BeginWave("wave-1")
+	m.BeginWave(Wave{Label: "wave-1"})
 	m.RegisterWorker("wrk-1", workerCursor{
 		Name: "w1",
 		Role: "echo",
@@ -149,7 +149,7 @@ func TestExtension_OnChildFrame_UnknownChildIgnored(t *testing.T) {
 	ext.InitState(context.Background(), state) // skipcq
 
 	m := FromState(state)
-	m.BeginWave("w1")
+	m.BeginWave(Wave{Label: "w1"})
 	// No RegisterWorker — frame should be ignored.
 
 	final := &protocol.AgentMessage{
@@ -193,7 +193,7 @@ func TestExtension_OnChildFrame_ErrorRecordedAsErrorHandoff(t *testing.T) {
 	state := newFakeState("mis-1")
 	ext.InitState(context.Background(), state) // skipcq
 	m := FromState(state)
-	m.BeginWave("w1")
+	m.BeginWave(Wave{Label: "w1"})
 	m.RegisterWorker("wrk-1", workerCursor{Name: "w1", Role: "echo"})
 
 	errFrame := &protocol.Error{
@@ -221,7 +221,7 @@ func TestExtension_OnChildFrame_ParseFailureRecordedAsError(t *testing.T) {
 	state := newFakeState("mis-1")
 	ext.InitState(context.Background(), state) // skipcq
 	m := FromState(state)
-	m.BeginWave("w1")
+	m.BeginWave(Wave{Label: "w1"})
 	m.RegisterWorker("wrk-1", workerCursor{Name: "w1"})
 
 	frame := &protocol.AgentMessage{
@@ -266,7 +266,7 @@ func TestExtension_ReportStatus_PayloadOnActiveWave(t *testing.T) {
 	state := newFakeState("mis-1")
 	ext.InitState(context.Background(), state) // skipcq
 	m := FromState(state)
-	m.BeginWave("w1")
+	m.BeginWave(Wave{Label: "w1"})
 	m.Handoffs.Put(Handoff{Ref: "w1@w1", Status: "ok", CreatedAt: time.Now()})
 
 	data := ext.ReportStatus(context.Background(), state)

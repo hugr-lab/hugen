@@ -242,6 +242,9 @@ func buildResearchTask(mission extension.SessionState, manifest MissionManifest,
 		Goal:               goal,
 		ValidationFeedback: validationFeedback,
 	}
+	if manifest.Research != nil {
+		view.RoleProse = renderRoleProse(mission, manifest.RolePrompts[manifest.Research.Role])
+	}
 	if m := FromState(mission); m != nil {
 		// Phase 5.x-followup — caller's spawn-time inputs are
 		// authoritative; the research role MUST treat them as
@@ -259,13 +262,18 @@ func buildResearchTask(mission extension.SessionState, manifest MissionManifest,
 }
 
 // researchTaskView is the typed payload the
-// `mission/research_task` template renders against. Kept narrow
-// — the role's domain prose lives in the skill's role system
-// prompt; this task message carries only the goal, the caller's
-// resolved inputs, and a shape-retry note.
+// `mission/research_task` template renders against. The universal
+// template carries only PDCA mechanics; the role's domain prose
+// (which refs to read, what each artifact must hold) rides in
+// RoleProse — the skill role's `prompt`, rendered into the
+// `[Your role]` slot. Phase B34.
 type researchTaskView struct {
 	Goal               string
 	ValidationFeedback []string
+	// RoleProse is the skill role's behavioral brief
+	// (`sub_agents[].prompt`), rendered into the template's
+	// `[Your role]` slot. Empty → the bare universal template.
+	RoleProse string
 	// SpawnInputs lists the structured key/value pairs the caller
 	// passed at spawn_mission time. Authoritative — the researcher
 	// MUST treat these keys as already resolved and skip any

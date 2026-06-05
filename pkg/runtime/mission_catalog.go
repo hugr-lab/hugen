@@ -151,7 +151,12 @@ func projectMissionManifest(m skillpkg.Manifest, skillDir string) *missionext.Mi
 	}
 	out.Capabilities = projectMissionCapabilities(mb.Capabilities)
 	out.Roles = projectRoleCapabilities(m.Hugen.SubAgents)
-	out.Workers = projectDoWorkers(m.Hugen.SubAgents, mb.Plan.Role, mb.Control.Role, mb.Synthesis.Role)
+	researchRole := ""
+	if mb.Research != nil {
+		researchRole = mb.Research.Role
+	}
+	out.Workers = projectDoWorkers(m.Hugen.SubAgents, mb.Plan.Role, mb.Control.Role, mb.Synthesis.Role, researchRole)
+	out.RolePrompts = projectRolePrompts(m.Hugen.SubAgents)
 	// Phase 5.x — B11 §3.2.2 — pass the manifest's iter-0 AC seed
 	// through verbatim. Templates are rendered with .Inputs at
 	// mission spawn (auto_runner.RunMission), not here, since the
@@ -196,18 +201,23 @@ func projectMissionHook(in *skillpkg.MissionStageHook) *missionext.MissionHook {
 }
 
 // projectDoWorkers filters the skill's sub_agents down to the
-// "Do" roles — everything that isn't the planner, the checker, or
-// the synthesizer — and carries the role name + description into
-// mission ext's WorkerManifest catalogue. The planner's first
-// message renders this catalogue so the model picks a real role
-// (`schema-explorer`, `query-builder`, …) instead of guessing
-// `worker` and falling through to the generic _worker autoload.
-func projectDoWorkers(roles []skillpkg.SubAgentRole, plannerRole, controlRole, synthesisRole string) []missionext.WorkerManifest {
+// "Do" roles — everything that isn't a stage-bound role (the
+// planner, the checker, the synthesizer, or the researcher) — and
+// carries the role name + description into mission ext's
+// WorkerManifest catalogue. The planner's first message renders this
+// catalogue so the model picks a real role (`schema-explorer`,
+// `query-builder`, …) instead of guessing `worker` and falling
+// through to the generic _worker autoload. Stage-bound roles run on
+// their own runtime step (research before the planner, checker after
+// each wave, synthesis on completion), so they must NOT appear as
+// pickable wave workers — a leaked `researcher` row lets the planner
+// schedule it as a Do-worker.
+func projectDoWorkers(roles []skillpkg.SubAgentRole, plannerRole, controlRole, synthesisRole, researchRole string) []missionext.WorkerManifest {
 	if len(roles) == 0 {
 		return nil
 	}
 	skip := map[string]struct{}{}
-	for _, r := range []string{plannerRole, controlRole, synthesisRole} {
+	for _, r := range []string{plannerRole, controlRole, synthesisRole, researchRole} {
 		if r != "" {
 			skip[r] = struct{}{}
 		}
@@ -224,6 +234,28 @@ func projectDoWorkers(roles []skillpkg.SubAgentRole, plannerRole, controlRole, s
 			Role:        r.Name,
 			Description: strings.TrimSpace(r.Description),
 		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// projectRolePrompts walks the skill's sub_agents and returns the
+// role-name → behavioral-brief map. Carries `sub_agents[].prompt`
+// for EVERY role (research / planner / control / synthesis / Do)
+// so each mission task builder renders the brief into its role's
+// `[Your role]` slot uniformly. Roles with an empty prompt are
+// skipped (they run on the bare universal template). Phase B34.
+func projectRolePrompts(roles []skillpkg.SubAgentRole) map[string]string {
+	out := map[string]string{}
+	for _, r := range roles {
+		if r.Name == "" {
+			continue
+		}
+		if p := strings.TrimSpace(r.Prompt); p != "" {
+			out[r.Name] = p
+		}
 	}
 	if len(out) == 0 {
 		return nil

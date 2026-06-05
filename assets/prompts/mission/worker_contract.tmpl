@@ -1,4 +1,7 @@
-{{- if .PlanContext }}
+{{if .RoleProse}}[Your role]
+{{.RoleProse}}
+
+{{end}}{{- if .PlanContext }}
 [Plan context — what prior iterations recorded]
 {{ range .PlanContext -}}
 - iter {{ .Iteration }} / {{ .Phase }}: {{ .Summary }}

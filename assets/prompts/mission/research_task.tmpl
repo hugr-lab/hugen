@@ -11,7 +11,10 @@ workers read. Concretely, by the end of your turn:
 3. The artifact files under `research/` are filled in (see
    [Write the research files]).
 
-[Mission goal]
+{{if .RoleProse}}[Your role]
+{{.RoleProse}}
+
+{{end}}[Mission goal]
 {{.Goal}}
 {{if .SpawnInputs}}
 [Inputs from caller — already resolved, do NOT re-ask]

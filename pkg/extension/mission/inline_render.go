@@ -4,7 +4,33 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+
+	"github.com/hugr-lab/hugen/pkg/extension"
 )
+
+// renderRoleProse renders a role's `prompt` (which may carry Go
+// `{{ .Inputs.<key> }}` template expressions) against the mission's
+// merged spawn ⊕ resolved inputs BEFORE it lands in a task template's
+// `[Your role]` slot — the same data shape inline plans use (Phase
+// 6.1d). Static prompts (no `{{`) skip the parse. Best-effort: a
+// broken template falls back to the raw string so a cosmetic authoring
+// slip in a role prompt never wedges a wave (the literal `{{...}}`
+// renders, which the author catches in dogfood). Phase B34.
+func renderRoleProse(mission extension.SessionState, prose string) string {
+	if prose == "" || !hasTemplate(prose) {
+		return prose
+	}
+	var spawn, resolved map[string]any
+	if m := FromState(mission); m != nil {
+		spawn = m.SpawnInputs()
+		_, resolved, _ = m.ResearchOutput()
+	}
+	out, err := renderInlineString(prose, inlineRenderData{Inputs: mergeInputs(spawn, resolved)})
+	if err != nil {
+		return prose
+	}
+	return out
+}
 
 // inlineRenderData is the dot value templates see when the runtime
 // renders an inline plan's per-subagent fields. Carries the merged

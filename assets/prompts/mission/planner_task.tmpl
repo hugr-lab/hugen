@@ -10,7 +10,10 @@ when approval is required, the user approves), reply with just `done`
 to end your turn — nothing else. The runtime will not let your turn
 finish until a plan has been submitted and approved this way.
 
-[Mission goal]
+{{if .RoleProse}}[Your role]
+{{.RoleProse}}
+
+{{end}}[Mission goal]
 {{.Goal}}
 
 [Iteration]
@@ -293,12 +296,17 @@ but they improve the plan and the user's approval view):
   satisfaction in the verdict and feeds it back to you on the
   next iteration. Use to narrow what "this wave succeeded"
   means when the wave produces a non-obvious artefact.
-- `body.roadmap` — array of anticipated future waves. Each entry
-  is an object with `label` (kebab-case) AND `description` (one
+- `body.roadmap` — array of anticipated future WORKER waves. Each
+  entry is an object with `label` (kebab-case) AND `description` (one
   short sentence — what the wave will do). The approval inquire
   renders this list verbatim so the user sees the full plan beyond
   `next_wave`. Hint only; the runtime does not auto-run roadmap
-  waves. Omit (or `[]`) when there is no plan-ahead.
+  waves. Omit (or `[]`) when there is no plan-ahead. NEVER list
+  `synthesis` / a final wrap-up / final-answer step as a roadmap
+  entry — synthesis is the runtime's AUTOMATIC terminal step (it runs
+  on `next_wave: null`), not a wave you plan or spawn. A phantom
+  synthesis roadmap entry makes the checker read work as still
+  pending and refuse `finish`, wasting a whole iteration.
 - `body.rationale` — one or two sentences on why this wave next;
   shown to the user as the approval modal's context.
 
