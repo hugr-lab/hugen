@@ -76,11 +76,18 @@ func phaseExtensions(_ context.Context, core *Core) error {
 	)
 	exts := []extension.Extension{
 		wsext.NewExtension(core.Cfg.Workspace.Dir, core.Logger),
-		notepadext.NewExtension(core.Store, core.Agent.ID(), notepadext.Config{}),
 		compactorExt,
 		planext.NewExtension(core.Agent.ID()),
 		wbext.NewExtension(core.Agent.ID()),
 		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()),
+		// Notepad registered AFTER skillext (B31): both contribute a
+		// ModelInTurnAdvisor.TurnPreamble joined in deps.Extensions
+		// order, and the deliberate reading order is skill catalogue +
+		// recommended-tags → notepad snapshot → user ask (findings get
+		// maximal recency, sitting closest to the ask). notepad no
+		// longer advertises into the system prefix, and nothing reads
+		// its state during InitState, so the later slot is free.
+		notepadext.NewExtension(core.Store, core.Agent.ID(), notepadext.Config{}),
 		// Mission ext owns the entire mission-PDCA dispatch
 		// surface — MissionDispatcher (validates spawn_mission's
 		// `skill` arg), MissionAutoRunner (drives the executor

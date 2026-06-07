@@ -263,10 +263,13 @@ func TestGeneration_BumpsOnLoadUnload(t *testing.T) {
 // pkg/extension/mission/dispatcher_test.go. Mission-PDCA
 // (design 003) — no fallback.
 
-// TestAdvertiseSystemPrompt_NotepadTagsBlockA verifies the Block
-// A section ("## Notepad — recommended tags") appears when a
-// loaded skill declares top-level metadata.hugen.notepad.tags.
-func TestAdvertiseSystemPrompt_NotepadTagsBlockA(t *testing.T) {
+// TestTurnPreamble_NotepadTagsBlockA verifies the Block A section
+// ("## Notepad — recommended tags") renders in the turn_preamble — B31
+// moved it off the system prompt so it rides next to the catalogue +
+// the notepad snapshot past the KV-cache boundary — when a loaded skill
+// declares top-level metadata.hugen.notepad.tags, and that it is ABSENT
+// from the system prompt.
+func TestTurnPreamble_NotepadTagsBlockA(t *testing.T) {
 	ctx := context.Background()
 	skillWithTags := `---
 name: analyst
@@ -301,7 +304,7 @@ body
 		t.Fatalf("Load: %v", err)
 	}
 
-	out := ext.AdvertiseSystemPrompt(ctx, missState)
+	pre := ext.TurnPreamble(ctx, missState)
 	for _, want := range []string{
 		"## Notepad — recommended tags",
 		"`schema-finding`",
@@ -309,17 +312,20 @@ body
 		"`data-quality-issue`",
 		"`deferred-question`",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("Block A missing %q; got:\n%s", want, out)
+		if !strings.Contains(pre, want) {
+			t.Errorf("Block A missing %q from turn_preamble; got:\n%s", want, pre)
 		}
+	}
+	if sys := ext.AdvertiseSystemPrompt(ctx, missState); strings.Contains(sys, "## Notepad — recommended tags") {
+		t.Errorf("Block A must NOT appear in the system prompt after B31; got:\n%s", sys)
 	}
 }
 
-// TestAdvertiseSystemPrompt_NotepadTagsEmptyWhenNoMissionSkill —
-// Block A omits entirely when no loaded skill declares notepad
-// tags (e.g. workers, or missions whose dispatcher doesn't use
-// the field).
-func TestAdvertiseSystemPrompt_NotepadTagsEmptyWhenNoMissionSkill(t *testing.T) {
+// TestTurnPreamble_NotepadTagsEmptyWhenNoMissionSkill — Block A omits
+// entirely when no loaded skill declares notepad tags (e.g. workers, or
+// missions whose dispatcher doesn't use the field). B31 — the tags now
+// render in the turn_preamble, so that's where their absence is checked.
+func TestTurnPreamble_NotepadTagsEmptyWhenNoMissionSkill(t *testing.T) {
 	ctx := context.Background()
 	noTags := `---
 name: analyst
@@ -346,7 +352,7 @@ body
 	if err := FromState(missState).Load(ctx, "analyst"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	out := ext.AdvertiseSystemPrompt(ctx, missState)
+	out := ext.TurnPreamble(ctx, missState)
 	if strings.Contains(out, "## Notepad — recommended tags") {
 		t.Errorf("expected no Block A when no tags declared; got:\n%s", out)
 	}

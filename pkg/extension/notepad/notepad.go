@@ -68,24 +68,36 @@ func NewExtension(s Store, agentID string, cfg Config) *Extension {
 
 // Compile-time interface assertions.
 var (
-	_ extension.Extension        = (*Extension)(nil)
-	_ extension.StateInitializer = (*Extension)(nil)
-	_ extension.Advertiser       = (*Extension)(nil)
-	_ tool.ToolProvider          = (*Extension)(nil)
+	_ extension.Extension          = (*Extension)(nil)
+	_ extension.StateInitializer   = (*Extension)(nil)
+	_ extension.ModelInTurnAdvisor = (*Extension)(nil)
+	_ tool.ToolProvider            = (*Extension)(nil)
 )
 
 func (e *Extension) Name() string            { return providerName }
 func (e *Extension) Lifetime() tool.Lifetime { return tool.LifetimePerAgent }
 
-// AdvertiseSystemPrompt implements [extension.Advertiser] —
-// Block B per phase 4.2.3 §5. Returns a compact snapshot of
-// recent notes (within the configured window), grouped by
-// category, ordered by most-recent-write. Capped to keep the
-// prompt budget tight; the model is expected to call
-// notepad:search / notepad:read for full content when relevant.
-// Empty string when the notepad is empty or the state handle is
-// missing.
-func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.SessionState) string {
+// TurnPreamble implements [extension.ModelInTurnAdvisor] — the
+// recent-notes snapshot (Block B per phase 4.2.3 §5), injected just
+// before the last user message each turn rather than baked into the
+// system prompt.
+//
+// B31 moved it off the system prefix: the snapshot is volatile EVERY
+// turn — its relative `{Age} ago` timestamps tick on every render and
+// notepad is climb-to-root, so a concurrent sibling/mission append
+// shifts it too. Sitting in the cacheable system prefix it invalidated
+// the model server's whole KV/prefix cache each turn (full re-prefill).
+// In the late preamble it rides past the cache boundary, next to the
+// skill catalogue (skill ext renders just before in turnPreamble
+// order), so its churn costs no prefill. The recommended-notepad-tags
+// (Block A) ride with the catalogue, directly above this block, so the
+// notepad thread reads as one situational unit above the user's ask.
+//
+// Returns a compact snapshot of recent notes (within the configured
+// window), grouped by category, ordered by most-recent-write. Empty
+// when the notepad is empty or the state handle is missing. Keeps the
+// SetAdvertiseTokens accounting the StatusReporter projection reads.
+func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionState) string {
 	np := FromState(state)
 	if np == nil {
 		return ""
@@ -98,6 +110,12 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	out := renderSnapshot(state.Prompts(), notes, np.Window())
 	np.SetAdvertiseTokens(extension.EstimateTokens(out))
 	return out
+}
+
+// OnToolResult implements [extension.ModelInTurnAdvisor]. The notepad
+// contributes no on_tool_result guidance, so it always returns "".
+func (e *Extension) OnToolResult(_ context.Context, _ extension.SessionState, _ extension.ToolResultEvent) string {
+	return ""
 }
 
 // ReportStatus implements [extension.StatusReporter]. Returns a

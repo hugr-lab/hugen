@@ -192,19 +192,20 @@ func closeBlockFromManifest(c skillpkg.MissionOnClose) extension.CloseTurnBlock 
 	}
 }
 
-// AdvertiseSystemPrompt implements [extension.Advertiser].
-// Composes three sections in order:
-//   - Loaded-skills metadata block: per-skill header with directory
-//     and bundled-files listing (scripts/references/assets) so the
-//     model can invoke artefacts via existing bash:run /
-//     python:run_script with `${SKILL_DIR}/scripts/foo.py` etc.
-//     Phase 4.2 §3.4. Skills with no on-disk Root (inline) emit only
-//     name + description.
+// AdvertiseSystemPrompt implements [extension.Advertiser]. It renders
+// only the STABLE section that belongs in the cacheable system prefix:
+//
 //   - bindings.Instructions: the rendered body of every loaded skill
-//     (concrete tool-usage guidance).
-//   - Available-skills catalogue: one bullet per skill in the store
-//     with a `(loaded)` tag for skills already loaded into the
-//     session.
+//     (concrete tool-usage guidance). Changes only on skill:load — a
+//     rare, deliberate prefix reset, like compaction.
+//
+// Everything volatile or situational moved to [TurnPreamble] (the late
+// preamble injected just before the last user message): the available-
+// skills catalogue + loaded-skill file listing (Phase 6.x, for recency
+// — weak models ignored them atop a long system prompt) and, as of B31,
+// the recommended-notepad-tags advice (Block A). Keeping those out of
+// the system prefix lets the model server's KV/prefix cache hold across
+// turns instead of re-prefilling on every notepad churn.
 //
 // Returns "" when nothing to render so the runtime skips the empty
 // section.
@@ -213,37 +214,16 @@ func (e *Extension) AdvertiseSystemPrompt(ctx context.Context, state extension.S
 	if h == nil || h.manager == nil {
 		return ""
 	}
-	renderer := state.Prompts()
 	// Phase 5.2 γ — score each render contribution separately so
 	// the context-budget UI can split "skill bodies you loaded"
 	// from "catalogue advertising more skills available".
-	//
-	// Phase 6.x — the catalogue half migrated to the
-	// ModelInTurnAdvisor turn_preamble (rendered by [TurnPreamble]
-	// and injected before the last user message for recency +
-	// prompt-cache). This method now keeps only the rendered skill
-	// bodies + recommended-tags advice. The loaded-skill bundle
-	// listing (references / scripts / assets) ALSO moved to
-	// turn_preamble (dogfood: roles never loaded refs when the
-	// listing sat atop a long system prompt) so it rides next to the
-	// catalogue with the "load the references you need" directive,
-	// near the model's decision point.
 	var (
 		parts        []string
 		loadedTokens int
 	)
-	// Available missions — moved to pkg/extension/mission's
-	// Advertiser. Mission-PDCA (design 003).
 	if b, err := h.Bindings(ctx); err == nil && b.Instructions != "" {
 		parts = append(parts, b.Instructions)
 		loadedTokens += extension.EstimateTokens(b.Instructions)
-	}
-	// Phase 4.2.3 Block A — recommended notepad tags advertised
-	// by the loaded mission dispatcher(s). Empty when no loaded
-	// skill is mission-enabled or carries a tag list.
-	if tags := renderNotepadTagAdvice(renderer, h); tags != "" {
-		parts = append(parts, tags)
-		loadedTokens += extension.EstimateTokens(tags)
 	}
 	h.SetLoadedTokens(loadedTokens)
 	if len(parts) == 0 {
@@ -286,12 +266,23 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 	// user ask (vs buried atop the system prompt) is what gets weak
 	// models to actually open the docs instead of guessing query /
 	// filter syntax.
-	parts := make([]string, 0, 2)
+	parts := make([]string, 0, 3)
 	if cat != "" {
 		parts = append(parts, cat)
 	}
 	if meta := renderLoadedSkillsMeta(h); meta != "" {
 		parts = append(parts, meta)
+	}
+	// B31 — recommended notepad tags (Block A) ride here too, right
+	// after the catalogue + loaded-skill listing and just above the
+	// notepad snapshot (notepad ext renders next in turnPreamble
+	// order). Keeps the whole "what's available · how to record
+	// findings · what we've found" situational thread together past
+	// the KV-cache boundary, instead of fragmenting Block A into the
+	// system prefix where its (stable) content split the notepad
+	// thread across the prompt.
+	if tags := renderNotepadTagAdvice(renderer, h); tags != "" {
+		parts = append(parts, tags)
 	}
 	out := strings.Join(parts, "\n\n")
 	h.SetCatalogTokens(extension.EstimateTokens(out))

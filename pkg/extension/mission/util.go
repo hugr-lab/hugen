@@ -18,18 +18,7 @@ func jsonMarshalIndent(v any) (string, error) {
 	return string(b), nil
 }
 
-// nowFn returns the current wall-clock time. Var-form so tests can
-// pin it to a fixed instant via setNow / restoreNow without
-// reaching into time.Now from every call site.
+// nowFn returns the current wall-clock time. Var-form so a test can
+// pin it to a fixed instant by swapping the var, without reaching
+// into time.Now from every call site.
 var nowFn = time.Now
-
-// setNow temporarily replaces nowFn for the duration of a test
-// scope. Returns a closer the caller calls in defer.
-//
-// Not safe for parallel tests — kept here rather than exported
-// because the package-internal callers are the only users.
-func setNow(t time.Time) (restore func()) {
-	prev := nowFn
-	nowFn = func() time.Time { return t }
-	return func() { nowFn = prev }
-}

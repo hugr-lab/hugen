@@ -1221,13 +1221,6 @@ func approvalRequiredForIteration(policy PlanApproval, _ int, _ *MissionState) b
 // non-empty). Phase F.
 type workerContractView struct {
 	PlanContext []plannerContextEntry
-	// ResearchAvailable is true when the mission carries a non-empty
-	// research findings projection (m.ResearchOutput()). Gates the
-	// proximate `[Research]` pull-pointer in the contract template so
-	// workers in a researched mission are told — in their first
-	// message, not just the distal constitution — to read the
-	// verified findings via mission:get_research before re-deriving.
-	ResearchAvailable bool
 	// RoleProse is the worker role's behavioral brief
 	// (`sub_agents[].prompt`), rendered into the template's
 	// `[Your role]` slot. Looked up by role name in the mission
@@ -1260,19 +1253,12 @@ func decorateWaveTasks(mission extension.SessionState, manifest MissionManifest,
 		return Wave{}, fmt.Errorf("mission: decorateWaveTasks: no prompts renderer on session")
 	}
 	planCtx := collectPlanContext(mission)
-	researchAvailable := false
-	if m := FromState(mission); m != nil {
-		if findings, _, _ := m.ResearchOutput(); strings.TrimSpace(findings) != "" {
-			researchAvailable = true
-		}
-	}
 	out := wave
 	out.Subagents = make([]SubagentSpec, len(wave.Subagents))
 	copy(out.Subagents, wave.Subagents)
 	for i := range out.Subagents {
 		view := workerContractView{
-			ResearchAvailable: researchAvailable,
-			RoleProse:         manifest.RoleProse(mission, out.Subagents[i].Role),
+			RoleProse: manifest.RoleProse(mission, out.Subagents[i].Role),
 		}
 		if ResolvePlanContextAccess(manifest, out.Subagents[i].Role) == PlanContextRead {
 			view.PlanContext = planCtx

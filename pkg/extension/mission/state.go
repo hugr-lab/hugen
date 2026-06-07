@@ -161,6 +161,17 @@ type MissionState struct {
 	// proposals are input only (§3.2.1). Phase 5.x — B15.
 	researchACProposals []ResearchACProposal
 
+	// researchFileRefs is the relative paths (under the mission dir)
+	// the research role DECLARED it wrote — the handoff body.file_refs.
+	// Surfaced to workers as the mission-files index so they read the
+	// real research artifacts by path instead of re-discovering. The
+	// runtime trusts the role's declaration here; it does NOT inspect
+	// file content to decide what's "filled", which would couple the
+	// universal runtime to one skill's scaffold/template format. The
+	// research `check` gate already enforced the load-bearing files
+	// were filled before this handoff was accepted. Phase B31.
+	researchFileRefs []string
+
 	// autoApproveTools mirrors the user's last pick on an approval
 	// modal — true when they chose "approve with tools", false on
 	// "approve" / refine / abort / reject. RESET to false at the
@@ -758,7 +769,7 @@ func (m *MissionState) AutoApproveResearch() bool {
 // on mission state so the subsequent planner spawn reads it from
 // plan_context. Idempotent (subsequent calls overwrite). Phase
 // 5.x — B15.
-func (m *MissionState) SetResearchOutput(findings string, resolvedUserInputs map[string]any, acProposals []ResearchACProposal) {
+func (m *MissionState) SetResearchOutput(findings string, resolvedUserInputs map[string]any, acProposals []ResearchACProposal, fileRefs []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.researchFindings = strings.TrimSpace(findings)
@@ -775,6 +786,23 @@ func (m *MissionState) SetResearchOutput(findings string, resolvedUserInputs map
 	} else {
 		m.researchACProposals = append(m.researchACProposals[:0:0], acProposals...)
 	}
+	if len(fileRefs) == 0 {
+		m.researchFileRefs = nil
+	} else {
+		m.researchFileRefs = append(m.researchFileRefs[:0:0], fileRefs...)
+	}
+}
+
+// ResearchFileRefs returns a lock-safe copy of the relative paths the
+// research role declared it wrote (handoff body.file_refs), or nil.
+// Phase B31.
+func (m *MissionState) ResearchFileRefs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.researchFileRefs) == 0 {
+		return nil
+	}
+	return append([]string(nil), m.researchFileRefs...)
 }
 
 // MarkResearchAttempted flips the researchAttempted bit on.

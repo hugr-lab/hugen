@@ -170,7 +170,7 @@ func (e *Extension) runResearchStage(ctx context.Context, executor *Executor, mi
 				Summary:   out.MemorySummary,
 			})
 		}
-		m.SetResearchOutput(strings.TrimSpace(out.Findings), out.ResolvedUserInputs, out.ACProposals)
+		m.SetResearchOutput(strings.TrimSpace(out.Findings), out.ResolvedUserInputs, out.ACProposals, out.FileRefs)
 		e.emitResearchComplete(mission, attempt, out)
 		return false, nil
 	}
