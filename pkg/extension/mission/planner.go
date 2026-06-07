@@ -1221,13 +1221,13 @@ func approvalRequiredForIteration(policy PlanApproval, _ int, _ *MissionState) b
 // non-empty). Phase F.
 type workerContractView struct {
 	PlanContext []plannerContextEntry
-	// ResearchAvailable is true when the mission carries a non-empty
-	// research findings projection (m.ResearchOutput()). Gates the
-	// proximate `[Research]` pull-pointer in the contract template so
-	// workers in a researched mission are told — in their first
-	// message, not just the distal constitution — to read the
-	// verified findings via mission:get_research before re-deriving.
-	ResearchAvailable bool
+	// MissionFiles is the index of files the mission has ACTUALLY
+	// produced under the shared working dir (filled research artifacts,
+	// prior-wave data files, spec.md), rendered once into the worker's
+	// spawn brief so it reads the real input set by path instead of
+	// re-discovering. Computed per wave (the input set is fixed at wave
+	// start); empty for root / standalone sessions. Phase B31.
+	MissionFiles []missionFile
 	// RoleProse is the worker role's behavioral brief
 	// (`sub_agents[].prompt`), rendered into the template's
 	// `[Your role]` slot. Looked up by role name in the mission
@@ -1260,19 +1260,18 @@ func decorateWaveTasks(mission extension.SessionState, manifest MissionManifest,
 		return Wave{}, fmt.Errorf("mission: decorateWaveTasks: no prompts renderer on session")
 	}
 	planCtx := collectPlanContext(mission)
-	researchAvailable := false
-	if m := FromState(mission); m != nil {
-		if findings, _, _ := m.ResearchOutput(); strings.TrimSpace(findings) != "" {
-			researchAvailable = true
-		}
-	}
+	// The mission-files index is the same for every worker in the wave —
+	// the input set is fixed at wave start (a worker can't see a
+	// sibling's outputs until the next wave boundary) — so compute it
+	// once here, not per subagent. Phase B31.
+	missionFiles := missionFilesForState(mission)
 	out := wave
 	out.Subagents = make([]SubagentSpec, len(wave.Subagents))
 	copy(out.Subagents, wave.Subagents)
 	for i := range out.Subagents {
 		view := workerContractView{
-			ResearchAvailable: researchAvailable,
-			RoleProse:         manifest.RoleProse(mission, out.Subagents[i].Role),
+			MissionFiles: missionFiles,
+			RoleProse:    manifest.RoleProse(mission, out.Subagents[i].Role),
 		}
 		if ResolvePlanContextAccess(manifest, out.Subagents[i].Role) == PlanContextRead {
 			view.PlanContext = planCtx

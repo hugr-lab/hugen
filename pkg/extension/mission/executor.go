@@ -257,7 +257,7 @@ func (e *Executor) RunWave(ctx context.Context, state extension.SessionState, wa
 
 	// Aggregate outcomes + status.
 	outcomes := collectOutcomes(records, wave.Label, m.Handoffs, timedOut)
-	status := aggregateStatus(outcomes, records)
+	status := aggregateStatus(outcomes)
 
 	// Record the wave under Done on PlanState.
 	m.mu.Lock()
@@ -410,7 +410,7 @@ func collectOutcomes(records []spawnRecord, waveLabel string, store *Handoffs, t
 	return out
 }
 
-func aggregateStatus(outcomes []DoneWorker, records []spawnRecord) WaveStatus {
+func aggregateStatus(outcomes []DoneWorker) WaveStatus {
 	ok, bad := 0, 0
 	for _, w := range outcomes {
 		switch w.Status {

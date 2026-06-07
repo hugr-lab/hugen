@@ -1511,28 +1511,6 @@ func TestBuildPlannerTask_RendersApprovalDirective(t *testing.T) {
 	}
 }
 
-// errAs is a thin wrapper around errors.As that takes any pointer
-// — keeps the test bodies less cluttered.
-func errAs(err error, target any) bool {
-	type targetErr interface{ Unwrap() error }
-	// Manual As-like walk to avoid pulling in errors twice in the
-	// test file; PlannerError implements Unwrap.
-	for cur := err; cur != nil; {
-		if pe, ok := cur.(*PlannerError); ok {
-			if t, ok := target.(**PlannerError); ok {
-				*t = pe
-				return true
-			}
-		}
-		un, ok := cur.(targetErr)
-		if !ok {
-			return false
-		}
-		cur = un.Unwrap()
-	}
-	return false
-}
-
 // waveNames extracts the wave label of every recorded spawn. Used
 // in error messages so a failed assertion shows exactly which
 // spawns happened.

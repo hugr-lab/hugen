@@ -1,69 +1,11 @@
 package mission
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
-	"github.com/hugr-lab/hugen/pkg/protocol"
 )
-
-// runApprovalInquire is the runtime-side approval gate (Phase I,
-// design 003). After the planner closes a valid plan handoff, the
-// mission's auto-runner calls this to surface the plan to the
-// user as a session:inquire(type=approval) — rendered from the
-// typed Plan body, not from prose the model produced. The user
-// answers; on approve the loop proceeds to the wave, on deny the
-// caller folds the response into a synthetic verdict-amend and
-// replans on the next iteration.
-//
-// Returns (approved, reason, error). `reason` carries the user's
-// optional decline text (or the canned options answer for
-// clarification-style replies) so the planner sees what to
-// address. `error` is reserved for infrastructure failures
-// (timeout, ctx cancel, render fault) — the caller treats those
-// as mission-abort.
-func (e *Extension) runApprovalInquire(ctx context.Context, mission extension.SessionState, plan Plan) (bool, string, error) {
-	question, err := renderApprovalQuestion(mission, plan)
-	if err != nil {
-		return false, "", fmt.Errorf("mission: approval: render question: %w", err)
-	}
-	payload := protocol.InquiryRequestPayload{
-		Type:     protocol.InquiryTypeApproval,
-		Question: question,
-		Context:  plan.Rationale,
-	}
-	resp, err := mission.RequestInquiry(ctx, payload)
-	if err != nil {
-		return false, "", err
-	}
-	if resp == nil {
-		return false, "", fmt.Errorf("mission: approval: nil response")
-	}
-	if resp.Payload.Timeout {
-		return false, "approval inquire timed out", nil
-	}
-	if resp.Payload.Approved != nil {
-		if *resp.Payload.Approved {
-			return true, "", nil
-		}
-		reason := strings.TrimSpace(resp.Payload.Reason)
-		if reason == "" {
-			reason = "user denied approval without a reason"
-		}
-		return false, reason, nil
-	}
-	// Adapter responded with free-text (clarification path) rather
-	// than an explicit approve/deny — treat the response body as
-	// amend feedback. Empty text degrades to a generic decline so
-	// the planner replans rather than running an unconfirmed plan.
-	free := strings.TrimSpace(resp.Payload.Response)
-	if free == "" {
-		return false, "user reply was empty — treating as decline", nil
-	}
-	return false, "user reply: " + free, nil
-}
 
 // approvalQuestionView is the typed payload the
 // `mission/approval_question` template renders against. The
