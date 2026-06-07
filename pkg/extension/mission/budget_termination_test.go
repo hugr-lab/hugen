@@ -24,7 +24,7 @@ func TestOnChildFrame_BudgetTermination_OrchestrationAborts(t *testing.T) {
 	state := newFakeState("mis-1")
 	ext.InitState(context.Background(), state) // skipcq
 	m := FromState(state)
-	m.BeginWave("_check-1")
+	m.BeginWave(Wave{Label: "_check-1"})
 	m.RegisterWorker("chk-1", workerCursor{Name: "checker", Role: "checker"})
 
 	ext.OnChildFrame(context.Background(), state, "chk-1", budgetTerminatedFrame())
@@ -48,7 +48,7 @@ func TestOnChildFrame_BudgetTermination_PlannerAbortsBeforeCompletion(t *testing
 	state := newFakeState("mis-1")
 	ext.InitState(context.Background(), state) // skipcq
 	m := FromState(state)
-	m.BeginWave(plannerWaveLabelPrefix + "1")
+	m.BeginWave(Wave{Label: plannerWaveLabelPrefix + "1"})
 	m.RegisterWorker("pln-1", workerCursor{Name: "planner", Role: "planner"})
 
 	// The budget check runs BEFORE the planner-completion special case,
@@ -66,7 +66,7 @@ func TestOnChildFrame_BudgetTermination_WorkerReplans(t *testing.T) {
 	state := newFakeState("mis-1")
 	ext.InitState(context.Background(), state) // skipcq
 	m := FromState(state)
-	m.BeginWave("do-1") // a planner-chosen worker wave (not _-prefixed)
+	m.BeginWave(Wave{Label: "do-1"}) // a planner-chosen worker wave (not _-prefixed)
 	m.RegisterWorker("wrk-1", workerCursor{Name: "analyst", Role: "data-analyst"})
 
 	ext.OnChildFrame(context.Background(), state, "wrk-1", budgetTerminatedFrame())
@@ -107,7 +107,7 @@ func TestOnChildFrame_BudgetFinalize_ForcesError(t *testing.T) {
 	state := newFakeState("mis-1")
 	ext.InitState(context.Background(), state) // skipcq
 	m := FromState(state)
-	m.BeginWave("do-1") // a worker (Do) wave
+	m.BeginWave(Wave{Label: "do-1"}) // a worker (Do) wave
 	m.RegisterWorker("wrk-1", workerCursor{Name: "analyst", Role: "data-analyst"})
 
 	frame := &protocol.AgentMessage{
@@ -144,7 +144,7 @@ func TestOnChildFrame_BudgetFinalize_PreservesRawSummary(t *testing.T) {
 	state := newFakeState("mis-1")
 	ext.InitState(context.Background(), state) // skipcq
 	m := FromState(state)
-	m.BeginWave("do-1")
+	m.BeginWave(Wave{Label: "do-1"})
 	m.RegisterWorker("wrk-1", workerCursor{Name: "analyst", Role: "data-analyst"})
 
 	frame := &protocol.AgentMessage{
@@ -173,7 +173,7 @@ func TestOnChildFrame_BudgetFinalize_OrchestrationAborts(t *testing.T) {
 	state := newFakeState("mis-1")
 	ext.InitState(context.Background(), state) // skipcq
 	m := FromState(state)
-	m.BeginWave(researchWaveLabelPrefix + "1")
+	m.BeginWave(Wave{Label: researchWaveLabelPrefix + "1"})
 	m.RegisterWorker("rsc-1", workerCursor{Name: "researcher", Role: "researcher"})
 
 	frame := &protocol.AgentMessage{
@@ -209,7 +209,7 @@ func TestMissionIncompleteReason(t *testing.T) {
 func TestBuildSynthesisTask_Incomplete(t *testing.T) {
 	mission := newRenderedFakeState("mis-synth", productionRenderer(t))
 
-	task, err := buildSynthesisTask(mission, "count roads", "the researcher ran out of its context budget")
+	task, err := buildSynthesisTask(mission, "count roads", "the researcher ran out of its context budget", "")
 	if err != nil {
 		t.Fatalf("buildSynthesisTask: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestBuildSynthesisTask_Incomplete(t *testing.T) {
 		t.Fatalf("incomplete task missing the abort framing:\n%s", task)
 	}
 
-	clean, err := buildSynthesisTask(mission, "count roads", "")
+	clean, err := buildSynthesisTask(mission, "count roads", "", "")
 	if err != nil {
 		t.Fatalf("buildSynthesisTask clean: %v", err)
 	}

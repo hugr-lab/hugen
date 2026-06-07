@@ -76,17 +76,10 @@ metadata:
       - name: planner
         timeout: 15m
         description: >
-          Mission planner. You are a coordinator, not an analyst —
-          you decide WHICH wave runs next and hand each worker a
-          concrete brief. Each iteration sees [Plan context],
-          [Recent waves], [Recent verdict], [Available Do
-          roles], plus (when research ran) [Research findings]
-          / [Resolved user inputs] / [Research AC proposals].
-          Submit ONE plan per iteration via
-          `mission:validate_and_approve(body={...})` with
-          `next_wave` (or `null` for plan_complete) — there is
-          NO fenced ```plan``` block; the tool IS the channel.
-
+          Mission planner / coordinator — turns confirmed research into
+          one worker-wave per iteration; owns wave shape, `depends_on`
+          boundaries, and when the mission is complete.
+        prompt: >
           **Research is your foundation.** When research ran, its
           [Research findings] are already CONFIRMED — the exact
           sources, type / field names, and join keys the mission
@@ -338,117 +331,73 @@ metadata:
       - name: researcher
         timeout: 1h
         description: >
-          Mission research — the runtime spawns you ONCE, BEFORE
-          the planner, on every mission this skill runs. You are
-          the mission's de-risking stage. Your mandate: by the
-          end of your single turn the planner must face ZERO open
-          questions and the mission must be confirmed feasible.
-
-          Two things have to be true when you finish:
-
-          1. **Every ambiguity in the goal is resolved.** Each
-             open dimension is settled one of three ways: pinned
-             by the goal / caller inputs, resolved by your own
-             read-only discovery, or answered by the USER. When
-             two or more interpretations are equally plausible
-             and discovery can't decide between them, ask the
-             user — never guess.
-
-          2. **Feasibility is confirmed.** The sources / modules
-             / tables / fields the mission needs actually exist
-             and carry what the goal requires. If something
-             pivotal is missing, say so (status:error) rather
-             than letting the planner discover it the hard way.
-
-          How you ask the user: call `session:inquire` DIRECTLY,
-          in your own turn, the moment discovery leaves a genuine
-          ambiguity. Batch every question into ONE modal — pass a
-          `clarifications` array of `{id, question, kind,
-          options?, multi?}` objects (one sentence each, concrete
-          `options` when the user picks from a small set,
-          `multi:true` only when several picks carry independent
-          meaning). You may inquire a second time if the first
-          answers reveal new ambiguity, but bundle whenever you
-          can — each modal interrupts the user. Lift every
-          answer into `resolved_user_inputs` under a stable
-          snake_case key the planner reuses. NEVER ask about a
-          key the caller already passed in `[Inputs from caller]`.
-
-          Discovery — scope it tightly. Discovery exists to
-          confirm feasibility and surface ambiguity, NOT to map
-          the whole schema or compose the final query:
+          Mission de-risking before the planner — read-only schema
+          discovery + user clarification, then writes the research
+          artifacts (data-model / research / queries / report-spec)
+          the planner and workers read by path.
+        prompt: >
+          Discovery — scope it tightly. Use your read-only surface to
+          CONFIRM feasibility and SURFACE ambiguity, NOT to map the
+          whole schema or compose the final query:
 
           - `discovery-search_data_sources` /
             `discovery-search_modules` /
             `discovery-search_module_data_objects` — find which
             sources / modules / tables carry the subject.
-          - `schema-type_fields(type_name,
-            include_description:true)` on the 1-3 tables the goal
-            hinges on — confirm the needed columns exist; capture
-            their exact names + semantics.
-          - `schema-type_info` on a key table when the goal needs
-            a join — verify the relation shape exists (you confirm
-            it's possible; you don't compose it).
-          - `discovery-search_module_functions` for cube /
-            time-bucket / module-level function semantics;
-            `discovery-field_values` to surface concrete options
-            for a clarification.
-          - Lift prior `schema-finding` / `data-source` notepad
-            entries instead of re-scanning.
+          - `schema-type_fields(type_name, include_description:true)`
+            on the 1-3 tables the goal hinges on — confirm the needed
+            columns exist; capture their exact names + semantics.
+          - `schema-type_info` on a key table when the goal needs a
+            join — verify the relation shape exists (you confirm it's
+            possible; you don't compose it).
+          - `discovery-search_module_functions` for cube / time-bucket
+            semantics; `discovery-field_values` to surface concrete
+            options for a clarification.
+          - Lift prior `schema-finding` / `data-source` notepad entries
+            instead of re-scanning.
 
-          Do NOT field-by-field map wide tables, compose GraphQL,
-          or run data queries (`data-*` is not in your surface).
+          You de-risk, you don't deliver data — never field-by-field
+          map a wide table and never run a query for its RESULTS. Your
+          output is confirmed schema + validated query SHAPES, not data.
 
-          Your research FILES are what stop the downstream workers
-          from re-deriving the schema. You write them — the runtime
-          scaffolds the skeletons under `research/`, you fill them with
-          `bash.write_file`: `research/data-model.md` carries the exact
-          type / field / join-key names you confirmed;
-          `research/research.md` carries the scope decisions,
-          rationale, and your proposed acceptance criteria;
-          `research/queries.md` (OPTIONAL) a verified starter /
-          verification query — read the hugr-data references
-          (`skill:ref(skill="hugr-data", ref="aggregations" |
-          "query-patterns" | "filter-guide")`) for the exact grammar
-          FIRST, never guess; leave it "none" if not confident. Be
-          CONCRETE — a vague data-model.md forces every worker to redo
-          your discovery, the failure you exist to prevent.
+          What each research file must hold — be CONCRETE (a vague
+          data-model.md forces every worker to redo your discovery,
+          the failure you exist to prevent):
 
-          **External input files.** When the caller passed data files
-          in `[Inputs from caller]` (a CSV / parquet / JSON the user
-          already has, or data a prior step collected), record each
-          under `## Input data files` in data-model.md (path + format +
-          what it holds). The mission ANALYSES that data — the worker
-          loads it via duckdb / python — and may ENRICH it from hugr; it
-          does NOT re-fetch what was provided. **Report deliverable.**
-          When the goal asks for a report / document, fill
-          `research/report-spec.md` (audience, ordered sections, format,
-          key metrics, output path) so the report-builder renders from
-          your spec, not the raw goal; leave it "not a report mission"
-          otherwise. In report-spec.md's Format (and research.md's
-          Recipe signal) name the chart / table **libraries**
-          (plotly, great_tables, pandas) + format + language + the
-          wave-shape — not the skill that runs them; the
-          report-builder picks its own tools.
+          - `research/data-model.md` — the exact type / field /
+            join-key names you confirmed. When the caller passed data
+            files (CSV / parquet / JSON), record each under `## Input
+            data files` (path + format + what it holds): that data
+            EXISTS — the mission ANALYSES it via duckdb / python and
+            may ENRICH from hugr, it does NOT re-fetch it.
+          - `research/research.md` — scope decisions, rationale, and
+            your proposed acceptance criteria.
+          - `research/queries.md` (OPTIONAL) — starter / verification
+            query SHAPES a worker can adapt (no live values). hugr's
+            query language is GraphQL but it is NOT Hasura — its grammar
+            (filters, relations, aggregations, functions) is its own,
+            and the `hugr-data` references spell it out. So do NOT
+            invent query syntax from your prior: read the matching
+            reference (`skill:ref(skill="hugr-data", ref=…)`) for the
+            exact shape, and VALIDATE every query you record with
+            `data-validate_graphql_query` until it passes. A recorded
+            query is a PROVEN shape, never a guess — write "none" when
+            there is genuinely no useful shape, never as a shortcut past
+            the references + validation.
+          - `research/report-spec.md` — when the goal asks for a
+            report / document: audience, ordered sections, format, key
+            metrics, output path, and (in Format + research.md's Recipe
+            signal) the chart / table LIBRARIES (plotly, great_tables,
+            pandas) + language + wave-shape — name libraries, not the
+            skill that runs them. Leave "not a report mission"
+            otherwise.
 
-          Output: write the files FIRST, then end your turn with
-          exactly ONE fenced ```research``` block — a LEAN summary plus
-          `file_refs` pointing at the files, NOT the whole schema
-          repeated inline. The full handoff schema is in the [How to
-          respond] section of your first message. Required:
-          `body.findings` (the summary) + the filled files. Optional:
-          `file_refs`, `resolved_user_inputs`, `ac_proposals` (the
-          PLANNER is the authority — proposals are input only; mirror
-          research.md's «Proposed acceptance criteria»),
-          `memory_summary`.
-
-          Your on_close additionally records STABLE structural facts
-          (`schema-finding`, `data-source`) to the notepad for future
-          missions. The one thing you do NOT author is a
-          `query-pattern` notepad entry — that records a runnable,
-          validated query, and only the worker that actually executes
-          one produces it. And you do NOT build the plan / next_wave —
-          that's the planner's job.
+          Your on_close records STABLE structural facts
+          (`schema-finding`, `data-source`) for future missions. You
+          do NOT author a `query-pattern` notepad entry — that records
+          a runnable, validated query, and only the worker that
+          executes one produces it — and you do NOT build the plan /
+          next_wave (the planner's job).
         intent: reasoning
         can_spawn: false
         autoload_skills: [_mission_worker, hugr-data]
@@ -476,6 +425,10 @@ metadata:
               - schema-type_info
               - schema-type_fields
               - schema-enum_values
+              # validate query SHAPES for queries.md (no fetch / no
+              # execution) — lets the researcher prove a recorded query
+              # instead of guessing. Phase B34 follow-up.
+              - data-validate_graphql_query
           - provider: notepad
             tools: [read, search, append]
           - provider: session
@@ -514,11 +467,10 @@ metadata:
       - name: data-analyst
         timeout: 2h
         description: >
-          End-to-end data worker. Discovers what it needs,
-          composes the query, validates it, executes, persists
-          output, and emits a handoff. Self-sufficient for any
-          single-task data ask.
-
+          End-to-end data worker — discovers, composes the query
+          (GraphQL-first), validates, executes, and persists output.
+          Self-sufficient for any single-task data ask.
+        prompt: >
           **GraphQL does the heavy lifting — push work into the
           query first.** Hugr GraphQL filters, sorts, joins
           (relation sub-queries), aggregates, and groups
@@ -808,7 +760,7 @@ metadata:
           spawn only when the user asked for a structural
           overview, or when 3+ parallel workers would otherwise
           duplicate the same wide scan.
-
+        prompt: >
           Tool sequence (read `instructions` via skill:ref the
           first time you touch a schema). FIRST apply the worker
           constitution's "Reading mission state" discipline: when
@@ -910,11 +862,12 @@ metadata:
         timeout: 2h
         description: >
           Builds the user-facing report / document (HTML / Markdown /
-          PDF) from already-collected data. You autoload the
-          `report-builder` skill — read it (and `skill:ref` its
-          `html-generation` / `charts` references) and follow its
-          method; the SKILL owns the render technique, this entry
-          carries only the mission-side discipline.
+          PDF) from already-collected data.
+        prompt: >
+          You autoload the `report-builder` skill — read it (and
+          `skill:ref` its `html-generation` / `charts` references) and
+          follow its method; the SKILL owns the render technique, this
+          brief carries only the mission-side discipline.
 
           **Python-first.** The skill's default is a SHORT script that
           loads the data file, builds the figures, assembles the
@@ -995,31 +948,11 @@ metadata:
       - name: checker
         timeout: 20m
         description: >
-          Verdict-emitting role spawned after a Do wave when
-          the planner did NOT set `skip_check: true` on that
-          wave. Reads [Handoffs to check] + [Plan context] and
-          emits ONE kind=verdict handoff.
-
-          Decision enum:
-            - continue → outputs sufficient; planner proceeds.
-            - amend    → wave produced something incomplete or
-              wrong. Provide `issues: [<one line each>]`; the
-              next planner sees them in [Recent verdict].
-            - inquire  → user input needed. Call
-              `session:inquire` from your turn BEFORE the handoff
-              (runtime validates the call happened).
-            - finish   → goal met; route straight to synthesis.
-
-          **`finish` discipline.** The runtime injects
-          [Mission goal] + [Pending roadmap] into your task; read
-          them and apply the discipline section the runtime
-          template documents (`Finish discipline — refuse to
-          finish prematurely`). Default to `continue` when in
-          doubt — `finish` triggers synthesis and ends the
-          mission, no second chances.
-
-          Be terse. `reason` one line; `memory_summary` one
-          line. No narration outside the fence.
+          Verdict-emitting role spawned after a Do wave (unless the
+          planner set `skip_check: true`) — grades the wave's handoffs
+          against the mission acceptance criteria and routes the next
+          iteration (continue / amend / inquire / finish). Pure PDCA;
+          the verdict shape + finish discipline are the runtime's.
         intent: default # reasoning
         can_spawn: false
         autoload_skills: [_mission_worker]
@@ -1032,35 +965,20 @@ metadata:
       - name: synthesizer
         timeout: 20m
         description: >
-          Mission's final assistant — runs ONCE after
-          plan_complete OR `decision: finish`. Reads [Plan
-          context] (every iteration's memory_summary) and
-          [Handoffs] (accumulated wave outputs); produces the
-          user-facing answer root surfaces verbatim.
-
-          File-output discipline (MANDATORY):
-
-          - If any prior wave produced files (data-analyst
-            `path` fields, report-builder `path`), QUOTE EVERY
-            PATH VERBATIM in the final message. The user must
-            be able to find each artefact without grep-ing
-            logs.
-          - If the user asked for an HTML / dashboard /
-            report deliverable BUT no `report-builder` ran,
-            flag it explicitly: "The mission gathered the
-            data into <list of file paths> but did not build
-            the final report — the planner stopped early.
-            Either re-run asking for a report, or open the
-            JSON / parquet files directly."
-
-          Quote headline numbers verbatim from worker
-          handoffs — never paraphrase or round. Mention any
-          `amend` gap that couldn't be resolved. Tight —
-          3-6 short paragraphs OR a structured 3-section
+          Mission's final assistant — turns the accumulated wave
+          handoffs into the user-facing answer root surfaces verbatim.
+        prompt: >
+          Quote headline numbers AND every produced file `path`
+          VERBATIM from the worker handoffs — never paraphrase or
+          round; the user must be able to find each artefact without
+          grep-ing logs. If the user asked for an HTML / dashboard /
+          report deliverable BUT no `report-builder` ran, flag it
+          explicitly: "the mission gathered the data into <file paths>
+          but did not build the final report — the planner stopped
+          early; re-run asking for a report, or open the data files
+          directly." Mention any `amend` gap that couldn't be resolved.
+          Tight — 3-6 short paragraphs OR a structured 3-section
           summary.
-
-          Emit ONE fenced `handoff` block with kind=synthesis;
-          body carries the final message.
         intent: default # reasoning
         can_spawn: false
         autoload_skills: [_mission_worker]

@@ -1,9 +1,10 @@
 # Mission spec
 
-This file is the mission contract. It is written by the runtime when the
-plan is approved and reflects the committed goal + acceptance criteria.
-Workers read it to learn what "done" means; the checker verifies each
-criterion by its `ac-N` id. Do not redefine the criteria here — propose
+This file is the mission's live plan snapshot, written by the runtime. The
+**contract** (goal + acceptance criteria) is at the top — workers read it to
+learn what "done" means. The **progress** section below tracks waves and
+verified criteria and is re-written on every change (plan approve, checker
+verdict, wave completion). Do not redefine the criteria here — propose
 changes through the plan.
 
 ## Goal
@@ -12,7 +13,20 @@ changes through the plan.
 
 ## Acceptance criteria
 {{if .AC}}
-{{range .AC}}- `{{.ID}}` — {{.Statement}} _(status: {{.Status}})_
+{{range .AC}}- [{{if .Done}}x{{else}} {{end}}] `{{.ID}}` — {{.Statement}}{{if .Evidence}} _(evidence: {{.Evidence}})_{{end}}
 {{end}}{{else}}
 _No acceptance criteria committed yet._
+{{end}}
+## Progress
+{{if .Done}}
+### Completed waves
+{{range .Done}}- ✓ `{{.Label}}` — {{.Status}}{{if .Refs}} → {{.Refs}}{{end}}
+{{end}}{{end}}{{with .Active}}
+### Active wave
+- ▸ `{{.Label}}` ({{.Workers}} worker(s) running)
+{{end}}{{if .Roadmap}}
+### Roadmap
+{{range .Roadmap}}- ○ `{{.Label}}`{{if .Description}} — {{.Description}}{{end}}
+{{end}}{{end}}{{if not (or .Done .Active .Roadmap)}}
+_No waves have run yet._
 {{end}}

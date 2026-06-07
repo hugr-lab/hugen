@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/oasdiff/yaml"
@@ -586,6 +587,17 @@ type SubAgentRole struct {
 	Name        string      `json:"name"`
 	Description string      `json:"description,omitempty"`
 	Tools       []ToolGrant `json:"tools,omitempty"`
+
+	// Prompt is the role's behavioral brief — the domain / mission-
+	// specific instructions the runtime renders INTO the spawned
+	// subagent's first message, via the universal mission task
+	// templates' `[Your role]` slot. Distinct from Description, which
+	// stays SHORT (the one-line catalogue text the planner / root read
+	// to PICK this role). The universal templates carry only PDCA
+	// mechanics; everything role- / domain-specific (which refs to
+	// read, query grammar, output discipline) lives here. Empty → the
+	// subagent runs on the bare universal template. Phase B34.
+	Prompt string `json:"prompt,omitempty" yaml:"prompt,omitempty"`
 
 	// CanSpawn controls whether this role itself may call
 	// spawn_subagent (phase-4-spec §3 step 8 + §4.4). Default true:
@@ -1333,6 +1345,17 @@ func (m *Manifest) validateHugen() error {
 		if _, err := r.TimeoutDuration(); err != nil {
 			return fmt.Errorf("metadata.hugen.sub_agents[%d].timeout = %q: invalid duration: %v",
 				i, r.Timeout, err)
+		}
+		// Fail loud on a malformed `prompt` Go template at load time —
+		// the runtime renders it best-effort (falls back to the raw
+		// string on error), so without this a typo like `{{ .Inputs.x }`
+		// would ship the literal braces into the worker's brief
+		// silently. Catch it here, in hugen-skill-validate + at startup.
+		if strings.Contains(r.Prompt, "{{") {
+			if _, err := template.New("prompt").Parse(r.Prompt); err != nil {
+				return fmt.Errorf("metadata.hugen.sub_agents[%d] (%s).prompt: invalid Go template: %w",
+					i, r.Name, err)
+			}
 		}
 	}
 

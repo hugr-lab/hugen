@@ -85,6 +85,17 @@ type MissionManifest struct {
 	// through to the role-class default.
 	Roles map[string]RoleCapabilities
 
+	// RolePrompts maps role-name → the role's behavioral brief
+	// (`sub_agents[].prompt`), rendered into that role's first
+	// message via the universal task templates' `[Your role]` slot.
+	// Populated by the catalog adapter for EVERY role type (research
+	// / planner / control / synthesis / Do-worker) so each builder
+	// looks up `RolePrompts[role]` uniformly. Distinct from the SHORT
+	// WorkerManifest.Description (the planner's role-picking
+	// catalogue). Empty entry → the role runs on the bare universal
+	// template. Phase B34.
+	RolePrompts map[string]string
+
 	// AcceptanceCriteria is the typed projection of the manifest's
 	// iter-0 AC seed. Each entry is the raw template string from the
 	// skill manifest; the runtime renders it with `.Inputs` at

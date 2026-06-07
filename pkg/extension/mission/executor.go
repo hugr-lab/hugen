@@ -65,6 +65,11 @@ type Executor struct {
 	spawner    Spawner
 	terminator Terminator
 	logger     loggerLike
+	// waveHook, when set, fires on every wave transition (start +
+	// completion) with the mission session. Prod wiring points it at
+	// the Extension's spec.md snapshot writer so the on-disk plan
+	// tracks done/doing live; tests leave it nil. Phase B39.
+	waveHook func(extension.SessionState)
 }
 
 // NewExecutor constructs an Executor backed by spawner. logger may
@@ -84,6 +89,15 @@ func NewExecutor(spawner Spawner, logger loggerLike) *Executor {
 // actually cancelled).
 func (e *Executor) WithTerminator(t Terminator) *Executor {
 	e.terminator = t
+	return e
+}
+
+// WithWaveHook sets the wave-transition callback RunWave fires at
+// wave start (after Active is stamped) and wave completion (after the
+// wave folds into Done). Prod wiring points it at the spec.md snapshot
+// writer; returns the executor for chaining. Phase B39.
+func (e *Executor) WithWaveHook(h func(extension.SessionState)) *Executor {
+	e.waveHook = h
 	return e
 }
 
@@ -150,7 +164,12 @@ func (e *Executor) RunWave(ctx context.Context, state extension.SessionState, wa
 	}
 
 	// Mark wave active so the observer attributes incoming frames.
-	m.BeginWave(wave.Label)
+	// BeginWave also stamps PlanState.Active; fire the wave hook so
+	// the spec.md snapshot shows the wave as "doing" while it runs.
+	m.BeginWave(wave)
+	if e.waveHook != nil {
+		e.waveHook(state)
+	}
 
 	renderMode := opts.RenderMode
 	if renderMode == "" {
@@ -221,7 +240,18 @@ func (e *Executor) RunWave(ctx context.Context, state extension.SessionState, wa
 	if waitErr != nil {
 		// Parent ctx fired (mission-level cancel / shutdown) — return
 		// what we have; the timeout map still flags any worker we
-		// terminated before the ctx cut us off.
+		// terminated before the ctx cut us off. Clear Active + fire the
+		// wave hook so a cancelled mission's spec.md doesn't strand a
+		// phantom "active wave" (the completion block below — which
+		// normally clears Active and re-snapshots — is skipped on this
+		// early return).
+		m.mu.Lock()
+		m.Plan.Active = nil
+		m.currentWave = ""
+		m.mu.Unlock()
+		if e.waveHook != nil {
+			e.waveHook(state)
+		}
 		return WaveStatusFailed, collectOutcomes(records, wave.Label, m.Handoffs, timedOut), waitErr
 	}
 
@@ -247,6 +277,13 @@ func (e *Executor) RunWave(ctx context.Context, state extension.SessionState, wa
 	m.Plan.Active = nil
 	m.currentWave = ""
 	m.mu.Unlock()
+
+	// Wave folded into Done + Active cleared — re-project the spec.md
+	// snapshot so the on-disk plan shows the completed wave. Fired
+	// outside m.mu (the snapshot writer takes the lock itself).
+	if e.waveHook != nil {
+		e.waveHook(state)
+	}
 
 	return status, outcomes, nil
 }

@@ -1,5 +1,8 @@
 Synthesize the mission's results.
-{{if .Goal}}
+{{if .RoleProse}}
+[Your role]
+{{.RoleProse}}
+{{end}}{{if .Goal}}
 Mission goal:
 {{.Goal}}
 {{end}}{{if .Incomplete}}
