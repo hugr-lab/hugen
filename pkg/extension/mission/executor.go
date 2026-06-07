@@ -240,7 +240,18 @@ func (e *Executor) RunWave(ctx context.Context, state extension.SessionState, wa
 	if waitErr != nil {
 		// Parent ctx fired (mission-level cancel / shutdown) — return
 		// what we have; the timeout map still flags any worker we
-		// terminated before the ctx cut us off.
+		// terminated before the ctx cut us off. Clear Active + fire the
+		// wave hook so a cancelled mission's spec.md doesn't strand a
+		// phantom "active wave" (the completion block below — which
+		// normally clears Active and re-snapshots — is skipped on this
+		// early return).
+		m.mu.Lock()
+		m.Plan.Active = nil
+		m.currentWave = ""
+		m.mu.Unlock()
+		if e.waveHook != nil {
+			e.waveHook(state)
+		}
 		return WaveStatusFailed, collectOutcomes(records, wave.Label, m.Handoffs, timedOut), waitErr
 	}
 

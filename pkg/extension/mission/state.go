@@ -35,6 +35,17 @@ const providerName = "mission"
 type MissionState struct {
 	mu sync.Mutex
 
+	// specRenderMu serialises spec.md writes and guards lastSpecRender.
+	// writeSpecContract can fire from two goroutines (the executor's
+	// wave hook + the planner worker's validate_and_approve tool
+	// dispatch); holding this across the file write both serialises
+	// them (no interleaved os.WriteFile) and powers the content
+	// dirty-check below. Kept separate from mu — writeSpecContract
+	// renders via PlanSnapshot/ACSnapshot (which take mu) BEFORE
+	// acquiring this, so the two locks never nest. Phase B39.
+	specRenderMu   sync.Mutex
+	lastSpecRender string
+
 	Plan        PlanState
 	Handoffs    *Handoffs
 	PlanContext *PlanContext

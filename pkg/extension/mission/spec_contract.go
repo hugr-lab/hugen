@@ -134,12 +134,28 @@ func (e *Extension) writeSpecContract(mission extension.SessionState, mState *Mi
 			"mission_session", mission.SessionID(), "err", err)
 		return
 	}
+	// Content dirty-check + writer serialisation. spec.md is re-projected
+	// on every wave transition (incl. orchestration waves that filter out
+	// of the Progress block) plus the approve / checker chokepoints, so
+	// most calls render byte-identical output — skip the write AND the
+	// spec_written event when nothing changed (keeps the append-only event
+	// log from accruing no-op rows). Holding specRenderMu across the write
+	// also serialises the executor wave-hook goroutine and the planner
+	// worker's validate_and_approve tool dispatch (no interleaved
+	// os.WriteFile). Plan / checker writes still land — their content
+	// genuinely changed. Phase B39.
+	mState.specRenderMu.Lock()
+	defer mState.specRenderMu.Unlock()
+	if content == mState.lastSpecRender {
+		return
+	}
 	path := filepath.Join(ws.Dir(), "spec.md")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		e.logger.Warn("mission: write spec.md failed",
 			"mission_session", mission.SessionID(), "path", path, "err", err)
 		return
 	}
+	mState.lastSpecRender = content
 	e.emitMissionOp(mission, "spec_written",
 		map[string]any{"path": "spec.md", "ac_count": len(view.AC)})
 }
