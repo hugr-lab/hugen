@@ -98,7 +98,7 @@ func collectMissionFiles(dir string) []missionFile {
 		if ierr != nil || info.Size() == 0 {
 			return nil
 		}
-		if isScaffoldText(path, name) {
+		if isScaffoldText(path, name, info.Size()) {
 			return nil
 		}
 		rel, rerr := filepath.Rel(dir, path)
@@ -117,15 +117,27 @@ func collectMissionFiles(dir string) []missionFile {
 	return out
 }
 
+// scaffoldMaxBytes bounds the read isScaffoldText does to classify a
+// text file. A seeded scaffold is small (a few KB of headings, comments
+// and `<placeholder>` rows), so any text file larger than this is
+// certainly real content — list it WITHOUT reading. Keeps a worker's
+// large markdown report off the read path on every wave spawn.
+const scaffoldMaxBytes = 64 << 10 // 64 KiB
+
 // isScaffoldText reports whether path is a TEXT file that still looks
 // like an unfilled scaffold (fewer than 2 real-content lines). Non-text
-// files always return false (a data file is never a scaffold). A read
-// failure conservatively returns false so the file is still listed —
-// better to over-list than hide a real artifact.
-func isScaffoldText(path, name string) bool {
+// files always return false (a data file is never a scaffold), as does
+// any text file larger than scaffoldMaxBytes (too big to be a seeded
+// skeleton — listed without a read). A read failure conservatively
+// returns false so the file is still listed — better to over-list than
+// hide a real artifact.
+func isScaffoldText(path, name string, size int64) bool {
 	switch strings.ToLower(filepath.Ext(name)) {
 	case ".md", ".markdown", ".txt":
 	default:
+		return false
+	}
+	if size > scaffoldMaxBytes {
 		return false
 	}
 	b, err := os.ReadFile(path)
