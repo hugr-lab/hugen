@@ -32,6 +32,14 @@ func renderRoleProse(mission extension.SessionState, prose string) string {
 	return out
 }
 
+// RoleProse returns role's behavioral brief — its `sub_agents[].prompt`
+// (RolePrompts[role]) rendered for the `[Your role]` slot of a task
+// template. Empty when the role declares no prompt. Centralises the
+// lookup+render the 5 task builders share. Phase B34.
+func (m MissionManifest) RoleProse(mission extension.SessionState, role string) string {
+	return renderRoleProse(mission, m.RolePrompts[role])
+}
+
 // inlineRenderData is the dot value templates see when the runtime
 // renders an inline plan's per-subagent fields. Carries the merged
 // .Inputs map (spawn-time inputs overlaid with the research stage's

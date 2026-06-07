@@ -209,7 +209,7 @@ func TestMissionIncompleteReason(t *testing.T) {
 func TestBuildSynthesisTask_Incomplete(t *testing.T) {
 	mission := newRenderedFakeState("mis-synth", productionRenderer(t))
 
-	task, err := buildSynthesisTask(mission, "count roads", "the researcher ran out of its context budget", "")
+	task, err := buildSynthesisTask(mission, MissionManifest{}, "count roads", "the researcher ran out of its context budget")
 	if err != nil {
 		t.Fatalf("buildSynthesisTask: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestBuildSynthesisTask_Incomplete(t *testing.T) {
 		t.Fatalf("incomplete task missing the abort framing:\n%s", task)
 	}
 
-	clean, err := buildSynthesisTask(mission, "count roads", "", "")
+	clean, err := buildSynthesisTask(mission, MissionManifest{}, "count roads", "")
 	if err != nil {
 		t.Fatalf("buildSynthesisTask clean: %v", err)
 	}

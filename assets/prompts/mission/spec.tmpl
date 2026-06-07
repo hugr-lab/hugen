@@ -20,10 +20,10 @@ _No acceptance criteria committed yet._
 ## Progress
 {{if .Done}}
 ### Completed waves
-{{range .Done}}- ✓ `{{.Label}}` — {{.Status}}{{if .Refs}} → {{.Refs}}{{end}}
+{{range .Done}}- ✓ `{{.Label}}` — {{.Status}}{{if .Refs}} → {{range $i, $r := .Refs}}{{if $i}}, {{end}}{{$r}}{{end}}{{end}}
 {{end}}{{end}}{{with .Active}}
 ### Active wave
-- ▸ `{{.Label}}` ({{.Workers}} worker(s) running)
+- ▸ `{{.Label}}` ({{len .Subagents}} worker(s) running)
 {{end}}{{if .Roadmap}}
 ### Roadmap
 {{range .Roadmap}}- ○ `{{.Label}}`{{if .Description}} — {{.Description}}{{end}}

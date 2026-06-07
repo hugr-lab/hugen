@@ -221,8 +221,10 @@ func (e *Extension) renderInlineForMission(mission extension.SessionState, manif
 // incomplete, when non-empty, marks the mission as aborted/unfinished:
 // the synthesizer is asked to report what happened + summarise partial
 // findings rather than claim success. Empty for a clean completion.
-func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, mission extension.SessionState, role, missionSkill, goal string, timeout time.Duration, incomplete, roleProse string) (string, error) {
-	task, err := buildSynthesisTask(mission, goal, incomplete, roleProse)
+func (e *Extension) runSynthesis(ctx context.Context, executor *Executor, mission extension.SessionState, manifest MissionManifest, missionSkill, goal, incomplete string) (string, error) {
+	role := manifest.Synthesis.Role
+	timeout := manifest.TimeoutForRole(role)
+	task, err := buildSynthesisTask(mission, manifest, goal, incomplete)
 	if err != nil {
 		return "", fmt.Errorf("synthesis: build task: %w", err)
 	}
@@ -299,9 +301,7 @@ func (e *Extension) maybeSynthesize(ctx context.Context, executor *Executor, mis
 	if aborted {
 		incomplete = missionIncompleteReason(mission)
 	}
-	text, err := e.runSynthesis(ctx, executor, mission, manifest.Synthesis.Role, missionSkill, goal,
-		manifest.TimeoutForRole(manifest.Synthesis.Role), incomplete,
-		renderRoleProse(mission, manifest.RolePrompts[manifest.Synthesis.Role]))
+	text, err := e.runSynthesis(ctx, executor, mission, manifest, missionSkill, goal, incomplete)
 	if err != nil {
 		e.logger.Warn("mission: synthesis failed",
 			"mission_session", mission.SessionID(), "err", err, "aborted", aborted)
@@ -345,14 +345,14 @@ type synthesisHandoffView struct {
 // skill-specific prompt. Returns an error when the prompts renderer
 // is unavailable or the template fails — there is no inline fallback
 // by design ([[feedback-prompts-in-assets]]).
-func buildSynthesisTask(mission extension.SessionState, goal, incomplete, roleProse string) (string, error) {
+func buildSynthesisTask(mission extension.SessionState, manifest MissionManifest, goal, incomplete string) (string, error) {
 	data := struct {
 		Goal       string
 		Incomplete string
 		Handoffs   []synthesisHandoffView
 		MissionAC  []plannerACView
 		RoleProse  string
-	}{Goal: goal, Incomplete: incomplete, RoleProse: roleProse}
+	}{Goal: goal, Incomplete: incomplete, RoleProse: manifest.RoleProse(mission, manifest.Synthesis.Role)}
 	if m := FromState(mission); m != nil {
 		for _, h := range m.Handoffs.List() {
 			data.Handoffs = append(data.Handoffs, synthesisHandoffView{

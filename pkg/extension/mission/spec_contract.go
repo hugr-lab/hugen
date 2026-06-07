@@ -16,11 +16,16 @@ import (
 // so spec.md is a single durable snapshot of done/doing/planned.
 // Phase 6.x — research→files; B39 — live snapshot.
 type specContractView struct {
-	Goal    string
-	AC      []specACView
-	Done    []specWaveView
-	Active  *specActiveView
-	Roadmap []specRoadmapView
+	Goal string
+	AC   []specACView
+	// Progress projects live PlanState directly (orchestration waves
+	// filtered out in writeSpecContract). The template reads DoneWave
+	// (Label / Status / Refs), Wave (Label + `len .Subagents`), and
+	// RoadmapEntry (Label / Description) — no per-row reshape structs.
+	// Phase B39.
+	Done    []DoneWave
+	Active  *Wave
+	Roadmap []RoadmapEntry
 }
 
 // specACView is one acceptance-criterion row in spec.md. Done drives
@@ -32,26 +37,6 @@ type specACView struct {
 	Status    string
 	Done      bool
 	Evidence  string
-}
-
-// specWaveView is one completed worker wave in the Progress block.
-// Refs is the wave's handoff refs pre-joined for the template.
-type specWaveView struct {
-	Label  string
-	Status string
-	Refs   string
-}
-
-// specActiveView is the wave currently executing (nil between waves).
-type specActiveView struct {
-	Label   string
-	Workers int
-}
-
-// specRoadmapView is one upcoming-wave hint the planner forecast.
-type specRoadmapView struct {
-	Label       string
-	Description string
 }
 
 // writeSpecContract projects the mission's committed contract (goal +
@@ -109,24 +94,12 @@ func (e *Extension) writeSpecContract(mission extension.SessionState, mState *Mi
 		if isOrchestrationWave(d.Label) {
 			continue
 		}
-		view.Done = append(view.Done, specWaveView{
-			Label:  d.Label,
-			Status: string(d.Status),
-			Refs:   strings.Join(d.Refs, ", "),
-		})
+		view.Done = append(view.Done, d)
 	}
 	if pstate.Active != nil && !isOrchestrationWave(pstate.Active.Label) {
-		view.Active = &specActiveView{
-			Label:   pstate.Active.Label,
-			Workers: len(pstate.Active.Subagents),
-		}
+		view.Active = pstate.Active
 	}
-	for _, r := range pstate.Roadmap {
-		view.Roadmap = append(view.Roadmap, specRoadmapView{
-			Label:       r.Label,
-			Description: r.Description,
-		})
-	}
+	view.Roadmap = pstate.Roadmap
 
 	content, err := renderer.Render("mission/spec", view)
 	if err != nil {
