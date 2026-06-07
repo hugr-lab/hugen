@@ -150,11 +150,11 @@ Reply with EXACTLY ONE fenced block (no other text, no narration):
 Examples of valid verdict shapes:
 
 ```verdict
-{"status":"ok","body":{"decision":"amend","issues":["wave wrote to wrong table","filter missed null rows"],"reason":"replan needed","ac_update":[{"id":"ac-1","status":"unsatisfied","evidence":"only 3 tables in handoff"}],"wave_ac_status":[{"criterion":"Numbers cover 4 tables","satisfied":false,"evidence":"only 3 tables in handoff"}]}}
+{"status":"ok","memory_summary":"wave-2 numbers incomplete — only 3 of 4 tables; replanning the fetch","body":{"decision":"amend","issues":["wave wrote to wrong table","filter missed null rows"],"reason":"replan needed","ac_update":[{"id":"ac-1","status":"unsatisfied","evidence":"only 3 tables in handoff"}],"wave_ac_status":[{"criterion":"Numbers cover 4 tables","satisfied":false,"evidence":"only 3 tables in handoff"}]}}
 ```
 
 ```verdict
-{"status":"ok","body":{"decision":"finish","reason":"goal met","ac_update":[{"id":"ac-1","status":"satisfied","evidence":"worker@some-wave path=/Users/x/Downloads/r.html"}]}}
+{"status":"ok","memory_summary":"report delivered to ~/Downloads/r.html; all AC met","body":{"decision":"finish","reason":"goal met","ac_update":[{"id":"ac-1","status":"satisfied","evidence":"worker@some-wave path=/Users/x/Downloads/r.html"}]}}
 ```
 
 The triple-backticks and the word `verdict` are mandatory; the
