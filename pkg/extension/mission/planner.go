@@ -1221,12 +1221,13 @@ func approvalRequiredForIteration(policy PlanApproval, _ int, _ *MissionState) b
 // non-empty). Phase F.
 type workerContractView struct {
 	PlanContext []plannerContextEntry
-	// MissionFiles is the index of files the mission has ACTUALLY
-	// produced under the shared working dir (filled research artifacts,
-	// prior-wave data files, spec.md), rendered once into the worker's
-	// spawn brief so it reads the real input set by path instead of
-	// re-discovering. Computed per wave (the input set is fixed at wave
-	// start); empty for root / standalone sessions. Phase B31.
+	// MissionFiles is the index of files the mission has DECLARED it
+	// produced — the research role's handoff `file_refs` plus the
+	// runtime-authored spec.md, each verified to exist — rendered once
+	// into the worker's spawn brief so it reads the real input set by
+	// path instead of re-discovering. Skill-agnostic: no file content is
+	// inspected (see missionFilesForState). Empty for root / standalone
+	// sessions. Phase B31.
 	MissionFiles []missionFile
 	// RoleProse is the worker role's behavioral brief
 	// (`sub_agents[].prompt`), rendered into the template's

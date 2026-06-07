@@ -9,9 +9,8 @@
 {{ end -}}
 {{- if .MissionFiles }}
 [Mission files — already produced under your shared working dir; READ before re-deriving]
-These files exist NOW in your working directory (filled by the research
-stage / earlier waves). Open the ones your task needs instead of
-re-discovering or re-fetching what they already hold:
+These files exist NOW in your working directory. Open the ones your task
+needs instead of re-discovering or re-fetching what they already hold:
 {{ range .MissionFiles -}}
 - {{ .Path }}{{ if .Size }} ({{ .Size }}){{ end }}
 {{ end }}

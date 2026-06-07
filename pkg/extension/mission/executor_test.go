@@ -403,7 +403,7 @@ func TestExtension_InitState_WorkerInheritsMissionState(t *testing.T) {
 	if mMission == nil {
 		t.Fatal("mission-tier session must own a MissionState")
 	}
-	mMission.SetResearchOutput("findings here", nil, nil)
+	mMission.SetResearchOutput("findings here", nil, nil, nil)
 
 	worker := &fakeState{id: "w", tier: "worker", parent: mission}
 	if err := ext.InitState(ctx, worker); err != nil {

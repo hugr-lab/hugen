@@ -2,10 +2,8 @@ package mission
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -14,11 +12,9 @@ import (
 )
 
 // missionFile is one entry in the worker-spawn mission-files index: a
-// file the mission has ACTUALLY produced (filled, not a scaffold) under
-// the shared mission working dir. The index is rendered once into the
-// worker's spawn brief (decorateWaveTasks → worker_contract.tmpl) so a
-// worker reads the real input set by path instead of re-discovering it.
-// Phase B31.
+// file the mission has produced under the shared working dir, surfaced
+// to a worker by path (decorateWaveTasks → worker_contract.tmpl) so it
+// reads the real input set instead of re-discovering it. Phase B31.
 type missionFile struct {
 	// Path is relative to the mission dir (e.g. "research/data-model.md").
 	Path string
@@ -26,153 +22,82 @@ type missionFile struct {
 	Size string
 }
 
-// maxMissionFilesIndex caps the index so a runaway working dir can't
-// bloat every worker's spawn brief; the overflow is summarised as a
-// "+N more" line (collectMissionFiles) rather than silently dropped.
-const maxMissionFilesIndex = 40
-
-// htmlCommentRe strips `<!-- ... -->` scaffold-guidance comments; the
-// (?s) flag makes `.` span newlines so multi-line comments are removed.
-var htmlCommentRe = regexp.MustCompile(`(?s)<!--.*?-->`)
-
-// placeholderTokenRe matches an unfilled `<placeholder>` scaffold token
-// (mirrors check_research.py's heuristic — kept skill-agnostic so the
-// runtime needn't know any one skill's scaffold layout).
-var placeholderTokenRe = regexp.MustCompile(`<[^>\s][^>]*>`)
-
-// missionFilesForState resolves the calling mission's working dir and
-// returns its produced-file index, or nil when the session has no
-// workspace dir (root / standalone sessions). Thin wrapper so callers
-// don't take the workspace-extension dependency.
+// missionFilesForState returns the index of files the mission has
+// DECLARED it produced, for the worker spawn brief. The set is
+// skill-agnostic by construction: the runtime lists only paths that a
+// role or the runtime itself declared, and NEVER inspects file content
+// to decide what counts — judging "filled vs scaffold" from content
+// would bake one skill's template/scaffold convention (a specific
+// markdown placeholder format, a JSON skeleton shape, …) into the
+// universal runtime. Sources:
+//
+//   - spec.md — the mission contract the runtime writes itself.
+//   - research artifacts — the relative paths the research role declared
+//     in its handoff `file_refs` (a universal handoff field). The
+//     research `check` gate already enforced the load-bearing files were
+//     filled before that handoff was accepted, so the declaration is
+//     trustworthy; the runtime needn't re-judge it.
+//
+// Returns nil when the session has no workspace dir (root / standalone)
+// or nothing has been produced yet. Worker-produced data files reach a
+// downstream worker through `depends_on` resolution (the handoff body is
+// inlined), not this index.
 func missionFilesForState(state extension.SessionState) []missionFile {
 	ws := wsext.FromState(state)
-	if ws == nil {
+	if ws == nil || ws.Dir() == "" {
 		return nil
 	}
-	return collectMissionFiles(ws.Dir())
+	var refs []string
+	if m := FromState(state); m != nil {
+		refs = m.ResearchFileRefs()
+	}
+	return collectDeclaredFiles(ws.Dir(), refs)
 }
 
-// collectMissionFiles walks the mission working dir and returns the
-// files the mission has GENUINELY produced — the input set a worker
-// should read before re-deriving. The filter is skill-agnostic (the
-// runtime can't know any one skill's scaffold layout):
-//
-//   - text files (.md / .markdown / .txt) are listed only when they
-//     carry real content beyond the scaffold. Comments, headings,
-//     blockquotes, table-rule separators, and lines still holding a
-//     `<placeholder>` token don't count — the same language- and
-//     structure-agnostic test check_research.py uses to tell a filled
-//     research file from an untouched skeleton. An empty or
-//     scaffold-only markdown file is NOT advertised, so a worker never
-//     chases a stub the research `before` hook merely seeded.
-//   - every other file (data: parquet / json / csv / xlsx, rendered
-//     html, scripts) is listed when non-empty — a data file is never a
-//     scaffold.
-//
-// Hidden entries (dotfiles / dot-dirs like .git) are skipped. Results
-// sort by path for a stable, cache-friendly render and cap at
-// maxMissionFilesIndex with a trailing "+N more" overflow line. Returns
-// nil for an empty or absent dir. Best-effort throughout: an unreadable
-// subtree is skipped, never fatal — the index is a convenience, not a
-// contract.
-func collectMissionFiles(dir string) []missionFile {
+// collectDeclaredFiles stats the runtime-known contract file (spec.md)
+// plus each role-declared relative path, returning those that exist as a
+// non-empty regular file under dir. Pure (dir + refs in, no SessionState)
+// so it is unit-testable without a session fixture. Declared paths are
+// normalised and confined to the mission dir — an absolute path or one
+// escaping via `../` is rejected, so a buggy role can't point the index
+// outside the workspace. De-dupes; results sort by path for a stable,
+// cache-friendly render.
+func collectDeclaredFiles(dir string, refs []string) []missionFile {
 	if strings.TrimSpace(dir) == "" {
 		return nil
 	}
-	var out []missionFile
-	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip unreadable subtrees rather than abort
+	seen := make(map[string]struct{})
+	var rels []string
+	add := func(rel string) {
+		rel = filepath.ToSlash(strings.TrimSpace(rel))
+		rel = strings.TrimPrefix(rel, "./")
+		if rel == "" || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../") {
+			return // keep the index inside the mission dir
 		}
-		name := d.Name()
-		if path != dir && strings.HasPrefix(name, ".") {
-			if d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
+		if _, dup := seen[rel]; dup {
+			return
 		}
-		if d.IsDir() {
-			return nil
-		}
-		info, ierr := d.Info()
-		if ierr != nil || info.Size() == 0 {
-			return nil
-		}
-		if isScaffoldText(path, name, info.Size()) {
-			return nil
-		}
-		rel, rerr := filepath.Rel(dir, path)
-		if rerr != nil {
-			rel = name
+		seen[rel] = struct{}{}
+		rels = append(rels, rel)
+	}
+	add("spec.md") // the contract the runtime authors
+	for _, r := range refs {
+		add(r)
+	}
+
+	out := make([]missionFile, 0, len(rels))
+	for _, rel := range rels {
+		info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil || info.IsDir() || info.Size() == 0 {
+			continue // declared-but-absent / empty / a dir → not a usable artifact
 		}
 		out = append(out, missionFile{Path: rel, Size: humanSize(info.Size())})
+	}
+	if len(out) == 0 {
 		return nil
-	})
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	if len(out) > maxMissionFilesIndex {
-		extra := len(out) - maxMissionFilesIndex
-		out = out[:maxMissionFilesIndex]
-		out = append(out, missionFile{Path: fmt.Sprintf("… +%d more file(s)", extra)})
-	}
 	return out
-}
-
-// scaffoldMaxBytes bounds the read isScaffoldText does to classify a
-// text file. A seeded scaffold is small (a few KB of headings, comments
-// and `<placeholder>` rows), so any text file larger than this is
-// certainly real content — list it WITHOUT reading. Keeps a worker's
-// large markdown report off the read path on every wave spawn.
-const scaffoldMaxBytes = 64 << 10 // 64 KiB
-
-// isScaffoldText reports whether path is a TEXT file that still looks
-// like an unfilled scaffold (fewer than 2 real-content lines). Non-text
-// files always return false (a data file is never a scaffold), as does
-// any text file larger than scaffoldMaxBytes (too big to be a seeded
-// skeleton — listed without a read). A read failure conservatively
-// returns false so the file is still listed — better to over-list than
-// hide a real artifact.
-func isScaffoldText(path, name string, size int64) bool {
-	switch strings.ToLower(filepath.Ext(name)) {
-	case ".md", ".markdown", ".txt":
-	default:
-		return false
-	}
-	if size > scaffoldMaxBytes {
-		return false
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	return realContentLines(string(b)) < 2
-}
-
-// realContentLines counts the lines a human actually wrote: HTML
-// comments are stripped, then blank lines, heading / blockquote lines,
-// pure table-rule separators, and lines still carrying a
-// `<placeholder>` token are all ignored. A direct port of
-// check_research.py's language-agnostic heuristic, so the runtime's
-// "is this filled?" test matches the research gate's exactly. Phase B31.
-func realContentLines(text string) int {
-	text = htmlCommentRe.ReplaceAllString(text, "")
-	n := 0
-	for _, raw := range strings.Split(text, "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, ">") {
-			continue
-		}
-		if strings.Trim(line, "|-: ") == "" { // table rule / separator
-			continue
-		}
-		if placeholderTokenRe.MatchString(line) { // still a scaffold placeholder
-			continue
-		}
-		n++
-	}
-	return n
 }
 
 // humanSize renders a byte count as a short human string ("1.2 KB").
