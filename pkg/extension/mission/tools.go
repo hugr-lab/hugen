@@ -145,7 +145,7 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 		},
 		{
 			Name:             providerName + ":get_research",
-			Description:      "Fetch the mission's research-stage output: the findings paragraph the researcher emitted on done=true, plus any structured resolved_user_inputs (file_path, output_format, scope choices the user picked) and ac_proposals. Returns `{ available: bool, findings: string, resolved_user_inputs: {...}, ac_proposals: [...] }`. Call when your task brief references scope set by the research stage and you need the full context — schema names, decided file paths, resolved scope choices — rather than re-discovering them. `available: false` means the mission didn't run a research stage; treat your task brief as the canonical source.",
+			Description:      "Fetch the mission's research-stage output: the findings paragraph the researcher emitted on done=true, the relative paths of the artifact files it wrote (file_refs — READ these before re-deriving), plus any structured resolved_user_inputs (file_path, output_format, scope choices the user picked) and ac_proposals. Returns `{ available: bool, findings: string, file_refs: [...], resolved_user_inputs: {...}, ac_proposals: [...] }`. Call when your task brief references scope set by the research stage and you need the full context — schema names, the research files to open, resolved scope choices — rather than re-discovering them. `available: false` means the mission didn't run a research stage; treat your task brief as the canonical source.",
 			Provider:         providerName,
 			PermissionObject: PermGetResearch,
 			ArgSchema:        json.RawMessage(missionGetResearchSchema),
@@ -320,6 +320,7 @@ type getResearchResponse struct {
 	Available          bool                 `json:"available"`
 	Attempted          bool                 `json:"attempted,omitempty"`
 	Findings           string               `json:"findings,omitempty"`
+	FileRefs           []string             `json:"file_refs,omitempty"`
 	ResolvedUserInputs map[string]any       `json:"resolved_user_inputs,omitempty"`
 	ACProposals        []ResearchACProposal `json:"ac_proposals,omitempty"`
 }
@@ -354,6 +355,7 @@ func (e *Extension) callGetResearch(ctx context.Context, _ json.RawMessage) (jso
 		Available:          true,
 		Attempted:          true,
 		Findings:           findings,
+		FileRefs:           m.ResearchFileRefs(),
 		ResolvedUserInputs: resolved,
 		ACProposals:        acProposals,
 	})

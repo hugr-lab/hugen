@@ -7,14 +7,6 @@
 - iter {{ .Iteration }} / {{ .Phase }}: {{ .Summary }}
 {{ end }}
 {{ end -}}
-{{- if .MissionFiles }}
-[Mission files — already produced under your shared working dir; READ before re-deriving]
-These files exist NOW in your working directory. Open the ones your task
-needs instead of re-discovering or re-fetching what they already hold:
-{{ range .MissionFiles -}}
-- {{ .Path }}{{ if .Size }} ({{ .Size }}){{ end }}
-{{ end }}
-{{ end -}}
 [Handoff contract — read this BEFORE doing anything else]
 **Start by re-reading your first message TOP to BOTTOM.** The
 sections you may see there are authoritative input — they are

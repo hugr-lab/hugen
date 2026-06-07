@@ -1221,14 +1221,6 @@ func approvalRequiredForIteration(policy PlanApproval, _ int, _ *MissionState) b
 // non-empty). Phase F.
 type workerContractView struct {
 	PlanContext []plannerContextEntry
-	// MissionFiles is the index of files the mission has DECLARED it
-	// produced — the research role's handoff `file_refs` plus the
-	// runtime-authored spec.md, each verified to exist — rendered once
-	// into the worker's spawn brief so it reads the real input set by
-	// path instead of re-discovering. Skill-agnostic: no file content is
-	// inspected (see missionFilesForState). Empty for root / standalone
-	// sessions. Phase B31.
-	MissionFiles []missionFile
 	// RoleProse is the worker role's behavioral brief
 	// (`sub_agents[].prompt`), rendered into the template's
 	// `[Your role]` slot. Looked up by role name in the mission
@@ -1261,18 +1253,12 @@ func decorateWaveTasks(mission extension.SessionState, manifest MissionManifest,
 		return Wave{}, fmt.Errorf("mission: decorateWaveTasks: no prompts renderer on session")
 	}
 	planCtx := collectPlanContext(mission)
-	// The mission-files index is the same for every worker in the wave —
-	// the input set is fixed at wave start (a worker can't see a
-	// sibling's outputs until the next wave boundary) — so compute it
-	// once here, not per subagent. Phase B31.
-	missionFiles := missionFilesForState(mission)
 	out := wave
 	out.Subagents = make([]SubagentSpec, len(wave.Subagents))
 	copy(out.Subagents, wave.Subagents)
 	for i := range out.Subagents {
 		view := workerContractView{
-			MissionFiles: missionFiles,
-			RoleProse:    manifest.RoleProse(mission, out.Subagents[i].Role),
+			RoleProse: manifest.RoleProse(mission, out.Subagents[i].Role),
 		}
 		if ResolvePlanContextAccess(manifest, out.Subagents[i].Role) == PlanContextRead {
 			view.PlanContext = planCtx
