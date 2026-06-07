@@ -869,7 +869,7 @@ func buildPlannerTask(mission extension.SessionState, manifest MissionManifest, 
 		DoRoles:          doRoles,
 		Recent:           collectRecentWaves(mission),
 		PlanContext:      collectPlanContext(mission),
-		RoleProse:        renderRoleProse(mission, manifest.RolePrompts[manifest.Plan.Role]),
+		RoleProse:        manifest.RoleProse(mission, manifest.Plan.Role),
 	}
 	if m := FromState(mission); m != nil {
 		// FirstPlanGate: planner has never gotten an approve yet.
@@ -1002,7 +1002,7 @@ func buildCheckerTask(mission extension.SessionState, manifest MissionManifest, 
 		Iteration:      iteration,
 		PlanContext:    collectPlanContext(mission),
 		PendingRoadmap: collectPendingRoadmap(mission),
-		RoleProse:      renderRoleProse(mission, manifest.RolePrompts[manifest.Control.Role]),
+		RoleProse:      manifest.RoleProse(mission, manifest.Control.Role),
 	}
 	if m := FromState(mission); m != nil {
 		// PlannerGoal + WaveAC pull from MissionFrame (which projects
@@ -1272,7 +1272,7 @@ func decorateWaveTasks(mission extension.SessionState, manifest MissionManifest,
 	for i := range out.Subagents {
 		view := workerContractView{
 			ResearchAvailable: researchAvailable,
-			RoleProse:         renderRoleProse(mission, manifest.RolePrompts[out.Subagents[i].Role]),
+			RoleProse:         manifest.RoleProse(mission, out.Subagents[i].Role),
 		}
 		if ResolvePlanContextAccess(manifest, out.Subagents[i].Role) == PlanContextRead {
 			view.PlanContext = planCtx

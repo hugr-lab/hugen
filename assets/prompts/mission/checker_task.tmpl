@@ -144,7 +144,7 @@ emit `continue` over `finish` — `continue` is the safe default.
 Reply with EXACTLY ONE fenced block (no other text, no narration):
 
 ```verdict
-{"status":"ok","body":{"decision":"continue","issues":[],"reason":"<one sentence>","ac_update":[{"id":"ac-1","status":"satisfied","evidence":"<ref>"},{"id":"ac-2","status":"unsatisfied","evidence":"missing svg"}],"wave_ac_status":[{"criterion":"...","satisfied":true,"evidence":"<ref>"}]}}
+{"status":"ok","memory_summary":"<one line — carried into the next planner's [Plan context]>","body":{"decision":"continue","issues":[],"reason":"<one sentence>","ac_update":[{"id":"ac-1","status":"satisfied","evidence":"<ref>"},{"id":"ac-2","status":"unsatisfied","evidence":"missing svg"}],"wave_ac_status":[{"criterion":"...","satisfied":true,"evidence":"<ref>"}]}}
 ```
 
 Examples of valid verdict shapes:
@@ -162,3 +162,8 @@ JSON inside must parse. `body.decision` is required and must be
 one of `continue | amend | inquire | finish`. The `issues` array
 is required for `amend` (empty arrays accepted for other
 decisions). The `reason` field is optional but encouraged.
+
+Always include a top-level `memory_summary` — one short line. The
+runtime appends it to the NEXT planner's `[Plan context]`, so your
+read of where the mission stands carries across iterations; omit it
+and that carry-forward is lost.

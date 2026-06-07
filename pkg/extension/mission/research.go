@@ -243,7 +243,7 @@ func buildResearchTask(mission extension.SessionState, manifest MissionManifest,
 		ValidationFeedback: validationFeedback,
 	}
 	if manifest.Research != nil {
-		view.RoleProse = renderRoleProse(mission, manifest.RolePrompts[manifest.Research.Role])
+		view.RoleProse = manifest.RoleProse(mission, manifest.Research.Role)
 	}
 	if m := FromState(mission); m != nil {
 		// Phase 5.x-followup — caller's spawn-time inputs are
