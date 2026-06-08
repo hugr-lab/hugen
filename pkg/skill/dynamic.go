@@ -459,6 +459,56 @@ func (x *dynamicIndex) replaceLinks(ctx context.Context, sourceID, relation stri
 	return errors.Join(errs...)
 }
 
+// newSkillLogID mints a skill_log row id (`slog-<hex>`).
+func newSkillLogID() string {
+	var b [9]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "slog-fallback"
+	}
+	return "slog-" + hex.EncodeToString(b[:])
+}
+
+// logSkillEvents appends one append-only skill_log row per skill id for
+// the given event (shown / loaded / used). Empty ids are skipped — system
+// / inline skills have no index row, and skill_log.skill_id is an FK into
+// skills. Used by the `shown` path, which already holds index ids from
+// List. Best-effort + accumulate. Insert-only (append-only constitution).
+func (x *dynamicIndex) logSkillEvents(ctx context.Context, skillIDs []string, event, sessionID string) error {
+	var errs []error
+	for _, sid := range skillIDs {
+		if err := x.insertSkillLog(ctx, sid, event, sessionID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// insertSkillLog writes one append-only skill_log row. Empty id is a
+// no-op (non-indexed skill). sessionID optional.
+func (x *dynamicIndex) insertSkillLog(ctx context.Context, skillID, event, sessionID string) error {
+	if skillID == "" {
+		return nil
+	}
+	data := map[string]any{
+		"id":       newSkillLogID(),
+		"skill_id": skillID,
+		"agent_id": x.agentID,
+		"event":    event,
+	}
+	if sessionID != "" {
+		data["session_id"] = sessionID
+	}
+	if err := queries.RunMutation(ctx, x.querier,
+		`mutation ($data: hub_db_skill_log_mut_input_data!) {
+			hub { db { agent { insert_skill_log(data: $data) { id } } } }
+		}`,
+		map[string]any{"data": data},
+	); err != nil {
+		return fmt.Errorf("skill: log %s/%s: %w", event, skillID, err)
+	}
+	return nil
+}
+
 // listMembers returns the skill rows reachable from sourceID along the
 // given relation — the step-2 of two-step discovery (catalog →
 // members). Resolves the `target` relation on skill_links in one query
@@ -592,7 +642,7 @@ func rowToSkill(r skillRow) (Skill, error) {
 	if m.Description == "" {
 		m.Description = r.Description
 	}
-	s := Skill{Manifest: m, Origin: OriginDynamic}
+	s := Skill{Manifest: m, Origin: OriginDynamic, ID: r.ID}
 	if r.BundlePath != "" {
 		s.FS = os.DirFS(r.BundlePath)
 		s.Root = r.BundlePath
@@ -651,6 +701,13 @@ func newDynamicBackend(root string, q types.Querier, agentID string, embedderEna
 }
 
 func (b *dynamicBackend) Origin() Origin { return OriginDynamic }
+
+// LogSkillEvents appends append-only skill_log rows for the given skill
+// ids + event (shown / loaded / used). Empty ids skipped inside the
+// index writer. Phase 6.2.db-2.
+func (b *dynamicBackend) LogSkillEvents(ctx context.Context, skillIDs []string, event, sessionID string) error {
+	return b.index.logSkillEvents(ctx, skillIDs, event, sessionID)
+}
 
 // List reads the DB index — fast, metadata-only, no disk walk. The
 // returned skills carry FS handles for lazy content, but their

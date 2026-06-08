@@ -135,6 +135,24 @@ type skillSearcher interface {
 	Search(ctx context.Context, query string, opts SearchOpts) ([]Skill, error)
 }
 
+// LogSkillEvents records append-only skill_log usage events (shown /
+// loaded / used) for the given DB-indexed skill ids, when the store
+// supports it (the dynamic backend). No-op otherwise. Best-effort: the
+// returned error is for the caller to log, never fatal to the turn.
+// Phase 6.2.db-2.
+func (m *SkillManager) LogSkillEvents(ctx context.Context, skillIDs []string, event, sessionID string) error {
+	if s, ok := m.store.(skillLogger); ok {
+		return s.LogSkillEvents(ctx, skillIDs, event, sessionID)
+	}
+	return nil
+}
+
+// skillLogger is the optional usage-logging surface a store backend may
+// implement (only *Store with a dynamic backend does). Phase 6.2.db-2.
+type skillLogger interface {
+	LogSkillEvents(ctx context.Context, skillIDs []string, event, sessionID string) error
+}
+
 // CatalogMembers returns the recipes inside a recipe catalog — the
 // step-2 of two-step discovery. Delegates to the store; returns
 // ErrSkillNotFound when the catalog doesn't exist, nil when the named

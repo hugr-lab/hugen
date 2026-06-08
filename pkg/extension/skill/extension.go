@@ -155,6 +155,17 @@ type SessionSkill struct {
 	mu     sync.RWMutex
 	loaded map[string]skillpkg.Skill // by manifest name
 	gen    int64                     // per-session generation; tracks manager.Gen() at last mutation
+	// shownPending is set on each user_message (by the FrameObserver) and
+	// cleared the first time TurnPreamble logs a `shown` impression that
+	// turn — so the catalogue's per-iteration re-renders log `shown` only
+	// ONCE per user turn (db-2). Guarded by mu.
+	shownPending bool
+	// shownCatalog maps name→index id for the skills surfaced in the LAST
+	// catalogue render (autoloaded excluded). The `used` (load) path
+	// resolves loaded names to ids through it — in-memory, no DB
+	// round-trip, and only skills the model was actually shown count.
+	// db-2. Guarded by mu.
+	shownCatalog map[string]string
 
 	advertiseMu sync.Mutex
 	// loadedTokens caches the estimated size of the LOADED-side
@@ -166,6 +177,56 @@ type SessionSkill struct {
 	// costs another M kB." Phase 5.2 (context-budget γ).
 	loadedTokens  int
 	catalogTokens int
+}
+
+// setShownCatalog records the name→id map of skills surfaced in the most
+// recent catalogue render (db-2).
+func (h *SessionSkill) setShownCatalog(catalog map[string]string) {
+	h.mu.Lock()
+	h.shownCatalog = catalog
+	h.mu.Unlock()
+}
+
+// idsForNames resolves the given skill names to their index ids via the
+// last-rendered shown catalogue (in-memory). Names not in it (never
+// shown / non-indexed / autoloaded) resolve to nothing — so a `used`
+// event is logged only for a deliberately-loaded skill the model was
+// actually shown. db-2.
+func (h *SessionSkill) idsForNames(names []string) []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if len(h.shownCatalog) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(names))
+	for _, n := range names {
+		if id := h.shownCatalog[n]; id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// markShownPending flags that a new user turn began, so the next
+// catalogue render logs a `shown` impression. Called by the skill
+// extension's FrameObserver on each user_message. db-2.
+func (h *SessionSkill) markShownPending() {
+	h.mu.Lock()
+	h.shownPending = true
+	h.mu.Unlock()
+}
+
+// takeShownPending atomically reports + clears the per-turn shown flag:
+// true exactly once per user turn (the first TurnPreamble render after a
+// user_message). db-2.
+func (h *SessionSkill) takeShownPending() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.shownPending {
+		return false
+	}
+	h.shownPending = false
+	return true
 }
 
 // SetAdvertiseSplit records the cached estimates for the loaded
@@ -258,6 +319,19 @@ func (h *SessionSkill) Load(ctx context.Context, name string) error {
 			SkillName:  s.Manifest.Name,
 			Generation: gen,
 		})
+	}
+	// db-2: a load IS the use signal — record it for the usage-driven
+	// skill bandit (append-only skill_log). Resolve the loaded names to
+	// index ids through the SESSION's shown catalogue (in-memory, no DB
+	// round-trip): only skills the model was actually shown resolve, so
+	// autoloaded skills (loaded before any catalogue render) and
+	// non-indexed skills contribute nothing. Non-fatal telemetry.
+	usedNames := make([]string, 0, len(resolved))
+	for _, s := range resolved {
+		usedNames = append(usedNames, s.Manifest.Name)
+	}
+	if ids := h.idsForNames(usedNames); len(ids) > 0 {
+		_ = h.manager.LogSkillEvents(ctx, ids, skillpkg.SkillLogUsed, h.sessionID)
 	}
 	return nil
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hugr-lab/hugen/pkg/store/local"
+	"github.com/hugr-lab/hugen/pkg/store/queries"
 	"github.com/hugr-lab/hugen/pkg/store/local/migrate"
 )
 
@@ -156,6 +157,43 @@ func TestDynamicBackend(t *testing.T) {
 		assert.Empty(t, s.Manifest.Body)
 		// FS handle points at the bundle for lazy content.
 		assert.NotNil(t, s.FS)
+		// db-2: the DB-index id is carried onto the Skill so usage
+		// logging (skill_log.skill_id FK) can reference it.
+		assert.True(t, strings.HasPrefix(s.ID, "skl-"), "Skill.ID = %q", s.ID)
+	})
+
+	t.Run("LogSkillEvents appends skill_log rows (skip empty id)", func(t *testing.T) {
+		rows, err := b.index.listAll(ctx)
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		id := rows[0].ID
+
+		// One real id + one empty (skipped) → exactly one row written.
+		require.NoError(t, b.LogSkillEvents(ctx, []string{id, ""}, SkillLogShown, "ses-1"))
+		require.NoError(t, b.LogSkillEvents(ctx, []string{id}, SkillLogUsed, "ses-1"))
+
+		type logRow struct {
+			SkillID string `json:"skill_id"`
+			Event   string `json:"event"`
+		}
+		logs, err := queries.RunQuery[[]logRow](ctx, q,
+			`query ($agent: String!) {
+				hub { db { agent { skill_log(filter: {agent_id: {eq: $agent}}) { skill_id event } } } }
+			}`,
+			map[string]any{"agent": agentID},
+			"hub.db.agent.skill_log",
+		)
+		require.NoError(t, err)
+		// Append-only: two rows (shown + used), both for the real id; the
+		// empty id contributed nothing.
+		require.Len(t, logs, 2)
+		events := map[string]int{}
+		for _, l := range logs {
+			assert.Equal(t, id, l.SkillID)
+			events[l.Event]++
+		}
+		assert.Equal(t, 1, events[SkillLogShown])
+		assert.Equal(t, 1, events[SkillLogUsed])
 	})
 
 	t.Run("Get reads full bundle from disk (with body)", func(t *testing.T) {

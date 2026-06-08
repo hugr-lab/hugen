@@ -11,6 +11,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/prompts"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -50,7 +51,21 @@ var (
 	_ extension.SubagentSpawnApplier = (*Extension)(nil)
 	_ extension.CloseTurnLookup     = (*Extension)(nil)
 	_ extension.StatusReporter      = (*Extension)(nil)
+	_ extension.FrameObserver       = (*Extension)(nil)
 )
+
+// OnFrameEmit implements [extension.FrameObserver]. On each user message
+// it flags the session so the next catalogue render logs ONE `shown`
+// impression for the turn (db-2). Cheap + non-blocking — an in-memory
+// flag only; the actual log write happens in TurnPreamble.
+func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState, frame protocol.Frame) {
+	if _, ok := frame.(*protocol.UserMessage); !ok {
+		return
+	}
+	if h := FromState(state); h != nil {
+		h.markShownPending()
+	}
+}
 
 // ReportStatus implements [extension.StatusReporter]. Returns the
 // sorted list of skills currently loaded into the calling session
@@ -253,11 +268,21 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 		return ""
 	}
 	renderer := state.Prompts()
-	var cat string
+	var (
+		cat      string
+		shownIDs []string
+	)
 	if allowedList, scoped := allowedSkillsFromState(state); scoped {
-		cat = renderCatalogueFiltered(ctx, renderer, h, allowedList)
+		cat, shownIDs = renderCatalogueFiltered(ctx, renderer, h, allowedList)
 	} else {
-		cat = renderCatalogue(ctx, renderer, h)
+		cat, shownIDs = renderCatalogue(ctx, renderer, h)
+	}
+	// db-2: log one `shown` impression for the surfaced skills per user
+	// turn. The advertise re-renders every model iteration; the per-turn
+	// flag (reset on each user_message by the FrameObserver) keeps it to
+	// one impression per turn. Best-effort, non-fatal telemetry.
+	if len(shownIDs) > 0 && h.takeShownPending() {
+		_ = h.manager.LogSkillEvents(ctx, shownIDs, skillpkg.SkillLogShown, h.sessionID)
 	}
 	// Phase 6.x dogfood follow-up — the loaded-skill bundle listing
 	// (references + scripts + assets) rides here, right after the
@@ -499,7 +524,7 @@ func writeBundleCategory(b *strings.Builder, sfs fs.FS, category string) {
 // renderCatalogue produces the "## Available skills" section of
 // the system prompt: one bullet per skill in the store using the
 // manifest description. Loaded skills carry a `(loaded)` tag.
-func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill) string {
+func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill) (string, []string) {
 	return renderCatalogueScoped(ctx, renderer, h, nil)
 }
 
@@ -511,7 +536,7 @@ func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *Session
 // alongside the whitelist entries reachable via `skill:load`.
 // Phase 6.1d (additive interpretation — allow-list adds to the
 // autoloaded baseline, never replaces it).
-func renderCatalogueFiltered(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allowed []string) string {
+func renderCatalogueFiltered(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allowed []string) (string, []string) {
 	allow := make(map[string]struct{}, len(allowed))
 	for _, n := range allowed {
 		allow[n] = struct{}{}
@@ -519,10 +544,13 @@ func renderCatalogueFiltered(ctx context.Context, renderer *prompts.Renderer, h 
 	return renderCatalogueScoped(ctx, renderer, h, allow)
 }
 
-func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allow map[string]struct{}) string {
+// renderCatalogueScoped returns the rendered "## Available skills"
+// section AND the DB-index ids of the skills it actually surfaced (the
+// `shown` impression set for db-2 — empty for non-indexed skills).
+func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allow map[string]struct{}) (string, []string) {
 	all, err := h.manager.List(ctx)
 	if err != nil || len(all) == 0 {
-		return ""
+		return "", nil
 	}
 	loadedSet := map[string]struct{}{}
 	for _, n := range h.LoadedNames(ctx) {
@@ -535,6 +563,8 @@ func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *S
 		RecipeCatalog bool
 	}
 	items := make([]skillItem, 0, len(all))
+	shownIDs := make([]string, 0, len(all))
+	shownCatalog := make(map[string]string, len(all)) // name → index id (for `used` resolution)
 	for _, sk := range all {
 		// Phase 6.1d — task-eligible recipe skills are not listed
 		// here. They surface to the model as synthetic
@@ -563,9 +593,27 @@ func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *S
 			Loaded:        on,
 			RecipeCatalog: sk.Manifest.Hugen.RecipeCatalog,
 		})
+		// db-2 — the `shown` impression set + the session-stored name→id
+		// catalog (used to resolve `used` ids without a DB round-trip)
+		// EXCLUDE:
+		//   - autoloaded skills — always present, not a discovery signal;
+		//   - ALREADY-LOADED skills (`on`) — once loaded a skill is in
+		//     context (tagged `(loaded)`), no longer a discovery
+		//     candidate, so it stops accruing `shown`. The load turn
+		//     still counts: at render time it wasn't loaded yet, so the
+		//     impression + the catalog entry that resolves its `used` are
+		//     captured before the load fires.
+		// Everything else stays, INCLUDING pinned skills (pin ≠ autoload
+		// — a pinned skill the model loads is a real signal). Non-indexed
+		// skills (empty id) have no FK target.
+		if sk.ID != "" && !on && !sk.Manifest.AutoloadInTier(h.tier) {
+			shownIDs = append(shownIDs, sk.ID)
+			shownCatalog[sk.Manifest.Name] = sk.ID
+		}
 	}
+	h.setShownCatalog(shownCatalog)
 	if len(items) == 0 {
-		return ""
+		return "", nil
 	}
 	// Phase 6.1d — recipe catalogs (skills bundling tested `task:*`
 	// recipes) sort to the top so the model spots them before the
@@ -582,7 +630,7 @@ func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *S
 	return renderer.MustRender(
 		"skill/catalogue",
 		map[string]any{"Skills": items},
-	)
+	), shownIDs
 }
 
 // FilterTools implements [extension.ToolFilter]. Narrows the
