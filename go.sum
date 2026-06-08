@@ -162,16 +162,10 @@ github.com/hexops/gotextdiff v1.0.3 h1:gitA9+qJrrTCsiCl7+kh75nPqQt1cx4ZkudSTLoUq
 github.com/hexops/gotextdiff v1.0.3/go.mod h1:pSWU5MAI3yDq+fZBTazCSJysOMbxWL1BSow5/V2vxeg=
 github.com/hugr-lab/airport-go v0.2.1 h1:fBCss0+ZrcBCs4CcF4/EBILAE9hNnS/jH0xWODz4gi0=
 github.com/hugr-lab/airport-go v0.2.1/go.mod h1:VQ+PTHpE3m9ok+JskPhzilAG+G7/f5YdplT6dTLmLNU=
-github.com/hugr-lab/query-engine v0.3.35 h1:4IRzdkZ25ienYVXEVFY/3vj6csmZbZEogAPBoF9chy8=
-github.com/hugr-lab/query-engine v0.3.35/go.mod h1:Uwepi5fLUJuAKauq2N4Y9yfMkvqToy7hrQIfI8DU2IY=
 github.com/hugr-lab/query-engine v0.3.36 h1:oWq7a0MJML4r5cgRd5IrR8VlisT9dJEneOvxmNFb4K8=
 github.com/hugr-lab/query-engine v0.3.36/go.mod h1:mstNiLh0x1Wo2fdZmRq49UTVC3fxZGANQ1RN1B/9oAc=
-github.com/hugr-lab/query-engine/client v0.3.35 h1:g8AsXK7BKJvUOBuiPkDI1rRh+5PUbOGwzZei45OsFjk=
-github.com/hugr-lab/query-engine/client v0.3.35/go.mod h1:buhPLnmqBF+kUTCSOx6uVnI1B7uZnZy8LyFb6iJ2Oj0=
 github.com/hugr-lab/query-engine/client v0.3.36 h1:q3oT68K+vgv2pt4UIOfpJxpUIQI8S5T5W4lc5UtkXEk=
 github.com/hugr-lab/query-engine/client v0.3.36/go.mod h1:aicY+8HfZHukLSQC+8+fQTVR3KTKd9LOcMDIKklzUMQ=
-github.com/hugr-lab/query-engine/types v0.3.35 h1:AmXorrxFQmPgsCZljaLVuMg4BEBmHKquxAOIi+5YLhI=
-github.com/hugr-lab/query-engine/types v0.3.35/go.mod h1:uZ6DzCNyYmZXD9R3+Uc0mJsySRXyCqaHh6O32zYTLus=
 github.com/hugr-lab/query-engine/types v0.3.36 h1:yRm3hS/xb1EF3fykGk9GZ8nzvRt6xeHN22zQ/91jjAE=
 github.com/hugr-lab/query-engine/types v0.3.36/go.mod h1:uZ6DzCNyYmZXD9R3+Uc0mJsySRXyCqaHh6O32zYTLus=
 github.com/itchyny/gojq v0.12.19 h1:ttXA0XCLEMoaLOz5lSeFOZ6u6Q3QxmG46vfgI4O0DEs=

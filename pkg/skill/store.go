@@ -305,6 +305,16 @@ func (s *Store) LogSkillEvents(ctx context.Context, skillIDs []string, event, se
 	return s.dynamic.LogSkillEvents(ctx, skillIDs, event, sessionID)
 }
 
+// RecallRanked is the db-2 combined recall+counts path. Returns
+// ErrNoEmbedder when no dynamic backend / embedder is wired so the caller
+// can fall back to List + a keyword filter. Phase 6.2.db-2.
+func (s *Store) RecallRanked(ctx context.Context, query string, limit int) ([]RecallCandidate, error) {
+	if s.dynamic == nil {
+		return nil, ErrNoEmbedder
+	}
+	return s.dynamic.RecallRanked(ctx, query, limit)
+}
+
 // Search runs semantic discovery over the dynamic index — the PRIMARY
 // discovery path when an embedder is wired. Returns ErrNoEmbedder when
 // no dynamic backend is present OR the backend has no embedder, so the

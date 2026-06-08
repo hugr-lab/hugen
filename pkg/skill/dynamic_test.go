@@ -194,6 +194,40 @@ func TestDynamicBackend(t *testing.T) {
 		}
 		assert.Equal(t, 1, events[SkillLogShown])
 		assert.Equal(t, 1, events[SkillLogUsed])
+
+		// db-2: the recall projection's log_bucket_aggregation surfaces
+		// the per-event tallies in ONE query (alongside the candidate),
+		// and pin:{eq:false} keeps the non-pinned change-report.
+		type bucketRow struct {
+			ID  string `json:"id"`
+			Log []struct {
+				Key struct {
+					Event string `json:"event"`
+				} `json:"key"`
+				Aggregations struct {
+					RowsCount int `json:"_rows_count"`
+				} `json:"aggregations"`
+			} `json:"log_bucket_aggregation"`
+		}
+		withLog, err := queries.RunQuery[[]bucketRow](ctx, q,
+			`query ($agent: String!) {
+				hub { db { agent {
+					skills(filter: {agent_id: {eq: $agent}, pin: {eq: false}}) {
+						id log_bucket_aggregation { key { event } aggregations { _rows_count } }
+					}
+				}}}
+			}`,
+			map[string]any{"agent": agentID},
+			"hub.db.agent.skills",
+		)
+		require.NoError(t, err)
+		require.Len(t, withLog, 1)
+		counts := map[string]int{}
+		for _, bkt := range withLog[0].Log {
+			counts[bkt.Key.Event] = bkt.Aggregations.RowsCount
+		}
+		assert.Equal(t, 1, counts[SkillLogShown], "shown count via log_bucket_aggregation")
+		assert.Equal(t, 1, counts[SkillLogUsed], "used count via log_bucket_aggregation")
 	})
 
 	t.Run("Get reads full bundle from disk (with body)", func(t *testing.T) {

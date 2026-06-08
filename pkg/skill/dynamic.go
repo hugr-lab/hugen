@@ -389,6 +389,82 @@ func (x *dynamicIndex) search(ctx context.Context, query string, taskEligible *b
 	return rows, nil
 }
 
+// rankedSkillRow parses the db-2 recall+counts projection: the semantic
+// candidate plus its skill_log usage bucketed by event (one row per
+// event with its _rows_count).
+type rankedSkillRow struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Log         []struct {
+		Key struct {
+			Event string `json:"event"`
+		} `json:"key"`
+		Aggregations struct {
+			RowsCount int `json:"_rows_count"`
+		} `json:"aggregations"`
+	} `json:"log_bucket_aggregation"`
+}
+
+// recallProjection selects exactly what the bandit needs — the candidate
+// fields + the per-event usage tallies via the auto-generated
+// log_bucket_aggregation (the `log` reverse relation grouped by event).
+const recallProjection = `id name description
+	log_bucket_aggregation { key { event } aggregations { _rows_count } }`
+
+// recallRanked runs the db-2 combined recall+counts query: a semantic
+// search over NON-PINNED skills (pinned ones bypass the bandit and are
+// advertised always, separately) that returns each candidate WITH its
+// shown/used tallies in ONE round-trip. The caller Thompson-ranks the
+// result. Returns ErrNoEmbedder when no embedder is wired (caller falls
+// back to keyword/List).
+func (x *dynamicIndex) recallRanked(ctx context.Context, query string, limit int) ([]RecallCandidate, error) {
+	if !x.embedderEnabled {
+		return nil, ErrNoEmbedder
+	}
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("skill: recall requires a non-empty query")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := queries.RunQuery[[]rankedSkillRow](ctx, x.querier,
+		`query ($filter: hub_db_skills_filter, $semantic: SemanticSearchInput) {
+			hub { db { agent {
+				skills(filter: $filter, semantic: $semantic) {`+recallProjection+`}
+			}}}
+		}`,
+		map[string]any{
+			"filter": map[string]any{
+				"agent_id": map[string]any{"eq": x.agentID},
+				"pin":      map[string]any{"eq": false},
+			},
+			"semantic": map[string]any{"query": query, "limit": limit},
+		},
+		"hub.db.agent.skills",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]RecallCandidate, 0, len(rows))
+	for _, r := range rows {
+		c := RecallCandidate{ID: r.ID, Name: r.Name, Description: r.Description}
+		for _, b := range r.Log {
+			switch b.Key.Event {
+			case SkillLogShown:
+				c.Shown = b.Aggregations.RowsCount
+			case SkillLogUsed:
+				c.Used = b.Aggregations.RowsCount
+			}
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
 // getIDByName resolves a skill's id from its name within the agent
 // scope (any source). Returns "" + nil when absent — used to resolve
 // catalog / member ids for link writes + reads.
@@ -707,6 +783,14 @@ func (b *dynamicBackend) Origin() Origin { return OriginDynamic }
 // index writer. Phase 6.2.db-2.
 func (b *dynamicBackend) LogSkillEvents(ctx context.Context, skillIDs []string, event, sessionID string) error {
 	return b.index.logSkillEvents(ctx, skillIDs, event, sessionID)
+}
+
+// RecallRanked runs the db-2 combined recall+counts query (semantic over
+// non-pinned skills, returning each candidate WITH its shown/used
+// tallies). The caller Thompson-ranks the result. ErrNoEmbedder when no
+// embedder is wired. Phase 6.2.db-2.
+func (b *dynamicBackend) RecallRanked(ctx context.Context, query string, limit int) ([]RecallCandidate, error) {
+	return b.index.recallRanked(ctx, query, limit)
 }
 
 // List reads the DB index — fast, metadata-only, no disk walk. The

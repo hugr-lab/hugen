@@ -135,6 +135,24 @@ type skillSearcher interface {
 	Search(ctx context.Context, query string, opts SearchOpts) ([]Skill, error)
 }
 
+// RecallRanked runs the db-2 combined recall+counts query (semantic
+// candidates over non-pinned skills, each with its shown/used tallies)
+// when the store supports it. Returns ErrNoEmbedder otherwise, so the
+// caller falls back to List + a keyword filter. The caller Thompson-
+// ranks the returned candidates. Phase 6.2.db-2.
+func (m *SkillManager) RecallRanked(ctx context.Context, query string, limit int) ([]RecallCandidate, error) {
+	if s, ok := m.store.(skillRecaller); ok {
+		return s.RecallRanked(ctx, query, limit)
+	}
+	return nil, ErrNoEmbedder
+}
+
+// skillRecaller is the optional db-2 recall+counts surface a store
+// backend may implement (only *Store with a dynamic backend does).
+type skillRecaller interface {
+	RecallRanked(ctx context.Context, query string, limit int) ([]RecallCandidate, error)
+}
+
 // LogSkillEvents records append-only skill_log usage events (shown /
 // loaded / used) for the given DB-indexed skill ids, when the store
 // supports it (the dynamic backend). No-op otherwise. Best-effort: the
