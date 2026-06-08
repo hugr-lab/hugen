@@ -108,6 +108,10 @@ func phaseExtensions(_ context.Context, core *Core) error {
 			// 0 → the extension default. Bounds the synchronous turn-start
 			// block, so raise it when testing against a slow local model.
 			BuildTimeout: core.Config.Recap().FoldTimeout(),
+			// Per-message cap (config `recap.max_message_tokens`); 0 → the
+			// extension default. Generous so a full delegated task distils
+			// into the marker intact.
+			MaxMessageTokens: core.Config.Recap().MaxMessageTokens(),
 		}),
 		// Mission ext owns the entire mission-PDCA dispatch
 		// surface — MissionDispatcher (validates spawn_mission's

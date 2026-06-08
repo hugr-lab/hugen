@@ -10,7 +10,7 @@ import (
 // it surfaces through the service view.
 func TestLoadStaticInput_RecapBlock(t *testing.T) {
 	in, err := LoadStaticInput(map[string]any{
-		"recap": map[string]any{"fold_timeout": "30s"},
+		"recap": map[string]any{"fold_timeout": "30s", "max_message_tokens": 4096},
 	}, true)
 	if err != nil {
 		t.Fatalf("LoadStaticInput: %v", err)
@@ -18,8 +18,15 @@ func TestLoadStaticInput_RecapBlock(t *testing.T) {
 	if in.Recap.FoldTimeout != 30*time.Second {
 		t.Errorf("FoldTimeout = %v, want 30s", in.Recap.FoldTimeout)
 	}
-	if got := NewStaticService(in).Recap().FoldTimeout(); got != 30*time.Second {
+	if in.Recap.MaxMessageTokens != 4096 {
+		t.Errorf("MaxMessageTokens = %d, want 4096", in.Recap.MaxMessageTokens)
+	}
+	svc := NewStaticService(in)
+	if got := svc.Recap().FoldTimeout(); got != 30*time.Second {
 		t.Errorf("Recap().FoldTimeout() = %v, want 30s", got)
+	}
+	if got := svc.Recap().MaxMessageTokens(); got != 4096 {
+		t.Errorf("Recap().MaxMessageTokens() = %d, want 4096", got)
 	}
 	// Absent → zero (the extension then applies its own default).
 	in2, _ := LoadStaticInput(map[string]any{}, true)

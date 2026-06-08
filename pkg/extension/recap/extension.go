@@ -23,8 +23,11 @@ type Deps struct {
 // Config carries operator-tunable knobs. Zero values resolve to the
 // defaults in [NewExtension].
 type Config struct {
-	// MaxMessageTokens truncates each dialogue message before it enters
-	// the ring, so one long turn can't dominate the marker. Default 512.
+	// MaxMessageTokens caps each dialogue message before it enters the
+	// ring — a generous bound (not a tight cut) so a full subagent task
+	// reaches the summariser intact and the fold distils it. Default 4096
+	// (≈ a full delegated task with headroom); short chat messages are
+	// unaffected. Lower it for a small-context local summariser.
 	MaxMessageTokens int
 	// RingMessages bounds how many recent messages the ring keeps. Default
 	// 8 — enough for the new user message(s) plus a couple of prior pairs.
@@ -47,8 +50,9 @@ type Config struct {
 // Extension is the agent-level recap singleton: a [FrameObserver] that
 // accumulates the root session's recent dialogue into a bounded ring, a
 // [TurnBoundaryHook] that (re)forms the topic marker synchronously before
-// the turn renders, a [Recovery] hook that replays the last marker on
-// restart, and a [StateInitializer] for the per-root-session handle.
+// the turn renders (every turn for root; once at start for a subagent), a
+// [Recovery] hook that replays the last marker on restart, and a
+// [StateInitializer] for the per-session handle.
 type Extension struct {
 	deps Deps
 	cfg  Config
@@ -61,7 +65,7 @@ type Extension struct {
 // NewExtension constructs the recap extension and fills config defaults.
 func NewExtension(deps Deps, cfg Config) *Extension {
 	if cfg.MaxMessageTokens <= 0 {
-		cfg.MaxMessageTokens = 512
+		cfg.MaxMessageTokens = 4096
 	}
 	if cfg.RingMessages <= 0 {
 		cfg.RingMessages = 8
@@ -102,14 +106,12 @@ var (
 func (e *Extension) Name() string            { return providerName }
 func (e *Extension) Lifetime() tool.Lifetime { return tool.LifetimePerAgent }
 
-// InitState allocates a [sessionRecap] handle for ROOT sessions only
-// (Depth 0). Subagents carry the task/wave brief as their topic and do
-// not recap, so they get no handle — [FromState] returns nil for them
-// and every recap path short-circuits.
+// InitState allocates a [sessionRecap] handle for EVERY session. Root
+// (Depth 0) re-forms a rolling marker each turn from the conversation; a
+// subagent forms its marker ONCE at start by distilling its task message
+// (its goal is fixed). The `root` flag drives that cadence in
+// [Extension.OnTurnBoundary].
 func (e *Extension) InitState(_ context.Context, state extension.SessionState) error {
-	if state.Depth() != 0 {
-		return nil
-	}
-	state.SetValue(StateKey, &sessionRecap{})
+	state.SetValue(StateKey, &sessionRecap{root: state.Depth() == 0})
 	return nil
 }

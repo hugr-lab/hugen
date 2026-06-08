@@ -55,12 +55,19 @@ func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState,
 // The turn waits on the (cheap, small-input) summariser, bounded by
 // BuildTimeout — "completes or times out", either way the turn proceeds
 // (the raw recent ring still backs CurrentRecap if the fold didn't land).
-// No-op for non-root sessions (FromState nil) and turns with no new user
-// message (the fold short-circuits).
+//
+// Cadence: root re-forms the marker every turn (rolling conversation); a
+// subagent forms it ONCE at start — its task is a fixed goal, so once it
+// has a marker the boundary is a no-op (no per-turn summariser cost on
+// every worker). No-op too when no handle (impossible now, defensive) or
+// no new user message (the fold short-circuits).
 func (e *Extension) OnTurnBoundary(ctx context.Context, state extension.SessionState) error {
 	h := FromState(state)
 	if h == nil {
 		return nil
+	}
+	if !h.root && h.hasMarker() {
+		return nil // subagent: marker already formed from its task
 	}
 	if h.beginRefresh() {
 		e.fold(ctx, state, h)

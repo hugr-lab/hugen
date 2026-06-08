@@ -13,7 +13,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
@@ -192,57 +191,7 @@ type SessionSkill struct {
 	drawPending bool
 	drawValid   bool
 	draw        map[string]struct{}
-	// firstMsg is the session's spawn brief — the leading user messages
-	// (goal + inputs) that arrive before the first agent reply, joined.
-	// A subagent's db-2 ranking anchor; root sessions read the recap
-	// marker and only fall back to this. briefSealed locks accumulation
-	// once the agent replies, so later conversation isn't folded into the
-	// brief.
-	firstMsg    string
-	briefSealed bool
 }
-
-// captureBriefUser appends a user message to the spawn brief — the session's
-// leading user messages (a subagent's goal + inputs may arrive as several
-// before its first turn). Bounded by maxAnchorChars; no-op once sealed. db-2.
-func (h *SessionSkill) captureBriefUser(text string) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return
-	}
-	h.drawMu.Lock()
-	defer h.drawMu.Unlock()
-	if h.briefSealed {
-		return
-	}
-	if h.firstMsg != "" {
-		h.firstMsg += "\n"
-	}
-	h.firstMsg += text
-	if len(h.firstMsg) > maxAnchorChars {
-		h.firstMsg = h.firstMsg[:maxAnchorChars]
-		h.briefSealed = true // full enough; stop accumulating
-	}
-}
-
-// sealBrief stops brief accumulation — called on the first agent reply,
-// after which later user messages are conversation, not the brief. db-2.
-func (h *SessionSkill) sealBrief() {
-	h.drawMu.Lock()
-	h.briefSealed = true
-	h.drawMu.Unlock()
-}
-
-// firstMessage returns the captured spawn brief, or "" if none yet. db-2.
-func (h *SessionSkill) firstMessage() string {
-	h.drawMu.Lock()
-	defer h.drawMu.Unlock()
-	return h.firstMsg
-}
-
-// maxAnchorChars bounds the captured brief so a large spawn task can't
-// blow the embedder input — the topic lives in the opening anyway.
-const maxAnchorChars = 2000
 
 // markAdvertiseRoll arms a fresh per-turn draw — called on each
 // user_message so the advertised catalogue rotates once per turn, not per

@@ -172,20 +172,20 @@ func TestRecover_NoFramesLeavesEmpty(t *testing.T) {
 	}
 }
 
-func TestInitState_RootOnly(t *testing.T) {
+func TestInitState_AllSessionsRootFlag(t *testing.T) {
 	ext := NewExtension(Deps{}, Config{})
 	ctx := context.Background()
 
 	root := fixture.NewTestSessionState("ses-root") // depth 0
 	_ = ext.InitState(ctx, root)
-	if FromState(root) == nil {
-		t.Error("root session must get a recap handle")
+	if h := FromState(root); h == nil || !h.root {
+		t.Error("root session must get a handle with root=true")
 	}
 
 	worker := fixture.NewTestSessionState("ses-w").WithDepth(1)
 	_ = ext.InitState(ctx, worker)
-	if FromState(worker) != nil {
-		t.Error("non-root session must NOT get a recap handle")
+	if h := FromState(worker); h == nil || h.root {
+		t.Error("subagent must get a handle with root=false")
 	}
 }
 

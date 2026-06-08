@@ -160,6 +160,10 @@ type RecapView interface {
 	// turn renders, so this bounds the worst-case turn-start block.
 	// Returns 0 when absent — the extension then applies its own default.
 	FoldTimeout() time.Duration
+
+	// MaxMessageTokens caps each message fed to the fold (so a full
+	// subagent task reaches the summariser intact). 0 → extension default.
+	MaxMessageTokens() int
 }
 
 // RecapConfig mirrors the operator-tunable recap.Config knobs.
@@ -168,6 +172,10 @@ type RecapConfig struct {
 	// the extension default. Raise it when testing against a slow local
 	// model.
 	FoldTimeout time.Duration `mapstructure:"fold_timeout" yaml:"fold_timeout,omitempty"`
+	// MaxMessageTokens caps each message before it enters the recap ring —
+	// a generous bound so a full delegated task distils intact. 0 / absent
+	// → the extension default. Lower it for a small-context summariser.
+	MaxMessageTokens int `mapstructure:"max_message_tokens" yaml:"max_message_tokens,omitempty"`
 }
 
 // SkillsView is the operator-config surface for the Phase-6.2.db

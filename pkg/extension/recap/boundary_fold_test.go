@@ -127,18 +127,34 @@ func TestOnTurnBoundary_NoOpWithoutNewUserMessage(t *testing.T) {
 	}
 }
 
-// TestOnTurnBoundary_NonRootNoOp: a non-root session has no recap handle,
-// so the boundary hook is a no-op (no fold, no panic).
-func TestOnTurnBoundary_NonRootNoOp(t *testing.T) {
-	mdl := &stubModel{reply: `{"topic":"x","recap":"y","keywords":[]}`}
+// TestOnTurnBoundary_SubagentFoldsOnce: a subagent forms its marker ONCE
+// at start (from its task) and does NOT re-fold on later turns — its goal
+// is fixed, so no per-turn summariser cost on every worker.
+func TestOnTurnBoundary_SubagentFoldsOnce(t *testing.T) {
+	mdl := &stubModel{reply: `{"topic":"op2023 report","recap":"Build the op2023 HTML report.","keywords":["op2023"]}`}
 	ext := NewExtension(Deps{Router: stubRouter(t, mdl)}, Config{})
 	ctx := context.Background()
 	worker := fixture.NewTestSessionState("ses-w").WithDepth(1)
-	_ = ext.InitState(ctx, worker) // no handle seeded for depth>0
+	_ = ext.InitState(ctx, worker)
+
+	// Turn 1: the delegated task → fold once.
+	ext.OnFrameEmit(ctx, worker, &protocol.UserMessage{Payload: protocol.UserMessagePayload{Text: "build the op2023 html report with charts"}})
 	if err := ext.OnTurnBoundary(ctx, worker); err != nil {
-		t.Fatalf("OnTurnBoundary non-root: %v", err)
+		t.Fatalf("OnTurnBoundary: %v", err)
 	}
-	if mdl.callCount() != 0 {
-		t.Errorf("non-root must not fold; model calls = %d", mdl.callCount())
+	if mdl.callCount() != 1 {
+		t.Fatalf("subagent should fold once at start; calls = %d", mdl.callCount())
+	}
+	if rec, _ := CurrentRecap(worker); rec.Topic != "op2023 report" {
+		t.Errorf("subagent marker not formed; Topic = %q", rec.Topic)
+	}
+
+	// Turn 2: marker already formed → NO re-fold (goal is fixed).
+	ext.OnFrameEmit(ctx, worker, &protocol.UserMessage{Payload: protocol.UserMessagePayload{Text: "now add a KPI section"}})
+	if err := ext.OnTurnBoundary(ctx, worker); err != nil {
+		t.Fatalf("OnTurnBoundary turn 2: %v", err)
+	}
+	if mdl.callCount() != 1 {
+		t.Errorf("subagent must NOT re-fold per turn; calls = %d, want 1", mdl.callCount())
 	}
 }

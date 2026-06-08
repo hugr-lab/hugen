@@ -251,6 +251,10 @@ func (s *StaticService) CompactorConfig() CompactorConfig { return s.compactor }
 // (0 when absent — the recap extension applies its own default).
 func (s *StaticService) FoldTimeout() time.Duration { return s.recap.FoldTimeout }
 
+// MaxMessageTokens returns the operator-configured per-message recap cap
+// (0 when absent — the recap extension applies its own default).
+func (s *StaticService) MaxMessageTokens() int { return s.recap.MaxMessageTokens }
+
 // --- SkillsView ---
 
 // InstallSet returns the configured dynamic-skill install set, or nil

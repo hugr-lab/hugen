@@ -154,53 +154,33 @@ func TestRankedAdvertise_RepoolsPerTurn(t *testing.T) {
 }
 
 // TestRankedAdvertise_SubagentUsesFirstMessage covers the universal anchor:
-// a subagent (no recap) ranks on its spawn brief — the leading user
-// messages (goal + inputs), captured by the skill ext's OnFrameEmit and
-// sealed once the agent replies.
-func TestRankedAdvertise_SubagentUsesFirstMessage(t *testing.T) {
+// a subagent ranks on its recap marker too (recap now runs for every
+// session, distilling the worker's delegated task into the anchor).
+func TestRankedAdvertise_SubagentUsesRecap(t *testing.T) {
 	store := &fakeRecallStore{dynamic: twelveCandidates()}
 	ext := NewExtension(skillpkg.NewSkillManager(store, nil), nil, "a1")
 	ctx := context.Background()
-	worker := fixture.NewTestSessionState("ses-w").WithDepth(1) // worker, no recap handle
+	worker := fixture.NewTestSessionState("ses-w").WithDepth(1) // worker (depth>0)
 	if err := ext.InitState(ctx, worker); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
 	h := FromState(worker)
 
-	// No anchor yet (no brief, no recap) → fall back.
+	// No anchor yet (no recap marker) → fall back.
 	if _, ok := ext.rankedAdvertise(ctx, worker, h); ok {
-		t.Fatal("no brief yet → must fall back")
+		t.Fatal("no anchor yet → must fall back")
 	}
 
-	// The spawn brief arrives as several leading user messages (goal +
-	// inputs) before the agent's first reply.
-	ext.OnFrameEmit(ctx, worker, userMsg("count flights by origin"))
-	ext.OnFrameEmit(ctx, worker, userMsg("for 2024, top 10"))
-	if want := "count flights by origin\nfor 2024, top 10"; h.firstMessage() != want {
-		t.Fatalf("brief not accumulated; firstMessage = %q, want %q", h.firstMessage(), want)
-	}
-
-	// The first agent reply seals the brief — later user messages are
-	// conversation, not the brief.
-	ext.OnFrameEmit(ctx, worker, &protocol.AgentMessage{
-		Payload: protocol.AgentMessagePayload{Text: "here are the top 10", Consolidated: true, Final: true},
-	})
-	ext.OnFrameEmit(ctx, worker, userMsg("now by destination"))
-	if want := "count flights by origin\nfor 2024, top 10"; h.firstMessage() != want {
-		t.Errorf("post-seal message must not extend the brief; firstMessage = %q", h.firstMessage())
-	}
+	// The worker's delegated task seeds its recap (runs for subagents now).
+	seedRecap(t, ctx, worker, "build the html report for op2023 with plotly charts")
 
 	allow, ok := ext.rankedAdvertise(ctx, worker, h)
 	if !ok {
-		t.Fatal("subagent with a brief should rank on the brief")
+		t.Fatal("subagent with a recap marker should rank on it")
 	}
 	if len(allow) != recallTopN {
 		t.Errorf("allow size = %d, want %d", len(allow), recallTopN)
 	}
-}
-
-func userMsg(text string) *protocol.UserMessage {
-	return &protocol.UserMessage{Payload: protocol.UserMessagePayload{Text: text}}
 }
 
 // TestRankedAdvertise_Fallbacks covers the (nil,false) → full-catalogue

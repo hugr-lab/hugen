@@ -57,32 +57,20 @@ var (
 )
 
 // OnFrameEmit implements [extension.FrameObserver] (db-2). On each user
-// message it: captures the spawn brief (a subagent's goal + inputs, the
-// ranking anchor); flags the session so the next catalogue render logs ONE
-// `shown` impression for the turn; and arms a fresh advertise draw. On the
-// first agent reply it seals the brief. Cheap + non-blocking — in-memory
-// flags only; the actual log write happens in TurnPreamble.
+// message it flags the session so the next catalogue render logs ONE
+// `shown` impression for the turn, and arms a fresh advertise draw. Cheap +
+// non-blocking — in-memory flags only; the actual log write happens in
+// TurnPreamble.
 func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState, frame protocol.Frame) {
-	h := FromState(state)
-	if h == nil {
+	if _, ok := frame.(*protocol.UserMessage); !ok {
 		return
 	}
-	switch f := frame.(type) {
-	case *protocol.UserMessage:
-		// Accumulate the spawn brief (goal + inputs); root sessions read
-		// the recap marker instead, so this is just their fallback.
-		h.captureBriefUser(f.Payload.Text)
+	if h := FromState(state); h != nil {
 		h.markShownPending()
 		// A new turn re-rolls the Thompson advertise draw (rotation per
 		// message); within the turn the selection is reused so the
 		// catalogue stays byte-stable across model iterations.
 		h.markAdvertiseRoll()
-	case *protocol.AgentMessage:
-		// The first reply ends the brief — later user messages are
-		// conversation, not the spawn brief.
-		if f.Payload.Consolidated && f.Payload.Final {
-			h.sealBrief()
-		}
 	}
 }
 
@@ -354,24 +342,15 @@ const (
 )
 
 // anchorForRanking returns the text db-2 feeds the semantic skill filter
-// for the calling session — the universal "what is this session about"
-// anchor:
-//
-//   - root → the rolling recap marker (recap ext, re-formed each turn);
-//   - subagent → its spawn brief (the first user message — the goal), which
-//     the skill ext captured on OnFrameEmit. Subagents do focused work, so
-//     the brief IS the fixed topic; no recap machinery runs for them.
-//
-// Returns ("", false) when neither is available (no dialogue / brief yet)
-// — the caller falls back to the full List catalogue.
-func anchorForRanking(state extension.SessionState, h *SessionSkill) (string, bool) {
+// for the calling session — the recap marker, which the recap ext forms for
+// EVERY session: a rolling topic for root, a once-distilled goal for a
+// subagent (from its delegated task). Returns ("", false) when no marker
+// exists yet — the caller falls back to the full List catalogue.
+func anchorForRanking(state extension.SessionState) (string, bool) {
 	if rec, ok := recap.CurrentRecap(state); ok {
 		if t := strings.TrimSpace(rec.Text); t != "" {
 			return t, true
 		}
-	}
-	if brief := h.firstMessage(); brief != "" {
-		return brief, true
 	}
 	return "", false
 }
@@ -397,7 +376,7 @@ func (e *Extension) rankedAdvertise(ctx context.Context, state extension.Session
 	if allow, ok := h.cachedDraw(); ok {
 		return allow, true
 	}
-	anchor, ok := anchorForRanking(state, h)
+	anchor, ok := anchorForRanking(state)
 	if !ok {
 		return nil, false
 	}

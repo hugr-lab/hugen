@@ -1,18 +1,17 @@
 // Package recap is the live-topic primitive: a short, embedding-sized
-// marker of what a root session is discussing right now, for db-2's
-// dynamic-skill recall and Phase 7's offline distiller. Root sessions
-// only; subagents carry their spawn goal as the topic (the skill ext
-// anchors ranking on the brief for them).
+// marker of what a session is discussing right now, for db-2's dynamic-
+// skill recall and Phase 7's offline distiller. It runs for EVERY session:
+// a root distils a rolling marker from the conversation; a subagent distils
+// its marker ONCE from its delegated task (its goal is fixed).
 //
-// The marker is (re)formed by a cheap model call at every turn boundary,
+// The marker is (re)formed by a cheap model call at the turn boundary,
 // SYNCHRONOUSLY, before the turn renders — so the skill advertise reads a
 // current topic. There is NO accumulating fold to store: the handle keeps
 // only a small bounded ring of recent messages plus the latest marker.
-// Each turn the model is given "what the dialogue is about" (the prior
-// marker), the recent completed exchanges, and the new user message(s),
-// and returns an updated marker. The marker is emitted as a CategoryOp
-// ExtensionFrame so a restart replays it (the ring is rebuilt from the
-// tail of history).
+// The model is given "what the dialogue is about" (the prior marker), the
+// recent completed exchanges, and the new user message(s), and returns an
+// updated marker. The marker is emitted as a CategoryOp ExtensionFrame so a
+// restart replays it (the ring is rebuilt from the tail of history).
 package recap
 
 import (
@@ -53,11 +52,15 @@ type message struct {
 	Text string
 }
 
-// sessionRecap is the per-root-session handle: a bounded ring of recent
+// sessionRecap is the per-session handle: a bounded ring of recent
 // messages + the latest marker.
 type sessionRecap struct {
 	mu sync.Mutex
 
+	// root marks a depth-0 session. Root re-forms the marker every turn
+	// (rolling conversation); a subagent forms it ONCE at start from its
+	// task (the goal is fixed), so its fold is gated on having no marker.
+	root bool
 	// recent is a bounded ring of the latest dialogue messages, oldest
 	// first. Trailing "user" entries (no assistant reply yet) are the
 	// turn's NEW messages; the rest is recent context.
@@ -67,6 +70,13 @@ type sessionRecap struct {
 
 	// inflight guards against concurrent folds.
 	inflight bool
+}
+
+// hasMarker reports whether a marker has been formed yet.
+func (s *sessionRecap) hasMarker() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.marker.Text != ""
 }
 
 // appendMessage records a dialogue message into the ring, truncating it to
