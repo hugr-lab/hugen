@@ -192,26 +192,44 @@ type SessionSkill struct {
 	drawPending bool
 	drawValid   bool
 	draw        map[string]struct{}
-	// firstMsg is the session's first user message — a subagent's spawn
-	// brief (the goal), used as its db-2 ranking anchor. First wins; root
-	// sessions read the recap marker and only fall back to this.
-	firstMsg string
+	// firstMsg is the session's spawn brief — the leading user messages
+	// (goal + inputs) that arrive before the first agent reply, joined.
+	// A subagent's db-2 ranking anchor; root sessions read the recap
+	// marker and only fall back to this. briefSealed locks accumulation
+	// once the agent replies, so later conversation isn't folded into the
+	// brief.
+	firstMsg    string
+	briefSealed bool
 }
 
-// captureFirstMessage records the session's first user message (truncated)
-// as the subagent ranking anchor. Idempotent — first wins. db-2.
-func (h *SessionSkill) captureFirstMessage(text string) {
+// captureBriefUser appends a user message to the spawn brief — the session's
+// leading user messages (a subagent's goal + inputs may arrive as several
+// before its first turn). Bounded by maxAnchorChars; no-op once sealed. db-2.
+func (h *SessionSkill) captureBriefUser(text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
 	}
-	if len(text) > maxAnchorChars {
-		text = text[:maxAnchorChars]
-	}
 	h.drawMu.Lock()
-	if h.firstMsg == "" {
-		h.firstMsg = text
+	defer h.drawMu.Unlock()
+	if h.briefSealed {
+		return
 	}
+	if h.firstMsg != "" {
+		h.firstMsg += "\n"
+	}
+	h.firstMsg += text
+	if len(h.firstMsg) > maxAnchorChars {
+		h.firstMsg = h.firstMsg[:maxAnchorChars]
+		h.briefSealed = true // full enough; stop accumulating
+	}
+}
+
+// sealBrief stops brief accumulation — called on the first agent reply,
+// after which later user messages are conversation, not the brief. db-2.
+func (h *SessionSkill) sealBrief() {
+	h.drawMu.Lock()
+	h.briefSealed = true
 	h.drawMu.Unlock()
 }
 

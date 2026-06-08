@@ -56,25 +56,33 @@ var (
 	_ extension.FrameObserver        = (*Extension)(nil)
 )
 
-// OnFrameEmit implements [extension.FrameObserver]. On each user message
-// it flags the session so the next catalogue render logs ONE `shown`
-// impression for the turn (db-2). Cheap + non-blocking — an in-memory
-// flag only; the actual log write happens in TurnPreamble.
+// OnFrameEmit implements [extension.FrameObserver] (db-2). On each user
+// message it: captures the spawn brief (a subagent's goal + inputs, the
+// ranking anchor); flags the session so the next catalogue render logs ONE
+// `shown` impression for the turn; and arms a fresh advertise draw. On the
+// first agent reply it seals the brief. Cheap + non-blocking — in-memory
+// flags only; the actual log write happens in TurnPreamble.
 func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState, frame protocol.Frame) {
-	um, ok := frame.(*protocol.UserMessage)
-	if !ok {
+	h := FromState(state)
+	if h == nil {
 		return
 	}
-	if h := FromState(state); h != nil {
-		// db-2 — capture the first user message as the subagent ranking
-		// anchor (its spawn brief / goal). First wins; root sessions read
+	switch f := frame.(type) {
+	case *protocol.UserMessage:
+		// Accumulate the spawn brief (goal + inputs); root sessions read
 		// the recap marker instead, so this is just their fallback.
-		h.captureFirstMessage(um.Payload.Text)
+		h.captureBriefUser(f.Payload.Text)
 		h.markShownPending()
-		// db-2 — a new turn re-rolls the Thompson advertise draw (rotation
-		// per message); within the turn the selection is reused so the
+		// A new turn re-rolls the Thompson advertise draw (rotation per
+		// message); within the turn the selection is reused so the
 		// catalogue stays byte-stable across model iterations.
 		h.markAdvertiseRoll()
+	case *protocol.AgentMessage:
+		// The first reply ends the brief — later user messages are
+		// conversation, not the spawn brief.
+		if f.Payload.Consolidated && f.Payload.Final {
+			h.sealBrief()
+		}
 	}
 }
 

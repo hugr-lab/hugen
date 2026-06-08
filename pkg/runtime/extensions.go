@@ -103,7 +103,12 @@ func phaseExtensions(_ context.Context, core *Core) error {
 			Router:  core.Models,
 			AgentID: core.Agent.ID(),
 			Logger:  core.Logger,
-		}, recapext.Config{}),
+		}, recapext.Config{
+			// Operator-tunable per-turn fold cap (config `recap.fold_timeout`);
+			// 0 → the extension default. Bounds the synchronous turn-start
+			// block, so raise it when testing against a slow local model.
+			BuildTimeout: core.Config.Recap().FoldTimeout(),
+		}),
 		// Mission ext owns the entire mission-PDCA dispatch
 		// surface — MissionDispatcher (validates spawn_mission's
 		// `skill` arg), MissionAutoRunner (drives the executor

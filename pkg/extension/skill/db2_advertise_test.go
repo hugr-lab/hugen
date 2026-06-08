@@ -154,8 +154,9 @@ func TestRankedAdvertise_RepoolsPerTurn(t *testing.T) {
 }
 
 // TestRankedAdvertise_SubagentUsesFirstMessage covers the universal anchor:
-// a subagent (no recap) ranks on its spawn brief — the first user message,
-// captured by the skill ext's OnFrameEmit.
+// a subagent (no recap) ranks on its spawn brief — the leading user
+// messages (goal + inputs), captured by the skill ext's OnFrameEmit and
+// sealed once the agent replies.
 func TestRankedAdvertise_SubagentUsesFirstMessage(t *testing.T) {
 	store := &fakeRecallStore{dynamic: twelveCandidates()}
 	ext := NewExtension(skillpkg.NewSkillManager(store, nil), nil, "a1")
@@ -171,13 +172,24 @@ func TestRankedAdvertise_SubagentUsesFirstMessage(t *testing.T) {
 		t.Fatal("no brief yet → must fall back")
 	}
 
-	// The spawn brief arrives as the first user message.
-	ext.OnFrameEmit(ctx, worker, &protocol.UserMessage{
-		Payload: protocol.UserMessagePayload{Text: "count flights by origin airport"},
-	})
-	if h.firstMessage() != "count flights by origin airport" {
-		t.Fatalf("brief not captured; firstMessage = %q", h.firstMessage())
+	// The spawn brief arrives as several leading user messages (goal +
+	// inputs) before the agent's first reply.
+	ext.OnFrameEmit(ctx, worker, userMsg("count flights by origin"))
+	ext.OnFrameEmit(ctx, worker, userMsg("for 2024, top 10"))
+	if want := "count flights by origin\nfor 2024, top 10"; h.firstMessage() != want {
+		t.Fatalf("brief not accumulated; firstMessage = %q, want %q", h.firstMessage(), want)
 	}
+
+	// The first agent reply seals the brief — later user messages are
+	// conversation, not the brief.
+	ext.OnFrameEmit(ctx, worker, &protocol.AgentMessage{
+		Payload: protocol.AgentMessagePayload{Text: "here are the top 10", Consolidated: true, Final: true},
+	})
+	ext.OnFrameEmit(ctx, worker, userMsg("now by destination"))
+	if want := "count flights by origin\nfor 2024, top 10"; h.firstMessage() != want {
+		t.Errorf("post-seal message must not extend the brief; firstMessage = %q", h.firstMessage())
+	}
+
 	allow, ok := ext.rankedAdvertise(ctx, worker, h)
 	if !ok {
 		t.Fatal("subagent with a brief should rank on the brief")
@@ -185,6 +197,10 @@ func TestRankedAdvertise_SubagentUsesFirstMessage(t *testing.T) {
 	if len(allow) != recallTopN {
 		t.Errorf("allow size = %d, want %d", len(allow), recallTopN)
 	}
+}
+
+func userMsg(text string) *protocol.UserMessage {
+	return &protocol.UserMessage{Payload: protocol.UserMessagePayload{Text: text}}
 }
 
 // TestRankedAdvertise_Fallbacks covers the (nil,false) → full-catalogue
