@@ -1,26 +1,18 @@
-// Package recap is the live-topic primitive: a compact, embedding-sized
-// descriptor of what a root session is discussing right now, for db-2's
+// Package recap is the live-topic primitive: a short, embedding-sized
+// marker of what a root session is discussing right now, for db-2's
 // dynamic-skill recall and Phase 7's offline distiller. Root sessions
-// only; subagents carry the task/wave brief as their topic.
+// only; subagents carry their spawn goal as the topic (the skill ext
+// anchors ranking on the brief for them).
 //
-// The descriptor is built WITHOUT blocking the conversation. State holds
-// two parts:
-//
-//   - recap — the compressed topic folded up to a watermark seq, bounded
-//     to ~MaxRecapTokens so it stays embeddable. Compressed by a cheap
-//     async model call, and ONLY when it needs to be.
-//   - tail — the raw user↔assistant messages AFTER the watermark, not yet
-//     folded in.
-//
-// What a consumer reads is the EFFECTIVE topic = recap ⊕ tail, always
-// available with zero wait: the first user message is the initial topic
-// (recap empty, tail = [that message]); every later message just appends
-// to the tail. Only when recap ⊕ tail grows past a fraction of
-// MaxRecapTokens does an async summarizer fold the tail into recap and
-// advance the watermark — so most turns cost no model call, and the next
-// message never waits on a summarization. The compressed recap +
-// watermark is emitted as a CategoryOp ExtensionFrame so a restart
-// replays it (the tail is rebuilt from history past the watermark).
+// The marker is (re)formed by a cheap model call at every turn boundary,
+// SYNCHRONOUSLY, before the turn renders — so the skill advertise reads a
+// current topic. There is NO accumulating fold to store: the handle keeps
+// only a small bounded ring of recent messages plus the latest marker.
+// Each turn the model is given "what the dialogue is about" (the prior
+// marker), the recent completed exchanges, and the new user message(s),
+// and returns an updated marker. The marker is emitted as a CategoryOp
+// ExtensionFrame so a restart replays it (the ring is rebuilt from the
+// tail of history).
 package recap
 
 import (
@@ -43,57 +35,44 @@ const providerName = "recap"
 // and converted to chars through this.
 const charsPerToken = 4
 
-// Recap is the descriptor a consumer reads. Two outputs:
+// Recap is the marker a consumer reads:
 //
-//   - Topic — a 3-5 word headline naming the conversation, for display +
-//     a coarse change signal. Empty until the first fold.
-//   - Text — the substantive rolling recap. As read (effective), it is
-//     the compressed long recap ⊕ the raw un-folded tail — the rich
-//     query db-2 embeds for skill/memory recall.
-//
-// Categories are keywords from the last fold; ChangeConfidence is the
-// embedding distance between the previous and current compressed LONG
-// recap, set at fold time (0 before the first fold / when no embedder).
+//   - Topic — a 3-5 word headline naming the conversation, for display.
+//   - Text — the substantive theme (one or two sentences): the text db-2
+//     embeds as the recall anchor.
+//   - Categories — keywords for display + Phase 7's memory index.
 type Recap struct {
-	Topic            string   `json:"topic,omitempty"`
-	Text             string   `json:"text"`
-	Categories       []string `json:"categories,omitempty"`
-	ChangeConfidence float64  `json:"change_confidence,omitempty"`
+	Topic      string   `json:"topic,omitempty"`
+	Text       string   `json:"text"`
+	Categories []string `json:"categories,omitempty"`
 }
 
-// tailTurn is one un-folded dialogue message: its seq (for the watermark)
-// plus role + text.
-type tailTurn struct {
-	Seq  int64
+// message is one ring entry: a dialogue turn's role + (truncated) text.
+type message struct {
 	Role string
 	Text string
 }
 
-// sessionRecap is the per-root-session handle.
+// sessionRecap is the per-root-session handle: a bounded ring of recent
+// messages + the latest marker.
 type sessionRecap struct {
 	mu sync.Mutex
 
-	// compressed is the folded topic up to watermarkSeq (Text +
-	// Categories + ChangeConfidence). Empty until the first fold.
-	compressed Recap
-	// watermarkSeq is the highest message seq folded into compressed.
-	watermarkSeq int64
-	// tail holds raw messages with Seq > watermarkSeq, oldest-first.
-	tail      []tailTurn
-	tailChars int
+	// recent is a bounded ring of the latest dialogue messages, oldest
+	// first. Trailing "user" entries (no assistant reply yet) are the
+	// turn's NEW messages; the rest is recent context.
+	recent []message
+	// marker is the latest formed topic. Empty until the first fold.
+	marker Recap
 
-	// inflight guards against concurrent summarizers.
+	// inflight guards against concurrent folds.
 	inflight bool
 }
 
-// appendTurn records a dialogue message into the tail when it post-dates
-// the watermark (already-folded messages are dropped). Each message is
-// truncated to maxMsgChars first so one long turn can't dominate the
-// tail (and so the first user message — the initial topic — stays
-// embeddable). windowCap bounds the whole tail as a safety valve if
-// summarization is stuck: the oldest tail turns evict so the in-memory
-// window can't grow without bound.
-func (s *sessionRecap) appendTurn(seq int64, role, text string, maxMsgChars, windowCap int) {
+// appendMessage records a dialogue message into the ring, truncating it to
+// maxMsgChars (so one long turn can't dominate the marker) and evicting the
+// oldest entries beyond maxRing.
+func (s *sessionRecap) appendMessage(role, text string, maxMsgChars, maxRing int) {
 	if maxMsgChars > 0 && len(text) > maxMsgChars {
 		text = text[:maxMsgChars]
 	}
@@ -102,56 +81,70 @@ func (s *sessionRecap) appendTurn(seq int64, role, text string, maxMsgChars, win
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if seq <= s.watermarkSeq {
-		return
-	}
-	s.tail = append(s.tail, tailTurn{Seq: seq, Role: role, Text: text})
-	s.tailChars += len(text)
-	for s.tailChars > windowCap && len(s.tail) > 1 {
-		s.tailChars -= len(s.tail[0].Text)
-		s.tail = s.tail[1:]
+	s.recent = append(s.recent, message{Role: role, Text: text})
+	if maxRing > 0 && len(s.recent) > maxRing {
+		s.recent = append(s.recent[:0], s.recent[len(s.recent)-maxRing:]...)
 	}
 }
 
-// effective returns the topic for USE — the compressed recap text plus
-// the raw un-folded tail — and whether anything exists yet. Lock-safe;
-// the read path db-2's advertise uses. Zero wait: this never blocks on a
-// summarization.
-func (s *sessionRecap) effective() (Recap, bool) {
+// snapshotForFold splits the ring into the fold inputs: the prior marker,
+// the recent completed exchanges (capped to recentContext entries), and the
+// turn's NEW user messages (the trailing run of "user" entries with no
+// assistant reply yet — there may be several, e.g. a spawn's goal+inputs).
+// Returns copies, safe to use outside the lock.
+func (s *sessionRecap) snapshotForFold(recentContext int) (prior Recap, recent []message, fresh []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.compressed.Text == "" && len(s.tail) == 0 {
+	prior = s.marker
+	n := len(s.recent)
+	// Trailing user messages = the turn's new input.
+	i := n
+	for i > 0 && s.recent[i-1].Role == "user" {
+		i--
+	}
+	for _, m := range s.recent[i:n] {
+		fresh = append(fresh, m.Text)
+	}
+	// Recent context = the messages before, last recentContext entries.
+	start := max(0, i-recentContext)
+	recent = append(recent, s.recent[start:i]...)
+	return prior, recent, fresh
+}
+
+// setMarker installs a freshly formed marker.
+func (s *sessionRecap) setMarker(rec Recap) {
+	s.mu.Lock()
+	s.marker = rec
+	s.mu.Unlock()
+}
+
+// current returns the marker for USE and whether one exists. Falls back to
+// the raw recent ring when no marker has been formed yet (or the fold
+// failed) so the topic is never empty while there is dialogue — db-2 always
+// has an anchor.
+func (s *sessionRecap) current() (Recap, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.marker.Text != "" {
+		return s.marker, true
+	}
+	if len(s.recent) == 0 {
 		return Recap{}, false
 	}
 	var b strings.Builder
-	b.WriteString(s.compressed.Text)
-	for _, t := range s.tail {
+	for _, m := range s.recent {
 		if b.Len() > 0 {
 			b.WriteByte('\n')
 		}
-		b.WriteString(t.Role)
+		b.WriteString(m.Role)
 		b.WriteString(": ")
-		b.WriteString(t.Text)
+		b.WriteString(m.Text)
 	}
-	return Recap{
-		Topic:            s.compressed.Topic,
-		Text:             b.String(),
-		Categories:       s.compressed.Categories,
-		ChangeConfidence: s.compressed.ChangeConfidence,
-	}, true
+	return Recap{Text: b.String()}, true
 }
 
-// needsFold reports whether recap ⊕ tail has grown past thresholdChars
-// (the configured fraction of the recap byte budget) — the trigger to
-// fold the tail into the compressed recap.
-func (s *sessionRecap) needsFold(thresholdChars int) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.compressed.Text)+s.tailChars > thresholdChars
-}
-
-// beginRefresh marks a summarizer in-flight, returning false when one is
-// already running.
+// beginRefresh marks a fold in-flight, returning false when one is already
+// running (single-flight guard).
 func (s *sessionRecap) beginRefresh() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -168,55 +161,13 @@ func (s *sessionRecap) endRefresh() {
 	s.mu.Unlock()
 }
 
-// snapshotForFold returns the inputs the async summarizer folds: the
-// prior compressed text, a copy of the current tail, and the highest
-// tail seq (the new watermark). Empty turns slice → nothing to fold.
-func (s *sessionRecap) snapshotForFold() (prevText string, turns []tailTurn, hiSeq int64) {
+// restore seeds the latest marker from a replayed frame. The ring is
+// rebuilt separately (Recover re-adds the tail of history), and the next
+// turn boundary re-forms the marker regardless.
+func (s *sessionRecap) restore(rec Recap) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	prevText = s.compressed.Text
-	turns = append([]tailTurn(nil), s.tail...)
-	for _, t := range s.tail {
-		if t.Seq > hiSeq {
-			hiSeq = t.Seq
-		}
-	}
-	return prevText, turns, hiSeq
-}
-
-// commitFold installs the freshly summarized recap, advances the
-// watermark to hiSeq, and drops tail turns at/under hiSeq (now folded).
-// Turns that arrived DURING summarization (Seq > hiSeq) survive in the
-// tail, so nothing is lost.
-func (s *sessionRecap) commitFold(rec Recap, hiSeq int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.compressed = rec
-	if hiSeq > s.watermarkSeq {
-		s.watermarkSeq = hiSeq
-	}
-	kept := s.tail[:0]
-	chars := 0
-	for _, t := range s.tail {
-		if t.Seq > s.watermarkSeq {
-			kept = append(kept, t)
-			chars += len(t.Text)
-		}
-	}
-	s.tail = kept
-	s.tailChars = chars
-}
-
-// restore seeds the compressed recap + watermark from a replayed frame,
-// clearing the tail (Recover re-adds post-watermark messages from
-// history afterwards).
-func (s *sessionRecap) restore(rec Recap, watermark int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.compressed = rec
-	s.watermarkSeq = watermark
-	s.tail = nil
-	s.tailChars = 0
+	s.marker = rec
+	s.mu.Unlock()
 }
 
 // FromState returns the *sessionRecap handle for state, or nil when
@@ -231,14 +182,14 @@ func FromState(state extension.SessionState) *sessionRecap {
 	return h
 }
 
-// CurrentRecap is the public read accessor db-2 (and other consumers)
-// use: the EFFECTIVE topic (compressed recap ⊕ un-folded tail) for the
-// root session reachable from state, or (zero, false) for a non-root
-// session or one with no dialogue yet. Never blocks on a summarization.
+// CurrentRecap is the public read accessor db-2 (and other consumers) use:
+// the current topic marker for the root session reachable from state, or
+// (zero, false) for a non-root session or one with no dialogue yet. Never
+// blocks.
 func CurrentRecap(state extension.SessionState) (Recap, bool) {
 	h := FromState(state)
 	if h == nil {
 		return Recap{}, false
 	}
-	return h.effective()
+	return h.current()
 }

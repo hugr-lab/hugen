@@ -8,18 +8,16 @@ import (
 )
 
 // OnFrameEmit implements [extension.FrameObserver]. It appends each root
-// user↔assistant message to the un-folded tail.
+// user↔assistant message to the bounded recent-message ring.
 //
 // The append is freshness-critical and MUST stay synchronous (a fast
 // in-memory op under the recap mutex) — never offloaded to a goroutine.
-// notifyFrameObservers runs this inline within Session.emit, and
-// startTurn emits the user message BEFORE it renders the turn, so a
-// synchronous append is what guarantees the effective topic (recap ⊕
-// tail) carries the latest user message when the skill advertise reads
-// it. The (model-calling) FOLD does NOT run here: it moved to
-// [Extension.OnTurnBoundary] so the session can wait on it deterministically
-// between the user-message emit and the render. No-op for non-root
-// sessions (FromState nil).
+// notifyFrameObservers runs this inline within Session.emit, and startTurn
+// emits the user message BEFORE it renders the turn, so a synchronous
+// append is what guarantees the marker the boundary fold forms carries the
+// latest user message when the skill advertise reads it. The (model-
+// calling) FOLD does NOT run here: it runs at [Extension.OnTurnBoundary].
+// No-op for non-root sessions (FromState nil).
 //
 // Both sides are captured: a user turn is often a pointer into the
 // assistant's prior turn, so the topic lives across the pair. Only
@@ -30,39 +28,41 @@ func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState,
 	if h == nil {
 		return
 	}
-	seq := int64(frame.Seq())
 	switch f := frame.(type) {
 	case *protocol.UserMessage:
-		h.appendTurn(seq, "user", f.Payload.Text, e.maxMsgChars, e.windowCapChars)
+		// Skip system-synthetic user messages (author=agent) — e.g. the
+		// async-mission summary kick (kickAsyncSummaryTurn). Those aren't
+		// real conversation; the mission's findings reach the marker via
+		// the agent's summary reply (an AgentMessage) at the next turn.
+		if f.Author().Kind == protocol.ParticipantAgent {
+			return
+		}
+		h.appendMessage("user", f.Payload.Text, e.maxMsgChars, e.maxRing)
 	case *protocol.AgentMessage:
 		if f.Payload.Consolidated && f.Payload.Final {
-			h.appendTurn(seq, "assistant", f.Payload.Text, e.maxMsgChars, e.windowCapChars)
+			h.appendMessage("assistant", f.Payload.Text, e.maxMsgChars, e.maxRing)
 		}
 	}
 }
 
 // OnTurnBoundary implements [extension.TurnBoundaryHook]. It runs
 // SYNCHRONOUSLY at the idle→active boundary (Session.startTurn, after the
-// user message has been emitted + appended to the tail, before the turn
-// renders). When the tail has crossed the fold threshold it folds it into
-// the compressed recap RIGHT HERE — so the compressed recap, topic, and
-// change_confidence are current before the skill advertise reads them as
-// its retrieval query + cache-refresh gate, instead of lagging a turn
-// behind an async fold.
+// user message has been emitted + appended to the ring, before the turn
+// renders) and (re)forms the topic marker via the cheap model — every
+// turn. So the marker is current before the skill advertise reads it as
+// its retrieval anchor, instead of lagging behind the conversation.
 //
-// This is a deliberate trade against the slice-3 non-blocking design: the
-// turn waits on the (cheap summarizer) fold, but only on the turns where
-// the tail actually crossed the threshold (every few turns, not every
-// turn), and the fold is bounded by BuildTimeout — "completes or times
-// out", either way the turn proceeds with a usable recap (effective topic
-// = recap ⊕ tail stays valid even if the fold didn't land). No-op for
-// non-root sessions (FromState nil) and below-threshold turns.
+// The turn waits on the (cheap, small-input) summariser, bounded by
+// BuildTimeout — "completes or times out", either way the turn proceeds
+// (the raw recent ring still backs CurrentRecap if the fold didn't land).
+// No-op for non-root sessions (FromState nil) and turns with no new user
+// message (the fold short-circuits).
 func (e *Extension) OnTurnBoundary(ctx context.Context, state extension.SessionState) error {
 	h := FromState(state)
 	if h == nil {
 		return nil
 	}
-	if h.needsFold(e.foldThresholdChars) && h.beginRefresh() {
+	if h.beginRefresh() {
 		e.fold(ctx, state, h)
 	}
 	return nil

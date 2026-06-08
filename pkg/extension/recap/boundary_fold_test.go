@@ -67,29 +67,21 @@ func stubRouter(t *testing.T, m model.Model) *model.ModelRouter {
 	return r
 }
 
-// lowFoldConfig makes any non-trivial tail cross the fold threshold
-// (MaxRecapTokens=4 → ~16 chars → 0.75 → ~12-char trigger), so a single
-// user message folds. RecapTargetTokens stays normal — the response cap is
-// decoupled from the fold trigger.
-func lowFoldConfig() Config { return Config{MaxRecapTokens: 4} }
-
 // TestOnTurnBoundary_FoldsSynchronously is the core db-2 freshness
-// guarantee: when the tail has crossed the threshold, OnTurnBoundary folds
-// SYNCHRONOUSLY — by the time it returns, the compressed recap + topic are
-// already committed (so the turn that follows renders a current recap).
-// A goroutine fold would race this read.
+// guarantee: OnTurnBoundary (re)forms the marker SYNCHRONOUSLY — by the
+// time it returns, the marker is committed (so the turn that follows
+// renders a current topic). A goroutine fold would race this read. Also
+// asserts the fold does NOT run in OnFrameEmit.
 func TestOnTurnBoundary_FoldsSynchronously(t *testing.T) {
 	mdl := &stubModel{reply: `{"topic":"sales analysis","recap":"User asked to analyze quarterly sales by region.","keywords":["sales","regional"]}`}
-	ext := NewExtension(Deps{Router: stubRouter(t, mdl)}, lowFoldConfig())
+	ext := NewExtension(Deps{Router: stubRouter(t, mdl)}, Config{})
 	ctx := context.Background()
 	state := fixture.NewTestSessionState("ses-root")
 	if err := ext.InitState(ctx, state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
 
-	// A user message long enough to cross the (tiny) fold threshold.
 	u := &protocol.UserMessage{Payload: protocol.UserMessagePayload{Text: "please analyze the quarterly sales data by region"}}
-	u.SetSeq(1)
 	ext.OnFrameEmit(ctx, state, u)
 
 	// The fold must NOT have run yet — it moved out of OnFrameEmit.
@@ -110,32 +102,28 @@ func TestOnTurnBoundary_FoldsSynchronously(t *testing.T) {
 		t.Fatal("recap should exist after the fold")
 	}
 	if rec.Topic != "sales analysis" {
-		t.Errorf("compressed topic not committed synchronously; Topic = %q", rec.Topic)
+		t.Errorf("marker not committed synchronously; Topic = %q", rec.Topic)
 	}
 }
 
-// TestOnTurnBoundary_NoOpBelowThreshold: a small tail does not fold, so the
-// turn-start never blocks on the summarizer.
-func TestOnTurnBoundary_NoOpBelowThreshold(t *testing.T) {
+// TestOnTurnBoundary_NoOpWithoutNewUserMessage: with no trailing (new) user
+// message in the ring, the fold short-circuits — the turn-start never
+// blocks on the summarizer for nothing.
+func TestOnTurnBoundary_NoOpWithoutNewUserMessage(t *testing.T) {
 	mdl := &stubModel{reply: `{"topic":"x","recap":"y","keywords":[]}`}
-	ext := NewExtension(Deps{Router: stubRouter(t, mdl)}, Config{}) // default 512-tok budget
+	ext := NewExtension(Deps{Router: stubRouter(t, mdl)}, Config{})
 	ctx := context.Background()
 	state := fixture.NewTestSessionState("ses-root")
 	_ = ext.InitState(ctx, state)
 
-	u := &protocol.UserMessage{Payload: protocol.UserMessagePayload{Text: "hi"}}
-	u.SetSeq(1)
-	ext.OnFrameEmit(ctx, state, u)
+	// Only an assistant message — no new user input to (re)form a topic.
+	reply := &protocol.AgentMessage{Payload: protocol.AgentMessagePayload{Text: "prior reply", Consolidated: true, Final: true}}
+	ext.OnFrameEmit(ctx, state, reply)
 	if err := ext.OnTurnBoundary(ctx, state); err != nil {
 		t.Fatalf("OnTurnBoundary: %v", err)
 	}
 	if mdl.callCount() != 0 {
-		t.Errorf("below-threshold turn must not fold; model calls = %d", mdl.callCount())
-	}
-	// The tail still carries the message verbatim (effective topic usable).
-	rec, ok := CurrentRecap(state)
-	if !ok || rec.Topic != "" {
-		t.Errorf("below threshold: expected un-folded tail with empty topic; got %+v", rec)
+		t.Errorf("no new user message → no fold; model calls = %d", mdl.callCount())
 	}
 }
 
@@ -143,7 +131,7 @@ func TestOnTurnBoundary_NoOpBelowThreshold(t *testing.T) {
 // so the boundary hook is a no-op (no fold, no panic).
 func TestOnTurnBoundary_NonRootNoOp(t *testing.T) {
 	mdl := &stubModel{reply: `{"topic":"x","recap":"y","keywords":[]}`}
-	ext := NewExtension(Deps{Router: stubRouter(t, mdl)}, lowFoldConfig())
+	ext := NewExtension(Deps{Router: stubRouter(t, mdl)}, Config{})
 	ctx := context.Background()
 	worker := fixture.NewTestSessionState("ses-w").WithDepth(1)
 	_ = ext.InitState(ctx, worker) // no handle seeded for depth>0

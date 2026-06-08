@@ -5,85 +5,69 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/hugr-lab/query-engine/types"
-
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
 // Deps carries the agent-level collaborators the recap extension needs.
-// Router resolves the cheap summarizer model; Querier runs the
-// server-side embedding_distance (nil disables change_confidence — the
-// topic is still produced). Both may be nil in boot-test fixtures, in
-// which case the extension degrades gracefully.
+// Router resolves the cheap summarizer model; it may be nil in boot-test
+// fixtures, in which case the fold degrades gracefully (no marker formed,
+// the raw recent ring still backs CurrentRecap).
 type Deps struct {
 	Router  *model.ModelRouter
-	Querier types.Querier
 	AgentID string
 	Logger  *slog.Logger
 }
 
 // Config carries operator-tunable knobs. Zero values resolve to the
-// defaults in [NewExtension]. Sizes are configured in TOKENS (the
-// runtime's char/4 heuristic converts internally) because the right
-// values track the embedding model's input budget.
+// defaults in [NewExtension].
 type Config struct {
-	// MaxRecapTokens is the embedder-input budget for the effective
-	// topic (compressed recap ⊕ tail). The tail folds into the
-	// compressed recap before it crosses FoldThreshold of this. Default
-	// 512 — tune to the embedding model.
-	MaxRecapTokens int
-	// FoldThreshold is the fraction of MaxRecapTokens at which the tail
-	// is folded into the compressed recap. Default 0.75 — accumulate raw
-	// below it (no model call), summarize above.
-	FoldThreshold float64
 	// MaxMessageTokens truncates each dialogue message before it enters
-	// the tail, so one long turn can't dominate the topic. Default 512.
+	// the ring, so one long turn can't dominate the marker. Default 512.
 	MaxMessageTokens int
-	// RecapTargetTokens is the size of the compressed LONG recap the fold
-	// produces — and the model response cap. Decoupled from MaxRecapTokens
-	// (the fold-trigger budget) so lowering the trigger for testing can't
-	// strangle the response. Default 256 (a concise few-sentence recap).
+	// RingMessages bounds how many recent messages the ring keeps. Default
+	// 8 — enough for the new user message(s) plus a couple of prior pairs.
+	RingMessages int
+	// RecentContext bounds how many prior (already-answered) messages the
+	// fold prompt shows as context, beyond the turn's new user messages.
+	// Default 4 (≈ the last two exchanges).
+	RecentContext int
+	// RecapTargetTokens is the size of the marker the fold produces — and
+	// the model response cap. Default 256 (topic + a concise theme).
 	RecapTargetTokens int
 	// Intent selects the model.Router route for the fold call. Default
 	// [model.IntentSummarize] — explicitly cheap, fast, NON-reasoning.
 	Intent model.Intent
-	// BuildTimeout bounds a single fold (model call + distance). Default
-	// 15s.
+	// BuildTimeout bounds a single fold (the synchronous model call).
+	// Default 15s.
 	BuildTimeout time.Duration
-	// EmbedModel is the embedder name passed to embedding_distance.
-	// Default "_system_embedder".
-	EmbedModel string
 }
 
 // Extension is the agent-level recap singleton: a [FrameObserver] that
-// accumulates the root session's recent dialogue into a tail, a
-// [TurnBoundaryHook] that folds the tail into a compact topic (synchronously,
-// before the turn renders) once it grows past the threshold, a [Recovery]
-// hook that replays the last compressed recap on restart, and a
-// [StateInitializer] for the per-root-session handle.
+// accumulates the root session's recent dialogue into a bounded ring, a
+// [TurnBoundaryHook] that (re)forms the topic marker synchronously before
+// the turn renders, a [Recovery] hook that replays the last marker on
+// restart, and a [StateInitializer] for the per-root-session handle.
 type Extension struct {
 	deps Deps
 	cfg  Config
 
-	// Resolved char budgets (cfg tokens × charsPerToken).
-	maxRecapChars      int
-	foldThresholdChars int
-	maxMsgChars        int
-	windowCapChars     int
+	maxMsgChars   int // per-message truncation (cfg tokens × charsPerToken)
+	maxRing       int // ring size in messages
+	recentContext int // prior messages shown as fold context
 }
 
 // NewExtension constructs the recap extension and fills config defaults.
 func NewExtension(deps Deps, cfg Config) *Extension {
-	if cfg.MaxRecapTokens <= 0 {
-		cfg.MaxRecapTokens = 512
-	}
-	if cfg.FoldThreshold <= 0 || cfg.FoldThreshold >= 1 {
-		cfg.FoldThreshold = 0.75
-	}
 	if cfg.MaxMessageTokens <= 0 {
 		cfg.MaxMessageTokens = 512
+	}
+	if cfg.RingMessages <= 0 {
+		cfg.RingMessages = 8
+	}
+	if cfg.RecentContext <= 0 {
+		cfg.RecentContext = 4
 	}
 	if cfg.RecapTargetTokens <= 0 {
 		cfg.RecapTargetTokens = 256
@@ -94,21 +78,15 @@ func NewExtension(deps Deps, cfg Config) *Extension {
 	if cfg.BuildTimeout <= 0 {
 		cfg.BuildTimeout = 15 * time.Second
 	}
-	if cfg.EmbedModel == "" {
-		cfg.EmbedModel = "_system_embedder"
-	}
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
-	maxRecapChars := cfg.MaxRecapTokens * charsPerToken
 	return &Extension{
-		deps:               deps,
-		cfg:                cfg,
-		maxRecapChars:      maxRecapChars,
-		foldThresholdChars: int(float64(maxRecapChars) * cfg.FoldThreshold),
-		maxMsgChars:        cfg.MaxMessageTokens * charsPerToken,
-		// Safety valve only — the tail normally folds well below this.
-		windowCapChars: maxRecapChars * 8,
+		deps:          deps,
+		cfg:           cfg,
+		maxMsgChars:   cfg.MaxMessageTokens * charsPerToken,
+		maxRing:       cfg.RingMessages,
+		recentContext: cfg.RecentContext,
 	}
 }
 

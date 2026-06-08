@@ -1,17 +1,17 @@
-You maintain a rolling understanding of an ongoing conversation, in its
-own language. Given the running recap so far (if any) and the latest
-messages, return an UPDATED recap: fold the new messages into the recap,
-keeping it CONCISE — a few sentences capturing what the conversation is
-about and where it stands, not a transcript. Also give a very short 3-5
-word topic label. Do not judge whether the topic changed.
+You maintain a short topic marker for an ongoing conversation, in its own
+language. You are given what the dialogue has been about, the recent
+exchanges, and the new user message(s). Return an UPDATED marker that
+captures the CURRENT topic of the conversation — let the new message(s)
+shift the topic if they do. Keep it concise: a one or two sentence theme,
+not a transcript, plus a very short 3-5 word topic label.
 {{ if .Prior }}
-Recap so far:
-{{ .Prior }}
+Conversation so far: {{ .Prior }}
+{{ end }}{{ if .Recent }}
+Recent messages:
+{{ range .Recent }}{{ .Role }}: {{ .Text }}
+{{ end }}{{ end }}
+New messages:
+{{ range .New }}user: {{ . }}
 {{ end }}
-Latest messages (oldest first):
-{{ range .Turns }}
-{{ .Role }}: {{ .Text }}
-{{- end }}
-
 Reply with ONE JSON object and nothing else — no prose, no code fence:
-{"topic": "<3 to 5 words>", "recap": "<concise updated recap, a few sentences>", "keywords": ["<3 to 6 short tags>"]}
+{"topic": "<3 to 5 words>", "recap": "<the current theme, one or two sentences>", "keywords": ["<3 to 6 short tags>"]}

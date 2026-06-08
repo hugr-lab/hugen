@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
@@ -178,46 +179,68 @@ type SessionSkill struct {
 	loadedTokens  int
 	catalogTokens int
 
-	// db-2 recall pool cache (root sessions only). Holds the semantic
-	// candidate pool + the always-advertise pinned set for the CURRENT
-	// recap topic. The expensive embed+vector-search must not run every
-	// model iteration, so it's refreshed only when the rolling recap's
-	// topic shifts past the change-confidence gate (recallKey tracks the
-	// topic the pool was built for). Thompson ranking draws fresh from
-	// this pool on every advertise — the cache holds the POOL, never a
-	// frozen order, so rotation stays per-message. Guarded by recallMu.
-	recallMu      sync.Mutex
-	recallValid   bool
-	recallKey     string // recap.Topic the cached pool was built for
-	recallDynamic []skillpkg.RecallCandidate
-	recallPinned  []skillpkg.RecallCandidate
 	// db-2 per-turn advertise draw. TurnPreamble re-renders every model
-	// iteration; a fresh Thompson draw per render would churn the
+	// iteration; a fresh recall + Thompson draw per render would churn the
 	// catalogue (which rides past the KV-cache boundary) mid-turn and show
-	// the model a shifting menu between tool rounds. So the draw is rolled
-	// ONCE per user turn (rotation per message) and reused across the
-	// turn's iterations. drawPending is armed on each user_message (by the
-	// FrameObserver) and cleared by the first re-roll that turn.
+	// the model a shifting menu between tool rounds. So the whole draw
+	// (recall pool + Thompson selection) is rolled ONCE per user turn
+	// (rotation per message, re-pooled under the current topic) and reused
+	// across the turn's iterations. drawPending is armed on each
+	// user_message (by the FrameObserver) and cleared by the first re-roll
+	// that turn. Guarded by drawMu.
+	drawMu      sync.Mutex
 	drawPending bool
 	drawValid   bool
 	draw        map[string]struct{}
+	// firstMsg is the session's first user message — a subagent's spawn
+	// brief (the goal), used as its db-2 ranking anchor. First wins; root
+	// sessions read the recap marker and only fall back to this.
+	firstMsg string
 }
 
-// markAdvertiseRoll arms a fresh per-turn Thompson draw — called on each
+// captureFirstMessage records the session's first user message (truncated)
+// as the subagent ranking anchor. Idempotent — first wins. db-2.
+func (h *SessionSkill) captureFirstMessage(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	if len(text) > maxAnchorChars {
+		text = text[:maxAnchorChars]
+	}
+	h.drawMu.Lock()
+	if h.firstMsg == "" {
+		h.firstMsg = text
+	}
+	h.drawMu.Unlock()
+}
+
+// firstMessage returns the captured spawn brief, or "" if none yet. db-2.
+func (h *SessionSkill) firstMessage() string {
+	h.drawMu.Lock()
+	defer h.drawMu.Unlock()
+	return h.firstMsg
+}
+
+// maxAnchorChars bounds the captured brief so a large spawn task can't
+// blow the embedder input — the topic lives in the opening anyway.
+const maxAnchorChars = 2000
+
+// markAdvertiseRoll arms a fresh per-turn draw — called on each
 // user_message so the advertised catalogue rotates once per turn, not per
 // model iteration. db-2.
 func (h *SessionSkill) markAdvertiseRoll() {
-	h.recallMu.Lock()
+	h.drawMu.Lock()
 	h.drawPending = true
-	h.recallMu.Unlock()
+	h.drawMu.Unlock()
 }
 
 // cachedDraw returns the turn's cached advertise selection, or (nil, false)
 // when a fresh roll is due (a new turn armed drawPending, or none built
 // yet). db-2.
 func (h *SessionSkill) cachedDraw() (map[string]struct{}, bool) {
-	h.recallMu.Lock()
-	defer h.recallMu.Unlock()
+	h.drawMu.Lock()
+	defer h.drawMu.Unlock()
 	if h.drawPending || !h.drawValid {
 		return nil, false
 	}
@@ -227,44 +250,11 @@ func (h *SessionSkill) cachedDraw() (map[string]struct{}, bool) {
 // storeDraw caches the freshly-rolled advertise selection for the rest of
 // the turn and disarms the roll latch. db-2.
 func (h *SessionSkill) storeDraw(allow map[string]struct{}) {
-	h.recallMu.Lock()
+	h.drawMu.Lock()
 	h.draw = allow
 	h.drawValid = true
 	h.drawPending = false
-	h.recallMu.Unlock()
-}
-
-// recallState reports the topic the cached recall pool was built for and
-// whether a pool is present. The orchestrator (capabilities.go) uses it to
-// decide a refresh before drawing. db-2.
-func (h *SessionSkill) recallState() (key string, valid bool) {
-	h.recallMu.Lock()
-	defer h.recallMu.Unlock()
-	return h.recallKey, h.recallValid
-}
-
-// storeRecall installs a freshly-pulled recall pool for `key` (the recap
-// topic it was built against). db-2.
-func (h *SessionSkill) storeRecall(key string, dynamic, pinned []skillpkg.RecallCandidate) {
-	h.recallMu.Lock()
-	h.recallValid = true
-	h.recallKey = key
-	h.recallDynamic = dynamic
-	h.recallPinned = pinned
-	h.recallMu.Unlock()
-}
-
-// loadRecall returns COPIES of the cached dynamic + pinned pools (safe to
-// Thompson-rank in place) and whether a usable pool is present. db-2.
-func (h *SessionSkill) loadRecall() (dynamic, pinned []skillpkg.RecallCandidate, ok bool) {
-	h.recallMu.Lock()
-	defer h.recallMu.Unlock()
-	if !h.recallValid {
-		return nil, nil, false
-	}
-	dynamic = append([]skillpkg.RecallCandidate(nil), h.recallDynamic...)
-	pinned = append([]skillpkg.RecallCandidate(nil), h.recallPinned...)
-	return dynamic, pinned, true
+	h.drawMu.Unlock()
 }
 
 // setShownCatalog records the name→id map of skills surfaced in the most

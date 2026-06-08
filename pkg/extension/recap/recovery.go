@@ -9,25 +9,26 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
-// Recover implements [extension.Recovery]. It rebuilds the recap handle
-// of a restarted root session in two steps:
+// Recover implements [extension.Recovery]. It rebuilds the recap handle of
+// a restarted root session in two steps:
 //
-//  1. Seed the COMPRESSED recap + watermark from the LAST recap frame the
-//     session emitted (latest-wins).
-//  2. Rebuild the un-folded tail by replaying the user↔assistant messages
-//     with seq PAST that watermark — the messages that hadn't been folded
-//     when the session stopped — so the effective topic (recap ⊕ tail)
-//     resumes intact.
+//  1. Seed the latest marker from the LAST recap frame the session emitted
+//     (latest-wins) — so a consumer reading before the next turn boundary
+//     still gets the topic the session stopped on.
+//  2. Rebuild the recent-message ring by replaying the user↔assistant
+//     messages in order (the ring self-bounds to the most recent ones), so
+//     the next boundary fold has context. The marker is re-formed at that
+//     boundary regardless.
 //
-// Best-effort + nil-safe: a non-root session (no handle) is a no-op; a
-// row that doesn't decode is skipped.
+// Best-effort + nil-safe: a non-root session (no handle) is a no-op; a row
+// that doesn't decode is skipped.
 func (e *Extension) Recover(_ context.Context, state extension.SessionState, events []store.EventRow) error {
 	h := FromState(state)
 	if h == nil {
 		return nil
 	}
 
-	// Step 1 — last compressed recap + watermark.
+	// Step 1 — last marker.
 	var last *framePayload
 	for _, r := range events {
 		if protocol.Kind(r.EventType) != protocol.KindExtensionFrame || r.Metadata == nil {
@@ -53,28 +54,21 @@ func (e *Extension) Recover(_ context.Context, state extension.SessionState, eve
 			last = &cp
 		}
 	}
-	var watermark int64
 	if last != nil {
 		h.restore(Recap{
-			Topic:            last.Topic,
-			Text:             last.Text,
-			Categories:       last.Categories,
-			ChangeConfidence: last.ChangeConfidence,
-		}, last.WatermarkSeq)
-		watermark = last.WatermarkSeq
+			Topic:      last.Topic,
+			Text:       last.Text,
+			Categories: last.Categories,
+		})
 	}
 
-	// Step 2 — rebuild the tail from messages past the watermark.
+	// Step 2 — rebuild the recent-message ring (self-bounds to the tail).
 	for _, r := range events {
-		seq := int64(r.Seq)
-		if seq <= watermark {
-			continue
-		}
 		switch protocol.Kind(r.EventType) {
 		case protocol.KindUserMessage:
-			h.appendTurn(seq, "user", r.Content, e.maxMsgChars, e.windowCapChars)
+			h.appendMessage("user", r.Content, e.maxMsgChars, e.maxRing)
 		case protocol.KindAgentMessage:
-			h.appendTurn(seq, "assistant", r.Content, e.maxMsgChars, e.windowCapChars)
+			h.appendMessage("assistant", r.Content, e.maxMsgChars, e.maxRing)
 		}
 	}
 	return nil

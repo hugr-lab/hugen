@@ -90,29 +90,20 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		// its state during InitState, so the later slot is free.
 		notepadext.NewExtension(core.Store, core.Agent.ID(), notepadext.Config{}),
 		// Recap (db-2 prerequisite): a ROOT-only extension that distils
-		// the recent user↔assistant dialogue into a live {text, topic,
-		// categories} signal for db-2's dynamic-skill recall, and replays
-		// its last recap on restart (CategoryOp frame). The tail append is
-		// a synchronous FrameObserver; the fold (summariser model call)
-		// runs SYNCHRONOUSLY at the turn boundary (TurnBoundaryHook), so
-		// the topic + change_confidence are current before the skill
-		// advertise reads them — at the cost of waiting on the fold
-		// (bounded by BuildTimeout) on the turns where the tail crossed
-		// the threshold. Querier is local-preferred (embedding_distance
-		// for change_confidence; nil-safe when no embedder).
+		// the recent user↔assistant dialogue into a short {topic, text,
+		// categories} marker for db-2's dynamic-skill recall (and Phase 7's
+		// memory index), and replays its last marker on restart (CategoryOp
+		// frame). A synchronous FrameObserver keeps a small ring of recent
+		// messages; a TurnBoundaryHook (re)forms the marker via the cheap
+		// summariser model SYNCHRONOUSLY before the turn renders, so the
+		// topic is current before the skill advertise reads it — at the cost
+		// of a small per-turn model call (bounded by BuildTimeout). Config
+		// knobs take their defaults; tune via config later if needed.
 		recapext.NewExtension(recapext.Deps{
 			Router:  core.Models,
-			Querier: pickQuerier(core),
 			AgentID: core.Agent.ID(),
 			Logger:  core.Logger,
-		}, recapext.Config{
-			// EmbedModel is the operator-configured embedder (embedding.model)
-			// — same one vector search uses — so embedding_distance resolves
-			// the right server-side model for change_confidence. The size
-			// knobs (MaxRecapTokens / FoldThreshold / RecapTargetTokens) take
-			// their defaults; tune via config later if needed.
-			EmbedModel: core.Config.Embedding().EmbeddingConfig().Model,
-		}),
+		}, recapext.Config{}),
 		// Mission ext owns the entire mission-PDCA dispatch
 		// surface — MissionDispatcher (validates spawn_mission's
 		// `skill` arg), MissionAutoRunner (drives the executor

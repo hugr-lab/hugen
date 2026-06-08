@@ -6,12 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/hugr-lab/query-engine/types"
-
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/store/queries"
 )
 
 // OpSet is the ExtensionFrame op stamped on every folded recap. Recover
@@ -25,22 +22,20 @@ const OpSet = "set"
 const recapResponseOverheadTokens = 128
 
 // framePayload is the JSON shape persisted on a recap CategoryOp frame:
-// the compressed recap fields plus the watermark seq so a restart can
-// rebuild the tail from history past it.
+// the latest marker, replayed on restart.
 type framePayload struct {
-	Topic            string   `json:"topic,omitempty"`
-	Text             string   `json:"text"`
-	Categories       []string `json:"categories,omitempty"`
-	ChangeConfidence float64  `json:"change_confidence,omitempty"`
-	WatermarkSeq     int64    `json:"watermark_seq"`
+	Topic      string   `json:"topic,omitempty"`
+	Text       string   `json:"text"`
+	Categories []string `json:"categories,omitempty"`
 }
 
 // foldView is the typed payload assets/prompts/recap/topic.tmpl renders
-// against: the prior compressed topic (may be empty) + the un-folded
-// tail messages.
+// against: the prior marker (may be empty), the recent completed exchanges,
+// and the turn's NEW user messages (possibly several).
 type foldView struct {
-	Prior string
-	Turns []foldTurnView
+	Prior  string
+	Recent []foldTurnView
+	New    []string
 }
 
 type foldTurnView struct {
@@ -48,33 +43,32 @@ type foldTurnView struct {
 	Text string
 }
 
-// fold is the summarizer body. Called synchronously (at most one at a
-// time, guarded by beginRefresh) from [Extension.OnTurnBoundary] when the
-// tail crosses the fold threshold. It snapshots the prior compressed topic
-// + tail, asks the cheap model for a 3-5 word updated topic, derives
-// change_confidence from the previous compressed topic, commits the fold
-// (advancing the watermark, dropping folded tail turns) and emits a
-// CategoryOp frame for restart-replay.
+// fold (re)forms the marker. Called synchronously (at most one at a time,
+// guarded by beginRefresh) from [Extension.OnTurnBoundary] at every turn
+// boundary. It gives the cheap model the prior marker ("what the dialogue
+// is about"), the recent completed exchanges, and the turn's new user
+// message(s), and stores the updated marker + emits a CategoryOp frame for
+// restart-replay.
 //
-// Best-effort + timeout-bounded: a render / model / parse failure logs
-// warn and leaves the previous recap + the (still-growing) tail in place
-// — the effective topic stays usable from recap ⊕ tail regardless. The
-// passed-in ctx (the turn's context) is bounded by BuildTimeout so a slow
-// or hung summarizer can't stall the turn-start past that budget.
+// Best-effort + timeout-bounded: a render / model / parse failure logs warn
+// and leaves the previous marker in place (the raw recent ring still backs
+// CurrentRecap, so the topic is never empty). The passed-in ctx (the turn's
+// context) is bounded by BuildTimeout so a slow or hung summarizer can't
+// stall the turn-start past that budget.
 func (e *Extension) fold(ctx context.Context, state extension.SessionState, h *sessionRecap) {
 	defer h.endRefresh()
 
-	prevText, turns, hiSeq := h.snapshotForFold()
-	if len(turns) == 0 {
-		return
+	prior, recent, fresh := h.snapshotForFold(e.recentContext)
+	if len(fresh) == 0 {
+		return // no new user message this turn — nothing to (re)form
 	}
 	if state.Prompts() == nil || e.deps.Router == nil {
 		return // boot-test fixture — nothing to fold
 	}
 
-	view := foldView{Prior: prevText, Turns: make([]foldTurnView, 0, len(turns))}
-	for _, t := range turns {
-		view.Turns = append(view.Turns, foldTurnView{Role: t.Role, Text: t.Text})
+	view := foldView{Prior: prior.Text, New: fresh}
+	for _, m := range recent {
+		view.Recent = append(view.Recent, foldTurnView{Role: m.Role, Text: m.Text})
 	}
 	body, err := state.Prompts().Render("recap/topic", view)
 	if err != nil {
@@ -95,33 +89,19 @@ func (e *Extension) fold(ctx context.Context, state extension.SessionState, h *s
 		e.deps.Logger.Warn("recap: model call failed", "err", err)
 		return
 	}
-	topic, recapLong, categories, err := parseRecapResponse(raw)
+	topic, theme, categories, err := parseRecapResponse(raw)
 	if err != nil {
 		e.deps.Logger.Warn("recap: parse response failed", "err", err, "raw", truncate(raw, 200))
 		return
 	}
 
-	rec := Recap{Topic: topic, Text: recapLong, Categories: categories}
-	// change_confidence = embedding distance(prev LONG recap, new LONG
-	// recap) — the substantive content drift, not the coarse topic label.
-	// Best-effort: no embedder / query failure leaves it 0.
-	if prevText != "" && e.deps.Querier != nil {
-		if d, derr := embeddingDistance(ctx, e.deps.Querier, e.cfg.EmbedModel, prevText, recapLong); derr == nil {
-			rec.ChangeConfidence = d
-		} else {
-			e.deps.Logger.Debug("recap: embedding_distance unavailable", "err", derr)
-		}
-	}
-
-	// Commit the fold (advance watermark, drop folded tail) and persist.
-	h.commitFold(rec, hiSeq)
+	rec := Recap{Topic: topic, Text: theme, Categories: categories}
+	h.setMarker(rec)
 
 	data, err := json.Marshal(framePayload{
-		Topic:            rec.Topic,
-		Text:             rec.Text,
-		Categories:       rec.Categories,
-		ChangeConfidence: rec.ChangeConfidence,
-		WatermarkSeq:     hiSeq,
+		Topic:      rec.Topic,
+		Text:       rec.Text,
+		Categories: rec.Categories,
 	})
 	if err != nil {
 		e.deps.Logger.Warn("recap: marshal frame failed", "err", err)
@@ -175,25 +155,6 @@ func parseRecapResponse(raw string) (topic, recap string, categories []string, e
 		}
 	}
 	return topic, recap, categories, nil
-}
-
-// embeddingDistance calls the server-side Hugr function that embeds both
-// phrases with `model` and returns their cosine distance — same embedder
-// as vector search, no client-side vectors.
-func embeddingDistance(ctx context.Context, q types.Querier, embedModel, a, b string) (float64, error) {
-	dist, err := queries.RunQuery[float64](ctx, q,
-		`query ($model: String!, $t1: String!, $t2: String!) {
-			function { core { models {
-				embedding_distance(model: $model, text1: $t1, text2: $t2, distance: Cosine)
-			}}}
-		}`,
-		map[string]any{"model": embedModel, "t1": a, "t2": b},
-		"function.core.models.embedding_distance",
-	)
-	if err != nil {
-		return 0, err
-	}
-	return dist, nil
 }
 
 // streamModelText drives a single-turn pure-text model call: one

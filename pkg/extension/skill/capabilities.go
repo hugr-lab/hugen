@@ -61,10 +61,15 @@ var (
 // impression for the turn (db-2). Cheap + non-blocking — an in-memory
 // flag only; the actual log write happens in TurnPreamble.
 func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState, frame protocol.Frame) {
-	if _, ok := frame.(*protocol.UserMessage); !ok {
+	um, ok := frame.(*protocol.UserMessage)
+	if !ok {
 		return
 	}
 	if h := FromState(state); h != nil {
+		// db-2 — capture the first user message as the subagent ranking
+		// anchor (its spawn brief / goal). First wins; root sessions read
+		// the recap marker instead, so this is just their fallback.
+		h.captureFirstMessage(um.Payload.Text)
 		h.markShownPending()
 		// db-2 — a new turn re-rolls the Thompson advertise draw (rotation
 		// per message); within the turn the selection is reused so the
@@ -338,81 +343,68 @@ const (
 	// advertised catalogue each turn — the bounded, rotating menu. Pinned
 	// skills are advertised on top of this, always.
 	recallTopN = 7
-	// recallRefreshConfidence gates re-running the (expensive) recall
-	// query: the cached pool is reused until the rolling recap's topic
-	// shifts by at least this embedding distance. Below it the dialogue is
-	// "the same topic" and the cached candidate pool still fits.
-	recallRefreshConfidence = 0.35
 )
 
-// recallShouldRefresh decides whether the cached recall pool must be
-// rebuilt for the current recap. Refresh when:
-//   - never built (!valid), OR
-//   - the topic changed AND either the change cleared the confidence gate,
-//     OR the cache was built pre-fold (cachedKey==""): the pre-fold pool
-//     came from the raw tail; the first compressed recap is a cleaner
-//     query and confidence can't be measured against a non-existent
-//     previous recap, so force one refresh at the first fold.
+// anchorForRanking returns the text db-2 feeds the semantic skill filter
+// for the calling session — the universal "what is this session about"
+// anchor:
 //
-// Same topic → always reuse (the dialogue is still on it; the
-// embed+search cost was already paid).
-func recallShouldRefresh(valid bool, cachedKey, topic string, confidence float64) bool {
-	if !valid {
-		return true
+//   - root → the rolling recap marker (recap ext, re-formed each turn);
+//   - subagent → its spawn brief (the first user message — the goal), which
+//     the skill ext captured on OnFrameEmit. Subagents do focused work, so
+//     the brief IS the fixed topic; no recap machinery runs for them.
+//
+// Returns ("", false) when neither is available (no dialogue / brief yet)
+// — the caller falls back to the full List catalogue.
+func anchorForRanking(state extension.SessionState, h *SessionSkill) (string, bool) {
+	if rec, ok := recap.CurrentRecap(state); ok {
+		if t := strings.TrimSpace(rec.Text); t != "" {
+			return t, true
+		}
 	}
-	if topic == cachedKey {
-		return false
+	if brief := h.firstMessage(); brief != "" {
+		return brief, true
 	}
-	return confidence >= recallRefreshConfidence || cachedKey == ""
+	return "", false
 }
 
-// rankedAdvertise computes the db-2 usage-driven catalogue scope for a
-// ROOT session: a Thompson-sampled top-N of the topic-relevant skill pool,
-// unioned with the always-advertise pinned set. Returns the allow-map
-// renderCatalogueScoped renders against (it surfaces loaded ∪ allow) and
-// ok=true. Returns (nil, false) — caller falls back to the full List
-// catalogue — when the session is not root, no recap/topic exists yet, no
-// embedder is wired, or the pool came back empty.
+// rankedAdvertise computes the db-2 usage-driven catalogue scope: a
+// Thompson-sampled top-N of the topic-relevant skill pool, unioned with the
+// always-advertise pinned set. Returns the allow-map renderCatalogueScoped
+// renders against (it surfaces loaded ∪ allow) and ok=true. Returns
+// (nil, false) — caller falls back to the full List catalogue — when no
+// anchor exists yet, no embedder is wired, or the pool came back empty.
 //
-// The recall query is cached on the session handle and refreshed only on a
-// material topic shift; the Thompson draw is fresh per call, so which
-// relevant skills make the bounded menu rotates message to message while
-// the embed+search cost is paid once per topic.
+// The recall runs ONCE per user turn (re-pooling under the current topic,
+// so the menu tracks pivots) and the whole draw is cached across the turn's
+// model iterations via the per-turn draw cache, so the catalogue stays
+// byte-stable past the KV-cache boundary within the turn and rotates between
+// turns.
 func (e *Extension) rankedAdvertise(ctx context.Context, state extension.SessionState, h *SessionSkill) (map[string]struct{}, bool) {
-	if h == nil || h.manager == nil || h.tier != skillpkg.TierRoot {
+	if h == nil || h.manager == nil {
 		return nil, false
 	}
-	// Within-turn fast path: reuse the turn's draw across model iterations
-	// so the catalogue stays byte-stable past the KV-cache boundary. A new
-	// user_message arms a re-roll (rotation per message).
+	// Within-turn fast path: reuse the turn's draw across model iterations.
+	// A new user_message arms a re-roll (re-pool + re-Thompson).
 	if allow, ok := h.cachedDraw(); ok {
 		return allow, true
 	}
-	rec, ok := recap.CurrentRecap(state)
-	if !ok || strings.TrimSpace(rec.Text) == "" {
+	anchor, ok := anchorForRanking(state, h)
+	if !ok {
 		return nil, false
 	}
-	// Refresh the cached pool only when never built, or when the topic
-	// shifted past the confidence gate.
-	key, valid := h.recallState()
-	if recallShouldRefresh(valid, key, rec.Topic, rec.ChangeConfidence) {
-		dyn, pin, err := h.manager.RecallRanked(ctx, rec.Text, recallSemanticLimit)
-		if err != nil {
-			// ErrNoEmbedder or a transient query error — fall back to the
-			// full catalogue. Don't cache, so a transient failure retries
-			// next turn rather than sticking on an empty pool.
-			return nil, false
-		}
-		h.storeRecall(rec.Topic, dyn, pin)
+	dyn, pin, err := h.manager.RecallRanked(ctx, anchor, recallSemanticLimit)
+	if err != nil {
+		// ErrNoEmbedder or a transient query error — fall back to the full
+		// catalogue (and retry next turn).
+		return nil, false
 	}
-	dyn, pin, ok := h.loadRecall()
-	if !ok || (len(dyn) == 0 && len(pin) == 0) {
+	if len(dyn) == 0 && len(pin) == 0 {
 		return nil, false
 	}
 	// One fresh Thompson draw per turn — the rotation. An auto-seeded
 	// rand/v2 source gives genuine per-message variation; the bandit's
-	// exploration is the variance across draws. Cached via storeDraw so the
-	// rest of the turn's iterations reuse this exact selection.
+	// exploration is the variance across draws.
 	skillpkg.ThompsonRank(dyn, rand.NewPCG(rand.Uint64(), rand.Uint64()))
 	allow := make(map[string]struct{}, recallTopN+len(pin))
 	for i, c := range dyn {

@@ -11,75 +11,64 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
-func TestAppendTurn_TruncateAndWatermarkAndEvict(t *testing.T) {
+func TestAppendMessage_TruncateAndEvict(t *testing.T) {
 	h := &sessionRecap{}
 	// Per-message truncation to maxMsgChars.
-	h.appendTurn(1, "user", "abcdefghij", 4, 1000) // → "abcd"
-	if got := h.tail[0].Text; got != "abcd" {
+	h.appendMessage("user", "abcdefghij", 4, 8) // → "abcd"
+	if got := h.recent[0].Text; got != "abcd" {
 		t.Errorf("message not truncated: got %q, want abcd", got)
 	}
-	// Already-folded seq (≤ watermark) is ignored.
-	h.watermarkSeq = 5
-	h.appendTurn(3, "user", "stale", 100, 1000)
-	if len(h.tail) != 1 {
-		t.Errorf("message at/under watermark must be dropped; tail=%d", len(h.tail))
-	}
-	// Window cap evicts oldest.
+	// Ring eviction: keep only the last maxRing.
 	h2 := &sessionRecap{}
-	h2.appendTurn(1, "user", "oldest", 100, 12)
-	h2.appendTurn(2, "user", "middle", 100, 12)
-	h2.appendTurn(3, "user", "newest", 100, 12)
-	for _, turn := range h2.tail {
-		if turn.Text == "oldest" {
-			t.Errorf("oldest should evict under window cap; tail=%+v", h2.tail)
-		}
+	for _, m := range []string{"m1", "m2", "m3", "m4"} {
+		h2.appendMessage("user", m, 100, 2)
+	}
+	if len(h2.recent) != 2 || h2.recent[0].Text != "m3" || h2.recent[1].Text != "m4" {
+		t.Errorf("ring should keep the last 2; got %+v", h2.recent)
 	}
 }
 
-func TestEffective_RecapPlusTail(t *testing.T) {
+func TestCurrent_MarkerOrRawFallback(t *testing.T) {
 	h := &sessionRecap{}
-	if _, ok := h.effective(); ok {
-		t.Fatal("effective should be absent before any dialogue")
+	if _, ok := h.current(); ok {
+		t.Fatal("current should be absent before any dialogue")
 	}
-	h.appendTurn(1, "user", "count roads by region", 4096, 16384)
-	eff, ok := h.effective()
-	if !ok || !strings.Contains(eff.Text, "count roads by region") {
-		t.Fatalf("effective should carry the first message; got %+v", eff)
+	// No marker yet → raw ring fallback (so db-2 always has an anchor).
+	h.appendMessage("user", "count roads by region", 4096, 8)
+	cur, ok := h.current()
+	if !ok || !strings.Contains(cur.Text, "count roads by region") {
+		t.Fatalf("fallback should carry the raw ring; got %+v", cur)
 	}
-	// Fold turns ≤ seq 1 into a compressed recap (long Text + short
-	// Topic); seq 2 stays in the tail.
-	h.appendTurn(2, "user", "only EMEA", 4096, 16384)
-	h.commitFold(Recap{Topic: "roads by region", Text: "User wants road counts and lengths per region.", Categories: []string{"roads"}}, 1)
-	if h.watermarkSeq != 1 {
-		t.Errorf("watermark = %d, want 1", h.watermarkSeq)
+	if cur.Topic != "" {
+		t.Errorf("raw fallback has no topic label; got %q", cur.Topic)
 	}
-	eff, _ = h.effective()
-	if eff.Topic != "roads by region" {
-		t.Errorf("effective Topic = %q, want 'roads by region'", eff.Topic)
-	}
-	if !strings.Contains(eff.Text, "road counts and lengths") {
-		t.Errorf("effective Text should carry the compressed long recap; got %q", eff.Text)
-	}
-	if !strings.Contains(eff.Text, "only EMEA") {
-		t.Errorf("effective Text should carry the un-folded tail; got %q", eff.Text)
-	}
-	if strings.Contains(eff.Text, "count roads by region") {
-		t.Errorf("folded message should be gone from the tail; got %q", eff.Text)
-	}
-	if !reflect.DeepEqual(eff.Categories, []string{"roads"}) {
-		t.Errorf("categories = %v, want [roads]", eff.Categories)
+	// Marker set → it supersedes the raw ring.
+	h.setMarker(Recap{Topic: "roads by region", Text: "User wants road counts per region.", Categories: []string{"roads"}})
+	cur, _ = h.current()
+	if cur.Topic != "roads by region" || !strings.Contains(cur.Text, "road counts per region") {
+		t.Errorf("marker should supersede the ring; got %+v", cur)
 	}
 }
 
-func TestNeedsFold(t *testing.T) {
+func TestSnapshotForFold_SplitsRecentAndNew(t *testing.T) {
 	h := &sessionRecap{}
-	h.appendTurn(1, "user", strings.Repeat("x", 50), 4096, 16384)
-	if h.needsFold(100) {
-		t.Error("50 chars should be under a 100-char threshold")
+	h.setMarker(Recap{Text: "prior theme"})
+	// q1/a1 = a completed exchange; q2, q3 = trailing new user messages
+	// (e.g. a spawn's goal+inputs, or a multi-message turn).
+	h.appendMessage("user", "q1", 100, 8)
+	h.appendMessage("assistant", "a1", 100, 8)
+	h.appendMessage("user", "q2", 100, 8)
+	h.appendMessage("user", "q3", 100, 8)
+
+	prior, recent, fresh := h.snapshotForFold(4)
+	if prior.Text != "prior theme" {
+		t.Errorf("prior = %q, want 'prior theme'", prior.Text)
 	}
-	h.appendTurn(2, "user", strings.Repeat("y", 60), 4096, 16384)
-	if !h.needsFold(100) {
-		t.Error("110 chars should cross a 100-char threshold")
+	if !reflect.DeepEqual(fresh, []string{"q2", "q3"}) {
+		t.Errorf("new = %v, want [q2 q3] (trailing user messages)", fresh)
+	}
+	if len(recent) != 2 || recent[0].Text != "q1" || recent[1].Text != "a1" {
+		t.Errorf("recent context = %+v, want [q1 a1]", recent)
 	}
 }
 
@@ -139,7 +128,7 @@ func TestParseRecapResponse(t *testing.T) {
 	}
 }
 
-func TestRecover_ReplaysCompressedAndRebuildsTail(t *testing.T) {
+func TestRecover_ReplaysMarkerAndRebuildsRing(t *testing.T) {
 	ext := NewExtension(Deps{}, Config{})
 	state := fixture.NewTestSessionState("ses-root") // depth 0 → root
 	if err := ext.InitState(context.Background(), state); err != nil {
@@ -147,33 +136,27 @@ func TestRecover_ReplaysCompressedAndRebuildsTail(t *testing.T) {
 	}
 
 	rows := []store.EventRow{
-		recapFrameRow("label1", "topic1 long recap", []any{"a"}, 2), // older recap
-		recapFrameRow("label2", "topic2 long recap", []any{"b"}, 4), // latest → wins, watermark 4
-		msgRow(3, protocol.KindUserMessage, "folded — under watermark"),    // seq ≤ 4 → skipped on rebuild
-		msgRow(5, protocol.KindUserMessage, "new question"),               // seq > 4 → tail
-		msgRow(6, protocol.KindAgentMessage, "new answer"),                // seq > 4 → tail
+		recapFrameRow("label1", "marker one"), // older marker
+		recapFrameRow("label2", "marker two"), // latest → wins
+		msgRow(5, protocol.KindUserMessage, "recent question"),
+		msgRow(6, protocol.KindAgentMessage, "recent answer"),
 	}
 	if err := ext.Recover(context.Background(), state, rows); err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
-	eff, ok := CurrentRecap(state)
+	// CurrentRecap returns the latest replayed marker.
+	cur, ok := CurrentRecap(state)
 	if !ok {
-		t.Fatal("expected a recovered recap")
+		t.Fatal("expected a recovered marker")
 	}
-	if eff.Topic != "label2" {
-		t.Errorf("recovered Topic = %q, want 'label2' (latest wins)", eff.Topic)
+	if cur.Topic != "label2" || !strings.Contains(cur.Text, "marker two") {
+		t.Errorf("recovered marker = %+v, want label2 / 'marker two' (latest wins)", cur)
 	}
-	if !strings.Contains(eff.Text, "topic2 long recap") {
-		t.Errorf("compressed long recap = %q, want to contain 'topic2 long recap'", eff.Text)
-	}
-	if !strings.Contains(eff.Text, "new question") || !strings.Contains(eff.Text, "new answer") {
-		t.Errorf("tail past watermark not rebuilt; got %q", eff.Text)
-	}
-	if strings.Contains(eff.Text, "folded") {
-		t.Errorf("message under the watermark must NOT be in the rebuilt tail; got %q", eff.Text)
-	}
-	if !reflect.DeepEqual(eff.Categories, []string{"b"}) {
-		t.Errorf("categories = %v, want [b]", eff.Categories)
+	// The ring was rebuilt from the message rows (fold context for the
+	// next boundary).
+	h := FromState(state)
+	if len(h.recent) != 2 || h.recent[0].Text != "recent question" || h.recent[1].Text != "recent answer" {
+		t.Errorf("ring not rebuilt from history; got %+v", h.recent)
 	}
 }
 
@@ -185,7 +168,7 @@ func TestRecover_NoFramesLeavesEmpty(t *testing.T) {
 		t.Fatalf("Recover: %v", err)
 	}
 	if _, ok := CurrentRecap(state); ok {
-		t.Error("no frames → no recap")
+		t.Error("no frames + no messages → no recap")
 	}
 }
 
@@ -206,44 +189,46 @@ func TestInitState_RootOnly(t *testing.T) {
 	}
 }
 
-func TestOnFrameEmit_AccumulatesTail(t *testing.T) {
-	ext := NewExtension(Deps{}, Config{}) // Router nil; small dialogue → no fold spawned
+func TestOnFrameEmit_AppendsRing(t *testing.T) {
+	ext := NewExtension(Deps{}, Config{}) // Router nil → no fold; ring only
 	ctx := context.Background()
 	state := fixture.NewTestSessionState("ses-root")
 	_ = ext.InitState(ctx, state)
 
 	// Streaming chunk ignored; consolidated final recorded; user recorded.
-	// Real frames carry seq ≥ 1 (the store allocates from 1); set them so
-	// the watermark (0) doesn't drop them.
 	stream := &protocol.AgentMessage{Payload: protocol.AgentMessagePayload{Text: "streaming", Consolidated: false}}
-	stream.SetSeq(1)
 	reply := &protocol.AgentMessage{Payload: protocol.AgentMessagePayload{Text: "prior reply", Consolidated: true, Final: true}}
-	reply.SetSeq(2)
 	user := &protocol.UserMessage{Payload: protocol.UserMessagePayload{Text: "do it"}}
-	user.SetSeq(3)
+	// A system-synthetic user message (author=agent) — e.g. the async
+	// summary kick — must be skipped.
+	synth := protocol.NewUserMessage("ses-root", protocol.ParticipantInfo{ID: "ag", Kind: protocol.ParticipantAgent}, "summarize the mission")
 	ext.OnFrameEmit(ctx, state, stream)
 	ext.OnFrameEmit(ctx, state, reply)
 	ext.OnFrameEmit(ctx, state, user)
+	ext.OnFrameEmit(ctx, state, synth)
 
-	eff, ok := CurrentRecap(state)
+	cur, ok := CurrentRecap(state)
 	if !ok {
-		t.Fatal("effective topic should exist after dialogue")
+		t.Fatal("topic should exist after dialogue")
 	}
-	if !strings.Contains(eff.Text, "prior reply") || !strings.Contains(eff.Text, "do it") {
-		t.Errorf("effective should carry assistant + user turns; got %q", eff.Text)
+	if !strings.Contains(cur.Text, "prior reply") || !strings.Contains(cur.Text, "do it") {
+		t.Errorf("ring should carry assistant + user turns; got %q", cur.Text)
 	}
-	if strings.Contains(eff.Text, "streaming") {
-		t.Errorf("streaming chunk must be ignored; got %q", eff.Text)
+	if strings.Contains(cur.Text, "streaming") {
+		t.Errorf("streaming chunk must be ignored; got %q", cur.Text)
+	}
+	if strings.Contains(cur.Text, "summarize the mission") {
+		t.Errorf("agent-authored synthetic user message must be skipped; got %q", cur.Text)
 	}
 }
 
-func recapFrameRow(topic, text string, cats []any, watermark int) store.EventRow {
+func recapFrameRow(topic, text string) store.EventRow {
 	return store.EventRow{
 		EventType: string(protocol.KindExtensionFrame),
 		Metadata: map[string]any{
 			"extension": providerName,
 			"op":        OpSet,
-			"data":      map[string]any{"topic": topic, "text": text, "categories": cats, "watermark_seq": watermark},
+			"data":      map[string]any{"topic": topic, "text": text},
 		},
 	}
 }
