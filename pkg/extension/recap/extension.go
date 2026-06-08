@@ -58,19 +58,20 @@ type Config struct {
 }
 
 // Extension is the agent-level recap singleton: a [FrameObserver] that
-// accumulates the root session's recent dialogue into a tail and folds
-// it (async) into a compact topic only when it grows past the threshold;
-// a [Recovery] hook that replays the last compressed recap on restart;
-// and a [StateInitializer] for the per-root-session handle.
+// accumulates the root session's recent dialogue into a tail, a
+// [TurnBoundaryHook] that folds the tail into a compact topic (synchronously,
+// before the turn renders) once it grows past the threshold, a [Recovery]
+// hook that replays the last compressed recap on restart, and a
+// [StateInitializer] for the per-root-session handle.
 type Extension struct {
 	deps Deps
 	cfg  Config
 
 	// Resolved char budgets (cfg tokens × charsPerToken).
-	maxRecapChars     int
+	maxRecapChars      int
 	foldThresholdChars int
-	maxMsgChars       int
-	windowCapChars    int
+	maxMsgChars        int
+	windowCapChars     int
 }
 
 // NewExtension constructs the recap extension and fills config defaults.
@@ -116,6 +117,7 @@ var (
 	_ extension.Extension        = (*Extension)(nil)
 	_ extension.StateInitializer = (*Extension)(nil)
 	_ extension.FrameObserver    = (*Extension)(nil)
+	_ extension.TurnBoundaryHook = (*Extension)(nil)
 	_ extension.Recovery         = (*Extension)(nil)
 )
 

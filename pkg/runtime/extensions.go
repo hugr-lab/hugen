@@ -89,13 +89,17 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		// longer advertises into the system prefix, and nothing reads
 		// its state during InitState, so the later slot is free.
 		notepadext.NewExtension(core.Store, core.Agent.ID(), notepadext.Config{}),
-		// Recap (db-2 prerequisite): a ROOT-only FrameObserver that
-		// distils the recent user↔assistant dialogue into a live
-		// {text, categories} topic once per user turn — async, off the
-		// turn's critical path — for db-2's dynamic-skill recall, and
-		// replays its last recap on restart (CategoryOp frame). Querier
-		// is local-preferred (embedding_distance for change_confidence;
-		// nil-safe when no embedder).
+		// Recap (db-2 prerequisite): a ROOT-only extension that distils
+		// the recent user↔assistant dialogue into a live {text, topic,
+		// categories} signal for db-2's dynamic-skill recall, and replays
+		// its last recap on restart (CategoryOp frame). The tail append is
+		// a synchronous FrameObserver; the fold (summariser model call)
+		// runs SYNCHRONOUSLY at the turn boundary (TurnBoundaryHook), so
+		// the topic + change_confidence are current before the skill
+		// advertise reads them — at the cost of waiting on the fold
+		// (bounded by BuildTimeout) on the turns where the tail crossed
+		// the threshold. Querier is local-preferred (embedding_distance
+		// for change_confidence; nil-safe when no embedder).
 		recapext.NewExtension(recapext.Deps{
 			Router:  core.Models,
 			Querier: pickQuerier(core),

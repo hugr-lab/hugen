@@ -48,20 +48,20 @@ type foldTurnView struct {
 	Text string
 }
 
-// fold is the async summarizer body. Spawned (at most one at a time)
-// from the FrameObserver when the tail crosses the fold threshold; runs
-// on its own goroutine so the conversation never blocks. It snapshots
-// the prior compressed topic + tail, asks the cheap model for a 3-5 word
-// updated topic, derives change_confidence from the previous compressed
-// topic, commits the fold (advancing the watermark, dropping folded tail
-// turns) and emits a CategoryOp frame for restart-replay.
+// fold is the summarizer body. Called synchronously (at most one at a
+// time, guarded by beginRefresh) from [Extension.OnTurnBoundary] when the
+// tail crosses the fold threshold. It snapshots the prior compressed topic
+// + tail, asks the cheap model for a 3-5 word updated topic, derives
+// change_confidence from the previous compressed topic, commits the fold
+// (advancing the watermark, dropping folded tail turns) and emits a
+// CategoryOp frame for restart-replay.
 //
 // Best-effort + timeout-bounded: a render / model / parse failure logs
 // warn and leaves the previous recap + the (still-growing) tail in place
-// — the effective topic stays usable from recap ⊕ tail regardless. ctx
-// is a fresh background context bounded by BuildTimeout (the observer's
-// ctx may already be cancelled).
-func (e *Extension) fold(state extension.SessionState, h *sessionRecap) {
+// — the effective topic stays usable from recap ⊕ tail regardless. The
+// passed-in ctx (the turn's context) is bounded by BuildTimeout so a slow
+// or hung summarizer can't stall the turn-start past that budget.
+func (e *Extension) fold(ctx context.Context, state extension.SessionState, h *sessionRecap) {
 	defer h.endRefresh()
 
 	prevText, turns, hiSeq := h.snapshotForFold()
@@ -82,7 +82,7 @@ func (e *Extension) fold(state extension.SessionState, h *sessionRecap) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.BuildTimeout)
+	ctx, cancel := context.WithTimeout(ctx, e.cfg.BuildTimeout)
 	defer cancel()
 
 	mdl, _, err := e.deps.Router.Resolve(ctx, model.Hint{Intent: e.cfg.Intent})
