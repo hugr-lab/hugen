@@ -18,8 +18,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hugr-lab/hugen/pkg/store/local"
-	"github.com/hugr-lab/hugen/pkg/store/queries"
 	"github.com/hugr-lab/hugen/pkg/store/local/migrate"
+	"github.com/hugr-lab/hugen/pkg/store/queries"
 )
 
 // newDynamicTestEngine boots a fresh DuckDB-backed hub.db + hugr
@@ -228,6 +228,46 @@ func TestDynamicBackend(t *testing.T) {
 		}
 		assert.Equal(t, 1, counts[SkillLogShown], "shown count via log_bucket_aggregation")
 		assert.Equal(t, 1, counts[SkillLogUsed], "used count via log_bucket_aggregation")
+	})
+
+	t.Run("aliased dynamic+pinned query extracts both at hub.db.agent", func(t *testing.T) {
+		// Validates the 2b data layer: two aliased skills() selections in
+		// one query, extracted at the "hub.db.agent" object path into a
+		// struct. No semantic here (the test engine has no embedder), so
+		// `dynamic` is just the non-pinned set. change-report is not
+		// pinned → dynamic has it, pinned is empty.
+		// The recall projection pulls everything the advertise needs —
+		// id + name + description + per-event stats — in the same query,
+		// for BOTH aliases. (Same recallProjection recallRanked uses.)
+		resp, err := q.Query(ctx,
+			`query ($agent: String!) {
+				hub { db { agent {
+					dynamic: skills(filter: {agent_id: {eq: $agent}, pin: {eq: false}}) {`+recallProjection+`}
+					pinned:  skills(filter: {agent_id: {eq: $agent}, pin: {eq: true}}) {`+recallProjection+`}
+				}}}
+			}`,
+			map[string]any{"agent": agentID},
+		)
+		require.NoError(t, err)
+		defer resp.Close()
+		require.NoError(t, resp.Err())
+
+		var dyn []rankedSkillRow
+		require.NoError(t, resp.ScanDataJSON("hub.db.agent.dynamic", &dyn))
+		require.Len(t, dyn, 1, "non-pinned change-report in dynamic alias")
+		assert.Equal(t, "change-report", dyn[0].Name)
+		counts := map[string]int{}
+		for _, bkt := range dyn[0].Log {
+			counts[bkt.Key.Event] = bkt.Aggregations.RowsCount
+		}
+		assert.Equal(t, 1, counts[SkillLogShown], "shown via aliased recall")
+		assert.Equal(t, 1, counts[SkillLogUsed], "used via aliased recall")
+
+		// pinned alias is empty here (no pinned skills) — ScanData may
+		// report no-data; either way it yields zero rows.
+		var pin []rankedSkillRow
+		_ = resp.ScanData("hub.db.agent.pinned", &pin)
+		assert.Empty(t, pin, "no pinned skills installed in this test")
 	})
 
 	t.Run("Get reads full bundle from disk (with body)", func(t *testing.T) {

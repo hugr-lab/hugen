@@ -412,43 +412,75 @@ type rankedSkillRow struct {
 const recallProjection = `id name description
 	log_bucket_aggregation { key { event } aggregations { _rows_count } }`
 
-// recallRanked runs the db-2 combined recall+counts query: a semantic
-// search over NON-PINNED skills (pinned ones bypass the bandit and are
-// advertised always, separately) that returns each candidate WITH its
-// shown/used tallies in ONE round-trip. The caller Thompson-ranks the
-// result. Returns ErrNoEmbedder when no embedder is wired (caller falls
-// back to keyword/List).
-func (x *dynamicIndex) recallRanked(ctx context.Context, query string, limit int) ([]RecallCandidate, error) {
+// recallRanked runs the db-2 recall+counts query in ONE round-trip via
+// two aliased selections:
+//
+//   - dynamic — a SEMANTIC search over non-pinned skills (the bandit's
+//     candidate pool, relevance-gated to `limit`); the caller Thompson-
+//     ranks these;
+//   - pinned — ALL pinned skills (operator always-advertise, bandit-
+//     bypass), regardless of topic relevance.
+//
+// Both carry their shown/used tallies via log_bucket_aggregation, so the
+// whole advertise input is one query. Returns ErrNoEmbedder when no
+// embedder is wired (caller falls back to keyword/List).
+func (x *dynamicIndex) recallRanked(ctx context.Context, query string, limit int) (dynamic, pinned []RecallCandidate, err error) {
 	if !x.embedderEnabled {
-		return nil, ErrNoEmbedder
+		return nil, nil, ErrNoEmbedder
 	}
 	if strings.TrimSpace(query) == "" {
-		return nil, fmt.Errorf("skill: recall requires a non-empty query")
+		return nil, nil, fmt.Errorf("skill: recall requires a non-empty query")
 	}
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := queries.RunQuery[[]rankedSkillRow](ctx, x.querier,
-		`query ($filter: hub_db_skills_filter, $semantic: SemanticSearchInput) {
+	agentEq := map[string]any{"eq": x.agentID}
+	// One query, two aliased selections — RunQuery scans a single path, so
+	// run it directly and ScanData each alias off the same response.
+	resp, err := x.querier.Query(ctx,
+		`query ($dyn: hub_db_skills_filter, $pin: hub_db_skills_filter, $semantic: SemanticSearchInput) {
 			hub { db { agent {
-				skills(filter: $filter, semantic: $semantic) {`+recallProjection+`}
+				dynamic: skills(filter: $dyn, semantic: $semantic) {`+recallProjection+`}
+				pinned: skills(filter: $pin) {`+recallProjection+`}
 			}}}
 		}`,
 		map[string]any{
-			"filter": map[string]any{
-				"agent_id": map[string]any{"eq": x.agentID},
-				"pin":      map[string]any{"eq": false},
-			},
+			"dyn":      map[string]any{"agent_id": agentEq, "pin": map[string]any{"eq": false}},
+			"pin":      map[string]any{"agent_id": agentEq, "pin": map[string]any{"eq": true}},
 			"semantic": map[string]any{"query": query, "limit": limit},
 		},
-		"hub.db.agent.skills",
 	)
 	if err != nil {
-		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
-			return nil, nil
-		}
-		return nil, err
+		return nil, nil, fmt.Errorf("skill: recall query: %w", err)
 	}
+	defer resp.Close()
+	if err := resp.Err(); err != nil {
+		return nil, nil, fmt.Errorf("skill: recall graphql: %w", err)
+	}
+	scanAlias := func(path string) ([]rankedSkillRow, error) {
+		var rows []rankedSkillRow
+		if serr := resp.ScanData(path, &rows); serr != nil {
+			if errors.Is(serr, types.ErrWrongDataPath) || errors.Is(serr, types.ErrNoData) {
+				return nil, nil
+			}
+			return nil, serr
+		}
+		return rows, nil
+	}
+	dynRows, err := scanAlias("hub.db.agent.dynamic")
+	if err != nil {
+		return nil, nil, err
+	}
+	pinRows, err := scanAlias("hub.db.agent.pinned")
+	if err != nil {
+		return nil, nil, err
+	}
+	return candidatesFromRows(dynRows), candidatesFromRows(pinRows), nil
+}
+
+// candidatesFromRows projects the index rows + their event buckets into
+// the public RecallCandidate shape.
+func candidatesFromRows(rows []rankedSkillRow) []RecallCandidate {
 	out := make([]RecallCandidate, 0, len(rows))
 	for _, r := range rows {
 		c := RecallCandidate{ID: r.ID, Name: r.Name, Description: r.Description}
@@ -462,7 +494,7 @@ func (x *dynamicIndex) recallRanked(ctx context.Context, query string, limit int
 		}
 		out = append(out, c)
 	}
-	return out, nil
+	return out
 }
 
 // getIDByName resolves a skill's id from its name within the agent
@@ -785,11 +817,11 @@ func (b *dynamicBackend) LogSkillEvents(ctx context.Context, skillIDs []string, 
 	return b.index.logSkillEvents(ctx, skillIDs, event, sessionID)
 }
 
-// RecallRanked runs the db-2 combined recall+counts query (semantic over
-// non-pinned skills, returning each candidate WITH its shown/used
-// tallies). The caller Thompson-ranks the result. ErrNoEmbedder when no
-// embedder is wired. Phase 6.2.db-2.
-func (b *dynamicBackend) RecallRanked(ctx context.Context, query string, limit int) ([]RecallCandidate, error) {
+// RecallRanked runs the db-2 recall+counts query in one round-trip,
+// returning the semantic non-pinned candidate pool (caller Thompson-
+// ranks) AND the always-advertise pinned set, both with shown/used
+// tallies. ErrNoEmbedder when no embedder is wired. Phase 6.2.db-2.
+func (b *dynamicBackend) RecallRanked(ctx context.Context, query string, limit int) (dynamic, pinned []RecallCandidate, err error) {
 	return b.index.recallRanked(ctx, query, limit)
 }
 
@@ -1016,10 +1048,10 @@ func (b *dynamicBackend) Reconcile(ctx context.Context) (int, error) {
 // the install set:
 //
 //   - declared == false  — install EVERY bundle in the dir (OOTB: the
-//                           operator said nothing, ship the full set);
+//     operator said nothing, ship the full set);
 //   - declared == true   — install only the named bundles that exist
-//                           in the dir (config is authoritative; an
-//                           empty names list installs nothing).
+//     in the dir (config is authoritative; an
+//     empty names list installs nothing).
 //
 // Does NOT relink catalogs — the caller runs relinkCatalogs once after
 // all source dirs are indexed. Returns the count installed/updated.

@@ -140,17 +140,17 @@ type skillSearcher interface {
 // when the store supports it. Returns ErrNoEmbedder otherwise, so the
 // caller falls back to List + a keyword filter. The caller Thompson-
 // ranks the returned candidates. Phase 6.2.db-2.
-func (m *SkillManager) RecallRanked(ctx context.Context, query string, limit int) ([]RecallCandidate, error) {
+func (m *SkillManager) RecallRanked(ctx context.Context, query string, limit int) (dynamic, pinned []RecallCandidate, err error) {
 	if s, ok := m.store.(skillRecaller); ok {
 		return s.RecallRanked(ctx, query, limit)
 	}
-	return nil, ErrNoEmbedder
+	return nil, nil, ErrNoEmbedder
 }
 
 // skillRecaller is the optional db-2 recall+counts surface a store
 // backend may implement (only *Store with a dynamic backend does).
 type skillRecaller interface {
-	RecallRanked(ctx context.Context, query string, limit int) ([]RecallCandidate, error)
+	RecallRanked(ctx context.Context, query string, limit int) (dynamic, pinned []RecallCandidate, err error)
 }
 
 // LogSkillEvents records append-only skill_log usage events (shown /

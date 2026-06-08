@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand/v2"
 	"sort"
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/extension/recap"
 	"github.com/hugr-lab/hugen/pkg/prompts"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
@@ -42,16 +44,16 @@ import (
 // inert under the new model — the PDCA shape lives in
 // `metadata.hugen.mission.plan.*` and mission ext owns parsing it.
 var (
-	_ extension.Advertiser          = (*Extension)(nil)
-	_ extension.ToolFilter          = (*Extension)(nil)
-	_ extension.GenerationProvider  = (*Extension)(nil)
-	_ extension.ToolPolicyAdvisor   = (*Extension)(nil)
-	_ extension.SubagentDescriber   = (*Extension)(nil)
-	_ extension.SubagentSpawnHinter = (*Extension)(nil)
+	_ extension.Advertiser           = (*Extension)(nil)
+	_ extension.ToolFilter           = (*Extension)(nil)
+	_ extension.GenerationProvider   = (*Extension)(nil)
+	_ extension.ToolPolicyAdvisor    = (*Extension)(nil)
+	_ extension.SubagentDescriber    = (*Extension)(nil)
+	_ extension.SubagentSpawnHinter  = (*Extension)(nil)
 	_ extension.SubagentSpawnApplier = (*Extension)(nil)
-	_ extension.CloseTurnLookup     = (*Extension)(nil)
-	_ extension.StatusReporter      = (*Extension)(nil)
-	_ extension.FrameObserver       = (*Extension)(nil)
+	_ extension.CloseTurnLookup      = (*Extension)(nil)
+	_ extension.StatusReporter       = (*Extension)(nil)
+	_ extension.FrameObserver        = (*Extension)(nil)
 )
 
 // OnFrameEmit implements [extension.FrameObserver]. On each user message
@@ -64,6 +66,10 @@ func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState,
 	}
 	if h := FromState(state); h != nil {
 		h.markShownPending()
+		// db-2 — a new turn re-rolls the Thompson advertise draw (rotation
+		// per message); within the turn the selection is reused so the
+		// catalogue stays byte-stable across model iterations.
+		h.markAdvertiseRoll()
 	}
 }
 
@@ -111,7 +117,6 @@ func (e *Extension) ReportStatus(ctx context.Context, state extension.SessionSta
 	}
 	return data
 }
-
 
 // ResolveCloseTurn implements [extension.CloseTurnLookup]. Walks
 // the calling session's loaded skills and returns the most-
@@ -272,8 +277,16 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 		cat      string
 		shownIDs []string
 	)
-	if allowedList, scoped := allowedSkillsFromState(state); scoped {
+	if allowedList, isScoped := allowedSkillsFromState(state); isScoped {
+		// Recipe-scoped session (Phase 6.1d) — explicit allow-list.
 		cat, shownIDs = renderCatalogueFiltered(ctx, renderer, h, allowedList)
+	} else if allow, ok := e.rankedAdvertise(ctx, state, h); ok {
+		// db-2 — a ROOT session with a topic + embedder gets a Thompson-
+		// sampled, topic-relevant catalogue (rotating top-N ∪ pinned)
+		// rendered through the same scoped path. rankedAdvertise returns
+		// ok=false (not root / no recap / no embedder / empty pool) → the
+		// full List catalogue, exactly as before db-2.
+		cat, shownIDs = renderCatalogueScoped(ctx, renderer, h, allow)
 	} else {
 		cat, shownIDs = renderCatalogue(ctx, renderer, h)
 	}
@@ -312,6 +325,110 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 	out := strings.Join(parts, "\n\n")
 	h.SetCatalogTokens(extension.EstimateTokens(out))
 	return out
+}
+
+// db-2 advertise tuning.
+const (
+	// recallSemanticLimit bounds the semantic candidate pool the recall
+	// query pulls before Thompson ranking narrows it to recallTopN. Wide
+	// enough that the bandit has arms to explore, capped so the vector
+	// search + per-candidate count join stay one cheap round-trip.
+	recallSemanticLimit = 60
+	// recallTopN is how many ranked dynamic skills survive into the
+	// advertised catalogue each turn — the bounded, rotating menu. Pinned
+	// skills are advertised on top of this, always.
+	recallTopN = 7
+	// recallRefreshConfidence gates re-running the (expensive) recall
+	// query: the cached pool is reused until the rolling recap's topic
+	// shifts by at least this embedding distance. Below it the dialogue is
+	// "the same topic" and the cached candidate pool still fits.
+	recallRefreshConfidence = 0.35
+)
+
+// recallShouldRefresh decides whether the cached recall pool must be
+// rebuilt for the current recap. Refresh when:
+//   - never built (!valid), OR
+//   - the topic changed AND either the change cleared the confidence gate,
+//     OR the cache was built pre-fold (cachedKey==""): the pre-fold pool
+//     came from the raw tail; the first compressed recap is a cleaner
+//     query and confidence can't be measured against a non-existent
+//     previous recap, so force one refresh at the first fold.
+//
+// Same topic → always reuse (the dialogue is still on it; the
+// embed+search cost was already paid).
+func recallShouldRefresh(valid bool, cachedKey, topic string, confidence float64) bool {
+	if !valid {
+		return true
+	}
+	if topic == cachedKey {
+		return false
+	}
+	return confidence >= recallRefreshConfidence || cachedKey == ""
+}
+
+// rankedAdvertise computes the db-2 usage-driven catalogue scope for a
+// ROOT session: a Thompson-sampled top-N of the topic-relevant skill pool,
+// unioned with the always-advertise pinned set. Returns the allow-map
+// renderCatalogueScoped renders against (it surfaces loaded ∪ allow) and
+// ok=true. Returns (nil, false) — caller falls back to the full List
+// catalogue — when the session is not root, no recap/topic exists yet, no
+// embedder is wired, or the pool came back empty.
+//
+// The recall query is cached on the session handle and refreshed only on a
+// material topic shift; the Thompson draw is fresh per call, so which
+// relevant skills make the bounded menu rotates message to message while
+// the embed+search cost is paid once per topic.
+func (e *Extension) rankedAdvertise(ctx context.Context, state extension.SessionState, h *SessionSkill) (map[string]struct{}, bool) {
+	if h == nil || h.manager == nil || h.tier != skillpkg.TierRoot {
+		return nil, false
+	}
+	// Within-turn fast path: reuse the turn's draw across model iterations
+	// so the catalogue stays byte-stable past the KV-cache boundary. A new
+	// user_message arms a re-roll (rotation per message).
+	if allow, ok := h.cachedDraw(); ok {
+		return allow, true
+	}
+	rec, ok := recap.CurrentRecap(state)
+	if !ok || strings.TrimSpace(rec.Text) == "" {
+		return nil, false
+	}
+	// Refresh the cached pool only when never built, or when the topic
+	// shifted past the confidence gate.
+	key, valid := h.recallState()
+	if recallShouldRefresh(valid, key, rec.Topic, rec.ChangeConfidence) {
+		dyn, pin, err := h.manager.RecallRanked(ctx, rec.Text, recallSemanticLimit)
+		if err != nil {
+			// ErrNoEmbedder or a transient query error — fall back to the
+			// full catalogue. Don't cache, so a transient failure retries
+			// next turn rather than sticking on an empty pool.
+			return nil, false
+		}
+		h.storeRecall(rec.Topic, dyn, pin)
+	}
+	dyn, pin, ok := h.loadRecall()
+	if !ok || (len(dyn) == 0 && len(pin) == 0) {
+		return nil, false
+	}
+	// One fresh Thompson draw per turn — the rotation. An auto-seeded
+	// rand/v2 source gives genuine per-message variation; the bandit's
+	// exploration is the variance across draws. Cached via storeDraw so the
+	// rest of the turn's iterations reuse this exact selection.
+	skillpkg.ThompsonRank(dyn, rand.NewPCG(rand.Uint64(), rand.Uint64()))
+	allow := make(map[string]struct{}, recallTopN+len(pin))
+	for i, c := range dyn {
+		if i >= recallTopN {
+			break
+		}
+		allow[c.Name] = struct{}{}
+	}
+	for _, c := range pin {
+		allow[c.Name] = struct{}{}
+	}
+	if len(allow) == 0 {
+		return nil, false
+	}
+	h.storeDraw(allow)
+	return allow, true
 }
 
 // OnToolResult implements [extension.ModelInTurnAdvisor]: it walks the
