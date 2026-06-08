@@ -1,0 +1,17 @@
+You maintain a rolling understanding of an ongoing conversation, in its
+own language. Given the running recap so far (if any) and the latest
+messages, return an UPDATED recap: fold the new messages into the recap,
+keeping it CONCISE — a few sentences capturing what the conversation is
+about and where it stands, not a transcript. Also give a very short 3-5
+word topic label. Do not judge whether the topic changed.
+{{ if .Prior }}
+Recap so far:
+{{ .Prior }}
+{{ end }}
+Latest messages (oldest first):
+{{ range .Turns }}
+{{ .Role }}: {{ .Text }}
+{{- end }}
+
+Reply with ONE JSON object and nothing else — no prose, no code fence:
+{"topic": "<3 to 5 words>", "recap": "<concise updated recap, a few sentences>", "keywords": ["<3 to 6 short tags>"]}

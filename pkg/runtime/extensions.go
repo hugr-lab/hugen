@@ -12,6 +12,7 @@ import (
 	missionext "github.com/hugr-lab/hugen/pkg/extension/mission"
 	notepadext "github.com/hugr-lab/hugen/pkg/extension/notepad"
 	planext "github.com/hugr-lab/hugen/pkg/extension/plan"
+	recapext "github.com/hugr-lab/hugen/pkg/extension/recap"
 	schedext "github.com/hugr-lab/hugen/pkg/extension/scheduler"
 	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
 	stuckdetectorext "github.com/hugr-lab/hugen/pkg/extension/stuckdetector"
@@ -88,6 +89,26 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		// longer advertises into the system prefix, and nothing reads
 		// its state during InitState, so the later slot is free.
 		notepadext.NewExtension(core.Store, core.Agent.ID(), notepadext.Config{}),
+		// Recap (db-2 prerequisite): a ROOT-only FrameObserver that
+		// distils the recent user↔assistant dialogue into a live
+		// {text, categories} topic once per user turn — async, off the
+		// turn's critical path — for db-2's dynamic-skill recall, and
+		// replays its last recap on restart (CategoryOp frame). Querier
+		// is local-preferred (embedding_distance for change_confidence;
+		// nil-safe when no embedder).
+		recapext.NewExtension(recapext.Deps{
+			Router:  core.Models,
+			Querier: pickQuerier(core),
+			AgentID: core.Agent.ID(),
+			Logger:  core.Logger,
+		}, recapext.Config{
+			// EmbedModel is the operator-configured embedder (embedding.model)
+			// — same one vector search uses — so embedding_distance resolves
+			// the right server-side model for change_confidence. The size
+			// knobs (MaxRecapTokens / FoldThreshold / RecapTargetTokens) take
+			// their defaults; tune via config later if needed.
+			EmbedModel: core.Config.Embedding().EmbeddingConfig().Model,
+		}),
 		// Mission ext owns the entire mission-PDCA dispatch
 		// surface — MissionDispatcher (validates spawn_mission's
 		// `skill` arg), MissionAutoRunner (drives the executor
