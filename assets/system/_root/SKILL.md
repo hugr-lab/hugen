@@ -49,6 +49,26 @@ metadata:
     autoload: true
     autoload_for: [root]
     tier_compatibility: [root]
+    # In-turn corrective hint at the exact decision point: a weak
+    # model that just received `status:"running"` from an async
+    # spawn sometimes talks itself into "the mission already
+    # finished" and fabricates results (dogfood 2026-06-10). Fold
+    # the announce-and-stop rule INLINE into the spawn result the
+    # model reads next — proximity beats the distal Knob 4 prose.
+    # The regex keeps it off sync spawns, whose result already
+    # carries the real outcome.
+    hints:
+      - type: on_tool_result
+        tools: ["session:spawn_mission"]
+        match: '"status"\s*:\s*"running"'
+        message: >
+          The mission is RUNNING in the background — you have NO
+          results yet and nothing to report. Reply to the user now
+          with a short acknowledgement (≤ 2 sentences, in the user's
+          language) naming what was started, then END your reply.
+          The results will arrive in a later turn as a
+          [system: subagent_result] block — NEVER state, estimate,
+          or invent any findings before it does.
     # Universal notepad categories the chat carries regardless of
     # which data / domain skill is loaded. The skill extension
     # walks every loaded skill's notepad.tags into Block A; this
@@ -195,6 +215,8 @@ Shape:
 - ≤ two sentences.
 - Name the goal in 4–8 words.
 - Do NOT promise an ETA.
+- Do NOT state or anticipate any results — none exist yet; they
+  arrive later as a `[system: subagent_result]` block.
 - Match the language the user wrote in.
 
 If you spawned **two** missions in the same turn, name both in

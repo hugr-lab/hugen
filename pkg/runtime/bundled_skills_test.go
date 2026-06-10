@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hugr-lab/hugen/assets"
+	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // hubTestSkill is a hub-tier skill we know ships with the binary
@@ -201,5 +204,40 @@ func TestPhaseBundledSkills_Direct(t *testing.T) {
 	manifest := filepath.Join(state, "skills/hub", hubTestSkill, "SKILL.md")
 	if _, err := os.Stat(manifest); err != nil {
 		t.Errorf("phase did not install hub skill: %v", err)
+	}
+}
+
+// TestRootManifest_AsyncSpawnHint pins the _root on_tool_result hint
+// against the shape the runtime actually produces: it must fire on an
+// async spawn_mission result (status "running" — the juncture where a
+// weak model fabricated mission results, dogfood 2026-06-10) and stay
+// silent on a sync spawn whose result carries the real outcome.
+func TestRootManifest_AsyncSpawnHint(t *testing.T) {
+	body, err := assets.SystemSkillsFS.ReadFile("system/_root/SKILL.md")
+	if err != nil {
+		t.Fatalf("read embedded _root: %v", err)
+	}
+	m, err := skill.Parse(body)
+	if err != nil {
+		t.Fatalf("parse _root: %v", err)
+	}
+	if len(m.Hugen.Hints) == 0 {
+		t.Fatal("_root must declare the async-spawn on_tool_result hint")
+	}
+	const asyncResult = `{"result":{"depth":1,"mission_id":"ses-1","name":"roads","session_id":"ses-1","status":"running"},"tool_id":"1"}`
+	const syncResult = `{"result":{"depth":1,"mission_id":"ses-1","name":"roads","session_id":"ses-1","status":"completed","handoff":{...}},"tool_id":"1"}`
+	var fired string
+	for _, h := range m.Hugen.Hints {
+		// Tool name in the model-visible `_` form — matching is
+		// separator-insensitive.
+		if msg := h.MatchToolResult("session_spawn_mission", "", asyncResult); msg != "" {
+			fired = msg
+		}
+		if msg := h.MatchToolResult("session_spawn_mission", "", syncResult); msg != "" {
+			t.Errorf("hint must not fire on a sync (completed) spawn result; got %q", msg)
+		}
+	}
+	if !strings.Contains(fired, "RUNNING in the background") {
+		t.Errorf("async spawn result must surface the announce-and-stop hint; got %q", fired)
 	}
 }
