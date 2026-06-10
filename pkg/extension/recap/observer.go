@@ -30,11 +30,17 @@ func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState,
 	}
 	switch f := frame.(type) {
 	case *protocol.UserMessage:
-		// Skip system-synthetic user messages (author=agent) — e.g. the
-		// async-mission summary kick (kickAsyncSummaryTurn). Those aren't
-		// real conversation; the mission's findings reach the marker via
-		// the agent's summary reply (an AgentMessage) at the next turn.
-		if f.Author().Kind == protocol.ParticipantAgent {
+		// ROOT ONLY: skip system-synthetic user messages (author=agent) —
+		// e.g. the async-mission summary kick (kickAsyncSummaryTurn). Those
+		// aren't real conversation; the mission's findings reach the marker
+		// via the agent's summary reply (an AgentMessage) at the next turn.
+		// A SUBAGENT's whole dialogue is agent-authored — the delegated
+		// task is injected by the parent's runtime (mission ext
+		// agentParticipant) — so applying the filter there would leave the
+		// ring permanently empty and the fold would never form a marker
+		// (dogfood 2026-06-10: zero recap frames across all six mission
+		// children).
+		if h.root && f.Author().Kind == protocol.ParticipantAgent {
 			return
 		}
 		h.appendMessage("user", f.Payload.Text, e.maxMsgChars, e.maxRing)

@@ -137,8 +137,14 @@ func TestOnTurnBoundary_SubagentFoldsOnce(t *testing.T) {
 	worker := fixture.NewTestSessionState("ses-w").WithDepth(1)
 	_ = ext.InitState(ctx, worker)
 
-	// Turn 1: the delegated task → fold once.
-	ext.OnFrameEmit(ctx, worker, &protocol.UserMessage{Payload: protocol.UserMessagePayload{Text: "build the op2023 html report with charts"}})
+	// Turn 1: the delegated task → fold once. The task arrives AGENT-
+	// authored (the mission ext injects it via agentParticipant) — the
+	// root-only synthetic filter must NOT drop it from a subagent's ring
+	// (dogfood 2026-06-10: it did, and no mission child ever got a marker).
+	task := protocol.NewUserMessage("ses-w",
+		protocol.ParticipantInfo{ID: "hugen", Kind: protocol.ParticipantAgent},
+		"build the op2023 html report with charts")
+	ext.OnFrameEmit(ctx, worker, task)
 	if err := ext.OnTurnBoundary(ctx, worker); err != nil {
 		t.Fatalf("OnTurnBoundary: %v", err)
 	}

@@ -222,6 +222,28 @@ func TestOnFrameEmit_AppendsRing(t *testing.T) {
 	}
 }
 
+// TestOnFrameEmit_SubagentKeepsAgentAuthoredTask: the synthetic filter is
+// ROOT-ONLY. A subagent's delegated task arrives as an agent-authored
+// UserMessage (mission ext agentParticipant) and is the very text its
+// marker distils — dropping it left every mission child markerless
+// (dogfood 2026-06-10).
+func TestOnFrameEmit_SubagentKeepsAgentAuthoredTask(t *testing.T) {
+	ext := NewExtension(Deps{}, Config{})
+	ctx := context.Background()
+	worker := fixture.NewTestSessionState("ses-w").WithDepth(1)
+	_ = ext.InitState(ctx, worker)
+
+	task := protocol.NewUserMessage("ses-w",
+		protocol.ParticipantInfo{ID: "hugen", Kind: protocol.ParticipantAgent},
+		"run the tf roads-by-geozones query and build the table")
+	ext.OnFrameEmit(ctx, worker, task)
+
+	cur, ok := CurrentRecap(worker)
+	if !ok || !strings.Contains(cur.Text, "roads-by-geozones") {
+		t.Fatalf("subagent ring must keep its agent-authored task; got %+v ok=%v", cur, ok)
+	}
+}
+
 func recapFrameRow(topic, text string) store.EventRow {
 	return store.EventRow{
 		EventType: string(protocol.KindExtensionFrame),
