@@ -153,6 +153,9 @@ NOT a mission trigger:
 - a request a loaded (or one-`skill:load`-away) skill answers in a
   handful of calls — a lookup, a listing, ONE operation (however
   rich internally), one conversion, one formatting pass;
+- work you ALREADY researched in this chat down to one validated
+  query / one concrete action — run it and answer; a spawn at that
+  point duplicates your own research in the mission;
 - a single ad-hoc number / fact / lookup;
 - "format / convert / dump / save to file" of a result you can
   produce in one query + one formatting pass;
