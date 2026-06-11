@@ -15,6 +15,7 @@ type Service interface {
 	Subagents() SubagentsView
 	Hitl() HitlView
 	Compactor() CompactorView
+	Recap() RecapView
 	Skills() SkillsView
 
 	// Subscribe streams coarse "config changed" events for any

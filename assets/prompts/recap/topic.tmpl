@@ -1,0 +1,22 @@
+You maintain a short topic marker for an ongoing conversation, in its own
+language. You are given what the dialogue has been about, the recent
+exchanges, and the new user message(s). Return an UPDATED marker that
+captures the CURRENT topic of the conversation — let the new message(s)
+shift the topic if they do. Keep it concise: a one or two sentence theme,
+not a transcript, plus a very short 3-5 word topic label.
+{{ if .Prior }}
+Conversation so far: {{ .Prior }}
+{{ end }}{{ if .Recent }}
+Recent messages:
+{{ range .Recent }}{{ .Role }}: {{ .Text }}
+{{ end }}{{ end }}
+New messages:
+{{ range .New }}user: {{ . }}
+{{ end }}
+Keywords must FAVOUR concrete identifiers that appear VERBATIM in the
+dialogue — exact names of data objects, fields, files, systems, code
+symbols, ids — over abstract concepts. Copy them as written; do not
+translate or generalise them. Add 1-2 broader theme tags after them.
+
+Reply with ONE JSON object and nothing else — no prose, no code fence:
+{"topic": "<3 to 5 words>", "recap": "<the current theme, one or two sentences>", "keywords": ["<3 to 8 tags: verbatim identifiers first, then theme tags>"]}

@@ -93,8 +93,8 @@ func (s *fakeIntegrationState) Submit(_ context.Context, _ protocol.Frame) <-cha
 	return nil
 }
 func (s *fakeIntegrationState) OutboxOnly(_ context.Context, _ protocol.Frame) error { return nil }
-func (s *fakeIntegrationState) ToolCatalogTokens(_ context.Context) int               { return 0 }
-func (s *fakeIntegrationState) SessionUsage() *protocol.TokenUsage                    { return nil }
+func (s *fakeIntegrationState) ToolCatalogTokens(_ context.Context) int              { return 0 }
+func (s *fakeIntegrationState) SessionUsage() *protocol.TokenUsage                   { return nil }
 func (s *fakeIntegrationState) Extensions() []extension.Extension                    { return nil }
 func (s *fakeIntegrationState) RequestInquiry(_ context.Context, _ protocol.InquiryRequestPayload) (*protocol.InquiryResponse, error) {
 	return nil, nil
@@ -825,7 +825,7 @@ func TestCompactor_Reset_RebuildsHistoryFromStore(t *testing.T) {
 	// projected row (the result). turns=60 → 60 user + 60 agent
 	// + 20 tool_result = 140 entries.
 	expected := turns*2 + (turns / 3)
-	if (turns%3) > 0 {
+	if (turns % 3) > 0 {
 		expected++
 	}
 	if got := len(rebuilt); got != expected {
@@ -1164,7 +1164,7 @@ func TestStreamModelText_Timeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 	mdl := &blockingModel{}
-	_, err := streamModelText(ctx, mdl, "body", 100)
+	_, err := extension.StreamModelText(ctx, mdl, "body", 100)
 	if err == nil {
 		t.Fatalf("streamModelText should error on cancelled ctx")
 	}

@@ -12,6 +12,7 @@ import (
 	missionext "github.com/hugr-lab/hugen/pkg/extension/mission"
 	notepadext "github.com/hugr-lab/hugen/pkg/extension/notepad"
 	planext "github.com/hugr-lab/hugen/pkg/extension/plan"
+	recapext "github.com/hugr-lab/hugen/pkg/extension/recap"
 	schedext "github.com/hugr-lab/hugen/pkg/extension/scheduler"
 	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
 	stuckdetectorext "github.com/hugr-lab/hugen/pkg/extension/stuckdetector"
@@ -88,6 +89,30 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		// longer advertises into the system prefix, and nothing reads
 		// its state during InitState, so the later slot is free.
 		notepadext.NewExtension(core.Store, core.Agent.ID(), notepadext.Config{}),
+		// Recap (db-2 prerequisite): a ROOT-only extension that distils
+		// the recent user↔assistant dialogue into a short {topic, text,
+		// categories} marker for db-2's dynamic-skill recall (and Phase 7's
+		// memory index), and replays its last marker on restart (CategoryOp
+		// frame). A synchronous FrameObserver keeps a small ring of recent
+		// messages; a TurnBoundaryHook (re)forms the marker via the cheap
+		// summariser model SYNCHRONOUSLY before the turn renders, so the
+		// topic is current before the skill advertise reads it — at the cost
+		// of a small per-turn model call (bounded by BuildTimeout). Config
+		// knobs take their defaults; tune via config later if needed.
+		recapext.NewExtension(recapext.Deps{
+			Router:  core.Models,
+			AgentID: core.Agent.ID(),
+			Logger:  core.Logger,
+		}, recapext.Config{
+			// Operator-tunable per-turn fold cap (config `recap.fold_timeout`);
+			// 0 → the extension default. Bounds the synchronous turn-start
+			// block, so raise it when testing against a slow local model.
+			BuildTimeout: core.Config.Recap().FoldTimeout(),
+			// Per-message cap (config `recap.max_message_tokens`); 0 → the
+			// extension default. Generous so a full delegated task distils
+			// into the marker intact.
+			MaxMessageTokens: core.Config.Recap().MaxMessageTokens(),
+		}),
 		// Mission ext owns the entire mission-PDCA dispatch
 		// surface — MissionDispatcher (validates spawn_mission's
 		// `skill` arg), MissionAutoRunner (drives the executor

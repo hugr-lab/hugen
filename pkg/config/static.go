@@ -17,6 +17,7 @@ var (
 	_ ToolProvidersView = (*StaticService)(nil)
 	_ SubagentsView     = (*StaticService)(nil)
 	_ CompactorView     = (*StaticService)(nil)
+	_ RecapView         = (*StaticService)(nil)
 )
 
 // Subagent runtime defaults — applied in NewStaticService when the
@@ -56,6 +57,7 @@ type StaticService struct {
 	subagents      SubagentsConfig
 	hitl           HitlConfig
 	compactor      CompactorConfig
+	recap          RecapConfig
 	skills         SkillsConfig
 }
 
@@ -73,6 +75,7 @@ type StaticInput struct {
 	Subagents      SubagentsConfig
 	Hitl           HitlConfig
 	Compactor      CompactorConfig
+	Recap          RecapConfig
 	Skills         SkillsConfig
 }
 
@@ -80,13 +83,13 @@ type StaticInput struct {
 // dynamic-skill install set. `Install` is a tri-state pointer:
 //
 //   - nil          — the `skills.install` key is ABSENT. The runtime
-//                    installs every bundled skill (OOTB safety — the
-//                    agent still ships with its full toolkit when the
-//                    operator says nothing).
+//     installs every bundled skill (OOTB safety — the
+//     agent still ships with its full toolkit when the
+//     operator says nothing).
 //   - non-nil      — the key is PRESENT (even as an empty list). The
-//                    runtime installs EXACTLY the named skills; the
-//                    config is authoritative. An explicit empty list
-//                    installs nothing.
+//     runtime installs EXACTLY the named skills; the
+//     config is authoritative. An explicit empty list
+//     installs nothing.
 //
 // Phase 6.2.db-1 carries names only; version pins + per-entry pin
 // land with the bandit advertise (db-2).
@@ -145,6 +148,7 @@ func NewStaticService(in StaticInput) *StaticService {
 		subagents:      subagents,
 		hitl:           hitl,
 		compactor:      in.Compactor,
+		recap:          in.Recap,
 		skills:         in.Skills,
 	}
 }
@@ -160,6 +164,7 @@ func (s *StaticService) ToolProviders() ToolProvidersView { return s }
 func (s *StaticService) Subagents() SubagentsView         { return s }
 func (s *StaticService) Hitl() HitlView                   { return s }
 func (s *StaticService) Compactor() CompactorView         { return s }
+func (s *StaticService) Recap() RecapView                 { return s }
 func (s *StaticService) Skills() SkillsView               { return s }
 
 // Subscribe returns a never-firing, never-closed channel. Phase-3
@@ -239,6 +244,16 @@ func (s *StaticService) DefaultTimeoutMs() int { return s.hitl.DefaultTimeoutMs 
 // Returning the value type (not pointer) preserves the read-only
 // contract on the View interface.
 func (s *StaticService) CompactorConfig() CompactorConfig { return s.compactor }
+
+// --- RecapView ---
+
+// FoldTimeout returns the operator-configured per-turn marker-fold cap
+// (0 when absent — the recap extension applies its own default).
+func (s *StaticService) FoldTimeout() time.Duration { return s.recap.FoldTimeout }
+
+// MaxMessageTokens returns the operator-configured per-message recap cap
+// (0 when absent — the recap extension applies its own default).
+func (s *StaticService) MaxMessageTokens() int { return s.recap.MaxMessageTokens }
 
 // --- SkillsView ---
 

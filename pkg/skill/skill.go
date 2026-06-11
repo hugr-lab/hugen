@@ -5,10 +5,25 @@ import (
 	"io/fs"
 )
 
+// skill_log event kinds (db-2). The usage-driven bandit reads these:
+//   - SkillLogShown — the skill was surfaced in the advertised catalogue
+//     (the impression / denominator).
+//   - SkillLogUsed — the model loaded the skill (a load IS the use signal;
+//     the conversion / reward).
+const (
+	SkillLogShown = "shown"
+	SkillLogUsed  = "used"
+)
+
 // Skill is a parsed Manifest plus a handle to its body files.
 type Skill struct {
 	Manifest Manifest
 	Origin   Origin
+	// ID is the dynamic-backend index id (`skl-<hex>`) when this skill
+	// is DB-indexed (authored / hub). Empty for system / inline skills
+	// that have no index row — usage logging (skill_log) skips those,
+	// since skill_log.skill_id is an FK into the skills table.
+	ID string
 	// FS is rooted at the skill's own directory. Empty for
 	// inline skills (Manifest is the entire content).
 	FS fs.FS

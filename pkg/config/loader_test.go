@@ -2,7 +2,38 @@ package config
 
 import (
 	"testing"
+	"time"
 )
+
+// TestLoadStaticInput_RecapBlock verifies the db-2 recap block decodes,
+// including the time.Duration fold_timeout via the decode hook, and that
+// it surfaces through the service view.
+func TestLoadStaticInput_RecapBlock(t *testing.T) {
+	in, err := LoadStaticInput(map[string]any{
+		"recap": map[string]any{"fold_timeout": "30s", "max_message_tokens": 4096},
+	}, true)
+	if err != nil {
+		t.Fatalf("LoadStaticInput: %v", err)
+	}
+	if in.Recap.FoldTimeout != 30*time.Second {
+		t.Errorf("FoldTimeout = %v, want 30s", in.Recap.FoldTimeout)
+	}
+	if in.Recap.MaxMessageTokens != 4096 {
+		t.Errorf("MaxMessageTokens = %d, want 4096", in.Recap.MaxMessageTokens)
+	}
+	svc := NewStaticService(in)
+	if got := svc.Recap().FoldTimeout(); got != 30*time.Second {
+		t.Errorf("Recap().FoldTimeout() = %v, want 30s", got)
+	}
+	if got := svc.Recap().MaxMessageTokens(); got != 4096 {
+		t.Errorf("Recap().MaxMessageTokens() = %d, want 4096", got)
+	}
+	// Absent → zero (the extension then applies its own default).
+	in2, _ := LoadStaticInput(map[string]any{}, true)
+	if in2.Recap.FoldTimeout != 0 {
+		t.Errorf("absent recap: FoldTimeout = %v, want 0", in2.Recap.FoldTimeout)
+	}
+}
 
 func TestLoadStaticInput_ExpandsEnvAcrossAllSections(t *testing.T) {
 	t.Setenv("HUGR_URL", "http://hugr.example.com:9000")

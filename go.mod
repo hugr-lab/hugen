@@ -24,6 +24,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/vektah/gqlparser/v2 v2.5.33
 	golang.org/x/sync v0.20.0
+	gonum.org/v1/gonum v0.17.0
 	google.golang.org/adk v1.4.0
 )
 

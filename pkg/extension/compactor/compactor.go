@@ -250,7 +250,7 @@ func (e *Extension) compactWithConfig(ctx context.Context, state extension.Sessi
 	}
 	frame := protocol.NewExtensionFrame(
 		state.SessionID(),
-		agentParticipant(e.deps.AgentID),
+		extension.AgentParticipant(e.deps.AgentID),
 		providerName,
 		protocol.CategoryOp,
 		OpDigestSet,
@@ -299,7 +299,7 @@ func classifyRows(rows []store.EventRow) classified {
 				Kind:   "user_message",
 				Author: r.Author,
 				Seq:    int64(r.Seq),
-				Text:   truncate(r.Content, keptVerbatimMaxChars),
+				Text:   extension.TruncateChars(r.Content, keptVerbatimMaxChars),
 			})
 		case protocol.KindAgentMessage:
 			// Only consolidated finals carry signal worth
@@ -312,7 +312,7 @@ func classifyRows(rows []store.EventRow) classified {
 					Kind:   "agent_message",
 					Author: r.Author,
 					Seq:    int64(r.Seq),
-					Text:   truncate(r.Content, keptVerbatimMaxChars),
+					Text:   extension.TruncateChars(r.Content, keptVerbatimMaxChars),
 				})
 			}
 		case protocol.KindSystemMessage:
@@ -323,7 +323,7 @@ func classifyRows(rows []store.EventRow) classified {
 				Kind:   "system_message",
 				Author: r.Author,
 				Seq:    int64(r.Seq),
-				Text:   truncate(r.Content, keptVerbatimMaxChars),
+				Text:   extension.TruncateChars(r.Content, keptVerbatimMaxChars),
 			})
 		case protocol.KindError:
 			// Terminal errors are user-visible context; keep.
@@ -336,19 +336,19 @@ func classifyRows(rows []store.EventRow) classified {
 				Kind:   "error",
 				Author: r.Author,
 				Seq:    int64(r.Seq),
-				Text:   truncate(r.Content, keptVerbatimMaxChars),
+				Text:   extension.TruncateChars(r.Content, keptVerbatimMaxChars),
 			})
 		case protocol.KindSlashCommand:
 			c.kept = append(c.kept, KeptSection{
 				Kind:   "slash_command",
 				Author: r.Author,
 				Seq:    int64(r.Seq),
-				Text:   truncate(r.Content, keptVerbatimMaxChars),
+				Text:   extension.TruncateChars(r.Content, keptVerbatimMaxChars),
 			})
 		case protocol.KindToolCall:
 			id, _ := r.Metadata["tool_id"].(string)
-			argsStr := truncate(stringifyArgs(r.ToolArgs), toolArgsMaxChars)
-			name := truncate(r.ToolName, toolNameMaxChars)
+			argsStr := extension.TruncateChars(stringifyArgs(r.ToolArgs), toolArgsMaxChars)
+			name := extension.TruncateChars(r.ToolName, toolNameMaxChars)
 			if id == "" {
 				// Unpaired tool_call; surface with empty
 				// result so the summariser still sees it.
@@ -362,7 +362,7 @@ func classifyRows(rows []store.EventRow) classified {
 			pending[id] = &pendingCall{name: name, args: argsStr}
 		case protocol.KindToolResult:
 			id, _ := r.Metadata["tool_id"].(string)
-			resultStr := truncate(r.ToolResult, toolResultMaxChars)
+			resultStr := extension.TruncateChars(r.ToolResult, toolResultMaxChars)
 			if id != "" {
 				if call, ok := pending[id]; ok {
 					c.toolPairs = append(c.toolPairs, toolCallPair{
@@ -387,13 +387,13 @@ func classifyRows(rows []store.EventRow) classified {
 			}
 			c.refs = append(c.refs, SubagentRef{
 				SessionID: sid,
-				Reason:    truncate(reason, toolResultMaxChars),
+				Reason:    extension.TruncateChars(reason, toolResultMaxChars),
 			})
 		case protocol.KindInquiryRequest:
 			rid, _ := r.Metadata["request_id"].(string)
 			q, _ := r.Metadata["question"].(string)
 			if rid != "" {
-				pendingInquiry[rid] = truncate(q, inquiryQuestionMaxChars)
+				pendingInquiry[rid] = extension.TruncateChars(q, inquiryQuestionMaxChars)
 			}
 		case protocol.KindInquiryResponse:
 			rid, _ := r.Metadata["request_id"].(string)
@@ -405,8 +405,8 @@ func classifyRows(rows []store.EventRow) classified {
 					delete(pendingInquiry, rid)
 				}
 			}
-			truncQuestion := truncate(question, inquiryQuestionMaxChars)
-			truncAnswer := truncate(ans, inquiryAnswerMaxChars)
+			truncQuestion := extension.TruncateChars(question, inquiryQuestionMaxChars)
+			truncAnswer := extension.TruncateChars(ans, inquiryAnswerMaxChars)
 			c.inquiries = append(c.inquiries, inquirySegment{
 				Question: truncQuestion,
 				Answer:   truncAnswer,
@@ -478,21 +478,11 @@ func answerFromResponseMeta(meta map[string]any) string {
 	return ""
 }
 
-// truncate caps s to maxChars; the cap is approximate (UTF-8
-// safe is overkill — the summariser tolerates a clipped tail
-// just fine).
-func truncate(s string, maxChars int) string {
-	if maxChars <= 0 || len(s) <= maxChars {
-		return s
-	}
-	return s[:maxChars] + "…"
-}
-
 // truncateForPrior caps a prior SummaryBlock text for the
 // re-prompt context — sized for the priorBlocks template
 // section per spec §5.3.
 func truncateForPrior(s string) string {
-	return truncate(s, priorBlockMaxChars)
+	return extension.TruncateChars(s, priorBlockMaxChars)
 }
 
 // estimateDigestTokens returns the running token estimate for
@@ -592,11 +582,3 @@ func dedupRefs(refs []SubagentRef) []SubagentRef {
 	}
 	return out
 }
-
-// agentParticipant builds the ParticipantInfo the compactor
-// stamps on emitted ExtensionFrames. Mirrors the mission ext
-// pattern.
-func agentParticipant(agentID string) protocol.ParticipantInfo {
-	return protocol.ParticipantInfo{ID: agentID, Kind: protocol.ParticipantAgent, Name: "hugen"}
-}
-

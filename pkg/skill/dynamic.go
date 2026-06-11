@@ -389,6 +389,114 @@ func (x *dynamicIndex) search(ctx context.Context, query string, taskEligible *b
 	return rows, nil
 }
 
+// rankedSkillRow parses the db-2 recall+counts projection: the semantic
+// candidate plus its skill_log usage bucketed by event (one row per
+// event with its _rows_count).
+type rankedSkillRow struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Log         []struct {
+		Key struct {
+			Event string `json:"event"`
+		} `json:"key"`
+		Aggregations struct {
+			RowsCount int `json:"_rows_count"`
+		} `json:"aggregations"`
+	} `json:"log_bucket_aggregation"`
+}
+
+// recallProjection selects exactly what the bandit needs — the candidate
+// fields + the per-event usage tallies via the auto-generated
+// log_bucket_aggregation (the `log` reverse relation grouped by event).
+const recallProjection = `id name description
+	log_bucket_aggregation { key { event } aggregations { _rows_count } }`
+
+// recallRanked runs the db-2 recall+counts query in ONE round-trip via
+// two aliased selections:
+//
+//   - dynamic — a SEMANTIC search over non-pinned skills (the bandit's
+//     candidate pool, relevance-gated to `limit`); the caller Thompson-
+//     ranks these;
+//   - pinned — ALL pinned skills (operator always-advertise, bandit-
+//     bypass), regardless of topic relevance.
+//
+// Both carry their shown/used tallies via log_bucket_aggregation, so the
+// whole advertise input is one query. Returns ErrNoEmbedder when no
+// embedder is wired (caller falls back to keyword/List).
+func (x *dynamicIndex) recallRanked(ctx context.Context, query string, limit int) (dynamic, pinned []RecallCandidate, err error) {
+	if !x.embedderEnabled {
+		return nil, nil, ErrNoEmbedder
+	}
+	if strings.TrimSpace(query) == "" {
+		return nil, nil, fmt.Errorf("skill: recall requires a non-empty query")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	agentEq := map[string]any{"eq": x.agentID}
+	// One query, two aliased selections — RunQuery scans a single path, so
+	// run it directly and ScanData each alias off the same response.
+	resp, err := x.querier.Query(ctx,
+		`query ($dyn: hub_db_skills_filter, $pin: hub_db_skills_filter, $semantic: SemanticSearchInput) {
+			hub { db { agent {
+				dynamic: skills(filter: $dyn, semantic: $semantic) {`+recallProjection+`}
+				pinned: skills(filter: $pin) {`+recallProjection+`}
+			}}}
+		}`,
+		map[string]any{
+			"dyn":      map[string]any{"agent_id": agentEq, "pin": map[string]any{"eq": false}},
+			"pin":      map[string]any{"agent_id": agentEq, "pin": map[string]any{"eq": true}},
+			"semantic": map[string]any{"query": query, "limit": limit},
+		},
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("skill: recall query: %w", err)
+	}
+	defer resp.Close()
+	if err := resp.Err(); err != nil {
+		return nil, nil, fmt.Errorf("skill: recall graphql: %w", err)
+	}
+	scanAlias := func(path string) ([]rankedSkillRow, error) {
+		var rows []rankedSkillRow
+		if serr := resp.ScanData(path, &rows); serr != nil {
+			if errors.Is(serr, types.ErrWrongDataPath) || errors.Is(serr, types.ErrNoData) {
+				return nil, nil
+			}
+			return nil, serr
+		}
+		return rows, nil
+	}
+	dynRows, err := scanAlias("hub.db.agent.dynamic")
+	if err != nil {
+		return nil, nil, err
+	}
+	pinRows, err := scanAlias("hub.db.agent.pinned")
+	if err != nil {
+		return nil, nil, err
+	}
+	return candidatesFromRows(dynRows), candidatesFromRows(pinRows), nil
+}
+
+// candidatesFromRows projects the index rows + their event buckets into
+// the public RecallCandidate shape.
+func candidatesFromRows(rows []rankedSkillRow) []RecallCandidate {
+	out := make([]RecallCandidate, 0, len(rows))
+	for _, r := range rows {
+		c := RecallCandidate{ID: r.ID, Name: r.Name, Description: r.Description}
+		for _, b := range r.Log {
+			switch b.Key.Event {
+			case SkillLogShown:
+				c.Shown = b.Aggregations.RowsCount
+			case SkillLogUsed:
+				c.Used = b.Aggregations.RowsCount
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // getIDByName resolves a skill's id from its name within the agent
 // scope (any source). Returns "" + nil when absent — used to resolve
 // catalog / member ids for link writes + reads.
@@ -457,6 +565,56 @@ func (x *dynamicIndex) replaceLinks(ctx context.Context, sourceID, relation stri
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// newSkillLogID mints a skill_log row id (`slog-<hex>`).
+func newSkillLogID() string {
+	var b [9]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "slog-fallback"
+	}
+	return "slog-" + hex.EncodeToString(b[:])
+}
+
+// logSkillEvents appends one append-only skill_log row per skill id for
+// the given event (shown / loaded / used). Empty ids are skipped — system
+// / inline skills have no index row, and skill_log.skill_id is an FK into
+// skills. Used by the `shown` path, which already holds index ids from
+// List. Best-effort + accumulate. Insert-only (append-only constitution).
+func (x *dynamicIndex) logSkillEvents(ctx context.Context, skillIDs []string, event, sessionID string) error {
+	var errs []error
+	for _, sid := range skillIDs {
+		if err := x.insertSkillLog(ctx, sid, event, sessionID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// insertSkillLog writes one append-only skill_log row. Empty id is a
+// no-op (non-indexed skill). sessionID optional.
+func (x *dynamicIndex) insertSkillLog(ctx context.Context, skillID, event, sessionID string) error {
+	if skillID == "" {
+		return nil
+	}
+	data := map[string]any{
+		"id":       newSkillLogID(),
+		"skill_id": skillID,
+		"agent_id": x.agentID,
+		"event":    event,
+	}
+	if sessionID != "" {
+		data["session_id"] = sessionID
+	}
+	if err := queries.RunMutation(ctx, x.querier,
+		`mutation ($data: hub_db_skill_log_mut_input_data!) {
+			hub { db { agent { insert_skill_log(data: $data) { id } } } }
+		}`,
+		map[string]any{"data": data},
+	); err != nil {
+		return fmt.Errorf("skill: log %s/%s: %w", event, skillID, err)
+	}
+	return nil
 }
 
 // listMembers returns the skill rows reachable from sourceID along the
@@ -592,7 +750,7 @@ func rowToSkill(r skillRow) (Skill, error) {
 	if m.Description == "" {
 		m.Description = r.Description
 	}
-	s := Skill{Manifest: m, Origin: OriginDynamic}
+	s := Skill{Manifest: m, Origin: OriginDynamic, ID: r.ID}
 	if r.BundlePath != "" {
 		s.FS = os.DirFS(r.BundlePath)
 		s.Root = r.BundlePath
@@ -651,6 +809,21 @@ func newDynamicBackend(root string, q types.Querier, agentID string, embedderEna
 }
 
 func (b *dynamicBackend) Origin() Origin { return OriginDynamic }
+
+// LogSkillEvents appends append-only skill_log rows for the given skill
+// ids + event (shown / loaded / used). Empty ids skipped inside the
+// index writer. Phase 6.2.db-2.
+func (b *dynamicBackend) LogSkillEvents(ctx context.Context, skillIDs []string, event, sessionID string) error {
+	return b.index.logSkillEvents(ctx, skillIDs, event, sessionID)
+}
+
+// RecallRanked runs the db-2 recall+counts query in one round-trip,
+// returning the semantic non-pinned candidate pool (caller Thompson-
+// ranks) AND the always-advertise pinned set, both with shown/used
+// tallies. ErrNoEmbedder when no embedder is wired. Phase 6.2.db-2.
+func (b *dynamicBackend) RecallRanked(ctx context.Context, query string, limit int) (dynamic, pinned []RecallCandidate, err error) {
+	return b.index.recallRanked(ctx, query, limit)
+}
 
 // List reads the DB index — fast, metadata-only, no disk walk. The
 // returned skills carry FS handles for lazy content, but their
@@ -875,10 +1048,10 @@ func (b *dynamicBackend) Reconcile(ctx context.Context) (int, error) {
 // the install set:
 //
 //   - declared == false  — install EVERY bundle in the dir (OOTB: the
-//                           operator said nothing, ship the full set);
+//     operator said nothing, ship the full set);
 //   - declared == true   — install only the named bundles that exist
-//                           in the dir (config is authoritative; an
-//                           empty names list installs nothing).
+//     in the dir (config is authoritative; an
+//     empty names list installs nothing).
 //
 // Does NOT relink catalogs — the caller runs relinkCatalogs once after
 // all source dirs are indexed. Returns the count installed/updated.

@@ -63,7 +63,18 @@ work — of ANY kind, not only data:
 
 A single operation is NOT multi-step even when it is internally
 rich (combining / filtering / computing in one call); handle it
-via rule 2. To delegate, call:
+via rule 2.
+
+**Finish what you started.** Decide chat-vs-mission BEFORE
+investing in research. If you nevertheless explored in chat —
+found the objects, resolved the relations, built and validated
+the query or action — then the remaining work IS one step: execute
+it and answer the user. Spawning a mission at that point throws
+your own work away and redoes it elsewhere. "It looks analytical /
+spatial / complex" is never the threshold; the number of
+*remaining* coordinated steps is.
+
+To delegate, call:
 
 ```
 session:spawn_mission({

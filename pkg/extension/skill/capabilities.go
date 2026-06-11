@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand/v2"
 	"sort"
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/extension/recap"
 	"github.com/hugr-lab/hugen/pkg/prompts"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -41,16 +44,46 @@ import (
 // inert under the new model — the PDCA shape lives in
 // `metadata.hugen.mission.plan.*` and mission ext owns parsing it.
 var (
-	_ extension.Advertiser          = (*Extension)(nil)
-	_ extension.ToolFilter          = (*Extension)(nil)
-	_ extension.GenerationProvider  = (*Extension)(nil)
-	_ extension.ToolPolicyAdvisor   = (*Extension)(nil)
-	_ extension.SubagentDescriber   = (*Extension)(nil)
-	_ extension.SubagentSpawnHinter = (*Extension)(nil)
+	_ extension.Advertiser           = (*Extension)(nil)
+	_ extension.ToolFilter           = (*Extension)(nil)
+	_ extension.GenerationProvider   = (*Extension)(nil)
+	_ extension.ToolPolicyAdvisor    = (*Extension)(nil)
+	_ extension.SubagentDescriber    = (*Extension)(nil)
+	_ extension.SubagentSpawnHinter  = (*Extension)(nil)
 	_ extension.SubagentSpawnApplier = (*Extension)(nil)
-	_ extension.CloseTurnLookup     = (*Extension)(nil)
-	_ extension.StatusReporter      = (*Extension)(nil)
+	_ extension.CloseTurnLookup      = (*Extension)(nil)
+	_ extension.StatusReporter       = (*Extension)(nil)
+	_ extension.FrameObserver        = (*Extension)(nil)
 )
+
+// OnFrameEmit implements [extension.FrameObserver] (db-2). On each user
+// message it flags the session so the next catalogue render logs ONE
+// `shown` impression for the turn, and arms a fresh advertise draw. Cheap +
+// non-blocking — in-memory flags only; the actual log write happens in
+// TurnPreamble.
+//
+// ROOT ONLY: agent-authored user messages (the async-summary kick, a
+// schedule wake) are runtime synthetics, not user discovery — they must
+// not re-roll the catalogue mid-conversation nor log a spurious `shown`
+// impression into the bandit's denominator. A SUBAGENT's task message is
+// agent-authored by construction (mission ext agentParticipant), so the
+// filter only applies on root — mirrors the recap observer's rule.
+func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState, frame protocol.Frame) {
+	f, ok := frame.(*protocol.UserMessage)
+	if !ok {
+		return
+	}
+	if state.Depth() == 0 && f.Author().Kind == protocol.ParticipantAgent {
+		return
+	}
+	if h := FromState(state); h != nil {
+		h.markShownPending()
+		// A new turn re-rolls the Thompson advertise draw (rotation per
+		// message); within the turn the selection is reused so the
+		// catalogue stays byte-stable across model iterations.
+		h.markAdvertiseRoll()
+	}
+}
 
 // ReportStatus implements [extension.StatusReporter]. Returns the
 // sorted list of skills currently loaded into the calling session
@@ -96,7 +129,6 @@ func (e *Extension) ReportStatus(ctx context.Context, state extension.SessionSta
 	}
 	return data
 }
-
 
 // ResolveCloseTurn implements [extension.CloseTurnLookup]. Walks
 // the calling session's loaded skills and returns the most-
@@ -253,11 +285,34 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 		return ""
 	}
 	renderer := state.Prompts()
-	var cat string
-	if allowedList, scoped := allowedSkillsFromState(state); scoped {
-		cat = renderCatalogueFiltered(ctx, renderer, h, allowedList)
+	var (
+		cat      string
+		shownIDs []string
+	)
+	if allowedList, isScoped := allowedSkillsFromState(state); isScoped {
+		// Recipe-scoped session (Phase 6.1d) — explicit allow-list.
+		cat, shownIDs = renderCatalogueFiltered(ctx, renderer, h, allowedList)
+	} else if allow, ok := e.rankedAdvertise(ctx, state, h); ok {
+		// db-2 — a ROOT session with a topic + embedder gets a Thompson-
+		// sampled, topic-relevant catalogue (rotating top-N ∪ pinned)
+		// rendered through the same scoped path. rankedAdvertise returns
+		// ok=false (not root / no recap / no embedder / empty pool) → the
+		// full List catalogue, exactly as before db-2.
+		cat, shownIDs = renderCatalogueScoped(ctx, renderer, h, allow)
 	} else {
-		cat = renderCatalogue(ctx, renderer, h)
+		cat, shownIDs = renderCatalogue(ctx, renderer, h)
+	}
+	// db-2: log one `shown` impression for the surfaced skills per user
+	// turn. The advertise re-renders every model iteration; the per-turn
+	// flag (reset on each user_message by the FrameObserver) keeps it to
+	// one impression per turn. Best-effort, non-fatal telemetry —
+	// DETACHED from the turn-start hot path (TurnPreamble runs inside
+	// buildMessages, before the model call; N per-id inserts would
+	// otherwise serialise in front of it). WithoutCancel: the write must
+	// survive the turn ending first.
+	if len(shownIDs) > 0 && h.takeShownPending() {
+		logCtx := context.WithoutCancel(ctx)
+		go func() { _ = h.manager.LogSkillEvents(logCtx, shownIDs, skillpkg.SkillLogShown, h.sessionID) }()
 	}
 	// Phase 6.x dogfood follow-up — the loaded-skill bundle listing
 	// (references + scripts + assets) rides here, right after the
@@ -287,6 +342,88 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 	out := strings.Join(parts, "\n\n")
 	h.SetCatalogTokens(extension.EstimateTokens(out))
 	return out
+}
+
+// db-2 advertise tuning.
+const (
+	// recallSemanticLimit bounds the semantic candidate pool the recall
+	// query pulls before Thompson ranking narrows it to recallTopN. Wide
+	// enough that the bandit has arms to explore, capped so the vector
+	// search + per-candidate count join stay one cheap round-trip.
+	recallSemanticLimit = 60
+	// recallTopN is how many ranked dynamic skills survive into the
+	// advertised catalogue each turn — the bounded, rotating menu. Pinned
+	// skills are advertised on top of this, always.
+	recallTopN = 7
+)
+
+// anchorForRanking returns the text db-2 feeds the semantic skill filter
+// for the calling session — the recap marker, which the recap ext forms for
+// EVERY session: a rolling topic for root, a once-distilled goal for a
+// subagent (from its delegated task). Returns ("", false) when no marker
+// exists yet — the caller falls back to the full List catalogue.
+func anchorForRanking(state extension.SessionState) (string, bool) {
+	if rec, ok := recap.CurrentRecap(state); ok {
+		if t := strings.TrimSpace(rec.Text); t != "" {
+			return t, true
+		}
+	}
+	return "", false
+}
+
+// rankedAdvertise computes the db-2 usage-driven catalogue scope: a
+// Thompson-sampled top-N of the topic-relevant skill pool, unioned with the
+// always-advertise pinned set. Returns the allow-map renderCatalogueScoped
+// renders against (it surfaces loaded ∪ allow) and ok=true. Returns
+// (nil, false) — caller falls back to the full List catalogue — when no
+// anchor exists yet, no embedder is wired, or the pool came back empty.
+//
+// The recall runs ONCE per user turn (re-pooling under the current topic,
+// so the menu tracks pivots) and the whole draw is cached across the turn's
+// model iterations via the per-turn draw cache, so the catalogue stays
+// byte-stable past the KV-cache boundary within the turn and rotates between
+// turns.
+func (e *Extension) rankedAdvertise(ctx context.Context, state extension.SessionState, h *SessionSkill) (map[string]struct{}, bool) {
+	if h == nil || h.manager == nil {
+		return nil, false
+	}
+	// Within-turn fast path: reuse the turn's draw across model iterations.
+	// A new user_message arms a re-roll (re-pool + re-Thompson).
+	if allow, ok := h.cachedDraw(); ok {
+		return allow, true
+	}
+	anchor, ok := anchorForRanking(state)
+	if !ok {
+		return nil, false
+	}
+	dyn, pin, err := h.manager.RecallRanked(ctx, anchor, recallSemanticLimit)
+	if err != nil {
+		// ErrNoEmbedder or a transient query error — fall back to the full
+		// catalogue (and retry next turn).
+		return nil, false
+	}
+	if len(dyn) == 0 && len(pin) == 0 {
+		return nil, false
+	}
+	// One fresh Thompson draw per turn — the rotation. An auto-seeded
+	// rand/v2 source gives genuine per-message variation; the bandit's
+	// exploration is the variance across draws.
+	skillpkg.ThompsonRank(dyn, rand.NewPCG(rand.Uint64(), rand.Uint64()))
+	allow := make(map[string]struct{}, recallTopN+len(pin))
+	for i, c := range dyn {
+		if i >= recallTopN {
+			break
+		}
+		allow[c.Name] = struct{}{}
+	}
+	for _, c := range pin {
+		allow[c.Name] = struct{}{}
+	}
+	if len(allow) == 0 {
+		return nil, false
+	}
+	h.storeDraw(allow)
+	return allow, true
 }
 
 // OnToolResult implements [extension.ModelInTurnAdvisor]: it walks the
@@ -499,7 +636,7 @@ func writeBundleCategory(b *strings.Builder, sfs fs.FS, category string) {
 // renderCatalogue produces the "## Available skills" section of
 // the system prompt: one bullet per skill in the store using the
 // manifest description. Loaded skills carry a `(loaded)` tag.
-func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill) string {
+func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill) (string, []string) {
 	return renderCatalogueScoped(ctx, renderer, h, nil)
 }
 
@@ -511,7 +648,7 @@ func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *Session
 // alongside the whitelist entries reachable via `skill:load`.
 // Phase 6.1d (additive interpretation — allow-list adds to the
 // autoloaded baseline, never replaces it).
-func renderCatalogueFiltered(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allowed []string) string {
+func renderCatalogueFiltered(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allowed []string) (string, []string) {
 	allow := make(map[string]struct{}, len(allowed))
 	for _, n := range allowed {
 		allow[n] = struct{}{}
@@ -519,10 +656,13 @@ func renderCatalogueFiltered(ctx context.Context, renderer *prompts.Renderer, h 
 	return renderCatalogueScoped(ctx, renderer, h, allow)
 }
 
-func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allow map[string]struct{}) string {
+// renderCatalogueScoped returns the rendered "## Available skills"
+// section AND the DB-index ids of the skills it actually surfaced (the
+// `shown` impression set for db-2 — empty for non-indexed skills).
+func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allow map[string]struct{}) (string, []string) {
 	all, err := h.manager.List(ctx)
 	if err != nil || len(all) == 0 {
-		return ""
+		return "", nil
 	}
 	loadedSet := map[string]struct{}{}
 	for _, n := range h.LoadedNames(ctx) {
@@ -535,6 +675,8 @@ func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *S
 		RecipeCatalog bool
 	}
 	items := make([]skillItem, 0, len(all))
+	shownIDs := make([]string, 0, len(all))
+	shownCatalog := make(map[string]string, len(all)) // name → index id (for `used` resolution)
 	for _, sk := range all {
 		// Phase 6.1d — task-eligible recipe skills are not listed
 		// here. They surface to the model as synthetic
@@ -563,9 +705,27 @@ func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *S
 			Loaded:        on,
 			RecipeCatalog: sk.Manifest.Hugen.RecipeCatalog,
 		})
+		// db-2 — the `shown` impression set + the session-stored name→id
+		// catalog (used to resolve `used` ids without a DB round-trip)
+		// EXCLUDE:
+		//   - autoloaded skills — always present, not a discovery signal;
+		//   - ALREADY-LOADED skills (`on`) — once loaded a skill is in
+		//     context (tagged `(loaded)`), no longer a discovery
+		//     candidate, so it stops accruing `shown`. The load turn
+		//     still counts: at render time it wasn't loaded yet, so the
+		//     impression + the catalog entry that resolves its `used` are
+		//     captured before the load fires.
+		// Everything else stays, INCLUDING pinned skills (pin ≠ autoload
+		// — a pinned skill the model loads is a real signal). Non-indexed
+		// skills (empty id) have no FK target.
+		if sk.ID != "" && !on && !sk.Manifest.AutoloadInTier(h.tier) {
+			shownIDs = append(shownIDs, sk.ID)
+			shownCatalog[sk.Manifest.Name] = sk.ID
+		}
 	}
+	h.setShownCatalog(shownCatalog)
 	if len(items) == 0 {
-		return ""
+		return "", nil
 	}
 	// Phase 6.1d — recipe catalogs (skills bundling tested `task:*`
 	// recipes) sort to the top so the model spots them before the
@@ -582,7 +742,7 @@ func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *S
 	return renderer.MustRender(
 		"skill/catalogue",
 		map[string]any{"Skills": items},
-	)
+	), shownIDs
 }
 
 // FilterTools implements [extension.ToolFilter]. Narrows the

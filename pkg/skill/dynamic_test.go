@@ -19,6 +19,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/store/local"
 	"github.com/hugr-lab/hugen/pkg/store/local/migrate"
+	"github.com/hugr-lab/hugen/pkg/store/queries"
 )
 
 // newDynamicTestEngine boots a fresh DuckDB-backed hub.db + hugr
@@ -156,6 +157,117 @@ func TestDynamicBackend(t *testing.T) {
 		assert.Empty(t, s.Manifest.Body)
 		// FS handle points at the bundle for lazy content.
 		assert.NotNil(t, s.FS)
+		// db-2: the DB-index id is carried onto the Skill so usage
+		// logging (skill_log.skill_id FK) can reference it.
+		assert.True(t, strings.HasPrefix(s.ID, "skl-"), "Skill.ID = %q", s.ID)
+	})
+
+	t.Run("LogSkillEvents appends skill_log rows (skip empty id)", func(t *testing.T) {
+		rows, err := b.index.listAll(ctx)
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		id := rows[0].ID
+
+		// One real id + one empty (skipped) → exactly one row written.
+		require.NoError(t, b.LogSkillEvents(ctx, []string{id, ""}, SkillLogShown, "ses-1"))
+		require.NoError(t, b.LogSkillEvents(ctx, []string{id}, SkillLogUsed, "ses-1"))
+
+		type logRow struct {
+			SkillID string `json:"skill_id"`
+			Event   string `json:"event"`
+		}
+		logs, err := queries.RunQuery[[]logRow](ctx, q,
+			`query ($agent: String!) {
+				hub { db { agent { skill_log(filter: {agent_id: {eq: $agent}}) { skill_id event } } } }
+			}`,
+			map[string]any{"agent": agentID},
+			"hub.db.agent.skill_log",
+		)
+		require.NoError(t, err)
+		// Append-only: two rows (shown + used), both for the real id; the
+		// empty id contributed nothing.
+		require.Len(t, logs, 2)
+		events := map[string]int{}
+		for _, l := range logs {
+			assert.Equal(t, id, l.SkillID)
+			events[l.Event]++
+		}
+		assert.Equal(t, 1, events[SkillLogShown])
+		assert.Equal(t, 1, events[SkillLogUsed])
+
+		// db-2: the recall projection's log_bucket_aggregation surfaces
+		// the per-event tallies in ONE query (alongside the candidate),
+		// and pin:{eq:false} keeps the non-pinned change-report.
+		type bucketRow struct {
+			ID  string `json:"id"`
+			Log []struct {
+				Key struct {
+					Event string `json:"event"`
+				} `json:"key"`
+				Aggregations struct {
+					RowsCount int `json:"_rows_count"`
+				} `json:"aggregations"`
+			} `json:"log_bucket_aggregation"`
+		}
+		withLog, err := queries.RunQuery[[]bucketRow](ctx, q,
+			`query ($agent: String!) {
+				hub { db { agent {
+					skills(filter: {agent_id: {eq: $agent}, pin: {eq: false}}) {
+						id log_bucket_aggregation { key { event } aggregations { _rows_count } }
+					}
+				}}}
+			}`,
+			map[string]any{"agent": agentID},
+			"hub.db.agent.skills",
+		)
+		require.NoError(t, err)
+		require.Len(t, withLog, 1)
+		counts := map[string]int{}
+		for _, bkt := range withLog[0].Log {
+			counts[bkt.Key.Event] = bkt.Aggregations.RowsCount
+		}
+		assert.Equal(t, 1, counts[SkillLogShown], "shown count via log_bucket_aggregation")
+		assert.Equal(t, 1, counts[SkillLogUsed], "used count via log_bucket_aggregation")
+	})
+
+	t.Run("aliased dynamic+pinned query extracts both at hub.db.agent", func(t *testing.T) {
+		// Validates the 2b data layer: two aliased skills() selections in
+		// one query, extracted at the "hub.db.agent" object path into a
+		// struct. No semantic here (the test engine has no embedder), so
+		// `dynamic` is just the non-pinned set. change-report is not
+		// pinned → dynamic has it, pinned is empty.
+		// The recall projection pulls everything the advertise needs —
+		// id + name + description + per-event stats — in the same query,
+		// for BOTH aliases. (Same recallProjection recallRanked uses.)
+		resp, err := q.Query(ctx,
+			`query ($agent: String!) {
+				hub { db { agent {
+					dynamic: skills(filter: {agent_id: {eq: $agent}, pin: {eq: false}}) {`+recallProjection+`}
+					pinned:  skills(filter: {agent_id: {eq: $agent}, pin: {eq: true}}) {`+recallProjection+`}
+				}}}
+			}`,
+			map[string]any{"agent": agentID},
+		)
+		require.NoError(t, err)
+		defer resp.Close()
+		require.NoError(t, resp.Err())
+
+		var dyn []rankedSkillRow
+		require.NoError(t, resp.ScanDataJSON("hub.db.agent.dynamic", &dyn))
+		require.Len(t, dyn, 1, "non-pinned change-report in dynamic alias")
+		assert.Equal(t, "change-report", dyn[0].Name)
+		counts := map[string]int{}
+		for _, bkt := range dyn[0].Log {
+			counts[bkt.Key.Event] = bkt.Aggregations.RowsCount
+		}
+		assert.Equal(t, 1, counts[SkillLogShown], "shown via aliased recall")
+		assert.Equal(t, 1, counts[SkillLogUsed], "used via aliased recall")
+
+		// pinned alias is empty here (no pinned skills) — ScanData may
+		// report no-data; either way it yields zero rows.
+		var pin []rankedSkillRow
+		_ = resp.ScanData("hub.db.agent.pinned", &pin)
+		assert.Empty(t, pin, "no pinned skills installed in this test")
 	})
 
 	t.Run("Get reads full bundle from disk (with body)", func(t *testing.T) {
