@@ -63,9 +63,18 @@ func (e *Extension) Recover(_ context.Context, state extension.SessionState, eve
 	}
 
 	// Step 2 — rebuild the recent-message ring (self-bounds to the tail).
+	// Mirrors the live OnFrameEmit filter: on ROOT, agent-authored user
+	// rows (the async-summary kick, a schedule wake — runtime synthetics
+	// authored by the agent; EventRow.Author carries the participant ID)
+	// are skipped, so a restart doesn't fold runtime boilerplate into the
+	// topic. Agent-message rows need no consolidated check — the store
+	// only persists consolidated finals.
 	for _, r := range events {
 		switch protocol.Kind(r.EventType) {
 		case protocol.KindUserMessage:
+			if h.root && e.deps.AgentID != "" && r.Author == e.deps.AgentID {
+				continue
+			}
 			h.appendMessage("user", r.Content, e.maxMsgChars, e.maxRing)
 		case protocol.KindAgentMessage:
 			h.appendMessage("assistant", r.Content, e.maxMsgChars, e.maxRing)

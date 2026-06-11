@@ -32,8 +32,9 @@ type RecallCandidate struct {
 //
 // src carries the randomness; the caller controls seeding (a fresh source
 // per advertise for rotation, a fixed seed in tests for determinism).
-// Used is clamped to ≤ Shown so the Beta β stays ≥ 1 even if a stale
-// count pair slips through.
+// Counts are clamped to 0 ≤ Used ≤ Shown so the Beta parameters stay ≥ 1
+// even if a stale or corrupt count pair slips through — gonum's Beta
+// returns NaN on non-positive parameters, which would poison the sort.
 func ThompsonRank(cands []RecallCandidate, src rand.Source) {
 	type scored struct {
 		c     RecallCandidate
@@ -41,8 +42,8 @@ func ThompsonRank(cands []RecallCandidate, src rand.Source) {
 	}
 	arr := make([]scored, len(cands))
 	for i, c := range cands {
-		used := c.Used
-		shown := c.Shown
+		used := max(c.Used, 0)
+		shown := max(c.Shown, 0)
 		if used > shown {
 			used = shown
 		}

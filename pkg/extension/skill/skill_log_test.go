@@ -44,6 +44,30 @@ func TestOnFrameEmit_ShownPendingPerTurn(t *testing.T) {
 	if h.takeShownPending() {
 		t.Error("agent message must not arm shownPending")
 	}
+
+	// A ROOT synthetic (agent-authored user message — async-summary kick,
+	// schedule wake) must NOT arm the flag nor re-roll the draw: it's a
+	// system-driven turn, not user discovery.
+	synth := protocol.NewUserMessage("ses-root",
+		protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent}, "[system:async_summary] ...")
+	ext.OnFrameEmit(ctx, state, synth)
+	if h.takeShownPending() {
+		t.Error("root agent-authored synthetic must not arm shownPending")
+	}
+
+	// A SUBAGENT's task message is agent-authored by construction and MUST
+	// arm — the filter is root-only.
+	worker := fixture.NewTestSessionState("ses-w").WithDepth(1)
+	if err := ext.InitState(ctx, worker); err != nil {
+		t.Fatalf("InitState worker: %v", err)
+	}
+	hw := FromState(worker)
+	task := protocol.NewUserMessage("ses-w",
+		protocol.ParticipantInfo{ID: "a1", Kind: protocol.ParticipantAgent}, "run the wave task")
+	ext.OnFrameEmit(ctx, worker, task)
+	if !hw.takeShownPending() {
+		t.Error("a subagent's agent-authored task must arm shownPending")
+	}
 }
 
 // TestIdsForNames_ResolvesViaShownCatalog verifies the db-2 in-memory

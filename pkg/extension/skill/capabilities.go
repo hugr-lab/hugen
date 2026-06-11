@@ -61,8 +61,19 @@ var (
 // `shown` impression for the turn, and arms a fresh advertise draw. Cheap +
 // non-blocking — in-memory flags only; the actual log write happens in
 // TurnPreamble.
+//
+// ROOT ONLY: agent-authored user messages (the async-summary kick, a
+// schedule wake) are runtime synthetics, not user discovery — they must
+// not re-roll the catalogue mid-conversation nor log a spurious `shown`
+// impression into the bandit's denominator. A SUBAGENT's task message is
+// agent-authored by construction (mission ext agentParticipant), so the
+// filter only applies on root — mirrors the recap observer's rule.
 func (e *Extension) OnFrameEmit(_ context.Context, state extension.SessionState, frame protocol.Frame) {
-	if _, ok := frame.(*protocol.UserMessage); !ok {
+	f, ok := frame.(*protocol.UserMessage)
+	if !ok {
+		return
+	}
+	if state.Depth() == 0 && f.Author().Kind == protocol.ParticipantAgent {
 		return
 	}
 	if h := FromState(state); h != nil {
@@ -294,9 +305,14 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 	// db-2: log one `shown` impression for the surfaced skills per user
 	// turn. The advertise re-renders every model iteration; the per-turn
 	// flag (reset on each user_message by the FrameObserver) keeps it to
-	// one impression per turn. Best-effort, non-fatal telemetry.
+	// one impression per turn. Best-effort, non-fatal telemetry —
+	// DETACHED from the turn-start hot path (TurnPreamble runs inside
+	// buildMessages, before the model call; N per-id inserts would
+	// otherwise serialise in front of it). WithoutCancel: the write must
+	// survive the turn ending first.
 	if len(shownIDs) > 0 && h.takeShownPending() {
-		_ = h.manager.LogSkillEvents(ctx, shownIDs, skillpkg.SkillLogShown, h.sessionID)
+		logCtx := context.WithoutCancel(ctx)
+		go func() { _ = h.manager.LogSkillEvents(logCtx, shownIDs, skillpkg.SkillLogShown, h.sessionID) }()
 	}
 	// Phase 6.x dogfood follow-up — the loaded-skill bundle listing
 	// (references + scripts + assets) rides here, right after the

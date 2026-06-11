@@ -61,4 +61,11 @@ func TestThompsonRank_Edges(t *testing.T) {
 	if cands[0].ID != "y" {
 		t.Fatal("single candidate should survive")
 	}
+	// Negative counts (corrupt row) clamp to 0 — gonum's Beta would
+	// return NaN on a non-positive parameter and poison the sort.
+	neg := []RecallCandidate{{ID: "n", Shown: -5, Used: -2}, {ID: "p", Shown: 4, Used: 4}}
+	ThompsonRank(neg, src)
+	if len(neg) != 2 {
+		t.Fatal("negative-count candidates should survive the rank")
+	}
 }

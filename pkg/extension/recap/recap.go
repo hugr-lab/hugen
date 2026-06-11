@@ -116,10 +116,9 @@ func (e *Extension) fold(ctx context.Context, state extension.SessionState, h *s
 		data,
 	)
 	// Emit persists the frame (AppendEvent) so Recover can replay it.
-	// Session.emit is goroutine-safe (the store serialises concurrent
-	// emits via NextSeq + AppendEvent), so calling it from this
-	// background goroutine is sound. A benign ErrSessionClosed during
-	// teardown is logged at debug, not warn.
+	// fold runs synchronously on the session Run goroutine (OnTurnBoundary),
+	// where emit is always safe. A benign ErrSessionClosed during teardown
+	// is logged at debug, not warn.
 	if err := state.Emit(ctx, frame); err != nil {
 		e.deps.Logger.Debug("recap: emit recap frame", "err", err)
 	}

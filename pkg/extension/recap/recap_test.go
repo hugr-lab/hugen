@@ -18,6 +18,13 @@ func TestAppendMessage_TruncateAndEvict(t *testing.T) {
 	if got := h.recent[0].Text; got != "abcd" {
 		t.Errorf("message not truncated: got %q, want abcd", got)
 	}
+	// Rune-safe: a cut landing mid-rune backs up to the last complete one
+	// (Cyrillic = 2 bytes/char; cut at byte 3 falls inside "б").
+	h3 := &sessionRecap{}
+	h3.appendMessage("user", "абвг", 3, 8) // → "а" (2 bytes), not "а"+half of "б"
+	if got := h3.recent[0].Text; got != "а" {
+		t.Errorf("truncation split a rune: got %q (% x), want а", got, got)
+	}
 	// Ring eviction: keep only the last maxRing.
 	h2 := &sessionRecap{}
 	for _, m := range []string{"m1", "m2", "m3", "m4"} {
@@ -129,17 +136,20 @@ func TestParseRecapResponse(t *testing.T) {
 }
 
 func TestRecover_ReplaysMarkerAndRebuildsRing(t *testing.T) {
-	ext := NewExtension(Deps{}, Config{})
+	ext := NewExtension(Deps{AgentID: "agent-1"}, Config{})
 	state := fixture.NewTestSessionState("ses-root") // depth 0 → root
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
 
+	synthRow := msgRow(7, protocol.KindUserMessage, "[system:async_summary] present the result")
+	synthRow.Author = "agent-1" // runtime synthetic — agent-authored
 	rows := []store.EventRow{
 		recapFrameRow("label1", "marker one"), // older marker
 		recapFrameRow("label2", "marker two"), // latest → wins
 		msgRow(5, protocol.KindUserMessage, "recent question"),
 		msgRow(6, protocol.KindAgentMessage, "recent answer"),
+		synthRow, // must be skipped on root, mirroring OnFrameEmit
 	}
 	if err := ext.Recover(context.Background(), state, rows); err != nil {
 		t.Fatalf("Recover: %v", err)
@@ -153,10 +163,10 @@ func TestRecover_ReplaysMarkerAndRebuildsRing(t *testing.T) {
 		t.Errorf("recovered marker = %+v, want label2 / 'marker two' (latest wins)", cur)
 	}
 	// The ring was rebuilt from the message rows (fold context for the
-	// next boundary).
+	// next boundary); the agent-authored synthetic row was skipped.
 	h := FromState(state)
 	if len(h.recent) != 2 || h.recent[0].Text != "recent question" || h.recent[1].Text != "recent answer" {
-		t.Errorf("ring not rebuilt from history; got %+v", h.recent)
+		t.Errorf("ring not rebuilt from history (synthetic must be skipped); got %+v", h.recent)
 	}
 }
 

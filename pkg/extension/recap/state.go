@@ -17,6 +17,7 @@ package recap
 import (
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 )
@@ -81,10 +82,16 @@ func (s *sessionRecap) hasMarker() bool {
 
 // appendMessage records a dialogue message into the ring, truncating it to
 // maxMsgChars (so one long turn can't dominate the marker) and evicting the
-// oldest entries beyond maxRing.
+// oldest entries beyond maxRing. Truncation is rune-safe: the cut backs up
+// to the last complete UTF-8 rune so Cyrillic / CJK text never leaves a
+// split byte in the fold prompt.
 func (s *sessionRecap) appendMessage(role, text string, maxMsgChars, maxRing int) {
 	if maxMsgChars > 0 && len(text) > maxMsgChars {
-		text = text[:maxMsgChars]
+		cut := maxMsgChars
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		text = text[:cut]
 	}
 	if text == "" {
 		return
