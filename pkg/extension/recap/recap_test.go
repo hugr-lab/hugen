@@ -79,20 +79,6 @@ func TestSnapshotForFold_SplitsRecentAndNew(t *testing.T) {
 	}
 }
 
-func TestSessionRecap_InflightGuard(t *testing.T) {
-	h := &sessionRecap{}
-	if !h.beginRefresh() {
-		t.Fatal("first beginRefresh should win")
-	}
-	if h.beginRefresh() {
-		t.Fatal("second beginRefresh must be blocked while in-flight")
-	}
-	h.endRefresh()
-	if !h.beginRefresh() {
-		t.Fatal("beginRefresh should win again after endRefresh")
-	}
-}
-
 func TestParseRecapResponse(t *testing.T) {
 	cases := []struct {
 		name      string

@@ -43,12 +43,12 @@ type foldTurnView struct {
 	Text string
 }
 
-// fold (re)forms the marker. Called synchronously (at most one at a time,
-// guarded by beginRefresh) from [Extension.OnTurnBoundary] at every turn
-// boundary. It gives the cheap model the prior marker ("what the dialogue
-// is about"), the recent completed exchanges, and the turn's new user
-// message(s), and stores the updated marker + emits a CategoryOp frame for
-// restart-replay.
+// fold (re)forms the marker. Called synchronously from
+// [Extension.OnTurnBoundary] on the session Run goroutine — one turn at a
+// time per session, so no re-entrancy guard is needed. It gives the cheap
+// model the prior marker ("what the dialogue is about"), the recent
+// completed exchanges, and the turn's new user message(s), and stores the
+// updated marker + emits a CategoryOp frame for restart-replay.
 //
 // Best-effort + timeout-bounded: a render / model / parse failure logs warn
 // and leaves the previous marker in place (the raw recent ring still backs
@@ -56,8 +56,6 @@ type foldTurnView struct {
 // context) is bounded by BuildTimeout so a slow or hung summarizer can't
 // stall the turn-start past that budget.
 func (e *Extension) fold(ctx context.Context, state extension.SessionState, h *sessionRecap) {
-	defer h.endRefresh()
-
 	prior, recent, fresh := h.snapshotForFold(e.recentContext)
 	if len(fresh) == 0 {
 		return // no new user message this turn — nothing to (re)form
@@ -84,14 +82,14 @@ func (e *Extension) fold(ctx context.Context, state extension.SessionState, h *s
 		e.deps.Logger.Warn("recap: resolve model failed", "err", err)
 		return
 	}
-	raw, err := streamModelText(ctx, mdl, body, e.cfg.RecapTargetTokens+recapResponseOverheadTokens)
+	raw, err := extension.StreamModelText(ctx, mdl, body, e.cfg.RecapTargetTokens+recapResponseOverheadTokens)
 	if err != nil {
 		e.deps.Logger.Warn("recap: model call failed", "err", err)
 		return
 	}
 	topic, theme, categories, err := parseRecapResponse(raw)
 	if err != nil {
-		e.deps.Logger.Warn("recap: parse response failed", "err", err, "raw", truncate(raw, 200))
+		e.deps.Logger.Warn("recap: parse response failed", "err", err, "raw", extension.TruncateChars(raw, 200))
 		return
 	}
 
@@ -109,7 +107,7 @@ func (e *Extension) fold(ctx context.Context, state extension.SessionState, h *s
 	}
 	frame := protocol.NewExtensionFrame(
 		state.SessionID(),
-		agentParticipant(e.deps.AgentID),
+		extension.AgentParticipant(e.deps.AgentID),
 		providerName,
 		protocol.CategoryOp,
 		OpSet,
@@ -156,39 +154,6 @@ func parseRecapResponse(raw string) (topic, recap string, categories []string, e
 	return topic, recap, categories, nil
 }
 
-// streamModelText drives a single-turn pure-text model call: one
-// user-role message in, accumulated content out. Mirrors the compactor's
-// helper of the same name.
-func streamModelText(ctx context.Context, mdl model.Model, body string, maxTokens int) (string, error) {
-	stream, err := mdl.Generate(ctx, model.Request{
-		Messages:  []model.Message{{Role: model.RoleUser, Content: body}},
-		MaxTokens: maxTokens,
-	})
-	if err != nil {
-		return "", fmt.Errorf("generate: %w", err)
-	}
-	defer func() { _ = stream.Close() }()
-
-	var buf strings.Builder
-	for {
-		chunk, more, err := stream.Next(ctx)
-		if err != nil {
-			return "", fmt.Errorf("stream: %w", err)
-		}
-		if chunk.Content != nil {
-			buf.WriteString(*chunk.Content)
-		}
-		if !more {
-			break
-		}
-	}
-	out := strings.TrimSpace(buf.String())
-	if out == "" {
-		return "", fmt.Errorf("empty response")
-	}
-	return out, nil
-}
-
 func stripFence(s string) string {
 	if !strings.HasPrefix(s, "```") {
 		return s
@@ -198,15 +163,4 @@ func stripFence(s string) string {
 	}
 	s = strings.TrimSuffix(strings.TrimSpace(s), "```")
 	return strings.TrimSpace(s)
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
-}
-
-func agentParticipant(agentID string) protocol.ParticipantInfo {
-	return protocol.ParticipantInfo{ID: agentID, Kind: protocol.ParticipantAgent, Name: "hugen"}
 }

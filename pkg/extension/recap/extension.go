@@ -20,8 +20,11 @@ type Deps struct {
 	Logger  *slog.Logger
 }
 
-// Config carries operator-tunable knobs. Zero values resolve to the
-// defaults in [NewExtension].
+// Config carries the extension's tunable knobs. Zero values resolve to
+// the defaults in [NewExtension]. Only MaxMessageTokens and BuildTimeout
+// are surfaced to the operator YAML (`recap:` block via config.RecapView);
+// the rest are programmatic — wire them through the view if an operator
+// ever needs them.
 type Config struct {
 	// MaxMessageTokens caps each dialogue message before it enters the
 	// ring — a generous bound (not a tight cut) so a full subagent task
@@ -57,7 +60,7 @@ type Extension struct {
 	deps Deps
 	cfg  Config
 
-	maxMsgChars   int // per-message truncation (cfg tokens × charsPerToken)
+	maxMsgChars   int // per-message truncation (cfg tokens × extension.CharsPerToken)
 	maxRing       int // ring size in messages
 	recentContext int // prior messages shown as fold context
 }
@@ -88,7 +91,7 @@ func NewExtension(deps Deps, cfg Config) *Extension {
 	return &Extension{
 		deps:          deps,
 		cfg:           cfg,
-		maxMsgChars:   cfg.MaxMessageTokens * charsPerToken,
+		maxMsgChars:   cfg.MaxMessageTokens * extension.CharsPerToken,
 		maxRing:       cfg.RingMessages,
 		recentContext: cfg.RecentContext,
 	}

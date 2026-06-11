@@ -103,7 +103,7 @@ func (e *Extension) SummarizeSegment(ctx context.Context, state extension.Sessio
 	if err != nil {
 		return "", fmt.Errorf("hide summary: render: %w", err)
 	}
-	return streamModelText(ctx, mdl, body, hideBriefMaxTokens)
+	return extension.StreamModelText(ctx, mdl, body, hideBriefMaxTokens)
 }
 
 // flattenEntriesForBrief renders the segment entries to a compact

@@ -119,7 +119,7 @@ func (e *Extension) cmdCompactorReset(ctx context.Context, state extension.Sessi
 	// inspects metadata.op.
 	frame := protocol.NewExtensionFrame(
 		sessionID,
-		agentParticipant(e.deps.AgentID),
+		extension.AgentParticipant(e.deps.AgentID),
 		providerName,
 		protocol.CategoryOp,
 		OpDigestClear,

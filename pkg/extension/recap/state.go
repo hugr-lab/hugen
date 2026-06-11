@@ -30,11 +30,6 @@ const StateKey = "recap"
 // ExtensionFrames (Recover filters on it).
 const providerName = "recap"
 
-// charsPerToken is the char/4 heuristic the runtime uses everywhere in
-// place of a per-model tokeniser. Recap sizes are configured in tokens
-// and converted to chars through this.
-const charsPerToken = 4
-
 // Recap is the marker a consumer reads:
 //
 //   - Topic — a 3-5 word headline naming the conversation, for display.
@@ -68,9 +63,6 @@ type sessionRecap struct {
 	recent []message
 	// marker is the latest formed topic. Empty until the first fold.
 	marker Recap
-
-	// inflight guards against concurrent folds.
-	inflight bool
 }
 
 // hasMarker reports whether a marker has been formed yet.
@@ -158,24 +150,6 @@ func (s *sessionRecap) current() (Recap, bool) {
 		b.WriteString(m.Text)
 	}
 	return Recap{Text: b.String()}, true
-}
-
-// beginRefresh marks a fold in-flight, returning false when one is already
-// running (single-flight guard).
-func (s *sessionRecap) beginRefresh() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.inflight {
-		return false
-	}
-	s.inflight = true
-	return true
-}
-
-func (s *sessionRecap) endRefresh() {
-	s.mu.Lock()
-	s.inflight = false
-	s.mu.Unlock()
 }
 
 // restore seeds the latest marker from a replayed frame. The ring is

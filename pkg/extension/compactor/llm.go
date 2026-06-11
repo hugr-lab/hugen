@@ -3,7 +3,6 @@ package compactor
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	"github.com/hugr-lab/hugen/pkg/model"
@@ -78,7 +77,7 @@ func (e *Extension) runSummariser(ctx context.Context, state extension.SessionSt
 		return "", fmt.Errorf("render summarise: %w", err)
 	}
 
-	return streamModelText(timeoutCtx, mdl, body, summariseMaxTokens)
+	return extension.StreamModelText(timeoutCtx, mdl, body, summariseMaxTokens)
 }
 
 // runCollapse runs the cap-driven collapse LLM call: takes the
@@ -119,39 +118,5 @@ func (e *Extension) runCollapse(ctx context.Context, state extension.SessionStat
 	if err != nil {
 		return "", fmt.Errorf("render collapse: %w", err)
 	}
-	return streamModelText(timeoutCtx, mdl, body, summariseMaxTokens)
-}
-
-// streamModelText drives a single-turn pure-text model call:
-// one user-role message in, accumulated content tokens out.
-// Mirrors the Session.runModelGoroutine streaming pattern but
-// stays synchronous because the caller is the boundary hook.
-func streamModelText(ctx context.Context, mdl model.Model, body string, maxTokens int) (string, error) {
-	stream, err := mdl.Generate(ctx, model.Request{
-		Messages:  []model.Message{{Role: model.RoleUser, Content: body}},
-		MaxTokens: maxTokens,
-	})
-	if err != nil {
-		return "", fmt.Errorf("generate: %w", err)
-	}
-	defer func() { _ = stream.Close() }()
-
-	var buf strings.Builder
-	for {
-		chunk, more, err := stream.Next(ctx)
-		if err != nil {
-			return "", fmt.Errorf("stream: %w", err)
-		}
-		if chunk.Content != nil {
-			buf.WriteString(*chunk.Content)
-		}
-		if !more {
-			break
-		}
-	}
-	out := strings.TrimSpace(buf.String())
-	if out == "" {
-		return "", fmt.Errorf("empty summariser response")
-	}
-	return out, nil
+	return extension.StreamModelText(timeoutCtx, mdl, body, summariseMaxTokens)
 }

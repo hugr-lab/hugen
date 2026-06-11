@@ -75,8 +75,8 @@ func (e *Extension) OnTurnBoundary(ctx context.Context, state extension.SessionS
 	if !h.root && h.hasMarker() {
 		return nil // subagent: marker already formed from its task
 	}
-	if h.beginRefresh() {
-		e.fold(ctx, state, h)
-	}
+	// fold runs synchronously on the session Run goroutine — one turn at
+	// a time per session, so no single-flight guard is needed here.
+	e.fold(ctx, state, h)
 	return nil
 }
