@@ -33,6 +33,19 @@ metadata:
         step the caller does afterwards.
       keywords: [task, recipe, automate, automation, recurring, periodic, reusable, build a task, create a task, make a task, schedule]
 
+      # Advisory contract for the caller (rendered into root's
+      # `## Available missions` block): what to pass at spawn.
+      inputs_schema:
+        type: object
+        required: [user_intent]
+        properties:
+          user_intent:
+            type: string
+            description: The user's request, verbatim, in the user's language.
+          known_details:
+            type: object
+            description: Facts the user ALREADY stated in chat (data source / tables, filters, output shape, task name, cadence intent). The researcher treats these as answered and will not re-ask them.
+
       capabilities:
         notepad: true
         plan_context: true
@@ -144,7 +157,9 @@ metadata:
             inputs <list>", "Query validated against the live
             schema", "Script smoke-runs green on synthetic data",
             "allowed_tools_default lists only the tools the task
-            calls". Promote relevant [Research AC proposals] here.
+            calls", "User confirmed the assembled bundle before
+            registration". Promote relevant [Research AC proposals]
+            here.
           - **Later iterations** — `ac_update[]` by id: `ac_add` a
             newly-revealed requirement (auto-reopens the modal),
             `drop:true` a no-longer-applicable row, or
@@ -218,10 +233,22 @@ metadata:
              not, emit `status: "error"` with a clear reason so the
              planner can amend or the user can rescope.
 
-          3. **Ask the user about open dimensions.** Bundle every
-             clarification into ONE `done: false` handoff with a
-             `clarifications: [...]` array. Derive the questions
-             from the actual intent — common axes for a TASK:
+          3. **Resolve first, ask second.** Before asking the user
+             anything, resolve every dimension you can YOURSELF —
+             from the intent's own wording, from [Inputs from
+             caller] (`known_details` are answers the user ALREADY
+             gave in chat; never re-ask them), and from the data
+             model you probed in step 2: when the data admits only
+             one answer (a single warehouse, one currency, one
+             granularity), that dimension is NOT open. Ask only
+             what remains genuinely open after that — fewer, more
+             pointed questions; an obviously-answerable question
+             costs the user's trust.
+
+             Bundle what remains into ONE `done: false` handoff
+             with a `clarifications: [...]` array. Derive the
+             questions from the actual intent — common axes for a
+             TASK:
 
              - **What the task produces** — a number, a table, a
                file, a report? What format?
@@ -420,30 +447,43 @@ metadata:
 
       - name: task-registrar
         description: >
-          Persists the assembled bundle and decides catalogue
-          placement. Reads the skill-assembler payload via [Resolved
-          depends_on].
+          Confirms the assembled bundle with the user, persists it,
+          and decides catalogue placement. Reads the skill-assembler
+          payload via [Resolved depends_on].
 
-          1. Call `skill:save` with the assembler's `skill_md` +
+          1. **Confirm the RESULT with the user — mandatory, BEFORE
+             saving.** The plan approval covered the PLAN; this gate
+             confirms the PRODUCT. Call `session:inquire(type:
+             "approval")` with a short `question` ("Save task
+             <name>?" in the user's language) and a `context`
+             summarising the bundle: the task name, ONE line on
+             what it does, the per-run inputs (key — meaning), the
+             `allowed_tools_default` list, and where it lands
+             (local store / catalogue note). On `approved: false`,
+             do NOT save — emit `status: "error"` quoting the
+             user's `reason` verbatim so the planner amends the
+             relevant author / assembler and re-runs this gate.
+          2. Call `skill:save` with the assembler's `skill_md` +
              `references` + `scripts`. On an `ErrSkillExists`
              collision, do NOT overwrite unless the [Resolved user
              inputs] explicitly authorised replacing an existing
              task — otherwise emit `status: "error"` noting the
              collision so the planner can rename. Within an amend
              retry of THIS save you may set `overwrite: true`.
-          2. `skill:save` auto-loads the saved skill — confirm it
+          3. `skill:save` auto-loads the saved skill — confirm it
              loaded (`skill:files(<name>)` lists the bundle) and that
              the manifest parsed (no error from save).
-          3. **Catalogue placement.** In local/personal mode the
+          4. **Catalogue placement.** In local/personal mode the
              saved skill lives in the local store and is immediately
              runnable via `task:<name>` and schedulable — there is
              no separate publish step. If [Resolved user inputs]
              named a shared catalogue to publish to, note it in your
              handoff for the synthesizer to surface (remote publish
              is not performed here).
-          4. Emit a `handoff` body with: `saved_name`, `bundle_dir`
+          5. Emit a `handoff` body with: `saved_name`, `bundle_dir`
              (from skill:files), `files` (saved relative paths),
              `inputs_schema_ok` (manifest parsed + schema present),
+             `user_confirmed` (true — the step-1 approval),
              `placement` (local | <catalogue note>),
              `memory_summary`.
         intent: default
@@ -452,6 +492,8 @@ metadata:
         tools:
           - provider: skill
             tools: [save, load, files, ref]
+          - provider: session
+            tools: [inquire]
           - provider: mission
             tools: [get_handoff, get_research]
 
@@ -476,11 +518,13 @@ metadata:
               `session:inquire` BEFORE the handoff.
             - finish   → the task skill is saved, loadable, has a
               valid inputs_schema + a minimal allowed_tools_default,
-              and (when applicable) its query validated and its
-              script smoke-ran green. Routes to synthesis.
+              the user confirmed the bundle before save, and (when
+              applicable) its query validated and its script
+              smoke-ran green. Routes to synthesis.
 
           Confirm from the registrar + author handoffs that the
-          evidence is present: `inputs_schema_ok`, a green
+          evidence is present: `inputs_schema_ok`, `user_confirmed`
+          (the registrar's pre-save approval), a green
           `smoke_result` if a script was authored, a validated query
           if one was authored. Missing evidence → `amend`, do not
           `finish` on faith. Be terse — `reason` + `memory_summary`
@@ -574,11 +618,13 @@ fits, the mission tells the user to reuse it instead of rebuilding.
 3. **Do waves.** `query-author` and/or `script-author` (parallel)
    author + validate the query / script by loading the
    researcher-named skills. `skill-assembler` composes the full
-   `skill:save` payload. `task-registrar` saves it + decides
-   placement.
+   `skill:save` payload. `task-registrar` confirms the assembled
+   bundle with the user (one approval modal — the plan approval
+   covered the plan; this confirms the product), then saves it +
+   decides placement.
 4. **Check.** `checker` confirms the saved bundle is valid (schema
-   present, query validated, script smoke-ran green) and routes
-   `finish` / `amend`.
+   present, user confirmed pre-save, query validated, script
+   smoke-ran green) and routes `finish` / `amend`.
 5. **Synth.** `synthesizer` confirms the created task to the user
    and points at the run / schedule next-steps.
 

@@ -346,15 +346,27 @@ session:spawn_mission(
   name="build-<short>",
   goal="Build a reusable task for: <user request, verbatim>",
   skill="_task_builder",
-  inputs={ user_intent: "<the user's full request, verbatim>" }
+  inputs={
+    user_intent: "<the user's full request, verbatim>",
+    known_details: { ... }  # only facts the user already stated
+  }
 )
 ```
 
+`known_details` follows the Knob 2 rule — pass ONLY facts the user
+actually named in this chat (a data source / tables, filters, the
+output shape, a task-name preference, the cadence they mentioned),
+never anything you'd have to probe for. The builder's researcher
+treats these as already answered and will NOT re-ask them; every
+dimension you omit it clarifies with the user itself. Omit the key
+entirely when the request carries no extra facts.
+
 `_task_builder` interviews the user for the task's inputs / output /
-name, authors + validates the bundle, and saves it as a task-
-eligible recipe. When it returns, the new `task:<name>` tool is
-available — run it ad-hoc (Path A) or bind it to a schedule
-(Path B) per what the user originally asked.
+name, authors + validates the bundle, confirms the assembled result
+with the user, and saves it as a task-eligible recipe. When it
+returns, the new `task:<name>` tool is available — run it ad-hoc
+(Path A) or bind it to a schedule (Path B) per what the user
+originally asked.
 
 Use this when the work is worth keeping (the user said "every…",
 "regularly", "make a task that…") — not for a single one-off,
