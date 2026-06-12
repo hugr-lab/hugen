@@ -355,10 +355,14 @@ session:spawn_mission(
 
 `known_details` follows the Knob 2 rule — pass ONLY facts the user
 actually named in this chat (a data source / tables, filters, the
-output shape, a task-name preference, the cadence they mentioned),
-never anything you'd have to probe for. The builder's researcher
-treats these as already answered and will NOT re-ask them; every
-dimension you omit it clarifies with the user itself. Omit the key
+output format, a task-name preference, the cadence they mentioned),
+never anything you'd have to probe for. Every value must be a
+CONCRETE answer ("html", "~/reports/roads.csv", "weekly"), not a
+restatement of the request — the builder treats every key you pass
+as already answered and will NOT re-ask it, so a paraphrase
+("output: report") silently suppresses a question the user never
+answered. When in doubt, leave the key out: every dimension you
+omit the builder clarifies with the user itself. Omit `known_details`
 entirely when the request carries no extra facts.
 
 `_task_builder` interviews the user for the task's inputs / output /

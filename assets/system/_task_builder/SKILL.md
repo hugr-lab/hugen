@@ -54,6 +54,116 @@ metadata:
         role: researcher
         max_iterations: 3
 
+      # Research-stage lifecycle hooks (research→files, the analyst
+      # pattern). This skill is embed-only — no on-disk bundle to
+      # copy templates from — so `before` writes the skeletons
+      # inline via heredoc. The researcher FILLS the files; the
+      # `check` gate re-prompts it while the load-bearing ones
+      # (requirements.md, data-model.md) are still skeleton-empty.
+      stages:
+        research:
+          before:
+            tool: bash-mcp:bash.shell
+            args:
+              cmd: |
+                mkdir -p {{.MissionDir}}/research
+                cat > {{.MissionDir}}/research/requirements.md <<'SKEL'
+                # Result requirements — the contract
+
+                > Filled by the researcher. Every section must be GROUNDED in one
+                > of: the user's words (intent / caller inputs with a CONCRETE
+                > value), the data model (derivable facts only), or the user's
+                > answer to a clarification asked THIS stage. A section you cannot
+                > ground is an open question — ask, never guess. Downstream roles
+                > build EXACTLY this contract; the registrar restates it to the
+                > user before saving.
+
+                ## What the task produces per run
+
+                <!-- Content + shape / format + language, concretely: "Markdown
+                     table printed in the reply", "CSV file", "HTML report". -->
+
+                ## Where the result goes
+
+                <!-- Printed back / written to a file path / other destination. -->
+
+                ## Per-run inputs vs fixed
+
+                <!-- Values that vary per run (each becomes a task.inputs_schema
+                     property: key — meaning — example) vs values fixed inside
+                     the task. "No per-run inputs" is a valid answer. -->
+
+                ## Task name
+
+                <!-- Short stable name (snake/kebab). -->
+
+                ## Grounding
+
+                <!-- One line per section above: where the answer came from —
+                     "user said X" / "data model admits only Y" / "asked, user
+                     answered Z". -->
+                SKEL
+                cat > {{.MissionDir}}/research/data-model.md <<'SKEL'
+                # Data model
+
+                > The exact objects / fields / joins the task's query relies on —
+                > written so the query author NEVER re-discovers the schema. When
+                > the task fetches no data, write "n/a — no data source".
+
+                ## Objects
+
+                <!-- module + object name + its role in the goal, one line each.
+                     Name the module EXACTLY as validated — similarly-named
+                     modules exist. -->
+
+                ## Key fields
+
+                <!-- object.field — type — meaning; only what the goal touches. -->
+
+                ## Joins / relations
+
+                <!-- How the objects connect (incl. spatial joins), with the
+                     exact argument shapes you validated. -->
+
+                ## Gotchas
+
+                <!-- Nulls, empty groups, magic ids encoding business terms
+                     (e.g. a type_id), pagination limits — anything a worker
+                     would otherwise trip on. -->
+                SKEL
+                cat > {{.MissionDir}}/research/queries.md <<'SKEL'
+                # Queries
+
+                > The validated query shapes the task will run — copy what you
+                > ACTUALLY executed, with one line on what each returns. Mark
+                > every per-run value with a Go-template placeholder over the
+                > input key (".Inputs.<key>" in double curly braces). When the
+                > task fetches nothing, write "n/a — no query".
+
+                ## Primary query
+
+                <!-- The validated query text. -->
+
+                ## Verification probes
+
+                <!-- Optional: counts / aggregation checks you used to confirm
+                     the data is real. -->
+                SKEL
+          check:
+            tool: bash-mcp:bash.shell
+            args:
+              cmd: |
+                cd {{.MissionDir}}
+                ok=1
+                for f in requirements.md data-model.md; do
+                  lines=$(awk '/<!--/{c=1} c==0{print} /-->/{c=0}' "research/$f" 2>/dev/null | grep -cv -e '^[[:space:]]*[#>]' -e '^[[:space:]]*$')
+                  if [ "${lines:-0}" -lt 3 ]; then
+                    echo "research/$f is still a skeleton ($lines content lines) — fill its sections (or write an explicit n/a where a section does not apply) before finishing" >&2
+                    ok=0
+                  fi
+                done
+                [ "$ok" -eq 1 ]
+
       plan:
         role: planner
         max_waves: 8
@@ -233,22 +343,46 @@ metadata:
              not, emit `status: "error"` with a clear reason so the
              planner can amend or the user can rescope.
 
-          3. **Resolve first, ask second.** Before asking the user
-             anything, resolve every dimension you can YOURSELF —
-             from the intent's own wording, from [Inputs from
-             caller] (`known_details` are answers the user ALREADY
-             gave in chat; never re-ask them), and from the data
-             model you probed in step 2: when the data admits only
-             one answer (a single warehouse, one currency, one
-             granularity), that dimension is NOT open. Ask only
-             what remains genuinely open after that — fewer, more
-             pointed questions; an obviously-answerable question
-             costs the user's trust.
+          3. **Build the RESULT CONTRACT — resolve or ask, never
+             guess.** The scaffolded `research/requirements.md` IS
+             the contract: fill it section by section. Before you
+             can finish, it must state CONCRETELY what the finished
+             task produces on each run: the result's content, its
+             shape / format, where it goes, its language, which
+             values vary per run vs. stay fixed, and the task's
+             name. Whatever form the result takes — a file, a
+             message, a dataset, an action performed — the contract
+             must describe it precisely enough that the user could
+             not later say "I didn't ask for THAT". (The schema
+             facts from step 2 land in `research/data-model.md` +
+             `research/queries.md` — the author workers read those
+             files instead of re-discovering, so name modules /
+             objects EXACTLY as validated.)
 
-             Bundle what remains into ONE `done: false` handoff
-             with a `clarifications: [...]` array. Derive the
-             questions from the actual intent — common axes for a
-             TASK:
+             That statement is your self-check. Every element of
+             it must be grounded in one of exactly three sources:
+
+             - **the user's own words** — the intent text or a
+               CONCRETE value in [Inputs from caller] (a paraphrase
+               of the request — e.g. output: "report" — is NOT a
+               resolved format; treat it as open);
+             - **the data model** — but only for facts that are
+               derivable: which objects / fields back the goal, how
+               entities join, which filter encodes a business term.
+               Resolve these YOURSELF in step 2; never ask what you
+               can look up;
+             - **the user's answer** to a clarification you ask NOW.
+
+             An element you cannot ground is an open question —
+             guessing it plants a wrong assumption into every
+             downstream worker. Producing ZERO questions on a fresh
+             task intent usually means a preference was guessed,
+             not resolved.
+
+             Bundle every open element into ONE `done: false`
+             handoff with a `clarifications: [...]` array. Derive
+             the questions from the actual intent — common axes for
+             a TASK:
 
              - **What the task produces** — a number, a table, a
                file, a report? What format?
@@ -270,15 +404,22 @@ metadata:
              slot. A SECOND round is allowed only when first answers
              reveal new ambiguity (runtime caps at 3 iterations).
 
-          4. **When you have everything**, emit `done: true` with:
+          4. **When you have everything**, fill the three
+             `research/` files, then emit `done: true` with:
              - `findings`: a short paragraph telling the planner what
                the task should do, what data backs it, and which
                skills author its query / script.
+             - `file_refs`: the `research/` paths you filled —
+               workers read them via `bash.read_file`.
              - `resolved_user_inputs`: stable key/value map — at
-               least `task_name`, `task_goal`, the per-run input
-               keys + their meaning, `output_target`, `data_skill`,
+               least `task_name`, `task_goal`,
+               `result_requirements` (the step-3 result contract,
+               one concrete paragraph), the per-run input keys +
+               their meaning, `output_target`, `data_skill`,
                `script_skill` (when relevant), and any catalogue
-               choice. The planner propagates these into workers.
+               choice. The planner propagates these into workers,
+               and the registrar restates the contract in its
+               pre-save confirmation.
              - `ac_proposals` (optional): proposed acceptance
                criteria grounded in the user's answers.
              - `memory_summary`: one line for plan_context.
@@ -317,14 +458,23 @@ metadata:
           research) as `inputs.data_skill`, the goal, and the per-run
           input keys.
 
+          0. **Read the research files FIRST** —
+             `bash.read_file research/data-model.md` +
+             `research/queries.md` (+ `research/requirements.md`
+             for the result contract). They carry the EXACT modules,
+             objects, fields, joins, and validated query shapes.
+             Trust them over your own re-discovery: similarly-named
+             modules exist, and a fresh search can drift to the
+             wrong one. Re-discover ONLY what the files genuinely
+             lack.
           1. `skill:load(<inputs.data_skill>)`. If the brief did not
              name one, `skill:catalog_list(keyword: "data discovery
              query validation")` (or check `## Available skills`) to
              find a query/validation skill and load it.
-          2. Discover only what you need — the source / module /
-             table and the columns the goal touches — reusing any
-             [Resolved depends_on] / research findings rather than
-             re-scanning.
+          2. Compose from the researched grammar — reuse the
+             validated shapes from `research/queries.md` and any
+             [Resolved depends_on] bodies rather than re-scanning
+             the schema.
           3. Compose the query the task will run. Where a value
              varies per run, mark it with a Go-template placeholder
              `{{ .Inputs.<key> }}` keyed on the task's input names
@@ -344,6 +494,8 @@ metadata:
         can_spawn: false
         autoload_skills: [_mission_worker]
         tools:
+          - provider: bash-mcp
+            tools: [bash.read_file, bash.list_dir]
           - provider: skill
             tools: [catalog_list, load, ref, files]
           - provider: notepad
@@ -360,6 +512,11 @@ metadata:
           goal, the expected input data shape (from the query-author
           handoff via [Resolved depends_on]), and the output target.
 
+          0. **Read `research/requirements.md` FIRST**
+             (`bash.read_file`) — the result contract: the exact
+             shape / format / destination / language the script's
+             output must honour. The script encodes THAT, not your
+             own taste.
           1. `skill:load(<inputs.script_skill>)`. If unnamed,
              `skill:catalog_list(keyword: "script execution python")`
              (or check `## Available skills`) to find a
@@ -384,6 +541,8 @@ metadata:
         can_spawn: false
         autoload_skills: [_mission_worker]
         tools:
+          - provider: bash-mcp
+            tools: [bash.read_file, bash.list_dir]
           - provider: skill
             tools: [catalog_list, load, ref, files]
           - provider: notepad
@@ -399,6 +558,11 @@ metadata:
           depends_on] and the [Resolved user inputs] the planner
           passed (task_name, task_goal, per-run input keys,
           output_target, allowed tools).
+
+          FIRST read `research/requirements.md` (`bash.read_file`) —
+          the result contract the bundle must encode: the produced
+          SKILL.md's steps, inputs_schema, and output handling must
+          match it exactly.
 
           Produce ONE `handoff` body carrying the full `skill:save`
           payload — do NOT call `skill:save` yourself (the registrar
@@ -442,6 +606,8 @@ metadata:
         can_spawn: false
         autoload_skills: [_mission_worker]
         tools:
+          - provider: bash-mcp
+            tools: [bash.read_file, bash.list_dir]
           - provider: mission
             tools: [get_handoff, get_research]
 
@@ -456,10 +622,15 @@ metadata:
              confirms the PRODUCT. Call `session:inquire(type:
              "approval")` with a short `question` ("Save task
              <name>?" in the user's language) and a `context`
-             summarising the bundle: the task name, ONE line on
-             what it does, the per-run inputs (key — meaning), the
-             `allowed_tools_default` list, and where it lands
-             (local store / catalogue note). On `approved: false`,
+             summarising the bundle: the task name, what it
+             produces per run (restate the contract from
+             `research/requirements.md` — read it via
+             `bash.read_file` — or `result_requirements` in
+             [Resolved user inputs]; the user agreed to THAT, so
+             flag any deviation), the per-run inputs (key —
+             meaning), the `allowed_tools_default` list, and where
+             it lands (local store / catalogue note). On
+             `approved: false`,
              do NOT save — emit `status: "error"` quoting the
              user's `reason` verbatim so the planner amends the
              relevant author / assembler and re-runs this gate.
@@ -490,6 +661,8 @@ metadata:
         can_spawn: false
         autoload_skills: [_mission_worker]
         tools:
+          - provider: bash-mcp
+            tools: [bash.read_file, bash.list_dir]
           - provider: skill
             tools: [save, load, files, ref]
           - provider: session
