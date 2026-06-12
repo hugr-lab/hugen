@@ -304,8 +304,8 @@ type HugenMetadata struct {
 	// TierCompatibility lists the tiers where the skill may be
 	// loaded at all, whether via autoload or via explicit
 	// skill:load. Outside this set the skill is invisible: it does
-	// not appear in skill:tools_catalog.available_in_skills and a
-	// direct skill:load surfaces tool_error{code:"tier_forbidden"}.
+	// not surface in the per-turn skill advertise and a direct
+	// skill:load surfaces tool_error{code:"tier_forbidden"}.
 	// Empty defaults to ["worker"] — the safest tier where domain
 	// tools are useful. Invariant: AutoloadFor ⊆ TierCompatibility
 	// (a skill cannot auto-load where it would be forbidden
@@ -532,9 +532,9 @@ func (m *Manifest) EffectiveTierCompatibility() []string {
 }
 
 // LoadableInTier reports whether the skill may be loaded into a
-// session at the given tier. Consulted by skill:load and
-// skill:tools_catalog gates — outside the returned set, the skill
-// is invisible from the model's perspective.
+// session at the given tier. Consulted by the skill:load gate and
+// the per-turn advertise — outside the returned set, the skill is
+// invisible from the model's perspective.
 func (m *Manifest) LoadableInTier(tier string) bool {
 	return slices.Contains(m.EffectiveTierCompatibility(), tier)
 }

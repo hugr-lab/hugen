@@ -33,9 +33,7 @@ runs:
       - delegation_required
       - whiteboard_fanout3
       - full_analyst_workflow
-      - skill_save_bundle
       - skill_save_overwrite_collision
-      - skill_discovery_via_catalog
       # Phase 5.2 ζ — root-as-chat. Quick data Q&A via root
       # directly (no mission); anaphoric follow-up; batch ask
       # spawns analyst with required `name` arg.
@@ -72,9 +70,7 @@ runs:
       # to mission B via climb-to-root storage + the 48h window.
       - cross_mission_notepad
       # skill-machinery scenarios — independent of tier topology.
-      - skill_save_bundle
       - skill_save_overwrite_collision
-      - skill_discovery_via_catalog
       # Phase 5.2 ζ — root-as-chat. Quick data Q&A via root
       # directly (no mission); anaphoric follow-up; batch ask
       # spawns analyst with required `name` arg.
@@ -98,7 +94,6 @@ runs:
       - single_explorer
       - delegation_required
       - full_analyst_workflow
-      - skill_save_bundle
 
   - name: gemma4-26b
     llm: configs/llm-gemma4-26b.yaml
@@ -117,9 +112,7 @@ runs:
       # validates that working memory survives spawn_mission
       # boundaries via climb-to-root storage.
       - cross_mission_notepad
-      - skill_save_bundle
       - skill_save_overwrite_collision
-      - skill_discovery_via_catalog
       # Phase 5.1 κ — HITL gate scenarios. Initial scaffolding;
       # harness wiring for InquiryRequest interception + multi-
       # root fan-out arrives in a fast-follow. Expect tuning

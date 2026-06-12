@@ -199,18 +199,17 @@ metadata:
              schedule it directly instead of rebuilding. Only build
              new when nothing fits.
 
-          1. **Discover the agent's capabilities.** Use
-             `skill:tools_catalog(pattern: <keyword>)` to find which
-             installed skills provide the capabilities this task
-             needs — e.g. data discovery / query validation
-             (search "discovery", "schema", "graphql", "query"),
-             and script / code execution (search "script",
-             "python", "run"). Record the chosen skill NAMES into
-             `resolved_user_inputs` under stable keys `data_skill`
-             and `script_skill` (omit one if the task doesn't need
-             it). The author workers will `skill:load` exactly these
-             names. Do NOT assume a name — read it from the
-             catalogue.
+          1. **Discover the agent's capabilities.** Check your
+             `## Available skills` block first, then search the full
+             catalogue with `skill:catalog_list(keyword: <what the
+             task needs>)` — e.g. "data discovery query validation"
+             for the data side, "script python execution" for the
+             code side. Pick by each skill's description. Record the
+             chosen skill NAMES into `resolved_user_inputs` under
+             stable keys `data_skill` and `script_skill` (omit one
+             if the task doesn't need it). The author workers will
+             `skill:load` exactly these names. Do NOT assume a
+             name — read it from the catalogue.
 
           2. **Probe feasibility.** `skill:load` the data skill you
              found and use ITS discovery / schema tools to confirm
@@ -275,7 +274,7 @@ metadata:
           llm_intent: summarize
         tools:
           - provider: skill
-            tools: [catalog_list, tools_catalog, load, ref, files]
+            tools: [catalog_list, load, ref, files]
           - provider: notepad
             tools: [read, search]
           - provider: session
@@ -292,9 +291,9 @@ metadata:
           input keys.
 
           1. `skill:load(<inputs.data_skill>)`. If the brief did not
-             name one, `skill:tools_catalog(pattern: "graphql")` /
-             "discovery" / "schema" to find a query/validation skill
-             and load it.
+             name one, `skill:catalog_list(keyword: "data discovery
+             query validation")` (or check `## Available skills`) to
+             find a query/validation skill and load it.
           2. Discover only what you need — the source / module /
              table and the columns the goal touches — reusing any
              [Resolved depends_on] / research findings rather than
@@ -319,7 +318,7 @@ metadata:
         autoload_skills: [_mission_worker]
         tools:
           - provider: skill
-            tools: [catalog_list, tools_catalog, load, ref, files]
+            tools: [catalog_list, load, ref, files]
           - provider: notepad
             tools: [read, search]
           - provider: mission
@@ -335,8 +334,9 @@ metadata:
           handoff via [Resolved depends_on]), and the output target.
 
           1. `skill:load(<inputs.script_skill>)`. If unnamed,
-             `skill:tools_catalog(pattern: "script")` / "python" /
-             "run" to find a code-execution skill and load it.
+             `skill:catalog_list(keyword: "script execution python")`
+             (or check `## Available skills`) to find a
+             code-execution skill and load it.
           2. Write a small, self-contained script that reads the
              task's data (a file path or the query result it is
              handed at run time), produces the output the user
@@ -358,7 +358,7 @@ metadata:
         autoload_skills: [_mission_worker]
         tools:
           - provider: skill
-            tools: [catalog_list, tools_catalog, load, ref, files]
+            tools: [catalog_list, load, ref, files]
           - provider: notepad
             tools: [read, search]
           - provider: mission

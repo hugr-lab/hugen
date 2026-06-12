@@ -42,9 +42,9 @@ type Skill struct {
 // Three production sources:
 //
 //   - **system** — agent-core skills bundled in the binary
-//     (`_root`, `_mission`, `_worker`, `_general`, `_planner`,
-//     `_skill_builder`, `_system`, `_whiteboard`). Embed-only;
-//     no on-disk presence. Owned by the binary; not tunable.
+//     (`_root`, `_mission_worker`, `_worker`, `_task_builder`,
+//     `_system`, `_admin`). Embed-only; no on-disk presence.
+//     Owned by the binary; not tunable.
 //   - **hub** — admin-delivered extensions (`hugr-data`,
 //     `analyst`, `duckdb-data`, `duckdb-docs`, `python-runner`).
 //     Today filled from the binary's embedded bundle at boot
@@ -137,9 +137,9 @@ var (
 
 	// ErrSkillExists is returned by SkillStore.Publish when a skill
 	// with the same name already exists in the writable backend
-	// and PublishOptions.Overwrite is false. The save protocol
-	// (`_skill_builder`) instructs the agent to ask the user
-	// before retrying with Overwrite=true.
+	// and PublishOptions.Overwrite is false. The authoring flow
+	// (`_task_builder`'s registrar) requires explicit user
+	// authorisation before retrying with Overwrite=true.
 	ErrSkillExists = errors.New("skill: already exists")
 
 	// ErrInvalidPath is returned by skill:save when a relative key

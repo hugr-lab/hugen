@@ -324,7 +324,7 @@ func (s *Store) Search(ctx context.Context, query string, opts SearchOpts) ([]Sk
 	if s.dynamic == nil {
 		return nil, ErrNoEmbedder
 	}
-	rows, err := s.dynamic.index.search(ctx, query, opts.TaskEligible, opts.Type, opts.Limit)
+	rows, err := s.dynamic.index.search(ctx, query, opts.TaskEligible, opts.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -366,42 +366,6 @@ func (s *Store) SyncDynamic(ctx context.Context, hubDir string, installSet []str
 	indexed, rerr := s.dynamic.Reconcile(ctx) // authored + relink (sees hub catalogs)
 	s.Refresh()
 	return installed + indexed, errors.Join(ierr, rerr)
-}
-
-// CatalogMembers returns the member skills of a recipe catalog — the
-// step-2 of two-step discovery (catalog → the recipes inside it).
-// Reads the persisted catalog_member edges when the catalog lives in
-// the dynamic index; otherwise derives membership from the catalog
-// manifest's `allowed-tools` task grants (covers hub catalogs not
-// indexed into the dynamic store + plain stores). Returns
-// ErrSkillNotFound when the named skill doesn't exist, nil when it
-// exists but is not a recipe catalog.
-func (s *Store) CatalogMembers(ctx context.Context, name string) ([]Skill, error) {
-	cat, err := s.Get(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	if !cat.Manifest.Hugen.RecipeCatalog {
-		return nil, nil
-	}
-	// Persisted-edge path (dynamic catalogs).
-	if s.dynamic != nil {
-		if members, err := s.dynamic.catalogMembersByName(ctx, name); err != nil {
-			return nil, err
-		} else if len(members) > 0 {
-			return members, nil
-		}
-	}
-	// Manifest-derived fallback: resolve each member recipe by name.
-	var out []Skill
-	for _, member := range catalogMemberNames(cat.Manifest) {
-		sk, gerr := s.Get(ctx, member)
-		if gerr != nil {
-			continue // a named member that isn't installed — skip
-		}
-		out = append(out, sk)
-	}
-	return out, nil
 }
 
 // ApplyPins reconciles the advertise-pin flag across the dynamic index

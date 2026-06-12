@@ -126,7 +126,7 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 		},
 		{
 			Name:             providerName + ":save",
-			Description:      "Persist a complete skill bundle (SKILL.md + optional references / scripts / assets) to the local skill store. Auto-loads the saved skill in the current session for immediate use. User-initiated only — do NOT propose this. Follow the `_skill_builder` protocol for naming, generalisation, and mandatory post-save validation.",
+			Description:      "Persist a complete skill bundle (SKILL.md + optional references / scripts / assets) to the local skill store. Auto-loads the saved skill in the current session for immediate use. User-initiated only — do NOT propose this. The authoring flow (naming, generalisation, post-save validation) is owned by the `_task_builder` mission.",
 			Provider:         providerName,
 			PermissionObject: permObjectSave,
 			ArgSchema:        json.RawMessage(saveSchema),
@@ -144,13 +144,6 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 			Provider:         providerName,
 			PermissionObject: permObjectRef,
 			ArgSchema:        json.RawMessage(refSchema),
-		},
-		{
-			Name:             toolNameToolsCatalog,
-			Description:      toolDescToolsCatalog,
-			Provider:         providerName,
-			PermissionObject: permObjectToolsCatalog,
-			ArgSchema:        json.RawMessage(toolsCatalogSchema),
 		},
 		{
 			Name:             toolNameCatalogList,
@@ -188,8 +181,6 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 		return h.callFiles(ctx, args)
 	case "ref":
 		return h.callRef(ctx, args)
-	case "tools_catalog":
-		return h.callToolsCatalog(ctx, args)
 	case "catalog_list":
 		return h.callCatalogList(ctx, args)
 	default:

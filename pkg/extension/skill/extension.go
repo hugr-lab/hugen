@@ -3,7 +3,7 @@
 // extension. Through stages 1-5 of phase 4.1b-pre this package
 // absorbed every skill-related concern that used to live in
 // pkg/session: the tool catalogue (load/unload/files/ref/publish/
-// tools_catalog), the system-prompt sections, the per-session
+// catalog_list), the system-prompt sections, the per-session
 // allow-list filter, the slash command handler, the policy advisor,
 // the subagent role describer, the per-session loaded-skills state
 // itself, and the Recovery / Closer hooks.

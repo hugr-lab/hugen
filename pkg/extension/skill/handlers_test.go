@@ -88,12 +88,12 @@ func TestExtension_List_CoreTools(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	want := map[string]bool{
-		"skill:load":          false,
-		"skill:unload":        false,
-		"skill:save":          false,
-		"skill:files":         false,
-		"skill:ref":           false,
-		"skill:tools_catalog": false,
+		"skill:load":         false,
+		"skill:unload":       false,
+		"skill:save":         false,
+		"skill:files":        false,
+		"skill:ref":          false,
+		"skill:catalog_list": false,
 	}
 	// Every tool's ArgSchema must conform to the cross-provider
 	// chat-completion subset (see pkg/tool/validate.go). Gemini in

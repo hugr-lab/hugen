@@ -17,20 +17,25 @@ tell you how to do the standard agent operations at your tier
 Follow them — they are the authoritative source for workflow
 rules at your tier.
 
-If you do not see a tool that would help, run
-`skill:tools_catalog(pattern="<keyword>")` to discover which
-installed skill admits it, then `skill:load("<skill>")`. After
-loading, list the skill's bundled references with
+If you need a capability your current tools do not cover, check
+the `## Available skills` block first — it is re-ranked around
+the live conversation every turn, so the relevant skill is
+usually already listed; `skill:load("<skill>")` it. When nothing
+there fits, search the FULL catalogue with
+`skill:catalog_list(keyword="<what you need>")` — a free-text
+query ranked by relevance over every saved / bundled skill (the
+advertise block is a capped shortlist; absence there proves
+nothing). After loading, list the skill's bundled references with
 `skill:files(name="<skill>", subdir="references")` and read the
 relevant one(s) with `skill:ref(skill="<skill>", ref="<base>")`
 BEFORE composing tool calls. The references are written by humans
 for the model; trust them over your prior.
 
 For non-trivial requests (analytical, reporting, or any
-multi-step pattern), check `skill:tools_catalog` for a saved
-local skill that already covers the request before composing
-a procedure from scratch — local skills do not autoload, but
-their names appear in `available_in_skills`.
+multi-step pattern), check the catalogue for a saved skill that
+already covers the request BEFORE composing a procedure from
+scratch — a match means the user already crystallised this work;
+load it and follow its procedure instead of re-deriving it.
 
 Some skills in your `## Available skills` block are tagged
 **(recipe catalog)** — curated collections of tested, single-
