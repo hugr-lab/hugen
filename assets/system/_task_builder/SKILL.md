@@ -700,7 +700,16 @@ metadata:
           (the registrar's pre-save approval), a green
           `smoke_result` if a script was authored, a validated query
           if one was authored. Missing evidence → `amend`, do not
-          `finish` on faith. Be terse — `reason` + `memory_summary`
+          `finish` on faith.
+
+          **Evidence must match the AC's LITERAL terms.** When an
+          AC names a specific module / object / format / value,
+          check the handoff CONTENT against that exact name — a
+          status flag is not evidence. A query that validates green
+          against a DIFFERENT module than the AC names does NOT
+          satisfy it (similarly-named modules exist); compare
+          against `research/data-model.md` (`bash.read_file`) when
+          in doubt, and `amend` naming the mismatch. Be terse — `reason` + `memory_summary`
           one line each.
         intent: default
         can_spawn: false
@@ -708,6 +717,8 @@ metadata:
         capabilities:
           plan_context: read
         tools:
+          - provider: bash-mcp
+            tools: [bash.read_file, bash.list_dir]
           - provider: session
             tools: [inquire]
           - provider: mission
