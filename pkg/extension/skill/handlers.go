@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"testing/fstest"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/extension"
@@ -54,37 +54,27 @@ const (
   "required": ["name"]
 }`
 
-	// saveSchema deliberately omits `additionalProperties` on
-	// references/scripts/assets — Gemini's tool-schema subset
-	// rejects it (see pkg/tool/validate.go and the cross-provider
-	// conformance test). The inner shape (open-ended string→string
-	// map) is described in each field's `description` so the model
-	// picks the right call shape from there.
+	// saveSchema is path-based: the bundle already lives as files in
+	// the session workspace (SKILL.md + references/ + scripts/ +
+	// assets/), so the model passes a directory rather than inlining
+	// every file through a handoff. Validate-then-register is atomic.
 	saveSchema = `{
   "type": "object",
   "properties": {
-    "skill_md": {
+    "bundle_dir": {
       "type": "string",
-      "description": "Full SKILL.md content (frontmatter + body markdown). Required. Must parse as a valid Manifest. The manifest must NOT set metadata.hugen.autoload — autoload is reserved for system / admin skills."
+      "description": "Absolute path (or path relative to your session workspace) of the bundle directory. It MUST contain SKILL.md; optional references/, scripts/, assets/ subdirs are read recursively. Files outside those three subdirs are ignored. The bundle_dir must live inside your session workspace."
     },
-    "references": {
-      "type": "object",
-      "description": "Optional. Map: relative path under references/ (string) → markdown file content (string). Example: {\"howto.md\":\"step-by-step notes\",\"deep/dive.md\":\"appendix\"}. Subdirs allowed; absolute paths and parent-dir references rejected."
-    },
-    "scripts": {
-      "type": "object",
-      "description": "Optional. Map: relative path under scripts/ (string) → executable artefact content (string). Example: {\"query.py\":\"print('q')\"}. The saved skill body invokes them via ${SKILL_DIR}/scripts/foo.py + bash:run / python:run_script."
-    },
-    "assets": {
-      "type": "object",
-      "description": "Optional. Map: relative path under assets/ (string) → text data file content (string). Example: {\"template.html.tmpl\":\"<html/>\"}. Binary assets are NOT supported in v1."
+    "validate_only": {
+      "type": "boolean",
+      "description": "Default false. When true, runs the full validation (manifest parse + task-block placement + allowed_tools_default name check) and returns the verdict WITHOUT registering — a cheap pre-commit check. Use it to confirm a bundle is correct before the real save."
     },
     "overwrite": {
       "type": "boolean",
-      "description": "Default false — collision returns ErrSkillExists; ask the user before retrying with overwrite=true. Within the post-save validation iteration loop the agent may set this without asking."
+      "description": "Default false — a name collision returns ErrSkillExists; ask the user before retrying with overwrite=true (this reinstalls / updates the existing skill). Within a post-save validation iteration loop the agent may set this without asking."
     }
   },
-  "required": ["skill_md"]
+  "required": ["bundle_dir"]
 }`
 
 	filesSchema = `{
@@ -126,7 +116,7 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 		},
 		{
 			Name:             providerName + ":save",
-			Description:      "Persist a complete skill bundle (SKILL.md + optional references / scripts / assets) to the local skill store. Auto-loads the saved skill in the current session for immediate use. User-initiated only — do NOT propose this. The authoring flow (naming, generalisation, post-save validation) is owned by the `_task_builder` mission.",
+			Description:      "Validate and register a skill bundle from a directory in your workspace (SKILL.md + optional references / scripts / assets). Validation (manifest parse + task-block placement + allowed_tools_default name check) runs BEFORE any write; on success the skill is registered and auto-loaded in the current session. Pass validate_only=true for a dry-run verdict. User-initiated only — do NOT propose this. The authoring format + flow is owned by the `_skill_builder` skill.",
 			Provider:         providerName,
 			PermissionObject: permObjectSave,
 			ArgSchema:        json.RawMessage(saveSchema),
@@ -355,34 +345,43 @@ func (h *SessionSkill) callUnload(ctx context.Context, args json.RawMessage) (js
 
 // saveInput is the parsed argument shape; mirrors saveSchema.
 type saveInput struct {
-	SkillMD    string            `json:"skill_md"`
-	References map[string]string `json:"references,omitempty"`
-	Scripts    map[string]string `json:"scripts,omitempty"`
-	Assets     map[string]string `json:"assets,omitempty"`
-	Overwrite  bool              `json:"overwrite,omitempty"`
+	BundleDir    string `json:"bundle_dir"`
+	Overwrite    bool   `json:"overwrite,omitempty"`
+	ValidateOnly bool   `json:"validate_only,omitempty"`
 }
 
 // saveResult is the JSON envelope returned to the LLM after a
-// successful save. The model uses Files to drive its mandatory
-// post-save validation (run scripts/* against test parameters);
-// Directory is the on-disk root the saved-skill body's
-// ${SKILL_DIR}/... references resolve against.
+// successful save (or a validate_only verdict). The model uses Files
+// to drive its mandatory post-save validation (run scripts/* against
+// test parameters); Directory is the on-disk root the saved-skill
+// body's ${SKILL_DIR}/... references resolve against. ValidateOnly +
+// Valid distinguish a dry-run verdict from a real registration.
 type saveResult struct {
-	Name      string   `json:"name"`
-	Directory string   `json:"directory,omitempty"`
-	Files     []string `json:"files"`
+	Name         string   `json:"name"`
+	Directory    string   `json:"directory,omitempty"`
+	Files        []string `json:"files"`
+	ValidateOnly bool     `json:"validate_only,omitempty"`
+	Valid        bool     `json:"valid,omitempty"`
 }
 
-// callSave persists a skill bundle to the local store and
-// auto-loads it in the current session. See
-// design/002-runtime-canonical/phase-4.2-spec.md §3.2.
+// callSave reads a skill bundle from a workspace directory, validates
+// it (manifest parse + task-block placement + allowed_tools_default
+// name check), then — unless validate_only — registers it to the
+// local store and auto-loads it in the current session. Validation is
+// atomic with the write: nothing is published until every check
+// passes. See design/005-reuse-and-memory/spec-skill-authoring.md D1.
 //
 // Error mapping (errors.Is-checkable for the LLM consumer via the
 // runtime's tool-error envelope):
-//   - tool.ErrArgValidation        — malformed args.
-//   - skillpkg.ErrManifestInvalid  — skill_md fails Parse.
+//   - tool.ErrArgValidation        — malformed args / missing bundle_dir.
+//   - tool.ErrNotFound             — bundle_dir or SKILL.md absent.
+//   - tool.ErrPathEscape           — bundle_dir escapes the workspace.
+//   - skillpkg.ErrManifestInvalid  — SKILL.md fails Parse.
 //   - skillpkg.ErrAutoloadReserved — manifest sets autoload:true.
-//   - skillpkg.ErrInvalidPath      — bundle key escapes safety.
+//   - skillpkg.ErrTaskBlockMisplaced — task block mis-nested.
+//   - ErrUnknownToolName           — allowed_tools_default names a
+//     tool absent from the registry.
+//   - skillpkg.ErrInvalidPath      — bundle file escapes safety.
 //   - skillpkg.ErrSkillExists      — name collision and !overwrite.
 //   - tool.ErrSystemUnavailable    — manager not wired.
 func (h *SessionSkill) callSave(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
@@ -393,34 +392,46 @@ func (h *SessionSkill) callSave(ctx context.Context, args json.RawMessage) (json
 	if err := json.Unmarshal(args, &in); err != nil {
 		return nil, fmt.Errorf("%w: skill:save: %v", tool.ErrArgValidation, err)
 	}
-	if strings.TrimSpace(in.SkillMD) == "" {
-		return nil, fmt.Errorf("%w: skill:save: skill_md is required", tool.ErrArgValidation)
+	if strings.TrimSpace(in.BundleDir) == "" {
+		return nil, fmt.Errorf("%w: skill:save: bundle_dir is required (path to the bundle directory in your workspace containing SKILL.md)", tool.ErrArgValidation)
 	}
 
-	manifest, err := skillpkg.Parse([]byte(in.SkillMD))
+	bundleDir, err := resolveBundleDir(ctx, in.BundleDir)
 	if err != nil {
-		return nil, fmt.Errorf("skill:save: manifest does not parse — fix the SKILL.md frontmatter and re-save: %w", err)
-	}
-	if manifest.Hugen.Autoload {
-		return nil, fmt.Errorf("skill:save: %w — drop `metadata.hugen.autoload` from the manifest and re-save (autoload is reserved for system / admin skills compiled into the binary; local skills load on demand)", skillpkg.ErrAutoloadReserved)
+		return nil, err
 	}
 
-	bundle := fstest.MapFS{}
-	for _, cat := range []struct {
-		name  string
-		files map[string]string
-	}{
-		{"references", in.References},
-		{"scripts", in.Scripts},
-		{"assets", in.Assets},
-	} {
-		for k, v := range cat.files {
-			cleaned, err := skillpkg.CleanRelPath(k)
-			if err != nil {
-				return nil, fmt.Errorf("skill:save: bundle key %q under %s/ rejected — use simple relative paths (no leading /, no .., no hidden segments): %w", k, cat.name, err)
-			}
-			bundle[cat.name+"/"+cleaned] = &fstest.MapFile{Data: []byte(v)}
+	mdPath := filepath.Join(bundleDir, "SKILL.md")
+	rawMD, err := os.ReadFile(mdPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%w: skill:save: no SKILL.md in %s — write the manifest to <bundle_dir>/SKILL.md first", tool.ErrNotFound, bundleDir)
 		}
+		return nil, fmt.Errorf("%w: skill:save: read %s: %v", tool.ErrIO, mdPath, err)
+	}
+	manifest, err := skillpkg.Parse(rawMD)
+	if err != nil {
+		return nil, fmt.Errorf("skill:save: SKILL.md does not parse — fix the frontmatter and re-save: %w", err)
+	}
+
+	// Full validation — identical verdict for dry-run and real save.
+	if err := h.validateAuthoring(ctx, manifest); err != nil {
+		return nil, err
+	}
+
+	bundle, files, err := readBundleBody(bundleDir)
+	if err != nil {
+		return nil, err
+	}
+
+	if in.ValidateOnly {
+		return json.Marshal(saveResult{
+			Name:         manifest.Name,
+			Directory:    bundleDir,
+			Files:        files,
+			ValidateOnly: true,
+			Valid:        true,
+		})
 	}
 
 	if err := h.manager.Publish(ctx, manifest, bundle, skillpkg.PublishOptions{Overwrite: in.Overwrite}); err != nil {
@@ -453,7 +464,9 @@ func (h *SessionSkill) callSave(ctx context.Context, args json.RawMessage) (json
 		return nil, fmt.Errorf("skill:save: skill %q saved and loaded but lookup for the result envelope failed: %w", manifest.Name, err)
 	}
 
-	files := []string{}
+	// Re-derive the file list from what actually landed on disk (the
+	// post-load walk includes SKILL.md, unlike the bundle-body list).
+	files = files[:0]
 	if loaded.FS != nil {
 		_ = fs.WalkDir(loaded.FS, ".", func(p string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || p == "." {
@@ -469,6 +482,7 @@ func (h *SessionSkill) callSave(ctx context.Context, args json.RawMessage) (json
 		Name:      manifest.Name,
 		Directory: loaded.Root,
 		Files:     files,
+		Valid:     true,
 	})
 }
 

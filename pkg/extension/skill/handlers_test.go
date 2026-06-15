@@ -11,6 +11,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/extension"
+	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
@@ -249,25 +250,77 @@ func TestCallUnload_Idempotent(t *testing.T) {
 // ---------- skill:save ----------
 
 // newSaveFixture wires the skill extension over a SkillStore that
-// has both an Inline alpha (so Load tests still work) AND a
-// writable LocalRoot under t.TempDir() (so Publish can persist).
-// Returns the LocalRoot path for assertions on the on-disk shape.
-func newSaveFixture(t *testing.T) (*Extension, *fixture.TestSessionState, *skillpkg.SkillManager, string) {
+// has both an Inline alpha (so Load tests still work) AND a writable
+// LocalRoot under t.TempDir() (so Publish can persist), plus a real
+// workspace extension rooted at a second temp dir so path-based save
+// can resolve + constrain bundle_dir. Returns the LocalRoot (on-disk
+// store) and the session workspace dir (where bundles are built).
+func newSaveFixture(t *testing.T) (ext *Extension, state *fixture.TestSessionState, mgr *skillpkg.SkillManager, localRoot, wsDir string) {
 	t.Helper()
-	localRoot := t.TempDir()
+	localRoot = t.TempDir()
 	store := skillpkg.NewSkillStore(skillpkg.Options{
 		LocalRoot: localRoot,
 		Inline: map[string][]byte{
 			"alpha": []byte(inlineAlphaManifest),
 		},
 	})
-	mgr := skillpkg.NewSkillManager(store, nil)
-	ext := NewExtension(mgr, nil, "agent-save")
-	state := fixture.NewTestSessionState("ses-save").WithDepth(2)
+	mgr = skillpkg.NewSkillManager(store, nil)
+	ext = NewExtension(mgr, nil, "agent-save")
+	state = fixture.NewTestSessionState("ses-save").WithDepth(2)
 	if err := ext.InitState(context.Background(), state); err != nil {
 		t.Fatalf("InitState: %v", err)
 	}
-	return ext, state, mgr, localRoot
+	// Wire a workspace so resolveBundleDir can find + constrain the
+	// session dir. Depth-2 with no parent falls back to a flat dir
+	// keyed by session id under the workspace root.
+	wsExt := wsext.NewExtension(t.TempDir(), nil)
+	if err := wsExt.InitState(context.Background(), state); err != nil {
+		t.Fatalf("workspace InitState: %v", err)
+	}
+	ws := wsext.FromState(state)
+	if ws == nil {
+		t.Fatal("workspace not wired on state")
+	}
+	wsDir = ws.Dir()
+	return ext, state, mgr, localRoot, wsDir
+}
+
+// writeBundle materialises a bundle directory under base named name:
+// SKILL.md plus the given files keyed by bundle-relative path (e.g.
+// "references/howto.md", "scripts/query.py"). Returns the bundle dir.
+func writeBundle(t *testing.T, base, name, skillMD string, files map[string]string) string {
+	t.Helper()
+	dir := filepath.Join(base, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir bundle: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(skillMD), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	for rel, content := range files {
+		p := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(p), err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	return dir
+}
+
+// saveArgs builds a path-based skill:save argument blob for the given
+// bundle dir + flags.
+func saveArgs(bundleDir string, overwrite, validateOnly bool) json.RawMessage {
+	m := map[string]any{"bundle_dir": bundleDir}
+	if overwrite {
+		m["overwrite"] = true
+	}
+	if validateOnly {
+		m["validate_only"] = true
+	}
+	raw, _ := json.Marshal(m)
+	return raw
 }
 
 func decodeSaveResult(t *testing.T, raw json.RawMessage) saveResult {
@@ -280,9 +333,9 @@ func decodeSaveResult(t *testing.T, raw json.RawMessage) saveResult {
 }
 
 func TestCallSave_HappyPath_MinimalBundle(t *testing.T) {
-	ext, state, _, localRoot := newSaveFixture(t)
-	args := json.RawMessage(`{"skill_md": "---\nname: minimal\ndescription: minimal smoke.\nlicense: MIT\n---\nbody"}`)
-	out, err := ext.Call(newCallCtx(state), "skill:save", args)
+	ext, state, _, localRoot, wsDir := newSaveFixture(t)
+	dir := writeBundle(t, wsDir, "minimal", "---\nname: minimal\ndescription: minimal smoke.\nlicense: MIT\n---\nbody", nil)
+	out, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, false))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -308,14 +361,17 @@ func TestCallSave_HappyPath_MinimalBundle(t *testing.T) {
 }
 
 func TestCallSave_HappyPath_FullBundle(t *testing.T) {
-	ext, state, _, localRoot := newSaveFixture(t)
-	args := json.RawMessage(`{
-		"skill_md": "---\nname: full\ndescription: full bundle.\nlicense: MIT\n---\nbody",
-		"references": {"howto.md": "how to use", "deep/dive.md": "details"},
-		"scripts":    {"query.py": "print('q')", "render.py": "print('r')"},
-		"assets":     {"template.html": "<html/>"}
-	}`)
-	out, err := ext.Call(newCallCtx(state), "skill:save", args)
+	ext, state, _, localRoot, wsDir := newSaveFixture(t)
+	dir := writeBundle(t, wsDir, "full",
+		"---\nname: full\ndescription: full bundle.\nlicense: MIT\n---\nbody",
+		map[string]string{
+			"references/howto.md":     "how to use",
+			"references/deep/dive.md": "details",
+			"scripts/query.py":        "print('q')",
+			"scripts/render.py":       "print('r')",
+			"assets/template.html":    "<html/>",
+		})
+	out, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, false))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -347,44 +403,70 @@ func TestCallSave_HappyPath_FullBundle(t *testing.T) {
 	}
 }
 
+// TestCallSave_ValidateOnly runs the dry-run path: full validation +
+// verdict, no registration, no auto-load.
+func TestCallSave_ValidateOnly(t *testing.T) {
+	ext, state, _, localRoot, wsDir := newSaveFixture(t)
+	dir := writeBundle(t, wsDir, "dry",
+		"---\nname: dry\ndescription: dry run.\nlicense: MIT\n---\nbody",
+		map[string]string{"references/x.md": "x"})
+	out, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, true))
+	if err != nil {
+		t.Fatalf("validate_only Call: %v", err)
+	}
+	res := decodeSaveResult(t, out)
+	if !res.ValidateOnly || !res.Valid {
+		t.Errorf("verdict = %+v, want ValidateOnly && Valid", res)
+	}
+	if res.Name != "dry" {
+		t.Errorf("Name = %q, want dry", res.Name)
+	}
+	// Nothing registered on disk.
+	if _, statErr := os.Stat(filepath.Join(localRoot, "dry")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("validate_only must not register: %v", statErr)
+	}
+	// Not auto-loaded.
+	if _, lerr := FromState(state).LoadedSkill(context.Background(), "dry"); lerr == nil {
+		t.Error("validate_only must not auto-load the skill")
+	}
+}
+
 func TestCallSave_RejectsAutoload(t *testing.T) {
-	ext, state, _, _ := newSaveFixture(t)
-	args := json.RawMessage(`{"skill_md": "---\nname: bad-autoload\ndescription: x.\nlicense: MIT\nmetadata:\n  hugen:\n    autoload: true\n---\n"}`)
-	_, err := ext.Call(newCallCtx(state), "skill:save", args)
+	ext, state, _, _, wsDir := newSaveFixture(t)
+	dir := writeBundle(t, wsDir, "bad-autoload", "---\nname: bad-autoload\ndescription: x.\nlicense: MIT\nmetadata:\n  hugen:\n    autoload: true\n---\n", nil)
+	_, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, false))
 	if !errors.Is(err, skillpkg.ErrAutoloadReserved) {
 		t.Errorf("err = %v, want ErrAutoloadReserved", err)
 	}
 }
 
 func TestCallSave_CollisionWithoutOverwrite(t *testing.T) {
-	ext, state, _, _ := newSaveFixture(t)
-	args := json.RawMessage(`{"skill_md": "---\nname: collide\ndescription: first.\nlicense: MIT\n---\n"}`)
-	if _, err := ext.Call(newCallCtx(state), "skill:save", args); err != nil {
+	ext, state, _, _, wsDir := newSaveFixture(t)
+	dir := writeBundle(t, wsDir, "collide", "---\nname: collide\ndescription: first.\nlicense: MIT\n---\n", nil)
+	if _, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, false)); err != nil {
 		t.Fatalf("first Call: %v", err)
 	}
-	// Second save under same name must fail.
-	args2 := json.RawMessage(`{"skill_md": "---\nname: collide\ndescription: second.\nlicense: MIT\n---\n"}`)
-	_, err := ext.Call(newCallCtx(state), "skill:save", args2)
+	// Second save under same name must fail (rebuild the bundle with a
+	// new description; same name → collision).
+	dir2 := writeBundle(t, wsDir, "collide2", "---\nname: collide\ndescription: second.\nlicense: MIT\n---\n", nil)
+	_, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir2, false, false))
 	if !errors.Is(err, skillpkg.ErrSkillExists) {
 		t.Errorf("err = %v, want ErrSkillExists", err)
 	}
 }
 
 func TestCallSave_OverwriteReplacesContents(t *testing.T) {
-	ext, state, _, localRoot := newSaveFixture(t)
-	v1 := json.RawMessage(`{
-		"skill_md":   "---\nname: ow\ndescription: v1.\nlicense: MIT\n---\n",
-		"references": {"v1.md": "first version"}
-	}`)
-	if _, err := ext.Call(newCallCtx(state), "skill:save", v1); err != nil {
+	ext, state, _, localRoot, wsDir := newSaveFixture(t)
+	dir1 := writeBundle(t, wsDir, "ow-v1",
+		"---\nname: ow\ndescription: v1.\nlicense: MIT\n---\n",
+		map[string]string{"references/v1.md": "first version"})
+	if _, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir1, false, false)); err != nil {
 		t.Fatalf("first Call: %v", err)
 	}
-	v2 := json.RawMessage(`{
-		"skill_md":   "---\nname: ow\ndescription: v2.\nlicense: MIT\n---\n",
-		"references": {"v2.md": "second version"},
-		"overwrite":  true
-	}`)
-	if _, err := ext.Call(newCallCtx(state), "skill:save", v2); err != nil {
+	dir2 := writeBundle(t, wsDir, "ow-v2",
+		"---\nname: ow\ndescription: v2.\nlicense: MIT\n---\n",
+		map[string]string{"references/v2.md": "second version"})
+	if _, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir2, true, false)); err != nil {
 		t.Fatalf("overwrite Call: %v", err)
 	}
 	// v1 file removed by overwrite (full directory replace).
@@ -413,9 +495,9 @@ func TestCallSave_OverwriteReplacesContents(t *testing.T) {
 // an actionable error referencing the skill name + the manual
 // recovery path. The skill stays on disk.
 func TestCallSave_AutoloadFailureSurfacesPartialSuccess(t *testing.T) {
-	ext, state, _, localRoot := newSaveFixture(t)
-	args := json.RawMessage(`{"skill_md": "---\nname: orphan\ndescription: missing dep.\nlicense: MIT\nmetadata:\n  hugen:\n    requires_skills: [definitely-not-a-real-skill]\n---\n"}`)
-	_, err := ext.Call(newCallCtx(state), "skill:save", args)
+	ext, state, _, localRoot, wsDir := newSaveFixture(t)
+	dir := writeBundle(t, wsDir, "orphan", "---\nname: orphan\ndescription: missing dep.\nlicense: MIT\nmetadata:\n  hugen:\n    requires_skills: [definitely-not-a-real-skill]\n---\n", nil)
+	_, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, false))
 	if err == nil {
 		t.Fatal("expected error from auto-load with missing dep, got nil")
 	}
@@ -432,33 +514,25 @@ func TestCallSave_AutoloadFailureSurfacesPartialSuccess(t *testing.T) {
 	}
 }
 
-// TestCallSave_ErrorSentinelsPropagate locks down the
-// errors.Is chain through fmt.Errorf wrapping in callSave —
-// session.go's dispatch error handler maps these sentinels to
-// typed ToolError codes (ToolErrorSkillExists / SkillBadManifest /
-// SkillBadPath / SkillAutoload). If a future refactor of the
-// wrap chain breaks errors.Is, the typed-code mapping silently
-// degrades to "io" — this test prevents that regression.
+// TestCallSave_ErrorSentinelsPropagate locks down the errors.Is chain
+// through fmt.Errorf wrapping in callSave — session.go's dispatch
+// error handler maps these sentinels to typed ToolError codes
+// (ToolErrorSkillExists / SkillBadManifest / SkillAutoload). If a
+// future refactor of the wrap chain breaks errors.Is, the typed-code
+// mapping silently degrades to "io" — this test prevents that.
 func TestCallSave_ErrorSentinelsPropagate(t *testing.T) {
-	ext, state, _, _ := newSaveFixture(t)
+	ext, state, _, _, wsDir := newSaveFixture(t)
 
 	// autoload:true → ErrAutoloadReserved
-	_, err := ext.Call(newCallCtx(state), "skill:save",
-		json.RawMessage(`{"skill_md": "---\nname: a\ndescription: x.\nlicense: MIT\nmetadata:\n  hugen:\n    autoload: true\n---\n"}`))
+	dirA := writeBundle(t, wsDir, "a", "---\nname: a\ndescription: x.\nlicense: MIT\nmetadata:\n  hugen:\n    autoload: true\n---\n", nil)
+	_, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dirA, false, false))
 	if !errors.Is(err, skillpkg.ErrAutoloadReserved) {
 		t.Errorf("autoload err = %v, want errors.Is ErrAutoloadReserved", err)
 	}
 
-	// invalid path → ErrInvalidPath
-	_, err = ext.Call(newCallCtx(state), "skill:save",
-		json.RawMessage(`{"skill_md": "---\nname: b\ndescription: x.\nlicense: MIT\n---\n","references":{"../escape.md":"x"}}`))
-	if !errors.Is(err, skillpkg.ErrInvalidPath) {
-		t.Errorf("path err = %v, want errors.Is ErrInvalidPath", err)
-	}
-
 	// invalid manifest (no description) → ErrManifestInvalid
-	_, err = ext.Call(newCallCtx(state), "skill:save",
-		json.RawMessage(`{"skill_md": "---\nname: c\nlicense: MIT\n---\n"}`))
+	dirC := writeBundle(t, wsDir, "c", "---\nname: c\nlicense: MIT\n---\n", nil)
+	_, err = ext.Call(newCallCtx(state), "skill:save", saveArgs(dirC, false, false))
 	if !errors.Is(err, skillpkg.ErrManifestInvalid) {
 		t.Errorf("manifest err = %v, want errors.Is ErrManifestInvalid", err)
 	}
@@ -466,64 +540,56 @@ func TestCallSave_ErrorSentinelsPropagate(t *testing.T) {
 	// collision: first save OK, second without overwrite →
 	// ErrSkillExists. Sentinel must survive the action-oriented
 	// wrapping in callSave.
-	_, err = ext.Call(newCallCtx(state), "skill:save",
-		json.RawMessage(`{"skill_md": "---\nname: dup\ndescription: x.\nlicense: MIT\n---\n"}`))
-	if err != nil {
+	dirD := writeBundle(t, wsDir, "dup", "---\nname: dup\ndescription: x.\nlicense: MIT\n---\n", nil)
+	if _, err = ext.Call(newCallCtx(state), "skill:save", saveArgs(dirD, false, false)); err != nil {
 		t.Fatalf("first dup save: %v", err)
 	}
-	_, err = ext.Call(newCallCtx(state), "skill:save",
-		json.RawMessage(`{"skill_md": "---\nname: dup\ndescription: y.\nlicense: MIT\n---\n"}`))
+	dirD2 := writeBundle(t, wsDir, "dup2", "---\nname: dup\ndescription: y.\nlicense: MIT\n---\n", nil)
+	_, err = ext.Call(newCallCtx(state), "skill:save", saveArgs(dirD2, false, false))
 	if !errors.Is(err, skillpkg.ErrSkillExists) {
 		t.Errorf("collision err = %v, want errors.Is ErrSkillExists", err)
 	}
 }
 
-func TestCallSave_PathTraversalRejected(t *testing.T) {
-	ext, state, _, _ := newSaveFixture(t)
-	cases := []struct {
-		name string
-		args string
-	}{
-		{
-			name: "references_parent_escape",
-			args: `{"skill_md":"---\nname: p1\ndescription: x.\nlicense: MIT\n---\n","references":{"../escape.md":"x"}}`,
-		},
-		{
-			name: "scripts_absolute",
-			args: `{"skill_md":"---\nname: p2\ndescription: x.\nlicense: MIT\n---\n","scripts":{"/etc/passwd":"x"}}`,
-		},
-		{
-			name: "assets_hidden",
-			args: `{"skill_md":"---\nname: p3\ndescription: x.\nlicense: MIT\n---\n","assets":{".env":"x"}}`,
-		},
-		{
-			name: "references_backslash",
-			args: `{"skill_md":"---\nname: p4\ndescription: x.\nlicense: MIT\n---\n","references":{"foo\\bar.md":"x"}}`,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := ext.Call(newCallCtx(state), "skill:save", json.RawMessage(tc.args))
-			if !errors.Is(err, skillpkg.ErrInvalidPath) {
-				t.Errorf("err = %v, want ErrInvalidPath", err)
-			}
-		})
+// TestCallSave_BundleDirEscapesWorkspace proves the path-escape guard:
+// a bundle_dir outside the session workspace is rejected before any
+// read.
+func TestCallSave_BundleDirEscapesWorkspace(t *testing.T) {
+	ext, state, _, _, _ := newSaveFixture(t)
+	outside := t.TempDir() // a sibling temp dir, not under the workspace
+	dir := writeBundle(t, outside, "evil", "---\nname: evil\ndescription: x.\nlicense: MIT\n---\n", nil)
+	_, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, false))
+	if !errors.Is(err, tool.ErrPathEscape) {
+		t.Errorf("err = %v, want ErrPathEscape", err)
 	}
 }
 
-func TestCallSave_EmptySkillMD(t *testing.T) {
-	ext, state, _, _ := newSaveFixture(t)
-	_, err := ext.Call(newCallCtx(state), "skill:save", json.RawMessage(`{"skill_md": "   "}`))
+func TestCallSave_MissingSkillMD(t *testing.T) {
+	ext, state, _, _, wsDir := newSaveFixture(t)
+	// Empty bundle dir — no SKILL.md.
+	dir := filepath.Join(wsDir, "empty")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	_, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, false))
+	if !errors.Is(err, tool.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCallSave_MissingBundleDir(t *testing.T) {
+	ext, state, _, _, _ := newSaveFixture(t)
+	_, err := ext.Call(newCallCtx(state), "skill:save", json.RawMessage(`{"bundle_dir": "   "}`))
 	if !errors.Is(err, tool.ErrArgValidation) {
 		t.Errorf("err = %v, want ErrArgValidation", err)
 	}
 }
 
 func TestCallSave_InvalidManifest(t *testing.T) {
-	ext, state, _, _ := newSaveFixture(t)
+	ext, state, _, _, wsDir := newSaveFixture(t)
 	// Missing description → ErrManifestInvalid.
-	args := json.RawMessage(`{"skill_md": "---\nname: incomplete\nlicense: MIT\n---\n"}`)
-	_, err := ext.Call(newCallCtx(state), "skill:save", args)
+	dir := writeBundle(t, wsDir, "incomplete", "---\nname: incomplete\nlicense: MIT\n---\n", nil)
+	_, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, false))
 	if !errors.Is(err, skillpkg.ErrManifestInvalid) {
 		t.Errorf("err = %v, want ErrManifestInvalid", err)
 	}
