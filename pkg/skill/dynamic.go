@@ -820,6 +820,13 @@ func (b *dynamicBackend) IndexBundle(ctx context.Context, dir, source string) (s
 // AFTER all bundles (hub + local) are indexed so every member id is
 // present. Was N+1 (one getIDByName per member per catalog); now one
 // read for the whole pass.
+//
+// NOTE: since the pre-db-1 `tools_catalog` removal there is currently
+// no model-facing READER of these `catalog_member` edges (the
+// catalog-expansion read tools were dropped). The write side is kept
+// deliberately: the edges are the membership index the planned task
+// catalog (`spec-task-execution.md`, B47) reads to expand a catalog
+// into its tasks. Retained, not dead — the reader returns with B47.
 func (b *dynamicBackend) relinkCatalogs(ctx context.Context) error {
 	all, err := b.index.listAll(ctx)
 	if err != nil {

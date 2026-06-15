@@ -103,7 +103,11 @@ func (a *AdminProvider) callProviders(ctx context.Context, args json.RawMessage)
 	}
 	pattern := strings.ToLower(strings.TrimSpace(in.Pattern))
 
-	cat, err := a.managerForCtx(ctx).Catalogue(ctx)
+	mgr := a.managerForCtx(ctx)
+	if mgr == nil {
+		return nil, fmt.Errorf("%w: tool:providers: no tool manager on the dispatch context", tool.ErrSystemUnavailable)
+	}
+	cat, err := mgr.Catalogue(ctx)
 	if err != nil {
 		// Partial catalogue is still useful — a single provider's
 		// List failure should not blank the whole listing. Log-worthy
@@ -151,7 +155,11 @@ func (a *AdminProvider) callTools(ctx context.Context, args json.RawMessage) (js
 	}
 	pattern := strings.ToLower(strings.TrimSpace(in.Pattern))
 
-	cat, _ := a.managerForCtx(ctx).Catalogue(ctx)
+	mgr := a.managerForCtx(ctx)
+	if mgr == nil {
+		return nil, fmt.Errorf("%w: tool:tools: no tool manager on the dispatch context", tool.ErrSystemUnavailable)
+	}
+	cat, _ := mgr.Catalogue(ctx)
 	var match *tool.ProviderCatalogue
 	for i := range cat {
 		if cat[i].Name == want {

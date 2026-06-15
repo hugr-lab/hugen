@@ -566,6 +566,21 @@ func TestCallSave_BundleDirEscapesWorkspace(t *testing.T) {
 	}
 }
 
+// TestCallSave_HiddenBundleFileHardFails proves a bundle file under a
+// hidden / dotted segment is REJECTED (ErrInvalidPath), not silently
+// dropped — so the saved skill never references a file the publish
+// excluded.
+func TestCallSave_HiddenBundleFileHardFails(t *testing.T) {
+	ext, state, _, _, wsDir := newSaveFixture(t)
+	dir := writeBundle(t, wsDir, "hidden",
+		"---\nname: hidden\ndescription: x.\nlicense: MIT\n---\nbody",
+		map[string]string{"references/.secret/x.md": "x"})
+	_, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, false))
+	if !errors.Is(err, skillpkg.ErrInvalidPath) {
+		t.Errorf("err = %v, want ErrInvalidPath (hidden bundle file must hard-fail, not skip)", err)
+	}
+}
+
 func TestCallSave_MissingSkillMD(t *testing.T) {
 	ext, state, _, _, wsDir := newSaveFixture(t)
 	// Empty bundle dir — no SKILL.md.

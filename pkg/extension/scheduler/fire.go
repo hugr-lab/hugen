@@ -276,21 +276,29 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 
 	// Render per-fire template vars embedded in input values (Phase 6
 	// §D7): an input like output_path: "report_{{.FireSeq}}.html" must
-	// produce a distinct path per fire. Render failure is recoverable —
-	// degrade to the raw inputs (same posture as the goal render
-	// below). The rendered inputs feed BOTH the goal render's
-	// {{.Inputs.x}} references and the spawned child's [Inputs from
-	// caller] channel, so the two stay consistent.
+	// produce a distinct path per fire. The rendered inputs feed BOTH
+	// the goal render's {{.Inputs.x}} references and the spawned child's
+	// [Inputs from caller] channel. A render FAILURE is NOT recoverable
+	// here (unlike the goal, where a literal still kicks the worker):
+	// degrading to the literal would ship `{{...}}` into the inputs and
+	// defeat D7's whole purpose (every fire writes the same path). A bad
+	// input template breaks every fire, so auto-pause — same posture as
+	// the wake path's render-failure handling.
 	rc := tplpkg.NewFireRenderContext(fireCtx)
-	spawnInputs := task.Spec.Inputs
-	if renderedInputs, ierr := tplpkg.RenderInputs(task.Spec.Inputs, rc); ierr != nil {
-		deps.logger.Warn("scheduler: inputs render failed; using literal",
-			"task_id", task.ID, "fire_seq", fire.FireSeq, "err", ierr)
-	} else {
-		spawnInputs = renderedInputs
-		fireCtx.Inputs = renderedInputs
-		rc.Inputs = renderedInputs
+	spawnInputs, ierr := tplpkg.RenderInputs(task.Spec.Inputs, rc)
+	if ierr != nil {
+		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+		if deps.pauseFn != nil {
+			_ = deps.pauseFn(task.ID)
+		}
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
+			ErrorMessage: ierr.Error(),
+			Reason:       schedstore.PauseRenderFailed,
+		}))
+		return runner.Outcome{ErrorMessage: ierr.Error()}, ierr
 	}
+	fireCtx.Inputs = spawnInputs
+	rc.Inputs = spawnInputs
 
 	// Render the goal as the spawn task body. Render failure is
 	// recoverable: we degrade to the literal goal so the subagent

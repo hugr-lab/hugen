@@ -93,7 +93,7 @@ func (h *SessionSkill) validateToolNames(ctx context.Context, declared []string)
 		if toolEntryMatches(entry, realTools, providers) {
 			continue
 		}
-		problems = append(problems, h.toolNameHint(ctx, entry, providers))
+		problems = append(problems, toolNameHint(entry, providers))
 	}
 	if len(problems) == 0 {
 		return nil
@@ -132,9 +132,12 @@ func toolEntryMatches(entry string, realTools, providers map[string]struct{}) bo
 
 // toolNameHint builds a targeted, single-entry diagnostic. When the
 // provider is real the tool name is the problem; when the provider is
-// unknown the classic cause is naming a SKILL as a provider — detected
-// via the skill manager so the message names the exact mistake.
-func (h *SessionSkill) toolNameHint(ctx context.Context, entry string, providers map[string]struct{}) string {
+// unknown the classic cause is naming a SKILL as a provider — the
+// message says so without a per-entry store lookup (the worse the
+// model's guess, the more bad entries; a DB round-trip each just to
+// sharpen error text is wasteful, and the wording steers correctly
+// either way).
+func toolNameHint(entry string, providers map[string]struct{}) string {
 	prov, name := entry, ""
 	if i := strings.IndexByte(entry, ':'); i > 0 {
 		prov, name = entry[:i], entry[i+1:]
@@ -142,20 +145,7 @@ func (h *SessionSkill) toolNameHint(ctx context.Context, entry string, providers
 	if _, ok := providers[prov]; ok {
 		return fmt.Sprintf("%q: provider %q has no tool %q — run tool:tools(%q) for its real tool names", entry, prov, name, prov)
 	}
-	if h.isKnownSkill(ctx, prov) {
-		return fmt.Sprintf("%q: %q is a SKILL, not a provider — a skill is not callable as a tool; the work it does runs through a real provider (e.g. python/bash/a hugr provider). Run tool:providers, then tool:tools(<provider>)", entry, prov)
-	}
-	return fmt.Sprintf("%q: %q is not a registered provider — run tool:providers to list real providers", entry, prov)
-}
-
-// isKnownSkill reports whether name resolves to a skill in the store —
-// used only to sharpen the unknown-provider hint, never to gate.
-func (h *SessionSkill) isKnownSkill(ctx context.Context, name string) bool {
-	if h.manager == nil || name == "" {
-		return false
-	}
-	_, err := h.manager.Get(ctx, name)
-	return err == nil
+	return fmt.Sprintf("%q: %q is not a registered provider — if it is a SKILL name, a skill is not callable as a tool; its work runs through a real provider (python / bash / a hugr provider). Run tool:providers, then tool:tools(<provider>)", entry, prov)
 }
 
 // toolCatalogue returns the full, unfiltered provider→tools registry
@@ -275,31 +265,16 @@ func materializeSkill(sk skillpkg.Skill, destAbs string) ([]string, error) {
 		}
 	}
 	if !wroteManifest {
-		if err := os.WriteFile(filepath.Join(destAbs, "SKILL.md"), reconstructManifest(sk.Manifest), 0o644); err != nil {
+		// fs-less skill (inline / hub): reconstruct SKILL.md through the
+		// SAME serializer Publish uses, so export→edit→save round-trips
+		// byte-identically (no false skill-drift).
+		if err := os.WriteFile(filepath.Join(destAbs, "SKILL.md"), skillpkg.EncodeManifest(sk.Manifest), 0o644); err != nil {
 			return nil, fmt.Errorf("%w: skill:export: write SKILL.md: %v", tool.ErrIO, err)
 		}
 		files = append(files, "SKILL.md")
 	}
 	sort.Strings(files)
 	return files, nil
-}
-
-// reconstructManifest rebuilds SKILL.md bytes from a parsed manifest —
-// the fs-less fallback for skill:export. Mirrors the store's own
-// encodeManifest: original frontmatter + body when Raw is present,
-// else a minimal preamble.
-func reconstructManifest(m skillpkg.Manifest) []byte {
-	const sep = "---\n"
-	if len(m.Raw) > 0 {
-		out := []byte(sep)
-		out = append(out, m.Raw...)
-		out = append(out, '\n')
-		out = append(out, []byte(sep)...)
-		out = append(out, m.Body...)
-		return out
-	}
-	min := fmt.Sprintf("%sname: %s\ndescription: %s\nlicense: %s\n%s", sep, m.Name, m.Description, m.License, sep)
-	return append([]byte(min), m.Body...)
 }
 
 // readBundleBody reads the canonical bundle subdirs (references/,
@@ -337,11 +312,14 @@ func readBundleBody(bundleDir string) (fstest.MapFS, []string, error) {
 			}
 			cleaned, cerr := skillpkg.CleanRelPath(filepath.ToSlash(rel))
 			if cerr != nil {
-				// Editor / OS cruft (dotfiles, hidden dirs) — skip
-				// rather than fail the whole save. WalkDir never yields
-				// a `..` segment from inside the constrained bundle dir,
-				// so the only rejections here are hidden segments.
-				return nil
+				// Hard-fail rather than silently drop the file: a bundle
+				// file the author put under a hidden segment (or any
+				// non-normalised path) would otherwise be excluded from
+				// the published skill with no signal, and the saved
+				// skill's body would reference a file that isn't there.
+				// WalkDir never yields a `..` from inside the bundle, so
+				// the only rejections here are hidden / dotted segments.
+				return fmt.Errorf("%w: skill:save: bundle file %s/%s rejected — remove it or rename (no leading /, no .., no hidden/dot segments)", skillpkg.ErrInvalidPath, cat, filepath.ToSlash(rel))
 			}
 			data, derr := os.ReadFile(p)
 			if derr != nil {

@@ -511,7 +511,7 @@ func (b *dirBackend) Publish(ctx context.Context, m Manifest, body fs.FS, opts P
 	// validated manifest. Write into tmpDir; the atomic swap
 	// happens at the end.
 	manifestPath := filepath.Join(tmpDir, "SKILL.md")
-	if err := os.WriteFile(manifestPath, encodeManifest(m), 0o644); err != nil {
+	if err := os.WriteFile(manifestPath, EncodeManifest(m), 0o644); err != nil {
 		_ = os.RemoveAll(tmpDir)
 		return fmt.Errorf("write %s: %w", manifestPath, err)
 	}
@@ -538,11 +538,13 @@ func (b *dirBackend) Publish(ctx context.Context, m Manifest, body fs.FS, opts P
 	return nil
 }
 
-// encodeManifest builds the SKILL.md content for Publish. Prefers
+// EncodeManifest builds the SKILL.md content for a manifest. Prefers
 // the original Raw bytes when available so a publish-then-fetch
 // round-trip preserves comments and key order; otherwise falls
-// back to a minimal "name + description + license" preamble.
-func encodeManifest(m Manifest) []byte {
+// back to a minimal "name + description + license" preamble. Exported
+// so the skill extension's skill:export fs-less fallback reconstructs
+// SKILL.md through the SAME serialization Publish uses (no drift).
+func EncodeManifest(m Manifest) []byte {
 	const sep = "---\n"
 	if len(m.Raw) > 0 {
 		out := []byte(sep)

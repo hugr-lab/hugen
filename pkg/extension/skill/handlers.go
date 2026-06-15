@@ -612,19 +612,12 @@ func (h *SessionSkill) callSave(ctx context.Context, args json.RawMessage) (json
 		return nil, fmt.Errorf("skill:save: skill %q saved and loaded but lookup for the result envelope failed: %w", manifest.Name, err)
 	}
 
-	// Re-derive the file list from what actually landed on disk (the
-	// post-load walk includes SKILL.md, unlike the bundle-body list).
-	files = files[:0]
-	if loaded.FS != nil {
-		_ = fs.WalkDir(loaded.FS, ".", func(p string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || p == "." {
-				return nil
-			}
-			files = append(files, p)
-			return nil
-		})
-		sort.Strings(files)
-	}
+	// Reuse the bundle-body file list readBundleBody already produced;
+	// the only delta on disk is SKILL.md (always written by Publish), so
+	// prepend it rather than re-walking the published bundle a second
+	// time.
+	files = append(files, "SKILL.md")
+	sort.Strings(files)
 
 	return json.Marshal(saveResult{
 		Name:      manifest.Name,

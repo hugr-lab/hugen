@@ -127,6 +127,22 @@ func TestRenderInputs_EmptyPassThrough(t *testing.T) {
 	}
 }
 
+// TestRenderInputs_EmptyMapNotAliased proves a non-nil empty input map
+// yields a FRESH map, not the caller's reference — so mutating the
+// result can never corrupt the stored task spec.
+func TestRenderInputs_EmptyMapNotAliased(t *testing.T) {
+	ctx := NewFireRenderContext(nil)
+	in := map[string]any{}
+	out, err := RenderInputs(in, ctx)
+	if err != nil {
+		t.Fatalf("RenderInputs(empty): %v", err)
+	}
+	out["injected"] = 1
+	if len(in) != 0 {
+		t.Errorf("source map was mutated through the returned map: %v", in)
+	}
+}
+
 func TestRenderTemplate_PrevFireGuard(t *testing.T) {
 	tmpl := `{{ if .PrevFire }}prior: {{ .PrevFire.Summary }}{{ else }}first run{{ end }}`
 

@@ -189,9 +189,12 @@ func RenderInto(tmpl *template.Template, ctx FireRenderContext) (string, error) 
 // mutated. A parse/exec failure surfaces with the offending key path
 // so the scheduler can pause the task with an actionable reason.
 func RenderInputs(inputs map[string]any, ctx FireRenderContext) (map[string]any, error) {
-	if len(inputs) == 0 {
-		return inputs, nil
+	if inputs == nil {
+		return nil, nil
 	}
+	// Always allocate a fresh map (even for an empty input) so the
+	// returned value never aliases the caller's stored spec — honouring
+	// the "Returns a NEW map" contract regardless of size.
 	out := make(map[string]any, len(inputs))
 	for k, v := range inputs {
 		rv, err := renderInputValue(v, ctx)
