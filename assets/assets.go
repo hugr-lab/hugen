@@ -9,10 +9,13 @@ import "embed"
 
 // SystemSkillsFS holds the agent-core skill set under
 // assets/system/. These skills (`_root`, `_mission_worker`,
-// `_worker`, `_task_builder`, `_system`, `_admin`) are owned by
-// the binary, embed-only, and never materialised on disk. Same
-// lifecycle as constitution and prompts — core agent behaviour,
-// not tunable by operators.
+// `_worker`, `_task_builder`, `_skill_builder`, `_system`,
+// `_admin`) are owned by the binary, embed-only, and never
+// materialised on disk. Same lifecycle as constitution and
+// prompts — core agent behaviour, not tunable by operators.
+// `_skill_builder` is loadable (not autoloaded): the authoring
+// knowledge + capability surface a mission or the user loads on
+// demand.
 //
 //go:embed all:system
 var SystemSkillsFS embed.FS

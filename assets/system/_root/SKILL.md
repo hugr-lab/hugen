@@ -436,24 +436,42 @@ for "do this N times", `{"kind":"until","spec":"<RFC3339>"}` for
 
 ### Per-fire values in `inputs` (recurring schedules)
 
-A recurring schedule fires the SAME `inputs` map every time. If an
-input is a fixed output path, every fire OVERWRITES one file. To make
-a value vary per fire, embed a fire-time template var in the string
-value — the runtime renders it at each fire BEFORE the recipe runs:
+A recurring schedule fires the SAME `inputs` map every time. To make a
+value DEPEND on the fire — vary an output path, window a query to
+"since last run", continue from the prior result — embed a Go-template
+action in the string value. The runtime renders each `inputs` value at
+fire time, against the full fire context, BEFORE the recipe runs.
 
-- `{{.FireSeq}}` — the 1-indexed fire counter (1, 2, 3, …).
-- `{{.FireTime}}` — the fire's wall-clock instant (a Go `time.Time`;
-  format it, e.g. `{{.FireTime.Format "2006-01-02"}}`).
+Available in the template (the dot):
+
+- `.FireSeq` — 1-indexed fire counter (1, 2, 3, …).
+- `.FireTime` — this fire's instant (`time.Time`; format it, e.g.
+  `{{ .FireTime.Format "2006-01-02" }}`).
+- `.PlannedAt` — the scheduled instant for this fire.
+- `.PrevFire` — the PREVIOUS fire's outcome, or nil on the first
+  fire. Use it to continue from last time:
+  - `.PrevFire.FiredAt` — when the prior fire ran (a window
+    boundary for "only what changed since last run").
+  - `.PrevFire.Summary` / `.PrevFire.Body` — its result text.
+  - Guard it — on the first fire `.PrevFire` is nil:
+    `{{ if .PrevFire }}…{{ else }}…{{ end }}`.
+
+Examples:
 
 ```
-inputs={ "output_path": "~/reports/roads_{{.FireSeq}}.html" }
-# fire 1 → roads_1.html, fire 2 → roads_2.html, …
+# distinct output per fire
+inputs={ "output_path": "~/reports/roads_{{ .FireSeq }}.html" }
+
+# incremental window — only data since the last run
+inputs={ "since": "{{ if .PrevFire }}{{ .PrevFire.FiredAt.Format \"2006-01-02\" }}{{ else }}1970-01-01{{ end }}" }
 ```
 
-Only `{{ … }}` Go-template actions are rendered. A naive placeholder
-like `<time>` or `$DATE` is passed through LITERALLY — every fire
-would write the same file. Use the template form for anything that
-must differ per fire.
+This is the right channel when the recipe's output schema is known and
+each run builds on the last. Only `{{ … }}` actions are rendered — a
+naive placeholder like `<time>` or `$DATE` passes through LITERALLY
+(every fire writes the same value). A template that fails to render
+(e.g. an unguarded `.PrevFire` on the first fire) auto-pauses the
+task — guard nil and provide a first-fire default.
 
 ### Acknowledgement
 

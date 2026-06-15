@@ -43,8 +43,8 @@ type Skill struct {
 //
 //   - **system** — agent-core skills bundled in the binary
 //     (`_root`, `_mission_worker`, `_worker`, `_task_builder`,
-//     `_system`, `_admin`). Embed-only; no on-disk presence.
-//     Owned by the binary; not tunable.
+//     `_skill_builder`, `_system`, `_admin`). Embed-only; no
+//     on-disk presence. Owned by the binary; not tunable.
 //   - **hub** — admin-delivered extensions (`hugr-data`,
 //     `analyst`, `duckdb-data`, `duckdb-docs`, `python-runner`).
 //     Today filled from the binary's embedded bundle at boot

@@ -218,11 +218,14 @@ metadata:
             existing file needs only `script-author`; many tasks
             need both, in parallel.
           - **Wave 2 — `skill-assembler`** with `depends_on` on the
-            wave-1 author handoffs. Composes the full bundle payload.
+            wave-1 author handoffs. Builds the bundle dir + self-
+            validates it (`skill:save validate_only`); hands off the
+            `bundle_dir`.
           - **Wave 3 — `task-registrar`** with `depends_on` on the
-            assembler. Calls `skill:save`; decides catalogue
-            placement. Do NOT set `skip_check` on this wave — the
-            checker validates the saved bundle.
+            assembler. Confirms the result with the user, then
+            `skill:save(bundle_dir)`; decides catalogue placement. Do
+            NOT set `skip_check` on this wave — the checker validates
+            the saved bundle.
 
           A trivial task (fixed prose, no query, no script) can
           collapse to wave-1 `skill-assembler` → wave-2
@@ -566,62 +569,77 @@ metadata:
 
       - name: skill-assembler
         description: >
-          Composes the complete task-skill bundle from the author
-          handoffs. Spawned after the authoring wave; reads the
-          query-author / script-author bodies via [Resolved
-          depends_on] and the [Resolved user inputs] the planner
-          passed (task_name, task_goal, per-run input keys,
-          output_target, allowed tools).
+          Builds the complete task-skill bundle as FILES in the
+          mission workspace, then self-validates it. Spawned after
+          the authoring wave; reads the query-author / script-author
+          bodies via [Resolved depends_on] and the [Resolved user
+          inputs] the planner passed (task_name, task_goal, per-run
+          input keys, output_target, allowed tools).
 
-          FIRST read `research/requirements.md` (`bash.read_file`) —
-          the result contract the bundle must encode: the produced
-          SKILL.md's steps, inputs_schema, and output handling must
-          match it exactly.
+          `_skill_builder` is loaded for you — it owns the manifest
+          format, the bundle layout, and the `skill:save` call.
+          Consult its references with `skill:ref(skill:
+          "_skill_builder", ref: "manifest-format")` (and
+          `bundle-layout`, `tool-discovery`, `save-call`) and follow
+          its authoring loop. Do NOT register the skill — you only
+          build + validate; the registrar saves it after the user
+          confirms.
 
-          Produce ONE `handoff` body carrying the full `skill:save`
-          payload — do NOT call `skill:save` yourself (the registrar
-          does):
+          1. **Read the contract.** `bash.read_file
+             research/requirements.md` — the produced SKILL.md's
+             steps, inputs_schema, and output handling MUST match it
+             exactly. Read `research/data-model.md` +
+             `research/queries.md` for the validated shapes.
 
-          - `skill_md`: the complete SKILL.md text for the task
-            skill. Frontmatter MUST set:
-            - `name: <task_name>` (kebab/snake), `description`,
-            - `metadata.hugen.task.eligible: true`,
-              `task.kind: worker`,
-              `task.goal_summary: <one-line imperative>`,
-              `task.inputs_schema:` a JSON Schema (draft 2020-12)
-              with one property per per-run input + `required`,
-              `task.allowed_tools_default:` the EXACT list of tools
-              the task worker calls (e.g. the data skill's execute
-              tool, the script run tool) — this is the cron
-              pre-approval allow-list, so keep it minimal and
-              precise,
-            - `tier_compatibility: [worker]`.
-            MUST NOT set `metadata.hugen.autoload` (rejected by
-            skill:save).
-            The body is the imperative step list the task worker
-            follows each run: substitute its `[Inputs]` into the
-            query, run it via the named tool, run the script on the
-            result, write/print output to the target. Reference
-            bundled files by their saved path
-            (`${SKILL_DIR}/references/query.graphql`,
-            `${SKILL_DIR}/scripts/report.py`). The generated task
-            skill is a normal user skill — it MAY name concrete data
-            / script skills and tools (the universality rule binds
-            this builder's own prose, not what it generates).
-          - `references`: `{ "query.graphql": <query-author query> }`
-            when a query was authored (ship the templated query so
-            the worker reads + substitutes it).
-          - `scripts`: `{ "report.py": <script-author script> }`
-            when a script was authored.
+          2. **Build the bundle dir.** `bash.shell: mkdir -p
+             bundle/references bundle/scripts`, then write the files:
+             - `bundle/SKILL.md` — frontmatter sets `name:
+               <task_name>` (kebab/snake), `description`,
+               `tier_compatibility: [worker]`, and the task block
+               UNDER `metadata.hugen.task` (NOT top-level, NOT a flat
+               `task_eligible`):
+                 `task.eligible: true`, `task.kind: worker`,
+                 `task.goal_summary: <one-line imperative>`,
+                 `task.inputs_schema:` a JSON Schema (draft 2020-12)
+                 with one property per per-run input + `required`,
+                 `task.allowed_tools_default:` the EXACT provider:tool
+                 names the task worker calls. Look them up with
+                 `tool:providers` / `tool:tools` — NEVER invent; a
+                 skill name like `hugr-data:execute` is rejected.
+                 Keep it minimal — it is the cron pre-approval list.
+               Do NOT set `metadata.hugen.autoload`.
+               The body is the imperative step list the task worker
+               follows each run: substitute its `[Inputs]` into the
+               query, run it via the named tool, run the script on
+               the result, write/print output to the target.
+               Reference bundled files by saved path
+               (`${SKILL_DIR}/references/query.graphql`,
+               `${SKILL_DIR}/scripts/report.py`). The generated task
+               skill is a normal user skill — it MAY name concrete
+               data / script skills and tools (the universality rule
+               binds THIS builder's prose, not what it generates).
+             - `bundle/references/query.graphql` — the query-author's
+               templated query, when one was authored.
+             - `bundle/scripts/report.py` — the script-author's
+               script, when one was authored.
 
-          Emit `status: "error"` if a required author handoff is
-          missing. Include a `memory_summary` (one line).
+          3. **Self-validate.** `skill:save(bundle_dir: "bundle",
+             validate_only: true)`. Fix every reported problem in the
+             files (task-block placement, unknown tool names, parse
+             errors) and re-run until it returns `valid: true`.
+
+          Emit ONE `handoff` body with: `bundle_dir: "bundle"`,
+          `task_name`, `validated: true`, the
+          `allowed_tools_default` list, a one-line `result_summary`
+          of what the task produces, and a `memory_summary`. Emit
+          `status: "error"` if a required author handoff is missing
+          or validation cannot be made to pass.
         intent: default
         can_spawn: false
-        autoload_skills: [_mission_worker]
+        autoload_skills: [_mission_worker, _skill_builder]
         tools:
           - provider: bash-mcp
-            tools: [bash.read_file, bash.list_dir]
+            tools: [bash.shell, bash.write_file, bash.read_file, bash.list_dir]
           - provider: mission
             tools: [get_handoff, get_research]
 
@@ -629,44 +647,51 @@ metadata:
         description: >
           Confirms the assembled bundle with the user, persists it,
           and decides catalogue placement. Reads the skill-assembler
-          payload via [Resolved depends_on].
+          handoff via [Resolved depends_on] — it carries `bundle_dir`
+          (the already-built, self-validated bundle directory in the
+          workspace), `task_name`, and `allowed_tools_default`.
 
           1. **Confirm the RESULT with the user — mandatory, BEFORE
              saving.** The plan approval covered the PLAN; this gate
              confirms the PRODUCT. Call `session:inquire(type:
              "approval")` with a short `question` ("Save task
              <name>?" in the user's language) and a `context`
-             summarising the bundle: the task name, what it
-             produces per run (restate the contract from
-             `research/requirements.md` — read it via
-             `bash.read_file` — or `result_requirements` in
-             [Resolved user inputs]; the user agreed to THAT, so
-             flag any deviation), the per-run inputs (key —
-             meaning), the `allowed_tools_default` list, and where
-             it lands (local store / catalogue note). On
-             `approved: false`,
-             do NOT save — emit `status: "error"` quoting the
-             user's `reason` verbatim so the planner amends the
-             relevant author / assembler and re-runs this gate.
-          2. Call `skill:save` with the assembler's `skill_md` +
-             `references` + `scripts`. On an `ErrSkillExists`
-             collision, do NOT overwrite unless the [Resolved user
-             inputs] explicitly authorised replacing an existing
-             task — otherwise emit `status: "error"` noting the
-             collision so the planner can rename. Within an amend
-             retry of THIS save you may set `overwrite: true`.
-          3. `skill:save` auto-loads the saved skill — confirm it
-             loaded (`skill:files(<name>)` lists the bundle) and that
-             the manifest parsed (no error from save).
+             summarising the bundle: the task name, what it produces
+             per run (restate the contract from
+             `research/requirements.md` — read it via `bash.read_file`
+             — or `result_requirements` in [Resolved user inputs];
+             the user agreed to THAT, so flag any deviation), the
+             per-run inputs (key — meaning), the
+             `allowed_tools_default` list, and where it lands (local
+             store / catalogue note). On `approved: false`, do NOT
+             save — emit `status: "error"` quoting the user's
+             `reason` verbatim so the planner amends the relevant
+             author / assembler and re-runs this gate.
+          2. **Register.** `skill:save(bundle_dir: <bundle_dir from
+             the assembler handoff>)`. The bundle was already
+             validated by the assembler, so this is the real write;
+             it parses, validates again, registers, and auto-loads.
+             On an `ErrSkillExists` collision, do NOT overwrite
+             unless [Resolved user inputs] explicitly authorised
+             replacing an existing task — otherwise emit `status:
+             "error"` noting the collision so the planner can rename.
+             Within an amend retry of THIS save you may set
+             `overwrite: true`. If save returns a validation error
+             (task-block placement, unknown tool name) the assembler
+             missed, emit `status: "error"` with the exact message so
+             the planner re-runs the assembler.
+          3. Confirm it loaded — the save result lists the registered
+             `name` + `files`; `skill:files(<name>)` shows the bundle
+             on disk.
           4. **Catalogue placement.** In local/personal mode the
              saved skill lives in the local store and is immediately
-             runnable via `task:<name>` and schedulable — there is
-             no separate publish step. If [Resolved user inputs]
-             named a shared catalogue to publish to, note it in your
-             handoff for the synthesizer to surface (remote publish
-             is not performed here).
-          5. Emit a `handoff` body with: `saved_name`, `bundle_dir`
-             (from skill:files), `files` (saved relative paths),
+             runnable via `task:<name>` and schedulable — there is no
+             separate publish step. If [Resolved user inputs] named a
+             shared catalogue to publish to, note it in your handoff
+             for the synthesizer to surface (remote publish is not
+             performed here).
+          5. Emit a `handoff` body with: `saved_name`, `bundle_dir`,
+             `files` (saved relative paths from the save result),
              `inputs_schema_ok` (manifest parsed + schema present),
              `user_confirmed` (true — the step-1 approval),
              `placement` (local | <catalogue note>),
@@ -815,11 +840,12 @@ fits, the mission tells the user to reuse it instead of rebuilding.
    approves the plan once). It schedules the authoring wave.
 3. **Do waves.** `query-author` and/or `script-author` (parallel)
    author + validate the query / script by loading the
-   researcher-named skills. `skill-assembler` composes the full
-   `skill:save` payload. `task-registrar` confirms the assembled
-   bundle with the user (one approval modal — the plan approval
-   covered the plan; this confirms the product), then saves it +
-   decides placement.
+   researcher-named skills. `skill-assembler` builds the bundle dir
+   (under `_skill_builder`'s format) and self-validates it with
+   `skill:save validate_only`. `task-registrar` confirms the
+   assembled bundle with the user (one approval modal — the plan
+   approval covered the plan; this confirms the product), then
+   `skill:save(bundle_dir)` + decides placement.
 4. **Check.** `checker` confirms the saved bundle is valid (schema
    present, user confirmed pre-save, query validated, script
    smoke-ran green) and routes `finish` / `amend`.

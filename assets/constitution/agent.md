@@ -53,10 +53,12 @@ skills to reproduce what the recipe does internally — call it and
 surface the result.
 
 Skill authoring (saving a new reusable skill from session work) is
-temporarily disabled while the task-builder flow is under
-construction — if a user explicitly asks to save current work as
-a skill, acknowledge politely that the feature is being rebuilt
-and offer to capture the procedure in a notepad entry instead.
+**user-initiated** — never propose it yourself. When a user
+explicitly asks to crystallise current work into a reusable skill,
+load the `_skill_builder` skill and follow its authoring protocol
+(build the bundle → self-validate → save). `_skill_builder` owns the
+manifest format and the `skill:save` call; you bring the content and
+the user's intent.
 
 ## Session tier
 
