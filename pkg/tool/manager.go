@@ -230,7 +230,6 @@ func WithBuilder(b ProviderBuilder) ToolManagerOption {
 	}
 }
 
-
 // Close tears down the providers owned by this Manager. On a
 // child Manager (parent != nil) it closes only the child's own
 // providers — parent state is untouched. Idempotent on both
@@ -323,6 +322,51 @@ func (m *ToolManager) Providers() []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// ProviderCatalogue is one provider's introspection entry — its
+// name, lifetime, and full tool list — returned by
+// [ToolManager.Catalogue]. The shape feeds the `tool:providers` /
+// `tool:tools` authoring surface.
+type ProviderCatalogue struct {
+	Name     string
+	Lifetime Lifetime
+	Tools    []Tool
+}
+
+// Catalogue enumerates every provider reachable from THIS manager —
+// agent-level providers via the parent chain (always present) plus
+// session-level providers registered on this manager (per_session
+// providers like the shell appear only when the session actually
+// loaded them) — and asks each for its full tool list. Call it on
+// the calling session's own manager ([extension.SessionState.Tools])
+// so the parent walk resolves the agent tier and the local providers
+// resolve the session tier; no session id is needed — the manager
+// hierarchy IS the resolution (mirrors collectMergedProviders, whose
+// id parameter is vestigial).
+//
+// UNLIKE the model-facing [Snapshot], Catalogue applies NO allow-set
+// / loaded-skill filter: it is the raw registry of real
+// `provider:tool` names. It is the source of truth a skill author
+// consults (via `tool:providers` / `tool:tools`) to name tools
+// precisely in a task's `allowed_tools_default` instead of inventing
+// them — the dominant dogfood failure. The same registry backs the
+// `skill:save` tool-name validation.
+func (m *ToolManager) Catalogue(ctx context.Context) ([]ProviderCatalogue, error) {
+	merged := m.collectMergedProviders("")
+	out := make([]ProviderCatalogue, 0, len(merged))
+	var errs []error
+	for name, p := range merged {
+		tools, err := p.List(ctx)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		slices.SortFunc(tools, func(a, b Tool) int { return strings.Compare(a.Name, b.Name) })
+		out = append(out, ProviderCatalogue{Name: name, Lifetime: p.Lifetime(), Tools: tools})
+	}
+	slices.SortFunc(out, func(a, b ProviderCatalogue) int { return strings.Compare(a.Name, b.Name) })
+	return out, errors.Join(errs...)
 }
 
 // ProviderLifetime returns the Lifetime declared by the provider

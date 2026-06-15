@@ -27,9 +27,9 @@ type fakeProvider struct {
 	name string
 }
 
-func (f *fakeProvider) Name() string                                      { return f.name }
-func (f *fakeProvider) Lifetime() tool.Lifetime                           { return tool.LifetimePerAgent }
-func (f *fakeProvider) List(context.Context) ([]tool.Tool, error)         { return nil, nil }
+func (f *fakeProvider) Name() string                              { return f.name }
+func (f *fakeProvider) Lifetime() tool.Lifetime                   { return tool.LifetimePerAgent }
+func (f *fakeProvider) List(context.Context) ([]tool.Tool, error) { return nil, nil }
 func (f *fakeProvider) Call(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 	return nil, nil
 }
@@ -60,12 +60,14 @@ func TestAdminProvider_List_NamesAndPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(tools) != 2 {
-		t.Fatalf("List len = %d, want 2", len(tools))
+	if len(tools) != 4 {
+		t.Fatalf("List len = %d, want 4", len(tools))
 	}
 	want := map[string]string{
 		"tool:provider_add":    "hugen:tool:provider_add",
 		"tool:provider_remove": "hugen:tool:provider_remove",
+		"tool:providers":       "hugen:tool:introspect",
+		"tool:tools":           "hugen:tool:introspect",
 	}
 	for _, tl := range tools {
 		got, ok := want[tl.Name]
