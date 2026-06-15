@@ -27,6 +27,7 @@ const (
 	permObjectLoad          = "hugen:tool:system"
 	permObjectUnload        = "hugen:tool:system"
 	permObjectSave          = "hugen:tool:system"
+	permObjectExport        = "hugen:tool:system"
 	permObjectUninstall     = "hugen:tool:system"
 	permObjectFiles         = "hugen:tool:system"
 	permObjectRef           = "hugen:tool:system"
@@ -59,6 +60,15 @@ const (
   "type": "object",
   "properties": {
     "name": {"type": "string", "description": "Skill name to remove from the store entirely (bundle + index row). Destructive and approval-gated. Distinct from skill:unload, which only drops it from the current session. To reinstall / update a skill instead of deleting it, use skill:save with overwrite=true."}
+  },
+  "required": ["name"]
+}`
+
+	exportSchema = `{
+  "type": "object",
+  "properties": {
+    "name":     {"type": "string", "description": "Name of the skill to copy out for editing (any registered skill — system, hub, or local)."},
+    "dest_dir": {"type": "string", "description": "Optional destination directory under your session workspace (relative or absolute, must stay inside the workspace). Defaults to the skill name. The skill's SKILL.md + references / scripts / assets are written there so you can edit them and re-register with skill:save(bundle_dir, overwrite=true)."}
   },
   "required": ["name"]
 }`
@@ -132,6 +142,13 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 			RequiresApproval: true,
 		},
 		{
+			Name:             providerName + ":export",
+			Description:      "Copy an existing skill's bundle (SKILL.md + references / scripts / assets) into a directory in your session workspace so you can EDIT it. This is the start of the update flow: export → edit the files → skill:save(bundle_dir, overwrite=true). Works on any registered skill.",
+			Provider:         providerName,
+			PermissionObject: permObjectExport,
+			ArgSchema:        json.RawMessage(exportSchema),
+		},
+		{
 			Name:             providerName + ":save",
 			Description:      "Validate and register a skill bundle from a directory in your workspace (SKILL.md + optional references / scripts / assets). Validation (manifest parse + task-block placement + allowed_tools_default name check) runs BEFORE any write; on success the skill is registered and auto-loaded in the current session. Pass validate_only=true for a dry-run verdict. User-initiated only — do NOT propose this. The authoring format + flow is owned by the `_skill_builder` skill.",
 			Provider:         providerName,
@@ -184,6 +201,8 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 		return h.callUnload(ctx, args)
 	case "uninstall":
 		return h.callUninstall(ctx, args)
+	case "export":
+		return h.callExport(ctx, args)
 	case "save":
 		return h.callSave(ctx, args)
 	case "files":
@@ -412,6 +431,62 @@ func (h *SessionSkill) callUninstall(ctx context.Context, args json.RawMessage) 
 		}
 	}
 	return json.Marshal(map[string]any{"uninstalled": in.Name})
+}
+
+// ---------- skill:export ----------
+
+// exportResult is the JSON envelope returned after a successful
+// export. Dir is the absolute workspace directory the bundle was
+// written to (pass it back to skill:save as bundle_dir after editing);
+// Files is the sorted set of written bundle-relative paths.
+type exportResult struct {
+	Name  string   `json:"name"`
+	Dir   string   `json:"dir"`
+	Files []string `json:"files"`
+}
+
+// callExport copies a registered skill's bundle into a workspace
+// directory so the agent can edit it and re-register with
+// skill:save(overwrite=true). The destination is constrained to the
+// session workspace (path-escape defence). See
+// design/005-reuse-and-memory/spec-skill-authoring.md (update flow).
+func (h *SessionSkill) callExport(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	if h.manager == nil {
+		return nil, tool.ErrSystemUnavailable
+	}
+	var in struct {
+		Name    string `json:"name"`
+		DestDir string `json:"dest_dir,omitempty"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil {
+		return nil, fmt.Errorf("%w: skill:export: %v", tool.ErrArgValidation, err)
+	}
+	if strings.TrimSpace(in.Name) == "" {
+		return nil, fmt.Errorf("%w: skill:export: name required", tool.ErrArgValidation)
+	}
+	dest := strings.TrimSpace(in.DestDir)
+	if dest == "" {
+		dest = in.Name
+	}
+	abs, err := constrainToWorkspace(ctx, "skill:export: dest_dir", dest)
+	if err != nil {
+		return nil, err
+	}
+	sk, err := h.manager.Get(ctx, in.Name)
+	if err != nil {
+		if errors.Is(err, skillpkg.ErrSkillNotFound) {
+			return nil, fmt.Errorf("%w: skill:export: skill %q not found in the store", tool.ErrNotFound, in.Name)
+		}
+		return nil, fmt.Errorf("skill:export: %w", err)
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		return nil, fmt.Errorf("%w: skill:export: mkdir %q: %v", tool.ErrIO, abs, err)
+	}
+	files, err := materializeSkill(sk, abs)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(exportResult{Name: sk.Manifest.Name, Dir: abs, Files: files})
 }
 
 // ---------- skill:save ----------

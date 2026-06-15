@@ -92,6 +92,7 @@ func TestExtension_List_CoreTools(t *testing.T) {
 		"skill:load":         false,
 		"skill:unload":       false,
 		"skill:uninstall":    false,
+		"skill:export":       false,
 		"skill:save":         false,
 		"skill:files":        false,
 		"skill:ref":          false,
@@ -652,6 +653,114 @@ func TestCallUninstall_HasApprovalGate(t *testing.T) {
 		}
 	}
 	t.Fatal("skill:uninstall not in catalogue")
+}
+
+// ---------- skill:export ----------
+
+// TestCallExport_RoundTrip saves a bundle, exports it back into the
+// workspace under a new dir, and proves the files + content round-trip
+// — the export → edit → overwrite-save update flow.
+func TestCallExport_RoundTrip(t *testing.T) {
+	ext, state, _, _, wsDir := newSaveFixture(t)
+	src := writeBundle(t, wsDir, "rt-src",
+		"---\nname: rt\ndescription: round trip.\nlicense: MIT\n---\nbody",
+		map[string]string{
+			"references/howto.md": "how to",
+			"scripts/run.py":      "print('x')",
+		})
+	if _, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(src, false, false)); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	out, err := ext.Call(newCallCtx(state), "skill:export", json.RawMessage(`{"name":"rt","dest_dir":"edit"}`))
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	var res exportResult
+	if uErr := json.Unmarshal(out, &res); uErr != nil {
+		t.Fatalf("decode exportResult: %v\nraw: %s", uErr, out)
+	}
+	if res.Name != "rt" {
+		t.Errorf("Name = %q, want rt", res.Name)
+	}
+	if !strings.HasPrefix(res.Dir, wsDir) {
+		t.Errorf("Dir = %q, want under workspace %q", res.Dir, wsDir)
+	}
+	// SKILL.md + both bundle files present.
+	for _, want := range []string{"SKILL.md", "references/howto.md", "scripts/run.py"} {
+		found := false
+		for _, f := range res.Files {
+			if f == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s missing from export file list %v", want, res.Files)
+		}
+		if _, sErr := os.Stat(filepath.Join(res.Dir, filepath.FromSlash(want))); sErr != nil {
+			t.Errorf("%s not written to disk: %v", want, sErr)
+		}
+	}
+	// Content round-trips.
+	body, _ := os.ReadFile(filepath.Join(res.Dir, "scripts", "run.py"))
+	if string(body) != "print('x')" {
+		t.Errorf("script content = %q, want print('x')", body)
+	}
+	// The exported dir is a valid bundle: overwrite-save accepts it.
+	if _, sErr := ext.Call(newCallCtx(state), "skill:save", saveArgs(res.Dir, true, false)); sErr != nil {
+		t.Errorf("re-save of exported bundle failed: %v", sErr)
+	}
+}
+
+// TestCallExport_InlineReconstructsManifest covers the fs-less path:
+// an inline skill has no on-disk FS, so SKILL.md is rebuilt from the
+// parsed manifest.
+func TestCallExport_InlineReconstructsManifest(t *testing.T) {
+	ext, state, _, _, _ := newSaveFixture(t)
+	out, err := ext.Call(newCallCtx(state), "skill:export", json.RawMessage(`{"name":"alpha","dest_dir":"alpha-edit"}`))
+	if err != nil {
+		t.Fatalf("export inline: %v", err)
+	}
+	var res exportResult
+	if uErr := json.Unmarshal(out, &res); uErr != nil {
+		t.Fatalf("decode: %v", uErr)
+	}
+	md, rErr := os.ReadFile(filepath.Join(res.Dir, "SKILL.md"))
+	if rErr != nil {
+		t.Fatalf("SKILL.md not written: %v", rErr)
+	}
+	if !strings.Contains(string(md), "name: alpha") {
+		t.Errorf("reconstructed SKILL.md missing manifest: %s", md)
+	}
+	// And it parses back via skill:save validate_only.
+	if _, sErr := ext.Call(newCallCtx(state), "skill:save", saveArgs(res.Dir, false, true)); sErr != nil {
+		t.Errorf("exported inline bundle does not validate: %v", sErr)
+	}
+}
+
+func TestCallExport_RequiresName(t *testing.T) {
+	ext, state, _, _, _ := newSaveFixture(t)
+	_, err := ext.Call(newCallCtx(state), "skill:export", json.RawMessage(`{"name":"  "}`))
+	if !errors.Is(err, tool.ErrArgValidation) {
+		t.Errorf("err = %v, want ErrArgValidation", err)
+	}
+}
+
+func TestCallExport_NotFound(t *testing.T) {
+	ext, state, _, _, _ := newSaveFixture(t)
+	_, err := ext.Call(newCallCtx(state), "skill:export", json.RawMessage(`{"name":"ghost"}`))
+	if !errors.Is(err, tool.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCallExport_DestEscapesWorkspace(t *testing.T) {
+	ext, state, _, _, _ := newSaveFixture(t)
+	// alpha is an inline skill in the fixture store — resolvable.
+	_, err := ext.Call(newCallCtx(state), "skill:export", json.RawMessage(`{"name":"alpha","dest_dir":"../escape"}`))
+	if !errors.Is(err, tool.ErrPathEscape) {
+		t.Errorf("err = %v, want ErrPathEscape", err)
+	}
 }
 
 // ---------- skill:ref ----------

@@ -10,6 +10,7 @@ description: >
 license: Apache-2.0
 allowed-tools:
   - skill:save
+  - skill:export
   - skill:uninstall
   - skill:load
   - skill:unload
@@ -102,14 +103,28 @@ NOT tools (those are skill names). Look up the real names first:
 `skill:save` rejects unknown names with `skill_unknown_tool` and a
 hint. See `references/tool-discovery.md`.
 
-## Updating / removing a saved skill
+## Updating an existing skill
 
-- **Update** an existing skill: re-run `skill:save(bundle_dir: "<dir>",
-  overwrite: true)` with the revised bundle. There is no separate
-  "edit" call — overwrite is the update path.
-- **Remove** a skill outright: `skill:uninstall(name: "<name>")`.
-  Destructive and approval-gated. Prefer overwrite-save for fixes;
-  uninstall is for retiring a skill you no longer want.
+To change a skill that already exists, edit its real bundle — don't
+re-author from memory:
+
+1. **Export it** — `skill:export(name: "<name>")` copies the skill's
+   SKILL.md + references / scripts / assets into a directory in your
+   workspace (defaults to the skill name; pass `dest_dir` to choose).
+   The result gives you `dir` + the file list.
+2. **Edit** the files in that directory with the bash / filesystem
+   tools — change only what needs changing.
+3. **Re-register** — `skill:save(bundle_dir: "<dir>", overwrite:
+   true)`. Validate first with `validate_only: true` if you touched
+   the manifest. Overwrite is the ONLY update path; there is no
+   in-place edit call.
+
+## Removing a skill
+
+`skill:uninstall(name: "<name>")` — removes it from the store
+entirely. Destructive and approval-gated. Prefer the export → edit →
+overwrite-save flow for fixes; uninstall is for retiring a skill you
+no longer want.
 
 ## What this skill does NOT do
 

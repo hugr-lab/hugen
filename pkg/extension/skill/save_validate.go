@@ -191,17 +191,19 @@ func workspaceDir(ctx context.Context) string {
 	return ""
 }
 
-// resolveBundleDir validates the caller-supplied bundle_dir: relative
-// paths resolve against the session workspace; the result is
-// constrained to the workspace subtree (path-escape defence) and must
-// be an existing directory. When no workspace is wired (fixture) the
-// cleaned absolute path is accepted as-is after the stat check.
-func resolveBundleDir(ctx context.Context, dir string) (string, error) {
+// constrainToWorkspace resolves dir (relative → against the session
+// workspace) and returns the cleaned absolute path, rejecting any path
+// that escapes the workspace subtree. Existence is NOT checked. label
+// prefixes the error messages so each caller (skill:save bundle_dir,
+// skill:export dest_dir) reads clearly. When no workspace is wired
+// (test fixtures) a relative path is rejected and an absolute one is
+// accepted as-is.
+func constrainToWorkspace(ctx context.Context, label, dir string) (string, error) {
 	ws := workspaceDir(ctx)
 	abs := dir
 	if !filepath.IsAbs(abs) {
 		if ws == "" {
-			return "", fmt.Errorf("%w: skill:save: bundle_dir must be an absolute path (no workspace is wired to resolve a relative one)", tool.ErrArgValidation)
+			return "", fmt.Errorf("%w: %s %q must be an absolute path (no workspace is wired to resolve a relative one)", tool.ErrArgValidation, label, dir)
 		}
 		abs = filepath.Join(ws, dir)
 	}
@@ -209,8 +211,18 @@ func resolveBundleDir(ctx context.Context, dir string) (string, error) {
 	if ws != "" {
 		rel, err := filepath.Rel(ws, abs)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "", fmt.Errorf("%w: skill:save: bundle_dir %q escapes the session workspace %q — build the bundle inside your workspace directory", tool.ErrPathEscape, abs, ws)
+			return "", fmt.Errorf("%w: %s %q escapes the session workspace %q — stay inside your workspace directory", tool.ErrPathEscape, label, abs, ws)
 		}
+	}
+	return abs, nil
+}
+
+// resolveBundleDir validates the caller-supplied bundle_dir: it must
+// resolve inside the session workspace AND be an existing directory.
+func resolveBundleDir(ctx context.Context, dir string) (string, error) {
+	abs, err := constrainToWorkspace(ctx, "skill:save: bundle_dir", dir)
+	if err != nil {
+		return "", err
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
@@ -223,6 +235,71 @@ func resolveBundleDir(ctx context.Context, dir string) (string, error) {
 		return "", fmt.Errorf("%w: skill:save: bundle_dir %q is not a directory", tool.ErrArgValidation, abs)
 	}
 	return abs, nil
+}
+
+// materializeSkill writes a resolved skill's bundle into destAbs (an
+// existing directory) so the agent can edit the files and re-save with
+// overwrite. Copies the on-disk bundle verbatim when the skill has an
+// FS (system / local / dynamic); reconstructs SKILL.md from the parsed
+// manifest for fs-less skills (inline / hub). Returns the sorted list
+// of written bundle-relative paths.
+func materializeSkill(sk skillpkg.Skill, destAbs string) ([]string, error) {
+	var files []string
+	wroteManifest := false
+	if sk.FS != nil {
+		if err := fs.WalkDir(sk.FS, ".", func(p string, d fs.DirEntry, werr error) error {
+			if werr != nil {
+				return werr
+			}
+			if p == "." || d.IsDir() {
+				return nil
+			}
+			data, rerr := fs.ReadFile(sk.FS, p)
+			if rerr != nil {
+				return rerr
+			}
+			target := filepath.Join(destAbs, filepath.FromSlash(p))
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(target, data, 0o644); err != nil {
+				return err
+			}
+			files = append(files, p)
+			if p == "SKILL.md" {
+				wroteManifest = true
+			}
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("%w: skill:export: copy bundle: %v", tool.ErrIO, err)
+		}
+	}
+	if !wroteManifest {
+		if err := os.WriteFile(filepath.Join(destAbs, "SKILL.md"), reconstructManifest(sk.Manifest), 0o644); err != nil {
+			return nil, fmt.Errorf("%w: skill:export: write SKILL.md: %v", tool.ErrIO, err)
+		}
+		files = append(files, "SKILL.md")
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+// reconstructManifest rebuilds SKILL.md bytes from a parsed manifest —
+// the fs-less fallback for skill:export. Mirrors the store's own
+// encodeManifest: original frontmatter + body when Raw is present,
+// else a minimal preamble.
+func reconstructManifest(m skillpkg.Manifest) []byte {
+	const sep = "---\n"
+	if len(m.Raw) > 0 {
+		out := []byte(sep)
+		out = append(out, m.Raw...)
+		out = append(out, '\n')
+		out = append(out, []byte(sep)...)
+		out = append(out, m.Body...)
+		return out
+	}
+	min := fmt.Sprintf("%sname: %s\ndescription: %s\nlicense: %s\n%s", sep, m.Name, m.Description, m.License, sep)
+	return append([]byte(min), m.Body...)
 }
 
 // readBundleBody reads the canonical bundle subdirs (references/,
