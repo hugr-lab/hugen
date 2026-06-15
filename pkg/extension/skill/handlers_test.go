@@ -91,6 +91,7 @@ func TestExtension_List_CoreTools(t *testing.T) {
 	want := map[string]bool{
 		"skill:load":         false,
 		"skill:unload":       false,
+		"skill:uninstall":    false,
 		"skill:save":         false,
 		"skill:files":        false,
 		"skill:ref":          false,
@@ -593,6 +594,64 @@ func TestCallSave_InvalidManifest(t *testing.T) {
 	if !errors.Is(err, skillpkg.ErrManifestInvalid) {
 		t.Errorf("err = %v, want ErrManifestInvalid", err)
 	}
+}
+
+// ---------- skill:uninstall ----------
+
+func TestCallUninstall_RequiresName(t *testing.T) {
+	ext, state, _, _, _ := newSaveFixture(t)
+	_, err := ext.Call(newCallCtx(state), "skill:uninstall", json.RawMessage(`{"name":"  "}`))
+	if !errors.Is(err, tool.ErrArgValidation) {
+		t.Errorf("err = %v, want ErrArgValidation", err)
+	}
+}
+
+// TestCallUninstall_UnsupportedBackendEnvelope proves that on a
+// local-only store (no removable dynamic backend) uninstall returns a
+// structured, actionable envelope rather than a hard error — pointing
+// the model at overwrite-save as the update path.
+func TestCallUninstall_UnsupportedBackendEnvelope(t *testing.T) {
+	ext, state, _, _, wsDir := newSaveFixture(t)
+	dir := writeBundle(t, wsDir, "gone", "---\nname: gone\ndescription: x.\nlicense: MIT\n---\n", nil)
+	if _, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, false)); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	out, err := ext.Call(newCallCtx(state), "skill:uninstall", json.RawMessage(`{"name":"gone"}`))
+	if err != nil {
+		t.Fatalf("uninstall returned a hard error, want envelope: %v", err)
+	}
+	var env struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if jErr := json.Unmarshal(out, &env); jErr != nil {
+		t.Fatalf("decode envelope: %v\nraw: %s", jErr, out)
+	}
+	if env.Error.Code != "skill_uninstall_unsupported" {
+		t.Errorf("code = %q, want skill_uninstall_unsupported", env.Error.Code)
+	}
+	if !strings.Contains(env.Error.Message, "overwrite") {
+		t.Errorf("message should point to overwrite-save: %q", env.Error.Message)
+	}
+}
+
+func TestCallUninstall_HasApprovalGate(t *testing.T) {
+	ext := NewExtension(nil, nil, "a1")
+	tools, err := ext.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, tl := range tools {
+		if tl.Name == "skill:uninstall" {
+			if !tl.RequiresApproval {
+				t.Error("skill:uninstall must set RequiresApproval (destructive)")
+			}
+			return
+		}
+	}
+	t.Fatal("skill:uninstall not in catalogue")
 }
 
 // ---------- skill:ref ----------

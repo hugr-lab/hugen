@@ -27,6 +27,7 @@ const (
 	permObjectLoad          = "hugen:tool:system"
 	permObjectUnload        = "hugen:tool:system"
 	permObjectSave          = "hugen:tool:system"
+	permObjectUninstall     = "hugen:tool:system"
 	permObjectFiles         = "hugen:tool:system"
 	permObjectRef           = "hugen:tool:system"
 	permObjectFilesPerSkill = "hugen:command:skill_files"
@@ -50,6 +51,14 @@ const (
   "type": "object",
   "properties": {
     "name": {"type": "string", "description": "Skill name to unload."}
+  },
+  "required": ["name"]
+}`
+
+	uninstallSchema = `{
+  "type": "object",
+  "properties": {
+    "name": {"type": "string", "description": "Skill name to remove from the store entirely (bundle + index row). Destructive and approval-gated. Distinct from skill:unload, which only drops it from the current session. To reinstall / update a skill instead of deleting it, use skill:save with overwrite=true."}
   },
   "required": ["name"]
 }`
@@ -115,6 +124,14 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 			ArgSchema:        json.RawMessage(unloadSchema),
 		},
 		{
+			Name:             providerName + ":uninstall",
+			Description:      "Remove a skill from the store entirely (on-disk bundle + index row) — the explicit deletion path. Destructive and approval-gated. To UPDATE a skill, prefer skill:save with overwrite=true; uninstall is for retiring a skill outright.",
+			Provider:         providerName,
+			PermissionObject: permObjectUninstall,
+			ArgSchema:        json.RawMessage(uninstallSchema),
+			RequiresApproval: true,
+		},
+		{
 			Name:             providerName + ":save",
 			Description:      "Validate and register a skill bundle from a directory in your workspace (SKILL.md + optional references / scripts / assets). Validation (manifest parse + task-block placement + allowed_tools_default name check) runs BEFORE any write; on success the skill is registered and auto-loaded in the current session. Pass validate_only=true for a dry-run verdict. User-initiated only — do NOT propose this. The authoring format + flow is owned by the `_skill_builder` skill.",
 			Provider:         providerName,
@@ -165,6 +182,8 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 		return h.callLoad(ctx, args)
 	case "unload":
 		return h.callUnload(ctx, args)
+	case "uninstall":
+		return h.callUninstall(ctx, args)
 	case "save":
 		return h.callSave(ctx, args)
 	case "files":
@@ -339,6 +358,60 @@ func (h *SessionSkill) callUnload(ctx context.Context, args json.RawMessage) (js
 	}
 	h.emitOp(ctx, OpUnload, in.Name)
 	return json.RawMessage(`{"unloaded":true}`), nil
+}
+
+// ---------- skill:uninstall ----------
+
+// callUninstall removes a skill from the store entirely (bundle +
+// index row), the deletion counterpart to skill:save. Destructive and
+// approval-gated at the dispatcher (RequiresApproval). If the skill
+// was loaded in the calling session it is unloaded first so the
+// session view stays consistent. Returns ErrUnsupportedBackend
+// (surfaced as a structured envelope) when the store has no removable
+// backend — e.g. a local-only store where the skill lives in a
+// read-through dir; in that case overwrite-save is the update path.
+func (h *SessionSkill) callUninstall(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	if h.manager == nil {
+		return nil, tool.ErrSystemUnavailable
+	}
+	var in struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil {
+		return nil, fmt.Errorf("%w: skill:uninstall: %v", tool.ErrArgValidation, err)
+	}
+	if strings.TrimSpace(in.Name) == "" {
+		return nil, fmt.Errorf("%w: skill:uninstall: name required", tool.ErrArgValidation)
+	}
+	// Remove from the store first — the authoritative, fallible action.
+	// Only after it succeeds do we drop the skill from the live session,
+	// so a failed removal leaves no partial (unloaded-but-present) state.
+	if err := h.manager.Uninstall(ctx, in.Name); err != nil {
+		if errors.Is(err, skillpkg.ErrUnsupportedBackend) {
+			body, mErr := json.Marshal(map[string]any{
+				"error": map[string]string{
+					"code":    "skill_uninstall_unsupported",
+					"message": fmt.Sprintf("skill:uninstall %q: the store has no removable backend (the skill lives in a read-through source). To update it, re-run skill:save with overwrite=true instead.", in.Name),
+				},
+			})
+			if mErr != nil {
+				return nil, err
+			}
+			return body, nil
+		}
+		return nil, fmt.Errorf("skill:uninstall: %w", err)
+	}
+	// Drop it from this session so the model's live catalogue no longer
+	// offers a skill that is gone from the store (best-effort).
+	for _, n := range h.LoadedNames(ctx) {
+		if n == in.Name {
+			if err := h.Unload(ctx, in.Name); err == nil {
+				h.emitOp(ctx, OpUnload, in.Name)
+			}
+			break
+		}
+	}
+	return json.Marshal(map[string]any{"uninstalled": in.Name})
 }
 
 // ---------- skill:save ----------
