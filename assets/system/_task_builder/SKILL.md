@@ -373,11 +373,25 @@ metadata:
                can look up;
              - **the user's answer** to a clarification you ask NOW.
 
+             A sensible DEFAULT is NOT a fourth source — it is a
+             guess. "Markdown table because a report is usually a
+             table", "printed back by default", "name composed from
+             a pattern" are all guesses, however reasonable. The
+             result's **format**, **destination**, and **name** are
+             USER-OWNED: the data model cannot answer them, so
+             unless the user named a concrete value they are OPEN
+             and MUST go in your clarification batch. If your
+             Grounding line for any of them would read "default" /
+             "convention" / "usually" — that element is unresolved;
+             ask it.
+
              An element you cannot ground is an open question —
              guessing it plants a wrong assumption into every
-             downstream worker. Producing ZERO questions on a fresh
-             task intent usually means a preference was guessed,
-             not resolved.
+             downstream worker. Asking ONE question (e.g. a genuine
+             data ambiguity you found) does NOT discharge the
+             others — every ungrounded user-owned element goes in
+             the SAME batch. The modal is already open; adding the
+             format / name questions to it is free.
 
              Bundle every open element into ONE `done: false`
              handoff with a `clarifications: [...]` array. Derive
