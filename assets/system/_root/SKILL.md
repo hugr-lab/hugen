@@ -434,6 +434,27 @@ explicitly only for recurring kinds: `{"kind":"count","spec":"<N>"}`
 for "do this N times", `{"kind":"until","spec":"<RFC3339>"}` for
 "stop on this date".
 
+### Per-fire values in `inputs` (recurring schedules)
+
+A recurring schedule fires the SAME `inputs` map every time. If an
+input is a fixed output path, every fire OVERWRITES one file. To make
+a value vary per fire, embed a fire-time template var in the string
+value — the runtime renders it at each fire BEFORE the recipe runs:
+
+- `{{.FireSeq}}` — the 1-indexed fire counter (1, 2, 3, …).
+- `{{.FireTime}}` — the fire's wall-clock instant (a Go `time.Time`;
+  format it, e.g. `{{.FireTime.Format "2006-01-02"}}`).
+
+```
+inputs={ "output_path": "~/reports/roads_{{.FireSeq}}.html" }
+# fire 1 → roads_1.html, fire 2 → roads_2.html, …
+```
+
+Only `{{ … }}` Go-template actions are rendered. A naive placeholder
+like `<time>` or `$DATE` is passed through LITERALLY — every fire
+would write the same file. Use the template form for anything that
+must differ per fire.
+
 ### Acknowledgement
 
 After successful `schedule:create`, emit a short user-visible
