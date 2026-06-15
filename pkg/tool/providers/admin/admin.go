@@ -50,9 +50,11 @@ func (a *AdminProvider) Subscribe(ctx context.Context) (<-chan tool.ProviderEven
 // Close is a no-op — AdminProvider holds no resources of its own.
 func (a *AdminProvider) Close() error { return nil }
 
-// List returns the registry-administration tools.
+// List returns the registry-administration tools (mutating,
+// admin-gated) plus the read-only introspection tools (`tool:
+// providers` / `tool:tools`, authoring-gated).
 func (a *AdminProvider) List(ctx context.Context) ([]tool.Tool, error) {
-	return []tool.Tool{
+	return append([]tool.Tool{
 		{
 			Name:             "tool:provider_add",
 			Description:      "Register a new tool provider at runtime. The Spec.Type field selects the concrete implementation (today: \"mcp\"). The new provider is dispatched through the runtime-wired ProviderBuilder; failures from Build (bad spec, unreachable endpoint, auth missing) surface as a tool error.",
@@ -67,7 +69,7 @@ func (a *AdminProvider) List(ctx context.Context) ([]tool.Tool, error) {
 			PermissionObject: "hugen:tool:provider_remove",
 			ArgSchema:        schemaRemove,
 		},
-	}, nil
+	}, introspectionTools()...), nil
 }
 
 // Call dispatches the two registry-admin tools. Args have already
@@ -78,6 +80,10 @@ func (a *AdminProvider) Call(ctx context.Context, name string, args json.RawMess
 		return a.callAdd(ctx, args)
 	case "provider_remove":
 		return a.callRemove(ctx, args)
+	case "providers":
+		return a.callProviders(ctx, args)
+	case "tools":
+		return a.callTools(ctx, args)
 	default:
 		return nil, fmt.Errorf("%w: %s", tool.ErrUnknownTool, name)
 	}

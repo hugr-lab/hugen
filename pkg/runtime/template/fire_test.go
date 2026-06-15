@@ -61,6 +61,88 @@ func TestRenderTemplate_GoalAndInputs(t *testing.T) {
 	}
 }
 
+func TestRenderInputs_PerFireSubstitution(t *testing.T) {
+	ctx := NewFireRenderContext(&protocol.FireContext{
+		TaskID:  "tsk_z",
+		FireSeq: 3,
+	})
+	in := map[string]any{
+		"output_path": "report_{{ .FireSeq }}.html",
+		"literal":     "<time>", // naive placeholder — stays literal
+		"count":       7,        // non-string passes through
+		"nested": map[string]any{
+			"file": "n_{{ .FireSeq }}.csv",
+		},
+		"list": []any{"a_{{ .FireSeq }}", "plain"},
+	}
+	out, err := RenderInputs(in, ctx)
+	if err != nil {
+		t.Fatalf("RenderInputs: %v", err)
+	}
+	if out["output_path"] != "report_3.html" {
+		t.Errorf("output_path = %v, want report_3.html", out["output_path"])
+	}
+	if out["literal"] != "<time>" {
+		t.Errorf("literal = %v, want <time> (unrendered)", out["literal"])
+	}
+	if out["count"] != 7 {
+		t.Errorf("count = %v, want 7", out["count"])
+	}
+	nested, _ := out["nested"].(map[string]any)
+	if nested["file"] != "n_3.csv" {
+		t.Errorf("nested.file = %v, want n_3.csv", nested["file"])
+	}
+	list, _ := out["list"].([]any)
+	if len(list) != 2 || list[0] != "a_3" || list[1] != "plain" {
+		t.Errorf("list = %v, want [a_3 plain]", list)
+	}
+	// Input map is NOT mutated.
+	if in["output_path"] != "report_{{ .FireSeq }}.html" {
+		t.Errorf("source map mutated: %v", in["output_path"])
+	}
+}
+
+func TestRenderInputs_BadTemplateReportsKey(t *testing.T) {
+	ctx := NewFireRenderContext(nil)
+	_, err := RenderInputs(map[string]any{
+		"good": "fine",
+		"bad":  "{{ .Nope ",
+	}, ctx)
+	if err == nil {
+		t.Fatal("expected error for malformed input template")
+	}
+	if !strings.Contains(err.Error(), "inputs.bad") {
+		t.Errorf("error should name the offending key: %v", err)
+	}
+}
+
+func TestRenderInputs_EmptyPassThrough(t *testing.T) {
+	ctx := NewFireRenderContext(nil)
+	out, err := RenderInputs(nil, ctx)
+	if err != nil {
+		t.Fatalf("RenderInputs(nil): %v", err)
+	}
+	if out != nil {
+		t.Errorf("nil inputs should pass through as nil, got %v", out)
+	}
+}
+
+// TestRenderInputs_EmptyMapNotAliased proves a non-nil empty input map
+// yields a FRESH map, not the caller's reference — so mutating the
+// result can never corrupt the stored task spec.
+func TestRenderInputs_EmptyMapNotAliased(t *testing.T) {
+	ctx := NewFireRenderContext(nil)
+	in := map[string]any{}
+	out, err := RenderInputs(in, ctx)
+	if err != nil {
+		t.Fatalf("RenderInputs(empty): %v", err)
+	}
+	out["injected"] = 1
+	if len(in) != 0 {
+		t.Errorf("source map was mutated through the returned map: %v", in)
+	}
+}
+
 func TestRenderTemplate_PrevFireGuard(t *testing.T) {
 	tmpl := `{{ if .PrevFire }}prior: {{ .PrevFire.Summary }}{{ else }}first run{{ end }}`
 

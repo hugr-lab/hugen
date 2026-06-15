@@ -330,27 +330,19 @@ func TestDynamicBackend(t *testing.T) {
 		require.NoError(t, err)
 		require.NotEmpty(t, catID)
 
-		members, err := b.index.listMembers(ctx, catID, "catalog_member")
-		require.NoError(t, err)
+		members := catalogMemberEdges(ctx, t, b.index, catID)
 		require.Len(t, members, 1, "catalog should link to its one member recipe")
-		assert.Equal(t, "change-report", members[0].Name)
-
-		// catalogMembersByName (the within read path) resolves the same.
-		skills, err := b.catalogMembersByName(ctx, "data-catalog")
-		require.NoError(t, err)
-		require.Len(t, skills, 1)
-		assert.Equal(t, "change-report", skills[0].Manifest.Name)
+		assert.Equal(t, "change-report", members[0])
 
 		// Idempotent: a second reconcile must not duplicate the edge.
 		_, err = b.Reconcile(ctx)
 		require.NoError(t, err)
-		members, err = b.index.listMembers(ctx, catID, "catalog_member")
-		require.NoError(t, err)
+		members = catalogMemberEdges(ctx, t, b.index, catID)
 		assert.Len(t, members, 1, "reconcile must converge, not duplicate edges")
 	})
 
 	t.Run("search returns ErrNoEmbedder without an embedder", func(t *testing.T) {
-		_, err := b.index.search(ctx, "change report", nil, "", 5)
+		_, err := b.index.search(ctx, "change report", nil, 5)
 		assert.ErrorIs(t, err, ErrNoEmbedder)
 	})
 
@@ -460,11 +452,13 @@ func TestStoreSyncDynamic(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(got.Manifest.Body), "change-report recipe body")
 
-	// Catalog relink ran during SyncDynamic — within reads real edges.
-	members, err := st.CatalogMembers(ctx, "data-catalog")
+	// Catalog relink ran during SyncDynamic — real catalog_member
+	// edges exist for the indexed catalog.
+	catID, err := st.dynamic.index.getIDByName(ctx, "data-catalog")
 	require.NoError(t, err)
+	members := catalogMemberEdges(ctx, t, st.dynamic.index, catID)
 	require.Len(t, members, 1)
-	assert.Equal(t, "change-report", members[0].Manifest.Name)
+	assert.Equal(t, "change-report", members[0])
 
 	// Absent install-set (declared=false) installs every hub bundle —
 	// plain-helper now joins the index.
@@ -507,4 +501,34 @@ func TestStoreNoQuerier_FallsBackToLocal(t *testing.T) {
 	_, err := st.Reconcile(context.Background())
 	require.NoError(t, err)
 	assert.ErrorIs(t, st.Uninstall(context.Background(), "x"), ErrUnsupportedBackend)
+}
+
+// catalogMemberEdges reads the persisted catalog_member edge targets
+// for a catalog row, returning member skill names. Test-local reader
+// for the write-side relink — the prod read path went away with
+// catalog_list's two-step `within` discovery.
+func catalogMemberEdges(ctx context.Context, t *testing.T, x *dynamicIndex, sourceID string) []string {
+	t.Helper()
+	type linkTarget struct {
+		Target skillRow `json:"target"`
+	}
+	links, err := queries.RunQuery[[]linkTarget](ctx, x.querier,
+		`query ($agent: String!, $src: String!) {
+			hub { db { agent {
+				skill_links(filter: {agent_id: {eq: $agent}, source_id: {eq: $src}, relation: {eq: "catalog_member"}}) {
+					target {`+skillRowProjection+`}
+				}
+			}}}
+		}`,
+		map[string]any{"agent": x.agentID, "src": sourceID},
+		"hub.db.agent.skill_links",
+	)
+	require.NoError(t, err)
+	var names []string
+	for _, l := range links {
+		if l.Target.ID != "" {
+			names = append(names, l.Target.Name)
+		}
+	}
+	return names
 }

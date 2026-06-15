@@ -256,6 +256,14 @@ func TestDispatchSpawnFire_DeadOwnerPauses(t *testing.T) {
 	}
 }
 
+// Note: the spawn-fire INPUT-render-failure auto-pause (symmetric to
+// TestDispatchWakeFire_RenderFailurePauses) is not unit-testable with
+// the fake host — dispatchSpawnFire requires a non-nil owner *session.
+// Session past the owner check before it reaches the input render, and
+// fakeHost.Get returns (nil, true). The behaviour mirrors the tested
+// wake path; template.RenderInputs error handling is covered in
+// pkg/runtime/template.
+
 // TestMaybeScheduleNext_CronRecomputes asserts the recompute path
 // for a recurring cron task: after a fire it inserts the next
 // `planned` row at the cron-derived instant and re-registers a Once

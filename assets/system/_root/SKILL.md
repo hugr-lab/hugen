@@ -346,15 +346,31 @@ session:spawn_mission(
   name="build-<short>",
   goal="Build a reusable task for: <user request, verbatim>",
   skill="_task_builder",
-  inputs={ user_intent: "<the user's full request, verbatim>" }
+  inputs={
+    user_intent: "<the user's full request, verbatim>",
+    known_details: { ... }  # only facts the user already stated
+  }
 )
 ```
 
+`known_details` follows the Knob 2 rule — pass ONLY facts the user
+actually named in this chat (a data source / tables, filters, the
+output format, a task-name preference, the cadence they mentioned),
+never anything you'd have to probe for. Every value must be a
+CONCRETE answer ("html", "~/reports/roads.csv", "weekly"), not a
+restatement of the request — the builder treats every key you pass
+as already answered and will NOT re-ask it, so a paraphrase
+("output: report") silently suppresses a question the user never
+answered. When in doubt, leave the key out: every dimension you
+omit the builder clarifies with the user itself. Omit `known_details`
+entirely when the request carries no extra facts.
+
 `_task_builder` interviews the user for the task's inputs / output /
-name, authors + validates the bundle, and saves it as a task-
-eligible recipe. When it returns, the new `task:<name>` tool is
-available — run it ad-hoc (Path A) or bind it to a schedule
-(Path B) per what the user originally asked.
+name, authors + validates the bundle, confirms the assembled result
+with the user, and saves it as a task-eligible recipe. When it
+returns, the new `task:<name>` tool is available — run it ad-hoc
+(Path A) or bind it to a schedule (Path B) per what the user
+originally asked.
 
 Use this when the work is worth keeping (the user said "every…",
 "regularly", "make a task that…") — not for a single one-off,
@@ -417,6 +433,45 @@ ignored; the task auto-cancels after the first fire. Pass
 explicitly only for recurring kinds: `{"kind":"count","spec":"<N>"}`
 for "do this N times", `{"kind":"until","spec":"<RFC3339>"}` for
 "stop on this date".
+
+### Per-fire values in `inputs` (recurring schedules)
+
+A recurring schedule fires the SAME `inputs` map every time. To make a
+value DEPEND on the fire — vary an output path, window a query to
+"since last run", continue from the prior result — embed a Go-template
+action in the string value. The runtime renders each `inputs` value at
+fire time, against the full fire context, BEFORE the recipe runs.
+
+Available in the template (the dot):
+
+- `.FireSeq` — 1-indexed fire counter (1, 2, 3, …).
+- `.FireTime` — this fire's instant (`time.Time`; format it, e.g.
+  `{{ .FireTime.Format "2006-01-02" }}`).
+- `.PlannedAt` — the scheduled instant for this fire.
+- `.PrevFire` — the PREVIOUS fire's outcome, or nil on the first
+  fire. Use it to continue from last time:
+  - `.PrevFire.FiredAt` — when the prior fire ran (a window
+    boundary for "only what changed since last run").
+  - `.PrevFire.Summary` / `.PrevFire.Body` — its result text.
+  - Guard it — on the first fire `.PrevFire` is nil:
+    `{{ if .PrevFire }}…{{ else }}…{{ end }}`.
+
+Examples:
+
+```
+# distinct output per fire
+inputs={ "output_path": "~/reports/roads_{{ .FireSeq }}.html" }
+
+# incremental window — only data since the last run
+inputs={ "since": "{{ if .PrevFire }}{{ .PrevFire.FiredAt.Format \"2006-01-02\" }}{{ else }}1970-01-01{{ end }}" }
+```
+
+This is the right channel when the recipe's output schema is known and
+each run builds on the last. Only `{{ … }}` actions are rendered — a
+naive placeholder like `<time>` or `$DATE` passes through LITERALLY
+(every fire writes the same value). A template that fails to render
+(e.g. an unguarded `.PrevFire` on the first fire) auto-pauses the
+task — guard nil and provide a first-fire default.
 
 ### Acknowledgement
 

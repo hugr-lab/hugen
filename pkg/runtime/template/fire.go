@@ -175,3 +175,60 @@ func RenderInto(tmpl *template.Template, ctx FireRenderContext) (string, error) 
 	}
 	return buf.String(), nil
 }
+
+// RenderInputs renders every string value in a per-task inputs blob
+// against ctx, so per-fire template vars ({{.FireSeq}}, {{.FireTime}})
+// embedded in an input value resolve at fire time instead of reaching
+// the task as a literal. The motivating case (Phase 6 spec §D7): a
+// task input `output_path: "report_{{.FireSeq}}.html"` must produce a
+// distinct path per fire — otherwise every fire overwrites one file.
+//
+// Walks nested maps and slices; non-string leaves and strings with no
+// `{{` action pass through untouched (so a naive `<time>` placeholder
+// stays literal). Returns a NEW map — the stored task spec is never
+// mutated. A parse/exec failure surfaces with the offending key path
+// so the scheduler can pause the task with an actionable reason.
+func RenderInputs(inputs map[string]any, ctx FireRenderContext) (map[string]any, error) {
+	if inputs == nil {
+		return nil, nil
+	}
+	// Always allocate a fresh map (even for an empty input) so the
+	// returned value never aliases the caller's stored spec — honouring
+	// the "Returns a NEW map" contract regardless of size.
+	out := make(map[string]any, len(inputs))
+	for k, v := range inputs {
+		rv, err := renderInputValue(v, ctx)
+		if err != nil {
+			return nil, fmt.Errorf("inputs.%s: %w", k, err)
+		}
+		out[k] = rv
+	}
+	return out, nil
+}
+
+// renderInputValue renders a single inputs value, recursing through
+// maps and slices and rendering string leaves that carry a template
+// action.
+func renderInputValue(v any, ctx FireRenderContext) (any, error) {
+	switch t := v.(type) {
+	case string:
+		if !strings.Contains(t, "{{") {
+			return t, nil
+		}
+		return RenderTemplate(t, ctx)
+	case map[string]any:
+		return RenderInputs(t, ctx)
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			rv, err := renderInputValue(e, ctx)
+			if err != nil {
+				return nil, fmt.Errorf("[%d]: %w", i, err)
+			}
+			out[i] = rv
+		}
+		return out, nil
+	default:
+		return v, nil
+	}
+}

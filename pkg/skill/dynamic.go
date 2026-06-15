@@ -31,9 +31,6 @@ type SearchOpts struct {
 	// TaskEligible, when non-nil & true, restricts results to
 	// task-runnable skills.
 	TaskEligible *bool
-	// Type filters on the coarse `type` column (catalog / recipe /
-	// skill). Empty = any.
-	Type string
 	// Limit caps the ranked result set. 0 → backend default.
 	Limit int
 }
@@ -161,51 +158,6 @@ func (x *dynamicIndex) getByName(ctx context.Context, name string) (skillRow, er
 		return skillRow{}, nil
 	}
 	return rows[0], nil
-}
-
-// membersOfCatalog returns a catalog's member skills in ONE query by
-// filtering to the catalog row and projecting its `outgoing_links`
-// relation (filtered to `catalog_member`) down to each edge's `target`
-// skill. Collapses the former getIDByName + listMembers two-trip path
-// into a single nested sub-query — the relation traversal the schema's
-// plain `skill_links` junction was designed for. Returns (nil, nil)
-// when the catalog isn't indexed or has no member edges.
-func (x *dynamicIndex) membersOfCatalog(ctx context.Context, name string) ([]skillRow, error) {
-	type linkTarget struct {
-		Target skillRow `json:"target"`
-	}
-	type catRow struct {
-		OutgoingLinks []linkTarget `json:"outgoing_links"`
-	}
-	rows, err := queries.RunQuery[[]catRow](ctx, x.querier,
-		`query ($agent: String!, $name: String!) {
-			hub { db { agent {
-				skills(filter: {agent_id: {eq: $agent}, name: {eq: $name}, type: {eq: "catalog"}}, limit: 1) {
-					outgoing_links(filter: {relation: {eq: "catalog_member"}}) {
-						target {`+skillRowProjection+`}
-					}
-				}
-			}}}
-		}`,
-		map[string]any{"agent": x.agentID, "name": name},
-		"hub.db.agent.skills",
-	)
-	if err != nil {
-		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if len(rows) == 0 {
-		return nil, nil
-	}
-	out := make([]skillRow, 0, len(rows[0].OutgoingLinks))
-	for _, l := range rows[0].OutgoingLinks {
-		if l.Target.ID != "" {
-			out = append(out, l.Target)
-		}
-	}
-	return out, nil
 }
 
 // upsert indexes a manifest given the PRE-FETCHED existing row for
@@ -349,9 +301,9 @@ func (x *dynamicIndex) deleteByName(ctx context.Context, name string) error {
 // search runs discovery over the index. When the embedder is wired it
 // is the PRIMARY path — a semantic top-K via Hugr's `semantic:` arg.
 // Without an embedder it returns ErrNoEmbedder so the caller degrades
-// to keyword listing (the notepad precedent). `taskEligible` / `typ`
-// are optional structural prefilters applied alongside the rank.
-func (x *dynamicIndex) search(ctx context.Context, query string, taskEligible *bool, typ string, limit int) ([]skillRow, error) {
+// to keyword listing (the notepad precedent). `taskEligible` is an
+// optional structural prefilter applied alongside the rank.
+func (x *dynamicIndex) search(ctx context.Context, query string, taskEligible *bool, limit int) ([]skillRow, error) {
 	if !x.embedderEnabled {
 		return nil, ErrNoEmbedder
 	}
@@ -364,9 +316,6 @@ func (x *dynamicIndex) search(ctx context.Context, query string, taskEligible *b
 	filter := map[string]any{"agent_id": map[string]any{"eq": x.agentID}}
 	if taskEligible != nil {
 		filter["task_eligible"] = map[string]any{"eq": *taskEligible}
-	}
-	if typ != "" {
-		filter["type"] = map[string]any{"eq": typ}
 	}
 	rows, err := queries.RunQuery[[]skillRow](ctx, x.querier,
 		`query ($filter: hub_db_skills_filter, $semantic: SemanticSearchInput) {
@@ -615,40 +564,6 @@ func (x *dynamicIndex) insertSkillLog(ctx context.Context, skillID, event, sessi
 		return fmt.Errorf("skill: log %s/%s: %w", event, skillID, err)
 	}
 	return nil
-}
-
-// listMembers returns the skill rows reachable from sourceID along the
-// given relation — the step-2 of two-step discovery (catalog →
-// members). Resolves the `target` relation on skill_links in one query
-// (the junction stays a plain table; the relation surfaces through it).
-func (x *dynamicIndex) listMembers(ctx context.Context, sourceID, relation string) ([]skillRow, error) {
-	type linkTarget struct {
-		Target skillRow `json:"target"`
-	}
-	links, err := queries.RunQuery[[]linkTarget](ctx, x.querier,
-		`query ($agent: String!, $src: String!, $rel: String!) {
-			hub { db { agent {
-				skill_links(filter: {agent_id: {eq: $agent}, source_id: {eq: $src}, relation: {eq: $rel}}) {
-					target {`+skillRowProjection+`}
-				}
-			}}}
-		}`,
-		map[string]any{"agent": x.agentID, "src": sourceID, "rel": relation},
-		"hub.db.agent.skill_links",
-	)
-	if err != nil {
-		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	out := make([]skillRow, 0, len(links))
-	for _, l := range links {
-		if l.Target.ID != "" {
-			out = append(out, l.Target)
-		}
-	}
-	return out, nil
 }
 
 // --- manifest <-> row helpers ---
@@ -905,6 +820,13 @@ func (b *dynamicBackend) IndexBundle(ctx context.Context, dir, source string) (s
 // AFTER all bundles (hub + local) are indexed so every member id is
 // present. Was N+1 (one getIDByName per member per catalog); now one
 // read for the whole pass.
+//
+// NOTE: since the pre-db-1 `tools_catalog` removal there is currently
+// no model-facing READER of these `catalog_member` edges (the
+// catalog-expansion read tools were dropped). The write side is kept
+// deliberately: the edges are the membership index the planned task
+// catalog (`spec-task-execution.md`, B47) reads to expand a catalog
+// into its tasks. Retained, not dead — the reader returns with B47.
 func (b *dynamicBackend) relinkCatalogs(ctx context.Context) error {
 	all, err := b.index.listAll(ctx)
 	if err != nil {
@@ -1106,25 +1028,4 @@ func (b *dynamicBackend) installFromDir(ctx context.Context, root, source string
 	}
 	b.log.Debug("skill install: done", "source", source, "indexed", n, "errors", len(errs))
 	return n, errors.Join(errs...)
-}
-
-// catalogMembersByName returns a dynamic catalog's member skills via
-// the persisted catalog_member edges. Returns (nil, nil) when the
-// catalog is not in the DB index or carries no edges — the caller
-// then falls back to manifest-derived membership (covers hub catalogs
-// not yet indexed into the dynamic store).
-func (b *dynamicBackend) catalogMembersByName(ctx context.Context, name string) ([]Skill, error) {
-	rows, err := b.index.membersOfCatalog(ctx, name)
-	if err != nil || len(rows) == 0 {
-		return nil, err
-	}
-	out := make([]Skill, 0, len(rows))
-	for _, r := range rows {
-		sk, rerr := rowToSkill(r)
-		if rerr != nil {
-			continue
-		}
-		out = append(out, sk)
-	}
-	return out, nil
 }

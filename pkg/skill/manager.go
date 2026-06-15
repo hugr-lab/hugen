@@ -171,25 +171,6 @@ type skillLogger interface {
 	LogSkillEvents(ctx context.Context, skillIDs []string, event, sessionID string) error
 }
 
-// CatalogMembers returns the recipes inside a recipe catalog — the
-// step-2 of two-step discovery. Delegates to the store; returns
-// ErrSkillNotFound when the catalog doesn't exist, nil when the named
-// skill is not a recipe catalog, and ErrUnsupportedBackend when the
-// store can't resolve membership.
-func (m *SkillManager) CatalogMembers(ctx context.Context, name string) ([]Skill, error) {
-	c, ok := m.store.(catalogMemberLister)
-	if !ok {
-		return nil, ErrUnsupportedBackend
-	}
-	return c.CatalogMembers(ctx, name)
-}
-
-// catalogMemberLister is the optional catalog-expansion surface a
-// store backend may implement (only *Store does).
-type catalogMemberLister interface {
-	CatalogMembers(ctx context.Context, name string) ([]Skill, error)
-}
-
 // Uninstall removes a dynamic skill's bundle + index row via the
 // store (the only explicit removal path; bandit hygiene demotes but
 // never deletes). Returns ErrUnsupportedBackend when the store has no

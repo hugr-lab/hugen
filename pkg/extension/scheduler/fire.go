@@ -152,14 +152,24 @@ func dispatchWakeFire(ctx context.Context, task schedstore.TaskRow, fire runner.
 		PlannedAt: fire.PlannedAt,
 	})
 
-	rendered, err := tplpkg.RenderTemplate(task.Spec.WakeMessage, tplpkg.NewFireRenderContext(&protocol.FireContext{
+	rc := tplpkg.NewFireRenderContext(&protocol.FireContext{
 		TaskID:    task.ID,
 		FireSeq:   fire.FireSeq,
 		PlannedAt: fire.PlannedAt,
 		Goal:      task.Spec.Goal,
 		Inputs:    task.Spec.Inputs,
 		PrevFire:  prevFireFromLog(ctx, deps.store, task.ID, deps.logger),
-	}))
+	})
+	// Render per-fire template vars embedded in input values BEFORE the
+	// WakeMessage render, so the WakeMessage's {{.Inputs.x}} references
+	// see the substituted values (Phase 6 §D7). A bad input template is
+	// a render failure — same auto-pause path as a bad WakeMessage.
+	var rendered string
+	renderedInputs, err := tplpkg.RenderInputs(task.Spec.Inputs, rc)
+	if err == nil {
+		rc.Inputs = renderedInputs
+		rendered, err = tplpkg.RenderTemplate(task.Spec.WakeMessage, rc)
+	}
 	if err != nil {
 		// Render failure auto-pauses the task in the store AND the
 		// runner — without the runner pause the broken template
@@ -264,10 +274,36 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 		AllowedTools: task.Spec.AllowedTools,
 	}
 
+	// Render per-fire template vars embedded in input values (Phase 6
+	// §D7): an input like output_path: "report_{{.FireSeq}}.html" must
+	// produce a distinct path per fire. The rendered inputs feed BOTH
+	// the goal render's {{.Inputs.x}} references and the spawned child's
+	// [Inputs from caller] channel. A render FAILURE is NOT recoverable
+	// here (unlike the goal, where a literal still kicks the worker):
+	// degrading to the literal would ship `{{...}}` into the inputs and
+	// defeat D7's whole purpose (every fire writes the same path). A bad
+	// input template breaks every fire, so auto-pause — same posture as
+	// the wake path's render-failure handling.
+	rc := tplpkg.NewFireRenderContext(fireCtx)
+	spawnInputs, ierr := tplpkg.RenderInputs(task.Spec.Inputs, rc)
+	if ierr != nil {
+		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+		if deps.pauseFn != nil {
+			_ = deps.pauseFn(task.ID)
+		}
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
+			ErrorMessage: ierr.Error(),
+			Reason:       schedstore.PauseRenderFailed,
+		}))
+		return runner.Outcome{ErrorMessage: ierr.Error()}, ierr
+	}
+	fireCtx.Inputs = spawnInputs
+	rc.Inputs = spawnInputs
+
 	// Render the goal as the spawn task body. Render failure is
 	// recoverable: we degrade to the literal goal so the subagent
 	// still has a kick.
-	renderedGoal, err := tplpkg.RenderTemplate(task.Spec.Goal, tplpkg.NewFireRenderContext(fireCtx))
+	renderedGoal, err := tplpkg.RenderTemplate(task.Spec.Goal, rc)
 	if err != nil {
 		deps.logger.Warn("scheduler: goal render failed; using literal",
 			"task_id", task.ID, "fire_seq", fire.FireSeq, "err", err)
@@ -288,7 +324,7 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 		Name:   spawnName,
 		Skill:  task.SkillRef,
 		Task:   renderedGoal,
-		Inputs: task.Spec.Inputs,
+		Inputs: spawnInputs,
 		// Persist origin metadata on the child row for liveview /
 		// audit grouping by source task without rejoining task_log.
 		Metadata: map[string]any{
