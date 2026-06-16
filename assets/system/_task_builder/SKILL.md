@@ -317,15 +317,21 @@ metadata:
 
           Do these, in order:
 
-          0. **Check for an existing match FIRST.** Call
-             `skill:catalog_list(task_eligible: true, keyword:
-             <domain term>)`. If a saved task skill already covers
-             the request, the user does NOT need a new one — emit
-             `done: true` with a `findings` note naming the match
-             and an `ac_proposal` "reuse existing task <name>", so
-             the planner / synthesizer can tell the user to run /
-             schedule it directly instead of rebuilding. Only build
-             new when nothing fits.
+          0. **Dedup FIRST — search the catalogue by the user's own
+             request.** Building a duplicate is the worst outcome, so
+             this is move zero. Call `skill:catalog_list(task_eligible:
+             true, keyword: <the user's request, in their own words>)`
+             — the search is semantic, so pass the INTENT (what the
+             task should do), not one narrow domain term. If a saved
+             task already covers the request, the user does NOT need a
+             new one — emit `done: true` with a `findings` note naming
+             the match and an `ac_proposal` "reuse existing task
+             <name>", so the planner / synthesizer can tell the user to
+             run or schedule it directly (`task:execute_task` /
+             `schedule:create`) instead of rebuilding. Only build new
+             when nothing fits — and when in doubt, run a second search
+             with a differently-worded query before concluding nothing
+             matches.
 
           1. **Discover the agent's capabilities.** Check your
              `## Available skills` block first, then search the full
@@ -651,7 +657,20 @@ metadata:
           (the already-built, self-validated bundle directory in the
           workspace), `task_name`, and `allowed_tools_default`.
 
-          1. **Confirm the RESULT with the user — mandatory, BEFORE
+          1. **Pre-save dedup gate — last check before the write.**
+             The researcher searched at the start, but a build is long
+             and a matching task may already exist (or have been saved
+             meanwhile). Call `skill:catalog_list(task_eligible: true,
+             keyword: <task_name + what it produces>)` once more. If an
+             equivalent task already exists and [Resolved user inputs]
+             did NOT authorise replacing it, do NOT save a duplicate —
+             emit a TERMINAL reuse handoff (`done: true` with
+             `reused_existing: <name>` and `saved_name: null`, no
+             save), so the synthesizer tells the user to run that one
+             instead. This is a SUCCESS (the work already exists), not
+             a failure to fix — do not retry or rename. Only proceed to
+             confirm + save when nothing equivalent is registered.
+          2. **Confirm the RESULT with the user — mandatory, BEFORE
              saving.** The plan approval covered the PLAN; this gate
              confirms the PRODUCT. Call `session:inquire(type:
              "approval")` with a short `question` ("Save task
@@ -667,7 +686,7 @@ metadata:
              save — emit `status: "error"` quoting the user's
              `reason` verbatim so the planner amends the relevant
              author / assembler and re-runs this gate.
-          2. **Register.** `skill:save(bundle_dir: <bundle_dir from
+          3. **Register.** `skill:save(bundle_dir: <bundle_dir from
              the assembler handoff>)`. The bundle was already
              validated by the assembler, so this is the real write;
              it parses, validates again, registers, and auto-loads.
@@ -680,21 +699,24 @@ metadata:
              (task-block placement, unknown tool name) the assembler
              missed, emit `status: "error"` with the exact message so
              the planner re-runs the assembler.
-          3. Confirm it loaded — the save result lists the registered
+          4. Confirm it loaded — the save result lists the registered
              `name` + `files`; `skill:files(<name>)` shows the bundle
              on disk.
-          4. **Catalogue placement.** In local/personal mode the
+          5. **Catalogue placement.** In local/personal mode the
              saved skill lives in the local store and is immediately
-             runnable via `task:<name>` and schedulable — there is no
-             separate publish step. If [Resolved user inputs] named a
-             shared catalogue to publish to, note it in your handoff
-             for the synthesizer to surface (remote publish is not
-             performed here).
-          5. Emit a `handoff` body with: `saved_name`, `bundle_dir`,
+             runnable via `task:execute_task` (or `task:<name>` once a
+             skill admits it) and schedulable — there is no separate
+             publish step. If [Resolved user inputs] named a shared
+             catalogue to publish to, note it in your handoff for the
+             synthesizer to surface (remote publish is not performed
+             here).
+          6. Emit a `handoff` body with: `saved_name`, `bundle_dir`,
              `files` (saved relative paths from the save result),
              `inputs_schema_ok` (manifest parsed + schema present),
-             `user_confirmed` (true — the step-1 approval),
+             `user_confirmed` (true — the step-2 approval),
              `placement` (local | <catalogue note>),
+             `reused_existing` (the existing task name when the step-1
+             dedup gate matched and nothing was saved; null otherwise),
              `memory_summary`.
         intent: default
         can_spawn: false
@@ -703,7 +725,7 @@ metadata:
           - provider: bash-mcp
             tools: [bash.read_file, bash.list_dir]
           - provider: skill
-            tools: [save, load, files, ref]
+            tools: [save, load, files, ref, catalog_list]
           - provider: session
             tools: [inquire]
           - provider: mission
@@ -732,7 +754,10 @@ metadata:
               valid inputs_schema + a minimal allowed_tools_default,
               the user confirmed the bundle before save, and (when
               applicable) its query validated and its script
-              smoke-ran green. Routes to synthesis.
+              smoke-ran green. Routes to synthesis. ALSO finish when
+              the registrar's pre-save dedup gate matched
+              (`reused_existing` set, nothing saved) — an equivalent
+              task already exists, so there is nothing more to build.
 
           Confirm from the registrar + author handoffs that the
           evidence is present: `inputs_schema_ok`, `user_confirmed`
@@ -771,13 +796,16 @@ metadata:
           verbatim.
 
           Report:
-          - The task skill name that was created (or, if research
-            found an existing match, that the user should reuse it).
+          - The task skill name that was created — OR, if research's
+            move-zero search or the registrar's pre-save dedup gate
+            (`reused_existing`) found an existing match, that the user
+            should reuse THAT task instead (name it); nothing new was
+            built.
           - In one line, what the task does and the inputs it
             accepts.
-          - **How to use it next** — it can be run on demand via
-            `task:<name>` with those inputs, and scheduled to run
-            periodically with `schedule:create` (this mission
+          - **How to use it next** — it can be run on demand by name
+            via `task:execute_task` with those inputs, and scheduled to
+            run periodically with `schedule:create` (this mission
             CREATED the task; it did NOT schedule it). If the user's
             original intent was to schedule it, say so explicitly so
             root performs the schedule step next.
@@ -810,8 +838,8 @@ PDCA mission that builds a **new reusable task skill** from the
 user's intent. A task is a self-contained, task-eligible skill
 bundle — prose steps the task worker follows each run, plus an
 optional data-fetch query and an optional post-processing script —
-that the user can run on demand (`task:<name>`) or bind to a
-schedule (`schedule:create`). This mission CREATES the task; it does
+that the user can run on demand by name (`task:execute_task`) or bind
+to a schedule (`schedule:create`). This mission CREATES the task; it does
 NOT schedule it. The runtime drives the iteration loop
 (Plan → Do → Check → Synth); each role's manifest entry above
 documents its contract.
