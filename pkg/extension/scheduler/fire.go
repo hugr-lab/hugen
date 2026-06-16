@@ -120,6 +120,11 @@ type fireDeps struct {
 	// BindRunRecipe wires it; dispatchSpawnFire fails fast when unset.
 	runRecipe func(context.Context, taskext.RunParams) (taskext.RunResult, error)
 
+	// now returns the current time for the overdue-refire clamp in
+	// maybeScheduleNext. Nil falls back to time.Now; tests inject a
+	// fixed clock so the clamp is deterministic.
+	now func() time.Time
+
 	// stashFire / releaseFire are the per-fire FireContext
 	// rendezvous between dispatchSpawnFire (writer) and
 	// scheduler.ApplyOnSubagentSpawn (reader). The applier looks up
@@ -566,6 +571,34 @@ func terminalLog(task schedstore.TaskRow, fire runner.FireMeta, eventType string
 	}
 }
 
+// nowUTC returns the clamp clock for overdue re-fires — the injected
+// test clock when set, else wall-clock.
+func (deps fireDeps) nowUTC() time.Time {
+	if deps.now != nil {
+		return deps.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// clampOverdue lifts a next-fire instant to "now" when it has already
+// passed. Recurring fires are SERIALISED (the runner won't start the
+// next fire while one is in flight — and a fire blocks on its worker,
+// which may run longer than the interval). So by the time a long fire
+// completes and re-registers, the arithmetic next instant
+// (prevPlanned + interval / cron step) can be in the past — and
+// runner.Once(past) never fires (onceSchedule.Next returns zero),
+// silently dropping the fire. Clamping to now fires it ASAP instead,
+// so a task whose duration exceeds its interval still runs its full
+// count back-to-back. Serialisation is intentional (it lets fire N+1
+// template its goal/inputs off fire N's {{.PrevFire}} outcome);
+// concurrent fires are a future opt-in (backlog).
+func clampOverdue(next time.Time, deps fireDeps) time.Time {
+	if now := deps.nowUTC(); next.Before(now) {
+		return now
+	}
+	return next
+}
+
 // maybeScheduleNext computes the next planned instant from the
 // task's schedule, inserts the corresponding `planned` row, and
 // re-registers the fn under the new Once schedule so Runner fires
@@ -598,6 +631,8 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 			return
 		}
 		next := fire.PlannedAt.Add(d).UTC()
+		// End-condition is checked on the LOGICAL next (pre-clamp) so a
+		// count/until boundary isn't perturbed by a late catch-up.
 		if shouldEndAfter(task.Spec.EndCondition, fire.FireSeq, next) {
 			if err := deps.store.CancelTask(context.Background(), task.ID); err != nil {
 				deps.logger.Warn("scheduler: end-condition cancel",
@@ -605,6 +640,7 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 			}
 			return
 		}
+		next = clampOverdue(next, deps)
 		appendLogSafely(ctx, deps, schedstore.TaskLogEntry{
 			TaskID:    task.ID,
 			AgentID:   deps.agentID,
@@ -655,6 +691,7 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 			}
 			return
 		}
+		next = clampOverdue(next, deps)
 		appendLogSafely(ctx, deps, schedstore.TaskLogEntry{
 			TaskID:    task.ID,
 			AgentID:   deps.agentID,

@@ -338,6 +338,7 @@ func (e *Extension) fireDeps() fireDeps {
 		releaseFire:    e.releaseFire,
 		takeSpawnToken: e.takeSpawnToken,
 		runRecipe:      e.runRecipe,
+		now:            time.Now,
 	}
 }
 
