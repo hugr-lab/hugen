@@ -57,6 +57,18 @@ const PermExecuteTask = "hugen:task:execute_task"
 // lookup so it never collides with a `task:<recipe>` skill name.
 const toolNameExecuteTask = "execute_task"
 
+// PermDescribeTask gates the generic `task:describe` read tool — the
+// inputs-contract inspector that reveals a task-eligible skill's
+// inputs_schema + goal_summary by name, without loading the (worker-
+// tier) skill root cannot `skill:load`. A distinct permission object
+// so the read tool can be granted independently of the runner.
+const PermDescribeTask = "hugen:task:describe"
+
+// toolNameDescribe is the bare (provider-stripped) name of the
+// describe read tool. Call intercepts it BEFORE the synthetic-recipe
+// lookup so it never collides with a `task:<recipe>` skill name.
+const toolNameDescribe = "describe"
+
 // SessionHost is the narrow surface the dispatch path needs from the
 // runtime's session supervisor. Mirrors the scheduler ext's
 // SessionHost — the two could share a common interface in a future
@@ -191,12 +203,13 @@ func (e *Extension) List(ctx context.Context) ([]tool.Tool, error) {
 			ArgSchema:        argSchema,
 		})
 	}
-	// The generic discovery-then-run tool: always present (one tool, not
-	// per-recipe) so a caller that found a task by search / catalog can
-	// run it by name without the per-recipe synthetic tool being
+	// The generic discovery-then-run + describe tools: always present
+	// (one each, not per-recipe) so a caller that found a task by search /
+	// catalog can inspect its inputs (`task:describe`) and run it by name
+	// (`task:execute_task`) without the per-recipe synthetic tool being
 	// surfaced. Allow-set gated like any tool — see _root / mission-role
 	// grants.
-	out = append(out, executeTaskTool())
+	out = append(out, describeTaskTool(), executeTaskTool())
 	return out, nil
 }
 
@@ -211,13 +224,36 @@ func executeTaskTool() tool.Tool {
 	}
 }
 
-const descExecuteTask = "Run a built task (a task-eligible skill) by name with inputs — the discovery-then-run path. Find the task by intent with `skill:catalog_list(task_eligible:true)`, collect any required inputs from the user, then run it here. It runs as a worker and the result lands in this conversation. Prefer this over spawning a mission to do work a built task already covers — never re-implement from scratch a task that already exists."
+const descExecuteTask = "Run a built task (a task-eligible skill) by name with inputs — the discovery-then-run path. Find the task by intent with `skill:catalog_list(task_eligible:true)`, inspect its inputs with `task:describe(name)`, collect any required inputs from the user, then run it here. It runs as a worker and the result lands in this conversation. Prefer this over spawning a mission to do work a built task already covers — never re-implement from scratch a task that already exists."
 
 const schemaExecuteTask = `{
   "type": "object",
   "properties": {
     "name": {"type": "string", "description": "The task-eligible skill name to run (from skill:catalog_list with task_eligible:true)."},
     "inputs": {"type": "object", "description": "Input values for the task's declared inputs_schema. Omit for a no-input task.", "additionalProperties": true}
+  },
+  "required": ["name"]
+}`
+
+// describeTaskTool returns the static `task:describe` descriptor — the
+// read tool that reveals a task's inputs_schema + goal_summary by name
+// without loading the worker-tier skill.
+func describeTaskTool() tool.Tool {
+	return tool.Tool{
+		Name:             providerName + ":" + toolNameDescribe,
+		Description:      descDescribeTask,
+		Provider:         providerName,
+		PermissionObject: PermDescribeTask,
+		ArgSchema:        json.RawMessage(schemaDescribeTask),
+	}
+}
+
+const descDescribeTask = "Reveal a built task's input contract by name: its inputs_schema (parameter names, types, defaults), which inputs are required, and its goal_summary. Use this after finding a task with `skill:catalog_list(task_eligible:true)` to learn what inputs to collect from the user before running it with `task:execute_task` or scheduling it. Pure read — does not run the task."
+
+const schemaDescribeTask = `{
+  "type": "object",
+  "properties": {
+    "name": {"type": "string", "description": "The task-eligible skill name to describe (from skill:catalog_list with task_eligible:true)."}
   },
   "required": ["name"]
 }`

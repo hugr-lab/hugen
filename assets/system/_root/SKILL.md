@@ -53,6 +53,7 @@ allowed-tools:
   # path that also works after a search.
   - provider: task
     tools:
+      - describe
       - execute_task
 metadata:
   hugen:
