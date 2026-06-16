@@ -69,6 +69,18 @@ const PermDescribeTask = "hugen:task:describe"
 // lookup so it never collides with a `task:<recipe>` skill name.
 const toolNameDescribe = "describe"
 
+// PermSearchTask gates the generic `task:search` read tool — the
+// explicit-query task-discovery surface (the task analogue of
+// `skill:catalog_list`, scoped to task-eligible skills). A distinct
+// permission object so the search read tool can be granted independently
+// of the runner.
+const PermSearchTask = "hugen:task:search"
+
+// toolNameSearch is the bare (provider-stripped) name of the task search
+// tool. Call intercepts it BEFORE the synthetic-recipe lookup so it never
+// collides with a `task:<recipe>` skill name.
+const toolNameSearch = "search"
+
 // SessionHost is the narrow surface the dispatch path needs from the
 // runtime's session supervisor. Mirrors the scheduler ext's
 // SessionHost — the two could share a common interface in a future
@@ -203,13 +215,13 @@ func (e *Extension) List(ctx context.Context) ([]tool.Tool, error) {
 			ArgSchema:        argSchema,
 		})
 	}
-	// The generic discovery-then-run + describe tools: always present
-	// (one each, not per-recipe) so a caller that found a task by search /
-	// catalog can inspect its inputs (`task:describe`) and run it by name
+	// The generic search + describe + run tools: always present (one each,
+	// not per-recipe) so a caller can find a task by intent (`task:search`),
+	// inspect its inputs (`task:describe`), and run it by name
 	// (`task:execute_task`) without the per-recipe synthetic tool being
 	// surfaced. Allow-set gated like any tool — see _root / mission-role
 	// grants.
-	out = append(out, describeTaskTool(), executeTaskTool())
+	out = append(out, searchTaskTool(), describeTaskTool(), executeTaskTool())
 	return out, nil
 }
 
@@ -224,15 +236,38 @@ func executeTaskTool() tool.Tool {
 	}
 }
 
-const descExecuteTask = "Run a built task (a task-eligible skill) by name with inputs — the discovery-then-run path. Find the task by intent with `skill:catalog_list(task_eligible:true)`, inspect its inputs with `task:describe(name)`, collect any required inputs from the user, then run it here. It runs as a worker and the result lands in this conversation. Prefer this over spawning a mission to do work a built task already covers — never re-implement from scratch a task that already exists."
+const descExecuteTask = "Run a built task (a task-eligible skill) by name with inputs — the discovery-then-run path. Find the task by intent with `task:search`, inspect its inputs with `task:describe(name)`, collect any required inputs from the user, then run it here. It runs as a worker and the result lands in this conversation. Prefer this over spawning a mission to do work a built task already covers — never re-implement from scratch a task that already exists."
 
 const schemaExecuteTask = `{
   "type": "object",
   "properties": {
-    "name": {"type": "string", "description": "The task-eligible skill name to run (from skill:catalog_list with task_eligible:true)."},
+    "name": {"type": "string", "description": "The task name to run (from task:search or the ## Available tasks block)."},
     "inputs": {"type": "object", "description": "Input values for the task's declared inputs_schema. Omit for a no-input task.", "additionalProperties": true}
   },
   "required": ["name"]
+}`
+
+// searchTaskTool returns the static `task:search` descriptor — the
+// explicit-query task-discovery surface (tasks only).
+func searchTaskTool() tool.Tool {
+	return tool.Tool{
+		Name:             providerName + ":" + toolNameSearch,
+		Description:      descSearchTask,
+		Provider:         providerName,
+		PermissionObject: PermSearchTask,
+		ArgSchema:        json.RawMessage(schemaSearchTask),
+	}
+}
+
+const descSearchTask = "Search the built-task catalogue by intent — returns matching task names + descriptions. This is the task analogue of `skill:catalog_list` (which lists SKILLS only): use it to find reusable work that already exists BEFORE composing a procedure or spawning a mission. The passive `## Available tasks` block is a ranked, capped shortlist, so absence there proves nothing — this searches every task. Follow a hit with `task:describe(name)` for its inputs, then `task:execute_task` to run it. Pure read."
+
+const schemaSearchTask = `{
+  "type": "object",
+  "properties": {
+    "query": {"type": "string", "description": "Free-text intent describing the work you want. Ranked by semantic relevance when an embedder is available, else a substring match over task name, description, and goal_summary."},
+    "limit": {"type": "integer", "description": "Max results to return (default backend cap)."}
+  },
+  "required": ["query"]
 }`
 
 // describeTaskTool returns the static `task:describe` descriptor — the
@@ -248,12 +283,12 @@ func describeTaskTool() tool.Tool {
 	}
 }
 
-const descDescribeTask = "Reveal a built task's input contract by name: its inputs_schema (parameter names, types, defaults), which inputs are required, and its goal_summary. Use this after finding a task with `skill:catalog_list(task_eligible:true)` to learn what inputs to collect from the user before running it with `task:execute_task` or scheduling it. Pure read — does not run the task."
+const descDescribeTask = "Reveal a built task's input contract by name: its inputs_schema (parameter names, types, defaults), which inputs are required, and its goal_summary. Use this after finding a task with `task:search` to learn what inputs to collect from the user before running it with `task:execute_task` or scheduling it. Pure read — does not run the task."
 
 const schemaDescribeTask = `{
   "type": "object",
   "properties": {
-    "name": {"type": "string", "description": "The task-eligible skill name to describe (from skill:catalog_list with task_eligible:true)."}
+    "name": {"type": "string", "description": "The task name to describe (from task:search or the ## Available tasks block)."}
   },
   "required": ["name"]
 }`

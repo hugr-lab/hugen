@@ -47,13 +47,14 @@ allowed-tools:
   # Phase B47 — the generic task runner. Root runs a BUILT task
   # (a task-eligible skill) by name via `task:execute_task` instead
   # of spawning a fresh mission that re-researches work the task
-  # already covers. Discovery is `## Available tasks` /
-  # `skill:catalog_list(task_eligible:true)`; the contract is
+  # already covers. Discovery is `## Available tasks` / `task:search`;
+  # the contract is
   # `task:describe(name)`. The per-recipe `task:<name>` tools remain
   # admitted by a loaded skill's allowed-tools — execute_task is the
   # name-parameterised path that also works after a search.
   - provider: task
     tools:
+      - search
       - describe
       - execute_task
 metadata:
@@ -286,17 +287,17 @@ A **built task** is a task-eligible skill that does one concrete
 job (count rows, summarise a dashboard, generate a daily report).
 You don't load it — you run it by NAME. The ones relevant to the
 conversation surface in your `## Available tasks` block; the full
-set is searchable with `skill:catalog_list(task_eligible:true)`.
+set is searchable by intent with `task:search`.
 
 ### Path A — ad-hoc (user wants it NOW)
 
 User described work that matches a built task but did NOT name a
 future time / cadence:
 
-1. Find the task in `## Available tasks` (or search the full set
-   with `skill:catalog_list(task_eligible:true)`) whose goal covers
-   what the user wants. Prefer running it over hand-rolling the job
-   with raw tools — built tasks are tested (constitution rule).
+1. Find the task in `## Available tasks` (or search the full set by
+   intent with `task:search`) whose goal covers what the user wants.
+   Prefer running it over hand-rolling the job with raw tools — built
+   tasks are tested (constitution rule).
 2. Inspect its input contract with `task:describe("<name>")`,
    collect any required inputs from the user, then run it by name:
 

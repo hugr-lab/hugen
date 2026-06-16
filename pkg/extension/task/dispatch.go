@@ -36,10 +36,13 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 	if short == "" {
 		return nil, fmt.Errorf("%w: %s", tool.ErrUnknownTool, name)
 	}
-	// The generic runner + describe read tool are intercepted BEFORE the
-	// synthetic-recipe lookup — they take the task name as an argument,
-	// not in the tool name, so they must never be treated as a
-	// `task:<recipe>` skill.
+	// The generic search / describe / runner tools are intercepted BEFORE
+	// the synthetic-recipe lookup — they take the task name (or a query)
+	// as an argument, not in the tool name, so they must never be treated
+	// as a `task:<recipe>` skill.
+	if short == toolNameSearch {
+		return e.callSearch(ctx, args)
+	}
 	if short == toolNameExecuteTask {
 		return e.callExecuteTask(ctx, args)
 	}

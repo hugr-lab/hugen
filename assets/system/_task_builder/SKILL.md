@@ -319,10 +319,10 @@ metadata:
 
           0. **Dedup FIRST — search the catalogue by the user's own
              request.** Building a duplicate is the worst outcome, so
-             this is move zero. Call `skill:catalog_list(task_eligible:
-             true, keyword: <the user's request, in their own words>)`
-             — the search is semantic, so pass the INTENT (what the
-             task should do), not one narrow domain term. If a saved
+             this is move zero. Call `task:search(query: <the user's
+             request, in their own words>)` — the search is semantic, so
+             pass the INTENT (what the task should do), not one narrow
+             domain term. If a saved
              task already covers the request, the user does NOT need a
              new one — emit `done: true` with a `findings` note naming
              the match and an `ac_proposal` "reuse existing task
@@ -466,6 +466,11 @@ metadata:
         tools:
           - provider: skill
             tools: [catalog_list, load, ref, files]
+          # task:search = the dedup move-zero (find an existing built task
+          # by the user's intent); skill:catalog_list above is for the
+          # DATA / SCRIPT skill discovery (steps 1+).
+          - provider: task
+            tools: [search]
           - provider: notepad
             tools: [read, search]
           - provider: session
@@ -660,8 +665,8 @@ metadata:
           1. **Pre-save dedup gate — last check before the write.**
              The researcher searched at the start, but a build is long
              and a matching task may already exist (or have been saved
-             meanwhile). Call `skill:catalog_list(task_eligible: true,
-             keyword: <task_name + what it produces>)` once more. If an
+             meanwhile). Call `task:search(query: <task_name + what it
+             produces>)` once more. If an
              equivalent task already exists and [Resolved user inputs]
              did NOT authorise replacing it, do NOT save a duplicate —
              emit a TERMINAL reuse handoff (`done: true` with
@@ -725,7 +730,11 @@ metadata:
           - provider: bash-mcp
             tools: [bash.read_file, bash.list_dir]
           - provider: skill
-            tools: [save, load, files, ref, catalog_list]
+            tools: [save, load, files, ref]
+          # task:search = the pre-save dedup gate (find an equivalent
+          # built task before writing a duplicate).
+          - provider: task
+            tools: [search]
           - provider: session
             tools: [inquire]
           - provider: mission
@@ -848,9 +857,9 @@ documents its contract.
 
 Root spawns it when the user wants a **repeatable / schedulable**
 piece of work and no existing task-eligible skill already covers it.
-The researcher's first move is to check the catalogue
-(`skill:catalog_list task_eligible:true`) — if a saved task already
-fits, the mission tells the user to reuse it instead of rebuilding.
+The researcher's first move is to search the task catalogue
+(`task:search`) — if a saved task already fits, the mission tells the
+user to reuse it instead of rebuilding.
 
 ## Lifecycle
 

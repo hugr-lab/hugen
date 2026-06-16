@@ -52,7 +52,7 @@ func (e *Extension) callExecuteTask(ctx context.Context, args json.RawMessage) (
 	if err != nil {
 		if errors.Is(err, skill.ErrSkillNotFound) {
 			return toolErr("task_not_found",
-				fmt.Sprintf("no task named %q — search with skill:catalog_list(task_eligible:true)", name)), nil
+				fmt.Sprintf("no task named %q — search with task:search", name)), nil
 		}
 		return nil, fmt.Errorf("execute_task: skill lookup %q: %w", name, err)
 	}

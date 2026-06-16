@@ -440,7 +440,7 @@ metadata:
           # question this stage needs, inspect (describe) + run
           # (execute_task) it instead of re-deriving.
           - provider: task
-            tools: [describe, execute_task]
+            tools: [search, describe, execute_task]
           # Phase 6.x — research→files. The researcher fills the
           # scaffolded research/*.md artifacts; write_file composes the
           # full file, read_file lets it re-read a skeleton/own draft.
@@ -715,7 +715,7 @@ metadata:
           # instead of re-deriving — it runs as a nested worker and
           # hands its result back like any tool call.
           - provider: task
-            tools: [describe, execute_task]
+            tools: [search, describe, execute_task]
           # Phase 6.x — research→files. Read the researcher's schema
           # contract (research/data-model.md) + spec.md directly,
           # instead of re-running discovery. read_file is not
@@ -837,7 +837,7 @@ metadata:
           # B47 — reuse a built task that already maps part of the
           # schema rather than re-scanning. describe + execute_task.
           - provider: task
-            tools: [describe, execute_task]
+            tools: [search, describe, execute_task]
           # Phase 6.x — research→files. Read research/data-model.md
           # directly to lift what research already mapped instead of
           # re-scanning. read_file is not approval-gated.
@@ -964,7 +964,7 @@ metadata:
           # B47 — reuse a built task that already produces part of the
           # report rather than rebuilding it. describe + execute_task.
           - provider: task
-            tools: [describe, execute_task]
+            tools: [search, describe, execute_task]
 
       - name: checker
         timeout: 20m
@@ -987,7 +987,7 @@ metadata:
           # rather than taking the handoff on faith. describe +
           # execute_task; this is a read-style cross-check, not a write.
           - provider: task
-            tools: [describe, execute_task]
+            tools: [search, describe, execute_task]
 
       - name: synthesizer
         timeout: 20m
