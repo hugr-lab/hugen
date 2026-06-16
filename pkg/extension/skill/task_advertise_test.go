@@ -179,7 +179,11 @@ func TestRecordTaskUsed_GatesOnShown(t *testing.T) {
 	h := FromState(state)
 
 	// Render the task catalogue to populate the task shown-catalogue.
-	if _, ids := renderTaskCatalogue(ctx, state.Prompts(), h, nil); len(ids) != 1 {
+	all, err := h.manager.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if _, ids := renderTaskCatalogue(state.Prompts(), h, nil, all); len(ids) != 1 {
 		t.Fatalf("expected 1 advertised task id, got %v", ids)
 	}
 

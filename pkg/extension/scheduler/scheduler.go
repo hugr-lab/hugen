@@ -320,7 +320,12 @@ func (e *Extension) registerTask(ctx context.Context, row schedstore.TaskRow) er
 	sched := runner.Once(clampOverdue(planned.PlannedAt, deps))
 
 	fn := buildFireFn(row, deps)
-	opts := []runner.RegisterOption{}
+	// Seed the runner's fire counter from the persisted planned seq so a
+	// recurring task that re-registers a fresh one-shot per cycle keeps a
+	// MONOTONIC FireSeq — without this every fire reports seq=1 and a
+	// `count` end-condition never advances (the re-register resets the
+	// runner's internal counter each cycle).
+	opts := []runner.RegisterOption{runner.WithInitialFireSeq(planned.FireSeq)}
 	if row.Status == schedstore.StatusPaused {
 		opts = append(opts, runner.WithStartPaused())
 	}
@@ -393,7 +398,15 @@ func (e *Extension) reRegisterFn() func(string, runner.Schedule) error {
 		if err != nil {
 			return err
 		}
-		return deps.runner.Register(context.Background(), runnerNameForTask(taskID), sched, fn)
+		// Seed the next registration's fire counter from the planned row
+		// maybeScheduleNext just wrote (FireSeq = prevSeq+1) so the counter
+		// stays monotonic across the per-cycle re-register — otherwise a
+		// fresh registration restarts at seq=1 and `count` never advances.
+		var opts []runner.RegisterOption
+		if planned, perr := e.store.LatestPlannedFire(context.Background(), taskID); perr == nil && planned != nil {
+			opts = append(opts, runner.WithInitialFireSeq(planned.FireSeq))
+		}
+		return deps.runner.Register(context.Background(), runnerNameForTask(taskID), sched, fn, opts...)
 	}
 }
 

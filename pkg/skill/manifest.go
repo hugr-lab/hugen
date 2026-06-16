@@ -1393,7 +1393,29 @@ func (m *Manifest) validateHugen() error {
 			h.re = re
 		}
 	}
+
+	// A task-eligible skill surfaces as a synthetic `task:<name>` tool, so
+	// its name must not collide with the static task-provider tools
+	// (`task:search` / `task:describe` / `task:execute_task`) — a collision
+	// shadows the static tool in the catalogue and makes the recipe
+	// permanently mis-dispatched. Reject at the authoring boundary.
+	if m.Hugen.Task.Eligible {
+		if _, bad := reservedTaskToolNames[m.Name]; bad {
+			return fmt.Errorf("a task-eligible skill cannot be named %q — it collides with the built-in task:%s tool; choose another name: %w",
+				m.Name, m.Name, ErrReservedTaskName)
+		}
+	}
 	return nil
+}
+
+// reservedTaskToolNames are the static task-provider tool short-names a
+// task-eligible skill must not take (its synthetic `task:<name>` tool
+// would shadow them). Kept in sync with the toolName* consts in
+// pkg/extension/task.
+var reservedTaskToolNames = map[string]struct{}{
+	"search":       {},
+	"describe":     {},
+	"execute_task": {},
 }
 
 // ParseReader is a convenience wrapper around Parse for io.Reader.

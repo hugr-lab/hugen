@@ -81,6 +81,14 @@ const PermSearchTask = "hugen:task:search"
 // collides with a `task:<recipe>` skill name.
 const toolNameSearch = "search"
 
+// isReservedTaskTool reports whether a skill name collides with a static
+// task-provider tool — such a name must not produce a synthetic
+// task:<name> recipe tool (it would shadow the built-in). Mirrors the
+// authoring-time reject in pkg/skill manifest validation.
+func isReservedTaskTool(name string) bool {
+	return name == toolNameSearch || name == toolNameDescribe || name == toolNameExecuteTask
+}
+
 // SessionHost is the narrow surface the dispatch path needs from the
 // runtime's session supervisor. Mirrors the scheduler ext's
 // SessionHost — the two could share a common interface in a future
@@ -190,6 +198,14 @@ func (e *Extension) List(ctx context.Context) ([]tool.Tool, error) {
 	for _, sk := range all {
 		tb := sk.Manifest.Hugen.Task
 		if !tb.Eligible {
+			continue
+		}
+		// Defensive: a task named search/describe/execute_task would
+		// produce a synthetic task:<name> that DUPLICATES + shadows the
+		// static tool below. Manifest validation rejects such names, but
+		// skip here too so a pre-validation / legacy bundle can't inject a
+		// colliding catalogue entry. Call() intercepts these names anyway.
+		if isReservedTaskTool(sk.Manifest.Name) {
 			continue
 		}
 		desc := strings.TrimSpace(tb.GoalSummary)

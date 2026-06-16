@@ -285,6 +285,13 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 		return ""
 	}
 	renderer := state.Prompts()
+	// Fetch the catalogue snapshot ONCE — the skills + tasks renders both
+	// partition it, so a single List (gen-cached) feeds both instead of
+	// one copy + scan each.
+	all, err := h.manager.List(ctx)
+	if err != nil {
+		all = nil
+	}
 	var (
 		cat          string
 		shownIDs     []string
@@ -295,7 +302,7 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 		// Recipe-scoped session (Phase 6.1d) — explicit allow-list. A
 		// recipe worker is already executing a fixed recipe, so it gets no
 		// `## Available tasks` discovery menu.
-		cat, shownIDs = renderCatalogueFiltered(ctx, renderer, h, allowedList)
+		cat, shownIDs = renderCatalogueFiltered(ctx, renderer, h, allowedList, all)
 	} else if draw, ok := e.advertiseDraws(ctx, state, h); ok {
 		// db-2 — a session with a topic + embedder gets Thompson-sampled,
 		// topic-relevant catalogues (rotating top-N ∪ pinned). One recall
@@ -303,11 +310,11 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 		// task-catalogue path. advertiseDraws returns ok=false (no recap /
 		// no embedder / empty pool) → the full List catalogue + full task
 		// list, exactly as before db-2.
-		cat, shownIDs = renderCatalogueScoped(ctx, renderer, h, draw.skills)
-		taskCat, taskShownIDs = renderTaskCatalogue(ctx, renderer, h, draw.tasks)
+		cat, shownIDs = renderCatalogueScoped(ctx, renderer, h, draw.skills, all)
+		taskCat, taskShownIDs = renderTaskCatalogue(renderer, h, draw.tasks, all)
 	} else {
-		cat, shownIDs = renderCatalogue(ctx, renderer, h)
-		taskCat, taskShownIDs = renderTaskCatalogue(ctx, renderer, h, nil)
+		cat, shownIDs = renderCatalogue(ctx, renderer, h, all)
+		taskCat, taskShownIDs = renderTaskCatalogue(renderer, h, nil, all)
 	}
 	// db-2: log one `shown` impression per user turn for every surfaced
 	// skill AND task (one append-only skill_log table, one `shown` event
@@ -708,8 +715,8 @@ func writeBundleCategory(b *strings.Builder, sfs fs.FS, category string) {
 // renderCatalogue produces the "## Available skills" section of
 // the system prompt: one bullet per skill in the store using the
 // manifest description. Loaded skills carry a `(loaded)` tag.
-func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill) (string, []string) {
-	return renderCatalogueScoped(ctx, renderer, h, nil)
+func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, all []skillpkg.Skill) (string, []string) {
+	return renderCatalogueScoped(ctx, renderer, h, nil, all)
 }
 
 // renderCatalogueFiltered narrows [renderCatalogue] to entries
@@ -720,20 +727,21 @@ func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *Session
 // alongside the whitelist entries reachable via `skill:load`.
 // Phase 6.1d (additive interpretation — allow-list adds to the
 // autoloaded baseline, never replaces it).
-func renderCatalogueFiltered(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allowed []string) (string, []string) {
+func renderCatalogueFiltered(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allowed []string, all []skillpkg.Skill) (string, []string) {
 	allow := make(map[string]struct{}, len(allowed))
 	for _, n := range allowed {
 		allow[n] = struct{}{}
 	}
-	return renderCatalogueScoped(ctx, renderer, h, allow)
+	return renderCatalogueScoped(ctx, renderer, h, allow, all)
 }
 
 // renderCatalogueScoped returns the rendered "## Available skills"
 // section AND the DB-index ids of the skills it actually surfaced (the
 // `shown` impression set for db-2 — empty for non-indexed skills).
-func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allow map[string]struct{}) (string, []string) {
-	all, err := h.manager.List(ctx)
-	if err != nil || len(all) == 0 {
+// `all` is the catalogue snapshot fetched ONCE by the caller (TurnPreamble)
+// so the skills + tasks renders share a single manager.List.
+func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allow map[string]struct{}, all []skillpkg.Skill) (string, []string) {
+	if len(all) == 0 {
 		return "", nil
 	}
 	loadedSet := map[string]struct{}{}
@@ -815,9 +823,8 @@ func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *S
 // fallback). Returns the rendered block + the DB-index ids of the tasks it
 // surfaced (the `shown` impression set, recorded into the session's task
 // shown-catalogue so `use` can resolve back to ids). B47 step 5.
-func renderTaskCatalogue(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allow map[string]struct{}) (string, []string) {
-	all, err := h.manager.List(ctx)
-	if err != nil || len(all) == 0 {
+func renderTaskCatalogue(renderer *prompts.Renderer, h *SessionSkill, allow map[string]struct{}, all []skillpkg.Skill) (string, []string) {
+	if len(all) == 0 {
 		return "", nil
 	}
 	type taskItem struct {

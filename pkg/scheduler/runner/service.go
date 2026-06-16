@@ -144,6 +144,13 @@ func (s *Service) Register(ctx context.Context, name string, sched Schedule, fn 
 	}
 	now := s.nowFn()
 	next := sched.Next(now)
+	// Seed fireCount so the first prepareFire (fireCount++ → seq) reports
+	// WithInitialFireSeq(n) as FireSeq n. Zero (the default) preserves the
+	// historical seq=1 first fire.
+	seedCount := 0
+	if o.initialFireSeq > 1 {
+		seedCount = o.initialFireSeq - 1
+	}
 	s.regs[name] = &registration{
 		name:       name,
 		sched:      sched,
@@ -151,6 +158,7 @@ func (s *Service) Register(ctx context.Context, name string, sched Schedule, fn 
 		opts:       o,
 		paused:     o.startPaused,
 		nextFireAt: next,
+		fireCount:  seedCount,
 	}
 	return nil
 }

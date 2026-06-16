@@ -29,11 +29,15 @@ universal boot sequence in the agent constitution (above this
 manual): `skill:load` → `skill:files` → `skill:ref` → call
 domain tools. Worker-specific notes:
 
-- If a skill you can load admits a `task:<recipe>` tool covering
-  your sub-task, prefer it: `skill:load` that skill and call the
-  `task:<recipe>` tool instead of doing the work yourself. The
-  recipe runs as its own spawn and returns a single result — don't
-  replicate its internal steps beforehand.
+- Reuse a built task that covers your sub-task instead of doing the
+  work yourself — it runs as its own spawn and returns a single
+  result, so don't replicate its internal steps beforehand. Two ways
+  in, depending on what your role was granted: if you have the
+  `task:*` tools (`task:search` / `task:execute_task`), find a task
+  by intent and run it by name; otherwise, if a skill you can load
+  admits a `task:<recipe>` tool covering the sub-task, `skill:load`
+  that skill and call the `task:<recipe>` tool. (Most worker roles
+  have neither and just do the work directly — that's fine.)
 - **Reuse beats rebuild — search before you compose.** Before
   building a non-trivial procedure from scratch, search the skill
   catalogue for an existing match — even when nothing relevant is

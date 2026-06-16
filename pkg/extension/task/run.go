@@ -217,6 +217,15 @@ func (e *Extension) RunRecipe(ctx context.Context, p RunParams) (RunResult, erro
 		}
 		return RunResult{ChildID: child.ID()}, nil
 	case <-ctx.Done():
+		// The recipe child runs on its OWN (parent-derived) context, not
+		// this tool-dispatch ctx — so a dispatch-ctx cancel (cron per-fire
+		// timeout, user cancel, tool-iteration cap) would otherwise leave
+		// it running detached: spending tokens and projecting an unwaited
+		// SubagentResult into the anchor's history. Cancel it explicitly,
+		// mirroring the mission ext's per-worker terminator. WithoutCancel
+		// so the cancel frame still routes after ctx is already done.
+		_, _ = p.Anchor.CancelChild(context.WithoutCancel(ctx), child.ID(),
+			"task: recipe launch context cancelled")
 		return RunResult{ChildID: child.ID()}, ctx.Err()
 	}
 }
