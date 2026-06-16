@@ -309,9 +309,16 @@ func (e *Extension) registerTask(ctx context.Context, row schedstore.TaskRow) er
 	if planned == nil {
 		return fmt.Errorf("task %s has no planned row in task_log", row.ID)
 	}
-	sched := runner.Once(planned.PlannedAt)
 
 	deps := e.fireDeps()
+	// Clamp an already-overdue planned fire to now so a fire that came
+	// due while the process was down (or one a long previous fire pushed
+	// past — see clampOverdue) still fires on bootstrap instead of being
+	// silently dropped by runner.Once(past) (onceSchedule.Next returns
+	// the zero time for a past instant). Serialised per task by the
+	// runner's in-flight guard.
+	sched := runner.Once(clampOverdue(planned.PlannedAt, deps))
+
 	fn := buildFireFn(row, deps)
 	opts := []runner.RegisterOption{}
 	if row.Status == schedstore.StatusPaused {
