@@ -45,6 +45,18 @@ const providerName = "task"
 // recipe tools admit into a session's catalogue.
 const PermRunRecipe = "hugen:task:run_recipe"
 
+// PermExecuteTask gates the generic `task:execute_task` tool — the
+// discovery-then-run path that runs ANY task-eligible skill by name
+// (vs. the per-recipe `task:<name>` tools gated by PermRunRecipe). A
+// distinct permission object so policies / allow-sets can grant the
+// generic runner without admitting every synthetic recipe tool.
+const PermExecuteTask = "hugen:task:execute_task"
+
+// toolNameExecuteTask is the bare (provider-stripped) name of the
+// generic runner. Call intercepts it BEFORE the synthetic-recipe
+// lookup so it never collides with a `task:<recipe>` skill name.
+const toolNameExecuteTask = "execute_task"
+
 // SessionHost is the narrow surface the dispatch path needs from the
 // runtime's session supervisor. Mirrors the scheduler ext's
 // SessionHost — the two could share a common interface in a future
@@ -178,8 +190,36 @@ func (e *Extension) List(ctx context.Context) ([]tool.Tool, error) {
 			ArgSchema:        argSchema,
 		})
 	}
+	// The generic discovery-then-run tool: always present (one tool, not
+	// per-recipe) so a caller that found a task by search / catalog can
+	// run it by name without the per-recipe synthetic tool being
+	// surfaced. Allow-set gated like any tool — see _root / mission-role
+	// grants.
+	out = append(out, executeTaskTool())
 	return out, nil
 }
+
+// executeTaskTool returns the static `task:execute_task` descriptor.
+func executeTaskTool() tool.Tool {
+	return tool.Tool{
+		Name:             providerName + ":" + toolNameExecuteTask,
+		Description:      descExecuteTask,
+		Provider:         providerName,
+		PermissionObject: PermExecuteTask,
+		ArgSchema:        json.RawMessage(schemaExecuteTask),
+	}
+}
+
+const descExecuteTask = "Run a built task (a task-eligible skill) by name with inputs — the discovery-then-run path. Find the task by intent with `skill:catalog_list(task_eligible:true)`, collect any required inputs from the user, then run it here. It runs as a worker and the result lands in this conversation. Prefer this over spawning a mission to do work a built task already covers — never re-implement from scratch a task that already exists."
+
+const schemaExecuteTask = `{
+  "type": "object",
+  "properties": {
+    "name": {"type": "string", "description": "The task-eligible skill name to run (from skill:catalog_list with task_eligible:true)."},
+    "inputs": {"type": "object", "description": "Input values for the task's declared inputs_schema. Omit for a no-input task.", "additionalProperties": true}
+  },
+  "required": ["name"]
+}`
 
 // Subscribe implements [tool.ToolProvider]. The synthetic surface
 // re-derives per List call from the skill manager, so a static

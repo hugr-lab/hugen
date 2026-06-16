@@ -43,6 +43,17 @@ allowed-tools:
       - pause
       - resume
       - cancel
+  # Phase B47 — the generic task runner. Root runs a BUILT task
+  # (a task-eligible skill) by name via `task:execute_task` instead
+  # of spawning a fresh mission that re-researches work the task
+  # already covers. Discovery is `## Available tasks` /
+  # `skill:catalog_list(task_eligible:true)`; the contract is
+  # `task:describe(name)`. The per-recipe `task:<name>` tools remain
+  # admitted by category skills — this is the name-parameterised
+  # path that also works after a search.
+  - provider: task
+    tools:
+      - execute_task
 metadata:
   hugen:
     requires_skills: []
