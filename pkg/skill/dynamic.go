@@ -472,51 +472,6 @@ func (x *dynamicIndex) getIDByName(ctx context.Context, name string) (string, er
 	return rows[0].ID, nil
 }
 
-// replaceLinks sets the (source_id, relation) edge set to exactly
-// targetIDs: delete the existing edges for that pair, then insert the
-// new ones. Idempotent — re-running reconcile converges on the
-// current membership (handles added / removed members). The
-// composite PK (agent_id, source_id, target_id, relation) means a
-// re-insert without the delete would collide, so the delete is
-// mandatory.
-func (x *dynamicIndex) replaceLinks(ctx context.Context, sourceID, relation string, targetIDs []string) error {
-	if err := queries.RunMutation(ctx, x.querier,
-		`mutation ($agent: String!, $src: String!, $rel: String!) {
-			hub { db { agent {
-				delete_skill_links(filter: {agent_id: {eq: $agent}, source_id: {eq: $src}, relation: {eq: $rel}}) { affected_rows }
-			}}}
-		}`,
-		map[string]any{"agent": x.agentID, "src": sourceID, "rel": relation},
-	); err != nil {
-		return fmt.Errorf("skill: clear links %s/%s: %w", sourceID, relation, err)
-	}
-	// Insert each edge; ACCUMULATE failures and continue rather than
-	// early-return. The delete above already committed, so an early
-	// return on one bad edge would strand the catalog with FEWER
-	// members than intended until the next full sync. Inserting the
-	// rest keeps the degradation to just the failing edge(s).
-	var errs []error
-	for _, tid := range targetIDs {
-		if tid == "" || tid == sourceID {
-			continue // skip self-edges / unresolved members
-		}
-		if err := queries.RunMutation(ctx, x.querier,
-			`mutation ($data: hub_db_skill_links_mut_input_data!) {
-				hub { db { agent { insert_skill_links(data: $data) { source_id } } } }
-			}`,
-			map[string]any{"data": map[string]any{
-				"agent_id":  x.agentID,
-				"source_id": sourceID,
-				"target_id": tid,
-				"relation":  relation,
-			}},
-		); err != nil {
-			errs = append(errs, fmt.Errorf("skill: add link %s->%s/%s: %w", sourceID, tid, relation, err))
-		}
-	}
-	return errors.Join(errs...)
-}
-
 // newSkillLogID mints a skill_log row id (`slog-<hex>`).
 func newSkillLogID() string {
 	var b [9]byte
@@ -569,47 +524,13 @@ func (x *dynamicIndex) insertSkillLog(ctx context.Context, skillID, event, sessi
 
 // --- manifest <-> row helpers ---
 
-// catalogMemberNames derives a recipe catalog's member recipe names
-// from its `allowed-tools` grants on the synthetic `task` provider —
-// the 6.1d mechanism by which a `recipe_catalog` skill admits its
-// recipes' `task:<name>` tools. Returns nil for non-catalog skills.
-// De-duplicated; the literal `*` wildcard is skipped (it admits every
-// task, not a named member).
-func catalogMemberNames(m Manifest) []string {
-	if !m.Hugen.RecipeCatalog {
-		return nil
-	}
-	seen := map[string]struct{}{}
-	var out []string
-	for _, g := range m.AllowedTools {
-		if g.Provider != "task" {
-			continue
-		}
-		for _, t := range g.Tools {
-			if t == "" || t == "*" {
-				continue
-			}
-			if _, ok := seen[t]; ok {
-				continue
-			}
-			seen[t] = struct{}{}
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
 // skillType classifies a manifest into the coarse `type` column used
 // for the structural discovery prefilter.
 func skillType(m Manifest) string {
-	switch {
-	case m.Hugen.RecipeCatalog:
-		return "catalog"
-	case m.Hugen.Task.Eligible:
+	if m.Hugen.Task.Eligible {
 		return "recipe"
-	default:
-		return "skill"
 	}
+	return "skill"
 }
 
 // manifestMetadataMap marshals the full manifest frontmatter (name +
@@ -813,57 +734,6 @@ func (b *dynamicBackend) IndexBundle(ctx context.Context, dir, source string) (s
 	return id, true, nil
 }
 
-// relinkCatalogs rewrites every recipe-catalog's `catalog_member`
-// edges from the index. ONE listAll fetches the whole index; from it
-// we build a name→id map AND pick the catalog rows in Go — member
-// names (derived from each catalog's manifest via catalogMemberNames)
-// resolve against that in-memory map with NO per-member query. Runs
-// AFTER all bundles (hub + local) are indexed so every member id is
-// present. Was N+1 (one getIDByName per member per catalog); now one
-// read for the whole pass.
-//
-// NOTE: since the pre-db-1 `tools_catalog` removal there is currently
-// no model-facing READER of these `catalog_member` edges (the
-// catalog-expansion read tools were dropped). The write side is kept
-// deliberately: the edges are the membership index the planned task
-// catalog (`spec-task-execution.md`, B47) reads to expand a catalog
-// into its tasks. Retained, not dead — the reader returns with B47.
-func (b *dynamicBackend) relinkCatalogs(ctx context.Context) error {
-	all, err := b.index.listAll(ctx)
-	if err != nil {
-		return err
-	}
-	idByName := make(map[string]string, len(all))
-	for _, r := range all {
-		idByName[r.Name] = r.ID
-	}
-	var errs []error
-	for _, c := range all {
-		if c.Type != "catalog" {
-			continue
-		}
-		m, merr := manifestFromMetadata(c.Metadata)
-		if merr != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", c.Name, merr))
-			continue
-		}
-		var targetIDs []string
-		var memberNames []string
-		for _, member := range catalogMemberNames(m) {
-			if id := idByName[member]; id != "" {
-				targetIDs = append(targetIDs, id)
-				memberNames = append(memberNames, member)
-			}
-		}
-		if err := b.index.replaceLinks(ctx, c.ID, "catalog_member", targetIDs); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", c.Name, err))
-			continue
-		}
-		b.log.Debug("skill catalog: linked members", "catalog", c.Name, "members", memberNames)
-	}
-	return errors.Join(errs...)
-}
-
 // Publish writes the bundle to disk (atomic swap via dirBackend) then
 // upserts the DB index row + embedding. A disk write that succeeds
 // followed by an index failure leaves the bundle reachable via Get +
@@ -956,14 +826,9 @@ func (b *dynamicBackend) indexDir(ctx context.Context, root, source string) (int
 }
 
 // Reconcile re-indexes the writable (authored / local) bundle dir into
-// the DB at startup, then rewrites catalog_member edges. The relink
-// runs over the whole index, so catalogs/members indexed from OTHER
-// source dirs (hub, installed via IndexBundle before this call) are
-// linked too. Returns the count of authored bundles indexed.
+// the DB at startup. Returns the count of authored bundles indexed.
 func (b *dynamicBackend) Reconcile(ctx context.Context) (int, error) {
-	n, ierr := b.indexDir(ctx, b.dir.root, "authored")
-	lerr := b.relinkCatalogs(ctx)
-	return n, errors.Join(ierr, lerr)
+	return b.indexDir(ctx, b.dir.root, "authored")
 }
 
 // installFromDir indexes bundles from a read-only source dir (e.g. the
@@ -976,8 +841,7 @@ func (b *dynamicBackend) Reconcile(ctx context.Context) (int, error) {
 //     in the dir (config is authoritative; an
 //     empty names list installs nothing).
 //
-// Does NOT relink catalogs — the caller runs relinkCatalogs once after
-// all source dirs are indexed. Returns the count installed/updated.
+// Returns the count installed/updated.
 func (b *dynamicBackend) installFromDir(ctx context.Context, root, source string, names []string, declared bool) (int, error) {
 	if root == "" {
 		return 0, nil

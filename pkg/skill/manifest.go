@@ -196,17 +196,6 @@ type HugenMetadata struct {
 	// branches. Phase 6.1d.
 	AllowedSkills []string `json:"allowed_skills,omitempty" yaml:"allowed_skills,omitempty"`
 
-	// RecipeCatalog marks the skill as a curated collection of
-	// task-eligible recipes (a category skill like `data_utils`):
-	// loading it admits its recipes' synthetic `task:*` tools into
-	// the catalogue. The skill extension surfaces flagged skills
-	// distinctly in the `## Available skills` block (a `(recipe
-	// catalog)` tag, sorted to the top) so the model prefers a
-	// tested recipe over hand-rolling the same job from raw tools.
-	// Purely declarative — the constitution carries the behavioural
-	// directive. Phase 6.1d.
-	RecipeCatalog bool `json:"recipe_catalog,omitempty" yaml:"recipe_catalog,omitempty"`
-
 	Intents   []string                  `json:"intents,omitempty"`
 	SubAgents []SubAgentRole            `json:"sub_agents,omitempty"`
 	Memory    map[string]MemoryCategory `json:"memory,omitempty"`

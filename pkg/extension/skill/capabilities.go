@@ -741,21 +741,18 @@ func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *S
 		loadedSet[n] = struct{}{}
 	}
 	type skillItem struct {
-		Name          string
-		Description   string
-		Loaded        bool
-		RecipeCatalog bool
+		Name        string
+		Description string
+		Loaded      bool
 	}
 	items := make([]skillItem, 0, len(all))
 	shownIDs := make([]string, 0, len(all))
 	shownCatalog := make(map[string]string, len(all)) // name → index id (for `used` resolution)
 	for _, sk := range all {
-		// Phase 6.1d — task-eligible recipe skills are not listed
-		// here. They surface to the model as synthetic
-		// `task:<recipe-name>` tools (scheduler ext provider), and
-		// loading them as regular skills is not part of the
-		// task-runner flow — the category skill admits the synthetic
-		// tool via its allowed-tools instead.
+		// Task-eligible skills are not listed here — they surface in the
+		// parallel `## Available tasks` catalogue (B47 step 5), runnable
+		// via task:execute_task. The regular skill catalogue is reserved
+		// for loadable category / utility skills.
 		if sk.Manifest.Hugen.Task.Eligible {
 			continue
 		}
@@ -772,10 +769,9 @@ func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *S
 			}
 		}
 		items = append(items, skillItem{
-			Name:          sk.Manifest.Name,
-			Description:   strings.TrimSpace(sk.Manifest.Description),
-			Loaded:        on,
-			RecipeCatalog: sk.Manifest.Hugen.RecipeCatalog,
+			Name:        sk.Manifest.Name,
+			Description: strings.TrimSpace(sk.Manifest.Description),
+			Loaded:      on,
 		})
 		// db-2 — the `shown` impression set + the session-stored name→id
 		// catalog (used to resolve `used` ids without a DB round-trip)
@@ -799,16 +795,8 @@ func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *S
 	if len(items) == 0 {
 		return "", nil
 	}
-	// Phase 6.1d — recipe catalogs (skills bundling tested `task:*`
-	// recipes) sort to the top so the model spots them before the
-	// long regular-skill tail; the constitution tells it to prefer
-	// a matching catalog's recipe over hand-rolling the job. Stable
-	// within each group, name-sorted, so the order is deterministic
-	// across renders.
+	// Name-sorted for a deterministic order across renders.
 	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].RecipeCatalog != items[j].RecipeCatalog {
-			return items[i].RecipeCatalog
-		}
 		return items[i].Name < items[j].Name
 	})
 	return renderer.MustRender(

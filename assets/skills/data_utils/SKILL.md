@@ -3,7 +3,7 @@ name: data_utils
 description: >
   One-shot data diagnostics for a single table, no GraphQL by hand.
   Counts the number of rows / records in a table and answers similar
-  single-number questions. Load this catalog when the user asks how
+  single-number questions. Load this skill when the user asks how
   many rows / records / items a table holds; joins, group-by, and
   dashboards belong in an analyst mission instead.
 license: Apache-2.0
@@ -14,7 +14,6 @@ allowed-tools:
 metadata:
   hugen:
     requires_skills: []
-    recipe_catalog: true
     autoload: false
     tier_compatibility: [root, mission, worker]
 compatibility:
@@ -22,12 +21,14 @@ compatibility:
   runtime: hugen
 ---
 
-# `data_utils` category
+# `data_utils`
 
-Loadable skill that admits Hugr Data Mesh utility recipes into the
-session's tool catalog. Recipes themselves live as separate
-task-eligible skills; this manifest is the discovery + permission
-group that brings them into root.
+Loadable skill that admits Hugr Data Mesh utility tasks into the
+session's tool catalog. The tasks themselves are separate
+task-eligible skills; this manifest is the permission group that
+admits their `task:<name>` tools when loaded. (Those tasks also run
+by name via `task:execute_task` without loading this skill at all —
+loading it just adds their per-recipe tools to the catalog.)
 
 Currently bundled:
 
@@ -41,7 +42,7 @@ Currently bundled:
 
 The user named a table and wants a count, schema-shape check, or
 similarly tiny one-question answer about a single data object —
-load this category, call the appropriate `task:*` tool, surface the
+load this skill, call the appropriate `task:*` tool, surface the
 result. Bigger questions (joins, group-by, dashboards) still belong
 in the analyst mission.
 

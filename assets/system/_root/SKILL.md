@@ -34,8 +34,9 @@ allowed-tools:
   # surface because scheduled fires belong to the user-facing
   # conversation; they spawn cron-fire subagents under this root
   # when they fire, and the SubagentResult lands here in chat
-  # history. Recipe execution itself flows through the `task` ext
-  # (synthetic `task:<recipe>` tools admitted by category skills).
+  # history. Task execution itself flows through the `task` ext
+  # (`task:execute_task` by name, or a per-recipe `task:<name>` tool
+  # admitted by a loaded skill's allowed-tools).
   - provider: schedule
     tools:
       - create
@@ -49,8 +50,8 @@ allowed-tools:
   # already covers. Discovery is `## Available tasks` /
   # `skill:catalog_list(task_eligible:true)`; the contract is
   # `task:describe(name)`. The per-recipe `task:<name>` tools remain
-  # admitted by category skills — this is the name-parameterised
-  # path that also works after a search.
+  # admitted by a loaded skill's allowed-tools — execute_task is the
+  # name-parameterised path that also works after a search.
   - provider: task
     tools:
       - describe
@@ -279,61 +280,64 @@ If present, the mission is already gone — `mission:notify` returns
 `not_found`. Answer from the visible result or spawn fresh,
 folding the context in.
 
-## Knob 7 — recipes (`task:*`) and schedules (`schedule:*`)
+## Knob 7 — built tasks (`task:*`) and schedules (`schedule:*`)
 
-A **recipe** is a small task-eligible skill that does one concrete
+A **built task** is a task-eligible skill that does one concrete
 job (count rows, summarise a dashboard, generate a daily report).
-Recipes are bundled into **category skills** (`data_utils`,
-`pr_workflows`, …) that you load on demand. Loading a category
-admits its recipes' synthetic tools — `task:<recipe-name>` — into
-your tool catalog with typed parameters.
+You don't load it — you run it by NAME. The ones relevant to the
+conversation surface in your `## Available tasks` block; the full
+set is searchable with `skill:catalog_list(task_eligible:true)`.
 
 ### Path A — ad-hoc (user wants it NOW)
 
-User described work that matches a recipe but did NOT name a
+User described work that matches a built task but did NOT name a
 future time / cadence:
 
-1. Find the `(recipe catalog)` skill in `## Available skills` whose
-   domain covers what the user wants. Load it via
-   `skill:load("<category>")` (only if it isn't already loaded).
-   Prefer this over hand-rolling the job with raw tools you may
-   already have loaded — recipes are tested (constitution rule).
-2. The recipe's synthetic tool `task:<recipe-name>` is now in your
-   tool catalog with its typed `inputs_schema`. Call it directly
-   with the user's parameters:
+1. Find the task in `## Available tasks` (or search the full set
+   with `skill:catalog_list(task_eligible:true)`) whose goal covers
+   what the user wants. Prefer running it over hand-rolling the job
+   with raw tools — built tasks are tested (constitution rule).
+2. Inspect its input contract with `task:describe("<name>")`,
+   collect any required inputs from the user, then run it by name:
 
 ```
-task:<recipe-name>({ key1: "...", key2: "..." })
+task:execute_task({ name: "<task-name>", inputs: { key1: "...", … } })
 ```
 
-The runtime spawns the recipe as a subagent under THIS root,
-awaits its terminal handoff, and the result projects back into
-chat history as a SubagentResult. Then summarise the result to
-the user in one sentence.
+The runtime spawns the task as a worker under THIS root, awaits
+its terminal handoff, and the result projects back into chat
+history as a SubagentResult. Then summarise the result to the user
+in one sentence.
 
-### Path B — scheduled recipe (user named a future time or cadence)
+(A task whose per-recipe `task:<name>` tool is already in your
+catalog — admitted by a loaded skill's allowed-tools — can be
+called directly instead; `task:execute_task` is the name-based path
+that works without any skill loaded.)
 
-User asked for a recipe to run on a schedule:
+### Path B — scheduled task (user named a future time or cadence)
+
+User asked for a built task to run on a schedule:
 
 ```
 schedule:create(
   kind="spawn",
-  skill_ref="<recipe-name>",
+  skill_ref="<task-name>",
   schedule_kind=..., schedule_spec=...,
   inputs={ ... }   # complete inputs — no input-collector at fire time
 )
 ```
 
-`skill_ref` is the recipe's skill name (the same name you'd use
-with `task:<recipe-name>` ad-hoc). The scheduled fire has no live
-user — ask the user up-front for every required input the recipe
-declares, then pass the complete map. Tip: the recipe's synthetic
-tool's schema lists exactly the same keys; consult it before
-prompting the user.
+`skill_ref` is the task's skill name (the same name you'd pass to
+`task:execute_task` ad-hoc). The scheduled fire has no live user —
+ask the user up-front for every required input the task declares,
+then pass the complete map. Tip: `task:describe("<name>")` lists
+exactly those keys; consult it before prompting the user.
+`schedule:create` rejects a spawn whose required inputs aren't all
+present, so an unfireable schedule fails fast at create time.
 
-### Path C — wake-only nudge (no recipe)
+### Path C — wake-only nudge (no task)
 
-User wants a reminder / ping, no recipe involved:
+User wants a reminder / ping, no task involved:
 
 ```
 schedule:create(
@@ -346,10 +350,10 @@ schedule:create(
 `wake_message` is the literal text that arrives as a fresh user
 message at fire time.
 
-### Path D — build a new reusable task (no recipe matches yet)
+### Path D — build a new reusable task (no built task matches yet)
 
-User wants repeatable / schedulable work but no recipe in
-`## Available skills` covers it. Don't decline, and don't hand-roll
+User wants repeatable / schedulable work but no built task in
+`## Available tasks` covers it. Don't decline, and don't hand-roll
 it as a one-off — create the task skill first, then run or schedule
 it:
 
@@ -379,10 +383,10 @@ entirely when the request carries no extra facts.
 
 `_task_builder` interviews the user for the task's inputs / output /
 name, authors + validates the bundle, confirms the assembled result
-with the user, and saves it as a task-eligible recipe. When it
-returns, the new `task:<name>` tool is available — run it ad-hoc
-(Path A) or bind it to a schedule (Path B) per what the user
-originally asked.
+with the user, and saves it as a task-eligible skill. When it
+returns, the new task is runnable by name — run it ad-hoc with
+`task:execute_task` (Path A) or bind it to a schedule (Path B) per
+what the user originally asked.
 
 Use this when the work is worth keeping (the user said "every…",
 "regularly", "make a task that…") — not for a single one-off,
@@ -395,26 +399,25 @@ which is just a mission (or chat).
    equivalents in the user's language.)
    - **No** → Path A or just-answer-in-chat.
    - **Yes** → Path B or C.
-2. Does the user's intent map to a recipe?
-   - **Yes** but recipe's category not yet loaded → `skill:load`
-     the category, then Path A (no schedule) or Path B (scheduled).
-   - **Yes** and the recipe's synthetic tool is already in catalog
-     → call it directly (Path A) or `schedule:create` (Path B).
+2. Does the user's intent map to a built task?
+   - **Yes** → run it by name with `task:execute_task` (Path A) or
+     `schedule:create` (Path B). Inspect inputs first with
+     `task:describe`.
    - **No, but the user wants a reminder** → Path C.
    - **No, but it's repeatable / schedulable work worth keeping**
-     → Path D: spawn `_task_builder` to create the recipe, then run
-     (Path A) or schedule (Path B) it. Do NOT invent a recipe name.
-   - **No, and it's a one-off** → no recipe needed; spawn a regular
+     → Path D: spawn `_task_builder` to create the task, then run
+     (Path A) or schedule (Path B) it. Do NOT invent a task name.
+   - **No, and it's a one-off** → no task needed; spawn a regular
      mission with a suitable mission skill, or just answer in chat.
 3. Pre-fill `inputs` from what the user already said. Anything
    missing — ask the user once via `session:inquire` BEFORE the
-   call (recipes have no input-collector at runtime; they expect
+   call (tasks have no input-collector at runtime; they expect
    a complete inputs map).
 
-### NOT a task / recipe trigger
+### NOT a task trigger
 
-- User wants the thing done now and there is **no recipe** for it
-  → just do it in chat or spawn a regular mission.
+- User wants the thing done now and there is **no built task** for
+  it → just do it in chat or spawn a regular mission.
 - User wants a single piece of work that happens to take a while
   → spawn a mission, do not schedule it.
 
@@ -489,8 +492,8 @@ task — guard nil and provide a first-fire default.
 
 After successful `schedule:create`, emit a short user-visible
 acknowledgement naming the schedule (≤ 1 sentence, match the
-user's language). After Path A's `task:<recipe>` call, summarise
-the recipe's projected result for the user in one sentence —
+user's language). After Path A's `task:execute_task` call, summarise
+the task's projected result for the user in one sentence —
 don't just dump the raw SubagentResult fence.
 
 ## What this skill does NOT grant

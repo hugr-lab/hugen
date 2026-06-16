@@ -451,50 +451,6 @@ metadata:
 	}
 }
 
-// TestTurnPreamble_RecipeCatalogTaggedAndFloated verifies
-// the Phase 6.1d catalogue treatment of recipe-catalog skills
-// (metadata.hugen.recipe_catalog: true) in the turn_preamble: they
-// carry a `(recipe catalog)` tag and sort ahead of regular skills
-// regardless of name order — `zeta_utils` is alphabetically AFTER
-// `alpha`, so its appearing first proves the flag floats it, not the
-// name. The constitution carries the behavioural "prefer the recipe"
-// rule; this test just pins the prompt surface it keys off.
-func TestTurnPreamble_RecipeCatalogTaggedAndFloated(t *testing.T) {
-	ctx := context.Background()
-	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
-		"alpha": []byte(inlineAlphaManifest),
-		"zeta_utils": []byte(`---
-name: zeta_utils
-description: A recipe catalog.
-license: MIT
-metadata:
-  hugen:
-    recipe_catalog: true
-    tier_compatibility: [root, mission, worker]
----
-`),
-	}})
-	mgr := skillpkg.NewSkillManager(store, nil)
-	ext := NewExtension(mgr, nil, "a1")
-	state := fixture.NewTestSessionState("ses-adv-catalog").WithDepth(2)
-	if err := ext.InitState(ctx, state); err != nil {
-		t.Fatalf("InitState: %v", err)
-	}
-	out := ext.TurnPreamble(ctx, state)
-	if !strings.Contains(out, "`zeta_utils` (recipe catalog)") {
-		t.Errorf("recipe-catalog tag missing:\n%s", out)
-	}
-	if strings.Contains(out, "`alpha` (recipe catalog)") {
-		t.Errorf("regular skill alpha wrongly tagged recipe catalog:\n%s", out)
-	}
-	idxCatalog := strings.Index(out, "`zeta_utils`")
-	idxAlpha := strings.Index(out, "`alpha`")
-	if idxCatalog < 0 || idxAlpha < 0 || idxCatalog >= idxAlpha {
-		t.Errorf("recipe catalog must float above regular skills: zeta_utils@%d alpha@%d\n%s",
-			idxCatalog, idxAlpha, out)
-	}
-}
-
 // TestReportStatus_AdvertiseSplit_LoadedVsCatalogue verifies the
 // γ split: ReportStatus surfaces `loaded_skill_tokens` and
 // `available_skill_tokens` separately so the context-budget UI
