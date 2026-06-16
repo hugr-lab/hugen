@@ -204,11 +204,16 @@ func (e *Extension) RunRecipe(ctx context.Context, p RunParams) (RunResult, erro
 	select {
 	case <-child.Done():
 		if p.CountAsUse {
-			// Step 5 (advertise) swaps this debug trace for the bandit
-			// `use` event — RunRecipe is the single choke point where a
-			// model-driven recipe run completes.
-			e.logger.Debug("task: recipe run counted as use",
-				"recipe", p.Recipe, "child", child.ID())
+			// db-2 bandit `use` (B47 step 5) — RunRecipe is the single
+			// choke point where a model-driven task run completes. Resolve
+			// through the anchor's task shown-catalogue so a `use` lands
+			// only for a task that was actually advertised this session
+			// (used ≤ shown, the skill-load path's invariant). Cron fires
+			// clear CountAsUse — no model chose them, so they don't reward
+			// the bandit. Best-effort; never blocks the completion ack.
+			if sh := skillext.FromState(p.Anchor); sh != nil {
+				sh.RecordTaskUsed(context.WithoutCancel(ctx), p.Recipe)
+			}
 		}
 		return RunResult{ChildID: child.ID()}, nil
 	case <-ctx.Done():

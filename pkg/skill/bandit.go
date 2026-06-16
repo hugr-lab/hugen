@@ -20,6 +20,12 @@ type RecallCandidate struct {
 	Description string
 	Shown       int
 	Used        int
+
+	// TaskEligible marks the candidate as a runnable task (a task-eligible
+	// skill), so the advertise can split one recall into the `## Available
+	// skills` and `## Available tasks` catalogues — each ranked + capped
+	// against its own population (B47 step 5).
+	TaskEligible bool
 }
 
 // ThompsonRank reorders cands in place by a FRESH Thompson sample: each

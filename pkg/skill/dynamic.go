@@ -342,10 +342,11 @@ func (x *dynamicIndex) search(ctx context.Context, query string, taskEligible *b
 // candidate plus its skill_log usage bucketed by event (one row per
 // event with its _rows_count).
 type rankedSkillRow struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Log         []struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	TaskEligible bool   `json:"task_eligible"`
+	Log          []struct {
 		Key struct {
 			Event string `json:"event"`
 		} `json:"key"`
@@ -358,7 +359,7 @@ type rankedSkillRow struct {
 // recallProjection selects exactly what the bandit needs — the candidate
 // fields + the per-event usage tallies via the auto-generated
 // log_bucket_aggregation (the `log` reverse relation grouped by event).
-const recallProjection = `id name description
+const recallProjection = `id name description task_eligible
 	log_bucket_aggregation { key { event } aggregations { _rows_count } }`
 
 // recallRanked runs the db-2 recall+counts query in ONE round-trip via
@@ -432,7 +433,7 @@ func (x *dynamicIndex) recallRanked(ctx context.Context, query string, limit int
 func candidatesFromRows(rows []rankedSkillRow) []RecallCandidate {
 	out := make([]RecallCandidate, 0, len(rows))
 	for _, r := range rows {
-		c := RecallCandidate{ID: r.ID, Name: r.Name, Description: r.Description}
+		c := RecallCandidate{ID: r.ID, Name: r.Name, Description: r.Description, TaskEligible: r.TaskEligible}
 		for _, b := range r.Log {
 			switch b.Key.Event {
 			case SkillLogShown:

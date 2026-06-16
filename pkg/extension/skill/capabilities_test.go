@@ -407,12 +407,11 @@ func TestTurnPreamble_CatalogueOnly(t *testing.T) {
 	}
 }
 
-// TestTurnPreamble_TaskEligibleSkillsHidden verifies the
-// Phase 6.1d filter: skills with `task.eligible: true` do NOT appear
-// in the `## Available skills` catalogue (now rendered in the
-// turn_preamble). They surface to the model as synthetic
-// `task:<recipe-name>` tools via scheduler ext; the regular skill
-// catalogue is reserved for loadable category / utility skills.
+// TestTurnPreamble_TaskEligibleSkillsHidden verifies the catalogue
+// split: skills with `task.eligible: true` do NOT appear in the
+// `## Available skills` catalogue (reserved for loadable category /
+// utility skills) — they surface in the parallel `## Available tasks`
+// block instead (B47 step 5), runnable via task:execute_task.
 func TestTurnPreamble_TaskEligibleSkillsHidden(t *testing.T) {
 	ctx := context.Background()
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
@@ -438,8 +437,17 @@ metadata:
 	if !strings.Contains(out, "`alpha`") {
 		t.Errorf("non-recipe alpha must still appear:\n%s", out)
 	}
-	if strings.Contains(out, "data_tables_rows_count") {
-		t.Errorf("task-eligible recipe leaked into Available skills:\n%s", out)
+	// Split at the tasks header: the recipe must be absent from the skills
+	// section but present in the tasks section.
+	skillsSection, tasksSection, split := strings.Cut(out, "## Available tasks")
+	if !split {
+		t.Fatalf("expected an `## Available tasks` block:\n%s", out)
+	}
+	if strings.Contains(skillsSection, "data_tables_rows_count") {
+		t.Errorf("task-eligible recipe leaked into Available skills:\n%s", skillsSection)
+	}
+	if !strings.Contains(tasksSection, "data_tables_rows_count") {
+		t.Errorf("task-eligible recipe missing from Available tasks:\n%s", tasksSection)
 	}
 }
 
