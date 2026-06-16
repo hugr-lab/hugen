@@ -125,8 +125,9 @@ func (e *Extension) sessionHost() SessionHost {
 
 // Compile-time interface assertions.
 var (
-	_ extension.Extension = (*Extension)(nil)
-	_ tool.ToolProvider   = (*Extension)(nil)
+	_ extension.Extension          = (*Extension)(nil)
+	_ tool.ToolProvider            = (*Extension)(nil)
+	_ extension.ToolApprovalPolicy = (*Extension)(nil)
 )
 
 // Name implements [extension.Extension] and [tool.ToolProvider].

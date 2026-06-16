@@ -68,6 +68,15 @@ type RunParams struct {
 	// recorder is wired in the advertise step; today the flag gates a
 	// debug trace at the single completion choke point.
 	CountAsUse bool
+
+	// RaiseLaunchApproval requests the §5.1 launch modal on the anchor
+	// before spawning: the user approves LAUNCHING the (standardized)
+	// task, optionally auto-approving its internal tools. Set by the
+	// chat tool callers (task:<recipe> / execute_task from a root chat);
+	// cleared for headless cron and for mission-worker callers (whose
+	// tool policy is inherited via the mission ext's MaybeAutoApprove).
+	// A reject returns RunResult{Rejected:true} without spawning.
+	RaiseLaunchApproval bool
 }
 
 // RunResult carries the spawned child's id for the caller's projection
@@ -76,6 +85,12 @@ type RunParams struct {
 // projection — this is just the cross-reference id.
 type RunResult struct {
 	ChildID string
+
+	// Rejected is true when a §5.1 launch modal was raised and the user
+	// declined — no child was spawned. ChildID is empty. RefineText
+	// carries any free-text the user added on the reject.
+	Rejected   bool
+	RefineText string
 }
 
 // RunRecipe is the shared execute path: spawn a recipe child under
@@ -99,6 +114,21 @@ func (e *Extension) RunRecipe(ctx context.Context, p RunParams) (RunResult, erro
 		return RunResult{}, fmt.Errorf("task: RunRecipe: empty spawn name")
 	}
 
+	// §5.1 launch approval (chat callers only) — raised BEFORE the spawn
+	// so a reject costs nothing. approve-with-tools flows into the
+	// per-worker auto-approve stamp below.
+	autoApproveTools := false
+	if p.RaiseLaunchApproval {
+		decision, err := e.raiseLaunchApproval(ctx, p.Anchor, p.Recipe, p.Skill)
+		if err != nil {
+			return RunResult{}, err
+		}
+		if !decision.approved {
+			return RunResult{Rejected: true, RefineText: decision.refine}, nil
+		}
+		autoApproveTools = decision.autoApproveTools
+	}
+
 	child, err := p.Anchor.Spawn(ctx, session.SpawnSpec{
 		Name:     p.SpawnName,
 		Skill:    p.Recipe,
@@ -119,6 +149,14 @@ func (e *Extension) RunRecipe(ctx context.Context, p RunParams) (RunResult, erro
 	// so the skill ext's typed switch hits the fast path.
 	allowList := append([]string(nil), p.Skill.Manifest.Hugen.AllowedSkills...)
 	child.SetValue(skillext.SessionAllowedSkillsKey, allowList)
+
+	// §5.1 approve-with-tools — stamp the worker so its standardized
+	// tools auto-approve via this ext's ToolApprovalPolicy. Set BEFORE
+	// the kick so the worker's first tool call is already covered. No
+	// stamp on plain approve (each tool prompts) or when no modal ran.
+	if autoApproveTools {
+		child.SetValue(taskAutoApproveToolsKey, true)
+	}
 
 	// Pre-load the recipe body (so its steps land in the system prompt)
 	// plus its requires_skills closure (no skill:load round-trip before

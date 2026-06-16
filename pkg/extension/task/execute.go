@@ -111,12 +111,20 @@ func (e *Extension) callExecuteTask(ctx context.Context, args json.RawMessage) (
 		Metadata:  map[string]any{"task_recipe": name, "via": toolNameExecuteTask},
 		// Model-driven launch → feeds the recipe-reuse bandit.
 		CountAsUse: true,
+		// §5.1 — raise the launch modal only from a root chat. A
+		// mission-worker caller inherits its tool policy from the
+		// mission (mission ext's MaybeAutoApprove walks the nested
+		// child's chain), so a second modal would be redundant.
+		RaiseLaunchApproval: state.Tier() == skill.TierRoot,
 	})
 	if rerr != nil {
 		if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
 			return toolErr("call_cancelled", rerr.Error()), nil
 		}
 		return toolErr("spawn_failed", rerr.Error()), nil
+	}
+	if res.Rejected {
+		return toolErr("launch_rejected", launchRejectedMsg(res.RefineText)), nil
 	}
 	return toolOK(name, spawnName, res.ChildID), nil
 }

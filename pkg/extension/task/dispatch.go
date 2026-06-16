@@ -128,6 +128,9 @@ func (e *Extension) dispatchWorker(ctx context.Context, sk skill.Skill, recipe s
 		Tier:       skill.TierWorker,
 		Metadata:   map[string]any{"task_recipe": recipe},
 		CountAsUse: true, // model-driven ad-hoc launch
+		// task:<recipe> is root-tier-only by allow-set design, so it
+		// always launches from a chat → raise the §5.1 launch modal.
+		RaiseLaunchApproval: true,
 	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -135,12 +138,25 @@ func (e *Extension) dispatchWorker(ctx context.Context, sk skill.Skill, recipe s
 		}
 		return toolErr("spawn_failed", err.Error()), nil
 	}
+	if res.Rejected {
+		return toolErr("launch_rejected", launchRejectedMsg(res.RefineText)), nil
+	}
 
 	// Recipe's terminal text + reason land in the parent's chat history
 	// via the standard SubagentResult projection — the LLM reads them
 	// there. The tool_result returned here is the completion ack, naming
 	// the child session_id for cross-referencing.
 	return toolOK(recipe, spawnName, res.ChildID), nil
+}
+
+// launchRejectedMsg builds the tool_result message for a user-declined
+// task launch, folding in any free-text the user added on the reject so
+// the model can adjust (e.g. fix inputs) instead of silently retrying.
+func launchRejectedMsg(refine string) string {
+	if refine == "" {
+		return "user declined to run the task"
+	}
+	return "user declined to run the task: " + refine
 }
 
 // decodeInputs materialises a tool-call args blob into a structured
