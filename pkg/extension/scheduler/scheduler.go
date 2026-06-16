@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -628,6 +629,31 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 		if sk.Manifest.Hugen.Task.Kind == skill.TaskKindMission {
 			return toolErr("not_yet_implemented", "mission-shape tasks are reserved — MVP supports kind=worker only")
 		}
+
+		// B47 step 3 — a scheduled task fires HEADLESS: no human at fire
+		// time to supply inputs or a goal. Both must be resolved + frozen
+		// NOW, or the schedule is unfireable (a bare skill_ref is not a
+		// run). Reject up front so root re-asks the user instead of
+		// persisting a schedule that fails / fires idle every tick. Only
+		// spawn-kind runs the skill; wake-kind nudges the owner and
+		// carries no inputs/goal.
+		if in.Kind == schedstore.KindSpawn {
+			if miss := missingRequiredInputs(sk.Manifest.Hugen.Task.InputsSchema, in.Inputs); len(miss) > 0 {
+				return toolErr("missing_inputs", fmt.Sprintf(
+					"task %q requires inputs [%s] — a scheduled task has no fire-time prompt, so set them in `inputs` now",
+					in.SkillRef, strings.Join(miss, ", ")))
+			}
+			// Freeze the launch goal: explicit `goal` wins, else the
+			// task's declared goal_summary. Resolved NOW so every fire
+			// has a kick body (the cron path uses Spec.Goal verbatim).
+			if strings.TrimSpace(in.Goal) == "" {
+				in.Goal = strings.TrimSpace(sk.Manifest.Hugen.Task.GoalSummary)
+			}
+			if in.Goal == "" {
+				return toolErr("missing_goal", fmt.Sprintf(
+					"task %q has no goal — set `goal`, or the task must declare a goal_summary", in.SkillRef))
+			}
+		}
 	}
 
 	state, ok := extension.SessionStateFromContext(ctx)
@@ -703,6 +729,31 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 		return nil, fmt.Errorf("schedule:create: marshal response: %w", err)
 	}
 	return body, nil
+}
+
+// missingRequiredInputs reports which `required` keys a task's
+// inputs_schema declares but the supplied inputs blob does not provide
+// (absent or explicit null). A nil/absent `required` array — or a task
+// with no inputs_schema — yields no missing keys. The schema's `required`
+// decodes to []any (JSON/YAML generic decode); non-string / empty
+// entries are skipped defensively. Order follows the schema for stable
+// error messages. B47 step 3.
+func missingRequiredInputs(schema, inputs map[string]any) []string {
+	req, ok := schema["required"].([]any)
+	if !ok {
+		return nil
+	}
+	var missing []string
+	for _, r := range req {
+		key, ok := r.(string)
+		if !ok || key == "" {
+			continue
+		}
+		if v, present := inputs[key]; !present || v == nil {
+			missing = append(missing, key)
+		}
+	}
+	return missing
 }
 
 // listInput / listOutput shape the `schedule:list` surface.
