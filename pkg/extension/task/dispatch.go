@@ -8,9 +8,7 @@ import (
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
-	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -91,6 +89,9 @@ func (e *Extension) dispatchWorker(ctx context.Context, sk skill.Skill, recipe s
 	if host == nil {
 		return toolErr("no_session_host", "task ext is not bound to a session host"), nil
 	}
+	// task:<recipe> anchors on the caller's ROOT — recipes are a
+	// user-facing concern so their results land in the chat history the
+	// user is watching.
 	root := rootOf(state)
 	owner, ok := host.Get(root.SessionID())
 	if !ok {
@@ -98,108 +99,56 @@ func (e *Extension) dispatchWorker(ctx context.Context, sk skill.Skill, recipe s
 			fmt.Sprintf("owner session %s not live", root.SessionID())), nil
 	}
 
-	// Materialise args as a structured value for SpawnSpec.Inputs.
-	// Empty args are common (no-input recipe); nil works downstream.
-	var inputs any
-	if len(args) > 0 && string(args) != "null" {
-		if err := json.Unmarshal(args, &inputs); err != nil {
-			return toolErr("invalid_args",
-				fmt.Sprintf("args is not valid JSON: %v", err)), nil
-		}
+	inputs, derr := decodeInputs(args)
+	if derr != nil {
+		return toolErr("invalid_args", derr.Error()), nil
 	}
 
 	// Spawn name uniqueness within the parent — pkg/session.Spawn
-	// sanitises + collision-suffixes, but generating a token here
-	// keeps the per-call audit name predictable.
+	// sanitises + collision-suffixes, but generating a token here keeps
+	// the per-call audit name predictable.
 	spawnName := fmt.Sprintf("task-%s-%d", recipe, e.spawnCounter.Add(1))
 
-	taskBody := fmt.Sprintf("Run the %s recipe once with the supplied inputs.", recipe)
-	child, err := owner.Spawn(ctx, session.SpawnSpec{
-		Name:   spawnName,
-		Skill:  recipe,
-		Task:   taskBody,
-		Inputs: inputs,
-		// Phase 6.1d: pin the recipe child to worker tier so its
-		// structural depth=1 (child of root) doesn't get mission
-		// semantics. Recipes are leaf executors, not coordinators —
-		// skill autoload then matches the recipe manifest's
-		// `tier_compatibility: [worker]`; constitution + compactor
-		// overlays + routing intent all see worker.
-		Tier: skill.TierWorker,
-		Metadata: map[string]any{
-			"task_recipe": recipe,
-		},
+	res, err := e.RunRecipe(ctx, RunParams{
+		Anchor:    owner,
+		Skill:     sk,
+		Recipe:    recipe,
+		SpawnName: spawnName,
+		TaskBody:  fmt.Sprintf("Run the %s recipe once with the supplied inputs.", recipe),
+		Inputs:    inputs,
+		// Pin the recipe child to worker tier so its structural depth=1
+		// (child of root) doesn't get mission semantics. Recipes are leaf
+		// executors, not coordinators.
+		Tier:       skill.TierWorker,
+		Metadata:   map[string]any{"task_recipe": recipe},
+		CountAsUse: true, // model-driven ad-hoc launch
 	})
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return toolErr("call_cancelled", err.Error()), nil
+		}
 		return toolErr("spawn_failed", err.Error()), nil
 	}
 
-	// Phase 6.1d — scope the recipe child's `skill:load` and
-	// `## Available skills` catalogue to the manifest-declared
-	// AllowedSkills whitelist. The skill extension reads this Value
-	// (key SessionAllowedSkillsKey) at callLoad + catalogue render.
-	// An empty list locks the surface to whatever was pre-loaded by
-	// the spawner (universal `_system`/`_worker` + RequiresSkills);
-	// a populated list adds reachable-via-skill-load entries on top
-	// of that. Mission ext spawns do NOT set this — wave-workers
-	// keep full dynamic-load flexibility. Pass `[]string` directly
-	// so handlers.go's typed switch hits the fast path without
-	// reaching the []any reflection branch.
-	allowList := append([]string(nil), sk.Manifest.Hugen.AllowedSkills...)
-	child.SetValue(skillext.SessionAllowedSkillsKey, allowList)
+	// Recipe's terminal text + reason land in the parent's chat history
+	// via the standard SubagentResult projection — the LLM reads them
+	// there. The tool_result returned here is the completion ack, naming
+	// the child session_id for cross-referencing.
+	return toolOK(recipe, spawnName, res.ChildID), nil
+}
 
-	// Phase 6.1d — load the recipe skill itself (so its body lands
-	// in the system prompt and the LLM actually sees the steps it
-	// must execute) plus its `requires_skills` declared dependencies
-	// (eager pre-load, no `skill:load` round-trip needed before the
-	// recipe's first step). SkillManager.Load walks the closure via
-	// `requires_skills` automatically, so the explicit per-dep loop
-	// is belt-and-braces — it surfaces individual failures in the
-	// log without the closure walk hiding them inside one aggregate
-	// error. Per-skill failures log + skip — one missing dependency
-	// must not deny the recipe its baseline surface; the recipe
-	// body limps along on partial deps and the result handoff
-	// surfaces the gap.
-	if skillState := skillext.FromState(child); skillState != nil {
-		if loadErr := skillState.Load(ctx, recipe); loadErr != nil {
-			e.logger.Warn("task: load recipe skill failed",
-				"recipe", recipe, "err", loadErr)
-		}
-		for _, dep := range sk.Manifest.Hugen.RequiresSkills {
-			if loadErr := skillState.Load(ctx, dep); loadErr != nil {
-				e.logger.Warn("task: pre-load requires_skills failed",
-					"recipe", recipe, "dep", dep, "err", loadErr)
-			}
-		}
+// decodeInputs materialises a tool-call args blob into a structured
+// value for SpawnSpec.Inputs. Empty / null args are common (no-input
+// recipe) and yield (nil, nil).
+func decodeInputs(args json.RawMessage) (any, error) {
+	if len(args) == 0 || string(args) == "null" {
+		return nil, nil
 	}
-
-	// Phase 6.1d: deliver the first UserMessage so the recipe child
-	// actually starts a turn. Without this the child sits idle after
-	// autoload — Session.Spawn opens the session and runs appliers
-	// but never injects an inbound user frame; the LLM loop has
-	// nothing to fire on. Mirrors the mission ext's planner.go
-	// spawner callback (which builds the wave-worker first message
-	// the same way).
-	first := protocol.NewUserMessage(child.ID(), e.agentParticipant(),
-		buildFirstMessage(taskBody, inputs))
-	_ = child.Submit(ctx, first)
-
-	// Wait for the subagent to terminate. Per-call cancellation
-	// flows through ctx — the tool dispatcher caps tool runs with
-	// its own timeout, and the runtime's stuck-detector eventually
-	// fires SessionClose on a runaway recipe.
-	select {
-	case <-child.Done():
-	case <-ctx.Done():
-		return toolErr("call_cancelled", ctx.Err().Error()), nil
+	var inputs any
+	if err := json.Unmarshal(args, &inputs); err != nil {
+		return nil, fmt.Errorf("args is not valid JSON: %v", err)
 	}
-
-	// Recipe's terminal text + reason land in the parent's chat
-	// history via the standard SubagentResult projection — the LLM
-	// reads them there. The tool_result returned here is the
-	// completion ack, naming the child session_id for cross-
-	// referencing.
-	return toolOK(recipe, spawnName, child.ID()), nil
+	return inputs, nil
 }
 
 // agentParticipant builds the participant the task extension stamps

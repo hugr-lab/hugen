@@ -11,6 +11,7 @@ import (
 	"sort"
 	"time"
 
+	taskext "github.com/hugr-lab/hugen/pkg/extension/task"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	tplpkg "github.com/hugr-lab/hugen/pkg/runtime/template"
 	"github.com/hugr-lab/hugen/pkg/scheduler/runner"
@@ -113,6 +114,11 @@ type fireDeps struct {
 	logger     *slog.Logger
 	registerFn func(taskID string, sched runner.Schedule) error
 	pauseFn    func(taskID string) error
+
+	// runRecipe is the shared execute helper (task ext's RunRecipe) the
+	// spawn-fire path delegates spawn → kick → wait to. Nil until
+	// BindRunRecipe wires it; dispatchSpawnFire fails fast when unset.
+	runRecipe func(context.Context, taskext.RunParams) (taskext.RunResult, error)
 
 	// stashFire / releaseFire are the per-fire FireContext
 	// rendezvous between dispatchSpawnFire (writer) and
@@ -310,9 +316,38 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 		renderedGoal = task.Spec.Goal
 	}
 
+	// The spawn-fire delegates spawn → scope → pre-load → KICK → wait to
+	// the shared task-ext helper, so the cron child runs through the
+	// exact same path as an ad-hoc `task:<recipe>` launch. RunRecipe (or
+	// the skill manager) must be wired; a fire that lands before
+	// BindRunRecipe fails fast rather than spawning a child it can never
+	// kick.
+	if deps.runRecipe == nil || deps.skills == nil {
+		err := fmt.Errorf("scheduler: spawn-fire dispatched before RunRecipe/skills wiring")
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
+			ErrorMessage: err.Error(),
+			Reason:       "spawn_unavailable",
+		}))
+		return runner.Outcome{ErrorMessage: err.Error()}, err
+	}
+
+	// Resolve the recipe skill so RunRecipe can scope the child's skill
+	// surface to the manifest whitelist + pre-load the recipe body.
+	// Drift was already checked above; a Get failure here means the
+	// skill vanished in the gap — pause-worthy, surface as skill_changed.
+	sk, serr := deps.skills.Get(ctx, task.SkillRef)
+	if serr != nil {
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
+			ErrorMessage: serr.Error(),
+			Reason:       schedstore.PauseSkillChanged,
+		}))
+		return runner.Outcome{ErrorMessage: serr.Error()}, serr
+	}
+
 	// Stash FireContext under a spawn-name token so the scheduler's
 	// SubagentSpawnApplier can stamp it on the child's state BEFORE
-	// the first task UserMessage lands in the child's inbox.
+	// the first task UserMessage lands in the child's inbox. RunRecipe
+	// spawns under this exact name, so the applier rendezvous holds.
 	// Monotonic counter keeps the token unique across concurrent
 	// fires; sanitisation by pkg/session preserves the bare alnum +
 	// dash payload (well under the 32-char Name cap).
@@ -320,47 +355,43 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 	deps.stashFire(spawnName, fireCtx)
 	defer deps.releaseFire(spawnName)
 
-	child, err := owner.Spawn(ctx, session.SpawnSpec{
-		Name:   spawnName,
-		Skill:  task.SkillRef,
-		Task:   renderedGoal,
-		Inputs: spawnInputs,
+	// CountAsUse stays false: a headless cron tick is not a model-driven
+	// launch, so it must not feed the recipe-reuse bandit (only chat /
+	// mission-worker launches count). The Runner's per-fire timeout
+	// (DefaultFireTimeout 30m) caps the wait via ctx; RunRecipe returns
+	// a context error on cancellation, which we map to fire_timeout.
+	res, rerr := deps.runRecipe(ctx, taskext.RunParams{
+		Anchor:    owner,
+		Skill:     sk,
+		Recipe:    task.SkillRef,
+		SpawnName: spawnName,
+		TaskBody:  renderedGoal,
+		Inputs:    spawnInputs,
 		// Persist origin metadata on the child row for liveview /
 		// audit grouping by source task without rejoining task_log.
 		Metadata: map[string]any{
 			"cron_task_id":  task.ID,
 			"cron_fire_seq": fire.FireSeq,
 		},
+		CountAsUse: false,
 	})
-	if err != nil {
+	if rerr != nil {
+		reason := "spawn_failed"
+		if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
+			reason = "fire_timeout"
+		}
 		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
-			ErrorMessage: err.Error(),
-			Reason:       "spawn_failed",
+			ErrorMessage: rerr.Error(),
+			Reason:       reason,
 		}))
-		return runner.Outcome{ErrorMessage: err.Error()}, err
-	}
-
-	// Wait for the subagent to terminate. close_turn (or any
-	// model-side SessionClose / mission:finish equivalent) drives
-	// teardown; sess.Done() closes when the goroutine exits after
-	// emitting SubagentResult to the parent. The Runner's per-fire
-	// timeout (DefaultFireTimeout 30m) caps the wait via ctx.Done.
-	select {
-	case <-child.Done():
-	case <-ctx.Done():
-		outErr := ctx.Err()
-		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
-			ErrorMessage: outErr.Error(),
-			Reason:       "fire_timeout",
-		}))
-		return runner.Outcome{ErrorMessage: outErr.Error()}, outErr
+		return runner.Outcome{ErrorMessage: rerr.Error()}, rerr
 	}
 
 	outcome := &schedstore.TaskOutcome{
 		Summary: fmt.Sprintf("cron fire %d completed", fire.FireSeq),
 	}
 	completed := terminalLog(task, fire, schedstore.LogEventCompleted, outcome)
-	completed.SessionID = child.ID()
+	completed.SessionID = res.ChildID
 	appendLogSafely(ctx, deps, completed)
 	maybeScheduleNext(ctx, task, fire, deps)
 	return runner.Outcome{Summary: outcome.Summary}, nil

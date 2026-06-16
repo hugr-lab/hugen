@@ -66,15 +66,26 @@ func phaseRunner(ctx context.Context, core *Core) error {
 	// dispatch wake / spawn fires. The Bind has to run BEFORE
 	// svc.Start so a tick that fires immediately after start finds
 	// a fully-wired extension.
-	if sched := findSchedulerExtension(core); sched != nil && core.Manager != nil {
+	sched := findSchedulerExtension(core)
+	te := findTaskExtension(core)
+	if sched != nil && core.Manager != nil {
 		sched.Bind(schedulerHost{mgr: core.Manager}, svc)
 	}
 	// Phase 6.1d — Bind the task extension to the session manager
 	// so synthetic `task:<recipe>` calls can resolve the owner
 	// session for spawn dispatch. No Runner dependency — task ext
 	// only fires through tool calls, not scheduled ticks.
-	if te := findTaskExtension(core); te != nil && core.Manager != nil {
+	if te != nil && core.Manager != nil {
 		te.Bind(taskHost{mgr: core.Manager})
+	}
+	// B47 step 1 — route the scheduler's spawn-fire through the task
+	// ext's shared RunRecipe helper so a cron fire spawns AND kicks the
+	// recipe child via the same path as an ad-hoc `task:<recipe>` call.
+	// This closes B46: the prior cron-as-subagent code spawned a child
+	// but never delivered a first UserMessage, so the model loop never
+	// fired and the fire silently went dead.
+	if sched != nil && te != nil {
+		sched.BindRunRecipe(te.RunRecipe)
 	}
 
 	if err := svc.Start(ctx); err != nil {

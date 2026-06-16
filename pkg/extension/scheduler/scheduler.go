@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	taskext "github.com/hugr-lab/hugen/pkg/extension/task"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/scheduler/runner"
 	schedstore "github.com/hugr-lab/hugen/pkg/scheduler/store"
@@ -62,6 +63,13 @@ type Extension struct {
 	mu     sync.RWMutex
 	host   SessionHost
 	runner runner.Runner
+
+	// runRecipe is the shared recipe-execute helper the spawn-fire path
+	// delegates to (the task extension's RunRecipe). Wired at boot via
+	// BindRunRecipe once both extensions exist. Nil until then — a
+	// spawn fire dispatched before wiring fails fast with a terminal
+	// log rather than silently never kicking the child.
+	runRecipe func(context.Context, taskext.RunParams) (taskext.RunResult, error)
 
 	// bootstrappedSessions tracks sessions whose owned tasks have
 	// already been registered with the Runner, so InitState (called
@@ -124,6 +132,22 @@ func (e *Extension) Bind(host SessionHost, r runner.Runner) {
 	}
 	if r != nil {
 		e.runner = r
+	}
+}
+
+// BindRunRecipe installs the shared recipe-execute helper the spawn-fire
+// path delegates to — the task extension's RunRecipe, which spawns the
+// recipe child, scopes its skill surface, pre-loads the recipe body,
+// KICKS the first turn, and waits for termination. Wired at boot once
+// both extensions exist (pkg/runtime/runner.go), after Bind. The kick is
+// the load-bearing half: the prior cron-as-subagent path spawned a child
+// but never delivered a first UserMessage, so the model loop never fired
+// (B46). Idempotent overwrite; a nil fn leaves the existing reference.
+func (e *Extension) BindRunRecipe(fn func(context.Context, taskext.RunParams) (taskext.RunResult, error)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if fn != nil {
+		e.runRecipe = fn
 	}
 }
 
@@ -312,6 +336,7 @@ func (e *Extension) fireDeps() fireDeps {
 		stashFire:      e.stashFire,
 		releaseFire:    e.releaseFire,
 		takeSpawnToken: e.takeSpawnToken,
+		runRecipe:      e.runRecipe,
 	}
 }
 
