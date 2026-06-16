@@ -86,6 +86,16 @@ type RunParams struct {
 	// this false and let RaiseLaunchApproval's modal decide — when a
 	// modal is raised its result is authoritative (overrides this).
 	AutoApproveTools bool
+
+	// RenderMode tags the spawned worker's terminal SubagentResult.
+	// Headless cron sets protocol.SubagentRenderAsyncNotify so the
+	// result, arriving at an IDLE owner root, arms the auto-summary turn
+	// and the model proactively surfaces it to the user (without it the
+	// result lands in history but nothing kicks a turn to show it). Chat
+	// callers leave it "": their worker completes mid-turn and the
+	// result is folded into the active turn, so the root surfaces it
+	// inline already.
+	RenderMode string
 }
 
 // RunResult carries the spawned child's id for the caller's projection
@@ -140,12 +150,13 @@ func (e *Extension) RunRecipe(ctx context.Context, p RunParams) (RunResult, erro
 	}
 
 	child, err := p.Anchor.Spawn(ctx, session.SpawnSpec{
-		Name:     p.SpawnName,
-		Skill:    p.Recipe,
-		Task:     p.TaskBody,
-		Inputs:   p.Inputs,
-		Tier:     p.Tier,
-		Metadata: p.Metadata,
+		Name:       p.SpawnName,
+		Skill:      p.Recipe,
+		Task:       p.TaskBody,
+		Inputs:     p.Inputs,
+		Tier:       p.Tier,
+		Metadata:   p.Metadata,
+		RenderMode: p.RenderMode,
 	})
 	if err != nil {
 		return RunResult{}, fmt.Errorf("task: spawn recipe %q: %w", p.Recipe, err)

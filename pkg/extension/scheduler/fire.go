@@ -385,6 +385,12 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 		// tools. Without this every requires_approval call is denied
 		// headless and the worker loops without progress (it can't ask).
 		AutoApproveTools: true,
+		// Tag the result AsyncNotify: the fire spawns into an IDLE owner
+		// root, so its terminal SubagentResult must arm the auto-summary
+		// turn or the model never surfaces it (the result lands in
+		// history but no turn kicks to show the user). Mirrors an async
+		// mission's completion.
+		RenderMode: protocol.SubagentRenderAsyncNotify,
 	})
 	if rerr != nil {
 		reason := "spawn_failed"
