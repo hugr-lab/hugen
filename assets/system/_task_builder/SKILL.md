@@ -318,18 +318,29 @@ metadata:
           Do these, in order:
 
           0. **Dedup FIRST — search the catalogue by the user's own
-             request.** Building a duplicate is the worst outcome, so
-             this is move zero. Call `task:search(query: <the user's
-             request, in their own words>)` — the search is semantic, so
-             pass the INTENT (what the task should do), not one narrow
-             domain term. If a saved
-             task already covers the request, the user does NOT need a
-             new one — emit `done: true` with a `findings` note naming
-             the match and an `ac_proposal` "reuse existing task
-             <name>", so the planner / synthesizer can tell the user to
-             run or schedule it directly (`task:execute_task` /
-             `schedule:create`) instead of rebuilding. Only build new
-             when nothing fits — and when in doubt, run a second search
+             request, and STOP on a match.** Building a duplicate is the
+             worst outcome, so this is move zero (root should already
+             have dedup-checked before spawning you, but verify). Call
+             `task:search(query: <the user's request, in their own
+             words>)` — the search is semantic, so pass the INTENT (what
+             the task should do), not one narrow domain term. Then read
+             the result HONESTLY: a task whose description covers the
+             user's goal IS a match — do NOT rationalize it away as "too
+             specific", "too general", or "they probably want it a bit
+             different". When a match exists, you have two valid moves
+             and building is NEITHER:
+               - clearly covers it → emit `done: true` with a `findings`
+                 note naming the match + an `ac_proposal` "reuse existing
+                 task <name>", so the user is told to run / schedule it
+                 directly (`task:execute_task` / `schedule:create`);
+               - plausibly covers it but you're unsure it fits → ASK:
+                 `session:inquire(type:"clarification")` naming the match
+                 and what it does ("reuse `<name>` or build a new one?").
+             Only build new when NOTHING fits, or the user confirmed they
+             want a genuinely new task. When unsure about ANYTHING
+             load-bearing — which match fits, which tables / dimensions
+             the task should cover — ASK rather than silently building on
+             a guess. When in doubt about coverage, run a second search
              with a differently-worded query before concluding nothing
              matches.
 

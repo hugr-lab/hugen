@@ -353,10 +353,26 @@ message at fire time.
 
 ### Path D — build a new reusable task (no built task matches yet)
 
-User wants repeatable / schedulable work but no built task in
-`## Available tasks` covers it. Don't decline, and don't hand-roll
-it as a one-off — create the task skill first, then run or schedule
-it:
+User wants repeatable / schedulable work but no built task covers it.
+Don't decline, and don't hand-roll it as a one-off — create the task
+skill first, then run or schedule it.
+
+**Dedup FIRST — do NOT spawn the builder over a match.** Building a
+mission is expensive; a duplicate task is worse. Before Path D, check
+whether the work already exists: scan `## Available tasks`, and
+`task:search(query: <the user's request>)` for anything not advertised.
+If a task plausibly covers the request, you are UNSURE whether to build
+— so ASK, don't assume. "Сделай задачу / make a task" does NOT override
+an existing match: a near-match means run-or-confirm, never silently
+build. `session:inquire(type:"clarification", question: "У тебя уже
+есть задача `<name>` — <one-line what it does>. Запустить её или
+построить новую?", options:["запустить существующую","построить
+новую","уточнить"])`. Spawn `_task_builder` ONLY when the user confirms
+they want a genuinely new task the existing one can't serve. On "run
+the existing one" → Path A. This is move zero — the same dedup the
+builder's researcher does, but at root, before paying for a mission.
+
+When nothing covers it, build:
 
 ```
 session:spawn_mission(
@@ -400,14 +416,19 @@ which is just a mission (or chat).
    equivalents in the user's language.)
    - **No** → Path A or just-answer-in-chat.
    - **Yes** → Path B or C.
-2. Does the user's intent map to a built task?
+2. Does the user's intent map to a built task (in `## Available
+   tasks`, or found via `task:search`)? — check this EVEN when the
+   user said "make a task": a match means reuse, not rebuild.
    - **Yes** → run it by name with `task:execute_task` (Path A) or
      `schedule:create` (Path B). Inspect inputs first with
-     `task:describe`.
+     `task:describe`. If the user asked to BUILD and a match exists,
+     `session:inquire` run-vs-build first (Path D dedup gate) — don't
+     spawn the builder over a match.
    - **No, but the user wants a reminder** → Path C.
    - **No, but it's repeatable / schedulable work worth keeping**
-     → Path D: spawn `_task_builder` to create the task, then run
-     (Path A) or schedule (Path B) it. Do NOT invent a task name.
+     → Path D (dedup-check first): spawn `_task_builder` only when
+     nothing covers it, then run (Path A) or schedule (Path B) it.
+     Do NOT invent a task name.
    - **No, and it's a one-off** → no task needed; spawn a regular
      mission with a suitable mission skill, or just answer in chat.
 3. Pre-fill `inputs` from what the user already said. Anything
