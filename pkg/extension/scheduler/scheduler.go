@@ -653,6 +653,14 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 				return toolErr("missing_goal", fmt.Sprintf(
 					"task %q has no goal — set `goal`, or the task must declare a goal_summary", in.SkillRef))
 			}
+			// Freeze the task's standardized tool set when the caller did
+			// not narrow it: a scheduled task fires headless, and the cron
+			// path blanket-auto-approves its tools, so the frozen list is
+			// the audit/visibility record of what the unattended fire may
+			// run (§5.1). An explicit allowed_tools on the call wins.
+			if len(in.AllowedTools) == 0 {
+				in.AllowedTools = append([]string(nil), sk.Manifest.Hugen.Task.AllowedToolsDefault...)
+			}
 		}
 	}
 

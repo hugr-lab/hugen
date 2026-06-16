@@ -64,6 +64,9 @@ metadata:
     task:
       eligible: true
       kind: worker` + gs + `
+      allowed_tools_default:
+        - hugr-main:data-inline_graphql_result
+        - python-mcp:run_script
       inputs_schema:
         type: object
         properties:
@@ -162,6 +165,13 @@ func TestCallCreate_FreezesGoalFromSummary(t *testing.T) {
 	}
 	if row.Spec.Goal != "Generate the road report" {
 		t.Errorf("frozen goal = %q, want the goal_summary", row.Spec.Goal)
+	}
+	// allowed_tools frozen from the manifest's allowed_tools_default
+	// (the caller passed none) so the headless fire has a tool budget.
+	if len(row.Spec.AllowedTools) != 2 ||
+		row.Spec.AllowedTools[0] != "hugr-main:data-inline_graphql_result" ||
+		row.Spec.AllowedTools[1] != "python-mcp:run_script" {
+		t.Errorf("frozen allowed_tools = %v, want the manifest default", row.Spec.AllowedTools)
 	}
 }
 

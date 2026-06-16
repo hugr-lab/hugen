@@ -367,6 +367,12 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 		SpawnName: spawnName,
 		TaskBody:  renderedGoal,
 		Inputs:    spawnInputs,
+		// Pin the recipe child to WORKER tier. Without this it spawns at
+		// depth 1 (child of the owner root) and TierFromDepth(1) defaults
+		// it to MISSION — so a leaf recipe executor would get mission/PDCA
+		// semantics (planner/checker prompt, no leaf execution). Matches
+		// the task:<recipe> + execute_task paths.
+		Tier: skill.TierWorker,
 		// Persist origin metadata on the child row for liveview /
 		// audit grouping by source task without rejoining task_log.
 		Metadata: map[string]any{
@@ -374,6 +380,11 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 			"cron_fire_seq": fire.FireSeq,
 		},
 		CountAsUse: false,
+		// A scheduled task is pre-approved by the user scheduling it, and
+		// there is no operator at fire time — so blanket auto-approve its
+		// tools. Without this every requires_approval call is denied
+		// headless and the worker loops without progress (it can't ask).
+		AutoApproveTools: true,
 	})
 	if rerr != nil {
 		reason := "spawn_failed"

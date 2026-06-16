@@ -77,6 +77,15 @@ type RunParams struct {
 	// tool policy is inherited via the mission ext's MaybeAutoApprove).
 	// A reject returns RunResult{Rejected:true} without spawning.
 	RaiseLaunchApproval bool
+
+	// AutoApproveTools pre-stamps the spawned worker with a blanket
+	// tool auto-approve (the §5.1 "approve with tools" effect) WITHOUT a
+	// modal. Set by the headless cron fire: a scheduled task is
+	// pre-approved by the user scheduling it, and there is no operator
+	// at fire time, so its tools must auto-approve. Chat callers leave
+	// this false and let RaiseLaunchApproval's modal decide — when a
+	// modal is raised its result is authoritative (overrides this).
+	AutoApproveTools bool
 }
 
 // RunResult carries the spawned child's id for the caller's projection
@@ -116,8 +125,9 @@ func (e *Extension) RunRecipe(ctx context.Context, p RunParams) (RunResult, erro
 
 	// §5.1 launch approval (chat callers only) — raised BEFORE the spawn
 	// so a reject costs nothing. approve-with-tools flows into the
-	// per-worker auto-approve stamp below.
-	autoApproveTools := false
+	// per-worker auto-approve stamp below. Headless cron pre-sets
+	// AutoApproveTools directly (no operator to answer a modal).
+	autoApproveTools := p.AutoApproveTools
 	if p.RaiseLaunchApproval {
 		decision, err := e.raiseLaunchApproval(ctx, p.Anchor, p.Recipe, p.Skill)
 		if err != nil {
