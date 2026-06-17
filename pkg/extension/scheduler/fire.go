@@ -580,21 +580,41 @@ func (deps fireDeps) nowUTC() time.Time {
 	return time.Now().UTC()
 }
 
-// clampOverdue lifts a next-fire instant to "now" when it has already
-// passed. Recurring fires are SERIALISED (the runner won't start the
-// next fire while one is in flight — and a fire blocks on its worker,
-// which may run longer than the interval). So by the time a long fire
-// completes and re-registers, the arithmetic next instant
-// (prevPlanned + interval / cron step) can be in the past — and
-// runner.Once(past) never fires (onceSchedule.Next returns zero),
-// silently dropping the fire. Clamping to now fires it ASAP instead,
-// so a task whose duration exceeds its interval still runs its full
-// count back-to-back. Serialisation is intentional (it lets fire N+1
-// template its goal/inputs off fire N's {{.PrevFire}} outcome);
-// concurrent fires are a future opt-in (backlog).
+// overdueRefireMargin lifts an overdue re-fire a fixed step into the
+// FUTURE rather than to bare "now". The runner re-evaluates
+// sched.Next(s.nowFn()) at Register time — a LATER instant than this
+// clamp computes, because the appendLog + GetTask + LatestPlannedFire
+// round-trips run in between (a synchronous call chain, sub-second
+// locally). onceSchedule.Next drops a fire whose instant is strictly
+// before the evaluation clock (returns zero = "no further fires"), so a
+// clamp to bare "now" is already in the past — and silently dropped —
+// by the time Register sees it. The margin comfortably exceeds that
+// registration latency so the Once is still in the future when Register
+// evaluates it and fires on the next tick. Cost: an overdue re-fire is
+// delayed by the margin (+ up to one tick), negligible for cron.
+//
+// This is the INTERIM fix for the long-fire drop the count=2 dogfood
+// exposed (a task slower than its interval fired once then died). The
+// poll-dispatch refactor removes clampOverdue + Once entirely (fire on
+// planned_at <= now, no Schedule.Next drop) — see
+// spec-scheduler-poll-dispatch.md.
+const overdueRefireMargin = 2 * time.Second
+
+// clampOverdue lifts a next-fire instant to "now"+margin when it has
+// already passed. Recurring fires are SERIALISED (the runner won't
+// start the next fire while one is in flight — and a fire blocks on its
+// worker, which may run longer than the interval). So by the time a
+// long fire completes and re-registers, the arithmetic next instant
+// (prevPlanned + interval / cron step) can be in the past; lifting it
+// fires the fire ASAP instead of dropping it, so a task whose duration
+// exceeds its interval still runs its full count back-to-back.
+// Serialisation is intentional (it lets fire N+1 template its
+// goal/inputs off fire N's {{.PrevFire}} outcome); concurrent fires are
+// a future opt-in (backlog). See overdueRefireMargin for why the lift
+// targets now+margin, not bare now.
 func clampOverdue(next time.Time, deps fireDeps) time.Time {
 	if now := deps.nowUTC(); next.Before(now) {
-		return now
+		return now.Add(overdueRefireMargin)
 	}
 	return next
 }
