@@ -184,6 +184,11 @@ type SessionSkill struct {
 	// costs another M kB." Phase 5.2 (context-budget γ).
 	loadedTokens  int
 	catalogTokens int
+	// taskCatalogTokens caches the size of the `## Available tasks`
+	// advertise block specifically — split out of catalogTokens so
+	// the context-budget UI shows the task menu's cost on its own
+	// line (catalogTokens is the skills catalogue + meta + tags only).
+	taskCatalogTokens int
 
 	// db-2 per-turn advertise draw. TurnPreamble re-renders every model
 	// iteration; a fresh recall + Thompson draw per render would churn the
@@ -330,28 +335,32 @@ func (h *SessionSkill) SetLoadedTokens(loaded int) {
 	h.loadedTokens = loaded
 }
 
-// SetCatalogTokens records just the catalogue-side estimate, set by
-// the turn_preamble render. See [SessionSkill.SetLoadedTokens].
-func (h *SessionSkill) SetCatalogTokens(catalog int) {
+// SetCatalogTokens records the catalogue-side estimate (skills
+// catalogue + loaded-skill meta + tag advice) AND the `## Available
+// tasks` block estimate separately, both set by the turn_preamble
+// render. See [SessionSkill.SetLoadedTokens].
+func (h *SessionSkill) SetCatalogTokens(catalog, task int) {
 	h.advertiseMu.Lock()
 	defer h.advertiseMu.Unlock()
 	h.catalogTokens = catalog
+	h.taskCatalogTokens = task
 }
 
-// AdvertiseSplit returns the cached per-section estimates (both
-// zero until the first render).
-func (h *SessionSkill) AdvertiseSplit() (loaded, catalog int) {
+// AdvertiseSplit returns the cached per-section estimates (all zero
+// until the first render): loaded skill bodies, the skills catalogue,
+// and the `## Available tasks` advertise block.
+func (h *SessionSkill) AdvertiseSplit() (loaded, catalog, task int) {
 	h.advertiseMu.Lock()
 	defer h.advertiseMu.Unlock()
-	return h.loadedTokens, h.catalogTokens
+	return h.loadedTokens, h.catalogTokens, h.taskCatalogTokens
 }
 
-// AdvertiseTokens returns the combined estimate (loaded +
-// catalog). Phase 5.2 β legacy callers continue to read a
-// single number through this accessor.
+// AdvertiseTokens returns the combined estimate (loaded + catalog +
+// task). Phase 5.2 β legacy callers continue to read a single number
+// through this accessor.
 func (h *SessionSkill) AdvertiseTokens() int {
-	loaded, catalog := h.AdvertiseSplit()
-	return loaded + catalog
+	loaded, catalog, task := h.AdvertiseSplit()
+	return loaded + catalog + task
 }
 
 // Compile-time assertion that *SessionSkill satisfies the manager's

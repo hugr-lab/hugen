@@ -59,9 +59,13 @@ type ContextBudget struct {
 // SkillsBudget is the loaded vs catalogue split the skill
 // extension reports separately so adapters can render "you've
 // loaded N kB of skill bodies; the catalogue itself costs M kB".
+// TaskTokens is the `## Available tasks` advertise block, split out
+// of the skills catalogue so the task menu's cost shows on its own
+// line.
 type SkillsBudget struct {
 	LoadedTokens    int `json:"loaded_tokens,omitempty"`
 	AvailableTokens int `json:"available_tokens,omitempty"`
+	TaskTokens      int `json:"task_tokens,omitempty"`
 }
 
 // buildContextBudget assembles the ContextBudget from the
@@ -104,7 +108,8 @@ func buildContextBudget(state extension.SessionState, exts map[string]json.RawMe
 		// same number twice.
 		loaded, hasLoaded := intField(doc, "loaded_skill_tokens")
 		catalog, hasCatalog := intField(doc, "available_skill_tokens")
-		if hasLoaded || hasCatalog {
+		taskCat, hasTaskCat := intField(doc, "available_task_tokens")
+		if hasLoaded || hasCatalog || hasTaskCat {
 			if budget.Skills == nil {
 				budget.Skills = &SkillsBudget{}
 			}
@@ -113,6 +118,9 @@ func buildContextBudget(state extension.SessionState, exts map[string]json.RawMe
 			}
 			if hasCatalog {
 				budget.Skills.AvailableTokens = catalog
+			}
+			if hasTaskCat {
+				budget.Skills.TaskTokens = taskCat
 			}
 		} else if v, ok := intField(doc, "advertise_tokens"); ok && v > 0 {
 			if budget.Extensions == nil {

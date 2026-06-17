@@ -63,7 +63,7 @@ func TestBuildContextBudget_AggregatesEveryDimension(t *testing.T) {
 		"compactor": json.RawMessage(`{"history_tokens":1500,"advertise_tokens":600}`),
 		"notepad":   json.RawMessage(`{"advertise_tokens":400}`),
 		"plan":      json.RawMessage(`{"advertise_tokens":200}`),
-		"skill":     json.RawMessage(`{"advertise_tokens":2100,"loaded_skill_tokens":1500,"available_skill_tokens":600}`),
+		"skill":     json.RawMessage(`{"advertise_tokens":2400,"loaded_skill_tokens":1500,"available_skill_tokens":600,"available_task_tokens":300}`),
 	}
 	got := buildContextBudget(state, exts)
 	if got == nil {
@@ -100,8 +100,8 @@ func TestBuildContextBudget_AggregatesEveryDimension(t *testing.T) {
 	if got.Skills == nil {
 		t.Fatalf("Skills nil with split in skill payload")
 	}
-	if got.Skills.LoadedTokens != 1500 || got.Skills.AvailableTokens != 600 {
-		t.Errorf("Skills = %+v, want loaded=1500 available=600", got.Skills)
+	if got.Skills.LoadedTokens != 1500 || got.Skills.AvailableTokens != 600 || got.Skills.TaskTokens != 300 {
+		t.Errorf("Skills = %+v, want loaded=1500 available=600 task=300", got.Skills)
 	}
 }
 

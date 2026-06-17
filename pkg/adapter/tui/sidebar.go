@@ -47,6 +47,7 @@ type contextBudget struct {
 type skillsBudget struct {
 	LoadedTokens    int `json:"loaded_tokens,omitempty"`
 	AvailableTokens int `json:"available_tokens,omitempty"`
+	TaskTokens      int `json:"task_tokens,omitempty"`
 }
 
 // childMetaEntry mirrors pkg/extension/liveview's childMetaEntry —
@@ -240,6 +241,7 @@ func renderSessionUsage(u *protocol.TokenUsage, width int) string {
 //	  notepad         400 tok
 //	  skill (loaded)  1.5k tok
 //	  skill (catalog)  600 tok
+//	  task (catalog)   300 tok
 //	  ─────────
 //	  session usage  45.0k → 8.0k tok
 //
@@ -288,6 +290,12 @@ func renderContextBudget(b *contextBudget, width int) string {
 			sb.WriteString(styleSidebarFaint.Render(
 				truncate(fmt.Sprintf("  skill (catalog) %s tok",
 					formatTokens(b.Skills.AvailableTokens)), width)))
+			sb.WriteString("\n")
+		}
+		if b.Skills.TaskTokens > 0 {
+			sb.WriteString(styleSidebarFaint.Render(
+				truncate(fmt.Sprintf("  task (catalog)  %s tok",
+					formatTokens(b.Skills.TaskTokens)), width)))
 			sb.WriteString("\n")
 		}
 	}
