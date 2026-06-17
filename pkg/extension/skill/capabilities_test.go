@@ -451,6 +451,43 @@ metadata:
 	}
 }
 
+// TestReportStatus_TaskCatalogueTokens verifies the `## Available
+// tasks` advertise block is metered separately as
+// `available_task_tokens`, split out of the skills catalogue so the
+// context-budget UI shows the task menu's cost on its own line.
+func TestReportStatus_TaskCatalogueTokens(t *testing.T) {
+	ctx := context.Background()
+	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
+		"alpha":   []byte(inlineAlphaManifest),                                          // normal skill → `## Available skills`
+		"roadrep": []byte(taskManifest("roadrep", []string{"bash-mcp:bash.read_file"})), // task-eligible → `## Available tasks`
+	}})
+	mgr := skillpkg.NewSkillManager(store, nil)
+	ext := NewExtension(mgr, nil, "a1")
+	state := fixture.NewTestSessionState("ses-task-budget").WithDepth(0) // root sees the task menu
+	if err := ext.InitState(ctx, state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	_ = ext.AdvertiseSystemPrompt(ctx, state)
+	_ = ext.TurnPreamble(ctx, state)
+	raw := ext.ReportStatus(ctx, state)
+	if raw == nil {
+		t.Fatalf("ReportStatus = nil")
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	taskTok, ok := body["available_task_tokens"].(float64)
+	if !ok || taskTok <= 0 {
+		t.Fatalf("available_task_tokens missing/zero with a task-eligible skill in the catalogue: %v", body)
+	}
+	// The skills catalogue (alpha) is counted separately and must NOT
+	// fold in the task block.
+	if skillTok, ok := body["available_skill_tokens"].(float64); !ok || skillTok <= 0 {
+		t.Errorf("available_skill_tokens should be >0 (alpha) and separate from tasks: %v", body)
+	}
+}
+
 // TestReportStatus_AdvertiseSplit_LoadedVsCatalogue verifies the
 // γ split: ReportStatus surfaces `loaded_skill_tokens` and
 // `available_skill_tokens` separately so the context-budget UI

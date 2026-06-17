@@ -109,7 +109,7 @@ func TestCallSave_RejectsUnknownToolName(t *testing.T) {
 	ext, state, wsDir := newToolNameFixture(t)
 	md := taskManifest("roadmove", []string{"python-mcp:run_script", "hugr-data:execute"})
 	dir := writeBundle(t, wsDir, "roadmove", md, nil)
-	_, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, false))
+	_, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir))
 	if !errors.Is(err, ErrUnknownToolName) {
 		t.Fatalf("err = %v, want ErrUnknownToolName", err)
 	}
@@ -132,11 +132,11 @@ func TestCallSave_AcceptsRealToolNames(t *testing.T) {
 	ext, state, wsDir := newToolNameFixture(t)
 	md := taskManifest("roadok", []string{"python-mcp:run_script", "python-mcp:install"})
 	dir := writeBundle(t, wsDir, "roadok", md, nil)
-	out, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, true))
+	out, err := ext.Call(newCallCtx(state), "skill:validate", validateArgs(dir))
 	if err != nil {
-		t.Fatalf("validate_only with real tools: %v", err)
+		t.Fatalf("skill:validate with real tools: %v", err)
 	}
-	res := decodeSaveResult(t, out)
+	res := decodeValidateResult(t, out)
 	if !res.Valid {
 		t.Errorf("verdict not valid: %+v", res)
 	}
@@ -148,8 +148,8 @@ func TestCallSave_AcceptsToolWildcard(t *testing.T) {
 	ext, state, wsDir := newToolNameFixture(t)
 	md := taskManifest("roadwild", []string{"python-mcp:*"})
 	dir := writeBundle(t, wsDir, "roadwild", md, nil)
-	if _, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, true)); err != nil {
-		t.Fatalf("validate_only with wildcard: %v", err)
+	if _, err := ext.Call(newCallCtx(state), "skill:validate", validateArgs(dir)); err != nil {
+		t.Fatalf("skill:validate with wildcard: %v", err)
 	}
 }
 
@@ -160,7 +160,7 @@ func TestCallSave_RejectsMisplacedTaskBlock(t *testing.T) {
 	ext, state, _, _, wsDir := newSaveFixture(t)
 	md := "---\nname: misplaced\ndescription: x.\nlicense: MIT\ntask:\n  eligible: true\n  kind: worker\n---\nbody\n"
 	dir := writeBundle(t, wsDir, "misplaced", md, nil)
-	_, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir, false, false))
+	_, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir))
 	if !errors.Is(err, skillpkg.ErrTaskBlockMisplaced) {
 		t.Errorf("err = %v, want ErrTaskBlockMisplaced", err)
 	}

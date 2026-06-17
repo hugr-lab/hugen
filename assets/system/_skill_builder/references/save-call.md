@@ -1,37 +1,50 @@
-# skill:save — the call, its verdict, and every error
+# skill:validate / skill:save — the calls, the verdict, every error
 
-`skill:save` is path-based: you build the bundle as files, then point
-the call at the directory. Validation runs BEFORE any write, so a
-rejected save changes nothing — fix the files and re-call.
+Authoring is two path-based tools — you build the bundle as files,
+then point the calls at the directory:
+
+- **`skill:validate`** — the dry-run CHECK. Runs the full validation
+  and returns the verdict WITHOUT writing. It cannot register; use it
+  to iterate until the bundle is clean.
+- **`skill:save`** — the REGISTER. Re-runs validation atomically, then
+  writes the bundle to the store and auto-loads it. Validation runs
+  BEFORE any write, so a rejected save changes nothing.
+
+Always `skill:validate` until `valid: true`, then `skill:save` once.
 
 ## Arguments
 
 ```
+skill:validate(
+  bundle_dir: "<dir>"       # required — dir with SKILL.md (+ references/scripts/assets)
+)
+
 skill:save(
-  bundle_dir:    "<dir>",   # required — dir with SKILL.md (+ references/scripts/assets)
-  validate_only: false,     # true = dry-run, validate + return verdict, do NOT register
-  overwrite:     false       # true = replace an existing skill of the same name
+  bundle_dir: "<dir>",      # required — same bundle
+  overwrite:  <omitted>     # see below — OMIT it and a name collision asks the user
 )
 ```
 
 - `bundle_dir` — relative (resolved against your session workspace) or
   absolute (must stay inside the workspace). Must contain `SKILL.md`.
-- `validate_only` — run the full check and return the verdict without
-  registering. Always do a `validate_only: true` pass first.
-- `overwrite` — only set after a collision, and only with the user's
-  agreement (or inside your own validate→fix→save iteration loop).
+- `overwrite` — OMIT it (the default) and a name collision pauses to
+  ASK the user (overwrite / save under a new name / cancel); it never
+  clobbers silently. Pass `true` only when the user has authorised
+  replacing the existing skill (e.g. an export→edit→re-save update);
+  pass `false` to hard-fail a collision without asking.
 
 ## The verdict
 
-On success the result carries `{ name, directory, files, valid }`
-(plus `validate_only: true` on a dry run). `files` is the bundle's
-file list — use it to confirm the right scripts / references were
-picked up. After a real save the skill is auto-loaded in your session.
+`skill:validate` returns `{ name, directory, files, validate_only:
+true, valid: true }`. `skill:save` returns `{ name, directory, files,
+valid: true }` after registering (the skill is auto-loaded in your
+session). `files` is the bundle's file list — use it to confirm the
+right scripts / references were picked up.
 
 ## Errors and how to fix each
 
 Every error is actionable. Read the message, fix the FILES in your
-workspace, re-run `skill:save`.
+workspace, re-run `skill:validate` (then `skill:save`).
 
 - **manifest does not parse** — the SKILL.md frontmatter is malformed
   YAML, or a required field (`name`, `description`) is missing. Fix
@@ -51,9 +64,12 @@ workspace, re-run `skill:save`.
 - **autoload reserved** — the manifest sets `metadata.hugen.autoload:
   true`. Drop it; local skills load on demand.
 
-- **`ErrSkillExists` / already in the store** — the name is taken. Ask
-  the user, then either rename the skill or re-call with
-  `overwrite: true`. Do NOT silently retry.
+- **`ErrSkillExists` / already in the store** — the name is taken.
+  With `overwrite` omitted, `skill:save` already asked the user and you
+  are acting on their answer: if they chose a NEW name, change `name:`
+  in SKILL.md and re-save; if they cancelled, stop. This error only
+  surfaces directly when you passed `overwrite: false` explicitly —
+  rename or re-save with the user's authorisation.
 
 - **bundle_dir escapes the workspace / does not exist / no SKILL.md** —
   a path problem. Build the bundle inside your session workspace and

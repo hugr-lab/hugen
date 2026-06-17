@@ -20,7 +20,7 @@ func TestRenderContextBudget_FullPane(t *testing.T) {
 			"notepad":   400,
 			"plan":      200,
 		},
-		Skills: &skillsBudget{LoadedTokens: 1_500, AvailableTokens: 600},
+		Skills: &skillsBudget{LoadedTokens: 1_500, AvailableTokens: 600, TaskTokens: 300},
 	}
 	out := renderContextBudget(b, 40)
 	for _, want := range []string{
@@ -39,6 +39,8 @@ func TestRenderContextBudget_FullPane(t *testing.T) {
 		"1.5k",
 		"skill (catalog)",
 		"600",
+		"task (catalog)",
+		"300",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("renderContextBudget missing %q:\n%s", want, out)

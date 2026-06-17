@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"testing/fstest"
 
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/extension"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 	skillpkg "github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
@@ -26,6 +28,7 @@ import (
 const (
 	permObjectLoad          = "hugen:tool:system"
 	permObjectUnload        = "hugen:tool:system"
+	permObjectValidate      = "hugen:tool:system"
 	permObjectSave          = "hugen:tool:system"
 	permObjectExport        = "hugen:tool:system"
 	permObjectUninstall     = "hugen:tool:system"
@@ -73,10 +76,26 @@ const (
   "required": ["name"]
 }`
 
+	// validateSchema is the dry-run counterpart to saveSchema: same
+	// path-based bundle, NO write. Splitting validation out of save
+	// gives an author a register-incapable check tool — it CANNOT
+	// publish, only report the verdict.
+	validateSchema = `{
+  "type": "object",
+  "properties": {
+    "bundle_dir": {
+      "type": "string",
+      "description": "Absolute path (or path relative to your session workspace) of the bundle directory to validate. It MUST contain SKILL.md; optional references/, scripts/, assets/ subdirs are read recursively. The bundle_dir must live inside your session workspace. Nothing is written — this only reports whether the bundle would register cleanly."
+    }
+  },
+  "required": ["bundle_dir"]
+}`
+
 	// saveSchema is path-based: the bundle already lives as files in
 	// the session workspace (SKILL.md + references/ + scripts/ +
 	// assets/), so the model passes a directory rather than inlining
-	// every file through a handoff. Validate-then-register is atomic.
+	// every file through a handoff. skill:save REGISTERS (validation
+	// re-runs first, atomically); use skill:validate for a dry run.
 	saveSchema = `{
   "type": "object",
   "properties": {
@@ -84,13 +103,9 @@ const (
       "type": "string",
       "description": "Absolute path (or path relative to your session workspace) of the bundle directory. It MUST contain SKILL.md; optional references/, scripts/, assets/ subdirs are read recursively. Files outside those three subdirs are ignored. The bundle_dir must live inside your session workspace."
     },
-    "validate_only": {
-      "type": "boolean",
-      "description": "Default false. When true, runs the full validation (manifest parse + task-block placement + allowed_tools_default name check) and returns the verdict WITHOUT registering — a cheap pre-commit check. Use it to confirm a bundle is correct before the real save."
-    },
     "overwrite": {
       "type": "boolean",
-      "description": "Default false — a name collision returns ErrSkillExists; ask the user before retrying with overwrite=true (this reinstalls / updates the existing skill). Within a post-save validation iteration loop the agent may set this without asking."
+      "description": "Whether to replace an existing skill of the same name. OMIT it (the default) and a name collision pauses to ASK THE USER (overwrite / save under a new name / cancel) — never silently clobbers. Pass true only when the user has authorised replacing the existing skill; pass false to hard-fail a collision without asking."
     }
   },
   "required": ["bundle_dir"]
@@ -149,8 +164,15 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 			ArgSchema:        json.RawMessage(exportSchema),
 		},
 		{
+			Name:             providerName + ":validate",
+			Description:      "Dry-run check a skill bundle in your workspace (SKILL.md + optional references / scripts / assets) WITHOUT registering it — manifest parse + task-block placement + allowed_tools_default name check. Returns the verdict only; it cannot publish. Iterate with this until the bundle is clean, then skill:save to register. The authoring format + flow is owned by the `_skill_builder` skill.",
+			Provider:         providerName,
+			PermissionObject: permObjectValidate,
+			ArgSchema:        json.RawMessage(validateSchema),
+		},
+		{
 			Name:             providerName + ":save",
-			Description:      "Validate and register a skill bundle from a directory in your workspace (SKILL.md + optional references / scripts / assets). Validation (manifest parse + task-block placement + allowed_tools_default name check) runs BEFORE any write; on success the skill is registered and auto-loaded in the current session. Pass validate_only=true for a dry-run verdict. User-initiated only — do NOT propose this. The authoring format + flow is owned by the `_skill_builder` skill.",
+			Description:      "Register a skill bundle from a directory in your workspace (SKILL.md + optional references / scripts / assets). Validation re-runs atomically BEFORE any write; on success the skill is registered and auto-loaded in the current session. On a name collision, OMITTING overwrite pauses to ask the user (overwrite / new name / cancel) — it never clobbers silently. Validate first with skill:validate. User-initiated only — do NOT propose this. The authoring format + flow is owned by the `_skill_builder` skill.",
 			Provider:         providerName,
 			PermissionObject: permObjectSave,
 			ArgSchema:        json.RawMessage(saveSchema),
@@ -203,6 +225,8 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 		return h.callUninstall(ctx, args)
 	case "export":
 		return h.callExport(ctx, args)
+	case "validate":
+		return h.callValidate(ctx, args)
 	case "save":
 		return h.callSave(ctx, args)
 	case "files":
@@ -489,35 +513,122 @@ func (h *SessionSkill) callExport(ctx context.Context, args json.RawMessage) (js
 	return json.Marshal(exportResult{Name: sk.Manifest.Name, Dir: abs, Files: files})
 }
 
-// ---------- skill:save ----------
+// ---------- skill:validate / skill:save ----------
+//
+// The authoring surface is two distinct tools, NOT one tool with a
+// `validate_only` flag (B54): a register-INCAPABLE check
+// (skill:validate) and a register-ONLY publish (skill:save). The
+// capability boundary lives in the toolset — an author granted only
+// skill:validate physically cannot register a bundle — instead of in
+// prose a weak model can rationalise around. skill:save additionally
+// gates name collisions with a runtime inquiry rather than a prose
+// "ask the user" hint, so a collision can never silently overwrite.
 
 // saveInput is the parsed argument shape; mirrors saveSchema.
+// Overwrite is a pointer so an ABSENT flag (ask the user on collision)
+// reads differently from an explicit true (replace) or false (hard
+// fail) — the distinction the collision gate turns on.
 type saveInput struct {
-	BundleDir    string `json:"bundle_dir"`
-	Overwrite    bool   `json:"overwrite,omitempty"`
-	ValidateOnly bool   `json:"validate_only,omitempty"`
+	BundleDir string `json:"bundle_dir"`
+	Overwrite *bool  `json:"overwrite,omitempty"`
 }
 
-// saveResult is the JSON envelope returned to the LLM after a
-// successful save (or a validate_only verdict). The model uses Files
-// to drive its mandatory post-save validation (run scripts/* against
-// test parameters); Directory is the on-disk root the saved-skill
-// body's ${SKILL_DIR}/... references resolve against. ValidateOnly +
-// Valid distinguish a dry-run verdict from a real registration.
+// validateInput mirrors validateSchema (bundle_dir only).
+type validateInput struct {
+	BundleDir string `json:"bundle_dir"`
+}
+
+// saveResult is the JSON envelope returned after a successful register.
+// The model uses Files to drive its mandatory post-save validation
+// (run scripts/* against test parameters); Directory is the on-disk
+// root the saved-skill body's ${SKILL_DIR}/... references resolve
+// against.
 type saveResult struct {
+	Name      string   `json:"name"`
+	Directory string   `json:"directory,omitempty"`
+	Files     []string `json:"files"`
+	Valid     bool     `json:"valid,omitempty"`
+}
+
+// validateResult is the dry-run verdict from skill:validate — same
+// shape as a save envelope minus the registration, with ValidateOnly
+// set so the model never mistakes a check for a publish.
+type validateResult struct {
 	Name         string   `json:"name"`
 	Directory    string   `json:"directory,omitempty"`
 	Files        []string `json:"files"`
-	ValidateOnly bool     `json:"validate_only,omitempty"`
-	Valid        bool     `json:"valid,omitempty"`
+	ValidateOnly bool     `json:"validate_only"`
+	Valid        bool     `json:"valid"`
 }
 
-// callSave reads a skill bundle from a workspace directory, validates
-// it (manifest parse + task-block placement + allowed_tools_default
-// name check), then — unless validate_only — registers it to the
-// local store and auto-loads it in the current session. Validation is
-// atomic with the write: nothing is published until every check
-// passes. See design/005-reuse-and-memory/spec-skill-authoring.md D1.
+// loadValidatedBundle reads + parses + fully validates a bundle dir
+// (the path shared by skill:validate and skill:save). Returns the
+// parsed manifest, its body FS, the relative file list, and the
+// resolved absolute dir. Every error is typed + actionable so the
+// author fixes the files and re-calls. `label` prefixes errors with
+// the calling tool name.
+func (h *SessionSkill) loadValidatedBundle(ctx context.Context, label, bundleDirArg string) (skillpkg.Manifest, fstest.MapFS, []string, string, error) {
+	if strings.TrimSpace(bundleDirArg) == "" {
+		return skillpkg.Manifest{}, nil, nil, "", fmt.Errorf("%w: %s: bundle_dir is required (path to the bundle directory in your workspace containing SKILL.md)", tool.ErrArgValidation, label)
+	}
+	bundleDir, err := resolveBundleDir(ctx, bundleDirArg)
+	if err != nil {
+		return skillpkg.Manifest{}, nil, nil, "", err
+	}
+	mdPath := filepath.Join(bundleDir, "SKILL.md")
+	rawMD, err := os.ReadFile(mdPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return skillpkg.Manifest{}, nil, nil, "", fmt.Errorf("%w: %s: no SKILL.md in %s — write the manifest to <bundle_dir>/SKILL.md first", tool.ErrNotFound, label, bundleDir)
+		}
+		return skillpkg.Manifest{}, nil, nil, "", fmt.Errorf("%w: %s: read %s: %v", tool.ErrIO, label, mdPath, err)
+	}
+	manifest, err := skillpkg.Parse(rawMD)
+	if err != nil {
+		return skillpkg.Manifest{}, nil, nil, "", fmt.Errorf("%s: SKILL.md does not parse — fix the frontmatter and re-validate: %w", label, err)
+	}
+	if err := h.validateAuthoring(ctx, manifest); err != nil {
+		return skillpkg.Manifest{}, nil, nil, "", err
+	}
+	bundle, files, err := readBundleBody(bundleDir)
+	if err != nil {
+		return skillpkg.Manifest{}, nil, nil, "", err
+	}
+	return manifest, bundle, files, bundleDir, nil
+}
+
+// callValidate runs every save-time check over a bundle and returns
+// the verdict WITHOUT registering. It cannot publish — the
+// register-incapable half of the authoring split (B54).
+func (h *SessionSkill) callValidate(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	if h.manager == nil {
+		return nil, tool.ErrSystemUnavailable
+	}
+	var in validateInput
+	if err := json.Unmarshal(args, &in); err != nil {
+		return nil, fmt.Errorf("%w: skill:validate: %v", tool.ErrArgValidation, err)
+	}
+	manifest, _, files, bundleDir, err := h.loadValidatedBundle(ctx, "skill:validate", in.BundleDir)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(validateResult{
+		Name:         manifest.Name,
+		Directory:    bundleDir,
+		Files:        files,
+		ValidateOnly: true,
+		Valid:        true,
+	})
+}
+
+// callSave reads a skill bundle from a workspace directory, re-runs
+// the full validation atomically, then REGISTERS it to the local
+// store and auto-loads it in the current session. Nothing is
+// published until every check passes. On a name collision the
+// `overwrite` flag decides: absent → the runtime ASKS the user
+// (overwrite / new name / cancel) so a collision never silently
+// clobbers; explicit true → replace; explicit false → hard fail. See
+// design/005-reuse-and-memory/spec-skill-authoring.md D1 + backlog B54.
 //
 // Error mapping (errors.Is-checkable for the LLM consumer via the
 // runtime's tool-error envelope):
@@ -530,7 +641,9 @@ type saveResult struct {
 //   - ErrUnknownToolName           — allowed_tools_default names a
 //     tool absent from the registry.
 //   - skillpkg.ErrInvalidPath      — bundle file escapes safety.
-//   - skillpkg.ErrSkillExists      — name collision and !overwrite.
+//   - skillpkg.ErrSkillExists      — name collision the user declined
+//     to overwrite (or explicit overwrite:false).
+//   - errSaveCancelled             — user cancelled the collision modal.
 //   - tool.ErrSystemUnavailable    — manager not wired.
 func (h *SessionSkill) callSave(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 	if h.manager == nil {
@@ -540,58 +653,48 @@ func (h *SessionSkill) callSave(ctx context.Context, args json.RawMessage) (json
 	if err := json.Unmarshal(args, &in); err != nil {
 		return nil, fmt.Errorf("%w: skill:save: %v", tool.ErrArgValidation, err)
 	}
-	if strings.TrimSpace(in.BundleDir) == "" {
-		return nil, fmt.Errorf("%w: skill:save: bundle_dir is required (path to the bundle directory in your workspace containing SKILL.md)", tool.ErrArgValidation)
-	}
 
-	bundleDir, err := resolveBundleDir(ctx, in.BundleDir)
+	// skill:save ALWAYS re-validates before it writes — the same full
+	// check skill:validate runs. It is structurally impossible to
+	// register an unvalidated or invalid bundle: validation is inline
+	// here, not a separate step the model can skip. On a validation
+	// failure, redirect to skill:validate so the model fixes the files
+	// and confirms green before retrying the save (user request: "save
+	// must re-validate; on error, validate first").
+	manifest, bundle, files, _, err := h.loadValidatedBundle(ctx, "skill:save", in.BundleDir)
 	if err != nil {
-		return nil, err
-	}
-
-	mdPath := filepath.Join(bundleDir, "SKILL.md")
-	rawMD, err := os.ReadFile(mdPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("%w: skill:save: no SKILL.md in %s — write the manifest to <bundle_dir>/SKILL.md first", tool.ErrNotFound, bundleDir)
+		if isAuthoringValidationError(err) {
+			return nil, fmt.Errorf("%w\nThe bundle did NOT register — skill:save re-runs this exact check before every write and refuses to persist an invalid bundle. Fix the files, run skill:validate until it returns valid:true, then skill:save", err)
 		}
-		return nil, fmt.Errorf("%w: skill:save: read %s: %v", tool.ErrIO, mdPath, err)
-	}
-	manifest, err := skillpkg.Parse(rawMD)
-	if err != nil {
-		return nil, fmt.Errorf("skill:save: SKILL.md does not parse — fix the frontmatter and re-save: %w", err)
-	}
-
-	// Full validation — identical verdict for dry-run and real save.
-	if err := h.validateAuthoring(ctx, manifest); err != nil {
 		return nil, err
 	}
 
-	bundle, files, err := readBundleBody(bundleDir)
-	if err != nil {
-		return nil, err
-	}
-
-	if in.ValidateOnly {
-		return json.Marshal(saveResult{
-			Name:         manifest.Name,
-			Directory:    bundleDir,
-			Files:        files,
-			ValidateOnly: true,
-			Valid:        true,
-		})
-	}
-
-	if err := h.manager.Publish(ctx, manifest, bundle, skillpkg.PublishOptions{Overwrite: in.Overwrite}); err != nil {
-		if errors.Is(err, skillpkg.ErrSkillExists) {
-			// Action-oriented message — both gemma and claude
-			// rationalised the prior generic "io: already
-			// exists" envelope as "no-op" or "success". The
-			// explicit hint about asking the user + overwrite
-			// flag makes the recovery path obvious.
-			return nil, fmt.Errorf("skill:save: %w — skill %q is already in the local store; ASK THE USER before retrying with `overwrite: true`, OR pick a different name. Do NOT silently retry", skillpkg.ErrSkillExists, manifest.Name)
+	// Register-only. On collision the gate decides whether to retry
+	// with Overwrite=true (the user agreed) or surface a typed error.
+	ow := in.Overwrite != nil && *in.Overwrite
+	pubErr := h.manager.Publish(ctx, manifest, bundle, skillpkg.PublishOptions{Overwrite: ow})
+	if errors.Is(pubErr, skillpkg.ErrSkillExists) {
+		if in.Overwrite != nil {
+			// Explicit overwrite:false (explicit true can't collide).
+			return nil, fmt.Errorf("skill:save: %w — skill %q already exists and overwrite=false; change `name:` in SKILL.md to save a new skill, or pass overwrite:true to replace it", skillpkg.ErrSkillExists, manifest.Name)
 		}
-		return nil, fmt.Errorf("skill:save: %w", err)
+		// overwrite ABSENT → ask the user; never silently clobber (B54).
+		decision, derr := h.inquireOverwrite(ctx, manifest.Name)
+		if derr != nil {
+			return nil, derr
+		}
+		switch decision {
+		case decideOverwrite:
+			if pubErr = h.manager.Publish(ctx, manifest, bundle, skillpkg.PublishOptions{Overwrite: true}); pubErr != nil {
+				return nil, fmt.Errorf("skill:save: %w", pubErr)
+			}
+		case decideRename:
+			return nil, fmt.Errorf("skill:save: %w — the user chose to keep both: change `name:` in SKILL.md to a DISTINCT name and call skill:save again (the existing %q was NOT modified)", skillpkg.ErrSkillExists, manifest.Name)
+		default: // decideCancel
+			return nil, fmt.Errorf("skill:save: %w (the existing %q was NOT modified) — do not retry without a new name or explicit user instruction", errSaveCancelled, manifest.Name)
+		}
+	} else if pubErr != nil {
+		return nil, fmt.Errorf("skill:save: %w", pubErr)
 	}
 
 	// Auto-load the freshly-saved skill so the model can use it
@@ -625,6 +728,75 @@ func (h *SessionSkill) callSave(ctx context.Context, args json.RawMessage) (json
 		Files:     files,
 		Valid:     true,
 	})
+}
+
+// errSaveCancelled marks a skill:save the user explicitly cancelled at
+// the collision modal — errors.Is-checkable so the caller distinguishes
+// "user said no" from a genuine write failure.
+var errSaveCancelled = errors.New("skill_save_cancelled")
+
+// isAuthoringValidationError reports whether err is a bundle-CONTENT
+// validation failure (the verdict skill:validate produces) as opposed
+// to a structural caller error (bad args, missing dir, path escape).
+// skill:save uses it to redirect content failures back through
+// skill:validate. ErrManifestInvalid wraps every Parse-time failure,
+// so it also covers malformed frontmatter / YAML.
+func isAuthoringValidationError(err error) bool {
+	return errors.Is(err, skillpkg.ErrManifestInvalid) ||
+		errors.Is(err, skillpkg.ErrAutoloadReserved) ||
+		errors.Is(err, skillpkg.ErrTaskBlockMisplaced) ||
+		errors.Is(err, ErrUnknownToolName)
+}
+
+// overwriteDecision is the user's pick at the name-collision modal.
+type overwriteDecision int
+
+const (
+	decideCancel overwriteDecision = iota // default — never write
+	decideOverwrite
+	decideRename
+)
+
+// inquireOverwrite asks the user how to resolve a skill:save name
+// collision (overwrite / rename / cancel) via a runtime inquiry. The
+// gate lives at the tool, not in a role's prose, so whoever calls
+// skill:save hits the same question at the exact save point — a
+// separate confirm-role can be out of order, a tool gate cannot (B54).
+// When no session is attached to ask (a fixture, a headless fire), it
+// fails safe to cancel rather than clobber.
+func (h *SessionSkill) inquireOverwrite(ctx context.Context, name string) (overwriteDecision, error) {
+	state, ok := extension.SessionStateFromContext(ctx)
+	if !ok || state == nil {
+		return decideCancel, fmt.Errorf("skill:save: %w — skill %q already exists and `overwrite` was not specified, and there is no attached session to ask the user; re-run with overwrite:true to replace it or change `name:` to save a new skill", skillpkg.ErrSkillExists, name)
+	}
+	resp, err := state.RequestInquiry(ctx, protocol.InquiryRequestPayload{
+		Type:     protocol.InquiryTypeClarification,
+		Question: fmt.Sprintf("A skill named %q already exists. Overwrite it, save the new skill under a different name, or cancel?", name),
+		Context:  "skill:save — name collision. Overwriting REPLACES the existing skill bundle in the local store (the old one is lost). Pick `rename` to keep both, or `cancel` to abort.",
+		Options:  []string{"overwrite", "rename", "cancel"},
+	})
+	if err != nil {
+		return decideCancel, fmt.Errorf("skill:save: could not ask the user about the %q name collision: %w", name, err)
+	}
+	return interpretOverwriteDecision(resp), nil
+}
+
+// interpretOverwriteDecision maps the clarification answer (the chosen
+// option text lands in Response) onto a decision. Anything unrecognised
+// — a timeout, an empty reply, a free-text "no" — is treated as cancel
+// so the existing skill is never overwritten without a clear yes.
+func interpretOverwriteDecision(resp *protocol.InquiryResponse) overwriteDecision {
+	if resp == nil || resp.Payload.Timeout {
+		return decideCancel
+	}
+	switch s := strings.ToLower(strings.TrimSpace(resp.Payload.Response)); {
+	case strings.HasPrefix(s, "overwrite"), s == "o", s == "y", s == "yes", s == "replace":
+		return decideOverwrite
+	case strings.HasPrefix(s, "rename"), strings.HasPrefix(s, "new"), s == "r":
+		return decideRename
+	default:
+		return decideCancel
+	}
 }
 
 // ---------- skill:ref ----------

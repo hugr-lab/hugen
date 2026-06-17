@@ -421,8 +421,38 @@ Use this when the work is worth keeping (the user said "every…",
 "regularly", "make a task that…") — not for a single one-off,
 which is just a mission (or chat).
 
+### Path E — change or delete an EXISTING task
+
+The user wants to FIX, UPDATE, or REMOVE a task that already exists —
+a wrong value, a different output, a query bug, or retiring it. A task
+is just a task-eligible skill, so this is the authoring surface, NOT a
+new build (Path D) and NOT a mission. Load `_skill_builder` — it owns
+the bundle format and the edit / remove flow — then follow it:
+
+- **Targeted edit** (a query predicate, a parameter, the output shape,
+  a prose step): `skill:export("<task-name>")` copies the bundle into
+  your workspace → edit the file that's wrong (e.g.
+  `references/query.graphql`, `scripts/*.py`, or `SKILL.md`) → check it
+  with `skill:validate` → re-register with `skill:save(bundle_dir,
+  overwrite:true)`. The user asked for the change, so `overwrite:true`
+  is the authorised replace. Confirm the change back to the user.
+- **Delete**: `skill:uninstall("<task-name>")` — removes it from the
+  store entirely. Destructive and approval-gated; the user confirms at
+  the modal.
+
+Keep the edit minimal — change ONLY what the user named, and re-save
+under the SAME name (overwrite). For a wholesale rework (the task
+should do something materially different), prefer rebuilding via Path D
+over a sprawling in-place edit.
+
 ### Decision tree (apply in order)
 
+0. Does the user want to CHANGE or DELETE a task/skill that ALREADY
+   exists — fix it, update its output, correct a query, retire it?
+   (They name or point at an existing task, not "make a new one.")
+   - **Yes** → Path E (load `_skill_builder`; edit-overwrite or
+     uninstall). This is NOT Path D — Path D is only for net-new tasks.
+   - **No** → continue.
 1. Did the user name a future time / cadence?
    ("remind me", "every morning", "in 30 minutes", or their
    equivalents in the user's language.)

@@ -111,14 +111,17 @@ func (e *Extension) ReportStatus(ctx context.Context, state extension.SessionSta
 	// catalogue so the UI can show "this is the cost of skills
 	// you actually loaded" separately from "this is what the
 	// model sees as the discovery menu".
-	loadedTokens, catalogTokens := h.AdvertiseSplit()
+	loadedTokens, catalogTokens, taskTokens := h.AdvertiseSplit()
 	if loadedTokens > 0 {
 		body["loaded_skill_tokens"] = loadedTokens
 	}
 	if catalogTokens > 0 {
 		body["available_skill_tokens"] = catalogTokens
 	}
-	if total := loadedTokens + catalogTokens; total > 0 {
+	if taskTokens > 0 {
+		body["available_task_tokens"] = taskTokens
+	}
+	if total := loadedTokens + catalogTokens + taskTokens; total > 0 {
 		// β legacy field — kept for adapters that haven't
 		// learned the split shape yet.
 		body["advertise_tokens"] = total
@@ -363,7 +366,22 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 		parts = append(parts, tags)
 	}
 	out := strings.Join(parts, "\n\n")
-	h.SetCatalogTokens(extension.EstimateTokens(out))
+	// Split the `## Available tasks` block out of the catalogue
+	// estimate so the context-budget UI shows the task menu's cost on
+	// its own line. Both reflect what's ACTUALLY rendered this turn:
+	// in the db-2 ranked path that's the SHOWN subset (top-N ∪ pinned),
+	// not the full catalogue; only the no-recap fallback renders the
+	// full List. catalogTokens is then the skills catalogue + loaded-
+	// skill meta + tag advice; taskCatalogTokens is the task block.
+	taskTokens := 0
+	if taskCat != "" {
+		taskTokens = extension.EstimateTokens(taskCat)
+	}
+	catalogTokens := extension.EstimateTokens(out) - taskTokens
+	if catalogTokens < 0 {
+		catalogTokens = 0
+	}
+	h.SetCatalogTokens(catalogTokens, taskTokens)
 	return out
 }
 

@@ -4,7 +4,8 @@ description: >
   Mission that BUILDS a new reusable task skill from the user's
   intent. Researcher pins intent + checks for an existing match;
   planner decomposes; author workers compose the query + script;
-  assembler writes the bundle; registrar saves it; checker validates;
+  the assembler builds the bundle, confirms it with the user, and
+  registers it; checker validates;
   synthesizer confirms. Use when no existing task-eligible skill
   covers the request and the user wants a repeatable / schedulable
   task. Creation only — scheduling is a separate step.
@@ -75,7 +76,7 @@ metadata:
                 > value), the data model (derivable facts only), or the user's
                 > answer to a clarification asked THIS stage. A section you cannot
                 > ground is an open question — ask, never guess. Downstream roles
-                > build EXACTLY this contract; the registrar restates it to the
+                > build EXACTLY this contract; the assembler restates it to the
                 > user before saving.
 
                 ## What the task produces per run
@@ -228,19 +229,19 @@ metadata:
             Keep the two-author shape when the fetch is a standalone
             tool call with no code step, or the query must be
             validated on its own.
-          - **Wave 2 — `skill-assembler`** with `depends_on` on the
-            wave-1 author handoffs. Builds the bundle dir + self-
-            validates it (`skill:save validate_only`); hands off the
-            `bundle_dir`.
-          - **Wave 3 — `task-registrar`** with `depends_on` on the
-            assembler. Confirms the result with the user, then
-            `skill:save(bundle_dir)`; decides catalogue placement. Do
-            NOT set `skip_check` on this wave — the checker validates
-            the saved bundle.
+          - **Wave 2 — `task-assembler`** with `depends_on` on the
+            wave-1 author handoffs. ONE role does the whole tail:
+            builds the bundle dir, self-validates it with
+            `skill:validate`, runs the pre-save dedup gate, confirms
+            the result with the user, then registers it with
+            `skill:save(bundle_dir)`, and decides catalogue placement.
+            Build and register are ONE step — there is no separate
+            registrar wave (a split confirm-role fired out of order and
+            clobbered an existing task; B54). Do NOT set `skip_check`
+            on this wave — the checker validates the saved bundle.
 
           A trivial task (fixed prose, no query, no script) can
-          collapse to wave-1 `skill-assembler` → wave-2
-          `task-registrar`.
+          collapse to a single wave-1 `task-assembler`.
 
           **Inputs propagation.** Lift every entry from [Resolved
           user inputs] into the relevant worker's `inputs.<key>`
@@ -470,7 +471,7 @@ metadata:
                their meaning, `output_target`, `data_skill`,
                `script_skill` (when relevant), and any catalogue
                choice. The planner propagates these into workers,
-               and the registrar restates the contract in its
+               and the assembler restates the contract in its
                pre-save confirmation.
              - `ac_proposals` (optional): proposed acceptance
                criteria grounded in the user's answers.
@@ -611,23 +612,25 @@ metadata:
           - provider: mission
             tools: [get_handoff, get_research]
 
-      - name: skill-assembler
+      - name: task-assembler
         description: >
-          Builds the complete task-skill bundle as FILES in the
-          mission workspace, then self-validates it. Spawned after
-          the authoring wave; reads the query-author / script-author
-          bodies via [Resolved depends_on] and the [Resolved user
-          inputs] the planner passed (task_name, task_goal, per-run
-          input keys, output_target, allowed tools).
+          Builds the task-skill bundle, confirms it with the user, and
+          REGISTERS it — all in one role. Build and register are a
+          single step (B54: a split build-then-register seam let a
+          confirm-role fire out of order and clobber an existing task).
+          Spawned after the authoring wave; reads the query-author /
+          script-author bodies via [Resolved depends_on] and the
+          [Resolved user inputs] the planner passed (task_name,
+          task_goal, per-run input keys, output_target, allowed tools).
 
           `_skill_builder` is loaded for you — it owns the manifest
-          format, the bundle layout, and the `skill:save` call.
-          Consult its references with `skill:ref(skill:
-          "_skill_builder", ref: "manifest-format")` (and
-          `bundle-layout`, `tool-discovery`, `save-call`) and follow
-          its authoring loop. Do NOT register the skill — you only
-          build + validate; the registrar saves it after the user
-          confirms.
+          format, the bundle layout, and the save call. Consult its
+          references with `skill:ref(skill: "_skill_builder", ref:
+          "manifest-format")` (and `bundle-layout`, `tool-discovery`,
+          `save-call`) and follow its authoring loop. The two authoring
+          tools are distinct: `skill:validate` CHECKS a bundle without
+          registering (iterate with it); `skill:save` REGISTERS. You
+          hold both.
 
           1. **Read the contract.** `bash.read_file
              research/requirements.md` — the produced SKILL.md's
@@ -667,48 +670,27 @@ metadata:
              - `bundle/scripts/report.py` — the script-author's
                script, when one was authored.
 
-          3. **Self-validate.** `skill:save(bundle_dir: "bundle",
-             validate_only: true)`. Fix every reported problem in the
-             files (task-block placement, unknown tool names, parse
-             errors) and re-run until it returns `valid: true`.
+          3. **Validate (no write).** `skill:validate(bundle_dir:
+             "bundle")`. Fix every reported problem in the files
+             (task-block placement, unknown tool names, parse errors)
+             and re-run until it returns `valid: true`. This tool
+             CANNOT register — it only checks.
 
-          Emit ONE `handoff` body with: `bundle_dir: "bundle"`,
-          `task_name`, `validated: true`, the
-          `allowed_tools_default` list, a one-line `result_summary`
-          of what the task produces, and a `memory_summary`. Emit
-          `status: "error"` if a required author handoff is missing
-          or validation cannot be made to pass.
-        intent: default
-        can_spawn: false
-        autoload_skills: [_mission_worker, _skill_builder]
-        tools:
-          - provider: bash-mcp
-            tools: [bash.shell, bash.write_file, bash.read_file, bash.list_dir]
-          - provider: mission
-            tools: [get_handoff, get_research]
-
-      - name: task-registrar
-        description: >
-          Confirms the assembled bundle with the user, persists it,
-          and decides catalogue placement. Reads the skill-assembler
-          handoff via [Resolved depends_on] — it carries `bundle_dir`
-          (the already-built, self-validated bundle directory in the
-          workspace), `task_name`, and `allowed_tools_default`.
-
-          1. **Pre-save dedup gate — last check before the write.**
+          4. **Pre-save dedup gate — last check before the write.**
              The researcher searched at the start, but a build is long
              and a matching task may already exist (or have been saved
              meanwhile). Call `task:search(query: <task_name + what it
-             produces>)` once more. If an
-             equivalent task already exists and [Resolved user inputs]
-             did NOT authorise replacing it, do NOT save a duplicate —
-             emit a TERMINAL reuse handoff (`done: true` with
-             `reused_existing: <name>` and `saved_name: null`, no
-             save), so the synthesizer tells the user to run that one
-             instead. This is a SUCCESS (the work already exists), not
-             a failure to fix — do not retry or rename. Only proceed to
-             confirm + save when nothing equivalent is registered.
-          2. **Confirm the RESULT with the user — mandatory, BEFORE
+             produces>)` once more. If an equivalent task already
+             exists and [Resolved user inputs] did NOT authorise
+             replacing it, do NOT save a duplicate — emit a TERMINAL
+             reuse handoff (`done: true` with `reused_existing: <name>`
+             and `saved_name: null`, no save), so the synthesizer tells
+             the user to run that one instead. This is a SUCCESS (the
+             work already exists), not a failure — do not retry or
+             rename. Only proceed to confirm + save when nothing
+             equivalent is registered.
+
+          5. **Confirm the RESULT with the user — mandatory, BEFORE
              saving.** The plan approval covered the PLAN; this gate
              confirms the PRODUCT. Call `session:inquire(type:
              "approval")` with a short `question` ("Save task
@@ -721,49 +703,49 @@ metadata:
              per-run inputs (key — meaning), the
              `allowed_tools_default` list, and where it lands (local
              store / catalogue note). On `approved: false`, do NOT
-             save — emit `status: "error"` quoting the user's
-             `reason` verbatim so the planner amends the relevant
-             author / assembler and re-runs this gate.
-          3. **Register.** `skill:save(bundle_dir: <bundle_dir from
-             the assembler handoff>)`. The bundle was already
-             validated by the assembler, so this is the real write;
-             it parses, validates again, registers, and auto-loads.
-             On an `ErrSkillExists` collision, do NOT overwrite
-             unless [Resolved user inputs] explicitly authorised
-             replacing an existing task — otherwise emit `status:
-             "error"` noting the collision so the planner can rename.
-             Within an amend retry of THIS save you may set
-             `overwrite: true`. If save returns a validation error
-             (task-block placement, unknown tool name) the assembler
-             missed, emit `status: "error"` with the exact message so
-             the planner re-runs the assembler.
-          4. Confirm it loaded — the save result lists the registered
-             `name` + `files`; `skill:files(<name>)` shows the bundle
-             on disk.
-          5. **Catalogue placement.** In local/personal mode the
-             saved skill lives in the local store and is immediately
-             runnable via `task:execute_task` (or `task:<name>` once a
-             skill admits it) and schedulable — there is no separate
-             publish step. If [Resolved user inputs] named a shared
-             catalogue to publish to, note it in your handoff for the
-             synthesizer to surface (remote publish is not performed
-             here).
-          6. Emit a `handoff` body with: `saved_name`, `bundle_dir`,
-             `files` (saved relative paths from the save result),
-             `inputs_schema_ok` (manifest parsed + schema present),
-             `user_confirmed` (true — the step-2 approval),
-             `placement` (local | <catalogue note>),
-             `reused_existing` (the existing task name when the step-1
-             dedup gate matched and nothing was saved; null otherwise),
-             `memory_summary`.
+             save — emit `status: "error"` quoting the user's `reason`
+             verbatim so the planner amends the relevant author and
+             re-runs this gate.
+
+          6. **Register.** `skill:save(bundle_dir: "bundle")` — the
+             real write: it re-validates, registers, and auto-loads.
+             Do NOT pass `overwrite` unless [Resolved user inputs]
+             explicitly authorised replacing an existing task: on a
+             name collision the tool ITSELF asks the user (overwrite /
+             new name / cancel) and never clobbers silently. Honour the
+             outcome — if save reports the user chose a NEW name,
+             change `name:` in `bundle/SKILL.md` to a distinct name and
+             re-save; if cancelled, emit `status: "error"`. If save
+             returns a validation error you missed, fix the files and
+             re-save. Then confirm it loaded — the save result lists
+             the registered `name` + `files`; `skill:files(<name>)`
+             shows the bundle on disk.
+
+          7. **Catalogue placement.** In local/personal mode the saved
+             skill lives in the local store and is immediately runnable
+             via `task:execute_task` (or `task:<name>` once a skill
+             admits it) and schedulable — there is no separate publish
+             step. If [Resolved user inputs] named a shared catalogue
+             to publish to, note it in your handoff for the synthesizer
+             to surface (remote publish is not performed here).
+
+          Emit a `handoff` body with: `saved_name`, `bundle_dir`,
+          `files` (saved relative paths from the save result),
+          `inputs_schema_ok` (manifest parsed + schema present),
+          `user_confirmed` (true — the step-5 approval), `placement`
+          (local | <catalogue note>), `reused_existing` (the existing
+          task name when the step-4 dedup gate matched and nothing was
+          saved; null otherwise), `memory_summary`. Emit `status:
+          "error"` if a required author handoff is missing or the save
+          cannot be made to succeed.
         intent: default
         can_spawn: false
-        autoload_skills: [_mission_worker]
+        autoload_skills: [_mission_worker, _skill_builder]
         tools:
           - provider: bash-mcp
-            tools: [bash.read_file, bash.list_dir]
+            tools: [bash.shell, bash.write_file, bash.read_file, bash.list_dir]
           - provider: skill
-            tools: [save, load, files, ref]
+            tools: [validate, save, load, files, ref]
           # task:search = the pre-save dedup gate (find an equivalent
           # built task before writing a duplicate).
           - provider: task
@@ -775,7 +757,7 @@ metadata:
 
       - name: checker
         description: >
-          Verdict-emitting role spawned after the registrar wave.
+          Verdict-emitting role spawned after the assembler wave.
           Reads [Handoffs to check] + [Plan context] and emits ONE
           kind=verdict handoff. Validates that the task skill the
           mission built is actually usable.
@@ -788,7 +770,7 @@ metadata:
               missing/invalid, allowed_tools_default empty or over-
               broad, the query never validated, the script never
               smoke-ran green. The next planner re-spawns the
-              relevant author / assembler / registrar to fix it.
+              relevant author / assembler to fix it.
             - inquire  → user input needed (rare here; e.g. a name
               collision the user must resolve). Call
               `session:inquire` BEFORE the handoff.
@@ -797,13 +779,13 @@ metadata:
               the user confirmed the bundle before save, and (when
               applicable) its query validated and its script
               smoke-ran green. Routes to synthesis. ALSO finish when
-              the registrar's pre-save dedup gate matched
+              the assembler's pre-save dedup gate matched
               (`reused_existing` set, nothing saved) — an equivalent
               task already exists, so there is nothing more to build.
 
-          Confirm from the registrar + author handoffs that the
+          Confirm from the assembler + author handoffs that the
           evidence is present: `inputs_schema_ok`, `user_confirmed`
-          (the registrar's pre-save approval), a green
+          (the assembler's pre-save approval), a green
           `smoke_result` if a script was authored, a validated query
           if one was authored. Missing evidence → `amend`, do not
           `finish` on faith.
@@ -839,7 +821,7 @@ metadata:
 
           Report:
           - The task skill name that was created — OR, if research's
-            move-zero search or the registrar's pre-save dedup gate
+            move-zero search or the assembler's pre-save dedup gate
             (`reused_existing`) found an existing match, that the user
             should reuse THAT task instead (name it); nothing new was
             built.
@@ -854,7 +836,7 @@ metadata:
           - The `allowed_tools_default` list (the tools that will be
             auto-approved when the task runs headless under a
             schedule), and any catalogue-placement note from the
-            registrar.
+            assembler.
 
           Quote the saved name + bundle paths verbatim. Mention any
           unresolved `amend` gap. Tight — a short paragraph or a
@@ -910,12 +892,15 @@ user to reuse it instead of rebuilding.
    approves the plan once). It schedules the authoring wave.
 3. **Do waves.** `query-author` and/or `script-author` (parallel)
    author + validate the query / script by loading the
-   researcher-named skills. `skill-assembler` builds the bundle dir
-   (under `_skill_builder`'s format) and self-validates it with
-   `skill:save validate_only`. `task-registrar` confirms the
-   assembled bundle with the user (one approval modal — the plan
-   approval covered the plan; this confirms the product), then
-   `skill:save(bundle_dir)` + decides placement.
+   researcher-named skills. `task-assembler` then does the whole tail
+   in ONE role: builds the bundle dir (under `_skill_builder`'s
+   format), checks it with `skill:validate` (no write), runs the
+   pre-save dedup gate, confirms the product with the user (one
+   approval modal — the plan approval covered the plan; this confirms
+   the product), and registers it with `skill:save(bundle_dir)` +
+   decides placement. Build and register are one step — a name
+   collision is resolved by `skill:save`'s own user prompt, never a
+   silent overwrite (B54).
 4. **Check.** `checker` confirms the saved bundle is valid (schema
    present, user confirmed pre-save, query validated, script
    smoke-ran green) and routes `finish` / `amend`.
