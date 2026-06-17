@@ -165,8 +165,9 @@ type Schedule interface {
 type RegisterOption func(*registerOptions)
 
 type registerOptions struct {
-	timeout   time.Duration
-	startPaused bool
+	timeout        time.Duration
+	startPaused    bool
+	initialFireSeq int
 }
 
 // WithFireTimeout overrides the per-fire context deadline.
@@ -184,6 +185,21 @@ func WithFireTimeout(d time.Duration) RegisterOption {
 func WithStartPaused() RegisterOption {
 	return func(o *registerOptions) {
 		o.startPaused = true
+	}
+}
+
+// WithInitialFireSeq seeds the registration's fire counter so the FIRST
+// fire of this registration reports FireSeq == n (n clamped to ≥1). A
+// recurring schedule that re-registers a fresh one-shot per cycle (the
+// scheduler ext's pattern) otherwise restarts the counter at 1 every
+// cycle, so a `count` end-condition (completedSeq >= N) never advances.
+// Seeding from the persisted planned-fire seq keeps FireSeq monotonic
+// across re-registrations.
+func WithInitialFireSeq(n int) RegisterOption {
+	return func(o *registerOptions) {
+		if n > 1 {
+			o.initialFireSeq = n
+		}
 	}
 }
 

@@ -16,11 +16,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	taskext "github.com/hugr-lab/hugen/pkg/extension/task"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/scheduler/runner"
 	schedstore "github.com/hugr-lab/hugen/pkg/scheduler/store"
@@ -62,6 +64,13 @@ type Extension struct {
 	mu     sync.RWMutex
 	host   SessionHost
 	runner runner.Runner
+
+	// runRecipe is the shared recipe-execute helper the spawn-fire path
+	// delegates to (the task extension's RunRecipe). Wired at boot via
+	// BindRunRecipe once both extensions exist. Nil until then — a
+	// spawn fire dispatched before wiring fails fast with a terminal
+	// log rather than silently never kicking the child.
+	runRecipe func(context.Context, taskext.RunParams) (taskext.RunResult, error)
 
 	// bootstrappedSessions tracks sessions whose owned tasks have
 	// already been registered with the Runner, so InitState (called
@@ -124,6 +133,22 @@ func (e *Extension) Bind(host SessionHost, r runner.Runner) {
 	}
 	if r != nil {
 		e.runner = r
+	}
+}
+
+// BindRunRecipe installs the shared recipe-execute helper the spawn-fire
+// path delegates to — the task extension's RunRecipe, which spawns the
+// recipe child, scopes its skill surface, pre-loads the recipe body,
+// KICKS the first turn, and waits for termination. Wired at boot once
+// both extensions exist (pkg/runtime/runner.go), after Bind. The kick is
+// the load-bearing half: the prior cron-as-subagent path spawned a child
+// but never delivered a first UserMessage, so the model loop never fired
+// (B46). Idempotent overwrite; a nil fn leaves the existing reference.
+func (e *Extension) BindRunRecipe(fn func(context.Context, taskext.RunParams) (taskext.RunResult, error)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if fn != nil {
+		e.runRecipe = fn
 	}
 }
 
@@ -284,11 +309,23 @@ func (e *Extension) registerTask(ctx context.Context, row schedstore.TaskRow) er
 	if planned == nil {
 		return fmt.Errorf("task %s has no planned row in task_log", row.ID)
 	}
-	sched := runner.Once(planned.PlannedAt)
 
 	deps := e.fireDeps()
+	// Clamp an already-overdue planned fire to now so a fire that came
+	// due while the process was down (or one a long previous fire pushed
+	// past — see clampOverdue) still fires on bootstrap instead of being
+	// silently dropped by runner.Once(past) (onceSchedule.Next returns
+	// the zero time for a past instant). Serialised per task by the
+	// runner's in-flight guard.
+	sched := runner.Once(clampOverdue(planned.PlannedAt, deps))
+
 	fn := buildFireFn(row, deps)
-	opts := []runner.RegisterOption{}
+	// Seed the runner's fire counter from the persisted planned seq so a
+	// recurring task that re-registers a fresh one-shot per cycle keeps a
+	// MONOTONIC FireSeq — without this every fire reports seq=1 and a
+	// `count` end-condition never advances (the re-register resets the
+	// runner's internal counter each cycle).
+	opts := []runner.RegisterOption{runner.WithInitialFireSeq(planned.FireSeq)}
 	if row.Status == schedstore.StatusPaused {
 		opts = append(opts, runner.WithStartPaused())
 	}
@@ -312,6 +349,8 @@ func (e *Extension) fireDeps() fireDeps {
 		stashFire:      e.stashFire,
 		releaseFire:    e.releaseFire,
 		takeSpawnToken: e.takeSpawnToken,
+		runRecipe:      e.runRecipe,
+		now:            time.Now,
 	}
 }
 
@@ -359,7 +398,15 @@ func (e *Extension) reRegisterFn() func(string, runner.Schedule) error {
 		if err != nil {
 			return err
 		}
-		return deps.runner.Register(context.Background(), runnerNameForTask(taskID), sched, fn)
+		// Seed the next registration's fire counter from the planned row
+		// maybeScheduleNext just wrote (FireSeq = prevSeq+1) so the counter
+		// stays monotonic across the per-cycle re-register — otherwise a
+		// fresh registration restarts at seq=1 and `count` never advances.
+		var opts []runner.RegisterOption
+		if planned, perr := e.store.LatestPlannedFire(context.Background(), taskID); perr == nil && planned != nil {
+			opts = append(opts, runner.WithInitialFireSeq(planned.FireSeq))
+		}
+		return deps.runner.Register(context.Background(), runnerNameForTask(taskID), sched, fn, opts...)
 	}
 }
 
@@ -603,6 +650,39 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 		if sk.Manifest.Hugen.Task.Kind == skill.TaskKindMission {
 			return toolErr("not_yet_implemented", "mission-shape tasks are reserved — MVP supports kind=worker only")
 		}
+
+		// B47 step 3 — a scheduled task fires HEADLESS: no human at fire
+		// time to supply inputs or a goal. Both must be resolved + frozen
+		// NOW, or the schedule is unfireable (a bare skill_ref is not a
+		// run). Reject up front so root re-asks the user instead of
+		// persisting a schedule that fails / fires idle every tick. Only
+		// spawn-kind runs the skill; wake-kind nudges the owner and
+		// carries no inputs/goal.
+		if in.Kind == schedstore.KindSpawn {
+			if miss := missingRequiredInputs(sk.Manifest.Hugen.Task.InputsSchema, in.Inputs); len(miss) > 0 {
+				return toolErr("missing_inputs", fmt.Sprintf(
+					"task %q requires inputs [%s] — a scheduled task has no fire-time prompt, so set them in `inputs` now",
+					in.SkillRef, strings.Join(miss, ", ")))
+			}
+			// Freeze the launch goal: explicit `goal` wins, else the
+			// task's declared goal_summary. Resolved NOW so every fire
+			// has a kick body (the cron path uses Spec.Goal verbatim).
+			if strings.TrimSpace(in.Goal) == "" {
+				in.Goal = strings.TrimSpace(sk.Manifest.Hugen.Task.GoalSummary)
+			}
+			if in.Goal == "" {
+				return toolErr("missing_goal", fmt.Sprintf(
+					"task %q has no goal — set `goal`, or the task must declare a goal_summary", in.SkillRef))
+			}
+			// Freeze the task's standardized tool set when the caller did
+			// not narrow it: a scheduled task fires headless, and the cron
+			// path blanket-auto-approves its tools, so the frozen list is
+			// the audit/visibility record of what the unattended fire may
+			// run (§5.1). An explicit allowed_tools on the call wins.
+			if len(in.AllowedTools) == 0 {
+				in.AllowedTools = append([]string(nil), sk.Manifest.Hugen.Task.AllowedToolsDefault...)
+			}
+		}
 	}
 
 	state, ok := extension.SessionStateFromContext(ctx)
@@ -678,6 +758,31 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 		return nil, fmt.Errorf("schedule:create: marshal response: %w", err)
 	}
 	return body, nil
+}
+
+// missingRequiredInputs reports which `required` keys a task's
+// inputs_schema declares but the supplied inputs blob does not provide
+// (absent or explicit null). A nil/absent `required` array — or a task
+// with no inputs_schema — yields no missing keys. The schema's `required`
+// decodes to []any (JSON/YAML generic decode); non-string / empty
+// entries are skipped defensively. Order follows the schema for stable
+// error messages. B47 step 3.
+func missingRequiredInputs(schema, inputs map[string]any) []string {
+	req, ok := schema["required"].([]any)
+	if !ok {
+		return nil
+	}
+	var missing []string
+	for _, r := range req {
+		key, ok := r.(string)
+		if !ok || key == "" {
+			continue
+		}
+		if v, present := inputs[key]; !present || v == nil {
+			missing = append(missing, key)
+		}
+	}
+	return missing
 }
 
 // listInput / listOutput shape the `schedule:list` surface.

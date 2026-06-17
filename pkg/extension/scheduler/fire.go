@@ -11,6 +11,7 @@ import (
 	"sort"
 	"time"
 
+	taskext "github.com/hugr-lab/hugen/pkg/extension/task"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	tplpkg "github.com/hugr-lab/hugen/pkg/runtime/template"
 	"github.com/hugr-lab/hugen/pkg/scheduler/runner"
@@ -113,6 +114,16 @@ type fireDeps struct {
 	logger     *slog.Logger
 	registerFn func(taskID string, sched runner.Schedule) error
 	pauseFn    func(taskID string) error
+
+	// runRecipe is the shared execute helper (task ext's RunRecipe) the
+	// spawn-fire path delegates spawn → kick → wait to. Nil until
+	// BindRunRecipe wires it; dispatchSpawnFire fails fast when unset.
+	runRecipe func(context.Context, taskext.RunParams) (taskext.RunResult, error)
+
+	// now returns the current time for the overdue-refire clamp in
+	// maybeScheduleNext. Nil falls back to time.Now; tests inject a
+	// fixed clock so the clamp is deterministic.
+	now func() time.Time
 
 	// stashFire / releaseFire are the per-fire FireContext
 	// rendezvous between dispatchSpawnFire (writer) and
@@ -310,9 +321,38 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 		renderedGoal = task.Spec.Goal
 	}
 
+	// The spawn-fire delegates spawn → scope → pre-load → KICK → wait to
+	// the shared task-ext helper, so the cron child runs through the
+	// exact same path as an ad-hoc `task:<recipe>` launch. RunRecipe (or
+	// the skill manager) must be wired; a fire that lands before
+	// BindRunRecipe fails fast rather than spawning a child it can never
+	// kick.
+	if deps.runRecipe == nil || deps.skills == nil {
+		err := fmt.Errorf("scheduler: spawn-fire dispatched before RunRecipe/skills wiring")
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
+			ErrorMessage: err.Error(),
+			Reason:       "spawn_unavailable",
+		}))
+		return runner.Outcome{ErrorMessage: err.Error()}, err
+	}
+
+	// Resolve the recipe skill so RunRecipe can scope the child's skill
+	// surface to the manifest whitelist + pre-load the recipe body.
+	// Drift was already checked above; a Get failure here means the
+	// skill vanished in the gap — pause-worthy, surface as skill_changed.
+	sk, serr := deps.skills.Get(ctx, task.SkillRef)
+	if serr != nil {
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
+			ErrorMessage: serr.Error(),
+			Reason:       schedstore.PauseSkillChanged,
+		}))
+		return runner.Outcome{ErrorMessage: serr.Error()}, serr
+	}
+
 	// Stash FireContext under a spawn-name token so the scheduler's
 	// SubagentSpawnApplier can stamp it on the child's state BEFORE
-	// the first task UserMessage lands in the child's inbox.
+	// the first task UserMessage lands in the child's inbox. RunRecipe
+	// spawns under this exact name, so the applier rendezvous holds.
 	// Monotonic counter keeps the token unique across concurrent
 	// fires; sanitisation by pkg/session preserves the bare alnum +
 	// dash payload (well under the 32-char Name cap).
@@ -320,47 +360,60 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 	deps.stashFire(spawnName, fireCtx)
 	defer deps.releaseFire(spawnName)
 
-	child, err := owner.Spawn(ctx, session.SpawnSpec{
-		Name:   spawnName,
-		Skill:  task.SkillRef,
-		Task:   renderedGoal,
-		Inputs: spawnInputs,
+	// CountAsUse stays false: a headless cron tick is not a model-driven
+	// launch, so it must not feed the recipe-reuse bandit (only chat /
+	// mission-worker launches count). The Runner's per-fire timeout
+	// (DefaultFireTimeout 30m) caps the wait via ctx; RunRecipe returns
+	// a context error on cancellation, which we map to fire_timeout.
+	res, rerr := deps.runRecipe(ctx, taskext.RunParams{
+		Anchor:    owner,
+		Skill:     sk,
+		Recipe:    task.SkillRef,
+		SpawnName: spawnName,
+		TaskBody:  renderedGoal,
+		Inputs:    spawnInputs,
+		// Pin the recipe child to WORKER tier. Without this it spawns at
+		// depth 1 (child of the owner root) and TierFromDepth(1) defaults
+		// it to MISSION — so a leaf recipe executor would get mission/PDCA
+		// semantics (planner/checker prompt, no leaf execution). Matches
+		// the task:<recipe> + execute_task paths.
+		Tier: skill.TierWorker,
 		// Persist origin metadata on the child row for liveview /
 		// audit grouping by source task without rejoining task_log.
 		Metadata: map[string]any{
 			"cron_task_id":  task.ID,
 			"cron_fire_seq": fire.FireSeq,
 		},
+		CountAsUse: false,
+		// A scheduled task is pre-approved by the user scheduling it, and
+		// there is no operator at fire time — so blanket auto-approve its
+		// tools. Without this every requires_approval call is denied
+		// headless and the worker loops without progress (it can't ask).
+		AutoApproveTools: true,
+		// Tag the result AsyncNotify: the fire spawns into an IDLE owner
+		// root, so its terminal SubagentResult must arm the auto-summary
+		// turn or the model never surfaces it (the result lands in
+		// history but no turn kicks to show the user). Mirrors an async
+		// mission's completion.
+		RenderMode: protocol.SubagentRenderAsyncNotify,
 	})
-	if err != nil {
+	if rerr != nil {
+		reason := "spawn_failed"
+		if errors.Is(rerr, context.Canceled) || errors.Is(rerr, context.DeadlineExceeded) {
+			reason = "fire_timeout"
+		}
 		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
-			ErrorMessage: err.Error(),
-			Reason:       "spawn_failed",
+			ErrorMessage: rerr.Error(),
+			Reason:       reason,
 		}))
-		return runner.Outcome{ErrorMessage: err.Error()}, err
-	}
-
-	// Wait for the subagent to terminate. close_turn (or any
-	// model-side SessionClose / mission:finish equivalent) drives
-	// teardown; sess.Done() closes when the goroutine exits after
-	// emitting SubagentResult to the parent. The Runner's per-fire
-	// timeout (DefaultFireTimeout 30m) caps the wait via ctx.Done.
-	select {
-	case <-child.Done():
-	case <-ctx.Done():
-		outErr := ctx.Err()
-		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
-			ErrorMessage: outErr.Error(),
-			Reason:       "fire_timeout",
-		}))
-		return runner.Outcome{ErrorMessage: outErr.Error()}, outErr
+		return runner.Outcome{ErrorMessage: rerr.Error()}, rerr
 	}
 
 	outcome := &schedstore.TaskOutcome{
 		Summary: fmt.Sprintf("cron fire %d completed", fire.FireSeq),
 	}
 	completed := terminalLog(task, fire, schedstore.LogEventCompleted, outcome)
-	completed.SessionID = child.ID()
+	completed.SessionID = res.ChildID
 	appendLogSafely(ctx, deps, completed)
 	maybeScheduleNext(ctx, task, fire, deps)
 	return runner.Outcome{Summary: outcome.Summary}, nil
@@ -518,6 +571,54 @@ func terminalLog(task schedstore.TaskRow, fire runner.FireMeta, eventType string
 	}
 }
 
+// nowUTC returns the clamp clock for overdue re-fires — the injected
+// test clock when set, else wall-clock.
+func (deps fireDeps) nowUTC() time.Time {
+	if deps.now != nil {
+		return deps.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// overdueRefireMargin lifts an overdue re-fire a fixed step into the
+// FUTURE rather than to bare "now". The runner re-evaluates
+// sched.Next(s.nowFn()) at Register time — a LATER instant than this
+// clamp computes, because the appendLog + GetTask + LatestPlannedFire
+// round-trips run in between (a synchronous call chain, sub-second
+// locally). onceSchedule.Next drops a fire whose instant is strictly
+// before the evaluation clock (returns zero = "no further fires"), so a
+// clamp to bare "now" is already in the past — and silently dropped —
+// by the time Register sees it. The margin comfortably exceeds that
+// registration latency so the Once is still in the future when Register
+// evaluates it and fires on the next tick. Cost: an overdue re-fire is
+// delayed by the margin (+ up to one tick), negligible for cron.
+//
+// This is the INTERIM fix for the long-fire drop the count=2 dogfood
+// exposed (a task slower than its interval fired once then died). The
+// poll-dispatch refactor removes clampOverdue + Once entirely (fire on
+// planned_at <= now, no Schedule.Next drop) — see
+// spec-scheduler-poll-dispatch.md.
+const overdueRefireMargin = 2 * time.Second
+
+// clampOverdue lifts a next-fire instant to "now"+margin when it has
+// already passed. Recurring fires are SERIALISED (the runner won't
+// start the next fire while one is in flight — and a fire blocks on its
+// worker, which may run longer than the interval). So by the time a
+// long fire completes and re-registers, the arithmetic next instant
+// (prevPlanned + interval / cron step) can be in the past; lifting it
+// fires the fire ASAP instead of dropping it, so a task whose duration
+// exceeds its interval still runs its full count back-to-back.
+// Serialisation is intentional (it lets fire N+1 template its
+// goal/inputs off fire N's {{.PrevFire}} outcome); concurrent fires are
+// a future opt-in (backlog). See overdueRefireMargin for why the lift
+// targets now+margin, not bare now.
+func clampOverdue(next time.Time, deps fireDeps) time.Time {
+	if now := deps.nowUTC(); next.Before(now) {
+		return now.Add(overdueRefireMargin)
+	}
+	return next
+}
+
 // maybeScheduleNext computes the next planned instant from the
 // task's schedule, inserts the corresponding `planned` row, and
 // re-registers the fn under the new Once schedule so Runner fires
@@ -550,6 +651,8 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 			return
 		}
 		next := fire.PlannedAt.Add(d).UTC()
+		// End-condition is checked on the LOGICAL next (pre-clamp) so a
+		// count/until boundary isn't perturbed by a late catch-up.
 		if shouldEndAfter(task.Spec.EndCondition, fire.FireSeq, next) {
 			if err := deps.store.CancelTask(context.Background(), task.ID); err != nil {
 				deps.logger.Warn("scheduler: end-condition cancel",
@@ -557,6 +660,7 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 			}
 			return
 		}
+		next = clampOverdue(next, deps)
 		appendLogSafely(ctx, deps, schedstore.TaskLogEntry{
 			TaskID:    task.ID,
 			AgentID:   deps.agentID,
@@ -607,6 +711,7 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 			}
 			return
 		}
+		next = clampOverdue(next, deps)
 		appendLogSafely(ctx, deps, schedstore.TaskLogEntry{
 			TaskID:    task.ID,
 			AgentID:   deps.agentID,

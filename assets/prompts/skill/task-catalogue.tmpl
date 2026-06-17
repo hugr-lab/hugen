@@ -1,0 +1,6 @@
+## Available tasks
+
+Reusable work that already exists. Each is a built task you can run directly — prefer running one of these over hand-rolling or spawning a fresh mission to do work it already covers. Inspect a task's inputs with `task:describe(name)`, then run it with `task:execute_task(name, inputs)`; the result lands in this conversation.
+
+{{range .Tasks}}- `{{.Name}}` — {{.Description}}
+{{end}}

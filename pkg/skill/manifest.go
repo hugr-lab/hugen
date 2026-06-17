@@ -196,17 +196,6 @@ type HugenMetadata struct {
 	// branches. Phase 6.1d.
 	AllowedSkills []string `json:"allowed_skills,omitempty" yaml:"allowed_skills,omitempty"`
 
-	// RecipeCatalog marks the skill as a curated collection of
-	// task-eligible recipes (a category skill like `data_utils`):
-	// loading it admits its recipes' synthetic `task:*` tools into
-	// the catalogue. The skill extension surfaces flagged skills
-	// distinctly in the `## Available skills` block (a `(recipe
-	// catalog)` tag, sorted to the top) so the model prefers a
-	// tested recipe over hand-rolling the same job from raw tools.
-	// Purely declarative — the constitution carries the behavioural
-	// directive. Phase 6.1d.
-	RecipeCatalog bool `json:"recipe_catalog,omitempty" yaml:"recipe_catalog,omitempty"`
-
 	Intents   []string                  `json:"intents,omitempty"`
 	SubAgents []SubAgentRole            `json:"sub_agents,omitempty"`
 	Memory    map[string]MemoryCategory `json:"memory,omitempty"`
@@ -1404,7 +1393,29 @@ func (m *Manifest) validateHugen() error {
 			h.re = re
 		}
 	}
+
+	// A task-eligible skill surfaces as a synthetic `task:<name>` tool, so
+	// its name must not collide with the static task-provider tools
+	// (`task:search` / `task:describe` / `task:execute_task`) — a collision
+	// shadows the static tool in the catalogue and makes the recipe
+	// permanently mis-dispatched. Reject at the authoring boundary.
+	if m.Hugen.Task.Eligible {
+		if _, bad := reservedTaskToolNames[m.Name]; bad {
+			return fmt.Errorf("a task-eligible skill cannot be named %q — it collides with the built-in task:%s tool; choose another name: %w",
+				m.Name, m.Name, ErrReservedTaskName)
+		}
+	}
 	return nil
+}
+
+// reservedTaskToolNames are the static task-provider tool short-names a
+// task-eligible skill must not take (its synthetic `task:<name>` tool
+// would shadow them). Kept in sync with the toolName* consts in
+// pkg/extension/task.
+var reservedTaskToolNames = map[string]struct{}{
+	"search":       {},
+	"describe":     {},
+	"execute_task": {},
 }
 
 // ParseReader is a convenience wrapper around Parse for io.Reader.

@@ -293,6 +293,9 @@ func TestMaybeScheduleNext_CronRecomputes(t *testing.T) {
 		store:   store,
 		agentID: "agt_test",
 		logger:  slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
+		// Fixed clock BEFORE the next cron instant so the overdue clamp
+		// stays inert and the deterministic cron-math assertion holds.
+		now: func() time.Time { return planned },
 		registerFn: func(_ string, sched runner.Schedule) error {
 			// Extract the Once instant by probing just before it.
 			registered = append(registered, sched.Next(planned))
@@ -315,6 +318,69 @@ func TestMaybeScheduleNext_CronRecomputes(t *testing.T) {
 	}
 	if len(registered) != 1 || !registered[0].Equal(wantNext) {
 		t.Errorf("re-register schedule = %v, want one Once(%v)", registered, wantNext)
+	}
+}
+
+// TestMaybeScheduleNext_IntervalOverdueClampsToNow asserts the
+// long-fire fix: when a fire ran longer than the interval, the next
+// instant (prevPlanned + interval) is already in the past by the time
+// the fire completes and re-registers. Pre-fix runner.Once(past) returns
+// zero (onceSchedule.Next) and the fire is silently dropped — only one
+// launch ever happens. The clamp lifts it to "now" so it fires ASAP and
+// the schedule keeps its cadence (serialised, back-to-back).
+func TestMaybeScheduleNext_IntervalOverdueClampsToNow(t *testing.T) {
+	store := newFakeStore()
+	row := schedstore.TaskRow{
+		ID:           "tsk_overdue",
+		AgentID:      "agt_test",
+		Kind:         schedstore.KindSpawn,
+		Status:       schedstore.StatusActive,
+		ScheduleKind: schedstore.ScheduleInterval,
+		Spec: schedstore.TaskSpec{
+			Name:         "slow",
+			ScheduleSpec: "2m",
+			EndCondition: schedstore.TaskEndCondition{Kind: "until_cancel"},
+		},
+	}
+	planned := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := planned.Add(9 * time.Minute) // fire ran 9m on a 2m interval
+	if err := store.OpenTask(context.Background(), row, planned); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// The runner does NOT probe the Once at the clamp instant — it calls
+	// sched.Next(s.nowFn()) inside Register, a LATER instant than the
+	// clamp (the appendLog + GetTask + LatestPlannedFire round-trips run
+	// in between). Model that advance so the probe exercises the real
+	// drop the old same-instant probe masked: with a bare-now clamp,
+	// Once(now).Next(now+latency) returns zero and the fire is lost.
+	const registerLatency = time.Second // < overdueRefireMargin
+	var registered []time.Time
+	deps := fireDeps{
+		store:   store,
+		agentID: "agt_test",
+		logger:  slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
+		now:     func() time.Time { return now },
+		registerFn: func(_ string, sched runner.Schedule) error {
+			registered = append(registered, sched.Next(now.Add(registerLatency)))
+			return nil
+		},
+	}
+
+	maybeScheduleNext(context.Background(), row, runner.FireMeta{FireSeq: 1, PlannedAt: planned}, deps)
+
+	wantPlanned := now.Add(overdueRefireMargin)
+	pl, err := store.LatestPlannedFire(context.Background(), row.ID)
+	if err != nil || pl == nil {
+		t.Fatalf("LatestPlannedFire: %v (%v)", err, pl)
+	}
+	if !pl.PlannedAt.Equal(wantPlanned) {
+		t.Errorf("overdue next planned_at=%v, want now+margin %v", pl.PlannedAt, wantPlanned)
+	}
+	if len(registered) != 1 || registered[0].IsZero() {
+		t.Fatalf("overdue re-fire must register a non-zero (firing) Once even after register latency; got %v", registered)
+	}
+	if !registered[0].Equal(wantPlanned) {
+		t.Errorf("registered fire=%v, want now+margin %v", registered[0], wantPlanned)
 	}
 }
 

@@ -100,58 +100,29 @@ func TestCatalogList_RegisteredOnSkillProvider(t *testing.T) {
 	t.Errorf("skill:catalog_list not registered on provider")
 }
 
-func TestCatalogList_ListsAllSortedWithTaskMetadata(t *testing.T) {
+func TestCatalogList_ExcludesTasks(t *testing.T) {
 	ext, state := newCatalogListFixture(t)
 	got := callCatalogList(t, ext, state, `{}`)
-	if len(got.Skills) != 2 {
-		t.Fatalf("skills = %d, want 2: %+v", len(got.Skills), got.Skills)
+	// change-report is a built task → EXCLUDED; only plain-helper lists.
+	if len(got.Skills) != 1 || got.Skills[0].Name != "plain-helper" {
+		t.Fatalf("catalog_list = %+v, want only plain-helper (tasks excluded)", got.Skills)
 	}
-	// Sorted alphabetically: change-report before plain-helper.
-	cr := got.Skills[0]
-	ph := got.Skills[1]
-	if cr.Name != "change-report" || ph.Name != "plain-helper" {
-		t.Fatalf("unsorted: %q then %q", cr.Name, ph.Name)
-	}
-	if !cr.TaskEligible {
-		t.Errorf("change-report should be task_eligible")
-	}
-	if cr.TaskKind != "worker" {
-		t.Errorf("change-report task_kind = %q, want worker", cr.TaskKind)
-	}
-	if cr.GoalSummary == "" {
-		t.Errorf("change-report goal_summary empty")
-	}
-	if !cr.HasInputsSchema {
-		t.Errorf("change-report should report has_inputs_schema")
-	}
-	if !contains(cr.Keywords, "report") {
-		t.Errorf("change-report keywords = %v, want report", cr.Keywords)
-	}
-	// Non-task skill: eligible false, no task-only fields populated.
-	if ph.TaskEligible {
-		t.Errorf("plain-helper should NOT be task_eligible")
-	}
-	if ph.TaskKind != "" || ph.GoalSummary != "" || ph.HasInputsSchema {
-		t.Errorf("plain-helper leaked task fields: %+v", ph)
-	}
-}
-
-func TestCatalogList_TaskEligibleFilter(t *testing.T) {
-	ext, state := newCatalogListFixture(t)
-	got := callCatalogList(t, ext, state, `{"task_eligible":true}`)
-	if len(got.Skills) != 1 || got.Skills[0].Name != "change-report" {
-		t.Fatalf("task_eligible filter = %+v, want only change-report", got.Skills)
+	for _, s := range got.Skills {
+		if s.Name == "change-report" {
+			t.Errorf("task change-report leaked into skill catalogue")
+		}
 	}
 }
 
 func TestCatalogList_KeywordFilter(t *testing.T) {
 	ext, state := newCatalogListFixture(t)
-	// Keyword matches a mission keyword on change-report only.
+	// A keyword that ONLY matches the task (change-report's "diff"
+	// keyword) returns nothing — tasks are excluded from skill search.
 	got := callCatalogList(t, ext, state, `{"keyword":"DIFF"}`)
-	if len(got.Skills) != 1 || got.Skills[0].Name != "change-report" {
-		t.Fatalf("keyword=diff = %+v, want only change-report", got.Skills)
+	if len(got.Skills) != 0 {
+		t.Fatalf("keyword=diff = %+v, want empty (only a task matched)", got.Skills)
 	}
-	// Keyword matching a description substring (case-insensitive).
+	// Keyword matching a non-task skill's description (case-insensitive).
 	got = callCatalogList(t, ext, state, `{"keyword":"non-task"}`)
 	if len(got.Skills) != 1 || got.Skills[0].Name != "plain-helper" {
 		t.Fatalf("keyword=non-task = %+v, want only plain-helper", got.Skills)

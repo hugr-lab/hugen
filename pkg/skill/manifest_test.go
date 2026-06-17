@@ -133,6 +133,32 @@ func TestParse_NameValidation(t *testing.T) {
 	}
 }
 
+// TestParse_TaskEligibleReservedName rejects a task-eligible skill whose
+// name collides with a built-in task-provider tool (its synthetic
+// task:<name> would shadow the static tool). A non-task skill with the
+// same name is fine.
+func TestParse_TaskEligibleReservedName(t *testing.T) {
+	taskManifest := func(name string) string {
+		return "---\nname: " + name + "\ndescription: x\nlicense: MIT\n" +
+			"metadata:\n  hugen:\n    task:\n      eligible: true\n      kind: worker\n---\n"
+	}
+	for _, name := range []string{"search", "describe", "execute_task"} {
+		t.Run("task/"+name, func(t *testing.T) {
+			_, err := Parse([]byte(taskManifest(name)))
+			if !errors.Is(err, ErrReservedTaskName) {
+				t.Errorf("Parse(task %q) err = %v, want ErrReservedTaskName", name, err)
+			}
+		})
+		t.Run("nontask/"+name, func(t *testing.T) {
+			// A non-task skill may take the name (no synthetic tool).
+			src := "---\nname: " + name + "\ndescription: x\nlicense: MIT\n---\n"
+			if _, err := Parse([]byte(src)); err != nil {
+				t.Errorf("Parse(non-task %q) err = %v, want ok", name, err)
+			}
+		})
+	}
+}
+
 func TestParse_MissingDescriptionRejected(t *testing.T) {
 	src := `---
 name: ok

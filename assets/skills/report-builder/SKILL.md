@@ -40,16 +40,15 @@ metadata:
     # appears in the `## Available skills` catalogue.
     #
     # NOT task-eligible (deliberate, for now). A `task.eligible: true`
-    # skill is EXCLUDED from the loadable catalogue
-    # (capabilities.go:554) and is reachable only via worker autoload
-    # or a synthetic `task:<name>` tool that a separate recipe-catalog
-    # skill must admit. The standalone "report from ready data" task
-    # path (structured inputs_schema + run in its own subagent from
-    # root) is a DEFERRED end-of-039 item — see the analyst-skill-
-    # backlog "report-builder as a task" entry for the design fork
-    # (recipe-catalog vs catalogue visibility). Keeping it a plain
-    # skill now keeps the mission (autoload) AND root (skill:load)
-    # paths working for the wedge-fix dogfood.
+    # skill is EXCLUDED from the loadable `## Available skills`
+    # catalogue — it surfaces instead in `## Available tasks` and runs
+    # by name via `task:execute_task` (or worker autoload). The
+    # standalone "report from ready data" task path (structured
+    # inputs_schema + run in its own subagent from root) is a DEFERRED
+    # end-of-039 item — see the analyst-skill-backlog "report-builder
+    # as a task" entry. Keeping it a plain skill now keeps the mission
+    # (autoload) AND root (skill:load) paths working for the wedge-fix
+    # dogfood.
     tier_compatibility: [worker, mission, root]
 compatibility:
   model: any

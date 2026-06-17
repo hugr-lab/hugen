@@ -166,6 +166,13 @@ type SessionSkill struct {
 	// round-trip, and only skills the model was actually shown count.
 	// db-2. Guarded by mu.
 	shownCatalog map[string]string
+	// taskShownCatalog is the `## Available tasks` analogue of
+	// shownCatalog: name→index id for the TASKS surfaced in the last
+	// task-catalogue render. The `used` (execute) path resolves an
+	// executed task's name to its id through it, so a task only accrues a
+	// bandit `use` when it was actually advertised — keeping used ≤ shown
+	// like the skill path (B47 step 5). Guarded by mu.
+	taskShownCatalog map[string]string
 
 	advertiseMu sync.Mutex
 	// loadedTokens caches the estimated size of the LOADED-side
@@ -190,7 +197,7 @@ type SessionSkill struct {
 	drawMu      sync.Mutex
 	drawPending bool
 	drawValid   bool
-	draw        map[string]struct{}
+	draw        advertiseDraw
 }
 
 // markAdvertiseRoll arms a fresh per-turn draw — called on each
@@ -202,23 +209,23 @@ func (h *SessionSkill) markAdvertiseRoll() {
 	h.drawMu.Unlock()
 }
 
-// cachedDraw returns the turn's cached advertise selection, or (nil, false)
-// when a fresh roll is due (a new turn armed drawPending, or none built
-// yet). db-2.
-func (h *SessionSkill) cachedDraw() (map[string]struct{}, bool) {
+// cachedDraw returns the turn's cached advertise selection (skills + tasks
+// catalogues), or (zero, false) when a fresh roll is due (a new turn armed
+// drawPending, or none built yet). db-2.
+func (h *SessionSkill) cachedDraw() (advertiseDraw, bool) {
 	h.drawMu.Lock()
 	defer h.drawMu.Unlock()
 	if h.drawPending || !h.drawValid {
-		return nil, false
+		return advertiseDraw{}, false
 	}
 	return h.draw, true
 }
 
 // storeDraw caches the freshly-rolled advertise selection for the rest of
 // the turn and disarms the roll latch. db-2.
-func (h *SessionSkill) storeDraw(allow map[string]struct{}) {
+func (h *SessionSkill) storeDraw(draw advertiseDraw) {
 	h.drawMu.Lock()
-	h.draw = allow
+	h.draw = draw
 	h.drawValid = true
 	h.drawPending = false
 	h.drawMu.Unlock()
@@ -230,6 +237,34 @@ func (h *SessionSkill) setShownCatalog(catalog map[string]string) {
 	h.mu.Lock()
 	h.shownCatalog = catalog
 	h.mu.Unlock()
+}
+
+// setTaskShownCatalog records the name→id map of TASKS surfaced in the most
+// recent `## Available tasks` render (B47 step 5).
+func (h *SessionSkill) setTaskShownCatalog(catalog map[string]string) {
+	h.mu.Lock()
+	h.taskShownCatalog = catalog
+	h.mu.Unlock()
+}
+
+// RecordTaskUsed logs a bandit `use` event for an EXECUTED task, resolving
+// its name to an index id through the session's task shown-catalogue — so
+// the `use` lands only when the task was actually advertised this session
+// (used ≤ shown, mirroring the skill load path). Called from the task
+// ext's RunRecipe choke point on a model-driven (non-cron) launch. No-op
+// when the task wasn't advertised or the store isn't indexed. Best-effort:
+// the returned error is for the caller to log, never fatal. B47 step 5.
+func (h *SessionSkill) RecordTaskUsed(ctx context.Context, name string) {
+	if h == nil || h.manager == nil {
+		return
+	}
+	h.mu.RLock()
+	id := h.taskShownCatalog[name]
+	h.mu.RUnlock()
+	if id == "" {
+		return
+	}
+	_ = h.manager.LogSkillEvents(ctx, []string{id}, skillpkg.SkillLogUsed, h.sessionID)
 }
 
 // idsForNames resolves the given skill names to their index ids via the

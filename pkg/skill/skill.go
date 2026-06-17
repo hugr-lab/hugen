@@ -127,6 +127,12 @@ var (
 	// design/002-runtime-canonical/phase-4.2-spec.md §3.2.2.
 	ErrAutoloadReserved = errors.New("skill: autoload is reserved for system / admin skills")
 
+	// ErrReservedTaskName is returned by manifest validation when a
+	// task-eligible skill takes a name that collides with a static
+	// task-provider tool (search / describe / execute_task) — its
+	// synthetic task:<name> tool would shadow the built-in.
+	ErrReservedTaskName = errors.New("skill: task-eligible skill name collides with a built-in task tool")
+
 	// ErrTierForbidden is returned by skill load when the calling
 	// session's tier (resolved from depth) is not in the manifest's
 	// tier_compatibility set. Surfaces to the LLM as

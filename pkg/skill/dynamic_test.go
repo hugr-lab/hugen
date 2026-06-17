@@ -85,15 +85,18 @@ metadata:
 plain body
 `
 
+// dataCatalogSKILL is an ordinary category skill that admits a task tool
+// via allowed-tools — the post-dissolution shape (no recipe_catalog flag,
+// no special index type). Kept named "data-catalog" so the shared-state
+// subtests below still reference it.
 const dataCatalogSKILL = `---
 name: data-catalog
-description: A catalog grouping data recipes.
+description: A category skill grouping data recipes.
 allowed-tools:
   - provider: task
     tools: [change-report]
 metadata:
   hugen:
-    recipe_catalog: true
     requires_skills: []
     tier_compatibility: [root, mission, worker]
 ---
@@ -316,29 +319,21 @@ func TestDynamicBackend(t *testing.T) {
 		assert.False(t, ph.TaskEligible)
 	})
 
-	t.Run("two-pass reconcile populates catalog_member edges", func(t *testing.T) {
-		// Publish a catalog whose allowed-tools name change-report as a
-		// member. Publish writes the bundle + catalog row; the two-pass
-		// reconcile derives + writes the catalog_member edge.
+	t.Run("category skill indexes as an ordinary skill", func(t *testing.T) {
+		// A category skill that admits a task tool via allowed-tools is an
+		// ordinary skill post-dissolution — type "skill", no special index
+		// treatment. Published here so the shared-state Uninstall subtest
+		// below still sees it in the index.
 		cat := mustParse(t, dataCatalogSKILL)
 		require.NoError(t, b.Publish(ctx, cat, nil, PublishOptions{}))
 
 		_, err := b.Reconcile(ctx)
 		require.NoError(t, err)
 
-		catID, err := b.index.getIDByName(ctx, "data-catalog")
+		row, err := b.index.getRowByName(ctx, "authored", "data-catalog")
 		require.NoError(t, err)
-		require.NotEmpty(t, catID)
-
-		members := catalogMemberEdges(ctx, t, b.index, catID)
-		require.Len(t, members, 1, "catalog should link to its one member recipe")
-		assert.Equal(t, "change-report", members[0])
-
-		// Idempotent: a second reconcile must not duplicate the edge.
-		_, err = b.Reconcile(ctx)
-		require.NoError(t, err)
-		members = catalogMemberEdges(ctx, t, b.index, catID)
-		assert.Len(t, members, 1, "reconcile must converge, not duplicate edges")
+		assert.Equal(t, "skill", row.Type)
+		assert.False(t, row.TaskEligible)
 	})
 
 	t.Run("search returns ErrNoEmbedder without an embedder", func(t *testing.T) {
@@ -452,14 +447,6 @@ func TestStoreSyncDynamic(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(got.Manifest.Body), "change-report recipe body")
 
-	// Catalog relink ran during SyncDynamic — real catalog_member
-	// edges exist for the indexed catalog.
-	catID, err := st.dynamic.index.getIDByName(ctx, "data-catalog")
-	require.NoError(t, err)
-	members := catalogMemberEdges(ctx, t, st.dynamic.index, catID)
-	require.Len(t, members, 1)
-	assert.Equal(t, "change-report", members[0])
-
 	// Absent install-set (declared=false) installs every hub bundle —
 	// plain-helper now joins the index.
 	n, err = st.SyncDynamic(ctx, hubDir, nil, false)
@@ -503,32 +490,3 @@ func TestStoreNoQuerier_FallsBackToLocal(t *testing.T) {
 	assert.ErrorIs(t, st.Uninstall(context.Background(), "x"), ErrUnsupportedBackend)
 }
 
-// catalogMemberEdges reads the persisted catalog_member edge targets
-// for a catalog row, returning member skill names. Test-local reader
-// for the write-side relink — the prod read path went away with
-// catalog_list's two-step `within` discovery.
-func catalogMemberEdges(ctx context.Context, t *testing.T, x *dynamicIndex, sourceID string) []string {
-	t.Helper()
-	type linkTarget struct {
-		Target skillRow `json:"target"`
-	}
-	links, err := queries.RunQuery[[]linkTarget](ctx, x.querier,
-		`query ($agent: String!, $src: String!) {
-			hub { db { agent {
-				skill_links(filter: {agent_id: {eq: $agent}, source_id: {eq: $src}, relation: {eq: "catalog_member"}}) {
-					target {`+skillRowProjection+`}
-				}
-			}}}
-		}`,
-		map[string]any{"agent": x.agentID, "src": sourceID},
-		"hub.db.agent.skill_links",
-	)
-	require.NoError(t, err)
-	var names []string
-	for _, l := range links {
-		if l.Target.ID != "" {
-			names = append(names, l.Target.Name)
-		}
-	}
-	return names
-}

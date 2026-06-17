@@ -18,28 +18,26 @@ import (
 // (Thompson top-N), so absence there proves nothing; this tool
 // answers the questions the advertise cannot: "does a skill for X
 // already exist?" (deterministic no-match) and "list everything"
-// (enumeration). `_task_builder`'s researcher and root's
-// schedule-intent flow ask both before composing a task from
-// scratch. A task IS a standalone skill (a task-eligible recipe
-// bundle), so a catalogue match means the work can be scheduled
-// directly instead of rebuilt.
+// (enumeration), BEFORE loading a skill or composing a procedure.
+//
+// It lists SKILLS only — task-eligible skills (built tasks) are
+// EXCLUDED here. Tasks are a distinct surface with their own discovery
+// (`task:search`), inspect (`task:describe`), and run (`task:execute_task`)
+// tools; mixing them into skill search confuses "what can I load" with
+// "what can I run". To find a runnable task, use `task:search`.
 //
 // This surface does NOT apply the caller's tier filter. Listing is
-// pure read-only inventory — nothing is loaded as a side effect —
-// and a task-eligible recipe runs in its own (typically worker-tier)
-// recipe / cron session, not in the caller's. A mission-tier
-// researcher browsing for a matching task must still see worker-tier
-// recipes; tier-filtering here would hide the very rows the
-// discovery is for.
+// pure read-only inventory — nothing is loaded as a side effect — and
+// a skill loadable at one tier is still worth surfacing to a browsing
+// caller at another.
 
 const (
 	toolNameCatalogList   = providerName + ":catalog_list"
 	permObjectCatalogList = "hugen:tool:system"
-	toolDescCatalogList   = "Search the agent's skill catalogue — every saved / bundled skill, with its description and (for task-eligible skills) goal_summary, kind, and whether it declares an inputs_schema. Use this BEFORE composing a task or procedure from scratch: a matching task-eligible skill can be run via `task:<name>` or scheduled via `schedule:create` directly, with no rebuild. With a `keyword` the catalogue is ranked by relevance (semantic when available, substring otherwise) and capped at `limit`; without one it lists everything. Optional filters: `task_eligible` (bool), `keyword`, `limit`."
+	toolDescCatalogList   = "Search the agent's SKILL catalogue — every saved / bundled loadable skill, with its description and keywords. Use this BEFORE composing a procedure from scratch or to check whether a skill for X already exists. With a `keyword` the catalogue is ranked by relevance (semantic when available, substring otherwise) and capped at `limit`; without one it lists everything. Built tasks are NOT listed here — find a runnable task with `task:search` instead."
 	catalogListSchema     = `{
   "type": "object",
   "properties": {
-    "task_eligible": {"type": "boolean", "description": "When true, return only task-eligible skills (those runnable via task:<name> and schedulable). Omit to list every skill."},
     "keyword":       {"type": "string", "description": "Free-text query. Ranked by semantic relevance when an embedder is available, else a case-insensitive substring match against name, description, and keywords."},
     "limit":         {"type": "integer", "description": "Max results to return when a keyword is given (default 10). Ignored for an unfiltered listing."}
   }
@@ -47,19 +45,14 @@ const (
 )
 
 type catalogListInput struct {
-	TaskEligible *bool  `json:"task_eligible,omitempty"`
-	Keyword      string `json:"keyword,omitempty"`
-	Limit        int    `json:"limit,omitempty"`
+	Keyword string `json:"keyword,omitempty"`
+	Limit   int    `json:"limit,omitempty"`
 }
 
 type catalogListEntry struct {
-	Name            string   `json:"name"`
-	Description     string   `json:"description,omitempty"`
-	TaskEligible    bool     `json:"task_eligible"`
-	TaskKind        string   `json:"task_kind,omitempty"`
-	GoalSummary     string   `json:"goal_summary,omitempty"`
-	Keywords        []string `json:"keywords,omitempty"`
-	HasInputsSchema bool     `json:"has_inputs_schema,omitempty"`
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Keywords    []string `json:"keywords,omitempty"`
 }
 
 type catalogListResult struct {
@@ -84,8 +77,10 @@ func (h *SessionSkill) callCatalogList(ctx context.Context, args json.RawMessage
 	// backend / no embedder) degrades to the substring scan below —
 	// the stable seam the catalogue evolved from.
 	if query != "" {
+		// Exclude tasks: skill search never returns task-eligible skills.
+		excludeTasks := false
 		ranked, err := h.manager.Search(ctx, query, skillpkg.SearchOpts{
-			TaskEligible: in.TaskEligible,
+			TaskEligible: &excludeTasks,
 			Limit:        in.Limit,
 		})
 		switch {
@@ -111,8 +106,9 @@ func (h *SessionSkill) callCatalogList(ctx context.Context, args json.RawMessage
 	out := catalogListResult{Skills: make([]catalogListEntry, 0, len(all))}
 	for _, sk := range all {
 		m := sk.Manifest
-		tb := m.Hugen.Task
-		if in.TaskEligible != nil && *in.TaskEligible && !tb.Eligible {
+		// Skill search lists skills only — built tasks are excluded
+		// (find them with task:search).
+		if m.Hugen.Task.Eligible {
 			continue
 		}
 		keywords := m.Hugen.Mission.Keywords
@@ -125,24 +121,16 @@ func (h *SessionSkill) callCatalogList(ctx context.Context, args json.RawMessage
 	return json.Marshal(out)
 }
 
-// catalogEntryFromSkill projects a Skill into the model-facing
-// catalogue entry. Shared by the semantic-ranked and substring paths
-// so both surface the same shape.
+// catalogEntryFromSkill projects a (non-task) Skill into the model-facing
+// catalogue entry. Shared by the semantic-ranked and substring paths so
+// both surface the same shape.
 func catalogEntryFromSkill(sk skillpkg.Skill) catalogListEntry {
 	m := sk.Manifest
-	tb := m.Hugen.Task
-	entry := catalogListEntry{
-		Name:            m.Name,
-		Description:     strings.TrimSpace(m.Description),
-		TaskEligible:    tb.Eligible,
-		Keywords:        m.Hugen.Mission.Keywords,
-		HasInputsSchema: len(tb.InputsSchema) > 0,
+	return catalogListEntry{
+		Name:        m.Name,
+		Description: strings.TrimSpace(m.Description),
+		Keywords:    m.Hugen.Mission.Keywords,
 	}
-	if tb.Eligible {
-		entry.TaskKind = tb.Kind
-		entry.GoalSummary = strings.TrimSpace(tb.GoalSummary)
-	}
-	return entry
 }
 
 // catalogMatchesKeyword reports whether the lower-cased keyword is a

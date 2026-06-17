@@ -407,12 +407,11 @@ func TestTurnPreamble_CatalogueOnly(t *testing.T) {
 	}
 }
 
-// TestTurnPreamble_TaskEligibleSkillsHidden verifies the
-// Phase 6.1d filter: skills with `task.eligible: true` do NOT appear
-// in the `## Available skills` catalogue (now rendered in the
-// turn_preamble). They surface to the model as synthetic
-// `task:<recipe-name>` tools via scheduler ext; the regular skill
-// catalogue is reserved for loadable category / utility skills.
+// TestTurnPreamble_TaskEligibleSkillsHidden verifies the catalogue
+// split: skills with `task.eligible: true` do NOT appear in the
+// `## Available skills` catalogue (reserved for loadable category /
+// utility skills) — they surface in the parallel `## Available tasks`
+// block instead (B47 step 5), runnable via task:execute_task.
 func TestTurnPreamble_TaskEligibleSkillsHidden(t *testing.T) {
 	ctx := context.Background()
 	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
@@ -438,52 +437,17 @@ metadata:
 	if !strings.Contains(out, "`alpha`") {
 		t.Errorf("non-recipe alpha must still appear:\n%s", out)
 	}
-	if strings.Contains(out, "data_tables_rows_count") {
-		t.Errorf("task-eligible recipe leaked into Available skills:\n%s", out)
+	// Split at the tasks header: the recipe must be absent from the skills
+	// section but present in the tasks section.
+	skillsSection, tasksSection, split := strings.Cut(out, "## Available tasks")
+	if !split {
+		t.Fatalf("expected an `## Available tasks` block:\n%s", out)
 	}
-}
-
-// TestTurnPreamble_RecipeCatalogTaggedAndFloated verifies
-// the Phase 6.1d catalogue treatment of recipe-catalog skills
-// (metadata.hugen.recipe_catalog: true) in the turn_preamble: they
-// carry a `(recipe catalog)` tag and sort ahead of regular skills
-// regardless of name order — `zeta_utils` is alphabetically AFTER
-// `alpha`, so its appearing first proves the flag floats it, not the
-// name. The constitution carries the behavioural "prefer the recipe"
-// rule; this test just pins the prompt surface it keys off.
-func TestTurnPreamble_RecipeCatalogTaggedAndFloated(t *testing.T) {
-	ctx := context.Background()
-	store := skillpkg.NewSkillStore(skillpkg.Options{Inline: map[string][]byte{
-		"alpha": []byte(inlineAlphaManifest),
-		"zeta_utils": []byte(`---
-name: zeta_utils
-description: A recipe catalog.
-license: MIT
-metadata:
-  hugen:
-    recipe_catalog: true
-    tier_compatibility: [root, mission, worker]
----
-`),
-	}})
-	mgr := skillpkg.NewSkillManager(store, nil)
-	ext := NewExtension(mgr, nil, "a1")
-	state := fixture.NewTestSessionState("ses-adv-catalog").WithDepth(2)
-	if err := ext.InitState(ctx, state); err != nil {
-		t.Fatalf("InitState: %v", err)
+	if strings.Contains(skillsSection, "data_tables_rows_count") {
+		t.Errorf("task-eligible recipe leaked into Available skills:\n%s", skillsSection)
 	}
-	out := ext.TurnPreamble(ctx, state)
-	if !strings.Contains(out, "`zeta_utils` (recipe catalog)") {
-		t.Errorf("recipe-catalog tag missing:\n%s", out)
-	}
-	if strings.Contains(out, "`alpha` (recipe catalog)") {
-		t.Errorf("regular skill alpha wrongly tagged recipe catalog:\n%s", out)
-	}
-	idxCatalog := strings.Index(out, "`zeta_utils`")
-	idxAlpha := strings.Index(out, "`alpha`")
-	if idxCatalog < 0 || idxAlpha < 0 || idxCatalog >= idxAlpha {
-		t.Errorf("recipe catalog must float above regular skills: zeta_utils@%d alpha@%d\n%s",
-			idxCatalog, idxAlpha, out)
+	if !strings.Contains(tasksSection, "data_tables_rows_count") {
+		t.Errorf("task-eligible recipe missing from Available tasks:\n%s", tasksSection)
 	}
 }
 

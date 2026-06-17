@@ -9,10 +9,10 @@ description: >
   dynamic joins, save large results to Parquet via hugr-query, and
   apply jq transforms. Read-only data fetch from the platform —
   for SQL on local files load `duckdb-data`; for charts / HTML / PDF
-  reports load `python-runner`. FIRST consider recipes: for a simple
-  single-object question (a count, a single value, a quick listing),
-  if a `(recipe catalog)` in `## Available skills` covers it, prefer
-  that recipe over hand-rolling the query here — load hugr-data for
+  reports load `python-runner`. FIRST consider built tasks: for a
+  simple single-object question (a count, a single value, a quick
+  listing), if a task in `## Available tasks` covers it, prefer
+  running it over hand-rolling the query here — load hugr-data for
   questions that need composition, joins, aggregation, or exploration.
 allowed-tools:
   - provider: hugr-main

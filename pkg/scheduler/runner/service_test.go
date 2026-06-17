@@ -282,6 +282,84 @@ func TestServicePrevOutcomePopulated(t *testing.T) {
 	}
 }
 
+// TestServiceWithInitialFireSeq verifies WithInitialFireSeq(n) seeds the
+// counter so the FIRST fire reports FireSeq == n — the fix for a recurring
+// task that re-registers a fresh one-shot per cycle (which otherwise
+// restarts FireSeq at 1 each cycle, breaking `count` end-conditions).
+func TestServiceWithInitialFireSeq(t *testing.T) {
+	t.Parallel()
+	clk := newFakeClock(time.Unix(1700000000, 0))
+	svc := New(
+		WithLogger(discardLogger()),
+		WithClock(clk.Now),
+		WithTickInterval(time.Millisecond),
+	)
+	defer func() { _ = svc.Stop(context.Background()) }()
+
+	var (
+		mu      sync.Mutex
+		firstSeq int
+	)
+	_ = svc.Register(context.Background(), "seeded", Once(clk.Now().Add(time.Second)),
+		func(_ context.Context, fire FireMeta) (Outcome, error) {
+			mu.Lock()
+			firstSeq = fire.FireSeq
+			mu.Unlock()
+			return Outcome{}, nil
+		},
+		WithInitialFireSeq(3),
+	)
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	clk.Advance(2 * time.Second)
+	awaitFireCount(t, svc, "seeded", 1)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if firstSeq != 3 {
+		t.Fatalf("first fire FireSeq = %d, want 3 (seeded)", firstSeq)
+	}
+}
+
+// TestServiceWithInitialFireSeqDefault confirms WithInitialFireSeq(0|1)
+// leaves the historical seq=1 first fire untouched.
+func TestServiceWithInitialFireSeqDefault(t *testing.T) {
+	t.Parallel()
+	clk := newFakeClock(time.Unix(1700000000, 0))
+	svc := New(
+		WithLogger(discardLogger()),
+		WithClock(clk.Now),
+		WithTickInterval(time.Millisecond),
+	)
+	defer func() { _ = svc.Stop(context.Background()) }()
+
+	var (
+		mu       sync.Mutex
+		firstSeq int
+	)
+	_ = svc.Register(context.Background(), "plain", Once(clk.Now().Add(time.Second)),
+		func(_ context.Context, fire FireMeta) (Outcome, error) {
+			mu.Lock()
+			firstSeq = fire.FireSeq
+			mu.Unlock()
+			return Outcome{}, nil
+		},
+		WithInitialFireSeq(1), // ≤1 is a no-op
+	)
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	clk.Advance(2 * time.Second)
+	awaitFireCount(t, svc, "plain", 1)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if firstSeq != 1 {
+		t.Fatalf("first fire FireSeq = %d, want 1 (default)", firstSeq)
+	}
+}
+
 func TestServiceErrorRecordedInRunLog(t *testing.T) {
 	t.Parallel()
 	clk := newFakeClock(time.Unix(1700000000, 0))

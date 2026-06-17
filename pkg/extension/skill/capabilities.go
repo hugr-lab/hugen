@@ -285,34 +285,50 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 		return ""
 	}
 	renderer := state.Prompts()
+	// Fetch the catalogue snapshot ONCE — the skills + tasks renders both
+	// partition it, so a single List (gen-cached) feeds both instead of
+	// one copy + scan each.
+	all, err := h.manager.List(ctx)
+	if err != nil {
+		all = nil
+	}
 	var (
-		cat      string
-		shownIDs []string
+		cat          string
+		shownIDs     []string
+		taskCat      string
+		taskShownIDs []string
 	)
 	if allowedList, isScoped := allowedSkillsFromState(state); isScoped {
-		// Recipe-scoped session (Phase 6.1d) — explicit allow-list.
-		cat, shownIDs = renderCatalogueFiltered(ctx, renderer, h, allowedList)
-	} else if allow, ok := e.rankedAdvertise(ctx, state, h); ok {
-		// db-2 — a ROOT session with a topic + embedder gets a Thompson-
-		// sampled, topic-relevant catalogue (rotating top-N ∪ pinned)
-		// rendered through the same scoped path. rankedAdvertise returns
-		// ok=false (not root / no recap / no embedder / empty pool) → the
-		// full List catalogue, exactly as before db-2.
-		cat, shownIDs = renderCatalogueScoped(ctx, renderer, h, allow)
+		// Recipe-scoped session (Phase 6.1d) — explicit allow-list. A
+		// recipe worker is already executing a fixed recipe, so it gets no
+		// `## Available tasks` discovery menu.
+		cat, shownIDs = renderCatalogueFiltered(ctx, renderer, h, allowedList, all)
+	} else if draw, ok := e.advertiseDraws(ctx, state, h); ok {
+		// db-2 — a session with a topic + embedder gets Thompson-sampled,
+		// topic-relevant catalogues (rotating top-N ∪ pinned). One recall
+		// feeds both: skills through the scoped path, tasks through the
+		// task-catalogue path. advertiseDraws returns ok=false (no recap /
+		// no embedder / empty pool) → the full List catalogue + full task
+		// list, exactly as before db-2.
+		cat, shownIDs = renderCatalogueScoped(ctx, renderer, h, draw.skills, all)
+		taskCat, taskShownIDs = renderTaskCatalogue(renderer, h, draw.tasks, all)
 	} else {
-		cat, shownIDs = renderCatalogue(ctx, renderer, h)
+		cat, shownIDs = renderCatalogue(ctx, renderer, h, all)
+		taskCat, taskShownIDs = renderTaskCatalogue(renderer, h, nil, all)
 	}
-	// db-2: log one `shown` impression for the surfaced skills per user
-	// turn. The advertise re-renders every model iteration; the per-turn
-	// flag (reset on each user_message by the FrameObserver) keeps it to
-	// one impression per turn. Best-effort, non-fatal telemetry —
-	// DETACHED from the turn-start hot path (TurnPreamble runs inside
-	// buildMessages, before the model call; N per-id inserts would
-	// otherwise serialise in front of it). WithoutCancel: the write must
-	// survive the turn ending first.
-	if len(shownIDs) > 0 && h.takeShownPending() {
+	// db-2: log one `shown` impression per user turn for every surfaced
+	// skill AND task (one append-only skill_log table, one `shown` event
+	// kind — tasks are task-eligible skills). The advertise re-renders
+	// every model iteration; the per-turn flag (reset on each user_message
+	// by the FrameObserver) keeps it to one impression per turn. Best-
+	// effort, non-fatal telemetry — DETACHED from the turn-start hot path
+	// (TurnPreamble runs inside buildMessages, before the model call; N
+	// per-id inserts would otherwise serialise in front of it). WithoutCancel:
+	// the write must survive the turn ending first.
+	shown := append(append(make([]string, 0, len(shownIDs)+len(taskShownIDs)), shownIDs...), taskShownIDs...)
+	if len(shown) > 0 && h.takeShownPending() {
 		logCtx := context.WithoutCancel(ctx)
-		go func() { _ = h.manager.LogSkillEvents(logCtx, shownIDs, skillpkg.SkillLogShown, h.sessionID) }()
+		go func() { _ = h.manager.LogSkillEvents(logCtx, shown, skillpkg.SkillLogShown, h.sessionID) }()
 	}
 	// Phase 6.x dogfood follow-up — the loaded-skill bundle listing
 	// (references + scripts + assets) rides here, right after the
@@ -321,9 +337,16 @@ func (e *Extension) TurnPreamble(ctx context.Context, state extension.SessionSta
 	// user ask (vs buried atop the system prompt) is what gets weak
 	// models to actually open the docs instead of guessing query /
 	// filter syntax.
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if cat != "" {
 		parts = append(parts, cat)
+	}
+	// `## Available tasks` rides right after `## Available skills` — the
+	// model sees "what reusable work already exists" next to "what skills
+	// I can load", both near the user ask, so it reaches for a built task
+	// before hand-rolling or missioning the job (B47 step 5).
+	if taskCat != "" {
+		parts = append(parts, taskCat)
 	}
 	if meta := renderLoadedSkillsMeta(h); meta != "" {
 		parts = append(parts, meta)
@@ -371,59 +394,115 @@ func anchorForRanking(state extension.SessionState) (string, bool) {
 	return "", false
 }
 
-// rankedAdvertise computes the db-2 usage-driven catalogue scope: a
-// Thompson-sampled top-N of the topic-relevant skill pool, unioned with the
-// always-advertise pinned set. Returns the allow-map renderCatalogueScoped
-// renders against (it surfaces loaded ∪ allow) and ok=true. Returns
-// (nil, false) — caller falls back to the full List catalogue — when no
+// advertiseDraw is one turn's cached advertise selection: the two
+// name-allow sets the `## Available skills` and `## Available tasks`
+// catalogues render against. Both come from ONE recall, split by
+// task-eligibility and ranked independently (B47 step 5).
+type advertiseDraw struct {
+	skills map[string]struct{}
+	tasks  map[string]struct{}
+}
+
+// recallTopTasks is the `## Available tasks` analogue of recallTopN — how
+// many ranked task-eligible skills survive into the advertised task menu
+// each turn. Smaller than recallTopN: tasks are a curated, action-oriented
+// set the model should scan fast, not a long discovery tail.
+const recallTopTasks = 5
+
+// rankedAdvertise returns the db-2 usage-driven SKILL catalogue scope (a
+// Thompson-sampled top-N of the topic-relevant non-task pool ∪ pinned
+// skills). Thin wrapper over [advertiseDraws] — kept as the skill-only
+// entry point. Returns (nil, false) when no draw is available (no anchor /
+// no embedder / empty pool) so the caller falls back to the full catalogue.
+func (e *Extension) rankedAdvertise(ctx context.Context, state extension.SessionState, h *SessionSkill) (map[string]struct{}, bool) {
+	d, ok := e.advertiseDraws(ctx, state, h)
+	if !ok {
+		return nil, false
+	}
+	return d.skills, true
+}
+
+// advertiseDraws computes (and per-turn caches) BOTH the skill and task
+// advertise scopes from one recall+counts query: the topic-relevant pool
+// is split by task-eligibility, each side Thompson-ranked + top-N capped
+// against its own population, and unioned with its matching pinned set.
+// Returns ok=false — caller falls back to the full List catalogue — when no
 // anchor exists yet, no embedder is wired, or the pool came back empty.
 //
 // The recall runs ONCE per user turn (re-pooling under the current topic,
 // so the menu tracks pivots) and the whole draw is cached across the turn's
-// model iterations via the per-turn draw cache, so the catalogue stays
-// byte-stable past the KV-cache boundary within the turn and rotates between
+// model iterations via the per-turn draw cache, so both catalogues stay
+// byte-stable past the KV-cache boundary within the turn and rotate between
 // turns.
-func (e *Extension) rankedAdvertise(ctx context.Context, state extension.SessionState, h *SessionSkill) (map[string]struct{}, bool) {
+func (e *Extension) advertiseDraws(ctx context.Context, state extension.SessionState, h *SessionSkill) (advertiseDraw, bool) {
 	if h == nil || h.manager == nil {
-		return nil, false
+		return advertiseDraw{}, false
 	}
 	// Within-turn fast path: reuse the turn's draw across model iterations.
 	// A new user_message arms a re-roll (re-pool + re-Thompson).
-	if allow, ok := h.cachedDraw(); ok {
-		return allow, true
+	if d, ok := h.cachedDraw(); ok {
+		return d, true
 	}
 	anchor, ok := anchorForRanking(state)
 	if !ok {
-		return nil, false
+		return advertiseDraw{}, false
 	}
 	dyn, pin, err := h.manager.RecallRanked(ctx, anchor, recallSemanticLimit)
 	if err != nil {
 		// ErrNoEmbedder or a transient query error — fall back to the full
 		// catalogue (and retry next turn).
-		return nil, false
+		return advertiseDraw{}, false
 	}
 	if len(dyn) == 0 && len(pin) == 0 {
-		return nil, false
+		return advertiseDraw{}, false
 	}
-	// One fresh Thompson draw per turn — the rotation. An auto-seeded
-	// rand/v2 source gives genuine per-message variation; the bandit's
-	// exploration is the variance across draws.
-	skillpkg.ThompsonRank(dyn, rand.NewPCG(rand.Uint64(), rand.Uint64()))
-	allow := make(map[string]struct{}, recallTopN+len(pin))
+	// Split the semantic pool by task-eligibility so each catalogue ranks
+	// against its own population — a handful of tasks never crowd the skill
+	// menu out of its slots, and vice versa.
+	var skillDyn, taskDyn []skillpkg.RecallCandidate
+	for _, c := range dyn {
+		if c.TaskEligible {
+			taskDyn = append(taskDyn, c)
+		} else {
+			skillDyn = append(skillDyn, c)
+		}
+	}
+	// One fresh Thompson draw per turn per population — the rotation. An
+	// auto-seeded rand/v2 source gives genuine per-message variation; the
+	// bandit's exploration is the variance across draws.
+	src := rand.NewPCG(rand.Uint64(), rand.Uint64())
+	skillpkg.ThompsonRank(skillDyn, src)
+	skillpkg.ThompsonRank(taskDyn, src)
+	d := advertiseDraw{
+		skills: topNUnionPinned(skillDyn, pin, recallTopN, false),
+		tasks:  topNUnionPinned(taskDyn, pin, recallTopTasks, true),
+	}
+	if len(d.skills) == 0 && len(d.tasks) == 0 {
+		return advertiseDraw{}, false
+	}
+	h.storeDraw(d)
+	return d, true
+}
+
+// topNUnionPinned builds one advertise allow-set: the top-`n` of an
+// already-Thompson-ranked dynamic pool, unioned with the pinned entries
+// whose task-eligibility matches `wantTask`. So the skills draw takes
+// non-task pinned and the tasks draw takes task-eligible pinned — each
+// pinned skill lands in exactly one catalogue.
+func topNUnionPinned(dyn, pin []skillpkg.RecallCandidate, n int, wantTask bool) map[string]struct{} {
+	allow := make(map[string]struct{}, n+len(pin))
 	for i, c := range dyn {
-		if i >= recallTopN {
+		if i >= n {
 			break
 		}
 		allow[c.Name] = struct{}{}
 	}
 	for _, c := range pin {
-		allow[c.Name] = struct{}{}
+		if c.TaskEligible == wantTask {
+			allow[c.Name] = struct{}{}
+		}
 	}
-	if len(allow) == 0 {
-		return nil, false
-	}
-	h.storeDraw(allow)
-	return allow, true
+	return allow
 }
 
 // OnToolResult implements [extension.ModelInTurnAdvisor]: it walks the
@@ -636,8 +715,8 @@ func writeBundleCategory(b *strings.Builder, sfs fs.FS, category string) {
 // renderCatalogue produces the "## Available skills" section of
 // the system prompt: one bullet per skill in the store using the
 // manifest description. Loaded skills carry a `(loaded)` tag.
-func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill) (string, []string) {
-	return renderCatalogueScoped(ctx, renderer, h, nil)
+func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, all []skillpkg.Skill) (string, []string) {
+	return renderCatalogueScoped(ctx, renderer, h, nil, all)
 }
 
 // renderCatalogueFiltered narrows [renderCatalogue] to entries
@@ -648,20 +727,21 @@ func renderCatalogue(ctx context.Context, renderer *prompts.Renderer, h *Session
 // alongside the whitelist entries reachable via `skill:load`.
 // Phase 6.1d (additive interpretation — allow-list adds to the
 // autoloaded baseline, never replaces it).
-func renderCatalogueFiltered(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allowed []string) (string, []string) {
+func renderCatalogueFiltered(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allowed []string, all []skillpkg.Skill) (string, []string) {
 	allow := make(map[string]struct{}, len(allowed))
 	for _, n := range allowed {
 		allow[n] = struct{}{}
 	}
-	return renderCatalogueScoped(ctx, renderer, h, allow)
+	return renderCatalogueScoped(ctx, renderer, h, allow, all)
 }
 
 // renderCatalogueScoped returns the rendered "## Available skills"
 // section AND the DB-index ids of the skills it actually surfaced (the
 // `shown` impression set for db-2 — empty for non-indexed skills).
-func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allow map[string]struct{}) (string, []string) {
-	all, err := h.manager.List(ctx)
-	if err != nil || len(all) == 0 {
+// `all` is the catalogue snapshot fetched ONCE by the caller (TurnPreamble)
+// so the skills + tasks renders share a single manager.List.
+func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *SessionSkill, allow map[string]struct{}, all []skillpkg.Skill) (string, []string) {
+	if len(all) == 0 {
 		return "", nil
 	}
 	loadedSet := map[string]struct{}{}
@@ -669,21 +749,18 @@ func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *S
 		loadedSet[n] = struct{}{}
 	}
 	type skillItem struct {
-		Name          string
-		Description   string
-		Loaded        bool
-		RecipeCatalog bool
+		Name        string
+		Description string
+		Loaded      bool
 	}
 	items := make([]skillItem, 0, len(all))
 	shownIDs := make([]string, 0, len(all))
 	shownCatalog := make(map[string]string, len(all)) // name → index id (for `used` resolution)
 	for _, sk := range all {
-		// Phase 6.1d — task-eligible recipe skills are not listed
-		// here. They surface to the model as synthetic
-		// `task:<recipe-name>` tools (scheduler ext provider), and
-		// loading them as regular skills is not part of the
-		// task-runner flow — the category skill admits the synthetic
-		// tool via its allowed-tools instead.
+		// Task-eligible skills are not listed here — they surface in the
+		// parallel `## Available tasks` catalogue (B47 step 5), runnable
+		// via task:execute_task. The regular skill catalogue is reserved
+		// for loadable category / utility skills.
 		if sk.Manifest.Hugen.Task.Eligible {
 			continue
 		}
@@ -700,10 +777,9 @@ func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *S
 			}
 		}
 		items = append(items, skillItem{
-			Name:          sk.Manifest.Name,
-			Description:   strings.TrimSpace(sk.Manifest.Description),
-			Loaded:        on,
-			RecipeCatalog: sk.Manifest.Hugen.RecipeCatalog,
+			Name:        sk.Manifest.Name,
+			Description: strings.TrimSpace(sk.Manifest.Description),
+			Loaded:      on,
 		})
 		// db-2 — the `shown` impression set + the session-stored name→id
 		// catalog (used to resolve `used` ids without a DB round-trip)
@@ -727,21 +803,64 @@ func renderCatalogueScoped(ctx context.Context, renderer *prompts.Renderer, h *S
 	if len(items) == 0 {
 		return "", nil
 	}
-	// Phase 6.1d — recipe catalogs (skills bundling tested `task:*`
-	// recipes) sort to the top so the model spots them before the
-	// long regular-skill tail; the constitution tells it to prefer
-	// a matching catalog's recipe over hand-rolling the job. Stable
-	// within each group, name-sorted, so the order is deterministic
-	// across renders.
+	// Name-sorted for a deterministic order across renders.
 	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].RecipeCatalog != items[j].RecipeCatalog {
-			return items[i].RecipeCatalog
-		}
 		return items[i].Name < items[j].Name
 	})
 	return renderer.MustRender(
 		"skill/catalogue",
 		map[string]any{"Skills": items},
+	), shownIDs
+}
+
+// renderTaskCatalogue produces the "## Available tasks" section — the
+// db-2-ranked menu of runnable built tasks (task-eligible skills) the model
+// can launch with `task:execute_task` / inspect with `task:describe`. It is
+// the task analogue of [renderCatalogueScoped]: name + one-line description
+// (the task's goal_summary, falling back to the manifest description), NO
+// inputs or tool detail (that's what `task:describe` is for). `allow` scopes
+// it to the turn's task draw (nil → all task-eligible, the no-embedder
+// fallback). Returns the rendered block + the DB-index ids of the tasks it
+// surfaced (the `shown` impression set, recorded into the session's task
+// shown-catalogue so `use` can resolve back to ids). B47 step 5.
+func renderTaskCatalogue(renderer *prompts.Renderer, h *SessionSkill, allow map[string]struct{}, all []skillpkg.Skill) (string, []string) {
+	if len(all) == 0 {
+		return "", nil
+	}
+	type taskItem struct {
+		Name        string
+		Description string
+	}
+	items := make([]taskItem, 0, len(all))
+	shownIDs := make([]string, 0, len(all))
+	shownCatalog := make(map[string]string, len(all))
+	for _, sk := range all {
+		if !sk.Manifest.Hugen.Task.Eligible {
+			continue
+		}
+		if allow != nil {
+			if _, ok := allow[sk.Manifest.Name]; !ok {
+				continue
+			}
+		}
+		desc := strings.TrimSpace(sk.Manifest.Hugen.Task.GoalSummary)
+		if desc == "" {
+			desc = strings.TrimSpace(sk.Manifest.Description)
+		}
+		items = append(items, taskItem{Name: sk.Manifest.Name, Description: desc})
+		if sk.ID != "" {
+			shownIDs = append(shownIDs, sk.ID)
+			shownCatalog[sk.Manifest.Name] = sk.ID
+		}
+	}
+	h.setTaskShownCatalog(shownCatalog)
+	if len(items) == 0 {
+		return "", nil
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+	return renderer.MustRender(
+		"skill/task-catalogue",
+		map[string]any{"Tasks": items},
 	), shownIDs
 }
 

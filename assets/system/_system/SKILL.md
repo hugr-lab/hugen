@@ -136,8 +136,8 @@ shell tools and file tools see exactly the same paths.
   free-text `keyword` (relevance-ranked), or list everything when
   called without one. The `## Available skills` block is a capped
   shortlist; use this tool when nothing there fits or the user
-  asks what skills / saved tasks exist (`task_eligible: true`
-  narrows to runnable / schedulable tasks).
+  asks what skills exist. It lists loadable SKILLS only — to find a
+  runnable built task, use `task:search` (where granted).
 - `skill:ref` — read a reference document that ships with a
   loaded skill (`references/<name>.md`).
 - `skill:files` — list the on-disk files of a loaded skill with
