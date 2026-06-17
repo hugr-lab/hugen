@@ -336,15 +336,23 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 
 	// Resolve the recipe skill so RunRecipe can scope the child's skill
 	// surface to the manifest whitelist + pre-load the recipe body.
-	// Drift was already checked above; a Get failure here means the
-	// skill vanished in the gap — pause-worthy, surface as skill_changed.
+	// Drift was already checked above; a Get failure here means the skill
+	// vanished in the gap — pause exactly like the drift path (the next
+	// fire is NOT scheduled from this path, so without the pause the task
+	// would silently stall with no runner-side stop). A resume / restart
+	// re-resolves it.
 	sk, serr := deps.skills.Get(ctx, task.SkillRef)
 	if serr != nil {
-		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventFailed, &schedstore.TaskOutcome{
+		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseSkillChanged)
+		if deps.pauseFn != nil {
+			_ = deps.pauseFn(task.ID)
+		}
+		appendLogSafely(ctx, deps, terminalLog(task, fire, schedstore.LogEventSkipped, &schedstore.TaskOutcome{
 			ErrorMessage: serr.Error(),
 			Reason:       schedstore.PauseSkillChanged,
+			Summary:      "paused on skill resolve failure",
 		}))
-		return runner.Outcome{ErrorMessage: serr.Error()}, serr
+		return runner.Outcome{Reason: schedstore.PauseSkillChanged}, nil
 	}
 
 	// Stash FireContext under a spawn-name token so the scheduler's

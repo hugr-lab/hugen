@@ -173,6 +173,69 @@ func TestDispatchWakeFire_DeliverFailureStillSchedulesNext(t *testing.T) {
 	}
 }
 
+// TestDispatchWakeFire_FailedFinalFireRespectsCount asserts the
+// failure-reschedule still honours the count end-condition: a failed
+// fire is an attempt, and a failed FINAL fire (seq == count) terminates
+// the task instead of rescheduling — one bad run neither stalls the
+// schedule (see above) nor runs past its count.
+func TestDispatchWakeFire_FailedFinalFireRespectsCount(t *testing.T) {
+	store := newFakeStore()
+	host := newFakeHost()
+	host.markAlive("ses-owner-count")
+	host.deliverErr = errors.New("inbox closed")
+	row := schedstore.TaskRow{
+		ID:             "tsk_wake_count1",
+		AgentID:        "agt_test",
+		Kind:           schedstore.KindWake,
+		Status:         schedstore.StatusActive,
+		ScheduleKind:   schedstore.ScheduleInterval,
+		OwnerSessionID: "ses-owner-count",
+		Spec: schedstore.TaskSpec{
+			Name:         "once",
+			ScheduleSpec: "1h",
+			EndCondition: schedstore.TaskEndCondition{Kind: "count", Spec: "1"},
+			WakeMessage:  "ping",
+		},
+	}
+	if err := store.OpenTask(context.Background(), row, time.Now().UTC()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var pauses []string
+	deps := minimalDeps(t, store, host, &pauses)
+	var rescheduled []time.Time
+	deps.rescheduleFn = func(_ string, at time.Time) error {
+		rescheduled = append(rescheduled, at)
+		return nil
+	}
+	fn := buildFireFn(row, deps)
+
+	if _, err := fn(context.Background(), runner.FireMeta{
+		Name:      "task_tsk_wake_count1",
+		FireSeq:   1, // the only allowed fire (count=1)
+		PlannedAt: time.Now().UTC(),
+	}); err == nil {
+		t.Fatal("deliver failure must surface as a fire error")
+	}
+
+	// count=1 reached on this (failed) fire → no next planned, no
+	// reschedule, task cancelled.
+	for _, e := range store.snapshotLog() {
+		if e.EventType == schedstore.LogEventPlanned && e.FireSeq == 2 {
+			t.Error("count=1 reached: must not write a next planned row")
+		}
+	}
+	if len(rescheduled) != 0 {
+		t.Errorf("count=1 reached: must not reschedule; got %v", rescheduled)
+	}
+	updated, err := store.GetTask(context.Background(), row.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if updated.Status != schedstore.StatusCancelled {
+		t.Errorf("status = %q, want cancelled (count reached)", updated.Status)
+	}
+}
+
 func TestDispatchWakeFire_DeadOwnerPauses(t *testing.T) {
 	store := newFakeStore()
 	host := newFakeHost()
