@@ -221,7 +221,12 @@ func (e *Extension) List(ctx context.Context) ([]tool.Tool, error) {
 			}
 			argSchema = raw
 		} else {
-			argSchema = json.RawMessage(`{"type":"object","properties":{},"additionalProperties":true}`)
+			// Open object (no declared inputs). Omit additionalProperties —
+			// JSON Schema already defaults it to true, and the explicit key
+			// is rejected by Gemini's function-declaration schema (our own
+			// tool schemas must conform to the conservative all-provider
+			// subset; see pkg/tool.ValidateLLMSchema).
+			argSchema = json.RawMessage(`{"type":"object","properties":{}}`)
 		}
 		out = append(out, tool.Tool{
 			Name:             providerName + ":" + sk.Manifest.Name,
@@ -258,7 +263,7 @@ const schemaExecuteTask = `{
   "type": "object",
   "properties": {
     "name": {"type": "string", "description": "The task name to run (from task:search or the ## Available tasks block)."},
-    "inputs": {"type": "object", "description": "Input values for the task's declared inputs_schema. Omit for a no-input task.", "additionalProperties": true}
+    "inputs": {"type": "object", "description": "Input values for the task's declared inputs_schema (a free-form object). Omit for a no-input task."}
   },
   "required": ["name"]
 }`
