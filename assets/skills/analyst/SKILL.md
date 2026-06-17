@@ -32,13 +32,14 @@ metadata:
       summary: >
         COMPLEX, open-ended data work that needs investigation: deep
         analysis, schema exploration / research, trend & relationship
-        & anomaly detection, hypothesis testing, dashboards, and
-        multi-stage analytics spanning several coordinated waves.
+        & anomaly detection, hypothesis testing, multi-source
+        dashboards, and multi-stage analytics spanning several
+        coordinated waves.
         Spawn this when the answer requires figuring something out.
         When the data (or the exact query) AND the output shape are
         already known and you just need the document rendered, that is
         the `build_report` task, not this mission.
-      keywords: [analyse, analysis, explore, research, investigate, trend, relationship, anomaly, compare, audit, dashboard, hypothesis]
+      keywords: [analyse, analysis, explore, research, investigate, trend, relationship, anomaly, compare, audit, hypothesis]
 
       capabilities:
         notepad: true

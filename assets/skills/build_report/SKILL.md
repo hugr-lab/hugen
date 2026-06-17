@@ -172,31 +172,31 @@ is un-retryable; see the report-builder method).
      `skill:ref(skill="python-runner", ref="hugr-client")`. Use the
      provided `graphql` text **VERBATIM** — assign it to a string
      literal exactly as given; do NOT reformat, re-indent, or retype
-     it. Reflowing a nested query is how a closing `}` gets dropped,
-     and a malformed query currently comes back as EMPTY parts, not a
-     raised error — the server returns the GraphQL error as a separate
-     part the current client drops, so you get zero parts and no
-     exception. Always guard the fetch:
+     it (reflowing a nested query drops braces and breaks it). Any
+     GraphQL error — a syntax error, an unknown field, a bad argument —
+     makes `query()` **raise `ValueError`**; an RBAC-filtered or
+     genuinely empty result, by contrast, is NOT an error and returns
+     normally with `r.parts == {}`. Always guard the fetch for both:
 
      ```python
-     import os
      from hugr import HugrClient
-     c = HugrClient(url=os.environ["HUGR_URL"], token=os.environ["HUGR_TOKEN"])
+     c = HugrClient()                          # reads HUGR_URL / HUGR_TOKEN from the env
      try:
          r = c.query(gql, variables=vars)      # gql verbatim; vars from params
-     except (ValueError, PermissionError) as e:  # error part / HTTP 500 / 401-403
+     except (ValueError, PermissionError) as e:  # GraphQL errors / HTTP 500 / 401-403
          raise SystemExit(f"query failed: {e}")
-     if not r.parts or part_path not in r.parts:  # silent empty (syntax / RBAC / no rows)
+     if not r.parts or part_path not in r.parts:  # empty / RBAC-filtered (not an error → no raise)
          raise SystemExit(f"no data for {part_path}; parts={list(r.parts)}")
      df = r.df(part_path)                        # or r[part_path].to_arrow()
      ```
 
      `df(path)` / `record(path)` / `gdf(path, field)` are on the
      response; `to_arrow()` is on the PART (`r[part_path].to_arrow()`),
-     takes no path. The empty-parts guard matters: a dropped brace or
-     an RBAC-filtered query returns `r.parts == {}` with NO exception,
-     so without the guard you'd debug a "fetch bug" that is really a
-     bad query — surface it as a blocker instead.
+     takes no path. Both checks matter: a malformed / errored query
+     RAISES (caught by `except`), while an empty / RBAC-filtered result
+     returns `r.parts == {}` with no exception — without both you'd
+     debug a "fetch bug" that is really a bad or empty query; surface it
+     as a blocker instead.
    - **A file** (`data_files[]`) → `pd.read_parquet` / `read_json` /
      `duckdb` by `path`.
    - **Inline** (`data`) → use as a literal in the script; quote

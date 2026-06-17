@@ -7,18 +7,17 @@ client reads `HUGR_URL` and `HUGR_TOKEN` from the env and runs headless.
 
 ## Construct a client — every call
 
-The runtime rotates `HUGR_TOKEN` between spawns. **Re-read the env every
-call — never cache the token at module level.**
+`HugrClient()` reads `HUGR_URL` / `HUGR_TOKEN` from the env at
+construction — no args needed (hugen injects them per spawn). The
+runtime rotates `HUGR_TOKEN` between spawns, so **construct a fresh
+client every call — never cache one at module level or across a sleep**
+(a stale instance holds a rotated-out JWT and the next call 401s).
 
 ```python
-import os
 from hugr import HugrClient
 
 def hugr() -> HugrClient:
-    return HugrClient(
-        url=os.environ["HUGR_URL"],
-        token=os.environ["HUGR_TOKEN"],
-    )
+    return HugrClient()   # reads HUGR_URL / HUGR_TOKEN from the env
 ```
 
 A short-lived helper is fine; persisting `HugrClient` across long sleeps
@@ -166,38 +165,35 @@ hugen.
 ## Common errors
 
 - **`401 Unauthenticated`** — almost always a stale token. Construct a
-  fresh `HugrClient` with `os.environ["HUGR_TOKEN"]` re-read at call site,
-  not stashed in a global. If it persists, the rotation contract is
-  broken at the runtime layer (operator problem).
+  fresh `HugrClient()` at the call site (it re-reads the env), not one
+  stashed in a global. If it persists, the rotation contract is broken
+  at the runtime layer (operator problem).
 - **`Cannot query field "X" on type "Query"`** — same trap as in raw
   GraphQL. `X` is a submodule (dotted-name nesting) or it's RBAC-gated.
   Run discovery via the `hugr-data` skill (or the `hugr-main` MCP) to
   see what's reachable for your role.
 - **`HUGR_URL not set`** — no-Hugr deployment, or operator dropped the
   `tool_providers[].env.HUGR_URL` entry. Bail out with a clear message.
-- **Empty `r.parts` with no exception** — the response carries zero
-  parts and `query()` did NOT raise. This is the silent failure mode
-  of a **malformed query** (a dropped `}` — common when a multi-line
-  query is reflowed) or an RBAC-filtered / genuinely empty result. The
-  server DOES return GraphQL errors as a dedicated multipart part
-  (`X-Hugr-Part-Type: errors`), but the current client only raises for
-  the singular `error` header, so that `errors` part is silently
-  dropped — you get empty parts and no exception. Until the client
-  matches `errors`, **guard every fetch** so a bad query surfaces
-  immediately instead of looking like a "client bug":
+- **Errors vs. empty — guard for both.** `query()` **raises** on a
+  failure: `ValueError` on any GraphQL error (a syntax error, an
+  unknown field, a bad argument — the server returns these as an
+  `errors` part and the client surfaces them) or HTTP 500;
+  `PermissionError` on 401/403. A partial response (data + errors)
+  comes back with the errors on `r.errors` (a list) — call
+  `r.raise_for_errors()` to fail loud on those too. An RBAC-filtered or
+  genuinely empty result is NOT an error: `query()` returns normally
+  with `r.parts == {}` (or the requested part missing). So guard every
+  fetch for BOTH — let `except` catch the raise, and a parts-check
+  catch the legitimate empty:
 
   ```python
   try:
       r = c.query(gql, variables=vars)        # keep gql VERBATIM — do not retype
-  except (ValueError, PermissionError) as e:  # raised today for an `error` part / 500 / 401-403
+  except (ValueError, PermissionError) as e:  # GraphQL errors / HTTP 500 / 401-403
       raise SystemExit(f"query failed: {e}")
-  if not r.parts or part_path not in r.parts:  # catches the dropped `errors` part + empty/RBAC
+  if not r.parts or part_path not in r.parts:  # empty / RBAC-filtered (not an error → no raise)
       raise SystemExit(f"no data for {part_path}; parts={list(r.parts)}")
   ```
-
-  The `except` is forward-compatible: once the client recognises the
-  `errors` part it will raise `ValueError` and the same guard catches
-  it. There is no `r.errors` / `r.Err` accessor today — use the guard.
 
 ## Choosing between `hugr-client` and `hugr-query`
 
