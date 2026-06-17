@@ -107,10 +107,13 @@ NOT tools (those are skill names). Look up the real names first:
 `skill:save` rejects unknown names with `skill_unknown_tool` and a
 hint. See `references/tool-discovery.md`.
 
-## Updating an existing skill
+## Updating an existing skill or task
 
 To change a skill that already exists, edit its real bundle — don't
-re-author from memory:
+re-author from memory. A **task** is just a task-eligible skill, so a
+task is updated the SAME way: export it, fix the file that's wrong (its
+`references/query.graphql`, a `scripts/*.py`, or `SKILL.md`), and
+re-save under the same name.
 
 1. **Export it** — `skill:export(name: "<name>")` copies the skill's
    SKILL.md + references / scripts / assets into a directory in your
@@ -124,12 +127,12 @@ re-author from memory:
    edit call. (Updating a skill you exported is the authorised-replace
    case for `overwrite: true`.)
 
-## Removing a skill
+## Removing a skill or task
 
-`skill:uninstall(name: "<name>")` — removes it from the store
-entirely. Destructive and approval-gated. Prefer the export → edit →
-overwrite-save flow for fixes; uninstall is for retiring a skill you
-no longer want.
+`skill:uninstall(name: "<name>")` — removes the skill (or task) from
+the store entirely. Destructive and approval-gated. Prefer the export →
+edit → overwrite-save flow for fixes; uninstall is for retiring a
+skill / task you no longer want.
 
 ## What this skill does NOT do
 
