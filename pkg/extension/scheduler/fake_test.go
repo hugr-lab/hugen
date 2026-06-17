@@ -259,9 +259,10 @@ func (s *fakeStore) snapshotLog() []schedstore.TaskLogEntry {
 // that need a real session use the [pkg/internal/fixture] harness
 // (separate integration-style coverage).
 type fakeHost struct {
-	mu        sync.Mutex
-	alive     map[string]struct{}
-	delivered []deliveredFrame
+	mu         sync.Mutex
+	alive      map[string]struct{}
+	delivered  []deliveredFrame
+	deliverErr error // when set, Deliver fails with it (delivery-failure tests)
 }
 
 type deliveredFrame struct {
@@ -280,6 +281,9 @@ func (h *fakeHost) markAlive(id string) {
 func (h *fakeHost) Deliver(_ context.Context, to string, f protocol.Frame) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.deliverErr != nil {
+		return h.deliverErr
+	}
 	h.delivered = append(h.delivered, deliveredFrame{To: to, Frame: f})
 	return nil
 }

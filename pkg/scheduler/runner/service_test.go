@@ -360,6 +360,85 @@ func TestServiceWithInitialFireSeqDefault(t *testing.T) {
 	}
 }
 
+// TestServiceWithInitialFireAtSeedsPastInstant verifies WithInitialFireAt
+// sets the registration's next fire to the given instant DIRECTLY, even
+// when it is already in the past — the overdue catch-up a schedule-driven
+// extension needs. (Deriving it from Schedule.Next, as Once does, drops a
+// past instant to the zero time and the registration never fires — the
+// bug this option exists to avoid.)
+func TestServiceWithInitialFireAtSeedsPastInstant(t *testing.T) {
+	t.Parallel()
+	clk := newFakeClock(time.Unix(1700000000, 0))
+	svc := New(WithLogger(discardLogger()), WithClock(clk.Now), WithTickInterval(time.Millisecond))
+	defer func() { _ = svc.Stop(context.Background()) }()
+
+	past := clk.Now().Add(-time.Hour)
+	if err := svc.Register(context.Background(), "overdue", Manual(),
+		func(context.Context, FireMeta) (Outcome, error) { return Outcome{}, nil },
+		WithInitialFireAt(past),
+	); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	st, ok := svc.Status(context.Background(), "overdue")
+	if !ok {
+		t.Fatal("overdue: not registered")
+	}
+	if !st.NextFireAt.Equal(past) {
+		t.Fatalf("NextFireAt = %v, want the verbatim past instant %v (not dropped to zero)", st.NextFireAt, past)
+	}
+}
+
+// TestServiceRescheduleFiresPastAndKeepsSeq verifies Reschedule arms a
+// live registration's next fire DIRECTLY — a past instant fires on the
+// next tick — WITHOUT resetting the fire counter, so a schedule-driven
+// extension that advances its cadence in place keeps FireSeq monotonic
+// (the property a `count` end-condition relies on).
+func TestServiceRescheduleFiresPastAndKeepsSeq(t *testing.T) {
+	t.Parallel()
+	clk := newFakeClock(time.Unix(1700000000, 0))
+	svc := New(WithLogger(discardLogger()), WithClock(clk.Now), WithTickInterval(time.Millisecond))
+	defer func() { _ = svc.Stop(context.Background()) }()
+
+	var (
+		mu   sync.Mutex
+		seqs []int
+	)
+	record := func(_ context.Context, fire FireMeta) (Outcome, error) {
+		mu.Lock()
+		seqs = append(seqs, fire.FireSeq)
+		mu.Unlock()
+		return Outcome{}, nil
+	}
+	start := clk.Now()
+	if err := svc.Register(context.Background(), "resched", Manual(), record,
+		WithInitialFireAt(start.Add(time.Second)),
+	); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Fire #1 at the seeded instant.
+	clk.Advance(time.Second)
+	awaitFireCount(t, svc, "resched", 1)
+
+	// Advance (so fire #2's LastFireAt is distinct from #1's) and
+	// reschedule to a PAST instant — Manual left nextFireAt at zero after
+	// fire #1, so only the Reschedule re-arms it, and a past instant must
+	// still fire.
+	clk.Advance(time.Second)
+	if err := svc.Reschedule(context.Background(), "resched", clk.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("Reschedule: %v", err)
+	}
+	awaitFireCount(t, svc, "resched", 2)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seqs) != 2 || seqs[0] != 1 || seqs[1] != 2 {
+		t.Fatalf("FireSeq across reschedule = %v, want [1 2] (monotonic, no reset)", seqs)
+	}
+}
+
 func TestServiceErrorRecordedInRunLog(t *testing.T) {
 	t.Parallel()
 	clk := newFakeClock(time.Unix(1700000000, 0))

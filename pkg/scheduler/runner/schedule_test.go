@@ -157,3 +157,19 @@ func TestCronNilLocationDefaultsUTC(t *testing.T) {
 		t.Fatalf("Cron nil loc (UTC): got %v want %v", got, want)
 	}
 }
+
+// TestManualNeverFires confirms Manual() is inert — Next always returns
+// the zero time, future or past. A schedule-driven extension pairs it
+// with WithInitialFireAt + Reschedule to own its cadence; the schedule
+// must never advance the registration on its own.
+func TestManualNeverFires(t *testing.T) {
+	t.Parallel()
+	s := Manual()
+	at := time.Date(2024, 1, 15, 9, 0, 0, 0, time.UTC)
+	if got := s.Next(at); !got.IsZero() {
+		t.Fatalf("Manual().Next = %v, want zero (inert)", got)
+	}
+	if got := s.Next(at.Add(-time.Hour)); !got.IsZero() {
+		t.Fatalf("Manual().Next(past) = %v, want zero", got)
+	}
+}

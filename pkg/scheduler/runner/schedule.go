@@ -89,3 +89,25 @@ func (s onceSchedule) Next(after time.Time) time.Time {
 	}
 	return time.Time{}
 }
+
+// Manual is an inert schedule: Next always returns the zero time, so
+// the registration never advances on its own. The next fire instant is
+// set explicitly — by [WithInitialFireAt] at registration and by
+// [Runner.Reschedule] thereafter. Used by schedule-driven extensions
+// (the scheduler ext) that own their cadence from a durable plan and
+// must fire overdue instants verbatim, which the past-dropping [Once]
+// cannot do.
+//
+// Footgun: [Runner.Resume] re-derives nextFireAt via Schedule.Next(now),
+// which for a Manual registration is the zero time — so Resume DISARMS
+// it. A schedule-driven extension that pauses/resumes must re-arm on
+// resume by re-registering (WithInitialFireAt) or Reschedule-ing from
+// its durable plan, not by calling Runner.Resume. (The scheduler ext
+// resumes via registerTask, so it is unaffected.)
+func Manual() Schedule {
+	return manualSchedule{}
+}
+
+type manualSchedule struct{}
+
+func (manualSchedule) Next(time.Time) time.Time { return time.Time{} }

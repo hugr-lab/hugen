@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -113,6 +114,125 @@ func TestDispatchWakeFire_DeliversRenderedMessage(t *testing.T) {
 
 	if len(pauses) != 0 {
 		t.Errorf("happy wake fire must not invoke pauseFn; got %v", pauses)
+	}
+}
+
+// TestDispatchWakeFire_DeliverFailureStillSchedulesNext asserts that a
+// fire whose delivery fails still advances the schedule: it logs the
+// failure AND writes the next planned row + reschedules, so one bad fire
+// (a transient inbox error) does not stall a recurring task. Mirrors the
+// spawn-fire spawn_failed/fire_timeout path.
+func TestDispatchWakeFire_DeliverFailureStillSchedulesNext(t *testing.T) {
+	store := newFakeStore()
+	host := newFakeHost()
+	host.markAlive("ses-owner-wake")
+	host.deliverErr = errors.New("inbox closed")
+	var pauses []string
+	row := makeWakeTaskRow(t, store, "ses-owner-wake")
+	deps := minimalDeps(t, store, host, &pauses)
+	var rescheduled []time.Time
+	deps.rescheduleFn = func(_ string, at time.Time) error {
+		rescheduled = append(rescheduled, at)
+		return nil
+	}
+	fn := buildFireFn(row, deps)
+
+	planned := time.Now().UTC()
+	if _, err := fn(context.Background(), runner.FireMeta{
+		Name:      "task_tsk_wake_1",
+		FireSeq:   1,
+		PlannedAt: planned,
+	}); err == nil {
+		t.Fatal("deliver failure must surface as a fire error")
+	}
+
+	var sawFailed, sawNextPlanned bool
+	for _, e := range store.snapshotLog() {
+		if e.EventType == schedstore.LogEventFailed {
+			sawFailed = true
+		}
+		if e.EventType == schedstore.LogEventPlanned && e.FireSeq == 2 {
+			sawNextPlanned = true
+		}
+	}
+	if !sawFailed {
+		t.Error("expected a failed task_log row")
+	}
+	if !sawNextPlanned {
+		t.Error("failed fire must still write the next planned row (fire #2)")
+	}
+	if len(rescheduled) != 1 {
+		t.Fatalf("failed fire must reschedule the next fire; got %d reschedules", len(rescheduled))
+	}
+	if wantNext := planned.Add(time.Hour); !rescheduled[0].Equal(wantNext) {
+		t.Errorf("reschedule at=%v, want one interval later %v", rescheduled[0], wantNext)
+	}
+	// A delivery failure is transient, not pause-worthy.
+	if len(pauses) != 0 {
+		t.Errorf("deliver-failure must not pause the task; got %v", pauses)
+	}
+}
+
+// TestDispatchWakeFire_FailedFinalFireRespectsCount asserts the
+// failure-reschedule still honours the count end-condition: a failed
+// fire is an attempt, and a failed FINAL fire (seq == count) terminates
+// the task instead of rescheduling — one bad run neither stalls the
+// schedule (see above) nor runs past its count.
+func TestDispatchWakeFire_FailedFinalFireRespectsCount(t *testing.T) {
+	store := newFakeStore()
+	host := newFakeHost()
+	host.markAlive("ses-owner-count")
+	host.deliverErr = errors.New("inbox closed")
+	row := schedstore.TaskRow{
+		ID:             "tsk_wake_count1",
+		AgentID:        "agt_test",
+		Kind:           schedstore.KindWake,
+		Status:         schedstore.StatusActive,
+		ScheduleKind:   schedstore.ScheduleInterval,
+		OwnerSessionID: "ses-owner-count",
+		Spec: schedstore.TaskSpec{
+			Name:         "once",
+			ScheduleSpec: "1h",
+			EndCondition: schedstore.TaskEndCondition{Kind: "count", Spec: "1"},
+			WakeMessage:  "ping",
+		},
+	}
+	if err := store.OpenTask(context.Background(), row, time.Now().UTC()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var pauses []string
+	deps := minimalDeps(t, store, host, &pauses)
+	var rescheduled []time.Time
+	deps.rescheduleFn = func(_ string, at time.Time) error {
+		rescheduled = append(rescheduled, at)
+		return nil
+	}
+	fn := buildFireFn(row, deps)
+
+	if _, err := fn(context.Background(), runner.FireMeta{
+		Name:      "task_tsk_wake_count1",
+		FireSeq:   1, // the only allowed fire (count=1)
+		PlannedAt: time.Now().UTC(),
+	}); err == nil {
+		t.Fatal("deliver failure must surface as a fire error")
+	}
+
+	// count=1 reached on this (failed) fire → no next planned, no
+	// reschedule, task cancelled.
+	for _, e := range store.snapshotLog() {
+		if e.EventType == schedstore.LogEventPlanned && e.FireSeq == 2 {
+			t.Error("count=1 reached: must not write a next planned row")
+		}
+	}
+	if len(rescheduled) != 0 {
+		t.Errorf("count=1 reached: must not reschedule; got %v", rescheduled)
+	}
+	updated, err := store.GetTask(context.Background(), row.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if updated.Status != schedstore.StatusCancelled {
+		t.Errorf("status = %q, want cancelled (count reached)", updated.Status)
 	}
 }
 
@@ -266,9 +386,9 @@ func TestDispatchSpawnFire_DeadOwnerPauses(t *testing.T) {
 
 // TestMaybeScheduleNext_CronRecomputes asserts the recompute path
 // for a recurring cron task: after a fire it inserts the next
-// `planned` row at the cron-derived instant and re-registers a Once
-// schedule so the Runner fires it on time. "0 9 * * 1" advances from
-// one Monday 09:00 to the next.
+// `planned` row at the cron-derived instant and reschedules the runner
+// registration's next fire to it. "0 9 * * 1" advances from one Monday
+// 09:00 to the next.
 func TestMaybeScheduleNext_CronRecomputes(t *testing.T) {
 	store := newFakeStore()
 	row := schedstore.TaskRow{
@@ -288,17 +408,13 @@ func TestMaybeScheduleNext_CronRecomputes(t *testing.T) {
 		t.Fatalf("seed OpenTask: %v", err)
 	}
 
-	var registered []time.Time
+	var rescheduled []time.Time
 	deps := fireDeps{
 		store:   store,
 		agentID: "agt_test",
 		logger:  slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
-		// Fixed clock BEFORE the next cron instant so the overdue clamp
-		// stays inert and the deterministic cron-math assertion holds.
-		now: func() time.Time { return planned },
-		registerFn: func(_ string, sched runner.Schedule) error {
-			// Extract the Once instant by probing just before it.
-			registered = append(registered, sched.Next(planned))
+		rescheduleFn: func(_ string, at time.Time) error {
+			rescheduled = append(rescheduled, at)
 			return nil
 		},
 	}
@@ -316,19 +432,22 @@ func TestMaybeScheduleNext_CronRecomputes(t *testing.T) {
 	if pl.FireSeq != 2 {
 		t.Errorf("next fire_seq=%d, want 2", pl.FireSeq)
 	}
-	if len(registered) != 1 || !registered[0].Equal(wantNext) {
-		t.Errorf("re-register schedule = %v, want one Once(%v)", registered, wantNext)
+	if len(rescheduled) != 1 || !rescheduled[0].Equal(wantNext) {
+		t.Errorf("reschedule = %v, want one at %v", rescheduled, wantNext)
 	}
 }
 
-// TestMaybeScheduleNext_IntervalOverdueClampsToNow asserts the
+// TestMaybeScheduleNext_IntervalOverdueFiresVerbatim asserts the
 // long-fire fix: when a fire ran longer than the interval, the next
-// instant (prevPlanned + interval) is already in the past by the time
-// the fire completes and re-registers. Pre-fix runner.Once(past) returns
-// zero (onceSchedule.Next) and the fire is silently dropped — only one
-// launch ever happens. The clamp lifts it to "now" so it fires ASAP and
-// the schedule keeps its cadence (serialised, back-to-back).
-func TestMaybeScheduleNext_IntervalOverdueClampsToNow(t *testing.T) {
+// instant (prevPlanned + interval) is already in the past. The refactor
+// writes it VERBATIM (no clamp) and reschedules the runner registration
+// to it; the runner then fires it on the next tick because nextFireAt <=
+// now (overdue catch-up), so a task slower than its interval keeps its
+// cadence back-to-back. (Pre-refactor runner.Once(past) returned zero
+// and the fire was silently dropped — see the runner-level
+// TestRegister_WithInitialFireAtPastFires / TestReschedule for the
+// firing half.)
+func TestMaybeScheduleNext_IntervalOverdueFiresVerbatim(t *testing.T) {
 	store := newFakeStore()
 	row := schedstore.TaskRow{
 		ID:           "tsk_overdue",
@@ -342,45 +461,35 @@ func TestMaybeScheduleNext_IntervalOverdueClampsToNow(t *testing.T) {
 			EndCondition: schedstore.TaskEndCondition{Kind: "until_cancel"},
 		},
 	}
+	// Fire #1 was planned at 12:00 and ran 9m (≫ the 2m interval), so the
+	// logical next (12:02) is already ~7m in the past at completion.
 	planned := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	now := planned.Add(9 * time.Minute) // fire ran 9m on a 2m interval
 	if err := store.OpenTask(context.Background(), row, planned); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	// The runner does NOT probe the Once at the clamp instant — it calls
-	// sched.Next(s.nowFn()) inside Register, a LATER instant than the
-	// clamp (the appendLog + GetTask + LatestPlannedFire round-trips run
-	// in between). Model that advance so the probe exercises the real
-	// drop the old same-instant probe masked: with a bare-now clamp,
-	// Once(now).Next(now+latency) returns zero and the fire is lost.
-	const registerLatency = time.Second // < overdueRefireMargin
-	var registered []time.Time
+	var rescheduled []time.Time
 	deps := fireDeps{
 		store:   store,
 		agentID: "agt_test",
 		logger:  slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
-		now:     func() time.Time { return now },
-		registerFn: func(_ string, sched runner.Schedule) error {
-			registered = append(registered, sched.Next(now.Add(registerLatency)))
+		rescheduleFn: func(_ string, at time.Time) error {
+			rescheduled = append(rescheduled, at)
 			return nil
 		},
 	}
 
 	maybeScheduleNext(context.Background(), row, runner.FireMeta{FireSeq: 1, PlannedAt: planned}, deps)
 
-	wantPlanned := now.Add(overdueRefireMargin)
+	wantNext := planned.Add(2 * time.Minute) // logical next, written verbatim — NOT clamped to now
 	pl, err := store.LatestPlannedFire(context.Background(), row.ID)
 	if err != nil || pl == nil {
 		t.Fatalf("LatestPlannedFire: %v (%v)", err, pl)
 	}
-	if !pl.PlannedAt.Equal(wantPlanned) {
-		t.Errorf("overdue next planned_at=%v, want now+margin %v", pl.PlannedAt, wantPlanned)
+	if !pl.PlannedAt.Equal(wantNext) {
+		t.Errorf("overdue next planned_at=%v, want verbatim logical %v (no clamp)", pl.PlannedAt, wantNext)
 	}
-	if len(registered) != 1 || registered[0].IsZero() {
-		t.Fatalf("overdue re-fire must register a non-zero (firing) Once even after register latency; got %v", registered)
-	}
-	if !registered[0].Equal(wantPlanned) {
-		t.Errorf("registered fire=%v, want now+margin %v", registered[0], wantPlanned)
+	if len(rescheduled) != 1 || !rescheduled[0].Equal(wantNext) {
+		t.Fatalf("overdue re-fire must reschedule to the verbatim instant; got %v", rescheduled)
 	}
 }
 
@@ -406,10 +515,10 @@ func TestMaybeScheduleNext_CronEndConditionCount(t *testing.T) {
 		t.Fatalf("seed OpenTask: %v", err)
 	}
 	deps := fireDeps{
-		store:      store,
-		agentID:    "agt_test",
-		logger:     slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
-		registerFn: func(string, runner.Schedule) error { return nil },
+		store:        store,
+		agentID:      "agt_test",
+		logger:       slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
+		rescheduleFn: func(string, time.Time) error { return nil },
 	}
 	// fire_seq 2 completed; count=2 reached → cancel, no new planned.
 	maybeScheduleNext(context.Background(), row, runner.FireMeta{FireSeq: 2, PlannedAt: planned}, deps)

@@ -51,6 +51,17 @@ type Runner interface {
 	// a burst of catch-up fires.
 	Resume(ctx context.Context, name string) error
 
+	// Reschedule sets a live registration's next fire instant
+	// directly, without re-creating the registration (so the fire
+	// counter and in-flight bit are preserved). `at` may be in the
+	// past — the registration then fires on the next tick (overdue
+	// catch-up). Used by schedule-driven extensions that own their
+	// own cadence (the next instant comes from a durable plan, not
+	// from a Schedule). Unknown names return nil. Pass the zero
+	// time to disarm (the registration stays installed but ticks
+	// skip it until rescheduled again).
+	Reschedule(ctx context.Context, name string, at time.Time) error
+
 	// Status snapshots the named registration's state. Returns
 	// ok=false when the name is not registered.
 	Status(ctx context.Context, name string) (RunnerStatus, bool)
@@ -168,6 +179,7 @@ type registerOptions struct {
 	timeout        time.Duration
 	startPaused    bool
 	initialFireSeq int
+	initialFireAt  time.Time
 }
 
 // WithFireTimeout overrides the per-fire context deadline.
@@ -189,17 +201,32 @@ func WithStartPaused() RegisterOption {
 }
 
 // WithInitialFireSeq seeds the registration's fire counter so the FIRST
-// fire of this registration reports FireSeq == n (n clamped to ≥1). A
-// recurring schedule that re-registers a fresh one-shot per cycle (the
-// scheduler ext's pattern) otherwise restarts the counter at 1 every
-// cycle, so a `count` end-condition (completedSeq >= N) never advances.
-// Seeding from the persisted planned-fire seq keeps FireSeq monotonic
-// across re-registrations.
+// fire of this registration reports FireSeq == n (n clamped to ≥1).
+// Schedule-driven extensions that persist their fire sequence (the
+// scheduler ext) seed this at restore so a process restart resumes a
+// `count` end-condition at the right number instead of restarting at 1.
+// With [Runner.Reschedule] driving subsequent fires in place, the
+// counter then stays monotonic without re-registration.
 func WithInitialFireSeq(n int) RegisterOption {
 	return func(o *registerOptions) {
 		if n > 1 {
 			o.initialFireSeq = n
 		}
+	}
+}
+
+// WithInitialFireAt sets the registration's FIRST next-fire instant
+// directly, instead of deriving it from Schedule.Next(now). Unlike a
+// Schedule (e.g. [Once]) that drops an instant already in the past
+// (Next returns the zero time), a past `at` here is preserved so the
+// registration fires on the next tick — the overdue catch-up a
+// schedule-driven extension needs when its durable plan's next instant
+// is already due. Pair with [Manual] so subsequent fires are driven by
+// [Runner.Reschedule], not the (inert) schedule. The zero time is
+// ignored (falls back to Schedule.Next).
+func WithInitialFireAt(at time.Time) RegisterOption {
+	return func(o *registerOptions) {
+		o.initialFireAt = at
 	}
 }
 
