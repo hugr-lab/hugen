@@ -297,7 +297,19 @@ future time / cadence:
 1. Find the task in `## Available tasks` (or search the full set by
    intent with `task:search`) whose goal covers what the user wants.
    Prefer running it over hand-rolling the job with raw tools — built
-   tasks are tested (constitution rule).
+   tasks are tested (constitution rule). Pick by match count:
+   - **One clear match** → use it.
+   - **Two or more plausible matches and none is the clear best fit**
+     (near-identical goals, or they differ on something the user left
+     unsaid — output format, scope, a parameter) → **ask the user
+     which one before running; do NOT pick silently.** List each
+     candidate by name + its one-line goal + the DISCRIMINATING
+     difference (e.g. "`A` → Markdown table · `B` → HTML with charts"),
+     and run only the one the user names. Inspect contracts with
+     `task:describe` to surface the real difference when it isn't
+     obvious from the descriptions.
+   - **No match** → fall through (build a task, or do the job with
+     raw tools).
 2. Inspect its input contract with `task:describe("<name>")`,
    collect any required inputs from the user, then run it by name:
 

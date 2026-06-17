@@ -33,23 +33,29 @@ metadata:
     requires_skills: [python-runner]
     autoload: false
     autoload_for: []
-    # worker: the analyst report-builder role autoloads this.
-    # mission: reference grounding. root: a quick inline report in
-    # chat (small enough not to need a mission) — the model can
-    # `skill:load` it because it is a PLAIN (non-task) skill, so it
-    # appears in the `## Available skills` catalogue.
+    # PLAIN render-only skill — the reusable report METHOD (python-
+    # first, normalize-to-file, charts / html-generation). It is the
+    # render half ONLY; FETCHING data is never its job.
     #
-    # NOT task-eligible (deliberate, for now). A `task.eligible: true`
-    # skill is EXCLUDED from the loadable `## Available skills`
-    # catalogue — it surfaces instead in `## Available tasks` and runs
-    # by name via `task:execute_task` (or worker autoload). The
-    # standalone "report from ready data" task path (structured
-    # inputs_schema + run in its own subagent from root) is a DEFERRED
-    # end-of-039 item — see the analyst-skill-backlog "report-builder
-    # as a task" entry. Keeping it a plain skill now keeps the mission
-    # (autoload) AND root (skill:load) paths working for the wedge-fix
-    # dogfood.
-    tier_compatibility: [worker, mission, root]
+    # Loaded three ways, all worker / mission tier:
+    #   - the analyst `report-builder` role autoloads it (the
+    #     mission's render stage);
+    #   - `_task_builder` author workers reach it via
+    #     `skill:catalog_list` → `skill:load` when minting a report
+    #     task (and the minted report task `requires_skills` it);
+    #   - the `build_report` task `requires_skills` it for the render
+    #     method (and `skill:ref`s its references).
+    #
+    # NOT task-eligible (deliberate). The standalone "render a report
+    # from known data / a named query" path is the SEPARATE
+    # `build_report` task (task-eligible, fetch-aware, one-script).
+    # Keeping report-builder a plain skill is what lets the mission
+    # autoload AND the task `requires_skills` reuse the SAME render
+    # method instead of duplicating it. Not root-loadable: at root the
+    # report entry point is the `build_report` task (render-ready data
+    # / a named query) or the `analyst` mission (open-ended analysis) —
+    # there is no report skill to load.
+    tier_compatibility: [worker, mission]
 compatibility:
   model: any
   runtime: hugen

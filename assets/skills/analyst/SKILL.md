@@ -1,10 +1,14 @@
 ---
 name: analyst
 description: >
-  Mission-PDCA coordinator for data work over Hugr Data Mesh.
-  Planner picks one wave per iteration; checker routes; synthesizer
-  produces the final answer. Worker catalogue covers schema
-  inventory, end-to-end data analysis, and report assembly.
+  Mission-PDCA coordinator for COMPLEX, open-ended data work over
+  Hugr Data Mesh: investigating unfamiliar schema, finding trends /
+  relationships / anomalies, testing hypotheses, multi-step analysis
+  that needs several coordinated waves. Planner picks one wave per
+  iteration; checker routes; synthesizer produces the final answer. A
+  report here is the RESULT of analysis — to render a document from
+  data you already have, or from a query you can name, use the
+  `build_report` task instead.
 license: Apache-2.0
 allowed-tools: []
 metadata:
@@ -26,11 +30,16 @@ metadata:
 
     mission:
       summary: >
-        COMPLEX, multi-step data work: deep analysis,
-        exploration / research, report building, dashboards, and
-        multi-stage analytics that need several coordinated waves or
-        produce an artifact.
-      keywords: [analyse, dashboard, report, chart, research, compare, audit, investigate]
+        COMPLEX, open-ended data work that needs investigation: deep
+        analysis, schema exploration / research, trend & relationship
+        & anomaly detection, hypothesis testing, multi-source
+        dashboards, and multi-stage analytics spanning several
+        coordinated waves.
+        Spawn this when the answer requires figuring something out.
+        When the data (or the exact query) AND the output shape are
+        already known and you just need the document rendered, that is
+        the `build_report` task, not this mission.
+      keywords: [analyse, analysis, explore, research, investigate, trend, relationship, anomaly, compare, audit, hypothesis]
 
       capabilities:
         notepad: true
