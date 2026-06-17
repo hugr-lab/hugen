@@ -435,6 +435,31 @@ func (m *ToolManager) rebuildSnapshot(ctx context.Context, sessionID string, gen
 	}
 	slices.SortFunc(tools, func(a, b Tool) int { return strings.Compare(a.Name, b.Name) })
 
+	// Every tool's arg schema must conform to the conservative JSON-Schema
+	// subset ALL chat-completion providers accept (Anthropic / OpenAI /
+	// Gemini) — Gemini, for one, 400s the WHOLE tools payload on a stray
+	// `additionalProperties` / `$ref` / `oneOf` / `examples`. MCP tools are
+	// already cleaned at their provider boundary; this is the universal net
+	// that also covers our in-repo system providers AND the task: provider's
+	// synthetic `task:<name>` tools (which project author-supplied
+	// inputs_schema we don't control). Idempotent on already-clean schemas
+	// (returns the original bytes, no repairs).
+	for i := range tools {
+		cleaned, notes, err := SanitizeLLMSchema(tools[i].ArgSchema)
+		if err != nil {
+			if m.log != nil {
+				m.log.Warn("tool: arg-schema sanitize failed; sending as-is",
+					"tool", tools[i].Name, "err", err)
+			}
+			continue
+		}
+		tools[i].ArgSchema = cleaned
+		if len(notes) > 0 && m.log != nil {
+			m.log.Warn("tool: arg-schema sanitized for LLM conformance",
+				"tool", tools[i].Name, "repairs", notes)
+		}
+	}
+
 	return Snapshot{Generations: gens, Tools: tools}, errors.Join(errs...)
 }
 
