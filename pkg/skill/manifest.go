@@ -906,6 +906,13 @@ type TaskBlock struct {
 	// supported" in 6.1b MVP). Empty value is treated as `worker`.
 	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
 
+	// DisableScheduling, when true, blocks `schedule:create` from
+	// binding this task to a periodic / headless fire — an opt-OUT for
+	// INTERACTIVE tasks (they `session:inquire` and would hang with no
+	// operator at a fire, e.g. `_task_builder`). Default false → every
+	// task is schedulable; only the rare interactive task sets it.
+	DisableScheduling bool `json:"disable_scheduling,omitempty" yaml:"disable_scheduling,omitempty"`
+
 	// GoalSummary is the default imperative one-line brief used
 	// when the caller omits `goal` at task-create time. Surfaces
 	// in liveview + notification subjects. Free-form prose.
@@ -939,6 +946,13 @@ type TaskBlock struct {
 	// only when the skill body contains `{{ ... }}` actions that
 	// depend on the per-fire envelope.
 	BodyIsTemplate bool `json:"body_is_template,omitempty" yaml:"body_is_template,omitempty"`
+}
+
+// IsSchedulable reports whether the task may be bound to a schedule.
+// Default true — only an explicit `disable_scheduling: true` blocks it,
+// for interactive tasks that cannot run headless.
+func (t TaskBlock) IsSchedulable() bool {
+	return !t.DisableScheduling
 }
 
 // MissionCapabilities lists the mission-tier opt-in toggles.

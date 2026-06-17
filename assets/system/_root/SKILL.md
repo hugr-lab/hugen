@@ -369,8 +369,8 @@ User wants repeatable / schedulable work but no built task covers it.
 Don't decline, and don't hand-roll it as a one-off — create the task
 skill first, then run or schedule it.
 
-**Dedup FIRST — do NOT spawn the builder over a match.** Building a
-mission is expensive; a duplicate task is worse. Before Path D, check
+**Dedup FIRST — do NOT run the builder over a match.** A duplicate task
+is worse than a slightly-imperfect existing one. Before Path D, check
 whether the work already exists: scan `## Available tasks`, and
 `task:search(query: <the user's request>)` for anything not advertised.
 If a task plausibly covers the request, you are UNSURE whether to build
@@ -379,23 +379,23 @@ an existing match: a near-match means run-or-confirm, never silently
 build. `session:inquire(type:"clarification", question: "У тебя уже
 есть задача `<name>` — <one-line what it does>. Запустить её или
 построить новую?", options:["запустить существующую","построить
-новую","уточнить"])`. Spawn `_task_builder` ONLY when the user confirms
+новую","уточнить"])`. Run `_task_builder` ONLY when the user confirms
 they want a genuinely new task the existing one can't serve. On "run
-the existing one" → Path A. This is move zero — the same dedup the
-builder's researcher does, but at root, before paying for a mission.
+the existing one" → Path A. This is move zero — the builder dedups too,
+but doing it at root first is cheaper.
 
-When nothing covers it, build:
+When nothing covers it, build by RUNNING the `_task_builder` task — it
+is itself a pinned, always-available system task in your
+`## Available tasks`:
 
 ```
-session:spawn_mission(
-  name="build-<short>",
-  goal="Build a reusable task for: <user request, verbatim>",
-  skill="_task_builder",
-  inputs={
+task:execute_task({
+  name: "_task_builder",
+  inputs: {
     user_intent: "<the user's full request, verbatim>",
     known_details: { ... }  # only facts the user already stated
   }
-)
+})
 ```
 
 `known_details` follows the Knob 2 rule — pass ONLY facts the user
@@ -407,15 +407,15 @@ restatement of the request — the builder treats every key you pass
 as already answered and will NOT re-ask it, so a paraphrase
 ("output: report") silently suppresses a question the user never
 answered. When in doubt, leave the key out: every dimension you
-omit the builder clarifies with the user itself. Omit `known_details`
+omit the builder agrees with the user itself. Omit `known_details`
 entirely when the request carries no extra facts.
 
-`_task_builder` interviews the user for the task's inputs / output /
-name, authors + validates the bundle, confirms the assembled result
-with the user, and saves it as a task-eligible skill. When it
-returns, the new task is runnable by name — run it ad-hoc with
-`task:execute_task` (Path A) or bind it to a schedule (Path B) per
-what the user originally asked.
+`_task_builder` runs as a worker under this root: it designs + AGREES
+the task's algorithm with the user, authors + validates the bundle,
+confirms the result, and saves it as a task-eligible skill. Its
+inquiries surface to you (the user) in chat. When it returns, the new
+task is runnable by name — run it ad-hoc with `task:execute_task`
+(Path A) or bind it to a schedule (Path B) per what the user asked.
 
 Use this when the work is worth keeping (the user said "every…",
 "regularly", "make a task that…") — not for a single one-off,
@@ -468,8 +468,8 @@ over a sprawling in-place edit.
      spawn the builder over a match.
    - **No, but the user wants a reminder** → Path C.
    - **No, but it's repeatable / schedulable work worth keeping**
-     → Path D (dedup-check first): spawn `_task_builder` only when
-     nothing covers it, then run (Path A) or schedule (Path B) it.
+     → Path D (dedup-check first): run the `_task_builder` task only
+     when nothing covers it, then run (Path A) or schedule (Path B) it.
      Do NOT invent a task name.
    - **No, and it's a one-off** → no task needed; spawn a regular
      mission with a suitable mission skill, or just answer in chat.
