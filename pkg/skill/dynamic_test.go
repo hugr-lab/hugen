@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	hugr "github.com/hugr-lab/query-engine"
 	"github.com/hugr-lab/query-engine/pkg/auth"
@@ -73,6 +74,21 @@ metadata:
     tier_compatibility: [worker]
 ---
 This is the change-report recipe body.
+`
+
+const systemTaskSKILL = `---
+name: _task_thing
+description: A task-eligible system skill for indexer tests.
+license: MIT
+metadata:
+  hugen:
+    tier_compatibility: [worker]
+    task:
+      eligible: true
+      kind: worker
+      goal_summary: do the thing
+---
+body
 `
 
 const plainHelperSKILL = `---
@@ -477,6 +493,60 @@ func TestStoreSyncDynamic(t *testing.T) {
 	pins = pinByName()
 	assert.True(t, pins["change-report"], "change-report now pinned")
 	assert.False(t, pins["data-catalog"], "data-catalog un-pinned")
+}
+
+// TestStoreSyncSystemTasks indexes task-eligible SYSTEM embed skills
+// into the index (source=system) so they surface in the advertise,
+// while non-task system skills stay embed-only; system tasks pin + are
+// uninstall-protected.
+func TestStoreSyncSystemTasks(t *testing.T) {
+	q, agentID := newDynamicTestEngine(t)
+	ctx := context.Background()
+	st := NewSkillStore(Options{
+		LocalRoot:      t.TempDir(),
+		DynamicQuerier: q,
+		AgentID:        agentID,
+	})
+	require.True(t, st.HasDynamic())
+
+	sysFS := fstest.MapFS{
+		"_task_thing/SKILL.md": {Data: []byte(systemTaskSKILL)},  // task-eligible → indexed
+		"_helper/SKILL.md":     {Data: []byte(plainHelperSKILL)}, // not task-eligible → skipped
+	}
+
+	names, err := st.SyncSystemTasks(ctx, sysFS)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"_task_thing"}, names,
+		"only task-eligible system skills are indexed")
+
+	// Indexed under source=system with the embed:// bundle marker.
+	row, err := st.dynamic.index.getRowByName(ctx, "system", "_task_thing")
+	require.NoError(t, err)
+	assert.Equal(t, "system", row.Source)
+	assert.True(t, row.TaskEligible)
+	assert.True(t, strings.HasPrefix(row.BundlePath, "embed://"),
+		"bundle_path is the embed marker: %s", row.BundlePath)
+
+	// The non-task system skill is NOT indexed.
+	helper, err := st.dynamic.index.getRowByName(ctx, "system", "plain-helper")
+	require.NoError(t, err)
+	assert.Empty(t, helper.ID, "non-task system skill must not be indexed")
+
+	// Idempotent: re-sync hash-skips but still returns the name (to pin).
+	names2, err := st.SyncSystemTasks(ctx, sysFS)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"_task_thing"}, names2)
+
+	// The system task pins.
+	require.NoError(t, st.ApplyPins(ctx, names))
+	pinned, err := st.dynamic.index.getRowByName(ctx, "system", "_task_thing")
+	require.NoError(t, err)
+	assert.True(t, pinned.Pin, "system task should be pinned")
+
+	// Uninstall of a system task is rejected (read-only embed).
+	err = st.Uninstall(ctx, "_task_thing")
+	assert.ErrorIs(t, err, ErrUnsupportedBackend,
+		"system task uninstall must be rejected")
 }
 
 // TestStoreNoQuerier_FallsBackToLocal confirms the consolidation

@@ -368,6 +368,21 @@ func (s *Store) SyncDynamic(ctx context.Context, hubDir string, installSet []str
 	return installed + indexed, errors.Join(ierr, rerr)
 }
 
+// SyncSystemTasks indexes the task-eligible SYSTEM (embed) skills from
+// sysFS into the index under source="system" so they surface in the
+// advertise + task discovery (execution resolves them via the embed
+// backend regardless). No-op when no dynamic backend is wired. Returns
+// the indexed system-task names — the caller folds them into the pin
+// set (system tasks are always-advertise). Invalidates the List cache.
+func (s *Store) SyncSystemTasks(ctx context.Context, sysFS fs.FS) ([]string, error) {
+	if s.dynamic == nil {
+		return nil, nil
+	}
+	names, err := s.dynamic.SyncSystemTasks(ctx, sysFS)
+	s.Refresh()
+	return names, err
+}
+
 // ApplyPins reconciles the advertise-pin flag across the dynamic index
 // against the authoritative pin set (listed → pin=true, others →
 // pin=false). No-op when no dynamic backend is wired. Invalidates the

@@ -177,10 +177,26 @@ func phaseSkillsAndPerms(ctx context.Context, core *Core) error {
 			} else {
 				core.Logger.Info("skills: dynamic index synced", "bundles", n)
 			}
-			// Apply advertise-pins after indexing (authoritative when
-			// declared; left untouched otherwise).
+			// Index task-eligible SYSTEM skills (e.g. _task_builder) so
+			// they surface in the advertise + task discovery; execution
+			// resolves them via the embed backend regardless. They are
+			// always-advertise, so they fold into the pin set below.
+			sysTasks, serr := ds.SyncSystemTasks(ctx, SystemSkillsFS())
+			if serr != nil {
+				core.Logger.Warn("skills: system task sync had errors", "indexed", len(sysTasks), "err", serr)
+			} else if len(sysTasks) > 0 {
+				core.Logger.Info("skills: system tasks indexed", "tasks", sysTasks)
+			}
+			// Apply advertise-pins after indexing: config pins ∪ system
+			// tasks (system tasks are always pinned). Authoritative — when
+			// declared it un-pins everything else; system tasks are added
+			// regardless of config.
+			pins := sysTasks
 			if view.PinSetDeclared() {
-				if perr := ds.ApplyPins(ctx, view.PinSet()); perr != nil {
+				pins = append(append([]string(nil), view.PinSet()...), sysTasks...)
+			}
+			if view.PinSetDeclared() || len(sysTasks) > 0 {
+				if perr := ds.ApplyPins(ctx, pins); perr != nil {
 					core.Logger.Warn("skills: apply pins had errors", "err", perr)
 				}
 			}
