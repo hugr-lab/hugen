@@ -433,7 +433,13 @@ func renderInquiryModal(state *inquiryState, width, maxHeight int) string {
 		body.WriteString(inquiryFaintStyle.Render(wrap("Context: "+c, contentW)))
 		body.WriteString("\n")
 	}
-	if len(state.req.Options) > 0 {
+	// For approval inquiries the §4.6 modal choices (approve / reject /
+	// refine, rendered in the footer) ARE the option set. A model that
+	// also stuffed an `options` array on an approval inquiry — e.g. a
+	// "Yes, register / No, don't" pair — would otherwise show a
+	// redundant, conflicting "Options:" list above the real buttons.
+	// Suppress it: the footer choices are authoritative.
+	if state.req.Type != protocol.InquiryTypeApproval && len(state.req.Options) > 0 {
 		body.WriteString("\n")
 		body.WriteString(inquiryFaintStyle.Render("Options:"))
 		body.WriteString("\n")

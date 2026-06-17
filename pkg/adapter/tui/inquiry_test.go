@@ -60,6 +60,27 @@ func TestRenderInquiryModal_ApprovalContainsHintAndQuestion(t *testing.T) {
 	}
 }
 
+// A model that stuffs an `options` array onto an APPROVAL inquiry (the
+// dogfood "Yes, register / No, don't" case) must not get a redundant
+// "Options:" block above the §4.6 approve/reject footer — those buttons
+// are the authoritative choice set.
+func TestRenderInquiryModal_ApprovalSuppressesModelOptions(t *testing.T) {
+	req := approvalInquiry()
+	req.Payload.Options = []string{"Yes, register the skill", "No, do not register"}
+	state := newInquiryState(req)
+	out := renderInquiryModal(state, 80, 0)
+	if strings.Contains(out, "Options:") {
+		t.Errorf("approval modal rendered a redundant Options: block:\n%s", out)
+	}
+	if strings.Contains(out, "Yes, register the skill") {
+		t.Errorf("approval modal rendered the model's redundant option text:\n%s", out)
+	}
+	// The real §4.6 footer choices still render.
+	if !strings.Contains(out, "approve") || !strings.Contains(out, "reject") {
+		t.Errorf("approval modal lost its footer choices:\n%s", out)
+	}
+}
+
 func TestRenderInquiryModal_ClarificationStartsInReplyMode(t *testing.T) {
 	state := newInquiryState(clarificationInquiry())
 	if !state.replyMode {
