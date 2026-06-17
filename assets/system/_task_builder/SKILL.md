@@ -217,6 +217,17 @@ metadata:
             needs only `query-author`; a task that reshapes an
             existing file needs only `script-author`; many tasks
             need both, in parallel.
+
+            **One-script collapse.** When research set
+            `fetch_in_script: true` (the execution skill fetches its
+            own data in-process), prefer ONE `script-author` authoring
+            a single self-contained fetch+transform script over
+            `query-author` + a runtime tool-hop into the script —
+            fewer run-time tool calls, no intermediate result handed
+            across a wave, and the whole run is one short generation.
+            Keep the two-author shape when the fetch is a standalone
+            tool call with no code step, or the query must be
+            validated on its own.
           - **Wave 2 — `skill-assembler`** with `depends_on` on the
             wave-1 author handoffs. Builds the bundle dir + self-
             validates it (`skill:save validate_only`); hands off the
@@ -354,7 +365,14 @@ metadata:
              stable keys `data_skill` and `script_skill` (omit one
              if the task doesn't need it). The author workers will
              `skill:load` exactly these names. Do NOT assume a
-             name — read it from the catalogue.
+             name — read it from the catalogue. **Also note whether
+             the chosen script / execution skill can fetch data
+             IN-PROCESS** — an in-script data client, not just a
+             separate fetch tool (read the skill's description /
+             references). When it can, the task can fetch AND
+             transform in ONE script; record `fetch_in_script: true`
+             in `resolved_user_inputs` so the planner collapses the
+             authoring wave.
 
           2. **Probe feasibility.** `skill:load` the data skill you
              found and use ITS discovery / schema tools to confirm
@@ -566,7 +584,11 @@ metadata:
              asked for, and writes / prints it to the output target.
              Parameterise per-run values via argv / kwargs so the
              task worker can pass its inputs — do not hard-code a
-             run-specific value.
+             run-specific value. When the loaded skill exposes an
+             in-process data client (research's `fetch_in_script`),
+             the script MAY fetch its own data directly — one
+             self-contained run — instead of consuming a pre-fetched
+             result; otherwise it reads the file / result it is handed.
           3. **Smoke-run it on synthetic data** using the loaded
              skill's run tool: feed a tiny fabricated input matching
              the expected shape and confirm it executes green and

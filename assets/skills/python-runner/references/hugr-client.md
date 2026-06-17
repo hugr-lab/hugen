@@ -35,8 +35,9 @@ result = client.query("""
 }
 """)
 
-# pyarrow Table — zero-copy, most efficient
-table = result.to_arrow("data.core.data_sources")
+# pyarrow Table — zero-copy, most efficient. to_arrow() lives on the
+# PART (no path arg); index the response by part path to reach it.
+table = result["data.core.data_sources"].to_arrow()
 
 # pandas DataFrame — fresh copy
 df = result.df("data.core.data_sources")
@@ -174,6 +175,29 @@ hugen.
   see what's reachable for your role.
 - **`HUGR_URL not set`** — no-Hugr deployment, or operator dropped the
   `tool_providers[].env.HUGR_URL` entry. Bail out with a clear message.
+- **Empty `r.parts` with no exception** — the response carries zero
+  parts and `query()` did NOT raise. This is the silent failure mode
+  of a **malformed query** (a dropped `}` — common when a multi-line
+  query is reflowed) or an RBAC-filtered / genuinely empty result. The
+  server DOES return GraphQL errors as a dedicated multipart part
+  (`X-Hugr-Part-Type: errors`), but the current client only raises for
+  the singular `error` header, so that `errors` part is silently
+  dropped — you get empty parts and no exception. Until the client
+  matches `errors`, **guard every fetch** so a bad query surfaces
+  immediately instead of looking like a "client bug":
+
+  ```python
+  try:
+      r = c.query(gql, variables=vars)        # keep gql VERBATIM — do not retype
+  except (ValueError, PermissionError) as e:  # raised today for an `error` part / 500 / 401-403
+      raise SystemExit(f"query failed: {e}")
+  if not r.parts or part_path not in r.parts:  # catches the dropped `errors` part + empty/RBAC
+      raise SystemExit(f"no data for {part_path}; parts={list(r.parts)}")
+  ```
+
+  The `except` is forward-compatible: once the client recognises the
+  `errors` part it will raise `ValueError` and the same guard catches
+  it. There is no `r.errors` / `r.Err` accessor today — use the guard.
 
 ## Choosing between `hugr-client` and `hugr-query`
 
