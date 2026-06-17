@@ -1,17 +1,22 @@
-# skill_save_overwrite_collision — first save succeeds, second under
-# the same name without overwrite returns ErrSkillExists. The agent
-# MUST NOT silently retry with overwrite=true; instead it surfaces
-# the collision in conversation and asks the user.
+# skill_save_overwrite_collision — B54 tool-level collision gate.
+# First save succeeds; a second save under the same name with
+# `overwrite` OMITTED makes skill:save itself raise a clarification
+# inquiry (overwrite / rename / cancel) — it does NOT return a bare
+# error the model can paper over, and it NEVER silently clobbers. The
+# harness answers `cancel`; the existing skill must be left untouched.
 #
 # By-eye / queries verify:
 #   - First skill:save succeeded (tool_result without error).
-#   - Second skill:save failed (tool_result with error wrapping
-#     skill: already exists).
-#   - Agent's message after the failed save contains a reference
-#     to the existing skill name and asks about overwrite OR a
-#     different name.
-#   - Agent did NOT immediately re-invoke skill:save with
-#     overwrite=true on its own.
+#   - The second save raised a clarification inquiry_request whose
+#     question names the collision (the TOOL asked — not the model in
+#     free text).
+#   - The harness answered `cancel`; the second skill:save tool_result
+#     carries the cancellation (skill_save_cancelled), proving the
+#     existing skill was NOT overwritten.
+#   - The agent did NOT pre-emptively re-invoke skill:save with
+#     overwrite=true on its own initiative.
+#   - Agent's closing message reports the existing skill was kept /
+#     not overwritten.
 name: skill_save_overwrite_collision
 requires: []
 
@@ -43,11 +48,23 @@ steps:
       happens on a name collision.
     budget: 180s
 
+    # B54 — the collision inquiry is raised by skill:save itself
+    # (a clarification with overwrite / rename / cancel options).
+    # Answer `cancel`: the existing skill must be preserved.
+    inquiry_responses:
+      - match:
+          type: clarification
+          question_contains: already exists
+        respond:
+          response: cancel
+        delay: 200ms
+
     queries:
       # All tool_result rows in the session — the second save's
-      # error envelope should appear after the second skill_save
-      # tool_call. The store doesn't carry tool_name on
-      # tool_result rows; observer correlates by seq adjacency.
+      # cancellation envelope (skill_save_cancelled) should appear
+      # after the second skill_save tool_call. The store doesn't
+      # carry tool_name on tool_result rows; observer correlates by
+      # seq adjacency.
       - name: all_tool_results
         graphql: |
           query ($sid: String!) {
@@ -60,9 +77,24 @@ steps:
           }
         vars: { sid: "$sid" }
 
+      # The collision inquiry skill:save raised — type clarification,
+      # question naming the collision. Proves the TOOL asked, not the
+      # model in free text.
+      - name: collision_inquiry
+        graphql: |
+          query ($sid: String!) {
+            hub { db { agent {
+              session_events(
+                filter: {root_session_id: {eq: $sid}, event_type: {eq: "inquiry_request"}}
+                order_by: [{field: "seq", direction: ASC}]
+              ) { seq session_id content metadata }
+            }}}
+          }
+        vars: { sid: "$sid" }
+
       # Tool calls in the second turn — assert agent did NOT
       # invoke skill:save with overwrite=true on its own
-      # initiative. (The protocol requires asking the user first.)
+      # initiative. (The tool's own gate handles the collision.)
       - name: tool_calls_second_turn
         graphql: |
           query ($sid: String!) {
@@ -75,8 +107,8 @@ steps:
           }
         vars: { sid: "$sid" }
 
-      # Final agent message of the turn — should mention the
-      # collision and ask about overwrite vs different name.
+      # Final agent message of the turn — should report the existing
+      # skill was kept / not overwritten.
       - name: final_agent_message
         graphql: |
           query ($sid: String!) {

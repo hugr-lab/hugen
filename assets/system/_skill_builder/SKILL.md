@@ -2,13 +2,15 @@
 name: _skill_builder
 description: >
   Knowledge + capability for authoring a hugen skill bundle and
-  registering it with skill:save. Teaches the manifest format (where
-  the task block goes), the on-disk bundle layout, the path-based
-  skill:save call + every validation error and its fix, and how to
-  look up real tool names instead of inventing them. Load it whenever
-  you build, update, or remove a skill.
+  registering it. Teaches the manifest format (where the task block
+  goes), the on-disk bundle layout, the path-based authoring tools —
+  skill:validate (dry-run check) then skill:save (register) — plus
+  every validation error and its fix, and how to look up real tool
+  names instead of inventing them. Load it whenever you build, update,
+  or remove a skill.
 license: Apache-2.0
 allowed-tools:
+  - skill:validate
   - skill:save
   - skill:export
   - skill:uninstall
@@ -33,10 +35,10 @@ compatibility:
 # _skill_builder
 
 Load this skill when you need to **author, update, or remove a hugen
-skill**. It grants the authoring surface (`skill:save`,
-`skill:uninstall`, `tool:providers`, `tool:tools`, …) and bundles the
-canonical references so you build the bundle correctly the first time
-instead of guessing the format.
+skill**. It grants the authoring surface (`skill:validate`,
+`skill:save`, `skill:uninstall`, `tool:providers`, `tool:tools`, …)
+and bundles the canonical references so you build the bundle correctly
+the first time instead of guessing the format.
 
 You are NOT the policy owner: a mission (`_task_builder`) or the user
 decides *that* a skill should be saved and *what* it should do. This
@@ -50,16 +52,18 @@ skill owns *how* — the format and the call.
    filesystem tools (relative paths resolve against your session
    workspace). See `references/bundle-layout.md`.
 
-2. **Self-validate** with a dry run — `skill:save(bundle_dir: "<dir>",
-   validate_only: true)`. This runs the full check (manifest parse +
-   task-block placement + tool-name check) and returns the verdict
-   WITHOUT registering. Fix every reported problem in the files and
-   re-run until it returns `valid: true`.
+2. **Self-validate** with a dry run — `skill:validate(bundle_dir:
+   "<dir>")`. This runs the full check (manifest parse + task-block
+   placement + tool-name check) and returns the verdict WITHOUT
+   registering — it cannot publish. Fix every reported problem in the
+   files and re-run until it returns `valid: true`.
 
 3. **Register** — `skill:save(bundle_dir: "<dir>")`. On success the
-   skill is written to the store and auto-loaded in your session.
-   Collision (name already exists) returns an error: ask the user,
-   then either pick a new name or pass `overwrite: true` to update.
+   skill is written to the store and auto-loaded in your session. If
+   the name already exists, `skill:save` ASKS the user (overwrite /
+   new name / cancel) — it never overwrites silently. Pass
+   `overwrite: true` only when the user has already authorised
+   replacing the existing skill.
 
 `bundle_dir` may be relative (resolved against your session
 workspace) or absolute (it must stay inside the workspace). Full call
@@ -115,9 +119,10 @@ re-author from memory:
 2. **Edit** the files in that directory with the bash / filesystem
    tools — change only what needs changing.
 3. **Re-register** — `skill:save(bundle_dir: "<dir>", overwrite:
-   true)`. Validate first with `validate_only: true` if you touched
-   the manifest. Overwrite is the ONLY update path; there is no
-   in-place edit call.
+   true)`. Validate first with `skill:validate` if you touched the
+   manifest. Overwrite is the ONLY update path; there is no in-place
+   edit call. (Updating a skill you exported is the authorised-replace
+   case for `overwrite: true`.)
 
 ## Removing a skill
 

@@ -31,8 +31,8 @@ var ErrUnknownToolName = errors.New("skill_unknown_tool")
 var errNoToolCatalogue = errors.New("skill: tool catalogue unavailable")
 
 // validateAuthoring runs every save-time check over a parsed manifest
-// before publish — the same verdict for `validate_only` dry-runs and
-// real saves. Three layers:
+// before publish — the same verdict for skill:validate dry-runs and
+// skill:save registrations. Three layers:
 //
 //   - autoload-reserved (local skills load on demand);
 //   - task-block placement (skillpkg.ValidateTaskAuthoring — the pure,

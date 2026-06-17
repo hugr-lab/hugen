@@ -44,8 +44,8 @@ bash.write_file: roads-by-region/references/howto.md <doc>
 Then validate + save against that directory:
 
 ```
-skill:save(bundle_dir: "roads-by-region", validate_only: true)
-# fix any reported problems, then:
+skill:validate(bundle_dir: "roads-by-region")
+# fix any reported problems, then register:
 skill:save(bundle_dir: "roads-by-region")
 ```
 

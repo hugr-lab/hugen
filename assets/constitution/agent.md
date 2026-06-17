@@ -59,9 +59,9 @@ Skill authoring (saving a new reusable skill from session work) is
 **user-initiated** — never propose it yourself. When a user
 explicitly asks to crystallise current work into a reusable skill,
 load the `_skill_builder` skill and follow its authoring protocol
-(build the bundle → self-validate → save). `_skill_builder` owns the
-manifest format and the `skill:save` call; you bring the content and
-the user's intent.
+(build the bundle → `skill:validate` → `skill:save`). `_skill_builder`
+owns the manifest format and the validate / save calls; you bring the
+content and the user's intent.
 
 ## Session tier
 

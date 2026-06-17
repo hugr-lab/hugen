@@ -86,9 +86,9 @@ type PublishOptions struct {
 	// Overwrite, when true, replaces an existing bundle of the
 	// same name (the existing directory is removed first to avoid
 	// stale leftovers). Default false — collision returns
-	// ErrSkillExists. The save protocol asks the user explicitly
-	// before retrying with Overwrite=true; the post-save
-	// validation iteration loop sets it without prompting.
+	// ErrSkillExists. skill:save turns the user's collision-modal
+	// answer (overwrite / new name / cancel) into this flag, so a
+	// collision is never silently overwritten (backlog B54).
 	Overwrite bool
 }
 
