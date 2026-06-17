@@ -144,6 +144,12 @@ func (s *Service) Register(ctx context.Context, name string, sched Schedule, fn 
 	}
 	now := s.nowFn()
 	next := sched.Next(now)
+	// WithInitialFireAt overrides the schedule-derived instant so an
+	// already-overdue plan instant is preserved (and fires next tick)
+	// rather than dropped by a past-rejecting Schedule.Next.
+	if !o.initialFireAt.IsZero() {
+		next = o.initialFireAt
+	}
 	// Seed fireCount so the first prepareFire (fireCount++ → seq) reports
 	// WithInitialFireSeq(n) as FireSeq n. Zero (the default) preserves the
 	// historical seq=1 first fire.
@@ -194,6 +200,21 @@ func (s *Service) Resume(_ context.Context, name string) error {
 	// Re-anchor the next fire to now so a long pause doesn't
 	// trigger an immediate burst of catch-up fires.
 	reg.nextFireAt = reg.sched.Next(s.nowFn())
+	reg.mu.Unlock()
+	return nil
+}
+
+// Reschedule implements [Runner.Reschedule]. Sets the registration's
+// next fire instant directly without re-creating it — fireCount and
+// the in-flight bit are preserved. A past `at` fires on the next tick
+// (overdue catch-up); the zero time disarms until the next call.
+func (s *Service) Reschedule(_ context.Context, name string, at time.Time) error {
+	reg, ok := s.lookup(name)
+	if !ok {
+		return nil
+	}
+	reg.mu.Lock()
+	reg.nextFireAt = at
 	reg.mu.Unlock()
 	return nil
 }

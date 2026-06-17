@@ -163,11 +163,11 @@ func (e *Extension) runtimeBound() bool {
 
 // Compile-time interface assertions.
 var (
-	_ extension.Extension             = (*Extension)(nil)
-	_ tool.ToolProvider               = (*Extension)(nil)
-	_ extension.ToolApprovalPolicy    = (*Extension)(nil)
-	_ extension.InquiryPolicy         = (*Extension)(nil)
-	_ extension.SubagentSpawnApplier  = (*Extension)(nil)
+	_ extension.Extension            = (*Extension)(nil)
+	_ tool.ToolProvider              = (*Extension)(nil)
+	_ extension.ToolApprovalPolicy   = (*Extension)(nil)
+	_ extension.InquiryPolicy        = (*Extension)(nil)
+	_ extension.SubagentSpawnApplier = (*Extension)(nil)
 )
 
 // stashFire records a FireContext for the named pending cron spawn.
@@ -311,25 +311,26 @@ func (e *Extension) registerTask(ctx context.Context, row schedstore.TaskRow) er
 	}
 
 	deps := e.fireDeps()
-	// Clamp an already-overdue planned fire to now so a fire that came
-	// due while the process was down (or one a long previous fire pushed
-	// past — see clampOverdue) still fires on bootstrap instead of being
-	// silently dropped by runner.Once(past) (onceSchedule.Next returns
-	// the zero time for a past instant). Serialised per task by the
-	// runner's in-flight guard.
-	sched := runner.Once(clampOverdue(planned.PlannedAt, deps))
-
 	fn := buildFireFn(row, deps)
-	// Seed the runner's fire counter from the persisted planned seq so a
-	// recurring task that re-registers a fresh one-shot per cycle keeps a
-	// MONOTONIC FireSeq — without this every fire reports seq=1 and a
-	// `count` end-condition never advances (the re-register resets the
-	// runner's internal counter each cycle).
-	opts := []runner.RegisterOption{runner.WithInitialFireSeq(planned.FireSeq)}
+	// The runner's registration IS the in-memory schedule index: it fires
+	// when nextFireAt <= now (overdue-capable) and runs each fire in its
+	// own goroutine. We drive nextFireAt ourselves from the durable plan
+	// — Manual() keeps the schedule inert, WithInitialFireAt seeds the
+	// next instant DIRECTLY from the persisted planned row (a past instant
+	// is preserved → fires on the next tick, the overdue catch-up a long
+	// previous fire or a process downtime needs; no clamp, no
+	// runner.Once(past)-drop). WithInitialFireSeq seeds the fire counter
+	// from the persisted seq so a `count` end-condition resumes at the
+	// right number after a restart; Reschedule keeps it monotonic in
+	// place thereafter (no per-fire re-register).
+	opts := []runner.RegisterOption{
+		runner.WithInitialFireAt(planned.PlannedAt),
+		runner.WithInitialFireSeq(planned.FireSeq),
+	}
 	if row.Status == schedstore.StatusPaused {
 		opts = append(opts, runner.WithStartPaused())
 	}
-	return e.runner.Register(ctx, runnerNameForTask(row.ID), sched, fn, opts...)
+	return e.runner.Register(ctx, runnerNameForTask(row.ID), runner.Manual(), fn, opts...)
 }
 
 // fireDeps materialises the closure-captured deps each fire fn
@@ -344,13 +345,12 @@ func (e *Extension) fireDeps() fireDeps {
 		skills:         e.skills,
 		agentID:        e.agentID,
 		logger:         e.logger,
-		registerFn:     e.reRegisterFn(),
+		rescheduleFn:   e.rescheduleFnLocked(),
 		pauseFn:        e.pauseFnLocked(),
 		stashFire:      e.stashFire,
 		releaseFire:    e.releaseFire,
 		takeSpawnToken: e.takeSpawnToken,
 		runRecipe:      e.runRecipe,
-		now:            time.Now,
 	}
 }
 
@@ -368,45 +368,23 @@ func (e *Extension) pauseFnLocked() func(string) error {
 	}
 }
 
-// reRegisterFn returns a closure the fire fn calls to install the
-// next planned fire's schedule after appending its `planned` row.
-// Captures `e.runner` once so the closure stays independent of any
-// later Bind swap.
+// rescheduleFnLocked returns a closure the fire fn calls to arm the
+// next planned fire after appending its `planned` row. It sets the live
+// registration's nextFireAt directly (Reschedule) — no re-registration,
+// so the registration's fire counter stays monotonic in place (the
+// next fire's seq comes from the persisted plan, no re-seed needed) and
+// an overdue next instant fires on the next tick. Captures e.runner
+// once so a later Bind swap doesn't change behaviour mid-fire.
 //
-// MUST be called under e.mu (read or write). Callers that don't
-// hold the lock should funnel through fireDeps().
-func (e *Extension) reRegisterFn() func(string, runner.Schedule) error {
+// MUST be called under e.mu (read or write). Callers that don't hold
+// the lock should funnel through fireDeps().
+func (e *Extension) rescheduleFnLocked() func(string, time.Time) error {
 	r := e.runner
 	if r == nil {
 		return nil
 	}
-	deps := struct {
-		runner   runner.Runner
-		buildFn  func(string) (runner.RunnerFn, error)
-	}{
-		runner: r,
-		buildFn: func(taskID string) (runner.RunnerFn, error) {
-			row, err := e.store.GetTask(context.Background(), taskID)
-			if err != nil {
-				return nil, err
-			}
-			return buildFireFn(row, e.fireDeps()), nil
-		},
-	}
-	return func(taskID string, sched runner.Schedule) error {
-		fn, err := deps.buildFn(taskID)
-		if err != nil {
-			return err
-		}
-		// Seed the next registration's fire counter from the planned row
-		// maybeScheduleNext just wrote (FireSeq = prevSeq+1) so the counter
-		// stays monotonic across the per-cycle re-register — otherwise a
-		// fresh registration restarts at seq=1 and `count` never advances.
-		var opts []runner.RegisterOption
-		if planned, perr := e.store.LatestPlannedFire(context.Background(), taskID); perr == nil && planned != nil {
-			opts = append(opts, runner.WithInitialFireSeq(planned.FireSeq))
-		}
-		return deps.runner.Register(context.Background(), runnerNameForTask(taskID), sched, fn, opts...)
+	return func(taskID string, at time.Time) error {
+		return r.Reschedule(context.Background(), runnerNameForTask(taskID), at)
 	}
 }
 
@@ -570,18 +548,18 @@ func stripProviderPrefix(name string) string {
 // the JSON Schema declared in createSchema above. Optional fields are
 // omitted via pointer or zero-value sentinels.
 type createInput struct {
-	SkillRef         string                       `json:"skill_ref,omitempty"`
-	Kind             string                       `json:"kind"`
-	ScheduleKind     string                       `json:"schedule_kind"`
-	ScheduleSpec     string                       `json:"schedule_spec"`
-	Timezone         string                       `json:"timezone,omitempty"`
-	InitialPlannedAt string                       `json:"initial_planned_at"`
-	Name             string                       `json:"name"`
-	Description      string                       `json:"description,omitempty"`
-	Goal             string                       `json:"goal,omitempty"`
-	WakeMessage      string                       `json:"wake_message,omitempty"`
-	AllowedTools     []string                     `json:"allowed_tools,omitempty"`
-	Inputs           map[string]any               `json:"inputs,omitempty"`
+	SkillRef         string                      `json:"skill_ref,omitempty"`
+	Kind             string                      `json:"kind"`
+	ScheduleKind     string                      `json:"schedule_kind"`
+	ScheduleSpec     string                      `json:"schedule_spec"`
+	Timezone         string                      `json:"timezone,omitempty"`
+	InitialPlannedAt string                      `json:"initial_planned_at"`
+	Name             string                      `json:"name"`
+	Description      string                      `json:"description,omitempty"`
+	Goal             string                      `json:"goal,omitempty"`
+	WakeMessage      string                      `json:"wake_message,omitempty"`
+	AllowedTools     []string                    `json:"allowed_tools,omitempty"`
+	Inputs           map[string]any              `json:"inputs,omitempty"`
 	EndCondition     schedstore.TaskEndCondition `json:"end_condition"`
 }
 
@@ -792,15 +770,15 @@ type listInput struct {
 }
 
 type listEntry struct {
-	TaskID         string `json:"task_id"`
-	Kind           string `json:"kind"`
-	Status         string `json:"status"`
-	ScheduleKind   string `json:"schedule_kind"`
-	ScheduleSpec   string `json:"schedule_spec,omitempty"`
-	Name           string `json:"name,omitempty"`
-	SkillRef       string `json:"skill_ref,omitempty"`
-	NextPlannedAt  string `json:"next_planned_at,omitempty"`
-	PauseReason    string `json:"pause_reason,omitempty"`
+	TaskID        string `json:"task_id"`
+	Kind          string `json:"kind"`
+	Status        string `json:"status"`
+	ScheduleKind  string `json:"schedule_kind"`
+	ScheduleSpec  string `json:"schedule_spec,omitempty"`
+	Name          string `json:"name,omitempty"`
+	SkillRef      string `json:"skill_ref,omitempty"`
+	NextPlannedAt string `json:"next_planned_at,omitempty"`
+	PauseReason   string `json:"pause_reason,omitempty"`
 }
 
 type listOutput struct {

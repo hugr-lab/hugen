@@ -58,23 +58,23 @@ type SessionHost interface {
 //
 // Per-fire layout (spawn kind):
 //
-//   1. Drift hash recompute (skill manifest changed since task-create?).
-//      Mismatch → AppendLog(skipped, reason=skill_changed), PauseTask,
-//      notify owner, return without firing.
-//   2. AppendLog(started, planned_at=fire.PlannedAt).
-//   3. Build FireContext (LatestSuccessfulFire as PrevFire, etc).
-//   4. host.Open(req{Cron: ctx}) → fresh cron session.
-//   5. Render the goal template; Deliver a UserMessage that kicks
-//      the model loop.
-//   6. Wait for the session to terminate via <-sess.Done().
-//   7. AppendLog(completed | failed) with last assistant text as
-//      outcome.body.
-//   8. Compute next planned via the schedule; AppendLog(planned)
-//      for the next fire. Recurring tasks (interval / cron)
-//      re-register a fresh Schedule via the captured runner
-//      reference; one-shot kinds (once_in / once_at) complete.
-//   9. Emit scheduler:notification ExtensionFrame on the owner
-//      session so the operator sees a status line.
+//  1. Drift hash recompute (skill manifest changed since task-create?).
+//     Mismatch → AppendLog(skipped, reason=skill_changed), PauseTask,
+//     notify owner, return without firing.
+//  2. AppendLog(started, planned_at=fire.PlannedAt).
+//  3. Build FireContext (LatestSuccessfulFire as PrevFire, etc).
+//  4. host.Open(req{Cron: ctx}) → fresh cron session.
+//  5. Render the goal template; Deliver a UserMessage that kicks
+//     the model loop.
+//  6. Wait for the session to terminate via <-sess.Done().
+//  7. AppendLog(completed | failed) with last assistant text as
+//     outcome.body.
+//  8. Compute next planned via the schedule; AppendLog(planned)
+//     for the next fire. Recurring tasks (interval / cron)
+//     re-register a fresh Schedule via the captured runner
+//     reference; one-shot kinds (once_in / once_at) complete.
+//  9. Emit scheduler:notification ExtensionFrame on the owner
+//     session so the operator sees a status line.
 //
 // Wake kind path (steps 1, 3 skip):
 //   - AppendLog(started)
@@ -107,31 +107,26 @@ func buildFireFn(task schedstore.TaskRow, deps fireDeps) runner.RunnerFn {
 // factory signature stays compact and adding a new dep (Phase 6.2
 // task:set_state writer) doesn't churn every call site.
 type fireDeps struct {
-	store      schedstore.TaskStore
-	host       SessionHost
-	skills     *skill.SkillManager
-	agentID    string
-	logger     *slog.Logger
-	registerFn func(taskID string, sched runner.Schedule) error
-	pauseFn    func(taskID string) error
+	store        schedstore.TaskStore
+	host         SessionHost
+	skills       *skill.SkillManager
+	agentID      string
+	logger       *slog.Logger
+	rescheduleFn func(taskID string, at time.Time) error
+	pauseFn      func(taskID string) error
 
 	// runRecipe is the shared execute helper (task ext's RunRecipe) the
 	// spawn-fire path delegates spawn → kick → wait to. Nil until
 	// BindRunRecipe wires it; dispatchSpawnFire fails fast when unset.
 	runRecipe func(context.Context, taskext.RunParams) (taskext.RunResult, error)
 
-	// now returns the current time for the overdue-refire clamp in
-	// maybeScheduleNext. Nil falls back to time.Now; tests inject a
-	// fixed clock so the clamp is deterministic.
-	now func() time.Time
-
 	// stashFire / releaseFire are the per-fire FireContext
 	// rendezvous between dispatchSpawnFire (writer) and
 	// scheduler.ApplyOnSubagentSpawn (reader). The applier looks up
 	// by sanitised SpawnSpec.Name; spawn-name uniqueness is
 	// guaranteed by takeSpawnToken (monotonic per-extension counter).
-	stashFire    func(spawnName string, fc *protocol.FireContext)
-	releaseFire  func(spawnName string)
+	stashFire      func(spawnName string, fc *protocol.FireContext)
+	releaseFire    func(spawnName string)
 	takeSpawnToken func() int64
 }
 
@@ -202,6 +197,9 @@ func dispatchWakeFire(ctx context.Context, task schedstore.TaskRow, fire runner.
 			ErrorMessage: err.Error(),
 			Reason:       "deliver_failed",
 		}))
+		// Advance the schedule despite the delivery failure — a transient
+		// inbox error must not stall a recurring wake.
+		maybeScheduleNext(ctx, task, fire, deps)
 		return runner.Outcome{ErrorMessage: err.Error()}, err
 	}
 
@@ -406,6 +404,13 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 			ErrorMessage: rerr.Error(),
 			Reason:       reason,
 		}))
+		// A failed fire still advances the schedule: log the failure, then
+		// plan the next fire so one bad run (worker error / timeout) does
+		// not silently kill a recurring task. count/until still terminate
+		// normally (a failed fire is an attempt); the pause-worthy paths
+		// (drift / render / owner-gone) returned earlier without reaching
+		// here, so they stay stopped.
+		maybeScheduleNext(ctx, task, fire, deps)
 		return runner.Outcome{ErrorMessage: rerr.Error()}, rerr
 	}
 
@@ -571,64 +576,19 @@ func terminalLog(task schedstore.TaskRow, fire runner.FireMeta, eventType string
 	}
 }
 
-// nowUTC returns the clamp clock for overdue re-fires — the injected
-// test clock when set, else wall-clock.
-func (deps fireDeps) nowUTC() time.Time {
-	if deps.now != nil {
-		return deps.now().UTC()
-	}
-	return time.Now().UTC()
-}
-
-// overdueRefireMargin lifts an overdue re-fire a fixed step into the
-// FUTURE rather than to bare "now". The runner re-evaluates
-// sched.Next(s.nowFn()) at Register time — a LATER instant than this
-// clamp computes, because the appendLog + GetTask + LatestPlannedFire
-// round-trips run in between (a synchronous call chain, sub-second
-// locally). onceSchedule.Next drops a fire whose instant is strictly
-// before the evaluation clock (returns zero = "no further fires"), so a
-// clamp to bare "now" is already in the past — and silently dropped —
-// by the time Register sees it. The margin comfortably exceeds that
-// registration latency so the Once is still in the future when Register
-// evaluates it and fires on the next tick. Cost: an overdue re-fire is
-// delayed by the margin (+ up to one tick), negligible for cron.
+// maybeScheduleNext computes the next planned instant from the task's
+// schedule, inserts the corresponding `planned` row, and reschedules
+// the runner registration's next fire to it (in place — no
+// re-registration, so the fire counter stays monotonic). End-condition
+// check (count exceeded / until passed) short-circuits with
+// status='cancelled' on the task row instead.
 //
-// This is the INTERIM fix for the long-fire drop the count=2 dogfood
-// exposed (a task slower than its interval fired once then died). The
-// poll-dispatch refactor removes clampOverdue + Once entirely (fire on
-// planned_at <= now, no Schedule.Next drop) — see
-// spec-scheduler-poll-dispatch.md.
-const overdueRefireMargin = 2 * time.Second
-
-// clampOverdue lifts a next-fire instant to "now"+margin when it has
-// already passed. Recurring fires are SERIALISED (the runner won't
-// start the next fire while one is in flight — and a fire blocks on its
-// worker, which may run longer than the interval). So by the time a
-// long fire completes and re-registers, the arithmetic next instant
-// (prevPlanned + interval / cron step) can be in the past; lifting it
-// fires the fire ASAP instead of dropping it, so a task whose duration
-// exceeds its interval still runs its full count back-to-back.
-// Serialisation is intentional (it lets fire N+1 template its
-// goal/inputs off fire N's {{.PrevFire}} outcome); concurrent fires are
-// a future opt-in (backlog). See overdueRefireMargin for why the lift
-// targets now+margin, not bare now.
-func clampOverdue(next time.Time, deps fireDeps) time.Time {
-	if now := deps.nowUTC(); next.Before(now) {
-		return now.Add(overdueRefireMargin)
-	}
-	return next
-}
-
-// maybeScheduleNext computes the next planned instant from the
-// task's schedule, inserts the corresponding `planned` row, and
-// re-registers the fn under the new Once schedule so Runner fires
-// it on time. End-condition check (count exceeded / until passed)
-// short-circuits with status='completed' on the task row.
-//
-// Recurring kinds (interval, cron) compute the next instant + insert
-// a fresh `planned` row + re-register a Once schedule. One-shot kinds
-// (once_in / once_at) skip the next planned row and mark the task
-// completed.
+// The next instant is the LOGICAL one (prevPlanned + interval / the
+// next cron tick), written verbatim — no clamp. If a long fire pushed
+// it into the past, Reschedule still arms it and the runner fires it on
+// the next tick (nextFireAt <= now), so a task slower than its interval
+// runs its full count back-to-back. One-shot kinds (once_in / once_at)
+// skip the next planned row and cancel the task.
 func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner.FireMeta, deps fireDeps) {
 	switch task.ScheduleKind {
 	case schedstore.ScheduleOnceIn, schedstore.ScheduleOnceAt:
@@ -651,8 +611,6 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 			return
 		}
 		next := fire.PlannedAt.Add(d).UTC()
-		// End-condition is checked on the LOGICAL next (pre-clamp) so a
-		// count/until boundary isn't perturbed by a late catch-up.
 		if shouldEndAfter(task.Spec.EndCondition, fire.FireSeq, next) {
 			if err := deps.store.CancelTask(context.Background(), task.ID); err != nil {
 				deps.logger.Warn("scheduler: end-condition cancel",
@@ -660,7 +618,6 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 			}
 			return
 		}
-		next = clampOverdue(next, deps)
 		appendLogSafely(ctx, deps, schedstore.TaskLogEntry{
 			TaskID:    task.ID,
 			AgentID:   deps.agentID,
@@ -668,9 +625,9 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 			EventType: schedstore.LogEventPlanned,
 			PlannedAt: next,
 		})
-		if deps.registerFn != nil {
-			if err := deps.registerFn(task.ID, runner.Once(next)); err != nil {
-				deps.logger.Warn("scheduler: re-register interval task",
+		if deps.rescheduleFn != nil {
+			if err := deps.rescheduleFn(task.ID, next); err != nil {
+				deps.logger.Warn("scheduler: reschedule interval task",
 					"task_id", task.ID, "err", err)
 			}
 		}
@@ -711,7 +668,6 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 			}
 			return
 		}
-		next = clampOverdue(next, deps)
 		appendLogSafely(ctx, deps, schedstore.TaskLogEntry{
 			TaskID:    task.ID,
 			AgentID:   deps.agentID,
@@ -719,9 +675,9 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 			EventType: schedstore.LogEventPlanned,
 			PlannedAt: next,
 		})
-		if deps.registerFn != nil {
-			if err := deps.registerFn(task.ID, runner.Once(next)); err != nil {
-				deps.logger.Warn("scheduler: re-register cron task",
+		if deps.rescheduleFn != nil {
+			if err := deps.rescheduleFn(task.ID, next); err != nil {
+				deps.logger.Warn("scheduler: reschedule cron task",
 					"task_id", task.ID, "err", err)
 			}
 		}
@@ -787,4 +743,3 @@ func appendLogSafely(_ context.Context, deps fireDeps, entry schedstore.TaskLogE
 			"err", err)
 	}
 }
-
