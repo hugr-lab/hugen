@@ -171,7 +171,7 @@ func (e *Extension) RunRecipe(ctx context.Context, p RunParams) (RunResult, erro
 	// of scoping entirely — leaving the key UNSET makes the child see the
 	// FULL catalogue and `skill:load` anything (for builder-style tasks
 	// that must discover + load arbitrary domain / execution skills, e.g.
-	// `_task_builder`). Pass `[]string` directly so the skill ext's typed
+	// `build_task`). Pass `[]string` directly so the skill ext's typed
 	// switch hits the fast path.
 	if list, scoped := scopeAllowList(p.Skill.Manifest.Hugen.AllowedSkills); scoped {
 		child.SetValue(skillext.SessionAllowedSkillsKey, list)
@@ -240,7 +240,7 @@ func (e *Extension) RunRecipe(ctx context.Context, p RunParams) (RunResult, erro
 // `allowed_skills`. The wildcard `"*"` opts OUT of scoping (scoped=false
 // → the caller leaves the scope key UNSET, so the child sees the FULL
 // catalogue and may skill:load anything — needed by builder-style tasks
-// like `_task_builder`). Any other value scopes: an empty list locks the
+// like `build_task`). Any other value scopes: an empty list locks the
 // child to its pre-loaded surface; a populated list adds those names on
 // top. Returns (list, true) to scope, (nil, false) to leave unscoped.
 func scopeAllowList(allowed []string) (list []string, scoped bool) {

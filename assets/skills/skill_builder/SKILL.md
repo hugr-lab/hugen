@@ -1,13 +1,15 @@
 ---
-name: _skill_builder
+name: skill_builder
 description: >
-  Knowledge + capability for authoring a hugen skill bundle and
-  registering it. Teaches the manifest format (where the task block
-  goes), the on-disk bundle layout, the path-based authoring tools —
-  skill:validate (dry-run check) then skill:save (register) — plus
-  every validation error and its fix, and how to look up real tool
-  names instead of inventing them. Load it whenever you build, update,
-  or remove a skill.
+  Edit, update, or DELETE an existing skill or task, or author a new
+  one from a bundle. Owns the manifest format + the path-based
+  authoring tools — skill:export (copy a registered skill/task out to
+  edit), skill:validate (dry-run check), skill:save (register /
+  overwrite), skill:uninstall (remove) — plus every validation error
+  and its fix. Load it whenever the user wants to CHANGE or REMOVE an
+  existing task / skill (export → edit the file → save overwrite, or
+  uninstall), or to hand-author a bundle. A task is a task-eligible
+  skill, edited / removed the same way.
 license: Apache-2.0
 allowed-tools:
   - skill:validate
@@ -32,7 +34,7 @@ compatibility:
   runtime: hugen
 ---
 
-# _skill_builder
+# skill_builder
 
 Load this skill when you need to **author, update, or remove a hugen
 skill**. It grants the authoring surface (`skill:validate`,
@@ -40,9 +42,11 @@ skill**. It grants the authoring surface (`skill:validate`,
 and bundles the canonical references so you build the bundle correctly
 the first time instead of guessing the format.
 
-You are NOT the policy owner: a mission (`_task_builder`) or the user
-decides *that* a skill should be saved and *what* it should do. This
-skill owns *how* — the format and the call.
+You are NOT the policy owner: the `build_task` task (for creating a new
+task) or the user decides *that* a skill should be saved and *what* it
+should do. This skill owns *how* — the format and the calls, and the
+export → edit → save / uninstall flow for changing or removing an
+existing skill or task.
 
 ## The authoring loop (always these three steps)
 

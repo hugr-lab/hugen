@@ -375,7 +375,7 @@ const (
 	// skill:save typed codes (phase 4.2). These give the LLM
 	// distinct signals it can map to specific recovery flows
 	// instead of treating every tool error as generic IO. The
-	// authoring prose (`_task_builder`) documents the right
+	// authoring prose (`build_task`) documents the right
 	// action per code:
 	//   - skill_exists       → ask the user before overwrite
 	//   - skill_bad_manifest → fix manifest and re-save

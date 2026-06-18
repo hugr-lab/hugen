@@ -875,7 +875,7 @@ const (
 
 // TaskBlock is the typed projection of `metadata.hugen.task`. When
 // `Eligible: true`, the skill is selectable by the `schedule:create`
-// tool — operators (or the future `_task_builder` mission) bind a
+// tool — operators (or the future `build_task` task) bind a
 // recurring schedule to it and TaskManager fires the skill per
 // scheduler tick. Phase 6 §0.5.4.
 //
@@ -909,7 +909,7 @@ type TaskBlock struct {
 	// DisableScheduling, when true, blocks `schedule:create` from
 	// binding this task to a periodic / headless fire — an opt-OUT for
 	// INTERACTIVE tasks (they `session:inquire` and would hang with no
-	// operator at a fire, e.g. `_task_builder`). Default false → every
+	// operator at a fire, e.g. `build_task`). Default false → every
 	// task is schedulable; only the rare interactive task sets it.
 	DisableScheduling bool `json:"disable_scheduling,omitempty" yaml:"disable_scheduling,omitempty"`
 

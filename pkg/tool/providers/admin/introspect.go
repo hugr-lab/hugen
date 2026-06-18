@@ -17,7 +17,7 @@ import (
 // `provider:tool` values in a task's `allowed_tools_default` instead
 // of inventing them (the dominant dogfood failure). They carry a
 // distinct, non-admin permission object so the authoring skill
-// (`_skill_builder`) can grant them without the admin tier.
+// (`skill_builder`) can grant them without the admin tier.
 //
 // Resolution is hierarchy-driven: the handler reads the CALLING
 // session's manager off the dispatch ctx and calls

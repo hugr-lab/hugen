@@ -40,7 +40,7 @@ metadata:
     # Loaded three ways, all worker / mission tier:
     #   - the analyst `report-builder` role autoloads it (the
     #     mission's render stage);
-    #   - `_task_builder` author workers reach it via
+    #   - `build_task` reaches it via
     #     `skill:catalog_list` → `skill:load` when minting a report
     #     task (and the minted report task `requires_skills` it);
     #   - the `build_report` task `requires_skills` it for the render

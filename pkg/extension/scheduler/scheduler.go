@@ -2,7 +2,7 @@
 // extension + the always-on `task_log_reap_stuck` system runner
 // (see reap.go). The extension's 6.1b shape is intentionally narrow:
 // it exposes the `schedule:create` tool so operators / the future
-// `_task_builder` mission can persist task rows + the initial
+// `build_task` task can persist task rows + the initial
 // `planned` row into hub.db. Fire dispatch, drift detection, and
 // the pause / resume / cancel / list surface land in 6.1c — those
 // tools advertise here as stubs returning a structured "not_yet"
