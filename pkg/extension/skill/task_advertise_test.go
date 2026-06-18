@@ -199,3 +199,36 @@ func TestRecordTaskUsed_GatesOnShown(t *testing.T) {
 		t.Errorf("unadvertised task must not log a use; got %v", got)
 	}
 }
+
+// TestRenderTaskCatalogue_ToolOnlyExcluded verifies a tool_only task is kept
+// OUT of the `## Available tasks` advertise menu (reached via its task:<name>
+// tool instead), while a normal task-eligible skill still advertises.
+func TestRenderTaskCatalogue_ToolOnlyExcluded(t *testing.T) {
+	normal := taskEligibleSkill("t1", "road_report", "Summarise roads.")
+	toolOnly := taskEligibleSkill("t2", "build_task", "Build a task from intent.")
+	toolOnly.Manifest.Hugen.Task.ToolOnly = true
+
+	store := &fakeTaskStore{skills: []skillpkg.Skill{normal, toolOnly}}
+	ext := NewExtension(skillpkg.NewSkillManager(store, nil), nil, "a1")
+	ctx := context.Background()
+	state := fixture.NewTestSessionState("ses-root")
+	if err := ext.InitState(ctx, state); err != nil {
+		t.Fatalf("InitState: %v", err)
+	}
+	h := FromState(state)
+	all, err := h.manager.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	out, ids := renderTaskCatalogue(state.Prompts(), h, nil, all)
+	if !strings.Contains(out, "road_report") {
+		t.Errorf("normal task should advertise:\n%s", out)
+	}
+	if strings.Contains(out, "build_task") {
+		t.Errorf("tool_only task must NOT advertise:\n%s", out)
+	}
+	if len(ids) != 1 || ids[0] != "t1" {
+		t.Errorf("only the normal task should be shown; got ids=%v", ids)
+	}
+}

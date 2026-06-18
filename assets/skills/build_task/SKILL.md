@@ -50,6 +50,10 @@ metadata:
       # Interactive (it asks the user to agree the algorithm + confirm
       # the result), so it must NEVER run headless under a schedule.
       disable_scheduling: true
+      # Reached as the `task:build_task` tool (granted by the
+      # task_builder coordinator skill), not run from `## Available
+      # tasks` — keep it out of the advertise menu.
+      tool_only: true
       goal_summary: >
         Build a new reusable task skill from the user's intent: design
         and AGREE the working algorithm, author the bundle (any shape —

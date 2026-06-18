@@ -923,6 +923,16 @@ type TaskBlock struct {
 	// task is schedulable; only the rare interactive task sets it.
 	DisableScheduling bool `json:"disable_scheduling,omitempty" yaml:"disable_scheduling,omitempty"`
 
+	// ToolOnly, when true, keeps the task OUT of the `## Available tasks`
+	// advertise menu. The `task:<name>` tool is still generated and is
+	// admitted by any loaded skill that grants it — so the task is
+	// reached as a TOOL (e.g. a coordinator skill that grants
+	// `task:build_task`), not discovered + run directly from the menu.
+	// Default false → every task advertises; set it on meta / builder
+	// tasks a coordinator skill drives rather than the user running by
+	// name.
+	ToolOnly bool `json:"tool_only,omitempty" yaml:"tool_only,omitempty"`
+
 	// GoalSummary is the default imperative one-line brief used
 	// when the caller omits `goal` at task-create time. Surfaces
 	// in liveview + notification subjects. Free-form prose.
