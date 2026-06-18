@@ -1,5 +1,5 @@
 ---
-name: build_task
+name: build-task
 description: >
   Build a NEW reusable task from the user's intent — a self-contained,
   parameterized task skill of ANY shape (a report, an automation
@@ -24,11 +24,11 @@ allowed-tools:
     tools: [bash.shell, bash.write_file, bash.read_file, bash.list_dir, bash.edit_file]
 metadata:
   hugen:
-    requires_skills: [skill_builder]
+    requires_skills: [skill-builder]
     # "*" = FULL catalogue access: the builder must discover (skill:
     # catalog_list) AND skill:load arbitrary domain / execution skills
     # for the task it's building. Without this the task worker is scoped
-    # to its pre-loaded surface (just skill_builder) and can't reach
+    # to its pre-loaded surface (just skill-builder) and can't reach
     # the catalogue.
     allowed_skills: ["*"]
     autoload: false
@@ -50,8 +50,8 @@ metadata:
       # Interactive (it asks the user to agree the algorithm + confirm
       # the result), so it must NEVER run headless under a schedule.
       disable_scheduling: true
-      # Reached as the `task:build_task` tool (granted by the
-      # task_builder coordinator skill), not run from `## Available
+      # Reached as the `task:build-task` tool (granted by the
+      # task-builder coordinator skill), not run from `## Available
       # tasks` — keep it out of the advertise menu.
       tool_only: true
       goal_summary: >
@@ -78,7 +78,7 @@ compatibility:
   runtime: hugen
 ---
 
-# build_task — build a reusable task from intent
+# build-task — build a reusable task from intent
 
 You turn a user's request into a **new reusable task** and register it.
 This is ONE interactive job: you design the task, agree it with the
@@ -177,7 +177,7 @@ for the agreement gate the moment you can describe the algorithm.
 ### 2. Author the bundle
 
 1. **Load the mechanics + the skills you found.** `skill:load`
-   `skill_builder` (it owns the bundle format + the
+   `skill-builder` (it owns the bundle format + the
    `skill:validate` / `skill:save` calls — read its references with
    `skill:ref`) plus the execution / domain skills from phase 1.
 2. **Read the real API before you write code against it.** For EVERY

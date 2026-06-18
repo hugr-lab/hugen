@@ -1,5 +1,5 @@
 ---
-name: skill_builder
+name: skill-builder
 description: >
   Edit, update, or DELETE an existing skill or task, or author a new
   one from a bundle. Owns the manifest format + the path-based
@@ -34,7 +34,7 @@ compatibility:
   runtime: hugen
 ---
 
-# skill_builder
+# skill-builder
 
 Load this skill when you need to **author, update, or remove a hugen
 skill**. It grants the authoring surface (`skill:validate`,
@@ -42,7 +42,7 @@ skill**. It grants the authoring surface (`skill:validate`,
 and bundles the canonical references so you build the bundle correctly
 the first time instead of guessing the format.
 
-You are NOT the policy owner: the `build_task` task (for creating a new
+You are NOT the policy owner: the `build-task` task (for creating a new
 task) or the user decides *that* a skill should be saved and *what* it
 should do. This skill owns *how* — the format and the calls, and the
 export → edit → save / uninstall flow for changing or removing an

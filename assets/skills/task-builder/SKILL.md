@@ -1,5 +1,5 @@
 ---
-name: task_builder
+name: task-builder
 description: >
   Work with reusable TASKS — create a new one from the user's intent, or
   change / fix / update / delete an existing one. Load this whenever the
@@ -10,7 +10,7 @@ description: >
   tool and skill it pulls in.
 license: Apache-2.0
 allowed-tools:
-  - task:build_task
+  - task:build-task
   - task:search
   - task:describe
   - skill:load
@@ -28,7 +28,7 @@ compatibility:
   runtime: hugen
 ---
 
-# task_builder — work with reusable tasks
+# task-builder — work with reusable tasks
 
 Load this skill when the user wants to **create**, **change**, **fix**,
 or **delete** a reusable task. A task is a task-eligible skill the user
@@ -45,10 +45,10 @@ The user wants a repeatable piece of work that no existing task covers.
    / schedule it) and stop — a duplicate is the worst outcome. Unsure
    whether a near-match fits → `session:inquire` "reuse `<name>` or build
    a new one?".
-2. **Run the builder.** Call `task:build_task` with the user's intent:
+2. **Run the builder.** Call `task:build-task` with the user's intent:
 
    ```
-   task:build_task({
+   task:build-task({
      inputs: {
        user_intent: "<the user's request, verbatim, in their language>",
        known_details: { ... }   # only facts the user already stated
@@ -79,13 +79,13 @@ The user wants a repeatable piece of work that no existing task covers.
 
 The user wants to correct a value, change the output, fix a bug, or
 otherwise edit a task that already exists. This is the authoring
-surface. `skill:load` the **`skill_builder`** skill and follow its
+surface. `skill:load` the **`skill-builder`** skill and follow its
 "Updating an existing skill" flow:
 
 export the task → edit the file that's wrong → run it once to verify
 (smoke test) → `skill:save` with `overwrite: true`.
 
-`skill_builder` owns the bundle format, the validate / save / export
+`skill-builder` owns the bundle format, the validate / save / export
 calls, and the read-the-real-API + smoke-test discipline. Keep the edit
 minimal — change only what the user named, and save under the SAME name.
 For a wholesale rework (the task should do something materially
@@ -93,7 +93,7 @@ different), prefer building a fresh task via the create flow above.
 
 ## Delete a task
 
-`skill:load` `skill_builder` and use its `skill:uninstall(name)` — it
+`skill:load` `skill-builder` and use its `skill:uninstall(name)` — it
 removes the task from the store. Destructive and approval-gated; prefer
 the edit flow above for fixes, and reserve uninstall for retiring a task
 the user no longer wants.
@@ -103,5 +103,5 @@ the user no longer wants.
 - It does NOT decide that a task should exist or be changed — the user
   does. You execute the lifecycle once asked.
 - It does NOT author or hand-edit a bundle from memory — creation goes
-  through `task:build_task`; the authoring mechanics live in
-  `skill_builder`.
+  through `task:build-task`; the authoring mechanics live in
+  `skill-builder`.

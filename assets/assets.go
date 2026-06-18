@@ -13,7 +13,7 @@ import "embed"
 // embed-only, and never
 // materialised on disk. Same lifecycle as constitution and
 // prompts — core agent behaviour, not tunable by operators.
-// (Task / skill authoring — `build_task`, `skill_builder` — moved
+// (Task / skill authoring — `build-task`, `skill-builder` — moved
 // to hub-tier `assets/skills/` so they index into the catalogue and
 // can be enabled per agent via the install set.)
 //

@@ -1,5 +1,5 @@
 ---
-name: data_utils
+name: data-utils
 description: >
   One-shot data diagnostics for a single table, no GraphQL by hand.
   Counts the number of rows / records in a table and answers similar
@@ -10,7 +10,7 @@ license: Apache-2.0
 allowed-tools:
   - provider: task
     tools:
-      - data_tables_rows_count
+      - data-tables-rows-count
 metadata:
   hugen:
     requires_skills: []
@@ -21,7 +21,7 @@ compatibility:
   runtime: hugen
 ---
 
-# `data_utils`
+# `data-utils`
 
 Loadable skill that admits Hugr Data Mesh utility tasks into the
 session's tool catalog. The tasks themselves are separate
@@ -32,7 +32,7 @@ loading it just adds their per-recipe tools to the catalog.)
 
 Currently bundled:
 
-- **`task:data_tables_rows_count(data_object)`** — counts rows in a
+- **`task:data-tables-rows-count(data_object)`** — counts rows in a
   named data object via the aggregation GraphQL field. Returns a
   single integer. Useful for daily diagnostics ("how many
   transactions yesterday?") or quick sanity checks before a deeper

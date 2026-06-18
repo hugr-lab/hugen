@@ -1,5 +1,5 @@
 ---
-name: data_tables_rows_count
+name: data-tables-rows-count
 description: >
   Count rows in one Hugr data object. Input: exact `name` or
   natural-language `query` (+ optional `module`). Output: a single
@@ -53,7 +53,7 @@ compatibility:
   runtime: hugen
 ---
 
-# data_tables_rows_count
+# data-tables-rows-count
 
 Count rows in one Hugr data object. The tools you need are in your
 catalogue — don't load anything else.
