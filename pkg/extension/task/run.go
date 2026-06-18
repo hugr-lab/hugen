@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
 	skillext "github.com/hugr-lab/hugen/pkg/extension/skill"
@@ -166,10 +167,15 @@ func (e *Extension) RunRecipe(ctx context.Context, p RunParams) (RunResult, erro
 	// catalogue to the manifest-declared AllowedSkills whitelist. An
 	// empty list locks the surface to whatever the spawner pre-loaded
 	// (universal `_system`/`_worker` + RequiresSkills); a populated list
-	// adds reachable-via-load entries on top. Pass `[]string` directly
-	// so the skill ext's typed switch hits the fast path.
-	allowList := append([]string(nil), p.Skill.Manifest.Hugen.AllowedSkills...)
-	child.SetValue(skillext.SessionAllowedSkillsKey, allowList)
+	// adds reachable-via-load entries on top. The wildcard `"*"` opts OUT
+	// of scoping entirely — leaving the key UNSET makes the child see the
+	// FULL catalogue and `skill:load` anything (for builder-style tasks
+	// that must discover + load arbitrary domain / execution skills, e.g.
+	// `_task_builder`). Pass `[]string` directly so the skill ext's typed
+	// switch hits the fast path.
+	if list, scoped := scopeAllowList(p.Skill.Manifest.Hugen.AllowedSkills); scoped {
+		child.SetValue(skillext.SessionAllowedSkillsKey, list)
+	}
 
 	// §5.1 approve-with-tools — stamp the worker so its standardized
 	// tools auto-approve via this ext's ToolApprovalPolicy. Set BEFORE
@@ -228,6 +234,20 @@ func (e *Extension) RunRecipe(ctx context.Context, p RunParams) (RunResult, erro
 			"task: recipe launch context cancelled")
 		return RunResult{ChildID: child.ID()}, ctx.Err()
 	}
+}
+
+// scopeAllowList decides a recipe child's skill scope from its manifest
+// `allowed_skills`. The wildcard `"*"` opts OUT of scoping (scoped=false
+// → the caller leaves the scope key UNSET, so the child sees the FULL
+// catalogue and may skill:load anything — needed by builder-style tasks
+// like `_task_builder`). Any other value scopes: an empty list locks the
+// child to its pre-loaded surface; a populated list adds those names on
+// top. Returns (list, true) to scope, (nil, false) to leave unscoped.
+func scopeAllowList(allowed []string) (list []string, scoped bool) {
+	if slices.Contains(allowed, "*") {
+		return nil, false
+	}
+	return append([]string(nil), allowed...), true
 }
 
 // preloadRecipeSkills loads the recipe body + its requires_skills

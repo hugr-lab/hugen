@@ -25,7 +25,12 @@ allowed-tools:
 metadata:
   hugen:
     requires_skills: [_skill_builder]
-    allowed_skills: []
+    # "*" = FULL catalogue access: the builder must discover (skill:
+    # catalog_list) AND skill:load arbitrary domain / execution skills
+    # for the task it's building. Without this the task worker is scoped
+    # to its pre-loaded surface (just _skill_builder) and can't reach
+    # the catalogue.
+    allowed_skills: ["*"]
     autoload: false
     tier_compatibility: [worker]
     mission:

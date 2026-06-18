@@ -16,6 +16,36 @@ import (
 // same precedent as the scheduler spawn-fire tests (see
 // pkg/extension/scheduler/fake_test.go).
 
+// TestScopeAllowList covers the skill-scope decision: the `"*"` wildcard
+// opts a builder-style task (e.g. _task_builder) OUT of scoping so it
+// sees the full catalogue + can skill:load anything; everything else
+// scopes (empty = locked to the pre-loaded surface).
+func TestScopeAllowList(t *testing.T) {
+	cases := []struct {
+		name       string
+		in         []string
+		wantScoped bool
+		wantLen    int
+	}{
+		{"wildcard unscopes", []string{"*"}, false, 0},
+		{"wildcard among others still unscopes", []string{"a", "*"}, false, 0},
+		{"nil scopes (locked surface)", nil, true, 0},
+		{"empty scopes (locked surface)", []string{}, true, 0},
+		{"populated scopes with the list", []string{"a", "b"}, true, 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			list, scoped := scopeAllowList(c.in)
+			if scoped != c.wantScoped {
+				t.Fatalf("scoped = %v, want %v", scoped, c.wantScoped)
+			}
+			if scoped && len(list) != c.wantLen {
+				t.Errorf("list = %v (len %d), want len %d", list, len(list), c.wantLen)
+			}
+		})
+	}
+}
+
 func TestRunRecipe_NilAnchorErrors(t *testing.T) {
 	e := NewExtension(nil, "agt_test", nil)
 	_, err := e.RunRecipe(context.Background(), RunParams{
