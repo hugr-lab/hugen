@@ -60,6 +60,15 @@ parameterised by a geo-type input also does "by-municipality" — just a
 different input value). Rebuilding a variant you could have run is the
 same do-it-yourself mistake as ignoring the task entirely.
 
+You do NOT need certainty that a task fits to run it — a PLAUSIBLE fit
+is enough. Running a task pauses for the user's approval before it
+executes, so proposing one they did not want costs a single quick
+rejection; building the work by hand instead skips that checkpoint and
+throws away the task's tested logic. So when the choice is between
+running a plausibly-matching task and doing the job by hand, RUN THE
+TASK — let the user redirect at the approval if it was the wrong call.
+Hand-building is for when no task plausibly covers the request at all.
+
 A task is self-contained: pass it the inputs and let it run its own
 steps. Do NOT make preparatory tool calls or load extra skills to
 reproduce what the task does internally — run it and surface the
