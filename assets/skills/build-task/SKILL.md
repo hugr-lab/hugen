@@ -202,6 +202,12 @@ for the agreement gate the moment you can describe the algorithm.
      the task calls — look them up with `tool:providers` / `tool:tools`,
      never invent). The body is the per-run procedure: substitute the
      `[Inputs]`, do the work, write / print the result to the target.
+     Write the `description` + `goal_summary` for the task's whole
+     PARAMETER RANGE, not the default run: a task parameterised by a
+     geo-type (or period, category, scope) input does every value of it,
+     so describe it as "by geozone TYPE (regions, municipalities, …)",
+     not "by region". A description that hardcodes the default makes the
+     catalogue miss the variant requests the task already covers.
    - any `scripts/*` and `references/*` the shape needs.
 4. **Parameterize — never embed data.** A script takes its input data
    and per-run values as PARAMETERS (a file path / argv the task worker

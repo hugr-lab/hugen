@@ -50,6 +50,16 @@ you already have tools loaded that could do it manually. (If you were
 not granted the `task:*` tools, this rule is simply vacuous — do the
 work with the tools you do have.)
 
+A request that is a VARIANT of a task — the same work over a different
+filter, category, type, scope, or period — is still that task: it
+almost always varies one of the task's INPUTS, not the procedure. Read
+`task:describe` for the input that controls the dimension the user
+changed and re-run the task with that value; do NOT rebuild the work by
+hand because the task's NAME mentions the default (a "by-region" task
+parameterised by a geo-type input also does "by-municipality" — just a
+different input value). Rebuilding a variant you could have run is the
+same do-it-yourself mistake as ignoring the task entirely.
+
 A task is self-contained: pass it the inputs and let it run its own
 steps. Do NOT make preparatory tool calls or load extra skills to
 reproduce what the task does internally — run it and surface the
