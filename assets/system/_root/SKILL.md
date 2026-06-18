@@ -369,6 +369,17 @@ User wants repeatable / schedulable work but no built task covers it.
 Don't decline, and don't hand-roll it as a one-off — create the task
 skill first, then run or schedule it.
 
+**DELEGATE — do NOT do the builder's work yourself.** `_task_builder`
+has FULL catalogue access: it discovers the data + skills, designs the
+algorithm, asks the user, authors + validates the bundle, and saves it.
+So once you've confirmed no existing task fits (the dedup below), your
+ONLY move is to run `_task_builder` with the user's intent and STOP. Do
+NOT first explore the data, `skill:load` a data skill, discover the
+schema, or sketch the report at root — that is exactly the work the
+builder does, and doing it here both duplicates it and derails the
+delegation. "Build me a task that …" is a delegate-and-stop signal, not
+a do-it-yourself one.
+
 **Dedup FIRST — do NOT run the builder over a match.** A duplicate task
 is worse than a slightly-imperfect existing one. Before Path D, check
 whether the work already exists: scan `## Available tasks`, and
