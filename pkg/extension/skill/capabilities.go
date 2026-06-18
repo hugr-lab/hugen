@@ -856,6 +856,11 @@ func renderTaskCatalogue(renderer *prompts.Renderer, h *SessionSkill, allow map[
 		if !sk.Manifest.Hugen.Task.Eligible {
 			continue
 		}
+		// Tool-only tasks are reached via their `task:<name>` tool (a
+		// coordinator skill grants it), never advertised in the menu.
+		if sk.Manifest.Hugen.Task.ToolOnly {
+			continue
+		}
 		if allow != nil {
 			if _, ok := allow[sk.Manifest.Name]; !ok {
 				continue

@@ -332,7 +332,14 @@ tool_providers:
 #
 # Bundled skills available to install:
 #   analyst · hugr-data · duckdb-data · duckdb-docs · python-runner
-#   data_utils · data_tables_rows_count
+#   report-builder · data-utils · data-tables-rows-count · build-report
+#   skill-builder · build-task · task-builder
+#
+# task-builder + build-task + skill-builder are the task lifecycle:
+# task-builder (discovered in `## Available skills`) coordinates
+# create / edit / delete; it grants `task:build-task` and loads
+# skill-builder on demand. Install all three to let the agent build
+# and fix reusable tasks from the user's intent.
 #
 # `pin` is the advertise-pin set: installed skills that are ALWAYS
 # surfaced in discovery (bypass the usage bandit). Tri-state like
@@ -348,8 +355,13 @@ tool_providers:
 #     - duckdb-data
 #     - duckdb-docs
 #     - python-runner
-#     - data_utils
-#     - data_tables_rows_count
+#     - report-builder
+#     - data-utils
+#     - data-tables-rows-count
+#     - build-report
+#     - skill-builder
+#     - build-task
+#     - task-builder
 #   pin:
 #     - hugr-data
 #     - analyst

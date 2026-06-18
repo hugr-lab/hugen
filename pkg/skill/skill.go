@@ -42,8 +42,8 @@ type Skill struct {
 // Three production sources:
 //
 //   - **system** — agent-core skills bundled in the binary
-//     (`_root`, `_mission_worker`, `_worker`, `_task_builder`,
-//     `_skill_builder`, `_system`, `_admin`). Embed-only; no
+//     (`_root`, `_mission_worker`, `_worker`, `_system`,
+//     `_admin`). Embed-only; no
 //     on-disk presence. Owned by the binary; not tunable.
 //   - **hub** — admin-delivered extensions (`hugr-data`,
 //     `analyst`, `duckdb-data`, `duckdb-docs`, `python-runner`).
@@ -144,7 +144,7 @@ var (
 	// ErrSkillExists is returned by SkillStore.Publish when a skill
 	// with the same name already exists in the writable backend
 	// and PublishOptions.Overwrite is false. The authoring flow
-	// (`_task_builder`'s registrar) requires explicit user
+	// (`build_task`) requires explicit user
 	// authorisation before retrying with Overwrite=true.
 	ErrSkillExists = errors.New("skill: already exists")
 

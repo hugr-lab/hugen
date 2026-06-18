@@ -308,8 +308,8 @@ future time / cadence:
      and run only the one the user names. Inspect contracts with
      `task:describe` to surface the real difference when it isn't
      obvious from the descriptions.
-   - **No match** → fall through (build a task, or do the job with
-     raw tools).
+   - **No match** → fall through to the decision tree (load a fitting
+     skill from `## Available skills`, or do the job with raw tools).
 2. Inspect its input contract with `task:describe("<name>")`,
    collect any required inputs from the user, then run it by name:
 
@@ -363,116 +363,24 @@ schedule:create(
 `wake_message` is the literal text that arrives as a fresh user
 message at fire time.
 
-### Path D — build a new reusable task (no built task matches yet)
-
-User wants repeatable / schedulable work but no built task covers it.
-Don't decline, and don't hand-roll it as a one-off — create the task
-skill first, then run or schedule it.
-
-**Dedup FIRST — do NOT spawn the builder over a match.** Building a
-mission is expensive; a duplicate task is worse. Before Path D, check
-whether the work already exists: scan `## Available tasks`, and
-`task:search(query: <the user's request>)` for anything not advertised.
-If a task plausibly covers the request, you are UNSURE whether to build
-— so ASK, don't assume. "Сделай задачу / make a task" does NOT override
-an existing match: a near-match means run-or-confirm, never silently
-build. `session:inquire(type:"clarification", question: "У тебя уже
-есть задача `<name>` — <one-line what it does>. Запустить её или
-построить новую?", options:["запустить существующую","построить
-новую","уточнить"])`. Spawn `_task_builder` ONLY when the user confirms
-they want a genuinely new task the existing one can't serve. On "run
-the existing one" → Path A. This is move zero — the same dedup the
-builder's researcher does, but at root, before paying for a mission.
-
-When nothing covers it, build:
-
-```
-session:spawn_mission(
-  name="build-<short>",
-  goal="Build a reusable task for: <user request, verbatim>",
-  skill="_task_builder",
-  inputs={
-    user_intent: "<the user's full request, verbatim>",
-    known_details: { ... }  # only facts the user already stated
-  }
-)
-```
-
-`known_details` follows the Knob 2 rule — pass ONLY facts the user
-actually named in this chat (a data source / tables, filters, the
-output format, a task-name preference, the cadence they mentioned),
-never anything you'd have to probe for. Every value must be a
-CONCRETE answer ("html", "~/reports/roads.csv", "weekly"), not a
-restatement of the request — the builder treats every key you pass
-as already answered and will NOT re-ask it, so a paraphrase
-("output: report") silently suppresses a question the user never
-answered. When in doubt, leave the key out: every dimension you
-omit the builder clarifies with the user itself. Omit `known_details`
-entirely when the request carries no extra facts.
-
-`_task_builder` interviews the user for the task's inputs / output /
-name, authors + validates the bundle, confirms the assembled result
-with the user, and saves it as a task-eligible skill. When it
-returns, the new task is runnable by name — run it ad-hoc with
-`task:execute_task` (Path A) or bind it to a schedule (Path B) per
-what the user originally asked.
-
-Use this when the work is worth keeping (the user said "every…",
-"regularly", "make a task that…") — not for a single one-off,
-which is just a mission (or chat).
-
-### Path E — change or delete an EXISTING task
-
-The user wants to FIX, UPDATE, or REMOVE a task that already exists —
-a wrong value, a different output, a query bug, or retiring it. A task
-is just a task-eligible skill, so this is the authoring surface, NOT a
-new build (Path D) and NOT a mission. Load `_skill_builder` — it owns
-the bundle format and the edit / remove flow — then follow it:
-
-- **Targeted edit** (a query predicate, a parameter, the output shape,
-  a prose step): `skill:export("<task-name>")` copies the bundle into
-  your workspace → edit the file that's wrong (e.g.
-  `references/query.graphql`, `scripts/*.py`, or `SKILL.md`) → check it
-  with `skill:validate` → re-register with `skill:save(bundle_dir,
-  overwrite:true)`. The user asked for the change, so `overwrite:true`
-  is the authorised replace. Confirm the change back to the user.
-- **Delete**: `skill:uninstall("<task-name>")` — removes it from the
-  store entirely. Destructive and approval-gated; the user confirms at
-  the modal.
-
-Keep the edit minimal — change ONLY what the user named, and re-save
-under the SAME name (overwrite). For a wholesale rework (the task
-should do something materially different), prefer rebuilding via Path D
-over a sprawling in-place edit.
-
 ### Decision tree (apply in order)
 
-0. Does the user want to CHANGE or DELETE a task/skill that ALREADY
-   exists — fix it, update its output, correct a query, retire it?
-   (They name or point at an existing task, not "make a new one.")
-   - **Yes** → Path E (load `_skill_builder`; edit-overwrite or
-     uninstall). This is NOT Path D — Path D is only for net-new tasks.
-   - **No** → continue.
 1. Did the user name a future time / cadence?
    ("remind me", "every morning", "in 30 minutes", or their
    equivalents in the user's language.)
-   - **No** → Path A or just-answer-in-chat.
-   - **Yes** → Path B or C.
+   - **No** → step 2.
+   - **Yes** → Path B if the work maps to a built task, Path C if it's
+     a bare reminder with no task.
 2. Does the user's intent map to a built task (in `## Available
-   tasks`, or found via `task:search`)? — check this EVEN when the
-   user said "make a task": a match means reuse, not rebuild.
+   tasks`, or found via `task:search`)?
    - **Yes** → run it by name with `task:execute_task` (Path A) or
      `schedule:create` (Path B). Inspect inputs first with
-     `task:describe`. If the user asked to BUILD and a match exists,
-     `session:inquire` run-vs-build first (Path D dedup gate) — don't
-     spawn the builder over a match.
-   - **No, but the user wants a reminder** → Path C.
-   - **No, but it's repeatable / schedulable work worth keeping**
-     → Path D (dedup-check first): spawn `_task_builder` only when
-     nothing covers it, then run (Path A) or schedule (Path B) it.
-     Do NOT invent a task name.
-   - **No, and it's a one-off** → no task needed; spawn a regular
-     mission with a suitable mission skill, or just answer in chat.
+     `task:describe`. A match means reuse — do not re-do the work by
+     hand.
+   - **No** → it is not a built-task job. If a skill in your
+     `## Available skills` fits the request, `skill:load` it and follow
+     it; otherwise spawn a regular mission with a suitable mission
+     skill, or just answer in chat.
 3. Pre-fill `inputs` from what the user already said. Anything
    missing — ask the user once via `session:inquire` BEFORE the
    call (tasks have no input-collector at runtime; they expect

@@ -678,6 +678,16 @@ type CompactorOverride struct {
 	LLMTimeoutMs         *int     `json:"llm_timeout_ms,omitempty"         yaml:"llm_timeout_ms,omitempty"`
 	LLMIntent            *string  `json:"llm_intent,omitempty"             yaml:"llm_intent,omitempty"`
 	TokenBudgetRatio     *float64 `json:"token_budget_ratio,omitempty"     yaml:"token_budget_ratio,omitempty"`
+
+	// L3 in-turn checkpoint overrides (Stage 2). Until now these were
+	// settable only per-tier (config `compactor.tiers.<tier>`); carrying
+	// them here lets an individual skill / task / mission-role tune its
+	// OWN checkpoint+hide aggressiveness without moving the whole tier.
+	// A research-heavy builder task, for instance, wants a tighter
+	// window + earlier hide than the shared worker tier. nil → inherit.
+	CheckpointsEnabled     *bool    `json:"checkpoints_enabled,omitempty"      yaml:"checkpoints_enabled,omitempty"`
+	CheckpointWindowTokens *int     `json:"checkpoint_window_tokens,omitempty" yaml:"checkpoint_window_tokens,omitempty"`
+	ContextHideRatio       *float64 `json:"context_hide_ratio,omitempty"       yaml:"context_hide_ratio,omitempty"`
 }
 
 // SubAgentCapabilities declares which mission-PDCA surfaces the
@@ -875,7 +885,7 @@ const (
 
 // TaskBlock is the typed projection of `metadata.hugen.task`. When
 // `Eligible: true`, the skill is selectable by the `schedule:create`
-// tool — operators (or the future `_task_builder` mission) bind a
+// tool — operators (or the future `build_task` task) bind a
 // recurring schedule to it and TaskManager fires the skill per
 // scheduler tick. Phase 6 §0.5.4.
 //
@@ -905,6 +915,23 @@ type TaskBlock struct {
 	// Kind is `worker` (default) or `mission` (guarded as "not yet
 	// supported" in 6.1b MVP). Empty value is treated as `worker`.
 	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
+
+	// DisableScheduling, when true, blocks `schedule:create` from
+	// binding this task to a periodic / headless fire — an opt-OUT for
+	// INTERACTIVE tasks (they `session:inquire` and would hang with no
+	// operator at a fire, e.g. `build_task`). Default false → every
+	// task is schedulable; only the rare interactive task sets it.
+	DisableScheduling bool `json:"disable_scheduling,omitempty" yaml:"disable_scheduling,omitempty"`
+
+	// ToolOnly, when true, keeps the task OUT of the `## Available tasks`
+	// advertise menu. The `task:<name>` tool is still generated and is
+	// admitted by any loaded skill that grants it — so the task is
+	// reached as a TOOL (e.g. a coordinator skill that grants
+	// `task:build_task`), not discovered + run directly from the menu.
+	// Default false → every task advertises; set it on meta / builder
+	// tasks a coordinator skill drives rather than the user running by
+	// name.
+	ToolOnly bool `json:"tool_only,omitempty" yaml:"tool_only,omitempty"`
 
 	// GoalSummary is the default imperative one-line brief used
 	// when the caller omits `goal` at task-create time. Surfaces
@@ -939,6 +966,13 @@ type TaskBlock struct {
 	// only when the skill body contains `{{ ... }}` actions that
 	// depend on the per-fire envelope.
 	BodyIsTemplate bool `json:"body_is_template,omitempty" yaml:"body_is_template,omitempty"`
+}
+
+// IsSchedulable reports whether the task may be bound to a schedule.
+// Default true — only an explicit `disable_scheduling: true` blocks it,
+// for interactive tasks that cannot run headless.
+func (t TaskBlock) IsSchedulable() bool {
+	return !t.DisableScheduling
 }
 
 // MissionCapabilities lists the mission-tier opt-in toggles.

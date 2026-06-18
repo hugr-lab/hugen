@@ -312,3 +312,59 @@ func TestApplyTierOverride_TimeoutAndRatio(t *testing.T) {
 		t.Errorf("MaxTurns mutated unexpectedly = %d", cfg.MaxTurns)
 	}
 }
+
+func TestApplyOverrideSpec_L3CheckpointFields(t *testing.T) {
+	// Direct unit on applyOverrideSpec — the L3 checkpoint/hide fields
+	// (added so a skill / task / role can tune its own checkpoint+hide
+	// aggressiveness) land, and absent fields stay put.
+	cfg := DefaultConfig()
+	cfg.CheckpointsEnabled = true
+	cfg.CheckpointWindowTokens = 12000
+	cfg.ContextHideRatio = 0.80
+
+	applyOverrideSpec(&cfg, OverrideSpec{
+		CheckpointWindowTokens: ptrInt(6000),
+		ContextHideRatio:       ptrFloat(0.55),
+	})
+	if cfg.CheckpointWindowTokens != 6000 {
+		t.Errorf("CheckpointWindowTokens = %d, want 6000", cfg.CheckpointWindowTokens)
+	}
+	if cfg.ContextHideRatio != 0.55 {
+		t.Errorf("ContextHideRatio = %v, want 0.55", cfg.ContextHideRatio)
+	}
+	// CheckpointsEnabled was nil in the override → untouched.
+	if !cfg.CheckpointsEnabled {
+		t.Errorf("CheckpointsEnabled = false, want true (untouched)")
+	}
+}
+
+func TestResolveTierConfig_L3CheckpointOverride_SkillBeatsTier(t *testing.T) {
+	// End-to-end: a per-skill (task) override of the L3 checkpoint+hide
+	// fields beats the per-tier value — the path build_task relies on to
+	// run a tighter window than the shared worker tier.
+	base := DefaultConfig()
+	base.Tiers = map[string]TierOverride{
+		"worker": {
+			CheckpointWindowTokens: ptrInt(12000),
+			ContextHideRatio:       ptrFloat(0.80),
+		},
+	}
+	catalog := &stubCatalog{
+		missions: map[string]*OverrideSpec{
+			"build_task": {
+				CheckpointWindowTokens: ptrInt(6000),
+				ContextHideRatio:       ptrFloat(0.55),
+			},
+		},
+	}
+	e := NewExtensionWithConfig(slog.Default(), base, Deps{SkillCatalog: catalog})
+
+	got := e.resolveTierConfig(context.Background(),
+		&resolveStateFake{id: "b0", depth: 2, skill: "build_task", role: ""})
+	if got.CheckpointWindowTokens != 6000 {
+		t.Errorf("CheckpointWindowTokens = %d, want 6000 (skill override beats tier 12000)", got.CheckpointWindowTokens)
+	}
+	if got.ContextHideRatio != 0.55 {
+		t.Errorf("ContextHideRatio = %v, want 0.55 (skill override beats tier 0.80)", got.ContextHideRatio)
+	}
+}

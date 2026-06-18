@@ -701,11 +701,19 @@ func (t *tab) dispatchBatchedInquiryKey(k tea.KeyMsg) (handled bool, cmd tea.Cmd
 				pend.answers[cur.ID] = entry
 			}
 		}
-		// Required-kind value must be non-empty — fall back to the
-		// ↑↓ highlighted option if the operator left it implicit.
-		if cur.Kind == protocol.ClarificationKindRequired && entry.Value == "" {
+		// Single-select option questions commit the highlighted option
+		// (or the declared Default) when the value textarea is empty —
+		// for EVERY kind, not just required. An `optional` clarification
+		// the operator picked by highlight + Enter must still capture
+		// that pick; gating this to required dropped the answer to empty,
+		// which fed the model an empty response and made it improvise.
+		if entry.Value == "" && !cur.Multi && len(cur.Options) > 0 {
 			if hi := pend.optionHighlight(); hi >= 0 && hi < len(cur.Options) {
 				entry.Value = cur.Options[hi]
+			} else if cur.Default != "" {
+				entry.Value = cur.Default
+			}
+			if entry.Value != "" {
 				if pend.answers == nil {
 					pend.answers = make(map[string]protocol.AnswerEntry)
 				}

@@ -221,5 +221,9 @@ func projectCompactorOverride(in *skillpkg.CompactorOverride) *OverrideSpec {
 		LLMTimeoutMs:         in.LLMTimeoutMs,
 		LLMIntent:            in.LLMIntent,
 		TokenBudgetRatio:     in.TokenBudgetRatio,
+
+		CheckpointsEnabled:     in.CheckpointsEnabled,
+		CheckpointWindowTokens: in.CheckpointWindowTokens,
+		ContextHideRatio:       in.ContextHideRatio,
 	}
 }

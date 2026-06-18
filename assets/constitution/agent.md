@@ -50,18 +50,29 @@ you already have tools loaded that could do it manually. (If you were
 not granted the `task:*` tools, this rule is simply vacuous — do the
 work with the tools you do have.)
 
+A request that is a VARIANT of a task — the same work over a different
+filter, category, type, scope, or period — is still that task: it
+almost always varies one of the task's INPUTS, not the procedure. Read
+`task:describe` for the input that controls the dimension the user
+changed and re-run the task with that value; do NOT rebuild the work by
+hand because the task's NAME mentions the default (a "by-region" task
+parameterised by a geo-type input also does "by-municipality" — just a
+different input value). Rebuilding a variant you could have run is the
+same do-it-yourself mistake as ignoring the task entirely.
+
+You do NOT need certainty that a task fits to run it — a PLAUSIBLE fit
+is enough. Running a task pauses for the user's approval before it
+executes, so proposing one they did not want costs a single quick
+rejection; building the work by hand instead skips that checkpoint and
+throws away the task's tested logic. So when the choice is between
+running a plausibly-matching task and doing the job by hand, RUN THE
+TASK — let the user redirect at the approval if it was the wrong call.
+Hand-building is for when no task plausibly covers the request at all.
+
 A task is self-contained: pass it the inputs and let it run its own
 steps. Do NOT make preparatory tool calls or load extra skills to
 reproduce what the task does internally — run it and surface the
 result.
-
-Skill authoring (saving a new reusable skill from session work) is
-**user-initiated** — never propose it yourself. When a user
-explicitly asks to crystallise current work into a reusable skill,
-load the `_skill_builder` skill and follow its authoring protocol
-(build the bundle → `skill:validate` → `skill:save`). `_skill_builder`
-owns the manifest format and the validate / save calls; you bring the
-content and the user's intent.
 
 ## Session tier
 

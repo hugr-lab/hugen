@@ -167,6 +167,15 @@ func applyOverrideSpec(cfg *Config, o OverrideSpec) {
 	if o.TokenBudgetRatio != nil {
 		cfg.TokenBudgetRatio = *o.TokenBudgetRatio
 	}
+	if o.CheckpointsEnabled != nil {
+		cfg.CheckpointsEnabled = *o.CheckpointsEnabled
+	}
+	if o.CheckpointWindowTokens != nil {
+		cfg.CheckpointWindowTokens = *o.CheckpointWindowTokens
+	}
+	if o.ContextHideRatio != nil {
+		cfg.ContextHideRatio = *o.ContextHideRatio
+	}
 }
 
 // resolveIntent maps a YAML intent string to a [model.Intent].

@@ -2,7 +2,7 @@
 // extension + the always-on `task_log_reap_stuck` system runner
 // (see reap.go). The extension's 6.1b shape is intentionally narrow:
 // it exposes the `schedule:create` tool so operators / the future
-// `_task_builder` mission can persist task rows + the initial
+// `build_task` task can persist task rows + the initial
 // `planned` row into hub.db. Fire dispatch, drift detection, and
 // the pause / resume / cancel / list surface land in 6.1c — those
 // tools advertise here as stubs returning a structured "not_yet"
@@ -624,6 +624,9 @@ func (e *Extension) callCreate(ctx context.Context, args json.RawMessage) (json.
 		}
 		if !sk.Manifest.Hugen.Task.Eligible {
 			return toolErr("not_task_eligible", fmt.Sprintf("skill %q is not task-eligible (metadata.hugen.task.eligible)", in.SkillRef))
+		}
+		if !sk.Manifest.Hugen.Task.IsSchedulable() {
+			return toolErr("not_schedulable", fmt.Sprintf("task %q is interactive (it prompts the user) and cannot be scheduled — there is no operator at a headless fire", in.SkillRef))
 		}
 		if sk.Manifest.Hugen.Task.Kind == skill.TaskKindMission {
 			return toolErr("not_yet_implemented", "mission-shape tasks are reserved — MVP supports kind=worker only")

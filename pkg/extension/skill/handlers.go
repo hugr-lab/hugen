@@ -165,14 +165,14 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 		},
 		{
 			Name:             providerName + ":validate",
-			Description:      "Dry-run check a skill bundle in your workspace (SKILL.md + optional references / scripts / assets) WITHOUT registering it — manifest parse + task-block placement + allowed_tools_default name check. Returns the verdict only; it cannot publish. Iterate with this until the bundle is clean, then skill:save to register. The authoring format + flow is owned by the `_skill_builder` skill.",
+			Description:      "Dry-run check a skill bundle in your workspace (SKILL.md + optional references / scripts / assets) WITHOUT registering it — manifest parse + task-block placement + allowed_tools_default name check. Returns the verdict only; it cannot publish. Iterate with this until the bundle is clean, then skill:save to register. The authoring format + flow is documented by the skill-authoring skill.",
 			Provider:         providerName,
 			PermissionObject: permObjectValidate,
 			ArgSchema:        json.RawMessage(validateSchema),
 		},
 		{
 			Name:             providerName + ":save",
-			Description:      "Register a skill bundle from a directory in your workspace (SKILL.md + optional references / scripts / assets). Validation re-runs atomically BEFORE any write; on success the skill is registered and auto-loaded in the current session. On a name collision, OMITTING overwrite pauses to ask the user (overwrite / new name / cancel) — it never clobbers silently. Validate first with skill:validate. User-initiated only — do NOT propose this. The authoring format + flow is owned by the `_skill_builder` skill.",
+			Description:      "Register a skill bundle from a directory in your workspace (SKILL.md + optional references / scripts / assets). Validation re-runs atomically BEFORE any write; on success the skill is registered and auto-loaded in the current session. On a name collision, OMITTING overwrite pauses to ask the user (overwrite / new name / cancel) — it never clobbers silently. Validate first with skill:validate. User-initiated only — do NOT propose this. The authoring format + flow is documented by the skill-authoring skill.",
 			Provider:         providerName,
 			PermissionObject: permObjectSave,
 			ArgSchema:        json.RawMessage(saveSchema),

@@ -8,7 +8,7 @@ description: >
   iteration; checker routes; synthesizer produces the final answer. A
   report here is the RESULT of analysis — to render a document from
   data you already have, or from a query you can name, use the
-  `build_report` task instead.
+  `build-report` task instead.
 license: Apache-2.0
 allowed-tools: []
 metadata:
@@ -38,7 +38,7 @@ metadata:
         Spawn this when the answer requires figuring something out.
         When the data (or the exact query) AND the output shape are
         already known and you just need the document rendered, that is
-        the `build_report` task, not this mission.
+        the `build-report` task, not this mission.
       keywords: [analyse, analysis, explore, research, investigate, trend, relationship, anomaly, compare, audit, hypothesis]
 
       capabilities:

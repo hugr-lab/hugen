@@ -60,6 +60,9 @@ func newToolNameFixture(t *testing.T) (*Extension, *fixture.TestSessionState, st
 		Inline: map[string][]byte{
 			"alpha":     []byte(inlineAlphaManifest),
 			"hugr-data": []byte("---\nname: hugr-data\ndescription: a skill, not a provider.\nlicense: MIT\n---\nbody\n"),
+			// a legacy `_`-named skill already in the store — re-saving
+			// it is grandfathered past the kebab-case rule.
+			"legacy_task": []byte("---\nname: legacy_task\ndescription: a legacy underscore-named skill.\nlicense: MIT\n---\nbody\n"),
 		},
 	})
 	mgr := skillpkg.NewSkillManager(store, nil)
@@ -150,6 +153,30 @@ func TestCallSave_AcceptsToolWildcard(t *testing.T) {
 	dir := writeBundle(t, wsDir, "roadwild", md, nil)
 	if _, err := ext.Call(newCallCtx(state), "skill:validate", validateArgs(dir)); err != nil {
 		t.Fatalf("skill:validate with wildcard: %v", err)
+	}
+}
+
+// TestCallSave_RejectsUnderscoreName proves a NEW skill name with an
+// underscore is rejected with ErrInvalidSkillName (the kebab-case rule).
+func TestCallSave_RejectsUnderscoreName(t *testing.T) {
+	ext, state, wsDir := newToolNameFixture(t)
+	md := taskManifest("road_move", []string{"python-mcp:run_script"})
+	dir := writeBundle(t, wsDir, "road_move", md, nil)
+	_, err := ext.Call(newCallCtx(state), "skill:save", saveArgs(dir))
+	if !errors.Is(err, ErrInvalidSkillName) {
+		t.Fatalf("err = %v, want ErrInvalidSkillName", err)
+	}
+}
+
+// TestCallSave_GrandfathersExistingUnderscoreName proves a `_`-named skill
+// ALREADY in the store can be re-saved — the overwrite of a legacy task
+// must not be blocked by the new kebab-case rule.
+func TestCallSave_GrandfathersExistingUnderscoreName(t *testing.T) {
+	ext, state, wsDir := newToolNameFixture(t)
+	md := "---\nname: legacy_task\ndescription: a legacy underscore-named skill.\nlicense: MIT\n---\nbody\n"
+	dir := writeBundle(t, wsDir, "legacy_task", md, nil)
+	if _, err := ext.Call(newCallCtx(state), "skill:validate", validateArgs(dir)); err != nil {
+		t.Fatalf("re-validating an existing `_`-named skill should pass (grandfathered): %v", err)
 	}
 }
 

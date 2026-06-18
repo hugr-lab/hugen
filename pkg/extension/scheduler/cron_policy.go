@@ -19,7 +19,7 @@ import (
 // therefore needs an explicit, per-tool authority decision the
 // scheduler can hand down without prompting. The authority chain:
 //
-//  1. At task-create time the operator (or `_task_builder` mission)
+//  1. At task-create time the operator (or `build_task` task)
 //     pins a tool allow-list onto `tasks.spec.allowed_tools`.
 //  2. The scheduler's fire fn stamps that list onto the cron
 //     session's [protocol.FireContext.AllowedTools] when opening

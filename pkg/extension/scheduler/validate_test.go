@@ -120,6 +120,31 @@ func createErrCode(t *testing.T, body json.RawMessage) string {
 	return resp.Error.Code
 }
 
+func TestCallCreate_RejectsNonSchedulableTask(t *testing.T) {
+	// A task with disable_scheduling: true (an interactive task that
+	// prompts the user) cannot be bound to a headless schedule.
+	const manifest = `---
+name: test_task
+description: An interactive task that prompts the user.
+license: MIT
+metadata:
+  hugen:
+    task:
+      eligible: true
+      kind: worker
+      disable_scheduling: true
+      goal_summary: do the interactive thing
+---
+body
+`
+	ext, _ := extWithTaskSkill(t, manifest)
+	owner := newFakeState("ses-owner-nosched")
+	body := callTool(t, ext, owner, "create", spawnCreateArgs(nil))
+	if code := createErrCode(t, body); code != "not_schedulable" {
+		t.Errorf("error code = %q, want not_schedulable (body %s)", code, body)
+	}
+}
+
 func TestCallCreate_RejectsMissingRequiredInputs(t *testing.T) {
 	ext, _ := extWithTaskSkill(t, taskSkillManifest("Generate the report", "        required:\n          - region"))
 	owner := newFakeState("ses-owner")

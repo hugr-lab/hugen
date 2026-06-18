@@ -1,13 +1,15 @@
 ---
-name: _skill_builder
+name: skill-builder
 description: >
-  Knowledge + capability for authoring a hugen skill bundle and
-  registering it. Teaches the manifest format (where the task block
-  goes), the on-disk bundle layout, the path-based authoring tools —
-  skill:validate (dry-run check) then skill:save (register) — plus
-  every validation error and its fix, and how to look up real tool
-  names instead of inventing them. Load it whenever you build, update,
-  or remove a skill.
+  Edit, update, or DELETE an existing skill or task, or author a new
+  one from a bundle. Owns the manifest format + the path-based
+  authoring tools — skill:export (copy a registered skill/task out to
+  edit), skill:validate (dry-run check), skill:save (register /
+  overwrite), skill:uninstall (remove) — plus every validation error
+  and its fix. Load it whenever the user wants to CHANGE or REMOVE an
+  existing task / skill (export → edit the file → save overwrite, or
+  uninstall), or to hand-author a bundle. A task is a task-eligible
+  skill, edited / removed the same way.
 license: Apache-2.0
 allowed-tools:
   - skill:validate
@@ -32,7 +34,7 @@ compatibility:
   runtime: hugen
 ---
 
-# _skill_builder
+# skill-builder
 
 Load this skill when you need to **author, update, or remove a hugen
 skill**. It grants the authoring surface (`skill:validate`,
@@ -40,9 +42,11 @@ skill**. It grants the authoring surface (`skill:validate`,
 and bundles the canonical references so you build the bundle correctly
 the first time instead of guessing the format.
 
-You are NOT the policy owner: a mission (`_task_builder`) or the user
-decides *that* a skill should be saved and *what* it should do. This
-skill owns *how* — the format and the call.
+You are NOT the policy owner: the `build-task` task (for creating a new
+task) or the user decides *that* a skill should be saved and *what* it
+should do. This skill owns *how* — the format and the calls, and the
+export → edit → save / uninstall flow for changing or removing an
+existing skill or task.
 
 ## The authoring loop (always these three steps)
 
@@ -120,8 +124,19 @@ re-save under the same name.
    workspace (defaults to the skill name; pass `dest_dir` to choose).
    The result gives you `dir` + the file list.
 2. **Edit** the files in that directory with the bash / filesystem
-   tools — change only what needs changing.
-3. **Re-register** — `skill:save(bundle_dir: "<dir>", overwrite:
+   tools — change only what needs changing. If the fix touches code that
+   calls another skill's library or tools, read THAT skill's reference
+   (`skill:ref`) for the real import / class / method / result-access
+   API instead of re-guessing it — a wrong call is the usual reason a
+   task crashes on its first run.
+3. **Smoke-test executable changes BEFORE saving.** If you changed a
+   script, a query, or any runnable command, RUN it once with sample
+   inputs (point side effects at a throwaway target) and confirm it
+   produces a valid result. `skill:validate` is a STATIC check — it
+   never runs the code, so it cannot catch a broken call; only an actual
+   run can. Fix and re-run until clean. (Pure-prose / manifest-only
+   edits have nothing to smoke-test — skip this step for them.)
+4. **Re-register** — `skill:save(bundle_dir: "<dir>", overwrite:
    true)`. Validate first with `skill:validate` if you touched the
    manifest. Overwrite is the ONLY update path; there is no in-place
    edit call. (Updating a skill you exported is the authorised-replace

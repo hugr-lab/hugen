@@ -40,19 +40,19 @@ metadata:
     # Loaded three ways, all worker / mission tier:
     #   - the analyst `report-builder` role autoloads it (the
     #     mission's render stage);
-    #   - `_task_builder` author workers reach it via
+    #   - `build-task` reaches it via
     #     `skill:catalog_list` → `skill:load` when minting a report
     #     task (and the minted report task `requires_skills` it);
-    #   - the `build_report` task `requires_skills` it for the render
+    #   - the `build-report` task `requires_skills` it for the render
     #     method (and `skill:ref`s its references).
     #
     # NOT task-eligible (deliberate). The standalone "render a report
     # from known data / a named query" path is the SEPARATE
-    # `build_report` task (task-eligible, fetch-aware, one-script).
+    # `build-report` task (task-eligible, fetch-aware, one-script).
     # Keeping report-builder a plain skill is what lets the mission
     # autoload AND the task `requires_skills` reuse the SAME render
     # method instead of duplicating it. Not root-loadable: at root the
-    # report entry point is the `build_report` task (render-ready data
+    # report entry point is the `build-report` task (render-ready data
     # / a named query) or the `analyst` mission (open-ended analysis) —
     # there is no report skill to load.
     tier_compatibility: [worker, mission]

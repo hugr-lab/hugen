@@ -298,6 +298,12 @@ type OverrideSpec struct {
 	LLMTimeoutMs         *int
 	LLMIntent            *string
 	TokenBudgetRatio     *float64
+
+	// L3 in-turn checkpoint overrides — skill/role granularity, to
+	// parity with the per-tier TierOverride. nil → inherit.
+	CheckpointsEnabled     *bool
+	CheckpointWindowTokens *int
+	ContextHideRatio       *float64
 }
 
 // StoreReader is the narrow slice of [store.RuntimeStore] the

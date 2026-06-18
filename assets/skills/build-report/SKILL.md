@@ -1,5 +1,5 @@
 ---
-name: build_report
+name: build-report
 license: Apache-2.0
 description: >
   Build a user-facing report / document (HTML, Markdown, PDF) from
@@ -131,7 +131,7 @@ compatibility:
   runtime: hugen
 ---
 
-# build_report
+# build-report
 
 Render a finished **document** — an HTML one-pager, a Markdown report,
 or a PDF — from data that is already known. The sources and the shape

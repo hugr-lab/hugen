@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing/fstest"
@@ -30,6 +31,35 @@ var ErrUnknownToolName = errors.New("skill_unknown_tool")
 // the authoring check skips rather than blocking a legitimate save.
 var errNoToolCatalogue = errors.New("skill: tool catalogue unavailable")
 
+// ErrInvalidSkillName is returned by skill:validate / skill:save when an
+// authored skill's name is not lowercase kebab-case. A clean name keeps
+// the generated `task:<name>` tool LLM-safe and the catalogue key
+// predictable. errors.Is-checkable so the model self-corrects.
+var ErrInvalidSkillName = errors.New("skill_invalid_name")
+
+// authoredNameRe enforces lowercase kebab-case for AUTHORED skill names:
+// segments of [a-z0-9] joined by single hyphens (e.g. `roads-by-region`).
+// Underscores and uppercase are rejected. The leading-underscore SYSTEM
+// skills (`_root`, …) are embedded and never go through skill:save, so
+// they never reach this check.
+var authoredNameRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// validateAuthoredName rejects a non-kebab name UNLESS a skill with that
+// exact name is already registered — overwriting an existing skill that
+// predates the rule is grandfathered (a fix to a legacy `_`-named task
+// must not be blocked). A brand-new name must be clean.
+func (h *SessionSkill) validateAuthoredName(ctx context.Context, name string) error {
+	if authoredNameRe.MatchString(name) {
+		return nil
+	}
+	if h.manager != nil {
+		if _, err := h.manager.Get(ctx, name); err == nil {
+			return nil // already registered → allow the overwrite
+		}
+	}
+	return fmt.Errorf("skill:save: %w: skill name %q must be lowercase kebab-case — letters, digits and single hyphens (e.g. `roads-by-region`); underscores and uppercase are not allowed for a new skill", ErrInvalidSkillName, name)
+}
+
 // validateAuthoring runs every save-time check over a parsed manifest
 // before publish — the same verdict for skill:validate dry-runs and
 // skill:save registrations. Three layers:
@@ -43,6 +73,9 @@ var errNoToolCatalogue = errors.New("skill: tool catalogue unavailable")
 // Every error is actionable and typed so the agent fixes the files in
 // its workspace and re-calls skill:save.
 func (h *SessionSkill) validateAuthoring(ctx context.Context, m skillpkg.Manifest) error {
+	if err := h.validateAuthoredName(ctx, m.Name); err != nil {
+		return err
+	}
 	if m.Hugen.Autoload {
 		return fmt.Errorf("skill:save: %w — drop `metadata.hugen.autoload` from the manifest and re-save (autoload is reserved for system / admin skills compiled into the binary; local skills load on demand)", skillpkg.ErrAutoloadReserved)
 	}
