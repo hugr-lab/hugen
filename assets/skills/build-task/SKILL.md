@@ -168,7 +168,10 @@ for the agreement gate the moment you can describe the algorithm.
    no longer need and move to the gate. Ground every user-owned element
    — the result **format**, its **destination**, the task **name** — in
    the user's own words; a sensible default is a GUESS, not an answer.
-   If you cannot ground an element, it is an open question.
+   If you cannot ground an element, it is an open question. The task
+   **name** must be lowercase kebab-case — letters, digits and single
+   hyphens, no underscores (e.g. `roads-by-region` from "roads by
+   region"); a non-kebab name is rejected at save.
 4. **AGREE with the user.** Put every open element AND a plain-language
    summary of the algorithm into ONE `session:inquire` (a
    `clarification` batch, or an `approval` when only confirmation is
