@@ -124,8 +124,19 @@ re-save under the same name.
    workspace (defaults to the skill name; pass `dest_dir` to choose).
    The result gives you `dir` + the file list.
 2. **Edit** the files in that directory with the bash / filesystem
-   tools — change only what needs changing.
-3. **Re-register** — `skill:save(bundle_dir: "<dir>", overwrite:
+   tools — change only what needs changing. If the fix touches code that
+   calls another skill's library or tools, read THAT skill's reference
+   (`skill:ref`) for the real import / class / method / result-access
+   API instead of re-guessing it — a wrong call is the usual reason a
+   task crashes on its first run.
+3. **Smoke-test executable changes BEFORE saving.** If you changed a
+   script, a query, or any runnable command, RUN it once with sample
+   inputs (point side effects at a throwaway target) and confirm it
+   produces a valid result. `skill:validate` is a STATIC check — it
+   never runs the code, so it cannot catch a broken call; only an actual
+   run can. Fix and re-run until clean. (Pure-prose / manifest-only
+   edits have nothing to smoke-test — skip this step for them.)
+4. **Re-register** — `skill:save(bundle_dir: "<dir>", overwrite:
    true)`. Validate first with `skill:validate` if you touched the
    manifest. Overwrite is the ONLY update path; there is no in-place
    edit call. (Updating a skill you exported is the authorised-replace

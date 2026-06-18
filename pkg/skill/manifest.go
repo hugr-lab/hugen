@@ -678,6 +678,16 @@ type CompactorOverride struct {
 	LLMTimeoutMs         *int     `json:"llm_timeout_ms,omitempty"         yaml:"llm_timeout_ms,omitempty"`
 	LLMIntent            *string  `json:"llm_intent,omitempty"             yaml:"llm_intent,omitempty"`
 	TokenBudgetRatio     *float64 `json:"token_budget_ratio,omitempty"     yaml:"token_budget_ratio,omitempty"`
+
+	// L3 in-turn checkpoint overrides (Stage 2). Until now these were
+	// settable only per-tier (config `compactor.tiers.<tier>`); carrying
+	// them here lets an individual skill / task / mission-role tune its
+	// OWN checkpoint+hide aggressiveness without moving the whole tier.
+	// A research-heavy builder task, for instance, wants a tighter
+	// window + earlier hide than the shared worker tier. nil → inherit.
+	CheckpointsEnabled     *bool    `json:"checkpoints_enabled,omitempty"      yaml:"checkpoints_enabled,omitempty"`
+	CheckpointWindowTokens *int     `json:"checkpoint_window_tokens,omitempty" yaml:"checkpoint_window_tokens,omitempty"`
+	ContextHideRatio       *float64 `json:"context_hide_ratio,omitempty"       yaml:"context_hide_ratio,omitempty"`
 }
 
 // SubAgentCapabilities declares which mission-PDCA surfaces the

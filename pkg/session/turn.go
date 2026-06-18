@@ -197,11 +197,12 @@ const maxFinalizeGateRetries = 6
 // llama.cpp: after a tool_call+tool_result is in history and the tools
 // carry large parameter schemas, the constrained sampler collapses to
 // an immediate finish_reason=stop with one token and nothing usable —
-// a silent dead turn that delivers nothing. 2 is enough: the injected
-// continuation perturbs the prompt and breaks the deterministic stop on
-// the first retry; the cap stops a model that genuinely has nothing to
-// say from looping.
-const maxEmptyRetries = 2
+// a silent dead turn that delivers nothing. The injected continuation
+// perturbs the prompt and usually breaks the deterministic stop within
+// a retry or two; 5 gives a context-bloated worker several attempts to
+// recover (hide a segment, then continue) before the turn retires,
+// while still capping a model that genuinely has nothing to say.
+const maxEmptyRetries = 5
 
 // emptyIterationNudge is the continuation injected when an iteration
 // comes back empty. It steers the model to either report or continue —
