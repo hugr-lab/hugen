@@ -734,74 +734,6 @@ func (b *dynamicBackend) IndexBundle(ctx context.Context, dir, source string) (s
 	return id, true, nil
 }
 
-// SyncSystemTasks indexes the task-eligible SYSTEM (embed) skills from
-// sysFS into the dynamic index under source="system", so they surface
-// in the recap advertise + task discovery (`## Available tasks`,
-// task:search). Execution never needs the index — the embed backend
-// resolves system skills by name first (see Store.Get); this is
-// purely a discovery row. ONLY task-eligible skills are indexed; the
-// rest of the agent-core set (_root / _mission / _skill_builder …)
-// stays embed-only. Hash-skips unchanged skills (stable manifest-byte
-// hash) so a re-boot doesn't re-embed. Returns the names it indexed —
-// the caller pins them (system tasks are always-advertise). bundle_path
-// is the virtual `embed://<name>`; rowToSkill falls back to the embed
-// backend, which Store.Get consults first regardless.
-func (b *dynamicBackend) SyncSystemTasks(ctx context.Context, sysFS fs.FS) ([]string, error) {
-	if sysFS == nil {
-		return nil, nil
-	}
-	entries, err := fs.ReadDir(sysFS, ".")
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("skill: sync system tasks: read root: %w", err)
-	}
-	var names []string
-	var errs []error
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return names, err
-		}
-		name := e.Name()
-		raw, rerr := fs.ReadFile(sysFS, name+"/SKILL.md")
-		if rerr != nil {
-			// A system dir without a SKILL.md isn't a skill — skip it.
-			continue
-		}
-		m, perr := Parse(raw)
-		if perr != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", name, perr))
-			continue
-		}
-		// Only task-eligible system skills join the catalogue.
-		if !m.Hugen.Task.Eligible {
-			continue
-		}
-		sum := sha256.Sum256(raw)
-		hash := "sha256:" + hex.EncodeToString(sum[:])
-		existing, gerr := b.index.getRowByName(ctx, "system", m.Name)
-		if gerr != nil {
-			errs = append(errs, fmt.Errorf("%s: lookup: %w", name, gerr))
-			continue
-		}
-		if existing.ID != "" && existing.ContentHash == hash {
-			names = append(names, m.Name) // already indexed, unchanged
-			continue
-		}
-		if _, uerr := b.index.upsert(ctx, m, "system", "embed://"+name, hash, existing); uerr != nil {
-			errs = append(errs, fmt.Errorf("%s: upsert: %w", name, uerr))
-			continue
-		}
-		b.log.Debug("skill: system task indexed", "name", m.Name)
-		names = append(names, m.Name)
-	}
-	return names, errors.Join(errs...)
-}
-
 // Publish writes the bundle to disk (atomic swap via dirBackend) then
 // upserts the DB index row + embedding. A disk write that succeeds
 // followed by an index failure leaves the bundle reachable via Get +
@@ -849,13 +781,6 @@ func (b *dynamicBackend) applyPins(ctx context.Context, pinNames []string) error
 // is the only explicit removal path on the dynamic backend (bandit
 // hygiene demotes but never deletes; reconcile only adds/updates).
 func (b *dynamicBackend) Uninstall(ctx context.Context, name string) error {
-	// System tasks are read-only embed skills indexed only for
-	// discovery — they can't be uninstalled (the bundle ships in the
-	// binary and the index row is rebuilt at the next boot). Reject
-	// rather than silently dropping the discovery row.
-	if sys, serr := b.index.getRowByName(ctx, "system", name); serr == nil && sys.ID != "" {
-		return fmt.Errorf("skill: uninstall %q: %w (system skill is read-only)", name, ErrUnsupportedBackend)
-	}
 	if err := b.index.deleteByName(ctx, name); err != nil {
 		return fmt.Errorf("skill: uninstall index %q: %w", name, err)
 	}
