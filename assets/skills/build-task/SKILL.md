@@ -208,7 +208,11 @@ for the agreement gate the moment you can describe the algorithm.
      so describe it as "by geozone TYPE (regions, municipalities, …)",
      not "by region". A description that hardcodes the default makes the
      catalogue miss the variant requests the task already covers.
-   - any `scripts/*` and `references/*` the shape needs.
+   - any `scripts/*` and `references/*` the shape needs. To RUN a bundled
+     script, the procedure calls `python-mcp:run_script(skill: "<this-task>",
+     path: "scripts/<x>.py", args: [...])` — the `skill` arg runs it IN PLACE
+     from the bundle (read-only, `$SKILL_DIR` set). NEVER instruct a `cp` of
+     the script into the workspace; that copy is obsolete.
 4. **Parameterize — never embed data.** A script takes its input data
    and per-run values as PARAMETERS (a file path / argv the task worker
    passes, or it acquires the data itself when it runs). The values your

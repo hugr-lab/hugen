@@ -665,7 +665,7 @@ func renderLoadedSkillsMeta(h *SessionSkill) string {
 	b.WriteString("## Loaded skill bundles\n\n")
 	b.WriteString("These skills are loaded. Any reference docs and files they " +
 		"bundle are listed below. When you need a loaded skill's detail, LOAD " +
-		"the relevant reference with `skill:ref` (args: `name`=<the skill>, " +
+		"the relevant reference with `skill:ref` (args: `skill`=<the skill>, " +
 		"`ref`=<a path shown under references/ below, without the `.md`>) and " +
 		"read it before relying on assumptions. Files under `scripts/` run via " +
 		"the bundled execution tools at the `directory` path shown.\n\n")
