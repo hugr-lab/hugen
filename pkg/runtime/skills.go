@@ -51,7 +51,17 @@ func skillLocalRoot(stateDir string) string { return filepath.Join(stateDir, "sk
 // are absent here. The dirs need not exist yet — skill:save may create
 // the local root later; a missing root simply contributes no match.
 func SkillDiskRoots(stateDir string) []string {
-	return []string{skillLocalRoot(stateDir), skillHubRoot(stateDir)}
+	roots := []string{skillLocalRoot(stateDir), skillHubRoot(stateDir)}
+	// Absolutise — python-mcp resolves these in the python child whose
+	// cwd is the session workspace (not hugen's cwd), so a relative
+	// state_dir would make findSkillDir's match unreachable to the
+	// child. Mirrors how WORKSPACES_ROOT is filepath.Abs'd.
+	for i, r := range roots {
+		if abs, err := filepath.Abs(r); err == nil {
+			roots[i] = abs
+		}
+	}
+	return roots
 }
 
 // BuildSkillStack constructs the SkillStore + SkillManager over

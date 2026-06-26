@@ -116,14 +116,14 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 	}
 
 	config := &BootstrapConfig{
-		Mode:           v.GetString("HUGEN_MODE"),
-		LogLevel:       v.GetString("HUGEN_LOG_LEVEL"),
-		ConfigPath:     v.GetString("HUGEN_CONFIG_FILE"),
-		Port:           v.GetInt("HUGEN_PORT"),
-		WebUIPort:      v.GetInt("HUGEN_WEBUI_PORT"),
-		BaseURI:        v.GetString("HUGEN_BASE_URL"),
-		StateDir:       v.GetString("HUGEN_STATE"),
-		WorkspaceDir: v.GetString("HUGEN_WORKSPACE_DIR"),
+		Mode:                  v.GetString("HUGEN_MODE"),
+		LogLevel:              v.GetString("HUGEN_LOG_LEVEL"),
+		ConfigPath:            v.GetString("HUGEN_CONFIG_FILE"),
+		Port:                  v.GetInt("HUGEN_PORT"),
+		WebUIPort:             v.GetInt("HUGEN_WEBUI_PORT"),
+		BaseURI:               v.GetString("HUGEN_BASE_URL"),
+		StateDir:              v.GetString("HUGEN_STATE"),
+		WorkspaceDir:          v.GetString("HUGEN_WORKSPACE_DIR"),
 		ArtifactsDir:          v.GetString("HUGEN_ARTIFACTS_DIR"),
 		ArtifactsMaxTotalMB:   v.GetInt("HUGEN_ARTIFACTS_MAX_TOTAL_MB"),
 		ArtifactsMaxSessionMB: v.GetInt("HUGEN_ARTIFACTS_MAX_SESSION_MB"),

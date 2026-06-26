@@ -207,7 +207,16 @@ func TestStore_ReapIdle(t *testing.T) {
 	if err := os.Chtimes(oldFile, past, past); err != nil {
 		t.Fatal(err)
 	}
-	n, err := s.ReapIdle(7*24*time.Hour, now)
+	// A live root is never reaped even when its files are old.
+	liveOld := func(rootID string) bool { return rootID == "old" }
+	if got, _ := s.ReapIdle(7*24*time.Hour, now, liveOld); got != 0 {
+		t.Errorf("live root reaped: %d", got)
+	}
+	if refs, _ := s.List("old"); len(refs) != 1 {
+		t.Errorf("live old scope was reaped")
+	}
+	// Not live → reaped; fresh survives.
+	n, err := s.ReapIdle(7*24*time.Hour, now, nil)
 	if err != nil {
 		t.Fatalf("reapIdle: %v", err)
 	}
@@ -221,22 +230,22 @@ func TestStore_ReapIdle(t *testing.T) {
 		t.Errorf("fresh scope reaped")
 	}
 	// ttl<=0 disables
-	if got, _ := s.ReapIdle(0, now); got != 0 {
+	if got, _ := s.ReapIdle(0, now, nil); got != 0 {
 		t.Errorf("ttl=0 reaped %d", got)
 	}
 }
 
 func TestSanitizeID(t *testing.T) {
 	cases := map[string]string{
-		"report.md":         "report.md",
-		"Road Report.md":    "Road-Report.md",
-		"a/b/c.txt":         "c.txt", // Base drops dirs
-		"../../etc/passwd":  "passwd",
-		"  spaced  .txt  ":  "spaced-.txt", // internal+edge runs collapse/trim
-		".hidden":           "hidden",
-		"":                  "",
-		"...":               "",
-		"naïve-café.md":     "na-ve-caf-.md",
+		"report.md":                      "report.md",
+		"Road Report.md":                 "Road-Report.md",
+		"a/b/c.txt":                      "c.txt", // Base drops dirs
+		"../../etc/passwd":               "passwd",
+		"  spaced  .txt  ":               "spaced-.txt", // internal+edge runs collapse/trim
+		".hidden":                        "hidden",
+		"":                               "",
+		"...":                            "",
+		"naïve-café.md":                  "na-ve-caf-.md",
 		strings.Repeat("x", 200) + ".md": strings.Repeat("x", 128),
 	}
 	for in, want := range cases {

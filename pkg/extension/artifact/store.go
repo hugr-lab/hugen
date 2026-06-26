@@ -84,7 +84,10 @@ func (s *Store) List(rootID string) ([]protocol.ArtifactRef, error) {
 	}
 	refs := make([]protocol.ArtifactRef, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() {
+		// Skip dirs + dotfiles — sanitizeID never yields a leading-dot
+		// id, so a "." prefix is a crash-leaked copyFile temp, never a
+		// real artifact.
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		ref, rerr := s.refFor(dir, e.Name())
@@ -208,10 +211,11 @@ func (s *Store) ReapRoot(rootID string) error {
 }
 
 // ReapIdle removes every root scope whose newest file is older than
-// ttl, returning the count reaped. ttl<=0 is a no-op. Catches roots
-// that never cleanly closed (crash, abandon); the periodic sweep
-// drives it (design 007 §7).
-func (s *Store) ReapIdle(ttl time.Duration, now time.Time) (int, error) {
+// ttl, returning the count reaped. ttl<=0 is a no-op. Targets roots
+// that never cleanly closed (crash, abandon) — a STILL-OPEN root is
+// the Closer's job and is skipped via isLive (nil = no liveness check,
+// tests). The periodic sweep drives it (design 007 §7).
+func (s *Store) ReapIdle(ttl time.Duration, now time.Time, isLive func(rootID string) bool) (int, error) {
 	if ttl <= 0 {
 		return 0, nil
 	}
@@ -227,6 +231,11 @@ func (s *Store) ReapIdle(ttl time.Duration, now time.Time) (int, error) {
 	reaped := 0
 	for _, r := range roots {
 		if !r.IsDir() {
+			continue
+		}
+		// Never reap a live root out from under an open conversation —
+		// its deletion belongs to CloseSession on root close.
+		if isLive != nil && isLive(r.Name()) {
 			continue
 		}
 		newest, ok := newestMTime(filepath.Join(agentDir, r.Name()))
@@ -311,22 +320,40 @@ func sniffMIME(path, name string) string {
 	return http.DetectContentType(buf[:n])
 }
 
-// copyFile copies src to dest (truncating an existing dest), 0o644.
+// copyFile copies src to dest atomically (0o644): write a temp sibling
+// then rename, so a mid-copy failure never truncates an existing
+// artifact (overwrite is all-or-nothing) nor leaves a partial file the
+// store would list as real. The temp is dot-prefixed so a crash-leaked
+// one is skipped by List.
 func copyFile(src, dest string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("open source: %w", err)
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	tmp, err := os.CreateTemp(filepath.Dir(dest), ".artifacttmp-*")
 	if err != nil {
-		return fmt.Errorf("create dest: %w", err)
+		return fmt.Errorf("create temp: %w", err)
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+	tmpName := tmp.Name()
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
 		return fmt.Errorf("copy bytes: %w", err)
 	}
-	return out.Close()
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("close temp: %w", err)
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("chmod temp: %w", err)
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
 }
 
 // dirSize sums the regular-file sizes directly under dir (artifacts

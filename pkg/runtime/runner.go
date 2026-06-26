@@ -14,7 +14,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session/manager"
 )
 
-
 // phaseRunner runs phase 10: builds the agent-level scheduling
 // runner (Phase 6.1a) and registers the always-on resilience
 // reapers catalogued in design/004-runtime-post-phase-i/
@@ -67,11 +66,22 @@ func phaseRunner(ctx context.Context, core *Core) error {
 	if core.Artifacts != nil && core.Cfg.Artifacts.IdleTTL > 0 {
 		store := core.Artifacts.Store()
 		ttl := core.Cfg.Artifacts.IdleTTL
+		mgr := core.Manager
+		// A root scope is only reaped when its session is NOT live —
+		// a still-open conversation keeps its artifacts (deletion is the
+		// Closer's job on root close); the sweep catches crash/abandon.
+		live := func(rootID string) bool {
+			if mgr == nil {
+				return false
+			}
+			_, ok := mgr.Get(rootID)
+			return ok
+		}
 		if err := svc.Register(ctx,
 			"artifacts_reap_idle",
 			runner.Every(time.Hour),
 			func(_ context.Context, _ runner.FireMeta) (runner.Outcome, error) {
-				n, rerr := store.ReapIdle(ttl, time.Now())
+				n, rerr := store.ReapIdle(ttl, time.Now(), live)
 				if rerr != nil {
 					return runner.Outcome{}, rerr
 				}
