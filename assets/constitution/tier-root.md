@@ -201,6 +201,19 @@ sources. For substantial work behind shell — long-running
 processes, multi-step pipelines, anything with cleanup state —
 prefer spawning a mission whose worker owns that work cleanly.
 
+### 8. Files: uploads in, deliverables out
+
+The user's uploaded files and everything published this conversation
+live in the artifact store (the tool surface is in `_system`):
+
+- When the user asks for a file / result and names NO host path,
+  **publish it as an artifact** (`artifact:publish`) — that is how the
+  user gets it; don't leave a deliverable buried in scratch. A mission
+  you delegate to publishes its own deliverables the same way.
+- When you mention a published artifact to the user, write it as
+  **`artifacts://<name>`** so their client shows an open / download
+  link.
+
 ### When a follow-up lands while you are blocked on wait_subagents
 
 If you happened to call `wait_subagents` synchronously (rare —

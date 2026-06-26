@@ -26,6 +26,10 @@ Prior handoffs:
 {{if .MemorySummary}}  summary: {{.MemorySummary}}
 {{end}}{{if .Body}}  body: {{.Body}}
 {{end}}{{end}}{{end}}
+If the mission produced a file the user should receive, make sure it
+is published as an artifact (`artifact:publish`) and reference it in
+your `body` as `artifacts://<name>` so the user can open it.
+
 Reply with a single fenced block — nothing else, no narration:
 
 ```handoff

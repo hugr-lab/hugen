@@ -240,7 +240,7 @@ func newAnalystIntegrationCore(t *testing.T, pyBin, tmpl, vendor string) *integr
 	perms := perm.NewLocalPermissions(view, staticIdentity{id: "agent-it"})
 	t.Cleanup(perms.Close)
 	tools := tool.NewToolManager(perms, cfgSvc.ToolProviders(), nil,
-		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, nil)))
+		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, "", nil)))
 	t.Cleanup(func() { _ = tools.Close() })
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))

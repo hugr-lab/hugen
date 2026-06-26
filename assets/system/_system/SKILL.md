@@ -27,6 +27,17 @@ allowed-tools:
   - provider: notepad
     tools:
       - append
+  # Artifacts (Phase 8) — the durable, user-facing store of the
+  # conversation (the user's uploads + everything a session published).
+  # Granted on every tier: the capability IS the access (a session sees
+  # its own conversation's artifacts, scoped by root). publish a
+  # deliverable the user asked for; copy one in to read / process it.
+  - provider: artifact
+    tools:
+      - list
+      - copy
+      - publish
+      - delete
   # Stage 2 (L3) in-turn context checkpoints. Granted on every tier so
   # any spawned worker can always shed context to recover; the triggers
   # only ARM on subagents (root-off tier gate in the compactor), and the
@@ -124,6 +135,31 @@ shell tools and file tools see exactly the same paths.
   page with `start`, or load the file in python for data.)
 - When the user asks "what files do you see", check both your
   scratch dir and `$SHARED_DIR` before reporting "empty".
+
+## artifacts — the user's deliverables
+
+Artifacts are the durable, user-facing store of THIS conversation:
+the files the **user uploaded** plus the files a session
+**published**. They are the user's one place to pick up results —
+distinct from the ephemeral scratch dir above.
+
+- **To use an artifact** (an upload, or a prior result): copy it into
+  your workspace and read it — `artifact:copy(id)` gives a normal
+  local file. `artifact:list` shows what exists (id · name · type ·
+  size).
+- **To deliver a result**: publish a workspace file —
+  `artifact:publish(path)`. Use this for any deliverable the user
+  asked for (a report, a cleaned dataset, a generated document) when
+  they did NOT name a specific host path.
+- **Disambiguation.** "Save the report" / "give me a file" with NO
+  path → **publish an artifact**. A CONCRETE host path the user named
+  → write that file (workspace or `$SHARED_DIR`). Scratch stays in the
+  workspace; deliverables become artifacts.
+- **Reference a published artifact in your reply to the user as
+  `artifacts://<name>`** (e.g. "saved to `artifacts://road-report.md`")
+  so their client renders an open / download element.
+- Publishing is non-overwriting by default; to replace one, read
+  `artifact:list` first, then publish with `overwrite:true`.
 
 ## meta tools
 

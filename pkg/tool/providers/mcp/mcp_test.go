@@ -17,7 +17,7 @@ func TestNew_RejectsStdioWithoutCommand(t *testing.T) {
 		Type: "mcp",
 		// Transport unset → defaults to stdio per parseLifetime.
 		Lifetime: tool.LifetimePerSession,
-	}, nil, "", nil)
+	}, nil, "", "", nil)
 	if err == nil {
 		t.Fatal("New should error for stdio spec without Command")
 	}

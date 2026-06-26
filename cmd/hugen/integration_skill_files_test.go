@@ -78,7 +78,7 @@ func TestSkill_FilesRoundTrip(t *testing.T) {
 	perms := perm.NewLocalPermissions(view, staticIdentity{id: "agent-it"})
 	t.Cleanup(perms.Close)
 	tools := tool.NewToolManager(perms, cfgSvc.ToolProviders(), nil,
-		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, nil)))
+		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, "", nil)))
 	t.Cleanup(func() { _ = tools.Close() })
 
 	skillExt := skillext.NewExtension(skills, perms, "agent-it")

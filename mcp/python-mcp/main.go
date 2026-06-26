@@ -78,10 +78,16 @@ func runServerMode(template string, log *slog.Logger) error {
 		return err
 	}
 
+	// HUGEN_SKILL_ROOTS — os.PathListSeparator-joined skill source dirs
+	// the runtime injects at spawn (local before hub). Empty when
+	// unconfigured; run_script(skill=…) then finds nothing.
+	skillRoots := filepath.SplitList(os.Getenv("HUGEN_SKILL_ROOTS"))
+
 	deps := &execDeps{
-		template: absTpl,
-		auth:     auth,
-		log:      log,
+		template:   absTpl,
+		auth:       auth,
+		log:        log,
+		skillRoots: skillRoots,
 	}
 
 	srv := server.NewMCPServer(
@@ -93,7 +99,8 @@ func runServerMode(template string, log *slog.Logger) error {
 
 	log.Info("python-mcp server starting",
 		"template", absTpl,
-		"hugr_configured", auth != nil)
+		"hugr_configured", auth != nil,
+		"skill_roots", len(skillRoots))
 	if err := server.ServeStdio(srv); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("python-mcp: serve: %w", err)
 	}

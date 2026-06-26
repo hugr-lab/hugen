@@ -33,6 +33,13 @@ type execDeps struct {
 	auth     *authSource
 	log      *slog.Logger
 
+	// skillRoots are the on-disk skill source dirs (HUGEN_SKILL_ROOTS,
+	// injected by the runtime at MCP spawn) in search-priority order
+	// — local before hub. run_script(skill=…) resolves the named
+	// skill's bundle dir by the first root that contains it. Empty
+	// when the runtime did not inject any (older config / no skills).
+	skillRoots []string
+
 	// bootstrapMu serialises venv bootstrap per session-dir within
 	// this single python-mcp process. Two workers in the same
 	// mission share their session_dir under 5.4 — without this map
@@ -76,8 +83,9 @@ func registerTools(srv *server.MCPServer, deps *execDeps) {
 		return handleRun(ctx, req, deps, runRequest{kind: "run_code"})
 	})
 	srv.AddTool(mcp.NewTool("run_script",
-		mcp.WithDescription(`Execute a Python script file in the per-session venv. The path is relative to the session workspace; absolute paths and ".." escapes are rejected. Positional argv comes from "args"; "kwargs" expands sorted by key as --key value pairs after the positional argv. Result envelope is identical to run_code.`),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Script path relative to the session workspace.")),
+		mcp.WithDescription(`Execute a Python script file in the per-session venv. Without "skill", "path" is relative to the session workspace (absolute paths and ".." escapes rejected). With "skill", "path" resolves under that loaded skill's bundle dir (read-only) — run a skill's own bundled scripts without copying them. Positional argv comes from "args"; "kwargs" expands sorted by key as --key value pairs after the positional argv. Result envelope is identical to run_code.`),
+		mcp.WithString("path", mcp.Required(), mcp.Description(`Script path. Relative to the session workspace, or — when "skill" is set — relative to that skill's bundle dir. Absolute paths and ".." escapes are rejected.`)),
+		mcp.WithString("skill", mcp.Description(`Optional. Name of a loaded skill; when set, "path" resolves under that skill's bundle dir (read-only) instead of the workspace, to run the skill's bundled scripts. Must be a single name (no "/" or "..").`)),
 		mcp.WithArray("args", mcp.Description("Optional positional argv passed to the script."),
 			func(s map[string]any) { s["items"] = map[string]any{"type": "string"} }),
 		mcp.WithObject("kwargs", mcp.Description("Optional keyword args expanded as --key value pairs, sorted by key, appended after positional argv. Values must be strings; the script does its own parsing."),
@@ -94,6 +102,7 @@ type runRequest struct {
 	kind        string // "run_code" or "run_script"
 	code        string
 	path        string
+	skill       string // run_script: optional loaded-skill name; resolves path under its bundle dir
 	scriptArg   []string
 	scriptKwarg map[string]string
 	timeoutMs   int64
@@ -152,6 +161,9 @@ func parseRunArgs(req mcp.CallToolRequest, r *runRequest) error {
 			return &toolError{Code: "arg_validation", Msg: "path is required"}
 		}
 		r.path = p
+		if sk, ok := args["skill"].(string); ok {
+			r.skill = sk
+		}
 		if rawArgs, ok := args["args"].([]any); ok {
 			for _, v := range rawArgs {
 				if s, ok := v.(string); ok {
@@ -289,6 +301,7 @@ func runPython(ctx context.Context, deps *execDeps, r runRequest, sessDir, sessV
 	pyBin := filepath.Join(sessVenv, "bin", "python")
 
 	var cmd *exec.Cmd
+	var skillDir string // non-empty only for run_script(skill=…); exported as $SKILL_DIR
 	timeout := time.Duration(r.timeoutMs) * time.Millisecond
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -297,10 +310,11 @@ func runPython(ctx context.Context, deps *execDeps, r runRequest, sessDir, sessV
 	case "run_code":
 		cmd = exec.CommandContext(cctx, pyBin, "-c", r.code)
 	case "run_script":
-		scriptPath, err := resolveScriptPath(sessDir, r.path)
+		scriptPath, sd, err := resolveScriptPath(deps, sessDir, r.skill, r.path)
 		if err != nil {
 			return runResult{}, err
 		}
+		skillDir = sd
 		argv := append([]string{scriptPath}, r.scriptArg...)
 		argv = append(argv, flattenKwargs(r.scriptKwarg)...)
 		cmd = exec.CommandContext(cctx, pyBin, argv...)
@@ -309,7 +323,7 @@ func runPython(ctx context.Context, deps *execDeps, r runRequest, sessDir, sessV
 	}
 
 	cmd.Dir = sessDir
-	cmd.Env = composeChildEnv(hugrURL, hugrToken, sessDir)
+	cmd.Env = composeChildEnv(hugrURL, hugrToken, sessDir, skillDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	var stdoutBuf, stderrBuf cappedBuffer
@@ -377,33 +391,93 @@ func flattenKwargs(kw map[string]string) []string {
 	return out
 }
 
-// resolveScriptPath enforces the session-workspace boundary
-// documented in the contract: relative paths only, no `..` escape.
-func resolveScriptPath(sessDir, requested string) (string, *toolError) {
+// resolveScriptPath resolves a run_script "path" to an absolute file,
+// enforcing the relevant boundary:
+//
+//   - skill == "":  "path" is relative to the session workspace
+//     (sessDir). Absolute paths and ".." escapes are rejected.
+//     skillDir is "".
+//   - skill != "":  "path" resolves under that skill's bundle dir
+//     (read-only), located by the first HUGEN_SKILL_ROOTS entry that
+//     holds <root>/<skill>/. The skill name must be a single path
+//     segment; "path" must not escape the skill dir. skillDir is the
+//     resolved bundle dir (exported as $SKILL_DIR so the script reads
+//     its own assets).
+//
+// scriptPath is stat-verified to exist before returning.
+func resolveScriptPath(deps *execDeps, sessDir, skill, requested string) (scriptPath, skillDir string, terr *toolError) {
+	base := sessDir
+	if skill != "" {
+		if terr := validateSkillName(skill); terr != nil {
+			return "", "", terr
+		}
+		dir, ok := deps.findSkillDir(skill)
+		if !ok {
+			return "", "", &toolError{Code: "not_found", Msg: fmt.Sprintf("skill %q: not found in skill roots", skill)}
+		}
+		base, skillDir = dir, dir
+	}
+	abs, terr := confineUnder(base, requested)
+	if terr != nil {
+		return "", "", terr
+	}
+	if _, err := os.Stat(abs); err != nil {
+		if os.IsNotExist(err) {
+			return "", "", &toolError{Code: "not_found", Msg: fmt.Sprintf("script %s: no such file", requested)}
+		}
+		return "", "", &toolError{Code: "io", Msg: err.Error()}
+	}
+	return abs, skillDir, nil
+}
+
+// confineUnder joins a relative requested path to base, rejecting
+// absolute paths and ".." escapes. The same rule guards both the
+// session workspace and a skill bundle dir.
+func confineUnder(base, requested string) (string, *toolError) {
 	if filepath.IsAbs(requested) {
-		return "", &toolError{Code: "arg_validation", Msg: "path must be relative to the session workspace"}
+		return "", &toolError{Code: "arg_validation", Msg: "path must be relative (no absolute paths)"}
 	}
 	cleaned := filepath.Clean(requested)
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-		return "", &toolError{Code: "arg_validation", Msg: "path escapes session workspace"}
+		return "", &toolError{Code: "arg_validation", Msg: "path escapes its base directory"}
 	}
-	abs := filepath.Join(sessDir, cleaned)
-	if _, err := os.Stat(abs); err != nil {
-		if os.IsNotExist(err) {
-			return "", &toolError{Code: "not_found", Msg: fmt.Sprintf("script %s: no such file", requested)}
+	return filepath.Join(base, cleaned), nil
+}
+
+// validateSkillName ensures the skill arg is a single path segment —
+// non-empty, not "."/"..", no separators — so joining it to a skill
+// root cannot escape that root.
+func validateSkillName(skill string) *toolError {
+	if skill == "" || skill == "." || skill == ".." || strings.ContainsAny(skill, `/\`) {
+		return &toolError{Code: "arg_validation", Msg: fmt.Sprintf(`skill %q must be a single name (no "/" or "..")`, skill)}
+	}
+	return nil
+}
+
+// findSkillDir returns <root>/<skill> for the first skillRoots entry
+// that holds it as a directory — local before hub, matching the
+// SkillStore.Get precedence so the script resolves to the same skill
+// the agent loaded. skill is pre-validated as a single segment.
+func (deps *execDeps) findSkillDir(skill string) (string, bool) {
+	for _, root := range deps.skillRoots {
+		if root == "" {
+			continue
 		}
-		return "", &toolError{Code: "io", Msg: err.Error()}
+		cand := filepath.Join(root, skill)
+		if fi, err := os.Stat(cand); err == nil && fi.IsDir() {
+			return cand, true
+		}
 	}
-	return abs, nil
+	return "", false
 }
 
 // composeChildEnv builds the env injected into every spawned
 // Python subprocess. It deliberately drops HUGR_ACCESS_TOKEN /
 // HUGR_TOKEN_URL (Go-side bootstrap secrets, not for user code)
 // while forwarding everything else from the parent env.
-func composeChildEnv(hugrURL, hugrToken, sessDir string) []string {
+func composeChildEnv(hugrURL, hugrToken, sessDir, skillDir string) []string {
 	parent := os.Environ()
-	out := make([]string, 0, len(parent)+5)
+	out := make([]string, 0, len(parent)+6)
 	for _, kv := range parent {
 		// strip secrets that should not leak into Python user code
 		if strings.HasPrefix(kv, "HUGR_ACCESS_TOKEN=") || strings.HasPrefix(kv, "HUGR_TOKEN_URL=") {
@@ -432,6 +506,11 @@ func composeChildEnv(hugrURL, hugrToken, sessDir string) []string {
 		"MPLBACKEND=Agg",
 		"SESSION_DIR="+sessDir,
 	)
+	// SKILL_DIR is set only for run_script(skill=…) so the script can
+	// read its own bundle assets (e.g. open(os.environ["SKILL_DIR"]+"/q.sql")).
+	if skillDir != "" {
+		out = append(out, "SKILL_DIR="+skillDir)
+	}
 	return out
 }
 

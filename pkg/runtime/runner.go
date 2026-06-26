@@ -60,6 +60,28 @@ func phaseRunner(ctx context.Context, core *Core) error {
 		}
 	}
 
+	// Phase 8 — artifact retention. Root-close-delete is the artifact
+	// ext's Closer hook; this hourly sweep catches roots that never
+	// cleanly closed (crash, abandon) by reaping scopes idle past
+	// IdleTTL. Quotas are enforced synchronously on publish, not here.
+	if core.Artifacts != nil && core.Cfg.Artifacts.IdleTTL > 0 {
+		store := core.Artifacts.Store()
+		ttl := core.Cfg.Artifacts.IdleTTL
+		if err := svc.Register(ctx,
+			"artifacts_reap_idle",
+			runner.Every(time.Hour),
+			func(_ context.Context, _ runner.FireMeta) (runner.Outcome, error) {
+				n, rerr := store.ReapIdle(ttl, time.Now())
+				if rerr != nil {
+					return runner.Outcome{}, rerr
+				}
+				return runner.Outcome{Summary: fmt.Sprintf("reaped %d idle artifact scope(s)", n)}, nil
+			},
+		); err != nil {
+			return fmt.Errorf("register artifacts_reap_idle: %w", err)
+		}
+	}
+
 	// Phase 6.1c — Bind the scheduler extension to the session
 	// manager + runner so InitState (called when sessions open after
 	// this phase) can bootstrap user tasks and the fire fns can
