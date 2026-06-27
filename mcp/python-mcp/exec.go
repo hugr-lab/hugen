@@ -151,7 +151,7 @@ func parseRunArgs(req mcp.CallToolRequest, r *runRequest) error {
 		}
 		if len(c) > maxRunCodeBytes {
 			return &toolError{Code: "arg_validation", Msg: fmt.Sprintf(
-				"code is %d bytes; the run_code per-call limit is %d. For a larger script, write it to a .py file (bash.write_file in ≤%d-byte chunks with mode=\"append\") and execute it with run_script — a long inline generation is wedge-prone.",
+				"code is %d bytes — over the %d-byte run_code per-call limit (the cap is on inline code, NOT on the script). Write the script to a .py file instead (bash.write_file in ≤%d-byte parts with mode=\"append\"; the file can be any size) and run it with run_script(path=…). If the bulk is DATA — a dataset, a catalog, query results — do NOT inline it as a literal: have the script fetch or compute it at runtime.",
 				len(c), maxRunCodeBytes, maxRunCodeBytes)}
 		}
 		r.code = c

@@ -42,9 +42,12 @@ func TestMaybeAutoApprove_GrantsWhenAncestorHasFlag(t *testing.T) {
 
 // TestMaybeAutoApprove_GrantsOnResearchFlag covers the Phase 6.x
 // research-stage path: the runtime sets AutoApproveResearch=true
-// around the researcher wave so its workspace-internal bash.write_file
-// calls don't open a modal. MaybeAutoApprove must honour it exactly
-// like the user's AutoApproveTools pick.
+// around the researcher wave so a gated tool call (e.g. bash.shell)
+// during discovery doesn't open a modal before the plan exists.
+// MaybeAutoApprove must honour it exactly like the user's
+// AutoApproveTools pick. (Research file writes go through the now
+// workspace-confined, ungated bash.write_file — F5 — so the flag is
+// a safety net for any other gated tool the researcher reaches for.)
 func TestMaybeAutoApprove_GrantsOnResearchFlag(t *testing.T) {
 	ext := newPlannerExtension()
 	mission := newRenderedFakeState("mis-research", productionRenderer(t))
@@ -55,7 +58,7 @@ func TestMaybeAutoApprove_GrantsOnResearchFlag(t *testing.T) {
 	researcher := newRenderedFakeState("researcher-1", productionRenderer(t))
 	researcher.fakeState.parent = mission
 
-	gotMission, ok := ext.MaybeAutoApprove(context.Background(), researcher, "bash-mcp:bash.write_file")
+	gotMission, ok := ext.MaybeAutoApprove(context.Background(), researcher, "bash-mcp:bash.shell")
 	if !ok {
 		t.Fatalf("MaybeAutoApprove ok=false; want true under research auto-approve")
 	}
@@ -65,7 +68,7 @@ func TestMaybeAutoApprove_GrantsOnResearchFlag(t *testing.T) {
 
 	// And once research exits (flag cleared) the same call is gated again.
 	mState.SetAutoApproveResearch(false)
-	if _, ok := ext.MaybeAutoApprove(context.Background(), researcher, "bash-mcp:bash.write_file"); ok {
+	if _, ok := ext.MaybeAutoApprove(context.Background(), researcher, "bash-mcp:bash.shell"); ok {
 		t.Errorf("MaybeAutoApprove granted after research flag cleared; want gated")
 	}
 }

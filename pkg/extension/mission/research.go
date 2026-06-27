@@ -53,15 +53,17 @@ func (e *Extension) runResearchStage(ctx context.Context, executor *Executor, mi
 	// "no research configured" from "tried and failed".
 	m.MarkResearchAttempted()
 
-	// Phase 6.x — research→files. Auto-approve the researcher's tool
-	// calls for the duration of the research stage. The researcher's
-	// only approval-gated tool is bash.write_file, which it uses to
-	// write the research/*.md artifacts into the mission workspace —
-	// internal, benign, never a user path. Without this the user has
-	// to click an approval modal per file write BEFORE the plan even
-	// exists (the §4.6 auto-approve pick only lands at the planner
-	// modal, which runs AFTER research). Reset on exit so Do-wave
-	// workers (which CAN write user-deliverable files) stay gated.
+	// Phase 6.x — research→files. Auto-approve the researcher's gated
+	// tool calls for the duration of the research stage so the
+	// pre-plan stage never blocks on an approval modal (the §4.6
+	// auto-approve pick only lands at the planner modal, which runs
+	// AFTER research). The researcher's main output path —
+	// bash.write_file of the research/*.md artifacts into the mission
+	// workspace — is workspace-confined and ungated (F5), so this is
+	// now a safety net for any OTHER gated tool the researcher reaches
+	// for during discovery (e.g. a bash.shell host-side fetch). Reset
+	// on exit so Do-wave workers (which CAN run gated host writes via
+	// shell) stay gated.
 	m.SetAutoApproveResearch(true)
 	defer m.SetAutoApproveResearch(false)
 

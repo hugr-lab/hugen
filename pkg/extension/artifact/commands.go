@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -55,13 +56,21 @@ func (e *Extension) cmdArtifacts(_ context.Context, state extension.SessionState
 func (e *Extension) cmdAttach(_ context.Context, state extension.SessionState, env extension.CommandContext, args []string) ([]protocol.Frame, error) {
 	sid := state.SessionID()
 	if len(args) == 0 {
-		return errFrame(sid, env, "usage: /attach <path>"), nil
+		return errFrame(sid, env, "usage: /attach <path> (absolute, ~/…, $VAR/…, or relative to the hugen launch dir)"), nil
 	}
 	sa := FromState(state)
 	if sa == nil {
 		return errFrame(sid, env, "artifacts extension not on this session"), nil
 	}
-	src, _ := filepath.Abs(strings.Join(args, " "))
+	// Expand a leading ~ / $VAR BEFORE resolving — filepath.Abs treats a
+	// literal "~" as a path segment joined onto the process cwd, so a
+	// `/attach ~/x` would otherwise resolve to a bogus <cwd>/~/x. After
+	// expansion, Abs makes a relative path absolute against the hugen
+	// process cwd (the launch dir).
+	src := expandPath(strings.Join(args, " "))
+	if abs, err := filepath.Abs(src); err == nil {
+		src = abs
+	}
 	ref, err := e.Ingest(sa.rootID, src, "")
 	if err != nil {
 		return errFrame(sid, env, "attach failed: "+err.Error()), nil
@@ -114,6 +123,27 @@ func openOnHost(path string) error {
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	return cmd.Start()
+}
+
+// expandPath resolves a leading ~ / ~/ to the user's home directory
+// and $VAR / ${VAR} via the environment, so /attach accepts an
+// absolute path, ~/…, $VAR/…, or a relative path. Mirrors bash-mcp's
+// expandPath. Only a LEADING ~ is special (mid-path ~ is a legal
+// filename character); an unset env var expands to "" (os.ExpandEnv
+// semantics).
+func expandPath(input string) string {
+	s := os.ExpandEnv(input)
+	switch {
+	case s == "~":
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+	case strings.HasPrefix(s, "~/"):
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, s[2:])
+		}
+	}
+	return s
 }
 
 // ---- small frame + format helpers ----

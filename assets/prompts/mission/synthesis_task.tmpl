@@ -26,9 +26,12 @@ Prior handoffs:
 {{if .MemorySummary}}  summary: {{.MemorySummary}}
 {{end}}{{if .Body}}  body: {{.Body}}
 {{end}}{{end}}{{end}}
-If the mission produced a file the user should receive, make sure it
-is published as an artifact (`artifact:publish`) and reference it in
-your `body` as `artifacts://<name>` so the user can open it.
+If the mission produced a deliverable file, a worker has already
+published it to the artifact store — reference it in your `body` as
+`artifacts://<name>` so the user can open it. Do NOT publish it
+again: re-publishing an existing name errors, and the publish is the
+worker's job, not the synthesizer's. (Unsure what exists? Check with
+`artifact:list`.)
 
 Reply with a single fenced block — nothing else, no narration:
 

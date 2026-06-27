@@ -16,7 +16,6 @@ allowed-tools:
     requires_approval:
       - bash.run
       - bash.shell
-      - bash.write_file
   - provider: skill
     tools:
       - load
@@ -105,8 +104,10 @@ shell tools and file tools see exactly the same paths.
    means there is no shared area in this deployment.
    - Files placed here are visible to the user outside the
      agent and persist across sessions.
-   - Use it for the durable outputs the user explicitly asks
-     for (reports, cleaned datasets, generated documents).
+   - Write to it with `bash.shell` (the file tools stay inside
+     your workspace). For most deliverables prefer
+     `artifact:publish` — `$SHARED_DIR` is for when the operator
+     designated a specific host exchange folder.
 
 3. **The rest of the host filesystem** — anything else you can
    reach by absolute path. In container deployments the kernel
@@ -116,14 +117,18 @@ shell tools and file tools see exactly the same paths.
 
 ### Behaviour rules
 
-- **Stay in your scratch directory by default.** Every tool call
-  starts there. Don't write to peer sessions' workspaces (sibling
-  directories) — they belong to other conversations.
+- **The file tools write only inside your workspace.** Every tool
+  call starts in your scratch dir, and `bash.write_file` /
+  `bash.edit_file` / `bash.sed` are confined to it — a host path or
+  a peer session's dir is rejected. That confinement is why they
+  need no approval: a workspace write can't clobber anything that
+  matters.
 - `cd` inside a single `bash.shell` invocation works for that
   call only. The next tool call starts back at scratch. Pass
   `cwd: "subdir"` to start a tool call in a sub-directory.
-- Writes that need to outlive the session go to `$SHARED_DIR`
-  (when configured). Everything else stays in scratch.
+- For a file that must outlive the session, publish it
+  (`artifact:publish`) or, for a `$SHARED_DIR` / user-named host
+  path, write it via `bash.shell`. Everything else stays in scratch.
 - All shell binaries on the host PATH are available — `du`,
   `find`, `grep`, `sed`, `awk`, `python`, `git`, etc. Use them
   freely; bash-mcp does not restrict them.
@@ -153,8 +158,9 @@ distinct from the ephemeral scratch dir above.
   they did NOT name a specific host path.
 - **Disambiguation.** "Save the report" / "give me a file" with NO
   path → **publish an artifact**. A CONCRETE host path the user named
-  → write that file (workspace or `$SHARED_DIR`). Scratch stays in the
-  workspace; deliverables become artifacts.
+  → write it there with `bash.shell` (the file tools are
+  workspace-only). Scratch stays in the workspace; deliverables
+  become artifacts.
 - **Reference a published artifact in your reply to the user as
   `artifacts://<name>`** (e.g. "saved to `artifacts://road-report.md`")
   so their client renders an open / download element.
@@ -222,10 +228,15 @@ do not retry, surface the constraint to the user.
 
 ## HITL approval
 
-`bash.run`, `bash.shell`, and `bash.write_file` carry
-`requires_approval: true` in the manifest. The runtime intercepts
-calls to those tools and routes them through `session:inquire`
-(type=approval); the call returns `{"error": "denied_by_user"}`
-unless the operator approves. Treat a denial as a hard stop —
+`bash.run` and `bash.shell` carry `requires_approval: true` in the
+manifest — they can reach the whole host. The file tools
+(`bash.write_file`, `bash.edit_file`, `bash.sed`) are NOT gated:
+they are confined to your session workspace, so a write is
+inherently safe and runs without a prompt (a host path is rejected
+— deliver host files with `artifact:publish`, or use the gated
+`bash.shell`). The runtime intercepts calls to the gated tools and
+routes them through `session:inquire` (type=approval); the call
+returns `{"error": "denied_by_user"}` unless the operator approves.
+Treat a denial as a hard stop —
 do not retry with a different argument hoping to slip past the
 gate; report the denial back to whoever spawned you.

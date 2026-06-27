@@ -83,7 +83,7 @@ func (t *Tools) Register(srv mcpToolRegistrar) {
 		mcp.WithNumber("line", mcp.Description("Optional 1-based line number (from bash.grep) to scope the match to a single line.")),
 	), t.editFile)
 	srv.AddTool(mcp.NewTool("bash.write_file",
-		mcp.WithDescription("Write a file by path. Refuses /readonly/. MAX 10000 bytes of content per call — for more, write in chunks: one call, then more with mode=\"append\" (each ≤10000 bytes). Returns {bytes_written, size_total, path} — size_total is the file's full size after the write, the durable offset to resume an append sequence from."),
+		mcp.WithDescription("Write a file by path, inside your session workspace (a host path is rejected — deliver host files with artifact:publish, or write outside the workspace via bash.shell). MAX 10000 bytes of content per call — for more, keep writing the SAME file with mode=\"append\" (each call ≤10000 bytes; the file itself can be any size). Returns {bytes_written, size_total, path} — size_total is the file's full size after the write, the durable offset to resume an append sequence from."),
 		mcp.WithString("path", mcp.Required()),
 		mcp.WithString("content"),
 		mcp.WithString("mode", mcp.Description(`"append" to add to the file (each call is a durable append — chunk a large document so a stall loses only the current chunk); anything else (default) truncates and overwrites.`)),
@@ -351,7 +351,7 @@ func (t *Tools) writeFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 	}
 	if len(a.Content) > maxWriteChunkBytes {
 		return errResult("arg_validation", fmt.Sprintf(
-			"content is %d bytes; the per-call limit is %d. Write large output in chunks: one write_file, then more with mode=\"append\" (each ≤ %d bytes). For a big generated document or script, prefer python (write the file from inside run_script) so the data never streams through the model.",
+			"content is %d bytes — over the %d-byte per-CALL limit (the cap is on a single write call, NOT on the file). Keep this exact file: split it into ≤ %d-byte parts and write the rest with mode=\"append\". The file itself can be as large as you need; once it is complete, run it with run_script(path=…) (no size limit there). If the bulk is DATA — a dataset, a catalog, query results — do NOT inline it as a literal: have the script fetch or compute it at runtime.",
 			len(a.Content), maxWriteChunkBytes, maxWriteChunkBytes)), nil
 	}
 	res, err := t.WS.Resolve(a.Path, true)
@@ -769,6 +769,8 @@ func errCode(err error) string {
 	switch {
 	case errors.Is(err, ErrCrossSessionPath):
 		return "cross_session"
+	case errors.Is(err, ErrHostWriteDenied):
+		return "workspace_only"
 	case errors.Is(err, ErrPathEscape):
 		return "path_escape"
 	case errors.Is(err, fs.ErrNotExist):

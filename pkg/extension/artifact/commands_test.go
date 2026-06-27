@@ -90,6 +90,51 @@ func TestCmdAttach_Usage(t *testing.T) {
 	}
 }
 
+// TestCmdAttach_ExpandsVar verifies /attach expands a $VAR before
+// resolving (F9) — the path reaches Ingest fully resolved, not as a
+// literal "$VAR/…" joined onto the process cwd.
+func TestCmdAttach_ExpandsVar(t *testing.T) {
+	e, state, _ := newExtFixture(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "v.csv"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARTIFACT_ATTACH_DIR", dir)
+	out := runCmd(t, e, state, "attach", []string{"$ARTIFACT_ATTACH_DIR/v.csv"})
+	if _, ok := out[0].(*protocol.ExtensionFrame); !ok {
+		t.Fatalf("attach via $VAR did not ingest, got %T", out[0])
+	}
+	sa := FromState(state)
+	if refs, _ := e.store.List(sa.rootID); len(refs) != 1 || refs[0].ID != "v.csv" {
+		t.Errorf("attach via $VAR did not register: %+v", refs)
+	}
+}
+
+// TestExpandPath covers the F9 path-expansion helper: a leading ~ /
+// ~/ → home, $VAR / ${VAR} → env, absolute + relative pass through,
+// and a mid-path ~ stays literal.
+func TestExpandPath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	t.Setenv("ARTIFACT_TEST_VAR", "/tmp/xyz")
+	cases := []struct{ in, want string }{
+		{"/abs/path", "/abs/path"},
+		{"rel/path", "rel/path"},
+		{"~", home},
+		{"~/sub/file", filepath.Join(home, "sub", "file")},
+		{"$ARTIFACT_TEST_VAR/f", "/tmp/xyz/f"},
+		{"${ARTIFACT_TEST_VAR}/f", "/tmp/xyz/f"},
+		{"a~b", "a~b"},
+	}
+	for _, c := range cases {
+		if got := expandPath(c.in); got != c.want {
+			t.Errorf("expandPath(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestCmdOpen(t *testing.T) {
 	e, state, _ := newExtFixture(t)
 	sa := FromState(state)
