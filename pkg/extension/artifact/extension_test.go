@@ -12,6 +12,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/extension"
 	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/internal/fixture"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
 func discardLog(t *testing.T) *slog.Logger {
@@ -121,6 +122,72 @@ func TestPublishListCopyRoundTrip(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(ws, "in", "copy.md"))
 	if err != nil || string(b) != "# Road report\nbody" {
 		t.Errorf("copied bytes wrong: %q err=%v", b, err)
+	}
+}
+
+// countProducedFrames returns how many artifact OpProduced
+// ExtensionFrames a fixture recorded (Emit + OutboxOnly land in the
+// same slice).
+func countProducedFrames(frames []protocol.Frame) int {
+	n := 0
+	for _, f := range frames {
+		ef, ok := f.(*protocol.ExtensionFrame)
+		if !ok {
+			continue
+		}
+		if ef.Payload.Extension == providerName && ef.Payload.Op == OpProduced {
+			n++
+		}
+	}
+	return n
+}
+
+// TestPublish_SurfacesRootMarkerFromSubTier is the F2 contract: a
+// mission / worker publish reaches its own (drained) outbox via the
+// standard emit, AND a transient marker lands on the ROOT outbox the
+// adapter watches — so the operator sees the 📎 live. The marker
+// jumps straight to root; intermediate tiers are untouched.
+func TestPublish_SurfacesRootMarkerFromSubTier(t *testing.T) {
+	store, _ := newStore(t, 0, 0)
+	e := NewExtension(store, "agent-x", discardLog(t))
+	ws := t.TempDir()
+	wsWrite(t, ws, "report.html", "<h1>modules</h1>")
+
+	root := fixture.NewTestSessionState("ses-root")
+	mission := fixture.NewTestSessionState("ses-mission").WithParent(root)
+	worker := fixture.NewTestSessionState("ses-worker").WithParent(mission)
+	worker.SetValue(StateKey, &sessionArtifacts{rootID: "ses-root", workspaceDir: ws})
+	if worker.Depth() != 2 {
+		t.Fatalf("worker depth = %d, want 2 (root→mission→worker)", worker.Depth())
+	}
+
+	pub := call(t, e, worker, "artifact:publish", map[string]any{"path": "report.html"})
+	if errCode(pub) != "" {
+		t.Fatalf("publish error: %v", pub)
+	}
+
+	if got := countProducedFrames(worker.Emitted()); got != 1 {
+		t.Errorf("worker own emit = %d produced frames, want 1", got)
+	}
+	if got := countProducedFrames(root.Emitted()); got != 1 {
+		t.Errorf("root marker = %d produced frames, want 1 (the cross-tier surface)", got)
+	}
+	if got := countProducedFrames(mission.Emitted()); got != 0 {
+		t.Errorf("mission saw %d produced frames, want 0 (marker jumps straight to root)", got)
+	}
+}
+
+// TestPublish_RootTierEmitsSingleMarker guards against a double 📎:
+// a root-tier publish already lands on the root outbox via the own
+// emit, so it must NOT also fire the cross-tier marker.
+func TestPublish_RootTierEmitsSingleMarker(t *testing.T) {
+	e, state, ws := newExtFixture(t)
+	wsWrite(t, ws, "r.md", "x")
+	if c := errCode(call(t, e, state, "artifact:publish", map[string]any{"path": "r.md"})); c != "" {
+		t.Fatalf("publish: %s", c)
+	}
+	if got := countProducedFrames(state.Emitted()); got != 1 {
+		t.Errorf("root publish = %d produced frames, want exactly 1 (no duplicate marker)", got)
 	}
 }
 

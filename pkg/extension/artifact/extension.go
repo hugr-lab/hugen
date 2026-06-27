@@ -72,17 +72,45 @@ func (e *Extension) Ingest(rootID, srcPath, name string) (protocol.ArtifactRef, 
 	return e.store.Register(rootID, srcPath, name, "", true)
 }
 
+// frameFor builds an artifact ExtensionFrame (CategoryMarker) attributed
+// to sessionID, carrying ref as its data payload. ok is false only on a
+// marshal failure (best-effort surface — the caller logs + drops).
+func (e *Extension) frameFor(sessionID, op string, ref protocol.ArtifactRef) (*protocol.ExtensionFrame, bool) {
+	data, err := json.Marshal(ref)
+	if err != nil {
+		return nil, false
+	}
+	return protocol.NewExtensionFrame(sessionID, extension.AgentParticipant(e.agentID),
+		providerName, protocol.CategoryMarker, op, data), true
+}
+
 // emit builds + persists an artifact ExtensionFrame on the calling
 // session's stream. Best-effort: a failure is logged, not surfaced.
 func (e *Extension) emit(ctx context.Context, state extension.SessionState, op string, ref protocol.ArtifactRef) {
-	data, err := json.Marshal(ref)
-	if err != nil {
+	frame, ok := e.frameFor(state.SessionID(), op, ref)
+	if !ok {
 		return
 	}
-	frame := protocol.NewExtensionFrame(state.SessionID(), extension.AgentParticipant(e.agentID),
-		providerName, protocol.CategoryMarker, op, data)
 	if eerr := state.Emit(ctx, frame); eerr != nil {
 		e.logger.Debug("artifact: emit frame failed", "op", op, "err", eerr)
+	}
+}
+
+// emitRootMarker pushes a transient OpProduced marker onto the root
+// conversation's outbox so the adapter — which subscribes to the root
+// session — renders the 📎 for a deliverable published by a mission /
+// worker sub-session. A sub-tier publish only emits on its OWN stream
+// (e.emit above), which the parent pump drains as an activity hint and
+// never forwards up; without this the operator would never see the
+// publish. OutboxOnly (no persist): the worker's own emit is the
+// durable record; this is a pure adapter signal, attributed to root.
+func (e *Extension) emitRootMarker(ctx context.Context, root extension.SessionState, ref protocol.ArtifactRef) {
+	frame, ok := e.frameFor(root.SessionID(), OpProduced, ref)
+	if !ok {
+		return
+	}
+	if eerr := root.OutboxOnly(ctx, frame); eerr != nil {
+		e.logger.Debug("artifact: root marker emit failed", "err", eerr)
 	}
 }
 
@@ -152,10 +180,11 @@ func (e *Extension) CloseSession(_ context.Context, state extension.SessionState
 	return nil
 }
 
-// walkToRootID returns the root (depth-0) ancestor's session id — the
-// artifact scope key shared by every mission / worker in the
-// conversation.
-func walkToRootID(state extension.SessionState) string {
+// walkToRoot returns the root (depth-0) ancestor SessionState — the
+// session whose outbox the adapter subscribes to. Returns the caller
+// itself when it is already root; callers that surface cross-tier guard
+// on Depth() > 0 before using the result.
+func walkToRoot(state extension.SessionState) extension.SessionState {
 	cur := state
 	for cur.Depth() > 0 {
 		p, ok := cur.Parent()
@@ -164,7 +193,14 @@ func walkToRootID(state extension.SessionState) string {
 		}
 		cur = p
 	}
-	return cur.SessionID()
+	return cur
+}
+
+// walkToRootID returns the root (depth-0) ancestor's session id — the
+// artifact scope key shared by every mission / worker in the
+// conversation.
+func walkToRootID(state extension.SessionState) string {
+	return walkToRoot(state).SessionID()
 }
 
 // ---------- ToolProvider surface ----------
@@ -386,9 +422,16 @@ func (e *Extension) callPublish(ctx context.Context, args json.RawMessage) (json
 		}
 	}
 	// Announce the publish so the adapter can render an open/download
-	// element (refs only — bytes stay out-of-band).
+	// element (refs only — bytes stay out-of-band). A root-tier publish
+	// lands on the root outbox the adapter watches via e.emit; a mission
+	// / worker publish only reaches its own (drained) outbox, so also
+	// surface a transient marker on the root outbox so the operator sees
+	// the 📎 live (F2).
 	if state, ok := extension.SessionStateFromContext(ctx); ok {
 		e.emit(ctx, state, OpProduced, ref)
+		if state.Depth() > 0 {
+			e.emitRootMarker(ctx, walkToRoot(state), ref)
+		}
 	}
 	resp := map[string]any{"artifact": ref}
 	if in.Overwrite {
