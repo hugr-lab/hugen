@@ -96,22 +96,51 @@ func (e *Extension) emit(ctx context.Context, state extension.SessionState, op s
 	}
 }
 
-// emitRootMarker pushes a transient OpProduced marker onto the root
-// conversation's outbox so the adapter — which subscribes to the root
-// session — renders the 📎 for a deliverable published by a mission /
-// worker sub-session. A sub-tier publish only emits on its OWN stream
-// (e.emit above), which the parent pump drains as an activity hint and
-// never forwards up; without this the operator would never see the
-// publish. OutboxOnly (no persist): the worker's own emit is the
-// durable record; this is a pure adapter signal, attributed to root.
+// emitRootMarker surfaces a deliverable published by a mission / worker
+// sub-session as a 📎 on the ROOT conversation — the session the adapter
+// subscribes to. A sub-tier publish only emits on its OWN stream (e.emit
+// above), which the parent pump drains as an activity hint and never
+// forwards up, so without this the operator never sees the publish.
+//
+// Delivery is via root.Submit — the established cross-session primitive
+// (whiteboard host↔member uses it) — NOT a hand-rolled cross-session
+// outbox write. Submit's delivery goroutine is owned by the session
+// machinery and escapes on the ROOT's done channel, so it cannot leak
+// past root's lifetime, and the publishing worker never blocks on the
+// root adapter's drain speed. The frame lands on root's inbox →
+// routeInbound → dispatchExtensionFrame → e.HandleFrame (below), which
+// re-emits it on the root's OWN Run goroutine. Attributed to root so
+// Runtime.fanout (routes by frame.SessionID) hands it to the root
+// subscriber. Fire-and-forget: the settled channel is not awaited, and
+// the worker's own emit + the store remain the durable record.
 func (e *Extension) emitRootMarker(ctx context.Context, root extension.SessionState, ref protocol.ArtifactRef) {
 	frame, ok := e.frameFor(root.SessionID(), OpProduced, ref)
 	if !ok {
 		return
 	}
-	if eerr := root.OutboxOnly(ctx, frame); eerr != nil {
-		e.logger.Debug("artifact: root marker emit failed", "err", eerr)
+	root.Submit(ctx, frame)
+}
+
+// HandleFrame implements [extension.FrameRouter]. The only artifact frame
+// that arrives cross-session is the publish marker a sub-session Submitted
+// to the root (emitRootMarker). The arriving frame is RouteInternal
+// (kindRoutes maps KindExtensionFrame here, the same class as an
+// InquiryResponse) — a pure side-effect that never starts a turn nor lands
+// in history/pendingInbound, so surfacing the deliverable does not wake the
+// root agent. It runs on the ROOT session's own Run goroutine, so emitting
+// on root is a same-goroutine emit — no cross-goroutine write, the ctx is
+// root's managed Run ctx.
+//
+// Emit (persist) — not OutboxOnly — so the 📎 is both rendered live AND
+// recorded in root's transcript, surviving a reload/replay, identical to a
+// root-tier publish (callPublish's own e.emit on the root). A sub-tier
+// deliverable thus behaves the same at root regardless of which tier
+// produced it. A non-publish op is ignored (defensive — none is sent today).
+func (e *Extension) HandleFrame(ctx context.Context, state extension.SessionState, f *protocol.ExtensionFrame) error {
+	if f.Payload.Op != OpProduced {
+		return nil
 	}
+	return state.Emit(ctx, f)
 }
 
 // Store returns the underlying folder store so out-of-band consumers
@@ -124,6 +153,7 @@ var (
 	_ extension.Extension        = (*Extension)(nil)
 	_ extension.StateInitializer = (*Extension)(nil)
 	_ extension.Closer           = (*Extension)(nil)
+	_ extension.FrameRouter      = (*Extension)(nil)
 	_ tool.ToolProvider          = (*Extension)(nil)
 )
 

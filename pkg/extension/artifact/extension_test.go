@@ -142,12 +142,13 @@ func countProducedFrames(frames []protocol.Frame) int {
 	return n
 }
 
-// TestPublish_SurfacesRootMarkerFromSubTier is the F2 contract: a
-// mission / worker publish reaches its own (drained) outbox via the
-// standard emit, AND a transient marker lands on the ROOT outbox the
-// adapter watches — so the operator sees the 📎 live. The marker
-// jumps straight to root; intermediate tiers are untouched.
-func TestPublish_SurfacesRootMarkerFromSubTier(t *testing.T) {
+// TestPublish_SubmitsRootMarkerFromSubTier is the F2 delivery half: a
+// mission / worker publish records its own emit on its OWN stream AND
+// hands a marker to the ROOT via Submit (root's inbox) — the cross-tier
+// hop. The marker goes straight to root; the intermediate tier is
+// untouched. (Surfacing the inbox marker onto the root outbox is
+// HandleFrame's job, covered separately — the fixture runs no Run loop.)
+func TestPublish_SubmitsRootMarkerFromSubTier(t *testing.T) {
 	store, _ := newStore(t, 0, 0)
 	e := NewExtension(store, "agent-x", discardLog(t))
 	ws := t.TempDir()
@@ -169,25 +170,61 @@ func TestPublish_SurfacesRootMarkerFromSubTier(t *testing.T) {
 	if got := countProducedFrames(worker.Emitted()); got != 1 {
 		t.Errorf("worker own emit = %d produced frames, want 1", got)
 	}
-	if got := countProducedFrames(root.Emitted()); got != 1 {
-		t.Errorf("root marker = %d produced frames, want 1 (the cross-tier surface)", got)
+	if got := countProducedFrames(root.Inbox()); got != 1 {
+		t.Errorf("root inbox = %d produced frames, want 1 (the Submit cross-tier hop)", got)
 	}
-	if got := countProducedFrames(mission.Emitted()); got != 0 {
-		t.Errorf("mission saw %d produced frames, want 0 (marker jumps straight to root)", got)
+	if got := countProducedFrames(mission.Inbox()); got != 0 {
+		t.Errorf("mission inbox = %d produced frames, want 0 (marker submitted straight to root)", got)
+	}
+	// The marker frame is attributed to root so Runtime.fanout delivers it
+	// to the root subscriber once HandleFrame re-emits it.
+	for _, f := range root.Inbox() {
+		if ef, ok := f.(*protocol.ExtensionFrame); ok && ef.Payload.Op == OpProduced && ef.SessionID() != "ses-root" {
+			t.Errorf("root marker attributed to %q, want ses-root", ef.SessionID())
+		}
 	}
 }
 
-// TestPublish_RootTierEmitsSingleMarker guards against a double 📎:
-// a root-tier publish already lands on the root outbox via the own
-// emit, so it must NOT also fire the cross-tier marker.
-func TestPublish_RootTierEmitsSingleMarker(t *testing.T) {
+// TestHandleFrame_SurfacesProducedMarkerOnRootOutbox is the F2 consumer
+// half: the root's route loop hands a Submitted publish marker to
+// HandleFrame, which re-emits it on the root outbox (OutboxOnly) so the
+// adapter renders the 📎. A non-publish op is ignored.
+func TestHandleFrame_SurfacesProducedMarkerOnRootOutbox(t *testing.T) {
+	e, root, _ := newExtFixture(t)
+	ref := protocol.ArtifactRef{ID: "report.html", Name: "report.html"}
+
+	produced, _ := e.frameFor(root.SessionID(), OpProduced, ref)
+	if err := e.HandleFrame(context.Background(), root, produced); err != nil {
+		t.Fatalf("HandleFrame(produced): %v", err)
+	}
+	if got := countProducedFrames(root.Emitted()); got != 1 {
+		t.Errorf("HandleFrame surfaced %d produced frames on the outbox, want 1", got)
+	}
+
+	// A non-publish op must NOT be surfaced.
+	uploaded, _ := e.frameFor(root.SessionID(), OpUploaded, ref)
+	if err := e.HandleFrame(context.Background(), root, uploaded); err != nil {
+		t.Fatalf("HandleFrame(uploaded): %v", err)
+	}
+	if got := countProducedFrames(root.Emitted()); got != 1 {
+		t.Errorf("HandleFrame surfaced a non-publish op; produced count = %d, want still 1", got)
+	}
+}
+
+// TestPublish_RootTierNoSubmit guards against a double 📎: a root-tier
+// publish already lands on the root outbox via its own emit, so it must
+// NOT also Submit a cross-tier marker.
+func TestPublish_RootTierNoSubmit(t *testing.T) {
 	e, state, ws := newExtFixture(t)
 	wsWrite(t, ws, "r.md", "x")
 	if c := errCode(call(t, e, state, "artifact:publish", map[string]any{"path": "r.md"})); c != "" {
 		t.Fatalf("publish: %s", c)
 	}
 	if got := countProducedFrames(state.Emitted()); got != 1 {
-		t.Errorf("root publish = %d produced frames, want exactly 1 (no duplicate marker)", got)
+		t.Errorf("root publish = %d produced emits, want exactly 1 (own emit)", got)
+	}
+	if got := countProducedFrames(state.Inbox()); got != 0 {
+		t.Errorf("root publish submitted %d markers to its own inbox, want 0 (no cross-tier hop at depth 0)", got)
 	}
 }
 
