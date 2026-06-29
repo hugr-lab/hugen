@@ -18,10 +18,11 @@ import (
 //
 // Phase 1 quarantined ADK below pkg/models. Phase 2 (R-Plan-23 /
 // R-Plan-24) finished the eviction: pkg/models, cmd/hugen, and the
-// rest of the binary have zero adk/genai deps. The orphaned legacy
-// pkg/a2a still has the deps; it is intentionally excluded — it is
-// not in the binary, and phase 10 retires it. Adding pkg/a2a back
-// to the binary requires fixing its deps first or this test fails.
+// rest of the binary have zero adk/genai deps. The integration arc
+// (design/008) Stage 0 deleted the last holdout — the orphaned
+// legacy pkg/a2a — and dropped adk/a2a-go from go.mod entirely.
+// This test now stands as a pure regression guard: re-introducing
+// any adk/genai import into the leaf set below fails the build.
 func TestADKQuarantine(t *testing.T) {
 	leaves := []string{
 		"github.com/hugr-lab/hugen/cmd/hugen/...",

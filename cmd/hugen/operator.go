@@ -10,9 +10,9 @@ import (
 )
 
 // tryFindResumableSession picks the most recent resumable root
-// session id, or "" if none exist. Adapter handlers (tui, webui)
-// use it to auto-resume a crashed-and-restarted process into the
-// last live root, so the operator doesn't manually re-attach.
+// session id, or "" if none exist. The adapter (tui) uses it to
+// auto-resume a crashed-and-restarted process into the last live
+// root, so the operator doesn't manually re-attach.
 func tryFindResumableSession(ctx context.Context, m *manager.Manager, logger *slog.Logger) string {
 	rows, err := m.ListResumableRoots(ctx)
 	if err != nil {
