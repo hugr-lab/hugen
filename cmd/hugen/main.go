@@ -8,8 +8,7 @@
 //     owned by main; subcommand handlers never re-bootstrap.
 //  2. Dispatch on os.Args[1]:
 //     tui    — attaches the Bubble Tea TUI adapter (default).
-//     webui  — attaches http + webui adapters.
-//     a2a    — refused (returns in phase 10).
+//     a2a    — refused (returns in the integration arc; design/008).
 //  3. Block on ctx until SIGINT/SIGTERM, then defer-shutdown core.
 package main
 
@@ -59,19 +58,18 @@ func run(args []string, errOut io.Writer) int {
 
 	switch sub {
 	case "a2a":
-		fmt.Fprintln(errOut, "the a2a mode is not yet available in this build; planned for phase 10")
+		fmt.Fprintln(errOut, "the a2a mode is not yet available in this build; planned for the integration arc (design/008)")
 		return exitUsage
-	case "", "webui", "tui":
+	case "", "tui":
 		// OK — fall through to bootstrap.
 	default:
 		fmt.Fprintf(errOut, "unknown subcommand %q\n\n", sub)
-		fmt.Fprintln(errOut, "usage: hugen [tui|webui]")
+		fmt.Fprintln(errOut, "usage: hugen [tui]")
 		fmt.Fprintln(errOut, "  tui    start the Bubble Tea TUI adapter (default)")
-		fmt.Fprintln(errOut, "  webui  start the HTTP API + loopback web UI")
 		return exitUsage
 	}
 
-	core, boot, err := bootRuntime(ctx)
+	core, _, err := bootRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(errOut, "%v\n", err)
 		return 1
@@ -82,12 +80,7 @@ func run(args []string, errOut io.Writer) int {
 		core.Shutdown(sCtx)
 	}()
 
-	switch sub {
-	case "webui":
-		return runWebUI(ctx, core, boot)
-	default:
-		return runTUI(ctx, core)
-	}
+	return runTUI(ctx, core)
 }
 
 func newLogger(level string) *slog.Logger {

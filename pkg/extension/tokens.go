@@ -12,8 +12,8 @@ const CharsPerToken = 4
 // extension's Advertise contribution. char/4 is the long-
 // standing English rule of thumb; for other scripts it
 // under-estimates, which is fine — the resulting number is a
-// UI indicator (rendered in the TUI / webui context budget
-// pane), not a hard budget cap.
+// UI indicator (rendered in the TUI context budget pane), not a
+// hard budget cap.
 //
 // Phase 5.2 (context-budget observability, β).
 func EstimateTokens(s string) int {

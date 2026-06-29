@@ -77,8 +77,8 @@ Phase plan:
 | B11 (mission-research-and-approval Step 4) — Structured acceptance criteria with stable `ac-N` identity. Eight sub-phases: α data model + state helpers (Seed/Stage/Commit/Discard/ApplyStatusOnly/ApplyWorkerSatisfies); β planner `ac_add` / `ac_update` schema + diff merge + auto-promote modal on any contract change; γ manifest `acceptance_criteria` iter-0 seed (Go template against `.Inputs`); δ checker `ac_update[]` by id + finish gate reads `state.AC`; ε worker `satisfies: ["ac-N"]` shorthand; ζ approval modal structured diff renderer (✓ / ▸ / + / ✗ icons + [EDITED]/[NEW]/[DROPPED] tags); η synthesis evidence trail + analyst SKILL prose. | shipped on `027-mission-research-approval-pr2` (PR pending 2026-05-24) |
 | §4.6 Approval modal v2 — Four-option approval modal (approve-with-tools / approve / reject / refine) replacing the legacy `y/n/r` single-key UX. Bundled on the B11 branch. α `InquiryResponsePayload.AutoApproveTools` protocol field; β `MissionState.AutoApproveTools` + reset-on-modal-open lifecycle + `mission:tool_approval_policy_set` audit frame; γ `extension.ToolApprovalPolicy` capability + mission `MaybeAutoApprove` walking parent chain + `mission:tool_approval_auto_granted` audit; δ TUI 4-row option list (j/k nav + 1-4 jump + a/A/n/r direct keys + y/d legacy aliases) + dedicated `submitApprovalChoice` / `submitApprovalRefine` helpers; ε harness `auto_approve_tools` YAML field + `approval_modal_v2_auto_approve` scenario. | shipped on `027-mission-research-approval-pr2` (dogfood pending 2026-05-26) |
 | 6. Cron + scheduler | open |
-| 7. Memory pipeline + LLM Wiki — cross-conversation distilled knowledge. Reads 4.2.3 notepad as input; session-scoped working memory is owned by 4.2.3. | open |
-| 8. Artifacts | open |
+| 7. Memory pipeline + LLM Wiki — cross-conversation distilled knowledge. Reads 4.2.3 notepad as input; session-scoped working memory is owned by 4.2.3. | open — DESIGNED `design/006-memory/` (design.md + v0-build-contract); **PAUSED — reordered AFTER Phase 8** (2026-06-18) |
+| 8. Artifacts | **open — ACTIVE (reordered ahead of Phase 7, 2026-06-18)**; requirements `design/007-artifacts/requirements.md`. v1 = artifacts as the canonical I/O channel (by-ref, visibility self/graph/user) + URI-ref resolver (`artifact://`/`skill://`/`workspace://`) + TUI binding on an adapter-agnostic Frame contract |
 | 9. A2A adapter | open (defer until needed) |
 | 10. Multi-party Workspaces (human + agent) | open — lands after A2A |
 | Backlog | see `design/004-runtime-post-phase-i/backlog.md` |
@@ -88,7 +88,31 @@ Goal: finish design-001 cleanly, then move to **hub integration**
 explicitly deferred until design-001 is complete — `phase-3.5-spec.md
 §Out of scope` and `design.md §16.8`.
 
-## Active focus — B11 shipped; §4.6 modal v2 + Phase 6 (cron) next
+## Active focus — Integration arc (A2A + hub), design/008
+
+**Current arc (planning agreed 2026-06-29):** Phase 8 artifacts
+SHIPPED (PR #55, `f9fd1d6`). Next strategic move is **integration**,
+designed in `design/008-integration/` (architecture-snapshot ·
+design · a2a-integration · azure-teams-setup). Agreed ordering:
+**Stage 0 foundations → Stage 1 A2A adapter (self-hosted, validate
+Teams/Copilot) → Stage 2 hub run → Stage 3 memory (Phase 7) +
+backlog refinements.**
+
+- **A2A is greenfield** on the post-ADK Frame protocol +
+  `a2a-go/v2` (`a2asrv`). The dead `pkg/a2a`/`pkg/devui` relic (on
+  evicted ADK) is deleted in Stage 0.
+- **Inquiry over A2A** = `input-required`, made robust against
+  Copilot's history-replay via `contextId`-keyed durable sessions
+  + inbound history-reconciliation (Stage 0). Async missions/tasks
+  = long-running A2A Tasks.
+- New backlog items **I1-I8** + integration refresh in
+  `design/005/backlog.md`; analyst-side in
+  `design/005/analyst-skill-backlog.md`. Toolchain is **Go
+  1.26.1** (the "1.23.x" Active-Technologies line is a stale
+  speckit auto-block).
+
+Below is the prior active focus (mission-research / B11 / §4.6 /
+Phase 6), kept for history.
 
 B11 (structured AC) shipped on `027-mission-research-approval-pr2`
 (2026-05-24, PR pending). Eight sub-phases α-θ deliver the
@@ -128,9 +152,10 @@ cancel-ux R-followups + Bucket-D clarify.
   first periodic / wake-up primitive. Consumes
   `MissionState.AutoApproveTools` via spawn-time pre-stamp.
 
-Phase plan beyond 5.2: 6 cron → 7 memory pipeline → 8 artifacts
-→ 9 A2A → 10 workspaces. See `design/004-runtime-post-phase-i/
-design.md §4.3` for the table.
+Phase plan beyond 5.2: 6 cron → **8 artifacts → 7 memory pipeline**
+(7↔8 reordered 2026-06-18: artifacts are independent of memory,
+deterministic to test, unblock bash-narrowing) → 9 A2A → 10
+workspaces. See `design/004-runtime-post-phase-i/design.md §4.3`.
 
 Закрытые 5.x: **5.4.workspace-tree** дропнут — workspace
 закрылся на уровне 5.4.b в PR #21 (workspace-as-extension);
@@ -148,14 +173,14 @@ mini-phase tracker.
 
 ```text
 cmd/
-├── hugen/                # main binary — runtime bootstrap, tui + webui adapters
+├── hugen/                # main binary — runtime bootstrap, tui adapter (A2A/web: design/008)
 └── hugen-skill-validate/ # CLI: validate a SKILL.md manifest
 mcp/
 ├── bash-mcp/             # in-tree shell + filesystem MCP (per_session)
 ├── hugr-query/           # in-tree Hugr GraphQL → file output (per_agent)
 └── python-mcp/           # in-tree Python execution + lazy per-session venv (per_agent)
 pkg/
-├── adapter/{http,tui,webui}  # transport adapters (tui owns slash-parse + inquiry helpers)
+├── adapter/tui            # transport adapter (slash-parse + inquiry helpers); A2A + hub web-app: design/008
 ├── auth/{perm,sources,template}  # 3-tier permission stack + auth.Service loopback
 ├── config/                       # YAML schema + StaticService views (incl. Hitl, Subagents)
 ├── extension/{plan,whiteboard,notepad,skill,mcp,workspace,liveview,mission}  # capability-bag extensions
@@ -251,7 +276,7 @@ slot is `.specify/feature.json`. Outputs are gitignored by design
 
 ## Active Technologies
 
-- Go 1.23.x (project uses generics, `slices`, `maps`, (005-phase-4-agent-runtime)
+- Go 1.26.x (`go.mod` is `go 1.26.1`; the earlier "1.23.x" was a stale auto-block) (005-phase-4-agent-runtime)
 - DuckDB local store via `pkg/store/local`; append-only on (005-phase-4-agent-runtime)
 
 ## Recent Changes

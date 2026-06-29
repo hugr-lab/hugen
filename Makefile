@@ -1,4 +1,4 @@
-.PHONY: build mcps bash-mcp hugr-query python-mcp python-mcp-template submodule-update submodule-check run run-console run-webui test vet lint check tidy clean scenario scenario-run scenario-one hugr-token
+.PHONY: build mcps bash-mcp hugr-query python-mcp python-mcp-template submodule-update submodule-check run test vet lint check tidy clean scenario scenario-run scenario-one hugr-token
 
 BINARY := bin/hugen
 TAGS   := duckdb_arrow
@@ -59,12 +59,6 @@ submodule-check:
 
 run:
 	go run -tags=$(TAGS) ./cmd/hugen
-
-run-console:
-	go run -tags=$(TAGS) ./cmd/hugen console
-
-run-webui:
-	go run -tags=$(TAGS) ./cmd/hugen webui
 
 test:
 	CGO_CFLAGS="$(CGO_DEBUG_FLAGS)" go test -tags=$(TAGS) -race -count=1 ./...

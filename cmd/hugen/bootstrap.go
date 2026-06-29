@@ -26,7 +26,6 @@ type BootstrapConfig struct {
 	LogLevel   string
 	ConfigPath string
 	Port       int
-	WebUIPort  int
 	BaseURI    string
 	// StateDir is the persistent state root (HUGEN_STATE).
 	// Used for installed skills (system/community/local), agent
@@ -78,7 +77,6 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 
 	v.SetDefault("HUGR_URL", "http://localhost:15000")
 	v.SetDefault("HUGEN_PORT", 10000)
-	v.SetDefault("HUGEN_WEBUI_PORT", 10001)
 	v.SetDefault("HUGEN_CONFIG_FILE", "config.yaml")
 	v.SetDefault("HUGEN_BASE_URL", "http://localhost:10000")
 
@@ -120,7 +118,6 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 		LogLevel:              v.GetString("HUGEN_LOG_LEVEL"),
 		ConfigPath:            v.GetString("HUGEN_CONFIG_FILE"),
 		Port:                  v.GetInt("HUGEN_PORT"),
-		WebUIPort:             v.GetInt("HUGEN_WEBUI_PORT"),
 		BaseURI:               v.GetString("HUGEN_BASE_URL"),
 		StateDir:              v.GetString("HUGEN_STATE"),
 		WorkspaceDir:          v.GetString("HUGEN_WORKSPACE_DIR"),
