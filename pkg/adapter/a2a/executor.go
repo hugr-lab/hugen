@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"log/slog"
 	"strings"
@@ -10,30 +11,40 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 )
 
-// echoExecutor is the A1 placeholder AgentExecutor: it echoes the inbound
-// text straight back as an agent Message. Emitting an a2a.Message
-// terminates the A2A turn (the server stops processing events after a
-// Message), so a single yield is a complete, spec-correct sync response.
+// echoExecutor is the A1/A2 placeholder AgentExecutor. As of A2 it resolves
+// the contextId → durable root session (opening or resuming as needed) and
+// echoes the inbound text back, tagged with the resolved root id — so the
+// contextId-session binding is exercised live on every turn. Emitting an
+// a2a.Message terminates the A2A turn (the server stops processing events
+// after a Message), so a single yield is a complete, spec-correct sync reply.
 //
-// The real executor — resolve the contextId session, Submit a Frame,
-// translate the outbound Frame stream — lands in A2–A6 and replaces this.
+// The real executor — Submit a Frame into the resolved session, subscribe,
+// translate the outbound Frame stream — lands in A3–A6 and replaces the echo.
 type echoExecutor struct {
 	logger *slog.Logger
+	reg    *contextRegistry
 }
 
-func newEchoExecutor(l *slog.Logger) *echoExecutor {
+func newEchoExecutor(l *slog.Logger, reg *contextRegistry) *echoExecutor {
 	if l == nil {
 		l = slog.Default()
 	}
-	return &echoExecutor{logger: l}
+	return &echoExecutor{logger: l, reg: reg}
 }
 
 // Execute implements a2asrv.AgentExecutor.
-func (e *echoExecutor) Execute(_ context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+func (e *echoExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
+		cs, err := e.reg.resolve(ctx, execCtx.ContextID)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
 		text := messageText(execCtx.Message)
-		e.logger.Debug("a2a: echo execute", "context_id", execCtx.ContextID, "task_id", execCtx.TaskID, "len", len(text))
-		reply := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("echo: "+text))
+		e.logger.Debug("a2a: echo execute",
+			"context_id", execCtx.ContextID, "root", cs.RootID(), "task_id", execCtx.TaskID, "len", len(text))
+		reply := a2a.NewMessage(a2a.MessageRoleAgent,
+			a2a.NewTextPart(fmt.Sprintf("echo[%s]: %s", cs.RootID(), text)))
 		yield(reply, nil)
 	}
 }

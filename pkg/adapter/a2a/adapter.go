@@ -25,6 +25,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
 	"github.com/hugr-lab/hugen/pkg/adapter"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
 const (
@@ -66,9 +67,16 @@ type Adapter struct {
 	agentName string
 	agentDesc string
 
-	// host is the runtime side of the adapter contract. Stored for the
-	// session-wiring steps (A2+); the A1 echo executor does not use it.
+	// owner is the service identity that owns A2A-opened root sessions
+	// (single identity for v1; A9 auth may override). Defaults to
+	// serviceParticipant().
+	owner protocol.ParticipantInfo
+
+	// host is the runtime side of the adapter contract, captured in Run.
 	host adapter.Host
+	// reg maps contextIds to durable root sessions (A2). Built in Run;
+	// the executor resolves through it, and idle-GC (A8) forgets through it.
+	reg *contextRegistry
 }
 
 // Option configures the Adapter.
@@ -101,6 +109,19 @@ func WithAgentIdentity(name, desc string) Option {
 	}
 }
 
+// WithServiceIdentity overrides the service identity that owns A2A-opened
+// root sessions. Empty fields keep the default (serviceParticipant()).
+func WithServiceIdentity(id, name string) Option {
+	return func(a *Adapter) {
+		if id != "" {
+			a.owner.ID = id
+		}
+		if name != "" {
+			a.owner.Name = name
+		}
+	}
+}
+
 // New constructs an A2A adapter. Callers must select a listener mode via
 // WithSharedMux or WithListenPort; New does not default one (the cmd layer
 // decides from HUGEN_A2A_PORT).
@@ -109,6 +130,7 @@ func New(opts ...Option) *Adapter {
 		logger:    slog.Default(),
 		agentName: defaultAgentName,
 		agentDesc: defaultAgentDesc,
+		owner:     serviceParticipant(),
 	}
 	for _, o := range opts {
 		o(a)
@@ -131,9 +153,10 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	if a.logger == nil {
 		a.logger = host.Logger()
 	}
+	a.reg = newContextRegistry(hostRootStore{host: host, owner: a.owner}, a.logger)
 
 	card := a.buildCard()
-	handler := a2asrv.NewHandler(newEchoExecutor(a.logger))
+	handler := a2asrv.NewHandler(newEchoExecutor(a.logger, a.reg))
 	jsonrpc := a2asrv.NewJSONRPCHandler(handler)
 	cardHandler := a2asrv.NewStaticAgentCardHandler(card)
 

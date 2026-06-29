@@ -93,7 +93,8 @@ func collect(t *testing.T, seq func(func(a2a.Event, error) bool)) []a2a.Event {
 }
 
 func TestEchoExecutor_Execute(t *testing.T) {
-	e := newEchoExecutor(quietLogger())
+	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
+	e := newEchoExecutor(quietLogger(), reg)
 	execCtx := &a2asrv.ExecutorContext{
 		Message:   a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("ping")),
 		ContextID: "ctx-1",
@@ -107,8 +108,10 @@ func TestEchoExecutor_Execute(t *testing.T) {
 	if !ok {
 		t.Fatalf("event 0 is %T, want *a2a.Message", events[0])
 	}
-	if got := messageText(msg); got != "echo: ping" {
-		t.Errorf("echo reply = %q, want %q", got, "echo: ping")
+	// A2: the reply is tagged with the resolved durable-root id, proving the
+	// contextId→session binding ran (fakeRootStore opens "root-1" first).
+	if got := messageText(msg); got != "echo[root-1]: ping" {
+		t.Errorf("echo reply = %q, want %q", got, "echo[root-1]: ping")
 	}
 	if msg.Role != a2a.MessageRoleAgent {
 		t.Errorf("reply role = %q, want %q", msg.Role, a2a.MessageRoleAgent)
@@ -116,7 +119,8 @@ func TestEchoExecutor_Execute(t *testing.T) {
 }
 
 func TestEchoExecutor_Cancel(t *testing.T) {
-	e := newEchoExecutor(quietLogger())
+	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
+	e := newEchoExecutor(quietLogger(), reg)
 	execCtx := &a2asrv.ExecutorContext{ContextID: "ctx-1", TaskID: a2a.NewTaskID()}
 	events := collect(t, e.Cancel(context.Background(), execCtx))
 	if len(events) != 1 {
