@@ -274,7 +274,7 @@ func newPythonIntegrationCore(t *testing.T, pyBin, tmpl string) *integrationCore
 	// WORKSPACES_ROOT to compute <sid>/.venv per call, and the
 	// runtime is the only thing that should pin it.
 	tools := tool.NewToolManager(perms, cfgSvc.ToolProviders(), nil,
-		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, nil)))
+		tool.WithBuilder(providers.NewBuilder(nil, perms, workspaceDir, "", nil)))
 	t.Cleanup(func() { _ = tools.Close() })
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))

@@ -308,22 +308,25 @@ func TestWorkspace_SharedRoundTrip_AndPersistOnClose(t *testing.T) {
 	}
 
 	snap, _ := sess.Tools().Snapshot(ctx, sess.ID())
-	writeTool, ok := findTool(snap.Tools, "bash-mcp:bash.write_file")
+	// A host write (the shared dir is outside the session workspace)
+	// goes through the gated bash.shell — the file tools (write_file)
+	// are confined to the workspace now (F5). Direct Dispatch bypasses
+	// the turn-loop approval gate, so this runs without a modal here.
+	shellTool, ok := findTool(snap.Tools, "bash-mcp:bash.shell")
 	if !ok {
-		t.Fatalf("bash.write_file missing")
+		t.Fatalf("bash.shell missing")
 	}
 	dispatchCtx := perm.WithSession(ctx, perm.SessionContext{SessionID: sess.ID()})
 	sharedFile := filepath.Join(core.sharedDir, "seed.csv")
 	writeArgs, _ := json.Marshal(map[string]any{
-		"path":    sharedFile,
-		"content": "k,v\na,1\n",
+		"cmd": "printf 'k,v\\na,1\\n' > '" + sharedFile + "'",
 	})
-	_, eff, err := sess.Tools().Resolve(dispatchCtx, writeTool, writeArgs)
+	_, eff, err := sess.Tools().Resolve(dispatchCtx, shellTool, writeArgs)
 	if err != nil {
-		t.Fatalf("Resolve write shared: %v", err)
+		t.Fatalf("Resolve shell write shared: %v", err)
 	}
-	if _, err := sess.Tools().Dispatch(dispatchCtx, writeTool, eff); err != nil {
-		t.Fatalf("Dispatch write shared: %v", err)
+	if _, err := sess.Tools().Dispatch(dispatchCtx, shellTool, eff); err != nil {
+		t.Fatalf("Dispatch shell write shared: %v", err)
 	}
 
 	body, err := os.ReadFile(sharedFile)

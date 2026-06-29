@@ -24,6 +24,7 @@ type Builder struct {
 	auth          *auth.Service
 	perms         perm.Service
 	workspaceRoot string
+	skillRoots    string
 	logger        *slog.Logger
 }
 
@@ -42,14 +43,19 @@ type Builder struct {
 //   - workspaceRoot: absolute path injected into stdio children
 //     as WORKSPACES_ROOT so per_agent and per_session subprocesses
 //     share the same on-disk tree. Empty disables injection.
+//   - skillRoots: os.PathListSeparator-joined on-disk skill source
+//     dirs injected into stdio children as HUGEN_SKILL_ROOTS so
+//     python-mcp's run_script(skill=…) resolves a skill's bundled
+//     scripts. Empty disables injection.
 //   - logger: forwarded into each provider's wire-level logger.
 //     nil falls back to slog.New(slog.DiscardHandler) inside the
 //     subpackage.
-func NewBuilder(authSvc *auth.Service, perms perm.Service, workspaceRoot string, logger *slog.Logger) *Builder {
+func NewBuilder(authSvc *auth.Service, perms perm.Service, workspaceRoot, skillRoots string, logger *slog.Logger) *Builder {
 	return &Builder{
 		auth:          authSvc,
 		perms:         perms,
 		workspaceRoot: workspaceRoot,
+		skillRoots:    skillRoots,
 		logger:        logger,
 	}
 }
@@ -73,7 +79,7 @@ func (b *Builder) Build(ctx context.Context, spec tool.Spec) (tool.ToolProvider,
 	}
 	switch t {
 	case "mcp":
-		prov, err := mcp.New(ctx, spec, b.auth, b.workspaceRoot, b.logger)
+		prov, err := mcp.New(ctx, spec, b.auth, b.workspaceRoot, b.skillRoots, b.logger)
 		if err != nil {
 			return nil, err
 		}

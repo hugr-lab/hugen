@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -45,7 +46,7 @@ func TestBuildSpec_HugrMain_HTTPWithAuth(t *testing.T) {
 		Transport: "http",
 		Endpoint:  "https://hugr.example.com/mcp",
 		Auth:      "hugr",
-	}, svc, "")
+	}, svc, "", "")
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -68,7 +69,7 @@ func TestBuildSpec_MissingEndpoint(t *testing.T) {
 		Name:      "hugr-main",
 		Type:      "mcp",
 		Transport: "http",
-	}, nil, "")
+	}, nil, "", "")
 	if err == nil || !strings.Contains(err.Error(), "missing endpoint") {
 		t.Fatalf("expected missing-endpoint error, got %v", err)
 	}
@@ -81,7 +82,7 @@ func TestBuildSpec_AuthWithoutService(t *testing.T) {
 		Transport: "http",
 		Endpoint:  "http://x",
 		Auth:      "hugr",
-	}, nil, "")
+	}, nil, "", "")
 	if err == nil || !strings.Contains(err.Error(), "auth.Service") {
 		t.Fatalf("expected no-service error, got %v", err)
 	}
@@ -95,7 +96,7 @@ func TestBuildSpec_AuthSourceMissing(t *testing.T) {
 		Transport: "http",
 		Endpoint:  "http://x",
 		Auth:      "hugr",
-	}, svc, "")
+	}, svc, "", "")
 	if err == nil || !strings.Contains(err.Error(), "not registered") {
 		t.Fatalf("expected source-missing error, got %v", err)
 	}
@@ -107,7 +108,7 @@ func TestBuildSpec_GenericHTTP(t *testing.T) {
 		Type:      "mcp",
 		Transport: "http",
 		Endpoint:  "http://w/mcp",
-	}, nil, "")
+	}, nil, "", "")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -120,8 +121,55 @@ func TestBuildSpec_StdioMissingCommand(t *testing.T) {
 	_, _, err := buildSpec(config.ToolProviderSpec{
 		Name: "x",
 		Type: "mcp",
-	}, nil, "")
+	}, nil, "", "")
 	if err == nil || !strings.Contains(err.Error(), "missing command") {
 		t.Fatalf("expected missing-command error, got %v", err)
+	}
+}
+
+// TestBuildSpec_StdioInjectsRuntimeEnv pins that a stdio child's env
+// carries the runtime-injected WORKSPACES_ROOT + HUGEN_SKILL_ROOTS
+// (over the operator-set env, which is preserved).
+func TestBuildSpec_StdioInjectsRuntimeEnv(t *testing.T) {
+	roots := "/state/skills/local" + string(os.PathListSeparator) + "/state/skills/hub"
+	got, _, err := buildSpec(config.ToolProviderSpec{
+		Name:    "python-mcp",
+		Type:    "mcp",
+		Command: "python-mcp",
+		Env:     map[string]string{"OPERATOR_SET": "keep"},
+	}, nil, "/ws/root", roots)
+	if err != nil {
+		t.Fatalf("buildSpec: %v", err)
+	}
+	if got.Transport != TransportStdio {
+		t.Errorf("Transport = %q want stdio", got.Transport)
+	}
+	if got.Env["WORKSPACES_ROOT"] != "/ws/root" {
+		t.Errorf("WORKSPACES_ROOT = %q", got.Env["WORKSPACES_ROOT"])
+	}
+	if got.Env["HUGEN_SKILL_ROOTS"] != roots {
+		t.Errorf("HUGEN_SKILL_ROOTS = %q want %q", got.Env["HUGEN_SKILL_ROOTS"], roots)
+	}
+	if got.Env["OPERATOR_SET"] != "keep" {
+		t.Errorf("operator env dropped: %q", got.Env["OPERATOR_SET"])
+	}
+}
+
+// TestBuildSpec_StdioNoRuntimeEnvWhenEmpty — empty workspaceRoot /
+// skillRoots inject nothing (no empty-valued keys leak in).
+func TestBuildSpec_StdioNoRuntimeEnvWhenEmpty(t *testing.T) {
+	got, _, err := buildSpec(config.ToolProviderSpec{
+		Name:    "bash-mcp",
+		Type:    "mcp",
+		Command: "bash-mcp",
+	}, nil, "", "")
+	if err != nil {
+		t.Fatalf("buildSpec: %v", err)
+	}
+	if _, ok := got.Env["HUGEN_SKILL_ROOTS"]; ok {
+		t.Errorf("HUGEN_SKILL_ROOTS should be absent when skillRoots empty")
+	}
+	if _, ok := got.Env["WORKSPACES_ROOT"]; ok {
+		t.Errorf("WORKSPACES_ROOT should be absent when workspaceRoot empty")
 	}
 }

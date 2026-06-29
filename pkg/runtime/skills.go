@@ -35,6 +35,35 @@ func SystemSkillsFS() fs.FS {
 	return sub
 }
 
+// skillHubRoot / skillLocalRoot are the single source of truth for
+// the on-disk skill source directories under stateDir. BuildSkillStack
+// wires them into the SkillStore backends; SkillDiskRoots exposes them
+// to python-mcp's run_script skill resolver — so the two can never
+// drift.
+func skillHubRoot(stateDir string) string   { return filepath.Join(stateDir, "skills", "hub") }
+func skillLocalRoot(stateDir string) string { return filepath.Join(stateDir, "skills", "local") }
+
+// SkillDiskRoots returns the on-disk skill roots in SkillStore.Get
+// search-priority order — **local before hub**, so an operator skill
+// shadows a same-named hub bundle exactly as Get resolves it. python-mcp
+// receives these as HUGEN_SKILL_ROOTS and resolves run_script(skill=…)
+// by first match. System skills are embed-only (no on-disk root) and so
+// are absent here. The dirs need not exist yet — skill:save may create
+// the local root later; a missing root simply contributes no match.
+func SkillDiskRoots(stateDir string) []string {
+	roots := []string{skillLocalRoot(stateDir), skillHubRoot(stateDir)}
+	// Absolutise — python-mcp resolves these in the python child whose
+	// cwd is the session workspace (not hugen's cwd), so a relative
+	// state_dir would make findSkillDir's match unreachable to the
+	// child. Mirrors how WORKSPACES_ROOT is filepath.Abs'd.
+	for i, r := range roots {
+		if abs, err := filepath.Abs(r); err == nil {
+			roots[i] = abs
+		}
+	}
+	return roots
+}
+
 // BuildSkillStack constructs the SkillStore + SkillManager over
 // the three-tier production layout:
 //
@@ -56,8 +85,8 @@ func BuildSkillStack(stateDir string, log *slog.Logger, opts DynamicSkillOpts) (
 	}
 	store := skill.NewSkillStore(skill.Options{
 		SystemFS:        SystemSkillsFS(),
-		HubRoot:         filepath.Join(stateDir, "skills/hub"),
-		LocalRoot:       filepath.Join(stateDir, "skills/local"),
+		HubRoot:         skillHubRoot(stateDir),
+		LocalRoot:       skillLocalRoot(stateDir),
 		DynamicQuerier:  opts.Querier,
 		AgentID:         opts.AgentID,
 		EmbedderEnabled: opts.EmbedderEnabled,

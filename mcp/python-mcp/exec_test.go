@@ -162,30 +162,68 @@ func TestEnsureSessionVenv_ConcurrentBootstrap(t *testing.T) {
 
 func TestResolveScriptPath(t *testing.T) {
 	sess := t.TempDir()
-	good := filepath.Join(sess, "ok.py")
-	if err := os.WriteFile(good, []byte("print(1)\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sess, "ok.py"), []byte("print(1)\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
+	// Two skill roots in search order (local before hub). "shared"
+	// exists in both → local must win; "hubonly" only in hub.
+	local, hub := t.TempDir(), t.TempDir()
+	mkSkill := func(root, name string) {
+		dir := filepath.Join(root, name, "scripts")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "run.py"), []byte("print('skill')\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkSkill(local, "shared")
+	mkSkill(hub, "shared")
+	mkSkill(hub, "hubonly")
+	deps := &execDeps{skillRoots: []string{local, hub}}
+
 	cases := []struct {
-		name, in string
-		wantCode string // "" = success
+		name, skill, in string
+		wantCode        string // "" = success
+		wantSkillDir    string // expected skillDir on a skill-branch success
 	}{
-		{"relative ok", "ok.py", ""},
-		{"absolute rejected", filepath.Join(sess, "ok.py"), "arg_validation"},
-		{"escape rejected", "../etc/passwd", "arg_validation"},
-		{"missing", "missing.py", "not_found"},
+		// workspace branch (skill == "")
+		{name: "relative ok", in: "ok.py"},
+		{name: "absolute rejected", in: filepath.Join(sess, "ok.py"), wantCode: "arg_validation"},
+		{name: "escape rejected", in: "../etc/passwd", wantCode: "arg_validation"},
+		{name: "missing", in: "missing.py", wantCode: "not_found"},
+		// skill branch
+		{name: "skill ok local wins", skill: "shared", in: "scripts/run.py", wantSkillDir: filepath.Join(local, "shared")},
+		{name: "skill ok hub only", skill: "hubonly", in: "scripts/run.py", wantSkillDir: filepath.Join(hub, "hubonly")},
+		{name: "skill not found", skill: "ghost", in: "scripts/run.py", wantCode: "not_found"},
+		{name: "skill script missing", skill: "shared", in: "scripts/nope.py", wantCode: "not_found"},
+		{name: "skill name with slash", skill: "a/b", in: "run.py", wantCode: "arg_validation"},
+		{name: "skill name dotdot", skill: "..", in: "run.py", wantCode: "arg_validation"},
+		{name: "skill path escape", skill: "shared", in: "../../../etc/passwd", wantCode: "arg_validation"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, terr := resolveScriptPath(sess, c.in)
-			if c.wantCode == "" {
-				if terr != nil {
-					t.Fatalf("unexpected err: %v", terr)
+			got, skillDir, terr := resolveScriptPath(deps, sess, c.skill, c.in)
+			if c.wantCode != "" {
+				if terr == nil || terr.Code != c.wantCode {
+					t.Fatalf("got %v, want code=%s", terr, c.wantCode)
 				}
 				return
 			}
-			if terr == nil || terr.Code != c.wantCode {
-				t.Fatalf("got %v, want code=%s", terr, c.wantCode)
+			if terr != nil {
+				t.Fatalf("unexpected err: %v", terr)
+			}
+			if c.skill == "" && skillDir != "" {
+				t.Errorf("workspace branch must return empty skillDir, got %q", skillDir)
+			}
+			if c.wantSkillDir != "" {
+				if skillDir != c.wantSkillDir {
+					t.Errorf("skillDir = %q want %q", skillDir, c.wantSkillDir)
+				}
+				if !strings.HasPrefix(got, c.wantSkillDir) {
+					t.Errorf("scriptPath %q not under skillDir %q", got, c.wantSkillDir)
+				}
 			}
 		})
 	}
@@ -198,7 +236,7 @@ func TestComposeChildEnv(t *testing.T) {
 	t.Setenv("HUGR_URL", "http://stale-parent")
 	t.Setenv("MY_OWN_VAR", "kept")
 
-	env := composeChildEnv("http://hub", "fresh-jwt", "/sessions/s1")
+	env := composeChildEnv("http://hub", "fresh-jwt", "/sessions/s1", "")
 
 	expectAbsent := []string{"HUGR_ACCESS_TOKEN", "HUGR_TOKEN_URL"}
 	for _, key := range expectAbsent {
@@ -229,12 +267,28 @@ func TestComposeChildEnv(t *testing.T) {
 func TestComposeChildEnv_NoHugr(t *testing.T) {
 	t.Setenv("HUGR_TOKEN", "stale")
 	t.Setenv("HUGR_URL", "stale")
-	env := composeChildEnv("", "", "/d")
+	env := composeChildEnv("", "", "/d", "")
 	if v := envValue(env, "HUGR_TOKEN"); v != "" {
 		t.Errorf("HUGR_TOKEN should be absent in no-Hugr path, got %q", v)
 	}
 	if v := envValue(env, "HUGR_URL"); v != "" {
 		t.Errorf("HUGR_URL should be absent in no-Hugr path, got %q", v)
+	}
+}
+
+// TestComposeChildEnv_SkillDir — SKILL_DIR is exported only when a
+// run_script(skill=…) resolved a bundle dir; the run_code / plain
+// run_script path leaves it absent.
+func TestComposeChildEnv_SkillDir(t *testing.T) {
+	with := composeChildEnv("", "", "/d", "/state/skills/local/road-report")
+	if v := envValue(with, "SKILL_DIR"); v != "/state/skills/local/road-report" {
+		t.Errorf("SKILL_DIR = %q want the resolved bundle dir", v)
+	}
+	without := composeChildEnv("", "", "/d", "")
+	for _, kv := range without {
+		if strings.HasPrefix(kv, "SKILL_DIR=") {
+			t.Errorf("SKILL_DIR should be absent when skillDir empty, got %q", kv)
+		}
 	}
 }
 

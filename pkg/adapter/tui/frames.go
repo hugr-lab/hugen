@@ -173,6 +173,15 @@ func (t *tab) handleFrame(f protocol.Frame) tea.Cmd {
 				t.refreshChat()
 			}
 		}
+		if v.Payload.Extension == "artifact" {
+			// A session published / a user attached an artifact — surface
+			// it in the transcript so the operator can /open it. Refs
+			// only; bytes never travel on the frame.
+			if line := formatArtifactFrame(v.Payload.Op, v.Payload.Data); line != "" {
+				t.chat.appendSystem(line)
+				t.refreshChat()
+			}
+		}
 	case *protocol.InquiryRequest:
 		t.pendingInquiry = newInquiryState(v)
 		t.statusLine = fmt.Sprintf("HITL: %s", v.Payload.Type)
@@ -587,4 +596,23 @@ func compactorMarkerEnabledFromStatus(s *liveviewStatus) bool {
 		return true
 	}
 	return c.UIMarkerEnabled
+}
+
+// formatArtifactFrame renders the one-line transcript marker for an
+// artifact ExtensionFrame (op artifact_produced / artifact_uploaded).
+// The data payload is a protocol.ArtifactRef (refs only — bytes never
+// ride the frame). Returns "" on decode failure or an unknown op.
+func formatArtifactFrame(op string, data json.RawMessage) string {
+	var ref protocol.ArtifactRef
+	if err := json.Unmarshal(data, &ref); err != nil || ref.ID == "" {
+		return ""
+	}
+	switch op {
+	case "artifact_produced":
+		return fmt.Sprintf("📎 published artifacts://%s — /open %s to view", ref.ID, ref.ID)
+	case "artifact_uploaded":
+		return fmt.Sprintf("📎 attached artifacts://%s", ref.ID)
+	default:
+		return ""
+	}
 }

@@ -42,7 +42,19 @@ type BootstrapConfig struct {
 	// bash-mcp is spawned with cmd.Dir set to the session's resolved
 	// workspace path. Defaults to "./.hugen/workspace".
 	WorkspaceDir string
-	Hugr         HugrConfig
+	// ArtifactsDir is the durable, user-facing artifact store root
+	// (HUGEN_ARTIFACTS_DIR) — files under <ArtifactsDir>/<agent>/<root_id>/.
+	// Defaults to "<StateDir>/artifacts".
+	ArtifactsDir string
+	// ArtifactsMaxTotalMB / ArtifactsMaxSessionMB cap the whole store
+	// and per-root usage (HUGEN_ARTIFACTS_MAX_TOTAL_MB /
+	// HUGEN_ARTIFACTS_MAX_SESSION_MB), MB; 0 = unlimited (v1 default).
+	ArtifactsMaxTotalMB   int
+	ArtifactsMaxSessionMB int
+	// ArtifactsIdleTTL (HUGEN_ARTIFACTS_IDLE_TTL): an open root idle
+	// past this is reaped by the retention sweep. Defaults to 7 days.
+	ArtifactsIdleTTL time.Duration
+	Hugr             HugrConfig
 }
 
 // HugrConfig — platform connection.
@@ -104,14 +116,18 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 	}
 
 	config := &BootstrapConfig{
-		Mode:           v.GetString("HUGEN_MODE"),
-		LogLevel:       v.GetString("HUGEN_LOG_LEVEL"),
-		ConfigPath:     v.GetString("HUGEN_CONFIG_FILE"),
-		Port:           v.GetInt("HUGEN_PORT"),
-		WebUIPort:      v.GetInt("HUGEN_WEBUI_PORT"),
-		BaseURI:        v.GetString("HUGEN_BASE_URL"),
-		StateDir:       v.GetString("HUGEN_STATE"),
-		WorkspaceDir: v.GetString("HUGEN_WORKSPACE_DIR"),
+		Mode:                  v.GetString("HUGEN_MODE"),
+		LogLevel:              v.GetString("HUGEN_LOG_LEVEL"),
+		ConfigPath:            v.GetString("HUGEN_CONFIG_FILE"),
+		Port:                  v.GetInt("HUGEN_PORT"),
+		WebUIPort:             v.GetInt("HUGEN_WEBUI_PORT"),
+		BaseURI:               v.GetString("HUGEN_BASE_URL"),
+		StateDir:              v.GetString("HUGEN_STATE"),
+		WorkspaceDir:          v.GetString("HUGEN_WORKSPACE_DIR"),
+		ArtifactsDir:          v.GetString("HUGEN_ARTIFACTS_DIR"),
+		ArtifactsMaxTotalMB:   v.GetInt("HUGEN_ARTIFACTS_MAX_TOTAL_MB"),
+		ArtifactsMaxSessionMB: v.GetInt("HUGEN_ARTIFACTS_MAX_SESSION_MB"),
+		ArtifactsIdleTTL:      v.GetDuration("HUGEN_ARTIFACTS_IDLE_TTL"),
 		Hugr: HugrConfig{
 			URL:         v.GetString("HUGR_URL"),
 			RedirectURI: v.GetString("HUGR_REDIRECT_URI"),
@@ -134,6 +150,12 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 	}
 	if config.WorkspaceDir == "" {
 		config.WorkspaceDir = filepath.Join(".hugen", "workspace")
+	}
+	if config.ArtifactsDir == "" {
+		config.ArtifactsDir = filepath.Join(config.StateDir, "artifacts")
+	}
+	if config.ArtifactsIdleTTL == 0 {
+		config.ArtifactsIdleTTL = 7 * 24 * time.Hour
 	}
 	if config.Hugr.AccessToken != "" && config.Hugr.TokenURL == "" ||
 		config.Hugr.AccessToken == "" && config.Hugr.TokenURL != "" {
@@ -216,6 +238,12 @@ func projectRuntimeConfig(boot *BootstrapConfig, logger *slog.Logger) runtime.Co
 		StateDir:        boot.StateDir,
 		Workspace: runtime.WorkspaceConfig{
 			Dir: boot.WorkspaceDir,
+		},
+		Artifacts: runtime.ArtifactsConfig{
+			Dir:            boot.ArtifactsDir,
+			MaxTotalSize:   int64(boot.ArtifactsMaxTotalMB) << 20,
+			MaxSessionSize: int64(boot.ArtifactsMaxSessionMB) << 20,
+			IdleTTL:        boot.ArtifactsIdleTTL,
 		},
 		HTTP: runtime.HTTPConfig{
 			Port:    boot.Port,

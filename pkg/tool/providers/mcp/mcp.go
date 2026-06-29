@@ -15,16 +15,18 @@ import (
 // point providers.Builder dispatches to. The auth.Service handles
 // spec.Auth (HTTP RoundTripper or stdio bootstrap mint);
 // workspaceRoot pins the WORKSPACES_ROOT env stdio children land
-// under. log captures connection-level events; pass
-// slog.New(slog.DiscardHandler) for a silent build.
+// under; skillRoots pins HUGEN_SKILL_ROOTS (the on-disk skill source
+// dirs python-mcp resolves run_script(skill=…) against). log captures
+// connection-level events; pass slog.New(slog.DiscardHandler) for a
+// silent build.
 //
 // New does NOT register the provider with any ToolManager — the
 // caller decides where it lives (root or per-session child).
 //
 // Tests that build the wire-level Spec directly use NewWithSpec.
-func New(ctx context.Context, spec tool.Spec, authSvc *auth.Service, workspaceRoot string, log *slog.Logger) (*Provider, error) {
+func New(ctx context.Context, spec tool.Spec, authSvc *auth.Service, workspaceRoot, skillRoots string, log *slog.Logger) (*Provider, error) {
 	cfgSpec := toConfigSpec(spec)
-	wireSpec, cleanups, err := buildSpec(cfgSpec, authSvc, workspaceRoot)
+	wireSpec, cleanups, err := buildSpec(cfgSpec, authSvc, workspaceRoot, skillRoots)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +61,14 @@ func New(ctx context.Context, spec tool.Spec, authSvc *auth.Service, workspaceRo
 // gets a WORKSPACES_ROOT entry pointing at it, overriding any
 // operator-supplied value. Empty string disables injection
 // (tests; deployments without session.Workspace).
-func buildSpec(spec config.ToolProviderSpec, authSvc *auth.Service, workspaceRoot string) (Spec, []func(), error) {
+//
+// skillRoots is the os.PathListSeparator-joined list of on-disk
+// skill source dirs — when non-empty it is injected as
+// HUGEN_SKILL_ROOTS, the search path python-mcp's run_script(skill=…)
+// resolves a skill bundle against. Non-secret (plain dir paths), so
+// it is injected into every stdio child uniformly like WORKSPACES_ROOT;
+// only python-mcp acts on it.
+func buildSpec(spec config.ToolProviderSpec, authSvc *auth.Service, workspaceRoot, skillRoots string) (Spec, []func(), error) {
 	out := Spec{
 		Name:       spec.Name,
 		Lifetime:   parseLifetime(spec.Lifetime, isHTTPTransport(spec.Transport)),
@@ -108,6 +117,9 @@ func buildSpec(spec config.ToolProviderSpec, authSvc *auth.Service, workspaceRoo
 	}
 	if workspaceRoot != "" {
 		merged["WORKSPACES_ROOT"] = workspaceRoot
+	}
+	if skillRoots != "" {
+		merged["HUGEN_SKILL_ROOTS"] = skillRoots
 	}
 
 	if spec.Auth == "" {

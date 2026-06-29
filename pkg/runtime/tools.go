@@ -3,7 +3,9 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/tool"
@@ -30,7 +32,13 @@ func phaseTools(ctx context.Context, core *Core) error {
 		return fmt.Errorf("workspace root: %w", err)
 	}
 
-	builder := providers.NewBuilder(core.Auth, core.Permissions, wsRoot, core.Logger)
+	// HUGEN_SKILL_ROOTS — the on-disk skill source dirs (local, hub),
+	// os.PathListSeparator-joined, injected into stdio MCP children so
+	// python-mcp's run_script(skill=…) can resolve a skill's bundled
+	// scripts read-only. Only python-mcp acts on it; bash-mcp ignores it.
+	skillRoots := strings.Join(SkillDiskRoots(core.Cfg.StateDir), string(os.PathListSeparator))
+
+	builder := providers.NewBuilder(core.Auth, core.Permissions, wsRoot, skillRoots, core.Logger)
 	tm := tool.NewToolManager(core.Permissions, core.Config.ToolProviders(), core.Logger,
 		tool.WithBuilder(builder))
 	core.Tools = tm

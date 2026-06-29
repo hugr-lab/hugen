@@ -3,9 +3,11 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/extension"
+	artifactext "github.com/hugr-lab/hugen/pkg/extension/artifact"
 	compactorext "github.com/hugr-lab/hugen/pkg/extension/compactor"
 	liveviewext "github.com/hugr-lab/hugen/pkg/extension/liveview"
 	mcpext "github.com/hugr-lab/hugen/pkg/extension/mcp"
@@ -75,8 +77,29 @@ func phaseExtensions(_ context.Context, core *Core) error {
 			Prompts:      renderer,
 		},
 	)
+
+	// Artifact store (Phase 8): durable, user-facing files under
+	// <artifacts.dir>/<agent>/<root_id>/ — the folder IS the registry
+	// (no DB). Empty dir falls back to <state>/artifacts. The extension
+	// grants list/copy/publish/delete and reaps a root's artifacts on
+	// root-session close.
+	artifactsDir := core.Cfg.Artifacts.Dir
+	if artifactsDir == "" {
+		artifactsDir = filepath.Join(core.Cfg.StateDir, "artifacts")
+	}
+	artifactStore := artifactext.NewStore(artifactsDir, core.Agent.ID(),
+		core.Cfg.Artifacts.MaxTotalSize, core.Cfg.Artifacts.MaxSessionSize, core.Logger)
+	artifactExt := artifactext.NewExtension(artifactStore, core.Agent.ID(), core.Logger)
+	// Stashed on Core so phaseRunner can register the idle reaper over
+	// the same store and adapters can reach Ingest / Path (download).
+	core.Artifacts = artifactExt
+
 	exts := []extension.Extension{
 		wsext.NewExtension(core.Cfg.Workspace.Dir, core.Logger),
+		// Artifact ext registered right after workspace: its InitState
+		// reads workspace.FromState for the copy/publish dir, so the
+		// workspace handle must exist first. Phase 8.
+		artifactExt,
 		compactorExt,
 		planext.NewExtension(core.Agent.ID()),
 		wbext.NewExtension(core.Agent.ID()),

@@ -23,7 +23,7 @@ import (
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 func TestBuilder_DispatchesUnknownType(t *testing.T) {
-	b := NewBuilder(nil, nil, "", nil)
+	b := NewBuilder(nil, nil, "", "", nil)
 	_, err := b.Build(context.Background(), tool.Spec{Name: "x", Type: "webhook"})
 	if err == nil {
 		t.Fatal("Build should error for unknown type")
@@ -39,7 +39,7 @@ func TestBuilder_DispatchesUnknownType(t *testing.T) {
 // behaviour. Both shapes fail at the same validation point (stdio
 // without Command), which is what we assert.
 func TestBuilder_RoutesMCPDefault(t *testing.T) {
-	b := NewBuilder(nil, nil, "", nil)
+	b := NewBuilder(nil, nil, "", "", nil)
 	for _, typ := range []string{"", "mcp", "MCP"} {
 		_, err := b.Build(context.Background(), tool.Spec{
 			Name:     "broken",
@@ -102,7 +102,7 @@ func TestInit_DegradesOnBadConfig(t *testing.T) {
 		// must skip + warn instead of aborting.
 	}}}
 	tm := tool.NewToolManager(nil, view, discardLogger(),
-		tool.WithBuilder(NewBuilder(nil, nil, "", discardLogger())))
+		tool.WithBuilder(NewBuilder(nil, nil, "", "", discardLogger())))
 	t.Cleanup(func() { _ = tm.Close() })
 	if err := tm.Init(context.Background()); err != nil {
 		t.Fatalf("Init aborted on bad config: %v", err)
@@ -124,7 +124,7 @@ func TestInit_DegradesOnConnectFailure(t *testing.T) {
 		Endpoint: "http://127.0.0.1:1/mcp",
 	}}}
 	tm := tool.NewToolManager(nil, view, discardLogger(),
-		tool.WithBuilder(NewBuilder(nil, nil, "", discardLogger())))
+		tool.WithBuilder(NewBuilder(nil, nil, "", "", discardLogger())))
 	t.Cleanup(func() { _ = tm.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -152,7 +152,7 @@ func TestInit_HTTPLive(t *testing.T) {
 		Auth:      "hugr",
 	}}}
 	tm := tool.NewToolManager(nil, view, discardLogger(),
-		tool.WithBuilder(NewBuilder(svc, nil, "", discardLogger())))
+		tool.WithBuilder(NewBuilder(svc, nil, "", "", discardLogger())))
 	t.Cleanup(func() { _ = tm.Close() })
 
 	if err := tm.Init(context.Background()); err != nil {

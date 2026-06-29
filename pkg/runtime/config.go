@@ -21,6 +21,7 @@ type Config struct {
 	AgentConfigPath string
 	StateDir        string
 	Workspace       WorkspaceConfig
+	Artifacts       ArtifactsConfig
 	HTTP            HTTPConfig
 	Hugr            HugrConfig
 
@@ -39,6 +40,20 @@ type Config struct {
 // phase-6 cron.
 type WorkspaceConfig struct {
 	Dir string
+}
+
+// ArtifactsConfig — the durable, user-facing artifact store (design
+// 007). Artifacts are plain files under Dir/<agent>/<root_id>/; the
+// folder is the registry (no DB). Empty Dir falls back to
+// <StateDir>/artifacts at boot. Size quotas of 0 mean unlimited;
+// a publish over a non-zero quota is rejected (no silent eviction).
+// IdleTTL of 0 falls back to the 7d default used by the retention
+// reaper; artifacts are otherwise deleted only on ROOT-session close.
+type ArtifactsConfig struct {
+	Dir            string
+	MaxTotalSize   int64 // whole store, bytes; 0 = unlimited
+	MaxSessionSize int64 // per root_id, bytes; 0 = unlimited
+	IdleTTL        time.Duration
 }
 
 // HTTPConfig — listener for /api/v1/* and the auth endpoints.

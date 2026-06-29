@@ -55,12 +55,18 @@ its own working directory under `${SESSION_DIR}` that bash-mcp shares.
   10000 bytes of code** — a longer inline script is a wedge-prone
   generation; past the cap, write the `.py` to the workspace
   (`bash.write_file`, ≤10000-byte `append` chunks) and use `run_script`.
-- **`python-mcp:run_script`** — execute a `.py` file from the session
-  workspace. Args: `path` (relative inside `${SESSION_DIR}`; absolute paths
-  and `..` rejected), `timeout_ms` (optional). Multi-line work, anything you
-  want to re-run. The right home for any non-trivial script. **Never
-  embed a large dataset as a literal** to fit a script — load it from a
-  file with `pd.read_*`, so the script stays small.
+- **`python-mcp:run_script`** — execute a `.py` file. Args: `path`, optional
+  `skill`, `timeout_ms`. **Without `skill`** → `path` is relative inside
+  `${SESSION_DIR}` (absolute paths and `..` rejected): your own workspace
+  scripts. **With `skill`** → `path` resolves under THAT loaded skill's bundle
+  dir (read-only) and runs IN PLACE — the no-copy way to run a skill's bundled
+  `scripts/*.py`, e.g. `run_script(skill="my-skill", path="scripts/build.py")`.
+  **Never `cp` a bundled script into the workspace first — pass `skill=` instead.**
+  `$SKILL_DIR` is exported so the script reads its sibling bundle assets; cwd
+  stays `${SESSION_DIR}`, so relative `--output` paths still land in the
+  workspace. Multi-line work, anything you want to re-run — the right home for
+  any non-trivial script. **Never embed a large dataset as a literal** to fit a
+  script — load it from a file with `pd.read_*`, so the script stays small.
 
 Both return the same JSON envelope:
 
@@ -106,12 +112,10 @@ patterns below cover the majority of tasks and prevent the typical
    handoff pattern: wave-1 writes `data/foo.parquet`, wave-2 reads it from
    the same path). The runtime reclaims the dir on its own schedule after
    the task ends, so it does NOT survive into the next unrelated user
-   follow-up. If the user explicitly asked for a file to keep across
-   conversations, **either** include its contents in your final `result`
-   text (so root captures it and can hand it back), **or** tell the user
-   the absolute path you'd write to and let them confirm. A dedicated
-   artifact-storage surface is on the roadmap; until it lands, treat
-   `${SESSION_DIR}` as task-scoped scratch.
+   follow-up. If the user asked for a file to keep / receive, **publish it as
+   an artifact** (`artifact:publish` — the durable, user-facing store) instead
+   of leaving it in `${SESSION_DIR}`, which is task-scoped scratch the runtime
+   reclaims after the task ends.
 
 ## Task-Specific Guidance
 

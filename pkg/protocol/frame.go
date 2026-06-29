@@ -177,6 +177,23 @@ type UserMessagePayload struct {
 	Text string `json:"text"`
 }
 
+// ArtifactRef is the by-reference handle to a stored artifact — the
+// ONLY artifact data that travels on a frame. File bytes never move
+// through the Frame/subscription channel (history bloat, base64 +33%,
+// and remote/embedded query-engine OOM on a transport not built for
+// binaries); the adapter fetches bytes out-of-band via the core's
+// artifact access (design 007 §4). The id is a readable, path/URL-safe
+// filename; holding it is the access capability, scoped to the root
+// conversation. Carried on artifact ExtensionFrames (op
+// artifact_uploaded / artifact_produced) and the /artifacts listing.
+type ArtifactRef struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	MIME      string    `json:"mime,omitempty"`
+	Size      int64     `json:"size"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
+}
+
 // TokenUsage carries per-turn token counts the model provider
 // reports on the final stream chunk. Stamped on the consolidated
 // final AgentMessage so the outbox carries the "this turn cost"

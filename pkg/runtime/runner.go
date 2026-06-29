@@ -14,7 +14,6 @@ import (
 	"github.com/hugr-lab/hugen/pkg/session/manager"
 )
 
-
 // phaseRunner runs phase 10: builds the agent-level scheduling
 // runner (Phase 6.1a) and registers the always-on resilience
 // reapers catalogued in design/004-runtime-post-phase-i/
@@ -57,6 +56,39 @@ func phaseRunner(ctx context.Context, core *Core) error {
 			schedext.ReapStuckTaskRuns(core.Agent.ID(), core.TaskStore, core.Logger),
 		); err != nil {
 			return fmt.Errorf("register task_log_reap_stuck: %w", err)
+		}
+	}
+
+	// Phase 8 — artifact retention. Root-close-delete is the artifact
+	// ext's Closer hook; this hourly sweep catches roots that never
+	// cleanly closed (crash, abandon) by reaping scopes idle past
+	// IdleTTL. Quotas are enforced synchronously on publish, not here.
+	if core.Artifacts != nil && core.Cfg.Artifacts.IdleTTL > 0 {
+		store := core.Artifacts.Store()
+		ttl := core.Cfg.Artifacts.IdleTTL
+		mgr := core.Manager
+		// A root scope is only reaped when its session is NOT live —
+		// a still-open conversation keeps its artifacts (deletion is the
+		// Closer's job on root close); the sweep catches crash/abandon.
+		live := func(rootID string) bool {
+			if mgr == nil {
+				return false
+			}
+			_, ok := mgr.Get(rootID)
+			return ok
+		}
+		if err := svc.Register(ctx,
+			"artifacts_reap_idle",
+			runner.Every(time.Hour),
+			func(_ context.Context, _ runner.FireMeta) (runner.Outcome, error) {
+				n, rerr := store.ReapIdle(ttl, time.Now(), live)
+				if rerr != nil {
+					return runner.Outcome{}, rerr
+				}
+				return runner.Outcome{Summary: fmt.Sprintf("reaped %d idle artifact scope(s)", n)}, nil
+			},
+		); err != nil {
+			return fmt.Errorf("register artifacts_reap_idle: %w", err)
 		}
 	}
 

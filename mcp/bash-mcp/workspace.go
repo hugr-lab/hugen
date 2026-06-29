@@ -8,25 +8,33 @@ import (
 	"strings"
 )
 
-// Workspace is the thin host-fs view bash-mcp's convenience tools
-// (read_file, write_file, list_dir, sed) use to canonicalise input
-// paths and enforce one safety property: never let a tool reach
-// into a peer session's scratch directory.
+// Workspace is the thin host-fs view bash-mcp's convenience file
+// tools (read_file, write_file, edit_file, list_dir, sed) use to
+// canonicalise input paths and enforce two direction-split safety
+// properties (see Resolve):
+//
+//   - WRITES (write_file / edit_file / sed) are confined to the
+//     session's own workspace — a host path or a peer session's
+//     dir is rejected. A workspace-confined write is inherently
+//     safe, so it carries no approval prompt; host deliverables go
+//     through artifact:publish, deliberate host writes through the
+//     gated bash.shell.
+//   - READS keep the host filesystem open (operator-provided
+//     inputs, $SHARED_DIR, skill bundles) with one guard: never
+//     reach into a peer session's scratch under the shared root.
 //
 // Two roots matter:
 //
 //   - SessionDir — this process's own scratch (= cwd at startup,
 //     the runtime sets cmd.Dir to <workspaces>/<session_id>/).
-//   - WorkspacesRoot — the parent of every session scratch. Any
-//     canonical path under this root that is not under
-//     SessionDir belongs to another session — the file tools
-//     reject access to it.
+//   - WorkspacesRoot — the parent of every session scratch; a
+//     canonical path under it but not under SessionDir belongs to
+//     another session.
 //
-// Outside these two roots the host filesystem is open. Shell
-// tools (bash.run/shell) inherit the same SESSION_DIR /
-// WORKSPACES_ROOT environment variables but bash-mcp does not
-// gate their args at exec time — kernel/OS isolation in the
-// deployment is responsible there.
+// Shell tools (bash.run/shell) inherit the same SESSION_DIR /
+// WORKSPACES_ROOT environment variables but bash-mcp does not gate
+// their args at exec time — kernel/OS isolation in the deployment
+// is responsible there.
 type Workspace struct {
 	SessionDir     string // absolute path; must equal os.Getwd() at start
 	WorkspacesRoot string // absolute parent of SessionDir
@@ -36,6 +44,7 @@ type Workspace struct {
 var (
 	ErrPathEscape       = errors.New("bash-mcp: path resolves outside allowed roots")
 	ErrCrossSessionPath = errors.New("bash-mcp: path resolves into another session's workspace")
+	ErrHostWriteDenied  = errors.New("bash-mcp: file-write tools are confined to your session workspace — deliver host files with artifact:publish, or write outside the workspace via bash.shell")
 )
 
 // Resolution is the result of Workspace.Resolve.
@@ -45,15 +54,21 @@ type Resolution struct {
 }
 
 // Resolve canonicalises an input path and enforces the
-// cross-session boundary: any canonical path under WorkspacesRoot
-// must also be under SessionDir, otherwise it belongs to a peer
-// session. Outside WorkspacesRoot the path is unconstrained.
+// direction-split boundary:
 //
-// The `write` parameter is preserved for HITL approval routing
-// in phase 5 — phase 3 applies the same boundary check to both
-// reads and writes.
+//   - write == true (write_file / edit_file / sed): the canonical
+//     path MUST be under SessionDir; a host path or a peer
+//     session's dir is rejected with ErrHostWriteDenied. The file
+//     tools never write outside the workspace, so a workspace
+//     write is inherently safe and needs no approval.
+//   - write == false (reads): the host filesystem stays open, with
+//     the single cross-session guard — a path under WorkspacesRoot
+//     that is not under SessionDir belongs to a peer session and is
+//     rejected with ErrCrossSessionPath.
+//
+// Both confines are gated on SessionDir being set; an unconfigured
+// Workspace (host mode, test fixtures) leaves everything open.
 func (w *Workspace) Resolve(input string, write bool) (Resolution, error) {
-	_ = write
 	if input == "" {
 		return Resolution{}, fmt.Errorf("%w: empty path", ErrPathEscape)
 	}
@@ -75,8 +90,13 @@ func (w *Workspace) Resolve(input string, write bool) (Resolution, error) {
 	if err != nil {
 		return Resolution{}, err
 	}
-	if w.WorkspacesRoot != "" && w.SessionDir != "" {
-		if underHostDir(canonical, w.WorkspacesRoot) && !underHostDir(canonical, w.SessionDir) {
+	if w.SessionDir != "" {
+		inSession := underHostDir(canonical, w.SessionDir)
+		switch {
+		case write && !inSession:
+			return Resolution{}, fmt.Errorf("%w: %s", ErrHostWriteDenied, input)
+		case !write && w.WorkspacesRoot != "" &&
+			underHostDir(canonical, w.WorkspacesRoot) && !inSession:
 			return Resolution{}, fmt.Errorf("%w: %s", ErrCrossSessionPath, input)
 		}
 	}

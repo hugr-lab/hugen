@@ -10,6 +10,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/auth/perm"
 	"github.com/hugr-lab/hugen/pkg/config"
 	"github.com/hugr-lab/hugen/pkg/extension"
+	artifactext "github.com/hugr-lab/hugen/pkg/extension/artifact"
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/model"
 	"github.com/hugr-lab/hugen/pkg/prompts"
@@ -89,6 +90,12 @@ type Core struct {
 	// implementing tool.ToolProvider is also registered on Tools so
 	// its catalogue surfaces to Snapshot/Resolve/Dispatch.
 	Extensions []extension.Extension
+
+	// Phase 8 (artifacts). The durable user-facing artifact store
+	// extension. Stashed so phaseRunner can register the idle reaper
+	// over the same store and adapters can reach Ingest (upload) /
+	// Store().Path (download). Constructed in phaseExtensions.
+	Artifacts *artifactext.Extension
 
 	// Phase 9 (session_manager).
 	Manager *manager.Manager
