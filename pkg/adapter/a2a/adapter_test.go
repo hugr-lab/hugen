@@ -92,35 +92,161 @@ func collect(t *testing.T, seq func(func(a2a.Event, error) bool)) []a2a.Event {
 	return got
 }
 
-func TestEchoExecutor_Execute(t *testing.T) {
+// fakeFrameIO is a programmable frameIO for executor tests: Subscribe returns
+// a pre-filled channel; Submit records frames.
+type fakeFrameIO struct {
+	ch        chan protocol.Frame
+	submitted []protocol.Frame
+	subID     string
+	subErr    error
+	submitErr error
+}
+
+func (f *fakeFrameIO) Subscribe(_ context.Context, sid string) (<-chan protocol.Frame, error) {
+	f.subID = sid
+	if f.subErr != nil {
+		return nil, f.subErr
+	}
+	return f.ch, nil
+}
+
+func (f *fakeFrameIO) Submit(_ context.Context, fr protocol.Frame) error {
+	if f.submitErr != nil {
+		return f.submitErr
+	}
+	f.submitted = append(f.submitted, fr)
+	return nil
+}
+
+// collectErr runs the iterator and returns the events plus the first error.
+func collectErr(seq func(func(a2a.Event, error) bool)) ([]a2a.Event, error) {
+	var got []a2a.Event
+	var firstErr error
+	seq(func(ev a2a.Event, err error) bool {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if ev != nil {
+			got = append(got, ev)
+		}
+		return true
+	})
+	return got, firstErr
+}
+
+// agentFrame builds a LIVE streaming chunk (Consolidated=false) — the shape
+// the executor accumulates (mirrors the runtime's outbox).
+func agentFrame(root, text string, final bool, seq int) protocol.Frame {
+	return protocol.NewAgentMessage(root, serviceParticipant(), text, seq, final)
+}
+
+func idleFrame(root, reason string) protocol.Frame {
+	return protocol.NewSessionStatus(root, serviceParticipant(), protocol.SessionStatusIdle, reason)
+}
+
+func TestSessionExecutor_Execute_SyncTurn(t *testing.T) {
+	io := &fakeFrameIO{ch: make(chan protocol.Frame, 8)}
+	// fakeRootStore opens "root-1" for the first contextId. Pre-fill: the
+	// open-time idle(session_opened) (must be SKIPPED, not treated as a
+	// boundary), two live chunks, then the real turn boundary.
+	io.ch <- idleFrame("root-1", "session_opened")
+	io.ch <- agentFrame("root-1", "Hello ", false, 0)
+	io.ch <- agentFrame("root-1", "there.", true, 1)
+	io.ch <- idleFrame("root-1", "turn_complete")
+
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newEchoExecutor(quietLogger(), reg)
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
 	execCtx := &a2asrv.ExecutorContext{
-		Message:   a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("ping")),
+		Message:   a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi")),
 		ContextID: "ctx-1",
 		TaskID:    a2a.NewTaskID(),
 	}
-	events := collect(t, e.Execute(context.Background(), execCtx))
+
+	events, err := collectErr(e.Execute(context.Background(), execCtx))
+	if err != nil {
+		t.Fatalf("Execute yielded error: %v", err)
+	}
 	if len(events) != 1 {
-		t.Fatalf("Execute yielded %d events, want 1", len(events))
+		t.Fatalf("Execute yielded %d events, want 1 (final message)", len(events))
 	}
 	msg, ok := events[0].(*a2a.Message)
 	if !ok {
 		t.Fatalf("event 0 is %T, want *a2a.Message", events[0])
 	}
-	// A2: the reply is tagged with the resolved durable-root id, proving the
-	// contextId→session binding ran (fakeRootStore opens "root-1" first).
-	if got := messageText(msg); got != "echo[root-1]: ping" {
-		t.Errorf("echo reply = %q, want %q", got, "echo[root-1]: ping")
+	if got := messageText(msg); got != "Hello there." {
+		t.Errorf("reply = %q, want %q (accumulated consolidated text)", got, "Hello there.")
 	}
-	if msg.Role != a2a.MessageRoleAgent {
-		t.Errorf("reply role = %q, want %q", msg.Role, a2a.MessageRoleAgent)
+
+	// The inbound was submitted as a user_message addressed at the root.
+	if len(io.submitted) != 1 {
+		t.Fatalf("submitted %d frames, want 1", len(io.submitted))
+	}
+	um, ok := io.submitted[0].(*protocol.UserMessage)
+	if !ok {
+		t.Fatalf("submitted[0] is %T, want *protocol.UserMessage", io.submitted[0])
+	}
+	if um.SessionID() != "root-1" {
+		t.Errorf("user_message session = %q, want root-1", um.SessionID())
+	}
+	if um.Payload.Text != "hi" {
+		t.Errorf("user_message text = %q, want hi", um.Payload.Text)
+	}
+	if io.subID != "root-1" {
+		t.Errorf("subscribed to %q, want root-1", io.subID)
 	}
 }
 
-func TestEchoExecutor_Cancel(t *testing.T) {
+func TestSessionExecutor_Execute_ErrorFrame(t *testing.T) {
+	io := &fakeFrameIO{ch: make(chan protocol.Frame, 4)}
+	io.ch <- protocol.NewError("root-1", serviceParticipant(), "boom", "kaboom", false)
+
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newEchoExecutor(quietLogger(), reg)
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	execCtx := &a2asrv.ExecutorContext{
+		Message:   a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi")),
+		ContextID: "ctx-1",
+		TaskID:    a2a.NewTaskID(),
+	}
+
+	events, err := collectErr(e.Execute(context.Background(), execCtx))
+	if err == nil {
+		t.Fatal("Execute did not yield an error for an error frame")
+	}
+	if len(events) != 0 {
+		t.Errorf("error turn yielded %d events, want 0", len(events))
+	}
+}
+
+func TestSessionExecutor_Execute_CtxCancel(t *testing.T) {
+	io := &fakeFrameIO{ch: make(chan protocol.Frame, 4)}
+	io.ch <- agentFrame("root-1", "partial", true, 0) // no idle boundary follows
+
+	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	execCtx := &a2asrv.ExecutorContext{
+		Message:   a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi")),
+		ContextID: "ctx-1",
+		TaskID:    a2a.NewTaskID(),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled → drain must not hang waiting for idle
+
+	events, err := collectErr(e.Execute(ctx, execCtx))
+	if err != nil {
+		t.Fatalf("ctx-cancel turn yielded error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("ctx-cancel turn yielded %d events, want 1 (partial reply)", len(events))
+	}
+	if _, ok := events[0].(*a2a.Message); !ok {
+		t.Fatalf("event 0 is %T, want *a2a.Message", events[0])
+	}
+}
+
+func TestSessionExecutor_Cancel(t *testing.T) {
+	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
+	e := newSessionExecutor(quietLogger(), reg, &fakeFrameIO{}, serviceParticipant())
 	execCtx := &a2asrv.ExecutorContext{ContextID: "ctx-1", TaskID: a2a.NewTaskID()}
 	events := collect(t, e.Cancel(context.Background(), execCtx))
 	if len(events) != 1 {

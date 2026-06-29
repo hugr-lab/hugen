@@ -29,15 +29,21 @@ var errEmptyContextID = errors.New("a2a: empty contextID")
 // *session.Session needs a full session manager. adapter.Host satisfies it
 // via hostRootStore; A3's executor uses adapter.Host directly for the
 // Subscribe/Submit traffic, which is out of this resolver's scope.
+//
+// The methods take NO ctx on purpose: a durable root must live for the whole
+// adapter process, not a single request. hostRootStore opens/resumes with the
+// adapter's long-lived lifecycle ctx — passing a per-request ctx would tie the
+// session's Run loop to that request and kill it when the request returns
+// (manager.Open starts the loop on the supplied ctx).
 type rootStore interface {
 	// openRoot opens a new durable root bound to contextID and returns its id.
-	openRoot(ctx context.Context, contextID string) (rootID string, err error)
+	openRoot(contextID string) (rootID string, err error)
 	// resumeRoot rehydrates an existing root by id; a non-nil error means it
 	// is gone / not resumable (GC'd, terminated) and the caller opens fresh.
-	resumeRoot(ctx context.Context, rootID string) error
+	resumeRoot(rootID string) error
 	// boundRoot finds an active root already bound to contextID (the
 	// restart-rebuild path). found=false when none exists.
-	boundRoot(ctx context.Context, contextID string) (rootID string, found bool, err error)
+	boundRoot(contextID string) (rootID string, found bool, err error)
 }
 
 // contextSession is the adapter's per-contextId view of a durable hugen root
@@ -77,8 +83,10 @@ func newContextRegistry(rs rootStore, logger *slog.Logger) *contextRegistry {
 }
 
 // resolve returns the contextSession bound to contextID. Cache hit → reuse;
-// miss → resume an existing bound root (restart) or open a fresh one.
-func (r *contextRegistry) resolve(ctx context.Context, contextID string) (*contextSession, error) {
+// miss → resume an existing bound root (restart) or open a fresh one. No ctx
+// param: the durable root lives on the adapter lifecycle, not the caller's
+// request (see rootStore).
+func (r *contextRegistry) resolve(contextID string) (*contextSession, error) {
 	if contextID == "" {
 		return nil, errEmptyContextID
 	}
@@ -91,16 +99,16 @@ func (r *contextRegistry) resolve(ctx context.Context, contextID string) (*conte
 
 	// Cache miss. After a restart the in-memory map is empty but a durable
 	// root may still carry the binding in its metadata — find + resume it.
-	if rootID, found, err := r.store.boundRoot(ctx, contextID); err != nil {
+	if rootID, found, err := r.store.boundRoot(contextID); err != nil {
 		r.logger.Warn("a2a: boundRoot lookup failed; opening fresh", "context_id", contextID, "err", err)
 	} else if found {
-		if err := r.store.resumeRoot(ctx, rootID); err == nil {
+		if err := r.store.resumeRoot(rootID); err == nil {
 			return r.bind(contextID, rootID, "resumed"), nil
 		}
 		r.logger.Warn("a2a: bound root not resumable; opening fresh", "context_id", contextID, "root", rootID)
 	}
 
-	rootID, err := r.store.openRoot(ctx, contextID)
+	rootID, err := r.store.openRoot(contextID)
 	if err != nil {
 		return nil, fmt.Errorf("a2a: open root for context %q: %w", contextID, err)
 	}
@@ -128,15 +136,22 @@ func (r *contextRegistry) forget(contextID string) {
 // hostRootStore is the production rootStore: it drives the runtime via
 // adapter.Host, stamping the contextId binding into session metadata on open
 // and reading it back from session summaries on rebuild.
+//
+// lifecycleCtx is the adapter's long-lived Run ctx (the whole `hugen a2a`
+// process). It — NOT a per-request ctx — is what opens/resumes sessions, so a
+// durable root's Run loop outlives any single A2A request (manager.Open starts
+// the loop on the supplied ctx; a request ctx would kill the session on
+// return).
 type hostRootStore struct {
-	host  adapter.Host
-	owner protocol.ParticipantInfo
+	host         adapter.Host
+	owner        protocol.ParticipantInfo
+	lifecycleCtx context.Context
 }
 
 var _ rootStore = hostRootStore{}
 
-func (h hostRootStore) openRoot(ctx context.Context, contextID string) (string, error) {
-	sess, _, err := h.host.OpenSession(ctx, session.OpenRequest{
+func (h hostRootStore) openRoot(contextID string) (string, error) {
+	sess, _, err := h.host.OpenSession(h.lifecycleCtx, session.OpenRequest{
 		OwnerID:      h.owner.ID,
 		Participants: []protocol.ParticipantInfo{h.owner},
 		Metadata:     map[string]any{contextIDMetaKey: contextID},
@@ -147,16 +162,16 @@ func (h hostRootStore) openRoot(ctx context.Context, contextID string) (string, 
 	return sess.ID(), nil
 }
 
-func (h hostRootStore) resumeRoot(ctx context.Context, rootID string) error {
-	_, err := h.host.ResumeSession(ctx, rootID)
+func (h hostRootStore) resumeRoot(rootID string) error {
+	_, err := h.host.ResumeSession(h.lifecycleCtx, rootID)
 	return err
 }
 
-func (h hostRootStore) boundRoot(ctx context.Context, contextID string) (string, bool, error) {
+func (h hostRootStore) boundRoot(contextID string) (string, bool, error) {
 	// Only active sessions are resumable; a GC'd/terminated root must not be
 	// returned (the caller would fail to resume and open fresh anyway). The
 	// store lists newest-first, so the first metadata match is the freshest.
-	sums, err := h.host.ListSessions(ctx, store.StatusActive)
+	sums, err := h.host.ListSessions(h.lifecycleCtx, store.StatusActive)
 	if err != nil {
 		return "", false, err
 	}

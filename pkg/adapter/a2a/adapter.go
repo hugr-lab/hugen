@@ -153,10 +153,13 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	if a.logger == nil {
 		a.logger = host.Logger()
 	}
-	a.reg = newContextRegistry(hostRootStore{host: host, owner: a.owner}, a.logger)
+	// The registry opens/resumes durable roots on the adapter's Run ctx (the
+	// whole process lifetime), NOT a per-request ctx — a session's Run loop
+	// must outlive any single A2A request.
+	a.reg = newContextRegistry(hostRootStore{host: host, owner: a.owner, lifecycleCtx: ctx}, a.logger)
 
 	card := a.buildCard()
-	handler := a2asrv.NewHandler(newEchoExecutor(a.logger, a.reg))
+	handler := a2asrv.NewHandler(newSessionExecutor(a.logger, a.reg, host, a.owner))
 	jsonrpc := a2asrv.NewJSONRPCHandler(handler)
 	cardHandler := a2asrv.NewStaticAgentCardHandler(card)
 

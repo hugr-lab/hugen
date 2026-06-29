@@ -25,13 +25,13 @@ type fakeRootStore struct {
 	nextID int
 }
 
-func (f *fakeRootStore) openRoot(_ context.Context, _ string) (string, error) {
+func (f *fakeRootStore) openRoot(_ string) (string, error) {
 	f.opens++
 	f.nextID++
 	return fmt.Sprintf("root-%d", f.nextID), nil
 }
 
-func (f *fakeRootStore) resumeRoot(_ context.Context, rootID string) error {
+func (f *fakeRootStore) resumeRoot(rootID string) error {
 	f.resumes++
 	if f.unresumable[rootID] {
 		return errors.New("not resumable")
@@ -39,7 +39,7 @@ func (f *fakeRootStore) resumeRoot(_ context.Context, rootID string) error {
 	return nil
 }
 
-func (f *fakeRootStore) boundRoot(_ context.Context, contextID string) (string, bool, error) {
+func (f *fakeRootStore) boundRoot(contextID string) (string, bool, error) {
 	f.lookups++
 	if id, ok := f.bound[contextID]; ok {
 		return id, true, nil
@@ -51,7 +51,7 @@ func TestResolve_NewContext_OpensOnceThenCaches(t *testing.T) {
 	fs := &fakeRootStore{}
 	r := newContextRegistry(fs, quietLogger())
 
-	cs1, err := r.resolve(context.Background(), "ctx-1")
+	cs1, err := r.resolve("ctx-1")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestResolve_NewContext_OpensOnceThenCaches(t *testing.T) {
 		t.Errorf("opens = %d, want 1", fs.opens)
 	}
 
-	cs2, err := r.resolve(context.Background(), "ctx-1")
+	cs2, err := r.resolve("ctx-1")
 	if err != nil {
 		t.Fatalf("resolve (repeat): %v", err)
 	}
@@ -81,8 +81,8 @@ func TestResolve_DistinctContexts_DistinctRoots(t *testing.T) {
 	fs := &fakeRootStore{}
 	r := newContextRegistry(fs, quietLogger())
 
-	a, _ := r.resolve(context.Background(), "ctx-a")
-	b, _ := r.resolve(context.Background(), "ctx-b")
+	a, _ := r.resolve("ctx-a")
+	b, _ := r.resolve("ctx-b")
 	if a.RootID() == b.RootID() {
 		t.Errorf("distinct contexts share rootID %q", a.RootID())
 	}
@@ -95,7 +95,7 @@ func TestResolve_Restart_ResumesBoundRoot(t *testing.T) {
 	fs := &fakeRootStore{bound: map[string]string{"ctx-1": "root-9"}}
 	r := newContextRegistry(fs, quietLogger())
 
-	cs, err := r.resolve(context.Background(), "ctx-1")
+	cs, err := r.resolve("ctx-1")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestResolve_BoundButNotResumable_OpensFresh(t *testing.T) {
 	}
 	r := newContextRegistry(fs, quietLogger())
 
-	cs, err := r.resolve(context.Background(), "ctx-1")
+	cs, err := r.resolve("ctx-1")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestResolve_BoundButNotResumable_OpensFresh(t *testing.T) {
 
 func TestResolve_EmptyContextID(t *testing.T) {
 	r := newContextRegistry(&fakeRootStore{}, quietLogger())
-	if _, err := r.resolve(context.Background(), ""); !errors.Is(err, errEmptyContextID) {
+	if _, err := r.resolve(""); !errors.Is(err, errEmptyContextID) {
 		t.Fatalf("resolve(\"\") err = %v, want errEmptyContextID", err)
 	}
 }
@@ -143,9 +143,9 @@ func TestForget_RebindsOnNextResolve(t *testing.T) {
 	fs := &fakeRootStore{}
 	r := newContextRegistry(fs, quietLogger())
 
-	r.resolve(context.Background(), "ctx-1") // opens root-1
+	r.resolve("ctx-1") // opens root-1
 	r.forget("ctx-1")
-	cs, _ := r.resolve(context.Background(), "ctx-1") // cache cleared → opens again
+	cs, _ := r.resolve("ctx-1") // cache cleared → opens again
 
 	if fs.opens != 2 {
 		t.Errorf("opens = %d, want 2 (forget cleared the cache)", fs.opens)
@@ -173,9 +173,9 @@ func TestHostRootStore_BoundRoot_FiltersByMetadata(t *testing.T) {
 		{ID: "root-y", Metadata: map[string]any{contextIDMetaKey: "ctx-want"}},
 		{ID: "root-z", Metadata: nil},
 	}}
-	hs := hostRootStore{host: host, owner: serviceParticipant()}
+	hs := hostRootStore{host: host, owner: serviceParticipant(), lifecycleCtx: context.Background()}
 
-	id, found, err := hs.boundRoot(context.Background(), "ctx-want")
+	id, found, err := hs.boundRoot("ctx-want")
 	if err != nil {
 		t.Fatalf("boundRoot: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestHostRootStore_BoundRoot_FiltersByMetadata(t *testing.T) {
 		t.Errorf("boundRoot = (%q, %v), want (root-y, true)", id, found)
 	}
 
-	if _, found, _ := hs.boundRoot(context.Background(), "ctx-missing"); found {
+	if _, found, _ := hs.boundRoot("ctx-missing"); found {
 		t.Error("boundRoot found a binding for an absent contextId")
 	}
 }
