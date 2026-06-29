@@ -154,8 +154,9 @@ type EventRow struct {
 //   - MinSeq=0 returns events from the start of the session (phase-1
 //     default; matches the previous int-only signature).
 //   - MinSeq>0 returns events with seq strictly greater than MinSeq;
-//     this is the reconnection-replay cursor consumed by
-//     pkg/adapter/http (Last-Event-ID header). See R-Plan-20.
+//     this is the reconnection-replay cursor for a streaming adapter's
+//     Last-Event-ID resume (the future hub HTTP web-app adapter +
+//     A2A resubscribe will consume it). See R-Plan-20.
 //   - Limit=0 means "use the implementation default" (1000 for the
 //     local store).
 //   - Kinds, when non-empty, narrows the query to those event_type

@@ -9,18 +9,6 @@ agent:
   name: hugen
   type: hugen-default
 
-# ── Listener bindings ───────────────────────────────────────
-# Port + base URL for the A2A endpoint (agent card + /invoke + OIDC
-# callback). Must be reachable from A2A clients.
-a2a:
-  port: 10000
-  base_url: http://localhost:10000
-
-# Loopback-only developer UI (webui mode).
-devui:
-  port: 10001
-  base_url: http://localhost:10001
-
 # ── LLM ─────────────────────────────────────────────────────
 # Hugr data source name + per-call defaults. The Hugr instance pointed
 # at by HUGR_URL is responsible for routing this name to a real provider.
