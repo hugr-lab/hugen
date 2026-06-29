@@ -90,25 +90,53 @@ func (e *sessionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorC
 				text = recovered
 			}
 		}
-		um := protocol.NewUserMessage(rootID, e.owner, text)
-		if err := e.io.Submit(turnCtx, um); err != nil {
-			yield(nil, fmt.Errorf("a2a: submit user_message to %s: %w", rootID, err))
-			return
-		}
-		e.logger.Debug("a2a: turn submitted", "context_id", execCtx.ContextID, "root", rootID, "len", len(text))
 
-		e.drainTurn(turnCtx, sub, execCtx, yield)
+		// A5: if this context is parked on an inquiry, the inbound text is the
+		// ANSWER — route it down as an InquiryResponse (cascade-down), not a new
+		// user turn. The park is keyed on the contextId, so it resolves even when
+		// a client replays with a fresh task (Copilot) rather than honouring
+		// stateful input-required.
+		if pend := cs.peekPending(); pend != nil {
+			resp, err := buildInquiryResponse(e.owner, rootID, pend, text)
+			if err != nil {
+				// Unparseable answer (e.g. an empty approval). Keep the inquiry
+				// parked and re-ask — the session is still blocked in
+				// session:inquire, so we must not submit a user turn.
+				e.logger.Debug("a2a: inquiry answer unparseable; re-asking",
+					"context_id", execCtx.ContextID, "err", err)
+				e.requestInput(execCtx, fmt.Sprintf("%s\n\n(%s)", pend.Question, err), yield)
+				return
+			}
+			cs.clearPending()
+			if err := e.io.Submit(turnCtx, resp); err != nil {
+				yield(nil, fmt.Errorf("a2a: submit inquiry_response to %s: %w", rootID, err))
+				return
+			}
+			e.logger.Debug("a2a: inquiry answered",
+				"context_id", execCtx.ContextID, "root", rootID, "kind", pend.Kind)
+		} else {
+			um := protocol.NewUserMessage(rootID, e.owner, text)
+			if err := e.io.Submit(turnCtx, um); err != nil {
+				yield(nil, fmt.Errorf("a2a: submit user_message to %s: %w", rootID, err))
+				return
+			}
+			e.logger.Debug("a2a: turn submitted", "context_id", execCtx.ContextID, "root", rootID, "len", len(text))
+		}
+
+		e.drainTurn(turnCtx, sub, execCtx, cs, yield)
 	}
 }
 
-// drainTurn reads the session's outbox until the synchronous turn completes,
-// accumulating the assistant text and yielding the final A2A Message. It is the
-// sync subset of the §4 translation table; A5 (inquiry) and A6 (async mission)
-// extend the SessionStatus handling.
+// drainTurn reads the session's outbox until the turn reaches a boundary,
+// accumulating the assistant text. A turn ends one of three ways: the session
+// goes idle (turn_complete → finishTurn), a tier calls session:inquire (an
+// InquiryRequest → park as input-required, A5), or it errors. A6 (async
+// mission) extends the SessionStatus handling further.
 func (e *sessionExecutor) drainTurn(
 	ctx context.Context,
 	sub <-chan protocol.Frame,
 	execCtx *a2asrv.ExecutorContext,
+	cs *contextSession,
 	yield func(a2a.Event, error) bool,
 ) {
 	var b strings.Builder
@@ -118,11 +146,11 @@ func (e *sessionExecutor) drainTurn(
 			// Client gave up or shutdown — emit what we have so the turn
 			// isn't left dangling, then stop. The session keeps running;
 			// its tail frames persist in the event log.
-			yield(e.replyMessage(b.String()), nil)
+			e.finishTurn(execCtx, b.String(), yield)
 			return
 		case f, ok := <-sub:
 			if !ok {
-				yield(e.replyMessage(b.String()), nil)
+				e.finishTurn(execCtx, b.String(), yield)
 				return
 			}
 			switch fr := f.(type) {
@@ -135,6 +163,15 @@ func (e *sessionExecutor) drainTurn(
 				if !fr.Payload.Consolidated {
 					b.WriteString(fr.Payload.Text)
 				}
+			case *protocol.InquiryRequest:
+				// A5: a tier called session:inquire — surface it as an A2A
+				// input-required task and park. Any assistant text streamed
+				// before the question becomes the prompt's preamble. The
+				// InquiryRequest (not the SessionStatus(wait_*) frame) is the
+				// authoritative park trigger — it always reaches root, the same
+				// signal the TUI keys on.
+				e.parkAndRequestInput(cs, execCtx, &fr.Payload, b.String(), yield)
+				return
 			case *protocol.Error:
 				yield(nil, fmt.Errorf("a2a: session error [%s]: %s", fr.Payload.Code, fr.Payload.Message))
 				return
@@ -150,20 +187,67 @@ func (e *sessionExecutor) drainTurn(
 					}
 					e.logger.Debug("a2a: turn complete",
 						"context_id", execCtx.ContextID, "reason", fr.Payload.Reason, "len", b.Len())
-					yield(e.replyMessage(b.String()), nil)
+					e.finishTurn(execCtx, b.String(), yield)
 					return
 				default:
-					// active / wait_subagents (A6) / wait_user_input (A5) /
-					// wait_approval — not yet special-cased; keep draining.
+					// active / wait_subagents (A6) / wait_user_input /
+					// wait_approval — narration only; the InquiryRequest frame
+					// above is what actually parks the turn.
 				}
 			}
 		}
 	}
 }
 
-// replyMessage builds the terminal agent Message for a turn.
-func (e *sessionExecutor) replyMessage(text string) a2a.Event {
-	return a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(text))
+// finishTurn yields the terminal event carrying the assistant reply. On a plain
+// turn (no task materialised) that is a bare agent Message. But once a prior
+// turn parked this context as input-required, a Task exists in the store, and
+// the SDK rejects a bare Message after a task is stored — so a turn that
+// CONTINUES such a task (StoredTask != nil) must complete via a status update
+// instead, carrying the reply as the status message.
+func (e *sessionExecutor) finishTurn(execCtx *a2asrv.ExecutorContext, text string, yield func(a2a.Event, error) bool) {
+	msg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(text))
+	if execCtx.StoredTask != nil {
+		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, msg), nil)
+		return
+	}
+	yield(msg, nil)
+}
+
+// parkAndRequestInput records the in-flight inquiry on the context session and
+// surfaces it to the client as an input-required task. Spec §A5.
+func (e *sessionExecutor) parkAndRequestInput(
+	cs *contextSession,
+	execCtx *a2asrv.ExecutorContext,
+	p *protocol.InquiryRequestPayload,
+	preamble string,
+	yield func(a2a.Event, error) bool,
+) {
+	prompt := inquiryPrompt(p, preamble)
+	cs.park(&parkedInquiry{
+		RequestID:       p.RequestID,
+		CallerSessionID: p.CallerSessionID,
+		Kind:            p.Type,
+		Question:        prompt,
+	})
+	e.logger.Debug("a2a: parking inquiry as input-required",
+		"context_id", execCtx.ContextID, "kind", p.Type, "request_id", p.RequestID)
+	e.requestInput(execCtx, prompt, yield)
+}
+
+// requestInput emits the input-required task carrying prompt. On a brand-new
+// turn (no StoredTask) it first materialises the task with a submitted event —
+// the SDK requires the first event on a new task to be a Task, not a status
+// update (taskupdate manager). On a continuation the task already exists, so the
+// status update goes out alone.
+func (e *sessionExecutor) requestInput(execCtx *a2asrv.ExecutorContext, prompt string, yield func(a2a.Event, error) bool) {
+	if execCtx.StoredTask == nil {
+		if !yield(a2a.NewSubmittedTask(execCtx, execCtx.Message), nil) {
+			return
+		}
+	}
+	msg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(prompt))
+	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateInputRequired, msg), nil)
 }
 
 // Cancel implements a2asrv.AgentExecutor. The minimal correct response is a

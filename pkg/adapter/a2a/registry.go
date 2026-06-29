@@ -46,17 +46,61 @@ type rootStore interface {
 	boundRoot(contextID string) (rootID string, found bool, err error)
 }
 
+// parkedInquiry is the adapter's record of an in-flight HITL inquiry that a
+// turn surfaced to the client as an A2A `input-required` task. On the runtime
+// side the inquiring tier is blocked inside session:inquire; the NEXT inbound
+// on this contextId is the user's answer. Keying the park on the contextId (not
+// the A2A task) is the design's robustness lever: it reconciles correctly even
+// when a client like Copilot ignores stateful input-required and just replays
+// with a fresh task. Mirrors tui.PendingInquiry. Spec §A5.
+type parkedInquiry struct {
+	RequestID       string
+	CallerSessionID string
+	Kind            string // protocol.InquiryType{Approval,Clarification,ResearchBatch}
+	// Question is the rendered prompt text, retained so an unparseable answer
+	// (e.g. an empty approval) can be re-asked against the same parked state.
+	Question string
+}
+
 // contextSession is the adapter's per-contextId view of a durable hugen root
-// session. A2 holds only the binding (contextId ↔ rootId). A3 grows it with
-// the long-lived Subscribe channel, the reader goroutine, and the observed
-// session state (parked? pending inquiry? active long-task).
+// session. A2 holds the binding (contextId ↔ rootId); A5 adds the parked-inquiry
+// state — set by the Execute that observes a session:inquire frame, read+cleared
+// by the next Execute (the answer turn). No goroutine: the state lives here, and
+// turns for one contextId run sequentially, but the mutex guards the rare
+// concurrent-inbound race.
 type contextSession struct {
 	contextID string
 	rootID    string
+
+	mu      sync.Mutex
+	pending *parkedInquiry
 }
 
 // RootID returns the durable root session id this context is bound to.
 func (cs *contextSession) RootID() string { return cs.rootID }
+
+// park records that this turn surfaced an inquiry; the next inbound is its
+// answer. A fresh inquiry supersedes any stale pending one.
+func (cs *contextSession) park(p *parkedInquiry) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.pending = p
+}
+
+// peekPending returns the in-flight inquiry without clearing it, so an
+// unparseable answer can re-ask against the same parked state.
+func (cs *contextSession) peekPending() *parkedInquiry {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.pending
+}
+
+// clearPending drops the in-flight inquiry once a valid answer was submitted.
+func (cs *contextSession) clearPending() {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.pending = nil
+}
 
 // contextRegistry maps A2A contextIds to durable root sessions, opening or
 // resuming as needed. One ContextSession per contextId; safe for concurrent
