@@ -72,7 +72,9 @@ func TestRun_RefusesDeferredSubcommands(t *testing.T) {
 		wantExit int
 		wantOut  string
 	}{
-		{"a2a refused", []string{"a2a"}, exitUsage, "integration arc"},
+		// `a2a` is no longer refused — it boots the A2A adapter (design/008
+		// Stage 1). Its happy path needs a full runtime, so it is covered by
+		// adapter-level tests in pkg/adapter/a2a, not here.
 		{"unknown sub refused", []string{"wat"}, exitUsage, "unknown subcommand"},
 	}
 	for _, tc := range cases {

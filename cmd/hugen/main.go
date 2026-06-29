@@ -8,7 +8,7 @@
 //     owned by main; subcommand handlers never re-bootstrap.
 //  2. Dispatch on os.Args[1]:
 //     tui    — attaches the Bubble Tea TUI adapter (default).
-//     a2a    — refused (returns in the integration arc; design/008).
+//     a2a    — attaches the A2A protocol adapter (design/008, Stage 1).
 //  3. Block on ctx until SIGINT/SIGTERM, then defer-shutdown core.
 package main
 
@@ -57,19 +57,17 @@ func run(args []string, errOut io.Writer) int {
 	}
 
 	switch sub {
-	case "a2a":
-		fmt.Fprintln(errOut, "the a2a mode is not yet available in this build; planned for the integration arc (design/008)")
-		return exitUsage
-	case "", "tui":
+	case "a2a", "", "tui":
 		// OK — fall through to bootstrap.
 	default:
 		fmt.Fprintf(errOut, "unknown subcommand %q\n\n", sub)
-		fmt.Fprintln(errOut, "usage: hugen [tui]")
+		fmt.Fprintln(errOut, "usage: hugen [tui|a2a]")
 		fmt.Fprintln(errOut, "  tui    start the Bubble Tea TUI adapter (default)")
+		fmt.Fprintln(errOut, "  a2a    start the A2A protocol adapter (headless; Teams/Copilot interop)")
 		return exitUsage
 	}
 
-	core, _, err := bootRuntime(ctx)
+	core, boot, err := bootRuntime(ctx)
 	if err != nil {
 		fmt.Fprintf(errOut, "%v\n", err)
 		return 1
@@ -80,6 +78,9 @@ func run(args []string, errOut io.Writer) int {
 		core.Shutdown(sCtx)
 	}()
 
+	if sub == "a2a" {
+		return runA2A(ctx, core, boot)
+	}
 	return runTUI(ctx, core)
 }
 

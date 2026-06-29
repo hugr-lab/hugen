@@ -3,6 +3,7 @@ module github.com/hugr-lab/hugen
 go 1.26.1
 
 require (
+	github.com/a2aproject/a2a-go/v2 v2.3.1
 	github.com/apache/arrow-go/v18 v18.6.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
