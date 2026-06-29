@@ -46,18 +46,23 @@ func TestBuildCard(t *testing.T) {
 	if !card.Capabilities.Streaming || !card.Capabilities.PushNotifications {
 		t.Errorf("card.Capabilities = %+v, want streaming+push", card.Capabilities)
 	}
-	if len(card.SupportedInterfaces) != 1 {
-		t.Fatalf("card.SupportedInterfaces = %+v, want exactly one", card.SupportedInterfaces)
+	// Two interfaces at the same /a2a URL: v1.0 + v0.3 (header-dispatched).
+	if len(card.SupportedInterfaces) != 2 {
+		t.Fatalf("card.SupportedInterfaces = %+v, want two (v1.0 + v0.3)", card.SupportedInterfaces)
 	}
-	iface := card.SupportedInterfaces[0]
-	if want := "https://agent.example.com" + jsonRPCPath; iface.URL != want {
-		t.Errorf("interface URL = %q, want %q", iface.URL, want)
+	wantURL := "https://agent.example.com" + jsonRPCPath
+	versions := map[a2a.ProtocolVersion]bool{}
+	for _, iface := range card.SupportedInterfaces {
+		if iface.URL != wantURL {
+			t.Errorf("interface URL = %q, want %q", iface.URL, wantURL)
+		}
+		if iface.ProtocolBinding != a2a.TransportProtocolJSONRPC {
+			t.Errorf("interface binding = %q, want %q", iface.ProtocolBinding, a2a.TransportProtocolJSONRPC)
+		}
+		versions[iface.ProtocolVersion] = true
 	}
-	if iface.ProtocolBinding != a2a.TransportProtocolJSONRPC {
-		t.Errorf("interface binding = %q, want %q", iface.ProtocolBinding, a2a.TransportProtocolJSONRPC)
-	}
-	if iface.ProtocolVersion != a2a.Version {
-		t.Errorf("interface version = %q, want %q", iface.ProtocolVersion, a2a.Version)
+	if !versions[a2a.Version] || !versions[protocolVersion03] {
+		t.Errorf("interface versions = %v, want both %q and %q", versions, a2a.Version, protocolVersion03)
 	}
 }
 
@@ -241,6 +246,114 @@ func TestSessionExecutor_Execute_CtxCancel(t *testing.T) {
 	}
 	if _, ok := events[0].(*a2a.Message); !ok {
 		t.Fatalf("event 0 is %T, want *a2a.Message", events[0])
+	}
+}
+
+func TestVersionDispatch(t *testing.T) {
+	mark := func(s string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, s) })
+	}
+	h := versionDispatchHandler{v1: mark("v1"), v03: mark("v03")}
+	cases := []struct{ hdr, want string }{
+		{"", "v03"},    // Copilot: no version header → v0.3
+		{"0.3", "v03"}, // explicit v0.3
+		{"1.0", "v1"},  // spec-compliant v1.0
+		{"1.4", "v1"},  // any 1.x
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodPost, jsonRPCPath, nil)
+		if c.hdr != "" {
+			req.Header.Set("A2A-Version", c.hdr)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Body.String(); got != c.want {
+			t.Errorf("A2A-Version %q → %q, want %q", c.hdr, got, c.want)
+		}
+	}
+}
+
+// copilotHistory builds the nested chathistory metadata envelope the way it
+// arrives after JSON decode (verified MS-sample shape, §2.3a).
+func copilotHistory(entries ...[2]string) map[string]any {
+	var vals []any
+	for _, e := range entries {
+		vals = append(vals, map[string]any{"From": e[0], "Locale": "en-US", "Text": e[1]})
+	}
+	return map[string]any{
+		chatHistoryMetaKey: []any{map[string]any{"HasValue": true, "Value": vals}},
+	}
+}
+
+func TestLatestUserTextFromHistory(t *testing.T) {
+	// From:"" = user; non-empty From = agent. Want the LAST user entry.
+	m := &a2a.Message{Metadata: copilotHistory(
+		[2]string{"agent1", "Hello"},
+		[2]string{"", "first user msg"},
+		[2]string{"agent1", "answer"},
+		[2]string{"", "latest user msg\n\n"},
+	)}
+	if got := latestUserTextFromHistory(m); got != "latest user msg" {
+		t.Errorf("latestUserTextFromHistory = %q, want %q", got, "latest user msg")
+	}
+	if got := latestUserTextFromHistory(&a2a.Message{}); got != "" {
+		t.Errorf("no-metadata = %q, want empty", got)
+	}
+	if got := latestUserTextFromHistory(nil); got != "" {
+		t.Errorf("nil message = %q, want empty", got)
+	}
+}
+
+func TestSessionExecutor_Execute_EmptyParts_FallsBackToHistory(t *testing.T) {
+	io := &fakeFrameIO{ch: make(chan protocol.Frame, 2)}
+	io.ch <- idleFrame("root-1", "turn_complete")
+
+	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	// Empty parts; the latest user turn is only in the chathistory tail.
+	msg := &a2a.Message{Role: a2a.MessageRoleUser, Metadata: copilotHistory(
+		[2]string{"agent1", "Hi there"},
+		[2]string{"", "recovered question"},
+	)}
+	execCtx := &a2asrv.ExecutorContext{Message: msg, ContextID: "ctx-1", TaskID: a2a.NewTaskID()}
+
+	if _, err := collectErr(e.Execute(context.Background(), execCtx)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(io.submitted) != 1 {
+		t.Fatalf("submitted %d, want 1", len(io.submitted))
+	}
+	um := io.submitted[0].(*protocol.UserMessage)
+	if um.Payload.Text != "recovered question" {
+		t.Errorf("submitted text = %q, want %q (recovered from history)", um.Payload.Text, "recovered question")
+	}
+}
+
+func TestSessionExecutor_Execute_WarmIgnoresHistory(t *testing.T) {
+	io := &fakeFrameIO{ch: make(chan protocol.Frame, 2)}
+	io.ch <- idleFrame("root-1", "turn_complete")
+
+	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	// parts carries the new turn; chathistory is full replayed context that the
+	// durable session already holds — must be IGNORED (no double history).
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("the real new message"))
+	msg.Metadata = copilotHistory(
+		[2]string{"agent1", "old agent reply"},
+		[2]string{"", "an older user message"},
+		[2]string{"", "the real new message"},
+	)
+	execCtx := &a2asrv.ExecutorContext{Message: msg, ContextID: "ctx-1", TaskID: a2a.NewTaskID()}
+
+	if _, err := collectErr(e.Execute(context.Background(), execCtx)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(io.submitted) != 1 {
+		t.Fatalf("submitted %d, want 1 (only the new turn, not replayed history)", len(io.submitted))
+	}
+	um := io.submitted[0].(*protocol.UserMessage)
+	if um.Payload.Text != "the real new message" {
+		t.Errorf("submitted text = %q, want only the parts text", um.Payload.Text)
 	}
 }
 

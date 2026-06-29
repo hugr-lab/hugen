@@ -18,6 +18,12 @@ import (
 // the executor must not mistake it for a turn boundary.
 const reasonSessionOpened = "session_opened"
 
+// chatHistoryMetaKey is the Copilot Studio metadata key carrying the full,
+// replayed conversation on every inbound (verified, a2a-integration.md §2.3a).
+// We normally ignore it (the durable session has its own history); it is only
+// consulted as a fallback when message.parts is empty.
+const chatHistoryMetaKey = "copilotstudio.microsoft.com/a2a/chathistory"
+
 // frameIO is the narrow inbound/outbound Frame surface the executor needs:
 // submit a frame into a session and subscribe to its outbox. adapter.Host
 // satisfies it; keeping the dependency narrow (no *session.Session) makes the
@@ -72,7 +78,18 @@ func (e *sessionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorC
 			return
 		}
 
+		// The new user turn is in message.parts (A4 / §2.3a verified). The
+		// Copilot chathistory metadata is the full, duplicated conversation —
+		// ignored here because our durable session already holds the history;
+		// feeding it back would double it. Defensive fallback only: if parts is
+		// empty, recover the latest user turn from the chathistory tail.
 		text := messageText(execCtx.Message)
+		if text == "" {
+			if recovered := latestUserTextFromHistory(execCtx.Message); recovered != "" {
+				e.logger.Debug("a2a: empty parts; recovered text from chathistory", "context_id", execCtx.ContextID)
+				text = recovered
+			}
+		}
 		um := protocol.NewUserMessage(rootID, e.owner, text)
 		if err := e.io.Submit(turnCtx, um); err != nil {
 			yield(nil, fmt.Errorf("a2a: submit user_message to %s: %w", rootID, err))
@@ -155,6 +172,47 @@ func (e *sessionExecutor) Cancel(_ context.Context, execCtx *a2asrv.ExecutorCont
 	return func(yield func(a2a.Event, error) bool) {
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCanceled, nil), nil)
 	}
+}
+
+// latestUserTextFromHistory recovers the most recent user utterance from the
+// Copilot chathistory metadata envelope — the A4 fallback for an inbound whose
+// message.parts is empty. Shape (verified, §2.3a):
+//
+//	metadata["…/chathistory"] = [ {HasValue, Value:[ {From, Text, …}, … ]} ]
+//
+// User entries carry From:"" (agent entries carry an internal name), so the
+// last entry with From=="" is the current user turn. Returns "" if absent.
+func latestUserTextFromHistory(m *a2a.Message) string {
+	if m == nil || m.Metadata == nil {
+		return ""
+	}
+	outer, ok := m.Metadata[chatHistoryMetaKey].([]any)
+	if !ok {
+		return ""
+	}
+	var last string
+	for _, o := range outer {
+		om, ok := o.(map[string]any)
+		if !ok {
+			continue
+		}
+		vals, ok := om["Value"].([]any)
+		if !ok {
+			continue
+		}
+		for _, v := range vals {
+			vm, ok := v.(map[string]any)
+			if !ok {
+				continue
+			}
+			from, _ := vm["From"].(string)
+			text, _ := vm["Text"].(string)
+			if from == "" && strings.TrimSpace(text) != "" {
+				last = text
+			}
+		}
+	}
+	return strings.TrimSpace(last)
 }
 
 // messageText concatenates the text content of every TextPart in m. Non-text

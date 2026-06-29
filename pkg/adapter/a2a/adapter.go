@@ -19,9 +19,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
 	"github.com/hugr-lab/hugen/pkg/adapter"
@@ -160,13 +162,20 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 
 	card := a.buildCard()
 	handler := a2asrv.NewHandler(newSessionExecutor(a.logger, a.reg, host, a.owner))
-	jsonrpc := a2asrv.NewJSONRPCHandler(handler)
+	// Serve BOTH wire versions over the same RequestHandler, dispatched by the
+	// A2A-Version header (A4): Microsoft Copilot posts message/send (v0.3) with
+	// no version header, while spec-compliant v1.0 clients send "1.x". Without
+	// the v0.3 leg Copilot can't reach the agent at all.
+	rpc := versionDispatchHandler{
+		v1:  a2asrv.NewJSONRPCHandler(handler),
+		v03: a2av0.NewJSONRPCHandler(handler),
+	}
 	cardHandler := a2asrv.NewStaticAgentCardHandler(card)
 
 	register := func(mux *http.ServeMux) {
 		mux.Handle(a2asrv.WellKnownAgentCardPath, cardHandler)
 		mux.Handle(legacyCardPath, cardHandler)
-		mux.Handle(jsonRPCPath, jsonrpc)
+		mux.Handle(jsonRPCPath, rpc)
 	}
 
 	if a.sharedMux != nil {
@@ -200,17 +209,43 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	return nil
 }
 
+// protocolVersion03 is the v0.3 wire version string (the SDK exports a const
+// only for the current 1.0). The same /a2a endpoint serves both via the
+// version-dispatch handler, so the card advertises both interfaces.
+const protocolVersion03 a2a.ProtocolVersion = "0.3"
+
+// versionDispatchHandler routes A2A JSON-RPC at /a2a by the A2A-Version header:
+// "1.x" → the v1.0 handler; empty or "0.3" → the v0.3 compat handler. Per the
+// A2A spec an absent header means 0.3 — which is exactly what Microsoft Copilot
+// sends (it posts message/send with no version header).
+type versionDispatchHandler struct {
+	v1  http.Handler
+	v03 http.Handler
+}
+
+func (h versionDispatchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(strings.TrimSpace(r.Header.Get("A2A-Version")), "1.") {
+		h.v1.ServeHTTP(w, r)
+		return
+	}
+	h.v03.ServeHTTP(w, r)
+}
+
 // buildCard assembles the v1.0 agent card. Stage 1 advertises one skill
 // ("hugr analyst") over the JSON-RPC interface; missions/tasks map to
-// additional AgentSkills later (spec §1 non-goals).
+// additional AgentSkills later (spec §1 non-goals). The same /a2a endpoint
+// serves v1.0 and v0.3 (header-dispatched), so both are advertised.
 func (a *Adapter) buildCard() *a2a.AgentCard {
-	iface := a2a.NewAgentInterface(a.baseURL+jsonRPCPath, a2a.TransportProtocolJSONRPC)
-	iface.ProtocolVersion = a2a.Version // "1.0"
+	url := a.baseURL + jsonRPCPath
+	ifaceV1 := a2a.NewAgentInterface(url, a2a.TransportProtocolJSONRPC)
+	ifaceV1.ProtocolVersion = a2a.Version // "1.0"
+	ifaceV03 := a2a.NewAgentInterface(url, a2a.TransportProtocolJSONRPC)
+	ifaceV03.ProtocolVersion = protocolVersion03
 	return &a2a.AgentCard{
 		Name:                a.agentName,
 		Description:         a.agentDesc,
 		Version:             agentVersion,
-		SupportedInterfaces: []*a2a.AgentInterface{iface},
+		SupportedInterfaces: []*a2a.AgentInterface{ifaceV1, ifaceV03},
 		Capabilities: a2a.AgentCapabilities{
 			Streaming:         true,
 			PushNotifications: true,
