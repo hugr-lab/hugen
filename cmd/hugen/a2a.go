@@ -23,6 +23,12 @@ func runA2A(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) int 
 		a2a.WithBaseURL(a2aBaseURL(boot)),
 		a2a.WithAPIKey(boot.A2AAPIKey),
 	}
+	// A10: by-ref artifact delivery — published files surface as FileParts
+	// pointing at the adapter's signed download endpoint, resolved through the
+	// artifact store. Only when artifacts are enabled.
+	if core.Artifacts != nil {
+		opts = append(opts, a2a.WithArtifactResolver(core.Artifacts.Store().Path))
+	}
 	if boot.A2APort > 0 {
 		opts = append(opts, a2a.WithListenPort(boot.A2APort))
 		core.Logger.Info("a2a: dedicated listener mode", "port", boot.A2APort)

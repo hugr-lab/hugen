@@ -220,7 +220,7 @@ func TestSessionExecutor_Execute_SyncTurn(t *testing.T) {
 	io.ch <- idleFrame("root-1", "turn_complete")
 
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant(), nil)
 	execCtx := &a2asrv.ExecutorContext{
 		Message:   a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi")),
 		ContextID: "ctx-1",
@@ -266,7 +266,7 @@ func TestSessionExecutor_Execute_ErrorFrame(t *testing.T) {
 	io.ch <- protocol.NewError("root-1", serviceParticipant(), "boom", "kaboom", false)
 
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant(), nil)
 	execCtx := &a2asrv.ExecutorContext{
 		Message:   a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi")),
 		ContextID: "ctx-1",
@@ -287,7 +287,7 @@ func TestSessionExecutor_Execute_CtxCancel(t *testing.T) {
 	io.ch <- agentFrame("root-1", "partial", true, 0) // no idle boundary follows
 
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant(), nil)
 	execCtx := &a2asrv.ExecutorContext{
 		Message:   a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi")),
 		ContextID: "ctx-1",
@@ -369,7 +369,7 @@ func TestSessionExecutor_Execute_EmptyParts_FallsBackToHistory(t *testing.T) {
 	io.ch <- idleFrame("root-1", "turn_complete")
 
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant(), nil)
 	// Empty parts; the latest user turn is only in the chathistory tail.
 	msg := &a2a.Message{Role: a2a.MessageRoleUser, Metadata: copilotHistory(
 		[2]string{"agent1", "Hi there"},
@@ -394,7 +394,7 @@ func TestSessionExecutor_Execute_WarmIgnoresHistory(t *testing.T) {
 	io.ch <- idleFrame("root-1", "turn_complete")
 
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant(), nil)
 	// parts carries the new turn; chathistory is full replayed context that the
 	// durable session already holds — must be IGNORED (no double history).
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("the real new message"))
@@ -419,7 +419,7 @@ func TestSessionExecutor_Execute_WarmIgnoresHistory(t *testing.T) {
 
 func TestSessionExecutor_Cancel(t *testing.T) {
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, &fakeFrameIO{}, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, &fakeFrameIO{}, serviceParticipant(), nil)
 	execCtx := &a2asrv.ExecutorContext{ContextID: "ctx-1", TaskID: a2a.NewTaskID()}
 	events := collect(t, e.Cancel(context.Background(), execCtx))
 	if len(events) != 1 {

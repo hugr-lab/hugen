@@ -92,6 +92,12 @@ type Adapter struct {
 	// from HUGEN_A2A_API_KEY (an adapter knob → env, never YAML).
 	apiKey string
 
+	// artifactResolve resolves a published artifact (rootID, id) to a local
+	// path so the by-ref download endpoint (A10) can stream it. nil disables
+	// artifact delivery (no /a2a/artifacts/ endpoint, no FilePart emitted).
+	// Wired from core.Artifacts.Store().Path in runA2A.
+	artifactResolve artifactResolver
+
 	// host is the runtime side of the adapter contract, captured in Run.
 	host adapter.Host
 	// reg maps contextIds to durable root sessions (A2). Built in Run;
@@ -146,6 +152,13 @@ func WithServiceIdentity(id, name string) Option {
 // apiKeyHeader header (A9). Empty leaves the endpoint open.
 func WithAPIKey(key string) Option { return func(a *Adapter) { a.apiKey = strings.TrimSpace(key) } }
 
+// WithArtifactResolver enables by-ref artifact delivery (A10): published
+// artifacts surface as A2A FileParts pointing at a signed download URL served
+// by the adapter, and r resolves (rootID, id) → local path. Nil = disabled.
+func WithArtifactResolver(r artifactResolver) Option {
+	return func(a *Adapter) { a.artifactResolve = r }
+}
+
 // New constructs an A2A adapter. Callers must select a listener mode via
 // WithSharedMux or WithListenPort; New does not default one (the cmd layer
 // decides from HUGEN_A2A_PORT).
@@ -182,8 +195,25 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	// must outlive any single A2A request.
 	a.reg = newContextRegistry(hostRootStore{host: host, owner: a.owner, lifecycleCtx: ctx}, a.logger)
 
+	// A10: artifact delivery. The signing secret is the API key when set
+	// (ties artifact access to the same trust) else a fresh random one; the
+	// executor stamps the by-ref signed URL on every published artifact's
+	// FilePart, and the /a2a/artifacts/ endpoint verifies + serves it.
+	var artifactURL func(rootID, id string) string
+	artifactSecret := a.apiKey
+	if a.artifactResolve != nil {
+		if artifactSecret == "" {
+			artifactSecret = randomArtifactSecret()
+		}
+		base := a.baseURL
+		artifactURL = func(rootID, id string) string {
+			return signedArtifactURL(base, artifactSecret, rootID, id, time.Now())
+		}
+		a.logger.Info("a2a: by-ref artifact delivery enabled", "endpoint", artifactPathPrefix)
+	}
+
 	card := a.buildCard()
-	handler := a2asrv.NewHandler(newSessionExecutor(a.logger, a.reg, host, a.owner))
+	handler := a2asrv.NewHandler(newSessionExecutor(a.logger, a.reg, host, a.owner, artifactURL))
 	// Serve BOTH wire versions over the same RequestHandler, dispatched by the
 	// A2A-Version header (A4): Microsoft Copilot posts message/send (v0.3) with
 	// no version header, while spec-compliant v1.0 clients send "1.x". Without
@@ -206,6 +236,11 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 		mux.Handle(a2asrv.WellKnownAgentCardPath, cardHandler)
 		mux.Handle(legacyCardPath, cardHandler)
 		mux.Handle(jsonRPCPath, rpc)
+		// A10: by-ref artifact download, self-authenticated by the signed URL
+		// (NOT behind the API-key header gate).
+		if a.artifactResolve != nil {
+			mux.Handle(artifactPathPrefix, artifactDownloadHandler(artifactSecret, a.artifactResolve, a.logger))
+		}
 	}
 
 	if a.sharedMux != nil {

@@ -31,7 +31,7 @@ func finalFrame(root, text string, active, resultOf []protocol.ActiveSubagentRef
 func TestSessionExecutor_AsyncMission_HeldToCompleted(t *testing.T) {
 	io := &fakeFrameIO{ch: make(chan protocol.Frame, 16)}
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant(), nil)
 
 	// Ack turn: a live chunk, then the Final reporting m1 newly async-spawned.
 	io.ch <- idleFrame("root-1", "session_opened") // pre-turn, skipped
@@ -87,7 +87,7 @@ func TestSessionExecutor_SyncTurn_NotHeldAsAsync(t *testing.T) {
 	io.ch <- finalFrame("root-1", "hi", nil, nil)
 
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant(), nil)
 	execCtx := &a2asrv.ExecutorContext{
 		Message:   a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi")),
 		ContextID: "ctx-1",
@@ -112,7 +112,7 @@ func TestSessionExecutor_SyncTurn_NotHeldAsAsync(t *testing.T) {
 // finishes its own reply immediately.
 func TestSessionExecutor_ChatTurn_DuringRunningMission(t *testing.T) {
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, &fakeFrameIO{}, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, &fakeFrameIO{}, serviceParticipant(), nil)
 	// Simulate the earlier Task already owning m1.
 	cs, _ := reg.resolve("ctx-1")
 	cs.recordNewAsync([]protocol.ActiveSubagentRef{aref("m1")})
@@ -146,7 +146,7 @@ func TestSessionExecutor_ChatTurn_DuringRunningMission(t *testing.T) {
 func TestSessionExecutor_AsyncMission_InnerInquiryFlipsToInputRequired(t *testing.T) {
 	io := &fakeFrameIO{ch: make(chan protocol.Frame, 16)}
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant(), nil)
 
 	io.ch <- agentFrame("root-1", "Started.", false, 0)
 	io.ch <- finalFrame("root-1", "Started.", []protocol.ActiveSubagentRef{aref("m1")}, nil) // → working
@@ -195,7 +195,7 @@ func TestSessionExecutor_AsyncMission_InnerInquiryFlipsToInputRequired(t *testin
 func TestSessionExecutor_AnswerResumesAsyncHold(t *testing.T) {
 	io := &fakeFrameIO{ch: make(chan protocol.Frame, 16)}
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant(), nil)
 	cs, _ := reg.resolve("ctx-1")
 	cs.recordNewAsync([]protocol.ActiveSubagentRef{aref("m1")}) // m1 known (the held Task owns it)
 	cs.park(&parkedInquiry{

@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -46,13 +47,16 @@ type sessionExecutor struct {
 	reg    *contextRegistry
 	io     frameIO
 	owner  protocol.ParticipantInfo
+	// artifactURL builds the by-ref signed download URL for a published
+	// artifact (A10). nil disables artifact delivery (no FilePart emitted).
+	artifactURL func(rootID, id string) string
 }
 
-func newSessionExecutor(l *slog.Logger, reg *contextRegistry, io frameIO, owner protocol.ParticipantInfo) *sessionExecutor {
+func newSessionExecutor(l *slog.Logger, reg *contextRegistry, io frameIO, owner protocol.ParticipantInfo, artifactURL func(rootID, id string) string) *sessionExecutor {
 	if l == nil {
 		l = slog.Default()
 	}
-	return &sessionExecutor{logger: l, reg: reg, io: io, owner: owner}
+	return &sessionExecutor{logger: l, reg: reg, io: io, owner: owner, artifactURL: artifactURL}
 }
 
 // Execute implements a2asrv.AgentExecutor. Sync-turn path (A3): one inbound
@@ -231,6 +235,15 @@ func (e *sessionExecutor) drainTurn(
 				// double-materialise).
 				e.parkAndRequestInput(cs, execCtx, &fr.Payload, b.String(), taskBorn, awaitedIDs(awaited), yield)
 				return
+			case *protocol.ExtensionFrame:
+				// A10: a tier published an artifact (any tier's publish bubbles
+				// to root via the F2 marker). Surface it as an A2A Artifact with
+				// a by-ref FilePart. Not a turn boundary — keep draining.
+				if e.artifactURL != nil &&
+					fr.Payload.Extension == artifactExtensionName &&
+					fr.Payload.Op == artifactOpProduced {
+					e.emitArtifact(execCtx, taskBorn, fr.SessionID(), fr.Payload.Data, yield)
+				}
 			case *protocol.Error:
 				yield(nil, fmt.Errorf("a2a: session error [%s]: %s", fr.Payload.Code, fr.Payload.Message))
 				return
@@ -298,6 +311,29 @@ func (e *sessionExecutor) finishTurn(execCtx *a2asrv.ExecutorContext, taskBorn b
 		return
 	}
 	yield(msg, nil)
+}
+
+// emitArtifact maps a published-artifact ExtensionFrame to an A2A Artifact with
+// a by-ref FilePart (A10): the bytes stay on disk, the FilePart carries the
+// signed URL the client fetches from /a2a/artifacts/. Materialises the Task
+// first (artifacts are task-scoped, so emitting one needs a Task). A malformed
+// ref or empty id is dropped. Phase 8/A10.
+func (e *sessionExecutor) emitArtifact(execCtx *a2asrv.ExecutorContext, taskBorn *bool, rootID string, data json.RawMessage, yield func(a2a.Event, error) bool) {
+	var ref protocol.ArtifactRef
+	if err := json.Unmarshal(data, &ref); err != nil || ref.ID == "" {
+		return
+	}
+	if !*taskBorn {
+		if !yield(a2a.NewSubmittedTask(execCtx, execCtx.Message), nil) {
+			return
+		}
+		*taskBorn = true
+	}
+	part := a2a.NewFileURLPart(a2a.URL(e.artifactURL(rootID, ref.ID)), ref.MIME)
+	part.Filename = ref.Name
+	e.logger.Debug("a2a: artifact published",
+		"context_id", execCtx.ContextID, "name", ref.Name, "id", ref.ID)
+	yield(a2a.NewArtifactEvent(execCtx, part), nil)
 }
 
 // reportWorking emits a `working` status update for an in-flight async mission

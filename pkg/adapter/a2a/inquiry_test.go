@@ -179,7 +179,7 @@ func TestInquiryPrompt(t *testing.T) {
 func TestSessionExecutor_InquiryRoundTrip(t *testing.T) {
 	io := &fakeFrameIO{ch: make(chan protocol.Frame, 8)}
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant(), nil)
 
 	// --- Turn 1: the session asks for approval ---
 	io.ch <- idleFrame("root-1", "session_opened") // pre-turn, must be skipped
@@ -269,7 +269,7 @@ func TestSessionExecutor_InquiryRoundTrip(t *testing.T) {
 func TestSessionExecutor_Answer_CompletesStoredTask(t *testing.T) {
 	io := &fakeFrameIO{ch: make(chan protocol.Frame, 4)}
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant(), nil)
 	cs, _ := reg.resolve("ctx-1")
 	cs.park(&parkedInquiry{RequestID: "req-1", CallerSessionID: "root-1", Kind: protocol.InquiryTypeClarification, Question: "Which region?"})
 
@@ -307,7 +307,7 @@ func TestSessionExecutor_Answer_CompletesStoredTask(t *testing.T) {
 func TestSessionExecutor_ReAsksOnEmptyAnswer(t *testing.T) {
 	io := &fakeFrameIO{ch: make(chan protocol.Frame, 4)}
 	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
-	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant(), nil)
 	cs, _ := reg.resolve("ctx-1")
 	cs.park(&parkedInquiry{RequestID: "req-1", CallerSessionID: "root-1", Kind: protocol.InquiryTypeApproval, Question: "Approve?"})
 
