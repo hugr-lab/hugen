@@ -175,11 +175,19 @@ func (e *Extension) callValidateAndApprove(ctx context.Context, args json.RawMes
 	// tools path). Refine / abort / approve-without-tools all
 	// leave the flag in its reset (false) state.
 	mState.SetAutoApproveTools(false)
+	// A6: this RequestInquiry BLOCKS the planner worker until the user
+	// approves — potentially a long human-time wait for an async mission
+	// reached over A2A. Pause this worker's wall-clock deadline for the
+	// duration so the mission executor's waitForWorkers does not cancel +
+	// re-spawn the planner (which would abandon this pending approval and drop
+	// the eventual answer). Bounded by the inquiry's own timeout.
+	mState.MarkHITLWaiting(state.SessionID())
 	resp, inqErr := parent.RequestInquiry(ctx, protocol.InquiryRequestPayload{
 		Type:     protocol.InquiryTypeApproval,
 		Question: question,
 		Context:  approvalContextFor(*plan, pendingReason),
 	})
+	mState.ClearHITLWaiting(state.SessionID())
 	if inqErr != nil {
 		mState.DiscardStagedDiff()
 		return toolErr("inquire_failed", inqErr.Error())

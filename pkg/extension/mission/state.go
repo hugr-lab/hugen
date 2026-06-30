@@ -75,6 +75,16 @@ type MissionState struct {
 	// session is still attributable.
 	inquired map[string]bool
 
+	// hitlWaiting tracks worker session ids currently blocked on a HITL
+	// inquiry (e.g. the planner inside mission:validate_and_approve waiting
+	// for the user to approve the plan). waitForWorkers pauses the deadline
+	// of any worker in this set so human-wait time does not burn the worker's
+	// work budget — without it an async mission's approval is cancelled +
+	// re-spawned before the user answers. Set/cleared around the blocking
+	// inquiry call; NOT persisted (a restart re-derives from a fresh
+	// approval). Phase 8/A6.
+	hitlWaiting map[string]struct{}
+
 	// firstPlanApproved flips to true the first time the user closes
 	// the approval modal with approve=true (or when the policy opts
 	// out via Initial=skip — the implicit-approve path also flips
@@ -451,6 +461,50 @@ func (m *MissionState) Inquired(sessionID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.inquired[sessionID]
+}
+
+// MarkHITLWaiting records that the worker `sessionID` is currently blocked on a
+// human-in-the-loop inquiry (e.g. the planner parked inside
+// mission:validate_and_approve waiting for the user to approve the plan).
+// waitForWorkers consults IsHITLWaiting to PAUSE that worker's wall-clock
+// deadline — the human-wait time must not count against the worker's work
+// budget, or an async mission's approval would be cancelled + re-spawned before
+// the user (who answers on human time) ever responds. Cleared by
+// ClearHITLWaiting once the inquiry returns (answered or timed out). Phase 8/A6.
+func (m *MissionState) MarkHITLWaiting(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hitlWaiting == nil {
+		m.hitlWaiting = make(map[string]struct{})
+	}
+	m.hitlWaiting[sessionID] = struct{}{}
+}
+
+// ClearHITLWaiting removes the HITL-blocked mark for sessionID (the inquiry
+// settled). Phase 8/A6.
+func (m *MissionState) ClearHITLWaiting(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.hitlWaiting, sessionID)
+}
+
+// IsHITLWaiting reports whether the worker `sessionID` is currently parked on a
+// HITL inquiry — the signal waitForWorkers uses to pause its deadline. Phase
+// 8/A6.
+func (m *MissionState) IsHITLWaiting(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.hitlWaiting[sessionID]
+	return ok
 }
 
 // SetPlannerApproval stamps the dispatching mission's approval

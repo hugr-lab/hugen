@@ -385,6 +385,84 @@ func TestExecutor_RunWave_PerWorkerTimeout(t *testing.T) {
 	}
 }
 
+// TestExecutor_RunWave_HITLWaitingPausesDeadline covers the A6 fix: a worker
+// parked on a HITL inquiry (e.g. the planner inside validate_and_approve
+// waiting for the user to approve) must NOT be cancelled when its wall-clock
+// budget passes — human-wait time is paused. Here the approver stays blocked
+// well past its 30ms role budget, then unblocks and hands off; it must finish
+// `ok`, never `timeout`, and the terminator must not fire.
+func TestExecutor_RunWave_HITLWaitingPausesDeadline(t *testing.T) {
+	state := newFakeState("mis-hitl")
+	m := installMissionState(state)
+
+	spawner := &fakeSpawner{}
+	spawner.ingestion = func(req SpawnRequest, sessionID string) {
+		switch req.Name {
+		case "fast":
+			ref, _ := MakeRef("fast", "w1")
+			m.Handoffs.Put(Handoff{
+				Ref: ref, Kind: KindHandoff, Status: "ok",
+				Body: "done", CreatedAt: time.Now(),
+			})
+		case "approver":
+			// Park on HITL well past the 30ms role budget, then hand off. Land
+			// the handoff BEFORE clearing the HITL mark so the next poll sees a
+			// completed worker (store.Get is checked before the deadline) —
+			// deterministic, no clear↔timeout race. Without the pause this
+			// worker would be cancelled at 30ms, long before the 120ms handoff.
+			m.MarkHITLWaiting(sessionID)
+			go func() {
+				time.Sleep(120 * time.Millisecond)
+				ref, _ := MakeRef("approver", "w1")
+				m.Handoffs.Put(Handoff{
+					Ref: ref, Kind: KindHandoff, Status: "ok",
+					Body: "approved", CreatedAt: time.Now(),
+				})
+				m.ClearHITLWaiting(sessionID)
+			}()
+		}
+	}
+
+	term := &recordingTerminator{}
+	exec := NewExecutor(spawner.spawn, nil).WithTerminator(term.terminate)
+
+	wave := Wave{
+		Label: "w1",
+		Subagents: []SubagentSpec{
+			{Name: "fast", Role: "fast", Task: "t"},
+			{Name: "approver", Role: "approver", Task: "t"},
+		},
+	}
+	roleTimeout := func(role string) time.Duration {
+		if role == "approver" {
+			return 30 * time.Millisecond
+		}
+		return 10 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	status, outcomes, err := exec.RunWave(ctx, state, wave,
+		RunWaveOptions{RoleTimeout: roleTimeout})
+	if err != nil {
+		t.Fatalf("RunWave: unexpected err: %v", err)
+	}
+	if status != WaveStatusOk {
+		t.Errorf("status = %q, want ok (HITL pause kept the approver alive past its budget)", status)
+	}
+
+	byName := map[string]DoneWorker{}
+	for _, o := range outcomes {
+		byName[o.Name] = o
+	}
+	if byName["approver"].Status != "ok" || byName["approver"].TimedOut {
+		t.Errorf("approver outcome = %+v, want ok + NOT timed out (deadline paused while HITL-blocked)", byName["approver"])
+	}
+	if got := term.ids(); len(got) != 0 {
+		t.Errorf("terminator cancelled %v, want none (a HITL-blocked worker must not be cancelled)", got)
+	}
+}
+
 // TestExtension_InitState_WorkerInheritsMissionState verifies the
 // shadowing fix: a worker-tier child does NOT get its own MissionState
 // (which would hide the mission's), so FromState — and thus
