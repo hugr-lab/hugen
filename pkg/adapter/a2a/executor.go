@@ -91,6 +91,21 @@ func (e *sessionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorC
 			}
 		}
 
+		// taskBorn tracks whether an A2A Task has been materialised for THIS
+		// Execute — either the client continued one (StoredTask != nil) or we
+		// emitted a Task/working/input-required event below. Once a Task exists
+		// the SDK forbids a bare Message to finish (taskupdate manager), so the
+		// terminal/working helpers branch on it. Threaded by pointer through the
+		// drain so a `working` emitted mid-drain (A6) flips the finish path.
+		taskBorn := execCtx.StoredTask != nil
+
+		// awaited is THIS Execute's set of async sub-agent session ids it is
+		// holding the Task open for (A6) — local to this turn so concurrent
+		// Tasks on one context each finish on their own async work. Restored
+		// from a parked inquiry when the inquiry fired inside a running async
+		// mission (so the Execute that answers resumes the hold).
+		awaited := map[string]struct{}{}
+
 		// A5: if this context is parked on an inquiry, the inbound text is the
 		// ANSWER — route it down as an InquiryResponse (cascade-down), not a new
 		// user turn. The park is keyed on the contextId, so it resolves even when
@@ -104,7 +119,7 @@ func (e *sessionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorC
 				// session:inquire, so we must not submit a user turn.
 				e.logger.Debug("a2a: inquiry answer unparseable; re-asking",
 					"context_id", execCtx.ContextID, "err", err)
-				e.requestInput(execCtx, fmt.Sprintf("%s\n\n(%s)", pend.Question, err), yield)
+				e.requestInput(execCtx, &taskBorn, fmt.Sprintf("%s\n\n(%s)", pend.Question, err), yield)
 				return
 			}
 			cs.clearPending()
@@ -114,6 +129,15 @@ func (e *sessionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorC
 			}
 			e.logger.Debug("a2a: inquiry answered",
 				"context_id", execCtx.ContextID, "root", rootID, "kind", pend.Kind)
+			// A6: the inquiry fired inside a running async mission — resume
+			// holding for the work it was waiting on and tell the client the
+			// answer was accepted and the Task is still working.
+			for _, id := range pend.AsyncAwaited {
+				awaited[id] = struct{}{}
+			}
+			if len(awaited) > 0 {
+				e.reportWorking(execCtx, &taskBorn, "", len(awaited), yield)
+			}
 		} else {
 			um := protocol.NewUserMessage(rootID, e.owner, text)
 			if err := e.io.Submit(turnCtx, um); err != nil {
@@ -123,20 +147,30 @@ func (e *sessionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorC
 			e.logger.Debug("a2a: turn submitted", "context_id", execCtx.ContextID, "root", rootID, "len", len(text))
 		}
 
-		e.drainTurn(turnCtx, sub, execCtx, cs, yield)
+		e.drainTurn(turnCtx, sub, execCtx, cs, &taskBorn, awaited, yield)
 	}
 }
 
-// drainTurn reads the session's outbox until the turn reaches a boundary,
-// accumulating the assistant text. A turn ends one of three ways: the session
-// goes idle (turn_complete → finishTurn), a tier calls session:inquire (an
-// InquiryRequest → park as input-required, A5), or it errors. A6 (async
-// mission) extends the SessionStatus handling further.
+// drainTurn reads the session's outbox until this Execute's Task reaches a
+// boundary. The turn boundary is the `AgentMessage{Consolidated, Final}` frame
+// (the model retired the turn) — NOT idle, because the runtime keeps root
+// active while an async sub-agent runs and never emits idle until it is fully
+// quiescent. On each Final:
+//   - new async sub-agents this turn launched (ActiveAsync diffed against the
+//     context's known set) join `awaited` → the Task stays `working`;
+//   - sub-agents whose result this turn surfaces (ResultOf ∩ awaited) leave it;
+//   - when `awaited` is empty the Task is done → finish.
+//
+// An InquiryRequest parks the Task as input-required (A5), stashing `awaited`
+// so the Execute that answers resumes the hold. idle is a fallback boundary for
+// an empty turn that emitted no Final frame.
 func (e *sessionExecutor) drainTurn(
 	ctx context.Context,
 	sub <-chan protocol.Frame,
 	execCtx *a2asrv.ExecutorContext,
 	cs *contextSession,
+	taskBorn *bool,
+	awaited map[string]struct{},
 	yield func(a2a.Event, error) bool,
 ) {
 	var b strings.Builder
@@ -146,72 +180,146 @@ func (e *sessionExecutor) drainTurn(
 			// Client gave up or shutdown — emit what we have so the turn
 			// isn't left dangling, then stop. The session keeps running;
 			// its tail frames persist in the event log.
-			e.finishTurn(execCtx, b.String(), yield)
+			e.finishTurn(execCtx, *taskBorn, b.String(), yield)
 			return
 		case f, ok := <-sub:
 			if !ok {
-				e.finishTurn(execCtx, b.String(), yield)
+				e.finishTurn(execCtx, *taskBorn, b.String(), yield)
 				return
 			}
 			switch fr := f.(type) {
 			case *protocol.AgentMessage:
-				// Accumulate the LIVE streaming chunks (Consolidated=false) —
-				// they carry the incremental assistant text on the outbox (the
-				// TUI assembles the same way). The Consolidated=true row
-				// duplicates that text and is the persist record / finalize
-				// signal, so we skip it to avoid double-counting.
 				if !fr.Payload.Consolidated {
+					// LIVE streaming chunk — accumulate the incremental text (the
+					// TUI assembles the same way). The Consolidated row duplicates
+					// it, so only chunks feed b.
 					b.WriteString(fr.Payload.Text)
+					continue
 				}
+				if !fr.Payload.Final {
+					// Per-iteration record of a tool-calling iteration; the live
+					// chunks already carried its text. Not a turn boundary.
+					continue
+				}
+				// Turn boundary. Attribute async work (A6).
+				fresh := cs.recordNewAsync(fr.Payload.ActiveAsync)
+				for _, id := range fresh {
+					awaited[id] = struct{}{} // this turn launched it → this Task awaits it
+				}
+				matched := e.collectResults(cs, awaited, fr.Payload.ResultOf)
+				if len(awaited) == 0 {
+					// No async pending for this Task — a plain turn, or the last
+					// thing it awaited just completed. Deliver the reply.
+					e.logger.Debug("a2a: turn complete",
+						"context_id", execCtx.ContextID, "len", b.Len())
+					e.finishTurn(execCtx, *taskBorn, b.String(), yield)
+					return
+				}
+				// Still holding. Report progress only when THIS frame moved this
+				// Task's work — it launched async (the ack) or one of its awaited
+				// results landed. Another Task's summary on the shared outbox is
+				// not ours to surface.
+				if len(fresh) > 0 || matched {
+					e.reportWorking(execCtx, taskBorn, b.String(), len(awaited), yield)
+				}
+				b.Reset()
 			case *protocol.InquiryRequest:
-				// A5: a tier called session:inquire — surface it as an A2A
-				// input-required task and park. Any assistant text streamed
-				// before the question becomes the prompt's preamble. The
-				// InquiryRequest (not the SessionStatus(wait_*) frame) is the
-				// authoritative park trigger — it always reaches root, the same
-				// signal the TUI keys on.
-				e.parkAndRequestInput(cs, execCtx, &fr.Payload, b.String(), yield)
+				// A5: a tier called session:inquire — surface it as input-required
+				// and park. An inquiry raised inside a running async mission flips
+				// the held Task to input-required; `awaited` is stashed so the
+				// Execute that answers resumes the hold (taskBorn respected — no
+				// double-materialise).
+				e.parkAndRequestInput(cs, execCtx, &fr.Payload, b.String(), taskBorn, awaitedIDs(awaited), yield)
 				return
 			case *protocol.Error:
 				yield(nil, fmt.Errorf("a2a: session error [%s]: %s", fr.Payload.Code, fr.Payload.Message))
 				return
 			case *protocol.SessionStatus:
-				switch fr.Payload.State {
-				case protocol.SessionStatusIdle:
-					// A freshly-opened session emits idle(session_opened) BEFORE
-					// our turn even starts — that is not a turn boundary. Only a
-					// post-turn idle (turn_complete / cancelled / stream_error)
-					// ends the turn.
-					if fr.Payload.Reason == reasonSessionOpened {
-						continue
-					}
-					e.logger.Debug("a2a: turn complete",
-						"context_id", execCtx.ContextID, "reason", fr.Payload.Reason, "len", b.Len())
-					e.finishTurn(execCtx, b.String(), yield)
+				if fr.Payload.State != protocol.SessionStatusIdle ||
+					fr.Payload.Reason == reasonSessionOpened {
+					continue
+				}
+				// idle (turn_complete / cancelled / stream_error) with no async
+				// pending — a fallback boundary for an empty turn that emitted no
+				// Final AgentMessage (the model produced nothing). While holding
+				// (awaited non-empty) the session is not quiescent, so this
+				// shouldn't fire; if it does, keep holding for the result.
+				if len(awaited) == 0 {
+					e.finishTurn(execCtx, *taskBorn, b.String(), yield)
 					return
-				default:
-					// active / wait_subagents (A6) / wait_user_input /
-					// wait_approval — narration only; the InquiryRequest frame
-					// above is what actually parks the turn.
 				}
 			}
 		}
 	}
 }
 
+// collectResults removes from awaited every async sub-agent whose result the
+// current Final frame surfaces (ResultOf ∩ awaited) and forgets them from the
+// context's global set. Returns true when at least one was this Task's — the
+// signal that this frame is worth surfacing as progress. Phase 8/A6.
+func (e *sessionExecutor) collectResults(cs *contextSession, awaited map[string]struct{}, resultOf []protocol.ActiveSubagentRef) bool {
+	var done []string
+	for _, r := range resultOf {
+		if _, ok := awaited[r.SessionID]; ok {
+			delete(awaited, r.SessionID)
+			done = append(done, r.SessionID)
+		}
+	}
+	if len(done) == 0 {
+		return false
+	}
+	cs.forgetAsync(done)
+	return true
+}
+
+// awaitedIDs returns the awaited set as a slice for stashing on a parked
+// inquiry. Order is irrelevant (rebuilt into a set on resume).
+func awaitedIDs(awaited map[string]struct{}) []string {
+	if len(awaited) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(awaited))
+	for id := range awaited {
+		out = append(out, id)
+	}
+	return out
+}
+
 // finishTurn yields the terminal event carrying the assistant reply. On a plain
-// turn (no task materialised) that is a bare agent Message. But once a prior
-// turn parked this context as input-required, a Task exists in the store, and
-// the SDK rejects a bare Message after a task is stored — so a turn that
-// CONTINUES such a task (StoredTask != nil) must complete via a status update
-// instead, carrying the reply as the status message.
-func (e *sessionExecutor) finishTurn(execCtx *a2asrv.ExecutorContext, text string, yield func(a2a.Event, error) bool) {
+// turn (no task materialised) that is a bare agent Message. But once a Task
+// exists — the client continued one (StoredTask != nil) OR we emitted a
+// working/input-required event this turn (taskBorn) — the SDK rejects a bare
+// Message after a task is stored, so we complete via a status update carrying
+// the reply as the status message.
+func (e *sessionExecutor) finishTurn(execCtx *a2asrv.ExecutorContext, taskBorn bool, text string, yield func(a2a.Event, error) bool) {
 	msg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(text))
-	if execCtx.StoredTask != nil {
+	if taskBorn {
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, msg), nil)
 		return
 	}
 	yield(msg, nil)
+}
+
+// reportWorking emits a `working` status update for an in-flight async mission
+// (A6), materialising the Task first if this turn hasn't yet (a fresh turn that
+// went async with no prior Task). text — the interim/ack text streamed so far —
+// rides the status message; an empty text yields a status with no message.
+// Streaming clients see these live; a non-streaming client gets only the final
+// Task, but the working event still drives the Task state in the store.
+func (e *sessionExecutor) reportWorking(execCtx *a2asrv.ExecutorContext, taskBorn *bool, text string, activeCount int, yield func(a2a.Event, error) bool) {
+	if !*taskBorn {
+		if !yield(a2a.NewSubmittedTask(execCtx, execCtx.Message), nil) {
+			return
+		}
+		*taskBorn = true
+	}
+	var msg *a2a.Message
+	if strings.TrimSpace(text) != "" {
+		msg = a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(text))
+	}
+	e.logger.Debug("a2a: async mission in flight; task working",
+		"context_id", execCtx.ContextID, "active_subagents", activeCount)
+	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, msg), nil)
 }
 
 // parkAndRequestInput records the in-flight inquiry on the context session and
@@ -221,6 +329,8 @@ func (e *sessionExecutor) parkAndRequestInput(
 	execCtx *a2asrv.ExecutorContext,
 	p *protocol.InquiryRequestPayload,
 	preamble string,
+	taskBorn *bool,
+	asyncAwaited []string,
 	yield func(a2a.Event, error) bool,
 ) {
 	prompt := inquiryPrompt(p, preamble)
@@ -229,22 +339,26 @@ func (e *sessionExecutor) parkAndRequestInput(
 		CallerSessionID: p.CallerSessionID,
 		Kind:            p.Type,
 		Question:        prompt,
+		AsyncAwaited:    asyncAwaited,
 	})
 	e.logger.Debug("a2a: parking inquiry as input-required",
-		"context_id", execCtx.ContextID, "kind", p.Type, "request_id", p.RequestID)
-	e.requestInput(execCtx, prompt, yield)
+		"context_id", execCtx.ContextID, "kind", p.Type, "request_id", p.RequestID,
+		"async_awaited", len(asyncAwaited))
+	e.requestInput(execCtx, taskBorn, prompt, yield)
 }
 
-// requestInput emits the input-required task carrying prompt. On a brand-new
-// turn (no StoredTask) it first materialises the task with a submitted event —
-// the SDK requires the first event on a new task to be a Task, not a status
-// update (taskupdate manager). On a continuation the task already exists, so the
-// status update goes out alone.
-func (e *sessionExecutor) requestInput(execCtx *a2asrv.ExecutorContext, prompt string, yield func(a2a.Event, error) bool) {
-	if execCtx.StoredTask == nil {
+// requestInput emits the input-required task carrying prompt. If no Task exists
+// yet (taskBorn false) it first materialises one with a submitted event — the
+// SDK requires the first event on a new task to be a Task, not a status update
+// (taskupdate manager). When a Task already exists (a continuation, or a held
+// async long-task that an inner inquiry flips to input-required) the status
+// update goes out alone.
+func (e *sessionExecutor) requestInput(execCtx *a2asrv.ExecutorContext, taskBorn *bool, prompt string, yield func(a2a.Event, error) bool) {
+	if !*taskBorn {
 		if !yield(a2a.NewSubmittedTask(execCtx, execCtx.Message), nil) {
 			return
 		}
+		*taskBorn = true
 	}
 	msg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(prompt))
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateInputRequired, msg), nil)

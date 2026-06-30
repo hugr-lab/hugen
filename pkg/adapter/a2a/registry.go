@@ -60,6 +60,12 @@ type parkedInquiry struct {
 	// Question is the rendered prompt text, retained so an unparseable answer
 	// (e.g. an empty approval) can be re-asked against the same parked state.
 	Question string
+	// AsyncAwaited carries the async sub-agent session ids the parking Execute
+	// was holding for (A6) when this inner inquiry fired — an inquiry raised
+	// inside a running async mission. The Execute that answers the inquiry
+	// restores them and resumes holding for their completion. Empty for an
+	// ordinary (non-async) inquiry. Phase 8/A6.
+	AsyncAwaited []string
 }
 
 // contextSession is the adapter's per-contextId view of a durable hugen root
@@ -74,10 +80,50 @@ type contextSession struct {
 
 	mu      sync.Mutex
 	pending *parkedInquiry
+	// knownAsync is the global set of async sub-agent session ids the adapter
+	// has already attributed to SOME request on this context (A6). It is the
+	// diff baseline: when a turn-final frame reports the live async set, ids
+	// already here belong to an earlier request, so only the genuinely-new ones
+	// are assigned to the current turn's Task. First Execute to record an id
+	// owns it; concurrent Tasks each hold their own local subset. Phase 8/A6.
+	knownAsync map[string]struct{}
 }
 
 // RootID returns the durable root session id this context is bound to.
 func (cs *contextSession) RootID() string { return cs.rootID }
+
+// recordNewAsync records the supplied async refs as known and returns the
+// session ids that were NOT previously known — i.e. the async sub-agents the
+// current turn just launched (the caller's Task awaits these). Phase 8/A6.
+func (cs *contextSession) recordNewAsync(refs []protocol.ActiveSubagentRef) []string {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.knownAsync == nil {
+		cs.knownAsync = make(map[string]struct{})
+	}
+	var fresh []string
+	for _, r := range refs {
+		if r.SessionID == "" {
+			continue
+		}
+		if _, ok := cs.knownAsync[r.SessionID]; ok {
+			continue
+		}
+		cs.knownAsync[r.SessionID] = struct{}{}
+		fresh = append(fresh, r.SessionID)
+	}
+	return fresh
+}
+
+// forgetAsync drops completed async session ids from the global known set
+// (called by the owning Execute when their result lands). Phase 8/A6.
+func (cs *contextSession) forgetAsync(ids []string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	for _, id := range ids {
+		delete(cs.knownAsync, id)
+	}
+}
 
 // park records that this turn surfaced an inquiry; the next inbound is its
 // answer. A fresh inquiry supersedes any stale pending one.

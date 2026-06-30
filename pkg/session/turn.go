@@ -125,6 +125,13 @@ type turnState struct {
 	// each evaluation so a later re-cross re-nudges.
 	checkpointNudged  bool
 	contextFullNudged bool
+
+	// resultOf carries the async sub-agent(s) whose terminal result THIS
+	// turn surfaces — drained from s.pendingResultOf at startTurn (the
+	// auto-summary turn kicked on async completion). Stamped on the Final
+	// frame as AgentMessagePayload.ResultOf so an adapter can attribute
+	// the summary to the async request it was awaiting. Phase 8/A6.
+	resultOf []protocol.ActiveSubagentRef
 }
 
 // modelChunkEvent is the single union the Run loop reads from
@@ -280,6 +287,10 @@ func (s *Session) startTurn(runCtx context.Context, f *protocol.UserMessage) {
 		capHard:          s.resolveHardCeiling(runCtx, softCap),
 		mdl:              mdl,
 		pendingToolCalls: map[string]model.ChunkToolCall{},
+		// A6: if this turn is the auto-summary kicked for completed async
+		// sub-agent(s), carry their refs so the Final frame attributes the
+		// summary. Empty for ordinary turns.
+		resultOf: s.takePendingResultOf(),
 	}
 	s.applyContextBudget()
 	s.startModelIteration(runCtx)
@@ -832,6 +843,15 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 		if final && (st.turnUsage.PromptTokens > 0 || st.turnUsage.CompletionTokens > 0) {
 			snap := st.turnUsage
 			consolidated.Payload.Usage = &snap
+		}
+		// A6: on the turn boundary, stamp the async-sub-agent attribution an
+		// adapter needs to bridge async work to an external request. ActiveAsync
+		// = every async sub-agent live now (the adapter diffs to spot ones this
+		// turn launched); ResultOf = the async sub-agent(s) this turn's reply
+		// summarises (set only when this is the kicked auto-summary turn).
+		if final {
+			consolidated.Payload.ActiveAsync = s.snapshotActiveAsync()
+			consolidated.Payload.ResultOf = st.resultOf
 		}
 		_ = s.emit(runCtx, consolidated)
 	}
