@@ -21,6 +21,7 @@ func runA2A(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) int 
 	opts := []a2a.Option{
 		a2a.WithLogger(core.Logger),
 		a2a.WithBaseURL(a2aBaseURL(boot)),
+		a2a.WithAPIKey(boot.A2AAPIKey),
 	}
 	if boot.A2APort > 0 {
 		opts = append(opts, a2a.WithListenPort(boot.A2APort))

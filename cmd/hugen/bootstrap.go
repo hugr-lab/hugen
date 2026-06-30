@@ -66,6 +66,11 @@ type BootstrapConfig struct {
 	// advertises (the tunnel hostname in production). Defaults are derived
 	// in runA2A: dedicated → http://localhost:<A2APort>; shared → BaseURI.
 	A2ABaseURL string
+	// A2AAPIKey (HUGEN_A2A_API_KEY) gates the A2A JSON-RPC endpoint behind a
+	// static API key (header X-API-Key). Empty = open endpoint (logged loud) —
+	// set it before exposing the endpoint over a tunnel. Transport/auth knob =
+	// env, never agent YAML.
+	A2AAPIKey string
 
 	Hugr HugrConfig
 }
@@ -141,6 +146,7 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 		ArtifactsIdleTTL:      v.GetDuration("HUGEN_ARTIFACTS_IDLE_TTL"),
 		A2APort:               v.GetInt("HUGEN_A2A_PORT"),
 		A2ABaseURL:            v.GetString("HUGEN_A2A_BASE_URL"),
+		A2AAPIKey:             v.GetString("HUGEN_A2A_API_KEY"),
 		Hugr: HugrConfig{
 			URL:         v.GetString("HUGR_URL"),
 			RedirectURI: v.GetString("HUGR_REDIRECT_URI"),

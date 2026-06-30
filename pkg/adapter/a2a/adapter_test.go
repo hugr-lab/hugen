@@ -66,6 +66,66 @@ func TestBuildCard(t *testing.T) {
 	}
 }
 
+func TestAPIKeyGate(t *testing.T) {
+	a := New(WithAPIKey("s3cret"))
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+	h := a.apiKeyGate(next)
+	cases := []struct {
+		name string
+		key  string
+		set  bool
+		want int
+		pass bool
+	}{
+		{"missing", "", false, http.StatusUnauthorized, false},
+		{"wrong", "nope", true, http.StatusUnauthorized, false},
+		{"correct", "s3cret", true, http.StatusOK, true},
+	}
+	for _, c := range cases {
+		called = false
+		req := httptest.NewRequest(http.MethodPost, jsonRPCPath, nil)
+		if c.set {
+			req.Header.Set(apiKeyHeader, c.key)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != c.want {
+			t.Errorf("%s: status = %d, want %d", c.name, rec.Code, c.want)
+		}
+		if called != c.pass {
+			t.Errorf("%s: reached next = %v, want %v", c.name, called, c.pass)
+		}
+	}
+}
+
+func TestBuildCard_APIKey(t *testing.T) {
+	// No key → the card advertises no security (clients connect anonymously).
+	open := New().buildCard()
+	if len(open.SecuritySchemes) != 0 || len(open.SecurityRequirements) != 0 {
+		t.Errorf("open card advertises security: schemes=%v reqs=%v", open.SecuritySchemes, open.SecurityRequirements)
+	}
+	// Key → the apiKey scheme is declared + required, naming the header.
+	c := New(WithAPIKey("k")).buildCard()
+	sch, ok := c.SecuritySchemes[apiKeySchemeName]
+	if !ok {
+		t.Fatalf("card missing the %q scheme: %v", apiKeySchemeName, c.SecuritySchemes)
+	}
+	ak, ok := sch.(a2a.APIKeySecurityScheme)
+	if !ok {
+		t.Fatalf("scheme is %T, want a2a.APIKeySecurityScheme", sch)
+	}
+	if ak.Location != a2a.APIKeySecuritySchemeLocationHeader || ak.Name != apiKeyHeader {
+		t.Errorf("scheme = %+v, want location=header name=%s", ak, apiKeyHeader)
+	}
+	if len(c.SecurityRequirements) != 1 {
+		t.Errorf("security requirements = %v, want one (apiKey)", c.SecurityRequirements)
+	}
+}
+
 func TestBuildCard_IdentityOverride(t *testing.T) {
 	a := New(WithAgentIdentity("acme-bot", "does acme things"))
 	card := a.buildCard()

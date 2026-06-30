@@ -15,6 +15,7 @@ package a2a
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -48,6 +49,14 @@ const (
 	// protocol version). Strict clients (a2a-inspector / a2a-tck, A11) expect
 	// a non-empty value. Bump as the adapter surface evolves.
 	agentVersion = "0.1.0"
+
+	// apiKeyHeader is the request header the API-key gate reads (A9). It is the
+	// header name the card advertises, so a client (e.g. a Copilot custom
+	// connector's API-key auth) knows where to put the key.
+	apiKeyHeader = "X-API-Key"
+
+	// apiKeySchemeName names the apiKey security scheme in the agent card.
+	apiKeySchemeName = "apiKey"
 )
 
 // Adapter is the A2A protocol adapter. It implements manager.Adapter
@@ -73,6 +82,15 @@ type Adapter struct {
 	// (single identity for v1; A9 auth may override). Defaults to
 	// serviceParticipant().
 	owner protocol.ParticipantInfo
+
+	// apiKey gates the JSON-RPC endpoint (A9). When non-empty, every /a2a
+	// request must carry it in the apiKeyHeader header or gets 401, and the
+	// card advertises the apiKey security scheme so clients know to send it.
+	// Empty = open endpoint (logged loud). The authenticated principal still
+	// maps to the single service identity in v1 — the key gates access, it
+	// does not select a per-user identity (that is Stage 2 / hub OBO). Set
+	// from HUGEN_A2A_API_KEY (an adapter knob → env, never YAML).
+	apiKey string
 
 	// host is the runtime side of the adapter contract, captured in Run.
 	host adapter.Host
@@ -124,6 +142,10 @@ func WithServiceIdentity(id, name string) Option {
 	}
 }
 
+// WithAPIKey gates the JSON-RPC endpoint behind an API key carried in the
+// apiKeyHeader header (A9). Empty leaves the endpoint open.
+func WithAPIKey(key string) Option { return func(a *Adapter) { a.apiKey = strings.TrimSpace(key) } }
+
 // New constructs an A2A adapter. Callers must select a listener mode via
 // WithSharedMux or WithListenPort; New does not default one (the cmd layer
 // decides from HUGEN_A2A_PORT).
@@ -166,9 +188,17 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	// A2A-Version header (A4): Microsoft Copilot posts message/send (v0.3) with
 	// no version header, while spec-compliant v1.0 clients send "1.x". Without
 	// the v0.3 leg Copilot can't reach the agent at all.
-	rpc := versionDispatchHandler{
+	var rpc http.Handler = versionDispatchHandler{
 		v1:  a2asrv.NewJSONRPCHandler(handler),
 		v03: a2av0.NewJSONRPCHandler(handler),
+	}
+	// A9: gate the RPC endpoint behind the API key (the card stays open so
+	// clients can discover the requirement). An open endpoint is logged loud.
+	if a.apiKey != "" {
+		rpc = a.apiKeyGate(rpc)
+		a.logger.Info("a2a: API-key auth enabled", "header", apiKeyHeader)
+	} else {
+		a.logger.Warn("a2a: NO API key set — the JSON-RPC endpoint is OPEN; set HUGEN_A2A_API_KEY before exposing it")
 	}
 	cardHandler := a2asrv.NewStaticAgentCardHandler(card)
 
@@ -231,6 +261,23 @@ func (h versionDispatchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	h.v03.ServeHTTP(w, r)
 }
 
+// apiKeyGate wraps next so every request must carry the configured key in the
+// apiKeyHeader header (constant-time compared) — otherwise 401 (A9). Only
+// reached when a.apiKey != "". The agent card is served outside this gate so
+// clients can still discover the auth requirement.
+func (a *Adapter) apiKeyGate(next http.Handler) http.Handler {
+	want := []byte(a.apiKey)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := strings.TrimSpace(r.Header.Get(apiKeyHeader))
+		if subtle.ConstantTimeCompare([]byte(got), want) != 1 {
+			w.Header().Set("WWW-Authenticate", apiKeySchemeName)
+			http.Error(w, "unauthorized: missing or invalid API key", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // buildCard assembles the v1.0 agent card. Stage 1 advertises one skill
 // ("hugr analyst") over the JSON-RPC interface; missions/tasks map to
 // additional AgentSkills later (spec §1 non-goals). The same /a2a endpoint
@@ -241,7 +288,7 @@ func (a *Adapter) buildCard() *a2a.AgentCard {
 	ifaceV1.ProtocolVersion = a2a.Version // "1.0"
 	ifaceV03 := a2a.NewAgentInterface(url, a2a.TransportProtocolJSONRPC)
 	ifaceV03.ProtocolVersion = protocolVersion03
-	return &a2a.AgentCard{
+	card := &a2a.AgentCard{
 		Name:                a.agentName,
 		Description:         a.agentDesc,
 		Version:             agentVersion,
@@ -263,4 +310,20 @@ func (a *Adapter) buildCard() *a2a.AgentCard {
 			},
 		}},
 	}
+	// A9: advertise the apiKey security scheme + require it, so a client knows
+	// to send the key in apiKeyHeader. Only when a key is actually configured —
+	// an open endpoint advertises no security.
+	if a.apiKey != "" {
+		card.SecuritySchemes = a2a.NamedSecuritySchemes{
+			apiKeySchemeName: a2a.APIKeySecurityScheme{
+				Description: "Static API key issued by the operator.",
+				Location:    a2a.APIKeySecuritySchemeLocationHeader,
+				Name:        apiKeyHeader,
+			},
+		}
+		card.SecurityRequirements = a2a.SecurityRequirementsOptions{
+			{apiKeySchemeName: a2a.SecuritySchemeScopes{}},
+		}
+	}
+	return card
 }
