@@ -76,17 +76,30 @@ function render(f) {
   const p = f.payload || {};
   switch (f.kind) {
     case 'agent_message':
-      if (p.consolidated) { curAgent = null; break; }      // final row duplicates the chunks
+      // Live: accumulate the streaming chunks (Consolidated=false). Replay:
+      // ONLY the Consolidated=true row is persisted (chunks are live-only,
+      // seq=0), so render its text when no chunks preceded it.
+      if (p.consolidated) {
+        if (!curAgent && (p.text || '').trim()) add('agent', p.text);
+        curAgent = null;
+        break;
+      }
       if (!curAgent) { curAgent = add('agent', ''); curReason = null; }
       curAgent.textContent += (p.text || '');
       $log.scrollTop = $log.scrollHeight;
       break;
     case 'user_message':
-      // Echoed by the runtime; our own sends are already shown, so only surface
-      // messages we didn't author here would need id tracking — keep it simple.
+      // The runtime echoes the user turn on the stream (and replays it), so we
+      // render it from the frame — but NOT agent-authored synthetics (e.g. the
+      // async-summary prompt), only real user turns.
+      if ((f.auth || {}).kind === 'user') { add('user', p.text || ''); curAgent = null; curReason = null; }
       break;
     case 'reasoning':
-      if (p.consolidated) { curReason = null; break; }
+      if (p.consolidated) {
+        if (!curReason && (p.text || '').trim()) add('reasoning', '💭 ' + p.text);
+        curReason = null;
+        break;
+      }
       if (!curReason) curReason = add('reasoning', '💭 ');
       curReason.textContent += (p.text || '');
       $log.scrollTop = $log.scrollHeight;
@@ -166,7 +179,8 @@ document.getElementById('form').addEventListener('submit', async (e) => {
   const text = $t.value.trim();
   if (!text) return;
   $t.value = '';
-  add('user', text);
+  // The user bubble is rendered from the runtime's echoed user_message frame
+  // (uniform with replay) — not added locally, to avoid a double on live.
   curAgent = null;
   curReason = null;
   await fetch('/v1/sessions/' + sessionId + '/messages', {
