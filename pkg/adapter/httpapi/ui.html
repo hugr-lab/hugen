@@ -33,6 +33,7 @@
   #text { flex: 1; padding: 8px; }
   button { padding: 8px 14px; cursor: pointer; }
   a { color: inherit; }
+  .meta a { color: #4a90d9; text-decoration: underline; opacity: 1; }
 </style>
 </head>
 <body>
@@ -110,7 +111,18 @@ function render(f) {
     case 'session_status': $status.textContent = p.state || '—'; break;
     case 'inquiry_request': showInquiry(f); break;
     case 'extension_frame':
-      if (p.op === 'artifact_produced' && p.data) add('meta', '📎 artifact: ' + (p.data.name || p.data.id));
+      if (p.op === 'artifact_produced' && p.data) {
+        const el = document.createElement('div');
+        el.className = 'msg meta';
+        const a = document.createElement('a');
+        a.href = '/v1/sessions/' + sessionId + '/artifacts/' + encodeURIComponent(p.data.id);
+        a.textContent = '📎 ' + (p.data.name || p.data.id) + (p.data.size ? ' (' + p.data.size + ' B)' : '');
+        a.target = '_blank';       // open/render (html) or download (binary)
+        a.rel = 'noopener';
+        el.appendChild(a);
+        $log.appendChild(el);
+        $log.scrollTop = $log.scrollHeight;
+      }
       break;
     case 'error': add('meta', '⚠ ' + (p.message || 'error')); break;
   }
