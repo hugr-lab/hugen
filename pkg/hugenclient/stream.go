@@ -25,12 +25,23 @@ type StreamEvent struct {
 const maxSSELine = 8 << 20
 
 // Stream opens the session's SSE frame stream. It replays from lastEventID (0 =
-// from the start / current) then streams live. The returned channel closes when
-// the context is cancelled or the stream ends; a terminal error arrives as a
+// from the start) then streams live. The returned channel closes when the
+// context is cancelled or the stream ends; a terminal error arrives as a
 // StreamEvent with Err set. Multiple Streams on one session are independent
 // (the runtime fans out to each).
 func (c *Client) Stream(ctx context.Context, id string, lastEventID int) (<-chan StreamEvent, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, "/v1/sessions/"+url.PathEscape(id)+"/stream", nil)
+	return c.stream(ctx, "/v1/sessions/"+url.PathEscape(id)+"/stream", lastEventID)
+}
+
+// StreamLive opens the stream in live-only mode (?live=1): no history replay,
+// only frames from now. The A2A bridge uses this — it submits a fresh turn and
+// wants ONLY that turn's frames, not the whole session history.
+func (c *Client) StreamLive(ctx context.Context, id string) (<-chan StreamEvent, error) {
+	return c.stream(ctx, "/v1/sessions/"+url.PathEscape(id)+"/stream?live=1", 0)
+}
+
+func (c *Client) stream(ctx context.Context, path string, lastEventID int) (<-chan StreamEvent, error) {
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}

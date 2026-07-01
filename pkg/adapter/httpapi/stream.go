@@ -62,24 +62,29 @@ func (a *Adapter) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	rc := http.NewResponseController(w)
 
-	// Replay the backlog after Last-Event-ID.
+	// Replay the backlog after Last-Event-ID — unless ?live=1 (live-only): a
+	// consumer that submits a fresh turn and wants ONLY that turn's frames (the
+	// A2A bridge) must not receive the whole history first. maxReplayed stays 0,
+	// so every live frame passes the dedup.
 	maxReplayed := parseLastEventID(r)
-	if events, lerr := a.host.ListEvents(r.Context(), id, store.ListEventsOpts{MinSeq: maxReplayed}); lerr == nil {
-		for _, ev := range events {
-			frame, ferr := store.EventRowToFrame(ev)
-			if ferr != nil {
-				continue
+	if r.URL.Query().Get("live") != "1" {
+		if events, lerr := a.host.ListEvents(r.Context(), id, store.ListEventsOpts{MinSeq: maxReplayed}); lerr == nil {
+			for _, ev := range events {
+				frame, ferr := store.EventRowToFrame(ev)
+				if ferr != nil {
+					continue
+				}
+				if writeErr := writeSSEFrame(w, rc, ev.Seq, frame); writeErr != nil {
+					return
+				}
+				if ev.Seq > maxReplayed {
+					maxReplayed = ev.Seq
+				}
 			}
-			if writeErr := writeSSEFrame(w, rc, ev.Seq, frame); writeErr != nil {
-				return
-			}
-			if ev.Seq > maxReplayed {
-				maxReplayed = ev.Seq
-			}
+			flusher.Flush()
+		} else {
+			a.logger.Warn("httpapi: stream replay skipped", "id", id, "err", lerr)
 		}
-		flusher.Flush()
-	} else {
-		a.logger.Warn("httpapi: stream replay skipped", "id", id, "err", lerr)
 	}
 
 	// Live.

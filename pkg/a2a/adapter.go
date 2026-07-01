@@ -1,16 +1,15 @@
-// Package a2a implements the A2A (Agent2Agent) protocol adapter — the
+// Package a2a implements the A2A (Agent2Agent) protocol bridge — the
 // integration surface that makes hugen reachable as a first-class agent
 // from Microsoft Teams / Copilot and any spec-compliant A2A client.
 //
-// It is a sibling of pkg/adapter/tui: a manager.Adapter whose Run hosts
-// an A2A server (agent card + JSON-RPC/SSE) built on the official
-// github.com/a2aproject/a2a-go/v2 SDK (a2asrv), with NO ADK. Stage 1
-// of design/008-integration; see spec-a2a-adapter.md.
-//
-// This file is the A1 skeleton: agent-card hosting, the JSON-RPC
-// transport mount, and the two listener modes (shared auth mux vs a
-// dedicated port). The AgentExecutor here is a trivial echo (executor.go);
-// the real contextId-session ↔ Frame translation lands in A2–A6.
+// It is a STANDALONE service (cmd/a2a), NOT an in-runtime adapter: Server
+// hosts the A2A surface (agent card + JSON-RPC/SSE, on the a2a-go/v2 SDK,
+// NO ADK) and drives hugen through the native HTTP API (pkg/hugenclient)
+// over HTTP. The contextId↔session translation, inquiry parking, async-Task
+// handling, and card live here; the I/O seam is hugenclient (clientRootStore
+// + clientFrameIO), which is what lets the bridge run out-of-process and
+// keeps a2a-go out of the hugen core. design/008-integration/spec-http-api.md
+// (H8) + spec-a2a-adapter.md.
 package a2a
 
 import (
@@ -28,7 +27,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
-	"github.com/hugr-lab/hugen/pkg/adapter"
+	"github.com/hugr-lab/hugen/pkg/hugenclient"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -60,82 +59,65 @@ const (
 	apiKeySchemeName = "apiKey"
 )
 
-// Adapter is the A2A protocol adapter. It implements manager.Adapter
-// (via the pkg/adapter alias) and is wired into the runtime's adapter
-// slice exactly like the TUI adapter.
-type Adapter struct {
+// Server is the standalone A2A bridge: it hosts the A2A protocol surface
+// (agent card + JSON-RPC/SSE) and drives hugen through the native HTTP API
+// (hugenclient) — out-of-process, NOT an in-runtime adapter. It owns a
+// dedicated http.Server on listenPort.
+type Server struct {
 	logger  *slog.Logger
 	baseURL string // public URL the agent card advertises (tunnel hostname in prod)
 
-	// Listener mode (mutually exclusive):
-	//   - sharedMux != nil → mount on the runtime's existing auth/callback
-	//     listener; Run registers handlers and blocks on ctx (the runtime
-	//     already serves). HUGEN_A2A_PORT=0.
-	//   - sharedMux == nil → bind a dedicated http.Server on listenPort.
-	//     Recommended for tunnel-exposed runs (spec §6.1 loopback caveat).
-	sharedMux  *http.ServeMux
 	listenPort int
 
 	agentName string
 	agentDesc string
 
-	// owner is the service identity that owns A2A-opened root sessions
-	// (single identity for v1; A9 auth may override). Defaults to
+	// owner is the service identity label on A2A-opened root sessions. The
+	// actual session owner is set API-side from the bridge's token; this is
+	// retained for frame authorship compatibility. Defaults to
 	// serviceParticipant().
 	owner protocol.ParticipantInfo
 
 	// apiKey gates the JSON-RPC endpoint (A9). When non-empty, every /a2a
 	// request must carry it in the apiKeyHeader header or gets 401, and the
-	// card advertises the apiKey security scheme so clients know to send it.
-	// Empty = open endpoint (logged loud). The authenticated principal still
-	// maps to the single service identity in v1 — the key gates access, it
-	// does not select a per-user identity (that is Stage 2 / hub OBO). Set
-	// from HUGEN_A2A_API_KEY (an adapter knob → env, never YAML).
+	// card advertises the apiKey security scheme. This is the A2A-facing gate;
+	// the bridge's OWN auth to the hugen API is the client token. Set from
+	// HUGEN_A2A_API_KEY.
 	apiKey string
 
-	// allowOpen lets the adapter serve an unauthenticated /a2a endpoint. Without
-	// it (the default) Run REFUSES to serve open — fail-closed (H2), because an
-	// open endpoint with no session reaper (A8, deferred) is a trivial resource
-	// -exhaustion vector (any contextId opens a permanent root). Set via
-	// HUGEN_A2A_ALLOW_OPEN=1 for a throwaway local run; never over a tunnel.
+	// allowOpen lets the bridge serve an unauthenticated /a2a endpoint. Without
+	// it, Run fails closed when no API key is set. Set via HUGEN_A2A_ALLOW_OPEN=1
+	// for a throwaway local run; never over a tunnel.
 	allowOpen bool
 
 	// artifactResolve resolves a published artifact (rootID, id) to a local
-	// path so the by-ref download endpoint (A10) can stream it. nil disables
-	// artifact delivery (no /a2a/artifacts/ endpoint, no FilePart emitted).
-	// Wired from core.Artifacts.Store().Path in runA2A.
+	// path for the by-ref download endpoint (A10). Over HTTP the bridge has no
+	// local artifact access, so this is nil for now — A2A artifact delivery via
+	// hugenclient.DownloadArtifact is a follow-up. nil = no FilePart emitted.
 	artifactResolve artifactResolver
 
-	// host is the runtime side of the adapter contract, captured in Run.
-	host adapter.Host
-	// reg maps contextIds to durable root sessions (A2). Built in Run; the
-	// executor resolves through it and Cancel forgets through it. NOTE: there is
-	// no idle-GC yet (A8, deferred) — every distinct contextId opens a permanent
-	// root, so the endpoint must stay private/keyed until A8 lands (H1/H2).
+	// client is the native HTTP API client the bridge drives hugen through.
+	client *hugenclient.Client
+	// reg maps contextIds to durable root sessions. Built in Run; the executor
+	// resolves through it and Cancel forgets through it.
 	reg *contextRegistry
 }
 
-// Option configures the Adapter.
-type Option func(*Adapter)
+// Option configures the Server.
+type Option func(*Server)
 
-func WithLogger(l *slog.Logger) Option { return func(a *Adapter) { a.logger = l } }
+func WithLogger(l *slog.Logger) Option { return func(a *Server) { a.logger = l } }
 
 // WithBaseURL sets the public URL the agent card advertises (the value a
 // client dials). In a tunnel deployment this is the tunnel hostname.
-func WithBaseURL(u string) Option { return func(a *Adapter) { a.baseURL = u } }
+func WithBaseURL(u string) Option { return func(a *Server) { a.baseURL = u } }
 
-// WithSharedMux selects shared-listener mode: the adapter mounts its
-// handlers on the supplied mux (the runtime's auth/callback mux) and
-// relies on the runtime's already-running http.Server to serve them.
-func WithSharedMux(m *http.ServeMux) Option { return func(a *Adapter) { a.sharedMux = m } }
-
-// WithListenPort selects dedicated-listener mode on the given port. Ignored
-// when WithSharedMux is also set.
-func WithListenPort(p int) Option { return func(a *Adapter) { a.listenPort = p } }
+// WithListenPort sets the dedicated listener port.
+func WithListenPort(p int) Option { return func(a *Server) { a.listenPort = p } }
 
 // WithAgentIdentity overrides the card's name/description.
 func WithAgentIdentity(name, desc string) Option {
-	return func(a *Adapter) {
+	return func(a *Server) {
 		if name != "" {
 			a.agentName = name
 		}
@@ -145,10 +127,10 @@ func WithAgentIdentity(name, desc string) Option {
 	}
 }
 
-// WithServiceIdentity overrides the service identity that owns A2A-opened
-// root sessions. Empty fields keep the default (serviceParticipant()).
+// WithServiceIdentity overrides the service identity label. Empty fields keep
+// the default (serviceParticipant()).
 func WithServiceIdentity(id, name string) Option {
-	return func(a *Adapter) {
+	return func(a *Server) {
 		if id != "" {
 			a.owner.ID = id
 		}
@@ -160,28 +142,25 @@ func WithServiceIdentity(id, name string) Option {
 
 // WithAPIKey gates the JSON-RPC endpoint behind an API key carried in the
 // apiKeyHeader header (A9). Empty leaves the endpoint open (see WithAllowOpen).
-func WithAPIKey(key string) Option { return func(a *Adapter) { a.apiKey = strings.TrimSpace(key) } }
+func WithAPIKey(key string) Option { return func(a *Server) { a.apiKey = strings.TrimSpace(key) } }
 
 // WithAllowOpen permits serving an unauthenticated /a2a endpoint. Without it,
-// Run fails closed when no API key is set (H2).
-func WithAllowOpen(v bool) Option { return func(a *Adapter) { a.allowOpen = v } }
+// Run fails closed when no API key is set.
+func WithAllowOpen(v bool) Option { return func(a *Server) { a.allowOpen = v } }
 
-// WithArtifactResolver enables by-ref artifact delivery (A10): published
-// artifacts surface as A2A FileParts pointing at a signed download URL served
-// by the adapter, and r resolves (rootID, id) → local path. Nil = disabled.
+// WithArtifactResolver enables by-ref artifact delivery (A10). nil = disabled.
 func WithArtifactResolver(r artifactResolver) Option {
-	return func(a *Adapter) { a.artifactResolve = r }
+	return func(a *Server) { a.artifactResolve = r }
 }
 
-// New constructs an A2A adapter. Callers must select a listener mode via
-// WithSharedMux or WithListenPort; New does not default one (the cmd layer
-// decides from HUGEN_A2A_PORT).
-func New(opts ...Option) *Adapter {
-	a := &Adapter{
+// New constructs an A2A bridge server driving hugen through client.
+func New(client *hugenclient.Client, opts ...Option) *Server {
+	a := &Server{
 		logger:    slog.Default(),
 		agentName: defaultAgentName,
 		agentDesc: defaultAgentDesc,
 		owner:     serviceParticipant(),
+		client:    client,
 	}
 	for _, o := range opts {
 		o(a)
@@ -189,25 +168,20 @@ func New(opts ...Option) *Adapter {
 	return a
 }
 
-// Name implements manager.Adapter.
-func (a *Adapter) Name() string { return "a2a" }
-
-// Run implements manager.Adapter. It builds the a2asrv handler stack,
-// mounts the agent card (+ legacy alias) and the JSON-RPC transport, and
-// serves until ctx cancels.
-//
-// In shared mode the runtime's http.Server already serves the mux, so Run
-// just registers handlers and blocks on ctx. In dedicated mode Run owns an
-// http.Server on listenPort and shuts it down gracefully on ctx cancel.
-func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
-	a.host = host
+// Run builds the a2asrv handler stack, mounts the agent card (+ legacy alias)
+// and the JSON-RPC transport on a dedicated http.Server, and serves until ctx
+// cancels.
+func (a *Server) Run(ctx context.Context) error {
 	if a.logger == nil {
-		a.logger = host.Logger()
+		a.logger = slog.Default()
 	}
-	// The registry opens/resumes durable roots on the adapter's Run ctx (the
-	// whole process lifetime), NOT a per-request ctx — a session's Run loop
-	// must outlive any single A2A request.
-	a.reg = newContextRegistry(hostRootStore{host: host, owner: a.owner, lifecycleCtx: ctx}, a.logger)
+	if a.client == nil {
+		return fmt.Errorf("a2a: nil hugen client")
+	}
+	// The registry opens/resumes durable roots via the HTTP API on the bridge
+	// lifecycle ctx — sessions live server-side (the API owns their Run loop),
+	// so no per-request-ctx lifetime concern here.
+	a.reg = newContextRegistry(clientRootStore{client: a.client, ctx: ctx}, a.logger)
 
 	// A10: artifact delivery. The signing secret is the API key when set
 	// (ties artifact access to the same trust) else a fresh random one; the
@@ -238,7 +212,7 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	}
 
 	card := a.buildCard()
-	handler := a2asrv.NewHandler(newSessionExecutor(a.logger, a.reg, host, a.owner, artifactURL))
+	handler := a2asrv.NewHandler(newSessionExecutor(a.logger, a.reg, clientFrameIO{client: a.client}, a.owner, artifactURL))
 	// Serve BOTH wire versions over the same RequestHandler, dispatched by the
 	// A2A-Version header (A4): Microsoft Copilot posts message/send (v0.3) with
 	// no version header, while spec-compliant v1.0 clients send "1.x". Without
@@ -282,14 +256,6 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 		if a.artifactResolve != nil {
 			mux.Handle(artifactPathPrefix, artifactDownloadHandler(artifactSecret, a.artifactResolve, a.logger))
 		}
-	}
-
-	if a.sharedMux != nil {
-		register(a.sharedMux)
-		a.logger.Info("a2a: mounted on shared auth listener",
-			"card", a2asrv.WellKnownAgentCardPath, "rpc", jsonRPCPath, "base_url", a.baseURL)
-		<-ctx.Done()
-		return nil
 	}
 
 	mux := http.NewServeMux()
@@ -341,7 +307,7 @@ func (h versionDispatchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 // apiKeyHeader header (constant-time compared) — otherwise 401 (A9). Only
 // reached when a.apiKey != "". The agent card is served outside this gate so
 // clients can still discover the auth requirement.
-func (a *Adapter) apiKeyGate(next http.Handler) http.Handler {
+func (a *Server) apiKeyGate(next http.Handler) http.Handler {
 	want := []byte(a.apiKey)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := strings.TrimSpace(r.Header.Get(apiKeyHeader))
@@ -358,7 +324,7 @@ func (a *Adapter) apiKeyGate(next http.Handler) http.Handler {
 // ("hugr analyst") over the JSON-RPC interface; missions/tasks map to
 // additional AgentSkills later (spec §1 non-goals). The same /a2a endpoint
 // serves v1.0 and v0.3 (header-dispatched), so both are advertised.
-func (a *Adapter) buildCard() *a2a.AgentCard {
+func (a *Server) buildCard() *a2a.AgentCard {
 	url := a.baseURL + jsonRPCPath
 	ifaceV1 := a2a.NewAgentInterface(url, a2a.TransportProtocolJSONRPC)
 	ifaceV1.ProtocolVersion = a2a.Version // "1.0"

@@ -1,13 +1,11 @@
 package a2a
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // fakeRootStore is a programmable rootStore for registry tests.
@@ -152,55 +150,6 @@ func TestForget_RebindsOnNextResolve(t *testing.T) {
 	}
 	if cs.RootID() == "" {
 		t.Error("post-forget resolve returned empty rootID")
-	}
-}
-
-// listHost overrides stubHost.ListSessions to script a summary set for the
-// hostRootStore.boundRoot metadata-filter test.
-type listHost struct {
-	stubHost
-	sums []session.SessionSummary
-	err  error
-}
-
-func (h listHost) ListSessions(context.Context, string) ([]session.SessionSummary, error) {
-	return h.sums, h.err
-}
-
-func TestHostRootStore_BoundRoot_FiltersByMetadata(t *testing.T) {
-	host := listHost{sums: []session.SessionSummary{
-		{ID: "root-x", Metadata: map[string]any{contextIDMetaKey: "ctx-other"}},
-		{ID: "root-y", Metadata: map[string]any{contextIDMetaKey: "ctx-want"}},
-		{ID: "root-z", Metadata: nil},
-	}}
-	hs := hostRootStore{host: host, owner: serviceParticipant(), lifecycleCtx: context.Background()}
-
-	id, found, err := hs.boundRoot("ctx-want")
-	if err != nil {
-		t.Fatalf("boundRoot: %v", err)
-	}
-	if !found || id != "root-y" {
-		t.Errorf("boundRoot = (%q, %v), want (root-y, true)", id, found)
-	}
-
-	if _, found, _ := hs.boundRoot("ctx-missing"); found {
-		t.Error("boundRoot found a binding for an absent contextId")
-	}
-}
-
-func TestMetaString(t *testing.T) {
-	if got := metaString(nil, "k"); got != "" {
-		t.Errorf("metaString(nil) = %q, want empty", got)
-	}
-	m := map[string]any{"s": "hi", "n": 42}
-	if got := metaString(m, "s"); got != "hi" {
-		t.Errorf("metaString string = %q, want hi", got)
-	}
-	if got := metaString(m, "n"); got != "42" {
-		t.Errorf("metaString non-string = %q, want 42", got)
-	}
-	if got := metaString(m, "absent"); got != "" {
-		t.Errorf("metaString absent = %q, want empty", got)
 	}
 }
 
