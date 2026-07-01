@@ -26,6 +26,8 @@
   .meta { align-self: flex-start; font-size: 12px; opacity: .6; font-family: ui-monospace, monospace; }
   .inquiry { align-self: flex-start; background: #e0a03033; border: 1px solid #e0a030; padding: 10px; border-radius: 10px; }
   .inquiry input { width: 100%; margin-top: 6px; }
+  .ibtns { display: flex; gap: 8px; margin-top: 8px; }
+  .ibtns button { padding: 6px 14px; }
   form { display: flex; gap: 8px; padding: 10px; border-top: 1px solid #8884; }
   #text { flex: 1; padding: 8px; }
   button { padding: 8px 14px; cursor: pointer; }
@@ -93,25 +95,54 @@ function render(f) {
   }
 }
 
+function mkbtn(label, fn) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = label;
+  b.addEventListener('click', fn);
+  return b;
+}
+
 function showInquiry(f) {
   const p = f.payload || {};
   const box = document.createElement('div');
   box.className = 'inquiry';
-  box.textContent = '❓ ' + (p.question || p.prompt || 'The agent is asking a question:');
-  const inp = document.createElement('input');
-  inp.placeholder = 'Your answer, then Enter';
-  box.appendChild(inp);
-  $log.appendChild(box);
-  inp.focus();
-  inp.addEventListener('keydown', async (e) => {
-    if (e.key !== 'Enter') return;
-    const answer = inp.value;
-    inp.disabled = true;
+  const q = document.createElement('div');
+  q.textContent = '❓ ' + (p.question || 'The agent is asking:');
+  box.appendChild(q);
+
+  const send = async (body) => {
+    box.querySelectorAll('button, input').forEach((el) => (el.disabled = true));
     await fetch('/v1/sessions/' + sessionId + '/inquiry', {
       method: 'POST', headers: {'content-type':'application/json'},
-      body: JSON.stringify({ request_id: p.request_id, response: answer }),
+      body: JSON.stringify(Object.assign({ request_id: p.request_id }, body)),
     });
-  });
+  };
+
+  if (p.type === 'approval') {
+    // Approval MUST answer with `approved` (a bool) — a `response` string leaves
+    // the agent blocked. Buttons, not a text box.
+    const bar = document.createElement('div');
+    bar.className = 'ibtns';
+    bar.append(
+      mkbtn('✓ Approve', () => send({ approved: true })),
+      mkbtn('✗ Reject', () => send({ approved: false, reason: 'rejected via dev UI' })),
+    );
+    box.appendChild(bar);
+  } else if (Array.isArray(p.options) && p.options.length) {
+    const bar = document.createElement('div');
+    bar.className = 'ibtns';
+    p.options.forEach((opt) => bar.appendChild(mkbtn(opt, () => send({ response: opt }))));
+    box.appendChild(bar);
+  } else {
+    const inp = document.createElement('input');
+    inp.placeholder = 'Your answer, then Enter';
+    box.appendChild(inp);
+    setTimeout(() => inp.focus(), 0);
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') send({ response: inp.value }); });
+  }
+  $log.appendChild(box);
+  $log.scrollTop = $log.scrollHeight;
 }
 
 function connect() {
