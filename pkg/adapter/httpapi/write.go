@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/hugr-lab/hugen/pkg/protocol"
+	"github.com/hugr-lab/hugen/pkg/session"
 )
 
 // The write path (H4): a caller drives its session by submitting inbound
@@ -117,6 +118,10 @@ func (a *Adapter) ownedRequest(w http.ResponseWriter, r *http.Request) (Verified
 // the stream, not this response).
 func (a *Adapter) submit(w http.ResponseWriter, r *http.Request, frame protocol.Frame) {
 	if err := a.host.Submit(r.Context(), frame); err != nil {
+		if errors.Is(err, session.ErrSessionClosed) {
+			httpError(w, http.StatusConflict, "session closed")
+			return
+		}
 		a.logger.Error("httpapi: submit", "session", frame.SessionID(), "kind", frame.Kind(), "err", err)
 		httpError(w, http.StatusInternalServerError, "submit failed")
 		return

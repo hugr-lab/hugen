@@ -27,8 +27,11 @@ const (
 
 type createSessionRequest struct {
 	Name     string         `json:"name,omitempty"`
-	Tier     string         `json:"tier,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
+	// Tier is intentionally NOT accepted from the client — an API-created root
+	// is always the root tier (OpenRequest.Tier empty → derived from depth 0).
+	// Letting a client pick the tier would mis-select the tier manual / model
+	// intent / approval policy for its own root (L3).
 }
 
 type createSessionResponse struct {
@@ -71,7 +74,6 @@ func (a *Adapter) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Participants: []protocol.ParticipantInfo{participantFor(user)},
 		Metadata:     meta,
 		Name:         body.Name,
-		Tier:         body.Tier,
 	})
 	if err != nil {
 		a.logger.Error("httpapi: open session", "owner", user.UserID, "err", err)

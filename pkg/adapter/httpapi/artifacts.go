@@ -84,10 +84,16 @@ func (a *Adapter) handleIngestArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpPath := tmp.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
-	_, copyErr := io.Copy(tmp, io.LimitReader(r.Body, maxArtifactBytes))
+	// Read one byte past the cap so an oversized body is REJECTED, not silently
+	// truncated to exactly maxArtifactBytes and accepted as if complete (M2).
+	n, copyErr := io.Copy(tmp, io.LimitReader(r.Body, maxArtifactBytes+1))
 	_ = tmp.Close()
 	if copyErr != nil {
 		httpError(w, http.StatusInternalServerError, "ingest read failed")
+		return
+	}
+	if n > maxArtifactBytes {
+		httpError(w, http.StatusRequestEntityTooLarge, "artifact exceeds 64 MiB cap")
 		return
 	}
 	ref, err := a.artifacts.Ingest(id, tmpPath, name)

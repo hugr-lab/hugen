@@ -17,9 +17,12 @@ var sseCodec = protocol.NewCodec()
 
 const (
 	// sseWriteTimeout bounds a single SSE write. A stuck client that blocks
-	// longer is disconnected (the handler returns → the subscription ctx
-	// cancels → the fanout channel drains) so one slow reader can't stall the
-	// session's blocking fanout indefinitely.
+	// longer is disconnected (the handler returns → r.Context() cancels → the
+	// subscription is deregistered). The runtime then DRAINS the deregistered
+	// channel (manager.Subscribe cleanup), so an in-flight blocking fanoutSend
+	// completes instead of parking forever — that drain, not this deadline, is
+	// what stops one dead reader from wedging the session's fanout. The deadline
+	// just bounds how long a slow write stalls THIS handler.
 	sseWriteTimeout = 15 * time.Second
 	// sseHeartbeat keeps the connection alive through idle proxies and surfaces
 	// a dead client (a failed heartbeat write ends the stream).
@@ -64,10 +67,12 @@ func (a *Adapter) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	// Replay the backlog after Last-Event-ID — unless ?live=1 (live-only): a
 	// consumer that submits a fresh turn and wants ONLY that turn's frames (the
-	// A2A bridge) must not receive the whole history first. maxReplayed stays 0,
-	// so every live frame passes the dedup.
-	maxReplayed := parseLastEventID(r)
+	// A2A bridge) must not receive the whole history first. In live-only mode
+	// maxReplayed MUST stay 0 (ignore any Last-Event-ID/?from) so every live
+	// frame passes the dedup — else live frames ≤ the cursor are wrongly skipped.
+	maxReplayed := 0
 	if r.URL.Query().Get("live") != "1" {
+		maxReplayed = parseLastEventID(r)
 		if events, lerr := a.host.ListEvents(r.Context(), id, store.ListEventsOpts{MinSeq: maxReplayed}); lerr == nil {
 			for _, ev := range events {
 				frame, ferr := store.EventRowToFrame(ev)

@@ -833,7 +833,10 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 	// never re-enters the model context (unlike Thinking/ThoughtSignature, which
 	// ride the consolidated AgentMessage back into the model).
 	if st.reasoning != "" {
-		_ = s.emit(runCtx, protocol.NewReasoning(s.id, s.agent.Participant(),
+		// persistOnly, not emit: live adapters already rendered the streamed
+		// Final=false deltas — fanning the consolidated Final=true frame out too
+		// would double-render it. It is persisted for replay/audit only (M1).
+		_ = s.persistOnly(runCtx, protocol.NewReasoning(s.id, s.agent.Participant(),
 			st.reasoning, st.reasoningSeq, true))
 	}
 	if st.agentSeq > 0 || hasToolCalls || st.finalText != "" {
