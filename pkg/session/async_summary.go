@@ -23,6 +23,29 @@ const asyncSummaryPrompt = "[system:async_summary] One or more async missions co
 	"Do NOT call session:notify_subagent for a completed mission — it has already terminated; the result is in the inject above. " +
 	"If the result is incomplete or ambiguous, ask the user a clarifying question instead of looping on tool calls."
 
+// addPendingResultOf records an async sub-agent whose AsyncNotify result just
+// arrived and will be surfaced by the next (auto-summary) turn. Drained by
+// takePendingResultOf at startTurn into turnState.resultOf. Phase 8/A6.
+func (s *Session) addPendingResultOf(ref protocol.ActiveSubagentRef) {
+	s.pendingResultMu.Lock()
+	defer s.pendingResultMu.Unlock()
+	s.pendingResultOf = append(s.pendingResultOf, ref)
+}
+
+// takePendingResultOf returns and clears the accumulated async-result refs so
+// the starting turn's Final frame attributes the summary it produces. Phase
+// 8/A6.
+func (s *Session) takePendingResultOf() []protocol.ActiveSubagentRef {
+	s.pendingResultMu.Lock()
+	defer s.pendingResultMu.Unlock()
+	if len(s.pendingResultOf) == 0 {
+		return nil
+	}
+	out := s.pendingResultOf
+	s.pendingResultOf = nil
+	return out
+}
+
 // kickAsyncSummaryTurn starts a system-initiated turn driven by a
 // synthetic UserMessage authored by the agent participant. Phase
 // 5.1c.cancel-ux follow-up — the model sees the just-folded

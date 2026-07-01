@@ -1,0 +1,20 @@
+# Dev test-infra: the A2A Inspector (visual A2A client) for eyeballing the
+# hugen A2A endpoint. hugen itself runs on the HOST (`hugen a2a`), reachable
+# from this container at host.docker.internal:10000.
+#
+#   docker compose -f docker/docker-compose.yml up -d --build
+#   # open http://127.0.0.1:10081 → connect to http://host.docker.internal:10000
+#
+# Boot hugen so the card advertises a container-reachable URL:
+#   HUGEN_A2A_BASE_URL=http://host.docker.internal:10000 ./bin/hugen a2a
+services:
+  a2a-inspector:
+    build:
+      context: .
+      dockerfile: a2a-inspector.Dockerfile
+    container_name: a2a-inspector
+    ports:
+      - "10081:8080" # host 10081 → container 8080 (8080 is taken on the host)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

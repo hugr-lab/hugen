@@ -173,6 +173,31 @@ func (s *Session) snapshotActiveSubagents() []protocol.ActiveSubagentRef {
 	return out
 }
 
+// snapshotActiveAsync returns one ActiveSubagentRef per async sub-agent live
+// right now — children carrying a non-empty asyncSpawnMode (async_notify /
+// silent / timeout-delivered). Synchronous children block their caller in
+// wait_subagents and are gone from s.children by a turn boundary, so at the
+// Final emit this is exactly "the async sub-agents still running". The runtime
+// reports the full current set; the adapter diffs it (AgentMessagePayload
+// .ActiveAsync). Returns nil when none. Phase 8/A6.
+func (s *Session) snapshotActiveAsync() []protocol.ActiveSubagentRef {
+	s.childMu.Lock()
+	defer s.childMu.Unlock()
+	var out []protocol.ActiveSubagentRef
+	for _, child := range s.children {
+		if child == nil || child.asyncSpawnMode == "" {
+			continue
+		}
+		out = append(out, protocol.ActiveSubagentRef{
+			SessionID: child.id,
+			Skill:     child.spawnSkill,
+			Role:      child.spawnRole,
+			StartedAt: child.openedAt,
+		})
+	}
+	return out
+}
+
 // MarkStatus is the cross-package entry point for the lifecycle
 // transition primitive. Used by the supervisor (pkg/session/manager)
 // to promote a session out of a stale wait_* state at restore time.

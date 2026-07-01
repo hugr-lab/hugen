@@ -236,7 +236,7 @@ func (e *Executor) RunWave(ctx context.Context, state extension.SessionState, wa
 		})
 	}
 
-	timedOut, waitErr := e.waitForWorkers(ctx, m.Handoffs, pending)
+	timedOut, waitErr := e.waitForWorkers(ctx, m, pending)
 	if waitErr != nil {
 		// Parent ctx fired (mission-level cancel / shutdown) — return
 		// what we have; the timeout map still flags any worker we
@@ -295,6 +295,16 @@ type pendingWorker struct {
 	ref       string
 	sessionID string
 	deadline  time.Time
+
+	// A6 HITL-pause bookkeeping. blockAccum is the total time this worker has
+	// spent parked on a HITL inquiry so far; blockStart is when the current
+	// block began (zero when not currently blocked). The effective deadline is
+	// deadline+blockAccum(+ongoing block) so human-wait time never counts
+	// against the work budget. Crediting the WHOLE block on the blocked→
+	// unblocked transition (not incrementally per poll) avoids losing the final
+	// partial interval and cancelling a just-answered worker.
+	blockAccum time.Duration
+	blockStart time.Time
 }
 
 // waitForWorkers polls the store until every pending worker is either
@@ -306,11 +316,12 @@ type pendingWorker struct {
 // shutdown), which returns ctx.Err() alongside whatever timed out so
 // far. Phase B will replace the poll with an observer completion
 // channel.
-func (e *Executor) waitForWorkers(ctx context.Context, store *Handoffs, workers []pendingWorker) (map[string]bool, error) {
+func (e *Executor) waitForWorkers(ctx context.Context, m *MissionState, workers []pendingWorker) (map[string]bool, error) {
 	timedOut := make(map[string]bool)
 	if len(workers) == 0 {
 		return timedOut, nil
 	}
+	store := m.Handoffs
 	done := make(map[string]bool)
 	const pollEvery = 50 * time.Millisecond
 	ticker := time.NewTicker(pollEvery)
@@ -318,7 +329,8 @@ func (e *Executor) waitForWorkers(ctx context.Context, store *Handoffs, workers 
 	for {
 		remaining := 0
 		now := nowFn()
-		for _, w := range workers {
+		for i := range workers {
+			w := &workers[i]
 			if done[w.ref] || timedOut[w.ref] {
 				continue
 			}
@@ -326,9 +338,27 @@ func (e *Executor) waitForWorkers(ctx context.Context, store *Handoffs, workers 
 				done[w.ref] = true
 				continue
 			}
-			if now.After(w.deadline) {
+			// A6: a worker parked on a HITL inquiry (e.g. the planner waiting
+			// for the user to approve the plan) must not burn its wall-clock
+			// budget on human-wait time. While blocked we never cancel it; the
+			// inquiry's own timeout bounds the wait, so a truly-stuck worker
+			// still settles.
+			if m.IsHITLWaiting(w.sessionID) {
+				if w.blockStart.IsZero() {
+					w.blockStart = now
+				}
+				remaining++
+				continue
+			}
+			// Just unblocked: credit the whole block (including the final
+			// partial interval) to the deadline before judging it.
+			if !w.blockStart.IsZero() {
+				w.blockAccum += now.Sub(w.blockStart)
+				w.blockStart = time.Time{}
+			}
+			if now.After(w.deadline.Add(w.blockAccum)) {
 				timedOut[w.ref] = true
-				e.cancelTimedOutWorker(ctx, w)
+				e.cancelTimedOutWorker(ctx, *w)
 				continue
 			}
 			remaining++

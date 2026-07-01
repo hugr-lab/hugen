@@ -53,7 +53,29 @@ type BootstrapConfig struct {
 	// ArtifactsIdleTTL (HUGEN_ARTIFACTS_IDLE_TTL): an open root idle
 	// past this is reaped by the retention sweep. Defaults to 7 days.
 	ArtifactsIdleTTL time.Duration
-	Hugr             HugrConfig
+
+	// A2APort (HUGEN_A2A_PORT) selects the A2A adapter's listener mode:
+	//   0 (default) → mount on the shared auth/callback listener (Port);
+	//   >0          → bind a dedicated listener on this port (recommended
+	//                 for tunnel-exposed runs — see design/008
+	//                 spec-a2a-adapter.md §6.1 loopback-token caveat).
+	// Only consumed by the `hugen a2a` run mode. Transport config is env,
+	// never agent YAML.
+	A2APort int
+	// A2ABaseURL (HUGEN_A2A_BASE_URL) is the public URL the agent card
+	// advertises (the tunnel hostname in production). Defaults are derived
+	// in runA2A: dedicated → http://localhost:<A2APort>; shared → BaseURI.
+	A2ABaseURL string
+	// A2AAPIKey (HUGEN_A2A_API_KEY) gates the A2A JSON-RPC endpoint behind a
+	// static API key (header X-API-Key). Empty = open endpoint — set it before
+	// exposing the endpoint over a tunnel. Transport/auth knob = env, never YAML.
+	A2AAPIKey string
+	// A2AAllowOpen (HUGEN_A2A_ALLOW_OPEN) explicitly permits serving an
+	// unauthenticated A2A endpoint. Without it, `hugen a2a` with no API key
+	// FAILS CLOSED (refuses to start). Set =1 for a throwaway local run only.
+	A2AAllowOpen bool
+
+	Hugr HugrConfig
 }
 
 // HugrConfig — platform connection.
@@ -125,6 +147,10 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 		ArtifactsMaxTotalMB:   v.GetInt("HUGEN_ARTIFACTS_MAX_TOTAL_MB"),
 		ArtifactsMaxSessionMB: v.GetInt("HUGEN_ARTIFACTS_MAX_SESSION_MB"),
 		ArtifactsIdleTTL:      v.GetDuration("HUGEN_ARTIFACTS_IDLE_TTL"),
+		A2APort:               v.GetInt("HUGEN_A2A_PORT"),
+		A2ABaseURL:            v.GetString("HUGEN_A2A_BASE_URL"),
+		A2AAPIKey:             v.GetString("HUGEN_A2A_API_KEY"),
+		A2AAllowOpen:          v.GetBool("HUGEN_A2A_ALLOW_OPEN"),
 		Hugr: HugrConfig{
 			URL:         v.GetString("HUGR_URL"),
 			RedirectURI: v.GetString("HUGR_REDIRECT_URI"),

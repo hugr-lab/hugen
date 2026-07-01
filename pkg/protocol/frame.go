@@ -254,6 +254,29 @@ type AgentMessagePayload struct {
 	// (reason context_budget) regardless of what the model claimed, so
 	// an out-of-budget role can never report success. Phase 5.2.
 	BudgetExceeded bool `json:"budget_exceeded,omitempty"`
+
+	// ActiveAsync lists ALL async sub-agents (a mission is a sub-agent;
+	// any sub-agent can be spawned async) that are live at this turn's
+	// boundary — the full current set, not a per-turn delta. Stamped on
+	// the Final=true consolidated frame only. The runtime reports raw
+	// state; an adapter that bridges turns to external requests (A2A
+	// Tasks) DIFFS it against what it already tracks: a session id here
+	// that it hasn't seen is newly spawned and belongs to THIS turn's
+	// request (keep it open / Task `working`, await a [ResultOf]-tagged
+	// follow-up); ids it already attributes to an earlier request stay
+	// there. Empty on a turn with no async sub-agents live (the common
+	// synchronous turn → adapter finishes immediately). Phase 8/A6.
+	ActiveAsync []ActiveSubagentRef `json:"active_async,omitempty"`
+
+	// ResultOf lists the sub-agent(s) whose terminal result THIS turn is
+	// surfacing — the runtime stamps it on the Final=true frame of the
+	// auto-summary turn it kicks when an async sub-agent completes. The
+	// reply text is the ROOT session's work (its summary of the result),
+	// not the raw SubagentResult; ResultOf carries the attribution so an
+	// adapter can match the summary back to the [SpawnedAsync] session id
+	// it was awaiting — essential when several async sub-agents run
+	// concurrently under one context. Empty on a normal turn. Phase 8/A6.
+	ResultOf []ActiveSubagentRef `json:"result_of,omitempty"`
 }
 
 type ReasoningPayload struct {

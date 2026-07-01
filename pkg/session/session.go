@@ -273,6 +273,17 @@ type Session struct {
 	// the top of every user-driven startTurn so a real UserMessage
 	// supersedes the pending kick.
 	pendingAsyncSummary atomic.Bool
+
+	// pendingResultOf accumulates the async sub-agent(s) whose
+	// SubagentResult{AsyncNotify} arrived while idle and is about to be
+	// summarised by a kicked auto-summary turn. Drained into
+	// turnState.resultOf at the next startTurn so that turn's Final frame
+	// carries ResultOf = the attribution an adapter needs to match the
+	// summary back to the async request it was awaiting. Run-goroutine
+	// only (routeInbound + startTurn); guarded for defensiveness against
+	// a future off-loop caller. Phase 8/A6.
+	pendingResultMu sync.Mutex
+	pendingResultOf []protocol.ActiveSubagentRef
 }
 
 // terminationCause is the cancel cause attached to a per-session ctx
@@ -1455,6 +1466,10 @@ func (s *Session) routeInbound(ctx context.Context, f protocol.Frame) error {
 		// summary turn that would have no inject to summarise.
 		if sr, ok := f.(*protocol.SubagentResult); ok && sr.Payload.RenderMode == protocol.SubagentRenderAsyncNotify {
 			s.pendingAsyncSummary.Store(true)
+			// A6: record the completed async sub-agent so the auto-summary
+			// turn's Final frame carries ResultOf (attribution by session id).
+			// Matched by id at the adapter — Name is the human label only.
+			s.addPendingResultOf(protocol.ActiveSubagentRef{SessionID: sr.Payload.SessionID})
 		}
 		if s.turnState == nil {
 			// Phase 5.1c.cancel-ux follow-up — inter-turn frames
