@@ -75,6 +75,18 @@ type BootstrapConfig struct {
 	// FAILS CLOSED (refuses to start). Set =1 for a throwaway local run only.
 	A2AAllowOpen bool
 
+	// APIPort (HUGEN_API_PORT) selects the native HTTP API adapter's listener
+	// mode: 0 → shared auth/callback listener (Port); >0 → dedicated listener
+	// (the norm — one container = one agent = its own port). `hugen serve`.
+	APIPort int
+	// APIBaseURL (HUGEN_API_BASE_URL) is the public base URL the agent card
+	// advertises. Derived in runServe when empty. Transport knob = env.
+	APIBaseURL string
+	// APIAllowOpen (HUGEN_API_ALLOW_OPEN) permits serving the HTTP API with no
+	// token issuer (HUGR_ISSUER) configured. Without it, `hugen serve` FAILS
+	// CLOSED — it cannot verify forwarded user tokens (D4). Local dev only.
+	APIAllowOpen bool
+
 	Hugr HugrConfig
 }
 
@@ -151,6 +163,9 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 		A2ABaseURL:            v.GetString("HUGEN_A2A_BASE_URL"),
 		A2AAPIKey:             v.GetString("HUGEN_A2A_API_KEY"),
 		A2AAllowOpen:          v.GetBool("HUGEN_A2A_ALLOW_OPEN"),
+		APIPort:               v.GetInt("HUGEN_API_PORT"),
+		APIBaseURL:            v.GetString("HUGEN_API_BASE_URL"),
+		APIAllowOpen:          v.GetBool("HUGEN_API_ALLOW_OPEN"),
 		Hugr: HugrConfig{
 			URL:         v.GetString("HUGR_URL"),
 			RedirectURI: v.GetString("HUGR_REDIRECT_URI"),

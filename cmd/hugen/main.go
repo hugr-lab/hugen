@@ -9,6 +9,7 @@
 //  2. Dispatch on os.Args[1]:
 //     tui    — attaches the Bubble Tea TUI adapter (default).
 //     a2a    — attaches the A2A protocol adapter (design/008, Stage 1).
+//     serve  — attaches the native HTTP API adapter (design/008 spec-http-api).
 //  3. Block on ctx until SIGINT/SIGTERM, then defer-shutdown core.
 package main
 
@@ -57,13 +58,14 @@ func run(args []string, errOut io.Writer) int {
 	}
 
 	switch sub {
-	case "a2a", "", "tui":
+	case "a2a", "serve", "", "tui":
 		// OK — fall through to bootstrap.
 	default:
 		fmt.Fprintf(errOut, "unknown subcommand %q\n\n", sub)
-		fmt.Fprintln(errOut, "usage: hugen [tui|a2a]")
+		fmt.Fprintln(errOut, "usage: hugen [tui|a2a|serve]")
 		fmt.Fprintln(errOut, "  tui    start the Bubble Tea TUI adapter (default)")
 		fmt.Fprintln(errOut, "  a2a    start the A2A protocol adapter (headless; Teams/Copilot interop)")
+		fmt.Fprintln(errOut, "  serve  start the native HTTP API (headless; gateway / hub UI)")
 		return exitUsage
 	}
 
@@ -80,6 +82,9 @@ func run(args []string, errOut io.Writer) int {
 
 	if sub == "a2a" {
 		return runA2A(ctx, core, boot)
+	}
+	if sub == "serve" {
+		return runServe(ctx, core, boot)
 	}
 	return runTUI(ctx, core)
 }
