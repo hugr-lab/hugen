@@ -65,9 +65,12 @@ HUGEN_API_URL=http://localhost:10100 go test ./pkg/hugenclient/ -run Integration
 
 ### 3. Browser — the multi-interface proof
 
-Open the built-in dev client and **prove many interfaces drive one session**:
+Open the built-in dev client and **prove many interfaces drive one session**.
+It is OFF by default — enable it with `HUGEN_API_DEV_UI=1` on the `hugen serve`
+run (unauthenticated; dev only):
 
 ```sh
+HUGEN_API_PORT=10100 HUGEN_API_ALLOW_OPEN=1 HUGEN_API_DEV_UI=1 ./bin/hugen serve
 open http://localhost:10100/ui
 ```
 

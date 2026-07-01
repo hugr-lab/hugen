@@ -64,6 +64,10 @@ type Adapter struct {
 	// anyone without it.
 	issuer    string
 	allowOpen bool
+	// devUI serves the built-in browser dev client at /ui. Off by default —
+	// opt-in via HUGEN_API_DEV_UI. It uses EventSource (no auth header), so it
+	// is only useful on an allow-open endpoint; never expose it on a real one.
+	devUI bool
 
 	// verify authenticates a forwarded user token (H2). nil ⇒ allow-open dev
 	// (authMiddleware injects devUser). Set via WithVerifier from the cmd layer,
@@ -118,6 +122,11 @@ func WithIssuer(url string) Option { return func(a *Adapter) { a.issuer = url } 
 // WithAllowOpen permits serving with no issuer configured (local dev). Without
 // it, Run fails closed when no issuer is set (D4).
 func WithAllowOpen(v bool) Option { return func(a *Adapter) { a.allowOpen = v } }
+
+// WithDevUI serves the built-in browser dev client at /ui. Off by default
+// (HUGEN_API_DEV_UI). It has no auth (EventSource), so enable it only on an
+// allow-open dev endpoint.
+func WithDevUI(v bool) Option { return func(a *Adapter) { a.devUI = v } }
 
 // WithVerifier installs the forwarded-user-token verifier (H2). Without it the
 // endpoint runs in allow-open dev mode — every request is the local dev user.
@@ -235,11 +244,12 @@ func (a *Adapter) mount(mux *http.ServeMux, health bool) error {
 		mux.HandleFunc(healthzPath, healthHandler)
 		mux.HandleFunc(readyzPath, healthHandler)
 	}
-	// H9: the minimal dev client — allow-open only (it uses EventSource, which
-	// cannot send an auth header, so it only works on an un-gated endpoint).
-	if a.allowOpen {
+	// H9: the minimal dev client — OFF by default, opt-in via HUGEN_API_DEV_UI.
+	// It uses EventSource (no auth header), so it is only useful on an allow-open
+	// endpoint; never enable it on a real one.
+	if a.devUI {
 		mux.HandleFunc(uiPath, serveUI)
-		a.logger.Info("httpapi: dev client at /ui (allow-open)", "path", uiPath)
+		a.logger.Warn("httpapi: dev client SERVED at /ui (HUGEN_API_DEV_UI) — dev only, unauthenticated", "path", uiPath)
 	}
 	return nil
 }

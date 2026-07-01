@@ -28,6 +28,7 @@ func runServe(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) in
 		httpapi.WithBaseURL(apiBaseURL(boot)),
 		httpapi.WithIssuer(boot.Hugr.Issuer),
 		httpapi.WithAllowOpen(boot.APIAllowOpen),
+		httpapi.WithDevUI(boot.APIDevUI),
 	}
 	// H2: verify forwarded user tokens against hugr's authority (auth.me).
 	// Allow-open (dev) skips it — every request becomes the local dev user.

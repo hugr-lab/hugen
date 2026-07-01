@@ -65,6 +65,9 @@ type BootstrapConfig struct {
 	// token issuer (HUGR_ISSUER) configured. Without it, `hugen serve` FAILS
 	// CLOSED — it cannot verify forwarded user tokens (D4). Local dev only.
 	APIAllowOpen bool
+	// APIDevUI (HUGEN_API_DEV_UI) serves the built-in browser dev client at
+	// /ui. Off by default; unauthenticated (EventSource) — dev only.
+	APIDevUI bool
 
 	Hugr HugrConfig
 }
@@ -141,6 +144,7 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 		APIPort:               v.GetInt("HUGEN_API_PORT"),
 		APIBaseURL:            v.GetString("HUGEN_API_BASE_URL"),
 		APIAllowOpen:          v.GetBool("HUGEN_API_ALLOW_OPEN"),
+		APIDevUI:              v.GetBool("HUGEN_API_DEV_UI"),
 		Hugr: HugrConfig{
 			URL:         v.GetString("HUGR_URL"),
 			RedirectURI: v.GetString("HUGR_REDIRECT_URI"),
