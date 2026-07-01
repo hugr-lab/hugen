@@ -22,6 +22,7 @@ func runA2A(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) int 
 		a2a.WithLogger(core.Logger),
 		a2a.WithBaseURL(a2aBaseURL(boot)),
 		a2a.WithAPIKey(boot.A2AAPIKey),
+		a2a.WithAllowOpen(boot.A2AAllowOpen),
 	}
 	// A10: by-ref artifact delivery — published files surface as FileParts
 	// pointing at the adapter's signed download endpoint, resolved through the

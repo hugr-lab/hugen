@@ -7,6 +7,7 @@ import (
 	"iter"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -33,6 +34,10 @@ const chatHistoryMetaKey = "copilotstudio.microsoft.com/a2a/chathistory"
 type frameIO interface {
 	Submit(ctx context.Context, f protocol.Frame) error
 	Subscribe(ctx context.Context, sessionID string) (<-chan protocol.Frame, error)
+	// CloseSession terminates a durable root (used by Cancel to actually stop
+	// an in-flight async mission, not just report a canceled Task). adapter.Host
+	// satisfies it.
+	CloseSession(ctx context.Context, sessionID, reason string) (time.Time, error)
 }
 
 // sessionExecutor is the A3 AgentExecutor: it resolves the contextId to a
@@ -205,7 +210,15 @@ func (e *sessionExecutor) drainTurn(
 					// chunks already carried its text. Not a turn boundary.
 					continue
 				}
-				// Turn boundary. Attribute async work (A6).
+				// Turn boundary. Reply text = the accumulated live chunks, but
+				// fall back to the authoritative consolidated Text when no deltas
+				// preceded this Final (a provider/path that emits only the
+				// consolidated frame would otherwise deliver an empty reply). L3.
+				replyText := b.String()
+				if strings.TrimSpace(replyText) == "" {
+					replyText = fr.Payload.Text
+				}
+				// Attribute async work (A6).
 				fresh := cs.recordNewAsync(fr.Payload.ActiveAsync)
 				for _, id := range fresh {
 					awaited[id] = struct{}{} // this turn launched it → this Task awaits it
@@ -214,9 +227,18 @@ func (e *sessionExecutor) drainTurn(
 				if len(awaited) == 0 {
 					// No async pending for this Task — a plain turn, or the last
 					// thing it awaited just completed. Deliver the reply.
+					//
+					// KNOWN LIMITATION (M2): two concurrent Executes on ONE
+					// contextId (a chat message sent while an async mission runs)
+					// both drain the same outbox; a plain-turn Execute has no
+					// async attribution to key on and finishes on the FIRST Final
+					// it sees — which may be another turn's. Rare with a
+					// request/response consumer (Copilot waits for the reply
+					// before sending the next); a per-turn request id on the Final
+					// would fully fix it. Tracked, not blocking single-flight use.
 					e.logger.Debug("a2a: turn complete",
-						"context_id", execCtx.ContextID, "len", b.Len())
-					e.finishTurn(execCtx, *taskBorn, b.String(), yield)
+						"context_id", execCtx.ContextID, "len", len(replyText))
+					e.finishTurn(execCtx, *taskBorn, replyText, yield)
 					return
 				}
 				// Still holding. Report progress only when THIS frame moved this
@@ -224,7 +246,7 @@ func (e *sessionExecutor) drainTurn(
 				// results landed. Another Task's summary on the shared outbox is
 				// not ours to surface.
 				if len(fresh) > 0 || matched {
-					e.reportWorking(execCtx, taskBorn, b.String(), len(awaited), yield)
+					e.reportWorking(execCtx, taskBorn, replyText, len(awaited), yield)
 				}
 				b.Reset()
 			case *protocol.InquiryRequest:
@@ -252,15 +274,16 @@ func (e *sessionExecutor) drainTurn(
 					fr.Payload.Reason == reasonSessionOpened {
 					continue
 				}
-				// idle (turn_complete / cancelled / stream_error) with no async
-				// pending — a fallback boundary for an empty turn that emitted no
-				// Final AgentMessage (the model produced nothing). While holding
-				// (awaited non-empty) the session is not quiescent, so this
-				// shouldn't fire; if it does, keep holding for the result.
-				if len(awaited) == 0 {
-					e.finishTurn(execCtx, *taskBorn, b.String(), yield)
-					return
-				}
+				// idle (turn_complete / cancelled / stream_error) = root went
+				// quiescent (idle is emitted ONLY when len(children)==0), so
+				// nothing more is coming — finish regardless of `awaited`. This
+				// is both the boundary for an empty turn (no Final AgentMessage)
+				// and a bounded backstop so a held Task whose awaited ResultOf
+				// never arrives can't hang until the client/ctx times out (L7).
+				e.logger.Debug("a2a: idle boundary",
+					"context_id", execCtx.ContextID, "reason", fr.Payload.Reason, "awaited", len(awaited))
+				e.finishTurn(execCtx, *taskBorn, b.String(), yield)
+				return
 			}
 		}
 	}
@@ -400,10 +423,22 @@ func (e *sessionExecutor) requestInput(execCtx *a2asrv.ExecutorContext, taskBorn
 	yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateInputRequired, msg), nil)
 }
 
-// Cancel implements a2asrv.AgentExecutor. The minimal correct response is a
-// canceled status update for the task. A6 cascades a real session Cancel.
-func (e *sessionExecutor) Cancel(_ context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+// Cancel implements a2asrv.AgentExecutor. It cascades a real close to the
+// durable root so an in-flight async mission actually stops (not just a
+// cosmetic canceled Task that leaves the mission running + billing tokens),
+// then reports the canceled Task. Closing the root ends this conversation's
+// work; a later inbound on the same contextId resumes/reopens it (A2/A4). Cache
+// -only lookup — Cancel never OPENS a session (nothing to cancel if unknown).
+func (e *sessionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
+		if rootID, ok := e.reg.peek(execCtx.ContextID); ok {
+			if _, err := e.io.CloseSession(ctx, rootID, "user_cancel: a2a"); err != nil {
+				e.logger.Warn("a2a: cancel close session", "context_id", execCtx.ContextID, "root", rootID, "err", err)
+			} else {
+				e.logger.Debug("a2a: cancel closed root", "context_id", execCtx.ContextID, "root", rootID)
+			}
+			e.reg.forget(execCtx.ContextID)
+		}
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCanceled, nil), nil)
 	}
 }

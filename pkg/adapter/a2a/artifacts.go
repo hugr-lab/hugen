@@ -51,15 +51,15 @@ type artifactResolver func(rootID, id string) (path string, err error)
 
 // randomArtifactSecret returns a fresh signing secret for when no API key is
 // configured — artifacts still get signed URLs, they just don't survive a
-// restart (acceptable for short-lived links).
-func randomArtifactSecret() string {
+// restart (acceptable for short-lived links). Fails closed (returns an error)
+// rather than installing a known constant secret if crypto/rand is unavailable
+// — a forgeable secret is worse than no artifact delivery (L1).
+func randomArtifactSecret() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		// crypto/rand should never fail; fall back to a fixed-but-unique-ish
-		// value so the adapter still boots (links just won't be unguessable).
-		return "a2a-artifact-fallback-secret"
+		return "", fmt.Errorf("a2a: artifact signing secret: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
 // signArtifact is the HMAC token over root|id|exp.

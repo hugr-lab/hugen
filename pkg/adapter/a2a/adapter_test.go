@@ -197,6 +197,12 @@ type fakeFrameIO struct {
 	subID     string
 	subErr    error
 	submitErr error
+	closed    []string // session ids passed to CloseSession (M4)
+}
+
+func (f *fakeFrameIO) CloseSession(_ context.Context, sessionID, _ string) (time.Time, error) {
+	f.closed = append(f.closed, sessionID)
+	return time.Time{}, nil
 }
 
 func (f *fakeFrameIO) Subscribe(_ context.Context, sid string) (<-chan protocol.Frame, error) {
@@ -466,6 +472,41 @@ func TestSessionExecutor_Cancel(t *testing.T) {
 	}
 }
 
+// TestSessionExecutor_Cancel_ClosesRoot covers M4: cancelling a known context
+// actually closes the durable root (stops an in-flight async mission), not just
+// a cosmetic canceled Task, and forgets the binding.
+func TestSessionExecutor_Cancel_ClosesRoot(t *testing.T) {
+	io := &fakeFrameIO{ch: make(chan protocol.Frame, 2)}
+	reg := newContextRegistry(&fakeRootStore{}, quietLogger())
+	e := newSessionExecutor(quietLogger(), reg, io, serviceParticipant(), nil)
+	cs, _ := reg.resolve("ctx-1") // cache the context → cancel can find the root
+
+	execCtx := &a2asrv.ExecutorContext{ContextID: "ctx-1", TaskID: a2a.NewTaskID()}
+	events := collect(t, e.Cancel(context.Background(), execCtx))
+	if len(events) != 1 {
+		t.Fatalf("Cancel yielded %d events, want 1", len(events))
+	}
+	if upd, ok := events[0].(*a2a.TaskStatusUpdateEvent); !ok || upd.Status.State != a2a.TaskStateCanceled {
+		t.Fatalf("event0 = %T/%v, want canceled status", events[0], events[0])
+	}
+	if len(io.closed) != 1 || io.closed[0] != cs.RootID() {
+		t.Errorf("closed sessions = %v, want [%s] (M4 — cancel stops the mission)", io.closed, cs.RootID())
+	}
+	if _, ok := reg.peek("ctx-1"); ok {
+		t.Error("context not forgotten after cancel")
+	}
+}
+
+// TestRun_FailsClosedWithoutKey covers H2: Run refuses to serve an open /a2a
+// when no API key and no explicit WithAllowOpen.
+func TestRun_FailsClosedWithoutKey(t *testing.T) {
+	a := New(WithLogger(quietLogger()), WithSharedMux(http.NewServeMux())) // no key, no allowOpen
+	err := a.Run(context.Background(), stubHost{})
+	if err == nil {
+		t.Fatal("Run served an open endpoint without a key or WithAllowOpen — want a fail-closed error")
+	}
+}
+
 // getCard fetches and decodes the agent card from base+path.
 func getCard(t *testing.T, url string) *a2a.AgentCard {
 	t.Helper()
@@ -486,7 +527,7 @@ func getCard(t *testing.T, url string) *a2a.AgentCard {
 
 func TestRun_SharedMux_ServesCardAtBothPaths(t *testing.T) {
 	mux := http.NewServeMux()
-	a := New(WithLogger(quietLogger()), WithBaseURL("http://x"), WithSharedMux(mux))
+	a := New(WithLogger(quietLogger()), WithBaseURL("http://x"), WithSharedMux(mux), WithAllowOpen(true))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -518,7 +559,7 @@ func TestRun_SharedMux_ServesCardAtBothPaths(t *testing.T) {
 
 func TestRun_DedicatedListener_Lifecycle(t *testing.T) {
 	port := freePort(t)
-	a := New(WithLogger(quietLogger()), WithListenPort(port))
+	a := New(WithLogger(quietLogger()), WithListenPort(port), WithAllowOpen(true))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

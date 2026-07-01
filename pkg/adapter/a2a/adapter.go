@@ -93,6 +93,13 @@ type Adapter struct {
 	// from HUGEN_A2A_API_KEY (an adapter knob → env, never YAML).
 	apiKey string
 
+	// allowOpen lets the adapter serve an unauthenticated /a2a endpoint. Without
+	// it (the default) Run REFUSES to serve open — fail-closed (H2), because an
+	// open endpoint with no session reaper (A8, deferred) is a trivial resource
+	// -exhaustion vector (any contextId opens a permanent root). Set via
+	// HUGEN_A2A_ALLOW_OPEN=1 for a throwaway local run; never over a tunnel.
+	allowOpen bool
+
 	// artifactResolve resolves a published artifact (rootID, id) to a local
 	// path so the by-ref download endpoint (A10) can stream it. nil disables
 	// artifact delivery (no /a2a/artifacts/ endpoint, no FilePart emitted).
@@ -101,8 +108,10 @@ type Adapter struct {
 
 	// host is the runtime side of the adapter contract, captured in Run.
 	host adapter.Host
-	// reg maps contextIds to durable root sessions (A2). Built in Run;
-	// the executor resolves through it, and idle-GC (A8) forgets through it.
+	// reg maps contextIds to durable root sessions (A2). Built in Run; the
+	// executor resolves through it and Cancel forgets through it. NOTE: there is
+	// no idle-GC yet (A8, deferred) — every distinct contextId opens a permanent
+	// root, so the endpoint must stay private/keyed until A8 lands (H1/H2).
 	reg *contextRegistry
 }
 
@@ -150,8 +159,12 @@ func WithServiceIdentity(id, name string) Option {
 }
 
 // WithAPIKey gates the JSON-RPC endpoint behind an API key carried in the
-// apiKeyHeader header (A9). Empty leaves the endpoint open.
+// apiKeyHeader header (A9). Empty leaves the endpoint open (see WithAllowOpen).
 func WithAPIKey(key string) Option { return func(a *Adapter) { a.apiKey = strings.TrimSpace(key) } }
+
+// WithAllowOpen permits serving an unauthenticated /a2a endpoint. Without it,
+// Run fails closed when no API key is set (H2).
+func WithAllowOpen(v bool) Option { return func(a *Adapter) { a.allowOpen = v } }
 
 // WithArtifactResolver enables by-ref artifact delivery (A10): published
 // artifacts surface as A2A FileParts pointing at a signed download URL served
@@ -204,8 +217,19 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	artifactSecret := a.apiKey
 	if a.artifactResolve != nil {
 		if artifactSecret == "" {
-			artifactSecret = randomArtifactSecret()
+			// L1: fail closed — never fall back to a known constant secret (which
+			// would make every signed URL forgeable). If crypto/rand is
+			// unavailable (effectively never), disable artifact delivery.
+			s, err := randomArtifactSecret()
+			if err != nil {
+				a.logger.Warn("a2a: artifact delivery DISABLED — no signing secret", "err", err)
+				a.artifactResolve = nil
+			} else {
+				artifactSecret = s
+			}
 		}
+	}
+	if a.artifactResolve != nil {
 		base := a.baseURL
 		artifactURL = func(rootID, id string) string {
 			return signedArtifactURL(base, artifactSecret, rootID, id, time.Now())
@@ -228,8 +252,12 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	if a.apiKey != "" {
 		rpc = a.apiKeyGate(rpc)
 		a.logger.Info("a2a: API-key auth enabled", "header", apiKeyHeader)
+	} else if a.allowOpen {
+		a.logger.Warn("a2a: NO API key — JSON-RPC endpoint is OPEN (HUGEN_A2A_ALLOW_OPEN set); do NOT expose it over a tunnel — no session reaper yet (A8)")
 	} else {
-		a.logger.Warn("a2a: NO API key set — the JSON-RPC endpoint is OPEN; set HUGEN_A2A_API_KEY before exposing it")
+		// Fail closed (H2): an open endpoint with no idle-GC (A8) is a trivial
+		// resource-exhaustion vector — any contextId opens a permanent root.
+		return fmt.Errorf("a2a: refusing to serve an OPEN JSON-RPC endpoint — set HUGEN_A2A_API_KEY, or HUGEN_A2A_ALLOW_OPEN=1 to allow it explicitly")
 	}
 	// Serve a DUAL-shaped card, not a2asrv.NewStaticAgentCardHandler (which
 	// emits the v1.0-only shape). The a2a-go/v2 AgentCard carries just

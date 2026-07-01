@@ -16,9 +16,10 @@ stream, trigger an `input-required` inquiry, receive a `FilePart` artifact.
 docker compose -f docker/docker-compose.yml up -d --build
 
 # 2. Boot hugen so the card advertises a container-reachable URL.
-HUGEN_A2A_BASE_URL=http://host.docker.internal:10000 ./bin/hugen a2a
-#   (add HUGEN_A2A_API_KEY=<secret> to gate the endpoint; then supply the
-#    X-API-Key header in the inspector's request settings.)
+#    The endpoint is fail-closed: an open (un-keyed) run needs HUGEN_A2A_ALLOW_OPEN=1.
+HUGEN_A2A_ALLOW_OPEN=1 HUGEN_A2A_BASE_URL=http://host.docker.internal:10000 ./bin/hugen a2a
+#   (or gate it: HUGEN_A2A_API_KEY=<secret> — then supply the X-API-Key header
+#    in the inspector's request settings, and drop HUGEN_A2A_ALLOW_OPEN.)
 
 # 3. Open the inspector and connect.
 open http://127.0.0.1:10081

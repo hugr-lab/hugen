@@ -43,10 +43,16 @@ func buildInquiryResponse(user protocol.ParticipantInfo, rootSessionID string, p
 		}
 	case protocol.InquiryTypeClarification, protocol.InquiryTypeResearchBatch:
 		// Clarification (and, best-effort, a single-line research_batch answer):
-		// the whole line is the response. Structured per-question batched
-		// answers over A2A are a follow-up — the TUI walks a multi-panel modal a
-		// chat transport can't reproduce in one turn, so a batch collapses to a
-		// single free-form Response here.
+		// the whole line is the response.
+		//
+		// KNOWN LIMITATION (M3): a research_batch carries Clarifications[] keyed
+		// by stable id and the research role reads answers back from
+		// Answers[id]; collapsing to a single free-form Response means the
+		// research stage gets no structured answers over A2A. inquiryPrompt does
+		// enumerate the questions so a human can read them, but the reply isn't
+		// mapped per-id. research_batch over A2A is effectively unsupported until
+		// a per-id answer surface is added; single-question clarification (the
+		// common case) works.
 		if answer == "" {
 			return nil, fmt.Errorf("a clarification needs a non-empty answer")
 		}

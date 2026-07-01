@@ -214,7 +214,19 @@ func (r *contextRegistry) bind(contextID, rootID, how string) *contextSession {
 	return cs
 }
 
-// forget drops the in-memory binding (used by idle-GC, A8). The durable
+// peek returns the root bound to contextID from the in-memory cache WITHOUT
+// opening or resuming one — used by Cancel, which must not create a session
+// just to cancel it. found=false when the context isn't currently cached.
+func (r *contextRegistry) peek(contextID string) (rootID string, found bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cs, ok := r.byContext[contextID]; ok {
+		return cs.rootID, true
+	}
+	return "", false
+}
+
+// forget drops the in-memory binding. The durable
 // session and its metadata are untouched; a later inbound on the same
 // contextId rebuilds the binding lazily via boundRoot/resumeRoot.
 func (r *contextRegistry) forget(contextID string) {

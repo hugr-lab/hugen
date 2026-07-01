@@ -67,10 +67,13 @@ type BootstrapConfig struct {
 	// in runA2A: dedicated → http://localhost:<A2APort>; shared → BaseURI.
 	A2ABaseURL string
 	// A2AAPIKey (HUGEN_A2A_API_KEY) gates the A2A JSON-RPC endpoint behind a
-	// static API key (header X-API-Key). Empty = open endpoint (logged loud) —
-	// set it before exposing the endpoint over a tunnel. Transport/auth knob =
-	// env, never agent YAML.
+	// static API key (header X-API-Key). Empty = open endpoint — set it before
+	// exposing the endpoint over a tunnel. Transport/auth knob = env, never YAML.
 	A2AAPIKey string
+	// A2AAllowOpen (HUGEN_A2A_ALLOW_OPEN) explicitly permits serving an
+	// unauthenticated A2A endpoint. Without it, `hugen a2a` with no API key
+	// FAILS CLOSED (refuses to start). Set =1 for a throwaway local run only.
+	A2AAllowOpen bool
 
 	Hugr HugrConfig
 }
@@ -147,6 +150,7 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 		A2APort:               v.GetInt("HUGEN_A2A_PORT"),
 		A2ABaseURL:            v.GetString("HUGEN_A2A_BASE_URL"),
 		A2AAPIKey:             v.GetString("HUGEN_A2A_API_KEY"),
+		A2AAllowOpen:          v.GetBool("HUGEN_A2A_ALLOW_OPEN"),
 		Hugr: HugrConfig{
 			URL:         v.GetString("HUGR_URL"),
 			RedirectURI: v.GetString("HUGR_REDIRECT_URI"),
