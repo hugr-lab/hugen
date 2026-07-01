@@ -27,6 +27,11 @@ func runServe(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) in
 		httpapi.WithIssuer(boot.Hugr.Issuer),
 		httpapi.WithAllowOpen(boot.APIAllowOpen),
 	}
+	// H2: verify forwarded user tokens against hugr's authority (auth.me).
+	// Allow-open (dev) skips it — every request becomes the local dev user.
+	if !boot.APIAllowOpen {
+		opts = append(opts, httpapi.WithVerifier(userTokenVerifier(core)))
+	}
 	if boot.APIPort > 0 {
 		opts = append(opts, httpapi.WithListenPort(boot.APIPort))
 		core.Logger.Info("httpapi: dedicated listener mode", "port", boot.APIPort)

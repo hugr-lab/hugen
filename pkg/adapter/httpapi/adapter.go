@@ -28,6 +28,8 @@ const (
 	// cardPath serves the agent card (name / capabilities / API descriptor).
 	// Public — discovery needs no auth, like the A2A well-known card.
 	cardPath = "/v1/agent"
+	// whoamiPath returns the verified end-user identity (protected). H2.
+	whoamiPath = "/v1/whoami"
 	// healthzPath / readyzPath are k8s probes (dedicated-listener mode only).
 	healthzPath = "/healthz"
 	readyzPath  = "/readyz"
@@ -62,6 +64,11 @@ type Adapter struct {
 	// anyone without it.
 	issuer    string
 	allowOpen bool
+
+	// verify authenticates a forwarded user token (H2). nil ⇒ allow-open dev
+	// (authMiddleware injects devUser). Set via WithVerifier from the cmd layer,
+	// which owns the hugr coupling.
+	verify VerifyFunc
 
 	host adapter.Host
 }
@@ -103,6 +110,10 @@ func WithIssuer(url string) Option { return func(a *Adapter) { a.issuer = url } 
 // WithAllowOpen permits serving with no issuer configured (local dev). Without
 // it, Run fails closed when no issuer is set (D4).
 func WithAllowOpen(v bool) Option { return func(a *Adapter) { a.allowOpen = v } }
+
+// WithVerifier installs the forwarded-user-token verifier (H2). Without it the
+// endpoint runs in allow-open dev mode — every request is the local dev user.
+func WithVerifier(f VerifyFunc) Option { return func(a *Adapter) { a.verify = f } }
 
 // New constructs the HTTP API adapter. Callers select a listener mode via
 // WithSharedMux or WithListenPort; New defaults neither (the cmd layer decides
@@ -187,6 +198,9 @@ func (a *Adapter) mount(mux *http.ServeMux, health bool) error {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(cardBytes)
 	})
+	// Protected routes go behind authMiddleware (verify forwarded user token →
+	// identity in ctx). Card + health stay public.
+	mux.Handle(whoamiPath, a.authMiddleware(http.HandlerFunc(whoamiHandler)))
 	if health {
 		mux.HandleFunc(healthzPath, healthHandler)
 		mux.HandleFunc(readyzPath, healthHandler)
