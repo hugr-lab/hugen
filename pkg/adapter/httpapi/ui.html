@@ -24,6 +24,7 @@
   .user { align-self: flex-end; background: #4a90d9; color: #fff; }
   .agent { align-self: flex-start; background: #8882; }
   .meta { align-self: flex-start; font-size: 12px; opacity: .6; font-family: ui-monospace, monospace; }
+  .reasoning { align-self: flex-start; max-width: 70ch; padding: 6px 12px; border-radius: 10px; background: #8881; opacity: .6; font-style: italic; font-size: 13px; white-space: pre-wrap; }
   .inquiry { align-self: flex-start; background: #e0a03033; border: 1px solid #e0a030; padding: 10px; border-radius: 10px; }
   .inquiry input { width: 100%; margin-top: 6px; }
   .ibtns { display: flex; gap: 8px; margin-top: 8px; }
@@ -51,7 +52,8 @@ const $log = document.getElementById('log');
 const $status = document.getElementById('status');
 const $sid = document.getElementById('sid');
 let sessionId = new URLSearchParams(location.search).get('session') || location.hash.replace(/^#session=/, '');
-let curAgent = null; // the in-progress assistant bubble
+let curAgent = null;  // the in-progress assistant bubble
+let curReason = null; // the in-progress reasoning bubble
 
 function add(cls, text) {
   const el = document.createElement('div');
@@ -75,7 +77,7 @@ function render(f) {
   switch (f.kind) {
     case 'agent_message':
       if (p.consolidated) { curAgent = null; break; }      // final row duplicates the chunks
-      if (!curAgent) curAgent = add('agent', '');
+      if (!curAgent) { curAgent = add('agent', ''); curReason = null; }
       curAgent.textContent += (p.text || '');
       $log.scrollTop = $log.scrollHeight;
       break;
@@ -84,8 +86,12 @@ function render(f) {
       // messages we didn't author here would need id tracking — keep it simple.
       break;
     case 'reasoning':
-      break; // dim internal reasoning — hidden in this minimal client
-    case 'tool_call':   add('meta', '⚙ tool: ' + (p.tool_name || p.name || '?')); curAgent = null; break;
+      if (p.consolidated) { curReason = null; break; }
+      if (!curReason) curReason = add('reasoning', '💭 ');
+      curReason.textContent += (p.text || '');
+      $log.scrollTop = $log.scrollHeight;
+      break;
+    case 'tool_call':   add('meta', '⚙ tool: ' + (p.tool_name || p.name || '?')); curAgent = null; curReason = null; break;
     case 'session_status': $status.textContent = p.state || '—'; break;
     case 'inquiry_request': showInquiry(f); break;
     case 'extension_frame':
@@ -162,6 +168,7 @@ document.getElementById('form').addEventListener('submit', async (e) => {
   $t.value = '';
   add('user', text);
   curAgent = null;
+  curReason = null;
   await fetch('/v1/sessions/' + sessionId + '/messages', {
     method: 'POST', headers: {'content-type':'application/json'},
     body: JSON.stringify({ text }),
