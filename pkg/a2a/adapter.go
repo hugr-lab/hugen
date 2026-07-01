@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -90,12 +91,6 @@ type Server struct {
 	// for a throwaway local run; never over a tunnel.
 	allowOpen bool
 
-	// artifactResolve resolves a published artifact (rootID, id) to a local
-	// path for the by-ref download endpoint (A10). Over HTTP the bridge has no
-	// local artifact access, so this is nil for now — A2A artifact delivery via
-	// hugenclient.DownloadArtifact is a follow-up. nil = no FilePart emitted.
-	artifactResolve artifactResolver
-
 	// client is the native HTTP API client the bridge drives hugen through.
 	client *hugenclient.Client
 	// reg maps contextIds to durable root sessions. Built in Run; the executor
@@ -148,11 +143,6 @@ func WithAPIKey(key string) Option { return func(a *Server) { a.apiKey = strings
 // Run fails closed when no API key is set.
 func WithAllowOpen(v bool) Option { return func(a *Server) { a.allowOpen = v } }
 
-// WithArtifactResolver enables by-ref artifact delivery (A10). nil = disabled.
-func WithArtifactResolver(r artifactResolver) Option {
-	return func(a *Server) { a.artifactResolve = r }
-}
-
 // New constructs an A2A bridge server driving hugen through client.
 func New(client *hugenclient.Client, opts ...Option) *Server {
 	a := &Server{
@@ -183,32 +173,33 @@ func (a *Server) Run(ctx context.Context) error {
 	// so no per-request-ctx lifetime concern here.
 	a.reg = newContextRegistry(clientRootStore{client: a.client, ctx: ctx}, a.logger)
 
-	// A10: artifact delivery. The signing secret is the API key when set
-	// (ties artifact access to the same trust) else a fresh random one; the
-	// executor stamps the by-ref signed URL on every published artifact's
-	// FilePart, and the /a2a/artifacts/ endpoint verifies + serves it.
+	// A10: artifact delivery. Published files surface as A2A FileParts pointing
+	// at a signed download URL this bridge serves — PROXYING the bytes from the
+	// hugen API (the bridge has no local artifact store; H8). The signing secret
+	// is the API key when set (ties artifact access to the same trust) else a
+	// fresh random one.
 	var artifactURL func(rootID, id string) string
+	var artifactFetch artifactResolver
 	artifactSecret := a.apiKey
-	if a.artifactResolve != nil {
-		if artifactSecret == "" {
-			// L1: fail closed — never fall back to a known constant secret (which
-			// would make every signed URL forgeable). If crypto/rand is
-			// unavailable (effectively never), disable artifact delivery.
-			s, err := randomArtifactSecret()
-			if err != nil {
-				a.logger.Warn("a2a: artifact delivery DISABLED — no signing secret", "err", err)
-				a.artifactResolve = nil
-			} else {
-				artifactSecret = s
-			}
+	if artifactSecret == "" {
+		// L1: never fall back to a known constant secret (which would make every
+		// signed URL forgeable). If crypto/rand is unavailable (effectively
+		// never), artifact delivery stays disabled.
+		if s, err := randomArtifactSecret(); err != nil {
+			a.logger.Warn("a2a: artifact delivery DISABLED — no signing secret", "err", err)
+		} else {
+			artifactSecret = s
 		}
 	}
-	if a.artifactResolve != nil {
+	if artifactSecret != "" {
 		base := a.baseURL
 		artifactURL = func(rootID, id string) string {
 			return signedArtifactURL(base, artifactSecret, rootID, id, time.Now())
 		}
-		a.logger.Info("a2a: by-ref artifact delivery enabled", "endpoint", artifactPathPrefix)
+		artifactFetch = func(ctx context.Context, root, id string) (io.ReadCloser, error) {
+			return a.client.DownloadArtifact(ctx, root, id)
+		}
+		a.logger.Info("a2a: by-ref artifact delivery enabled (proxied)", "endpoint", artifactPathPrefix)
 	}
 
 	card := a.buildCard()
@@ -253,8 +244,8 @@ func (a *Server) Run(ctx context.Context) error {
 		mux.Handle(jsonRPCPath, rpc)
 		// A10: by-ref artifact download, self-authenticated by the signed URL
 		// (NOT behind the API-key header gate).
-		if a.artifactResolve != nil {
-			mux.Handle(artifactPathPrefix, artifactDownloadHandler(artifactSecret, a.artifactResolve, a.logger))
+		if artifactFetch != nil {
+			mux.Handle(artifactPathPrefix, artifactDownloadHandler(artifactSecret, artifactFetch, a.logger))
 		}
 	}
 
