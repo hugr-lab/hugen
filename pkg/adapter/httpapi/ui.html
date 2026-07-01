@@ -95,7 +95,9 @@ function render(f) {
       if ((f.auth || {}).kind === 'user') { add('user', p.text || ''); curAgent = null; curReason = null; }
       break;
     case 'reasoning':
-      if (p.consolidated) {
+      // Reasoning frames use `final` (not `consolidated`): streaming chunks are
+      // final=false (live), the persisted consolidated is final=true (replay).
+      if (p.final) {
         if (!curReason && (p.text || '').trim()) add('reasoning', '💭 ' + p.text);
         curReason = null;
         break;

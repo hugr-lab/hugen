@@ -46,6 +46,14 @@ type turnState struct {
 	sawFinal         bool
 	agentSeq         int
 	reasoningSeq     int
+	// reasoning accumulates the streamed display reasoning (chunk.Reasoning)
+	// across the iteration's chunks. At the fold boundary it is emitted as a
+	// single Reasoning{Final=true} frame — PERSISTED for display/audit but NOT
+	// projected into model history (projectFrameToEntry has no Reasoning case),
+	// so it never re-enters the model context. Distinct from Thinking/
+	// ThoughtSignature (the Gemini/Anthropic reasoning-chain BYTES that DO ride
+	// the consolidated AgentMessage back into the model).
+	reasoning string
 
 	// turnUsage aggregates each iter's model.Usage over the turn.
 	// Stamped on the Final=true Consolidated AgentMessage so the
@@ -355,6 +363,7 @@ func (s *Session) resetModelAccumulator() {
 	st.sawFinal = false
 	st.agentSeq = 0
 	st.reasoningSeq = 0
+	st.reasoning = ""
 	st.streamErr = nil
 	st.assistantFolded = false
 	// Per-call usage is per-iteration — clear it so a stream that ends
@@ -436,6 +445,7 @@ func (s *Session) handleModelEvent(runCtx context.Context, ev modelChunkEvent) {
 func (s *Session) applyChunk(runCtx context.Context, chunk model.Chunk) {
 	st := s.turnState
 	if chunk.Reasoning != nil && *chunk.Reasoning != "" {
+		st.reasoning += *chunk.Reasoning // accumulate for the Final=true fold frame
 		rf := protocol.NewReasoning(s.id, s.agent.Participant(),
 			*chunk.Reasoning, st.reasoningSeq, false)
 		if err := s.emit(runCtx, rf); err != nil {
@@ -816,6 +826,16 @@ func (s *Session) foldAssistantAndMaybeDispatch(runCtx context.Context) {
 	// this); Final=false is a tool-iteration (hands off to the
 	// dispatcher) or a gate-blocked iteration (re-iterates the same
 	// session). Skipped when the iteration produced nothing.
+	// Persist the iteration's display reasoning as a single Final=true frame
+	// (the streamed chunks are live-only, never persisted). Emitted BEFORE the
+	// consolidated AgentMessage so it carries a lower seq and replays first.
+	// Display/audit only — the history projection has no Reasoning case, so this
+	// never re-enters the model context (unlike Thinking/ThoughtSignature, which
+	// ride the consolidated AgentMessage back into the model).
+	if st.reasoning != "" {
+		_ = s.emit(runCtx, protocol.NewReasoning(s.id, s.agent.Participant(),
+			st.reasoning, st.reasoningSeq, true))
+	}
 	if st.agentSeq > 0 || hasToolCalls || st.finalText != "" {
 		consolidated := protocol.NewAgentMessageConsolidated(s.id, s.agent.Participant(),
 			st.finalText, st.agentSeq, final,
