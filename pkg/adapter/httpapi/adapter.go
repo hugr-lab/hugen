@@ -235,6 +235,12 @@ func (a *Adapter) mount(mux *http.ServeMux, health bool) error {
 		mux.HandleFunc(healthzPath, healthHandler)
 		mux.HandleFunc(readyzPath, healthHandler)
 	}
+	// H9: the minimal dev client — allow-open only (it uses EventSource, which
+	// cannot send an auth header, so it only works on an un-gated endpoint).
+	if a.allowOpen {
+		mux.HandleFunc(uiPath, serveUI)
+		a.logger.Info("httpapi: dev client at /ui (allow-open)", "path", uiPath)
+	}
 	return nil
 }
 
