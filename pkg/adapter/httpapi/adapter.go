@@ -70,6 +70,10 @@ type Adapter struct {
 	// which owns the hugr coupling.
 	verify VerifyFunc
 
+	// artifacts backs the H6 artifact endpoints. nil ⇒ artifact endpoints
+	// return 501. Wired from core.Artifacts in the cmd layer.
+	artifacts ArtifactStore
+
 	host adapter.Host
 	// lifecycleCtx is the adapter's Run ctx (process lifetime). Sessions are
 	// opened/closed on it, NOT a per-request ctx — a session's Run loop must
@@ -118,6 +122,10 @@ func WithAllowOpen(v bool) Option { return func(a *Adapter) { a.allowOpen = v } 
 // WithVerifier installs the forwarded-user-token verifier (H2). Without it the
 // endpoint runs in allow-open dev mode — every request is the local dev user.
 func WithVerifier(f VerifyFunc) Option { return func(a *Adapter) { a.verify = f } }
+
+// WithArtifactStore enables the H6 artifact endpoints (list / download /
+// ingest). nil leaves them returning 501.
+func WithArtifactStore(s ArtifactStore) Option { return func(a *Adapter) { a.artifacts = s } }
 
 // New constructs the HTTP API adapter. Callers select a listener mode via
 // WithSharedMux or WithListenPort; New defaults neither (the cmd layer decides
@@ -218,6 +226,11 @@ func (a *Adapter) mount(mux *http.ServeMux, health bool) error {
 	mux.Handle("POST /v1/sessions/{id}/cancel", a.authMiddleware(http.HandlerFunc(a.handleCancel)))
 	// H5: the SSE frame stream — replay + live, multi-subscriber.
 	mux.Handle("GET /v1/sessions/{id}/stream", a.authMiddleware(http.HandlerFunc(a.handleStream)))
+	// H6: history + artifacts.
+	mux.Handle("GET /v1/sessions/{id}/events", a.authMiddleware(http.HandlerFunc(a.handleListEvents)))
+	mux.Handle("GET /v1/sessions/{id}/artifacts", a.authMiddleware(http.HandlerFunc(a.handleListArtifacts)))
+	mux.Handle("GET /v1/sessions/{id}/artifacts/{aid}", a.authMiddleware(http.HandlerFunc(a.handleGetArtifact)))
+	mux.Handle("POST /v1/sessions/{id}/artifacts", a.authMiddleware(http.HandlerFunc(a.handleIngestArtifact)))
 	if health {
 		mux.HandleFunc(healthzPath, healthHandler)
 		mux.HandleFunc(readyzPath, healthHandler)

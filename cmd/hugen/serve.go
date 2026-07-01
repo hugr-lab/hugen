@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/adapter/httpapi"
+	artifactext "github.com/hugr-lab/hugen/pkg/extension/artifact"
+	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session/manager"
 )
@@ -32,6 +34,10 @@ func runServe(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) in
 	if !boot.APIAllowOpen {
 		opts = append(opts, httpapi.WithVerifier(userTokenVerifier(core)))
 	}
+	// H6: artifact endpoints, backed by the artifact extension.
+	if core.Artifacts != nil {
+		opts = append(opts, httpapi.WithArtifactStore(artifactShim{core.Artifacts}))
+	}
 	if boot.APIPort > 0 {
 		opts = append(opts, httpapi.WithListenPort(boot.APIPort))
 		core.Logger.Info("httpapi: dedicated listener mode", "port", boot.APIPort)
@@ -56,6 +62,18 @@ func runServe(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) in
 		return 1
 	}
 	return exitOK
+}
+
+// artifactShim adapts core.Artifacts (Store.List/Path + Extension.Ingest) to
+// httpapi.ArtifactStore.
+type artifactShim struct{ ext *artifactext.Extension }
+
+func (s artifactShim) List(rootID string) ([]protocol.ArtifactRef, error) {
+	return s.ext.Store().List(rootID)
+}
+func (s artifactShim) Path(rootID, id string) (string, error) { return s.ext.Store().Path(rootID, id) }
+func (s artifactShim) Ingest(rootID, src, name string) (protocol.ArtifactRef, error) {
+	return s.ext.Ingest(rootID, src, name)
 }
 
 // apiBaseURL resolves the public URL the agent card advertises. Explicit
