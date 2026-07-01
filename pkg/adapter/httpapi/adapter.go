@@ -71,6 +71,10 @@ type Adapter struct {
 	verify VerifyFunc
 
 	host adapter.Host
+	// lifecycleCtx is the adapter's Run ctx (process lifetime). Sessions are
+	// opened/closed on it, NOT a per-request ctx — a session's Run loop must
+	// outlive any single HTTP request (the same discipline as the a2a adapter).
+	lifecycleCtx context.Context
 }
 
 // Option configures an Adapter.
@@ -139,6 +143,7 @@ func (a *Adapter) Name() string { return "httpapi" }
 // down gracefully.
 func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	a.host = host
+	a.lifecycleCtx = ctx
 	if a.logger == nil {
 		a.logger = host.Logger()
 	}
@@ -201,6 +206,12 @@ func (a *Adapter) mount(mux *http.ServeMux, health bool) error {
 	// Protected routes go behind authMiddleware (verify forwarded user token →
 	// identity in ctx). Card + health stay public.
 	mux.Handle(whoamiPath, a.authMiddleware(http.HandlerFunc(whoamiHandler)))
+	// H3: session lifecycle. Owner-scoped — a caller sees/controls only its own
+	// sessions (identified by the httpapi_owner metadata stamp).
+	mux.Handle("POST /v1/sessions", a.authMiddleware(http.HandlerFunc(a.handleCreateSession)))
+	mux.Handle("GET /v1/sessions", a.authMiddleware(http.HandlerFunc(a.handleListSessions)))
+	mux.Handle("GET /v1/sessions/{id}", a.authMiddleware(http.HandlerFunc(a.handleGetSession)))
+	mux.Handle("DELETE /v1/sessions/{id}", a.authMiddleware(http.HandlerFunc(a.handleDeleteSession)))
 	if health {
 		mux.HandleFunc(healthzPath, healthHandler)
 		mux.HandleFunc(readyzPath, healthHandler)
