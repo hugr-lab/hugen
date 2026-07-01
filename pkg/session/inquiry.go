@@ -172,38 +172,40 @@ func (s *Session) sweepResponseRoutesForChild(childID string) {
 }
 
 // dispatchInquiryResponse is the RouteInternal handler for
-// KindInquiryResponse. Phase 5.1 § 2.4:
+// KindInquiryResponse. Routing is keyed on RequestID alone — a client answers
+// with the request_id and need NOT know which session (root or a sub-agent)
+// raised the inquiry:
 //
-//   - If CallerSessionID == s.id, the response has reached the
-//     hop that called inquire. Deliver it to the pending channel
-//     (which the tool body is blocked on) and clear local state.
-//   - Else look up the per-RequestID route. If found, forward to
-//     the direct child via Submit; clear the route. If not found
-//     (terminated chain, cleared by timeout / cancel), drop with
+//   - If WE hold the pending inquiry for this RequestID, deliver it to the
+//     pending channel (which the tool body is blocked on) and clear state.
+//   - Else look up the per-RequestID route. If found, forward to the direct
+//     child via Submit; clear the route. If not found (we neither raised it nor
+//     forwarded it — terminated chain / cleared by timeout / cancel), drop with
 //     warn.
 //
-// The handler is sync — RouteInternal runs in the Run loop, the
-// forward is a Submit (channel send), no blocking. Phase 5.1's
-// "routing-only frames are safe inline" principle holds.
+// (CallerSessionID, set by inquire on the request for display/audit, is no
+// longer required on the response — deliverPending matches by RequestID.)
+//
+// The handler is sync — RouteInternal runs in the Run loop, the forward is a
+// Submit (channel send), no blocking. Phase 5.1's "routing-only frames are safe
+// inline" principle holds.
 func dispatchInquiryResponse(s *Session, ctx context.Context, f protocol.Frame) {
 	resp, ok := f.(*protocol.InquiryResponse)
 	if !ok {
 		return
 	}
 	rid := resp.Payload.RequestID
-	if resp.Payload.CallerSessionID == s.id {
-		if delivered := s.deliverPending(resp); !delivered {
-			s.logger.Warn("session: inquiry_response with no pending caller; drop",
-				"session", s.id, "request_id", rid)
-		}
+	// Local pending for this RequestID? Deliver to the blocked tool body.
+	if s.deliverPending(resp) {
 		s.clearResponseRoute(rid)
 		return
 	}
+	// Otherwise forward down the per-RequestID route to the child that bubbled
+	// the inquiry up.
 	cid, ok := s.lookupResponseRoute(rid)
 	if !ok {
-		s.logger.Warn("session: inquiry_response at hop with no route; drop",
-			"session", s.id, "request_id", rid,
-			"caller_session_id", resp.Payload.CallerSessionID)
+		s.logger.Warn("session: inquiry_response with no pending + no route; drop",
+			"session", s.id, "request_id", rid)
 		return
 	}
 	s.childMu.Lock()

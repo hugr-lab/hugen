@@ -19,6 +19,9 @@ type sendMessageRequest struct {
 	Text string `json:"text"`
 }
 
+// inquiryResponseRequest — the client answers with request_id + the answer only.
+// It does NOT echo which session raised the inquiry; the runtime routes by
+// request_id (dispatchInquiryResponse).
 type inquiryResponseRequest struct {
 	RequestID        string                          `json:"request_id"`
 	Approved         *bool                           `json:"approved,omitempty"`
