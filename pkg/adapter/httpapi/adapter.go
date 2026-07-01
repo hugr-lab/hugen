@@ -212,6 +212,10 @@ func (a *Adapter) mount(mux *http.ServeMux, health bool) error {
 	mux.Handle("GET /v1/sessions", a.authMiddleware(http.HandlerFunc(a.handleListSessions)))
 	mux.Handle("GET /v1/sessions/{id}", a.authMiddleware(http.HandlerFunc(a.handleGetSession)))
 	mux.Handle("DELETE /v1/sessions/{id}", a.authMiddleware(http.HandlerFunc(a.handleDeleteSession)))
+	// H4: write path — drive the session by submitting inbound frames.
+	mux.Handle("POST /v1/sessions/{id}/messages", a.authMiddleware(http.HandlerFunc(a.handleSendMessage)))
+	mux.Handle("POST /v1/sessions/{id}/inquiry", a.authMiddleware(http.HandlerFunc(a.handleInquiryResponse)))
+	mux.Handle("POST /v1/sessions/{id}/cancel", a.authMiddleware(http.HandlerFunc(a.handleCancel)))
 	if health {
 		mux.HandleFunc(healthzPath, healthHandler)
 		mux.HandleFunc(readyzPath, healthHandler)

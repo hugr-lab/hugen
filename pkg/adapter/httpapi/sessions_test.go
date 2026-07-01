@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/manager"
 )
@@ -17,8 +18,18 @@ import (
 // methods the H3 handlers reach are implemented; the rest stay nil-embedded.
 type fakeHost struct {
 	manager.AdapterHost
-	sessions []session.SessionSummary
-	closed   []string
+	sessions  []session.SessionSummary
+	closed    []string
+	submitted []protocol.Frame
+	submitErr error
+}
+
+func (f *fakeHost) Submit(_ context.Context, frame protocol.Frame) error {
+	if f.submitErr != nil {
+		return f.submitErr
+	}
+	f.submitted = append(f.submitted, frame)
+	return nil
 }
 
 func (f *fakeHost) ListSessions(_ context.Context, status string) ([]session.SessionSummary, error) {
