@@ -16,6 +16,7 @@ package a2a
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -230,7 +231,19 @@ func (a *Adapter) Run(ctx context.Context, host adapter.Host) error {
 	} else {
 		a.logger.Warn("a2a: NO API key set — the JSON-RPC endpoint is OPEN; set HUGEN_A2A_API_KEY before exposing it")
 	}
-	cardHandler := a2asrv.NewStaticAgentCardHandler(card)
+	// Serve a DUAL-shaped card, not a2asrv.NewStaticAgentCardHandler (which
+	// emits the v1.0-only shape). The a2a-go/v2 AgentCard carries just
+	// `supportedInterfaces`; v0.3 consumers (a2a-inspector, Microsoft Copilot)
+	// validate against the legacy schema and hard-reject a card with no
+	// top-level `url`. Carrying both shapes makes the card acceptable to either.
+	cardBytes, cardErr := marshalDualCard(card, a.baseURL+jsonRPCPath)
+	if cardErr != nil {
+		return fmt.Errorf("a2a: marshal card: %w", cardErr)
+	}
+	cardHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(cardBytes)
+	})
 
 	register := func(mux *http.ServeMux) {
 		mux.Handle(a2asrv.WellKnownAgentCardPath, cardHandler)
@@ -361,4 +374,28 @@ func (a *Adapter) buildCard() *a2a.AgentCard {
 		}
 	}
 	return card
+}
+
+// dualAgentCard wraps the v1.0 AgentCard (which the a2a-go/v2 type emits with
+// only `supportedInterfaces`) and adds the legacy top-level fields a v0.3
+// consumer's schema requires — `url`, `preferredTransport`, `protocolVersion`.
+// The embedded card's fields are promoted in JSON, so the served card satisfies
+// BOTH a v1.0 client (reads supportedInterfaces) and a v0.3 client / validator
+// (a2a-inspector, Microsoft Copilot — reads the top-level url). A9.
+type dualAgentCard struct {
+	*a2a.AgentCard
+	URL                string              `json:"url"`
+	PreferredTransport string              `json:"preferredTransport"`
+	ProtocolVersion    a2a.ProtocolVersion `json:"protocolVersion"`
+}
+
+// marshalDualCard serves the both-shapes card JSON. rpcURL is the JSON-RPC
+// endpoint (baseURL + jsonRPCPath).
+func marshalDualCard(card *a2a.AgentCard, rpcURL string) ([]byte, error) {
+	return json.Marshal(dualAgentCard{
+		AgentCard:          card,
+		URL:                rpcURL,
+		PreferredTransport: string(a2a.TransportProtocolJSONRPC),
+		ProtocolVersion:    protocolVersion03,
+	})
 }

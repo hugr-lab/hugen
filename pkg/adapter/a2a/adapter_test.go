@@ -126,6 +126,38 @@ func TestBuildCard_APIKey(t *testing.T) {
 	}
 }
 
+func TestMarshalDualCard(t *testing.T) {
+	// The served card must carry BOTH the v1.0 shape (supportedInterfaces) AND
+	// the legacy top-level url/preferredTransport a v0.3 validator (a2a-inspector,
+	// Copilot) requires — the a2a-go/v2 AgentCard emits only the v1.0 shape.
+	card := New(WithBaseURL("https://host.example")).buildCard()
+	b, err := marshalDualCard(card, "https://host.example"+jsonRPCPath)
+	if err != nil {
+		t.Fatalf("marshalDualCard: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["url"] != "https://host.example/a2a" {
+		t.Errorf("top-level url = %v, want the rpc url", m["url"])
+	}
+	if m["preferredTransport"] != "JSONRPC" {
+		t.Errorf("preferredTransport = %v, want JSONRPC", m["preferredTransport"])
+	}
+	if m["protocolVersion"] == nil {
+		t.Error("missing top-level protocolVersion")
+	}
+	// v1.0 shape preserved for v1.0 clients.
+	ifaces, _ := m["supportedInterfaces"].([]any)
+	if len(ifaces) != 2 {
+		t.Errorf("supportedInterfaces = %v, want 2 (v1.0 shape kept)", m["supportedInterfaces"])
+	}
+	if m["name"] != defaultAgentName {
+		t.Errorf("name = %v, want %q (embedded card fields promoted)", m["name"], defaultAgentName)
+	}
+}
+
 func TestBuildCard_IdentityOverride(t *testing.T) {
 	a := New(WithAgentIdentity("acme-bot", "does acme things"))
 	card := a.buildCard()
