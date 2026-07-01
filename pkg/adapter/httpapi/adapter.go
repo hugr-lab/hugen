@@ -216,6 +216,8 @@ func (a *Adapter) mount(mux *http.ServeMux, health bool) error {
 	mux.Handle("POST /v1/sessions/{id}/messages", a.authMiddleware(http.HandlerFunc(a.handleSendMessage)))
 	mux.Handle("POST /v1/sessions/{id}/inquiry", a.authMiddleware(http.HandlerFunc(a.handleInquiryResponse)))
 	mux.Handle("POST /v1/sessions/{id}/cancel", a.authMiddleware(http.HandlerFunc(a.handleCancel)))
+	// H5: the SSE frame stream — replay + live, multi-subscriber.
+	mux.Handle("GET /v1/sessions/{id}/stream", a.authMiddleware(http.HandlerFunc(a.handleStream)))
 	if health {
 		mux.HandleFunc(healthzPath, healthHandler)
 		mux.HandleFunc(readyzPath, healthHandler)

@@ -12,6 +12,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
 	"github.com/hugr-lab/hugen/pkg/session/manager"
+	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 // fakeHost serves canned sessions and records closes. Only the read/close
@@ -22,6 +23,16 @@ type fakeHost struct {
 	closed    []string
 	submitted []protocol.Frame
 	submitErr error
+	sub       chan protocol.Frame
+	events    []store.EventRow
+}
+
+func (f *fakeHost) Subscribe(_ context.Context, _ string) (<-chan protocol.Frame, error) {
+	return f.sub, nil
+}
+
+func (f *fakeHost) ListEvents(_ context.Context, _ string, _ store.ListEventsOpts) ([]store.EventRow, error) {
+	return f.events, nil
 }
 
 func (f *fakeHost) Submit(_ context.Context, frame protocol.Frame) error {
