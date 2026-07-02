@@ -1140,9 +1140,12 @@ func (s *Session) drainOnTeardown() {
 }
 
 // persistOnly appends a Frame to the session's event log without
-// pushing it to the outbox. Used by teardown to flush
-// pendingInbound after the outbox close path is committed but
-// before handleExit writes the terminal row. Mirrors emit's seq
+// pushing it to the outbox. Used by teardown to flush pendingInbound
+// after the outbox close path is committed but before handleExit
+// writes the terminal row — and by the fold to persist the Final
+// reasoning frame, whose live rendering already happened via its
+// streamed Final=false deltas (fanning it out too would double-render
+// in live adapters; it is for replay/audit only). Mirrors emit's seq
 // allocation so seq monotonicity holds across the boundary.
 func (s *Session) persistOnly(ctx context.Context, f protocol.Frame) error {
 	row, summary, err := store.FrameToEventRow(f, s.agent.ID())

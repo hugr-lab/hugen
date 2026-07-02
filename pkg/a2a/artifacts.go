@@ -1,12 +1,14 @@
 package a2a
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -45,9 +47,11 @@ const (
 	artifactURLTTL = time.Hour
 )
 
-// artifactResolver resolves a (rootID, artifactID) to a readable local path.
-// The adapter wires core.Artifacts.Store().Path here.
-type artifactResolver func(rootID, id string) (path string, err error)
+// artifactResolver streams a (rootID, artifactID) artifact's bytes. The bridge
+// wires it to hugenclient.DownloadArtifact — the bytes are proxied from the
+// hugen API (the bridge has no local artifact store). The caller closes the
+// reader.
+type artifactResolver func(ctx context.Context, rootID, id string) (io.ReadCloser, error)
 
 // randomArtifactSecret returns a fresh signing secret for when no API key is
 // configured — artifacts still get signed URLs, they just don't survive a
@@ -79,8 +83,9 @@ func signedArtifactURL(base, secret, root, id string, now time.Time) string {
 }
 
 // artifactDownloadHandler serves a by-ref artifact after verifying the signed
-// URL (root/id from the path, exp+sig from the query). http.ServeFile sets the
-// Content-Type from the extension and supports range requests. Phase 8/A10.
+// URL (root/id from the path, exp+sig from the query), proxying the bytes from
+// the hugen API through resolve. The FilePart carries the declared MIME, so the
+// download itself streams as octet-stream. Phase 8/A10 (H8: proxied, not local).
 func artifactDownloadHandler(secret string, resolve artifactResolver, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, artifactPathPrefix)
@@ -106,14 +111,16 @@ func artifactDownloadHandler(secret string, resolve artifactResolver, logger *sl
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return
 		}
-		path, err := resolve(root, id)
+		rc, err := resolve(r.Context(), root, id)
 		if err != nil {
 			http.Error(w, "artifact not found", http.StatusNotFound)
 			return
 		}
+		defer func() { _ = rc.Close() }()
 		if logger != nil {
-			logger.Debug("a2a: serving artifact", "root", root, "id", id)
+			logger.Debug("a2a: proxying artifact", "root", root, "id", id)
 		}
-		http.ServeFile(w, r, path)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = io.Copy(w, rc)
 	})
 }

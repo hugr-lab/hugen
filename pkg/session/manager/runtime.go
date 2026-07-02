@@ -155,6 +155,13 @@ func (r *Runtime) fanout(f protocol.Frame) {
 // adapter is stuck.
 const fanoutWarnAfter = 30 * time.Second
 
+// fanoutDrainGrace is how long a deregistered subscriber channel is drained
+// (idle, self-resetting) before the drain goroutine exits — long enough to
+// service any in-flight blocking fanoutSend that captured it before
+// deregistration, bounded so a disconnect doesn't leak a goroutine for the
+// process lifetime.
+const fanoutDrainGrace = 10 * time.Second
+
 // fanoutSend pushes one Frame onto one subscriber channel. Blocks
 // until the subscriber drains so deltas accrue rather than getting
 // silently dropped at the fanout. Three escape hatches keep the
@@ -290,13 +297,11 @@ func (h *adapterHost) Subscribe(ctx context.Context, sessionID string) (<-chan p
 	go func() {
 		<-ctx.Done()
 		h.rt.subMu.Lock()
-		defer h.rt.subMu.Unlock()
-		// Drop our channel from the subscriber list. The runtime
-		// keeps ownership of the channel close (Runtime.Shutdown
-		// closes everything in the map at process exit); the
-		// adapter must NOT range over c expecting it to close on
-		// its own ctx — it should select on its own ctx.Done()
-		// alongside the channel.
+		// Drop our channel from the subscriber list. The runtime keeps
+		// ownership of the channel close (Runtime.Shutdown closes
+		// everything in the map at process exit); the adapter must NOT
+		// range over c expecting it to close on its own ctx — it should
+		// select on its own ctx.Done() alongside the channel.
 		subs := h.rt.subscribers[sessionID]
 		out := subs[:0]
 		for _, sub := range subs {
@@ -305,6 +310,30 @@ func (h *adapterHost) Subscribe(ctx context.Context, sessionID string) (<-chan p
 			}
 		}
 		h.rt.subscribers[sessionID] = out
+		h.rt.subMu.Unlock()
+
+		// Drain the deregistered channel. A blocking fanoutSend that
+		// captured c in its lock-free slice snapshot BEFORE this
+		// deregistration would otherwise park forever with no reader
+		// (fanoutSend's only escape is runtime teardown) — filling the
+		// session's outbox and wedging its Run loop permanently. No NEW
+		// fanout targets c now (removed under subMu), so once in-flight
+		// sends clear, the drain goes idle and exits; teardown also ends
+		// it. Frames drained here are lost for this already-gone client
+		// (a reconnect gets a fresh subscription + replay). Fixes the
+		// dead-SSE-reader session freeze.
+		t := time.NewTimer(fanoutDrainGrace)
+		defer t.Stop()
+		for {
+			select {
+			case <-c:
+				t.Reset(fanoutDrainGrace)
+			case <-t.C:
+				return
+			case <-h.rt.ctx.Done():
+				return
+			}
+		}
 	}()
 	return c, nil
 }

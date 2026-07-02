@@ -14,24 +14,16 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
+	"github.com/hugr-lab/hugen/pkg/hugenclient"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session"
-	"github.com/hugr-lab/hugen/pkg/session/manager"
-	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func TestAdapter_Name(t *testing.T) {
-	if got := New().Name(); got != "a2a" {
-		t.Fatalf("Name() = %q, want %q", got, "a2a")
-	}
-}
-
 func TestBuildCard(t *testing.T) {
-	a := New(WithBaseURL("https://agent.example.com"))
+	a := New(nil, WithBaseURL("https://agent.example.com"))
 	card := a.buildCard()
 
 	if card.Name != defaultAgentName {
@@ -67,7 +59,7 @@ func TestBuildCard(t *testing.T) {
 }
 
 func TestAPIKeyGate(t *testing.T) {
-	a := New(WithAPIKey("s3cret"))
+	a := New(nil, WithAPIKey("s3cret"))
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -104,12 +96,12 @@ func TestAPIKeyGate(t *testing.T) {
 
 func TestBuildCard_APIKey(t *testing.T) {
 	// No key → the card advertises no security (clients connect anonymously).
-	open := New().buildCard()
+	open := New(nil).buildCard()
 	if len(open.SecuritySchemes) != 0 || len(open.SecurityRequirements) != 0 {
 		t.Errorf("open card advertises security: schemes=%v reqs=%v", open.SecuritySchemes, open.SecurityRequirements)
 	}
 	// Key → the apiKey scheme is declared + required, naming the header.
-	c := New(WithAPIKey("k")).buildCard()
+	c := New(nil, WithAPIKey("k")).buildCard()
 	sch, ok := c.SecuritySchemes[apiKeySchemeName]
 	if !ok {
 		t.Fatalf("card missing the %q scheme: %v", apiKeySchemeName, c.SecuritySchemes)
@@ -130,7 +122,7 @@ func TestMarshalDualCard(t *testing.T) {
 	// The served card must carry BOTH the v1.0 shape (supportedInterfaces) AND
 	// the legacy top-level url/preferredTransport a v0.3 validator (a2a-inspector,
 	// Copilot) requires — the a2a-go/v2 AgentCard emits only the v1.0 shape.
-	card := New(WithBaseURL("https://host.example")).buildCard()
+	card := New(nil, WithBaseURL("https://host.example")).buildCard()
 	b, err := marshalDualCard(card, "https://host.example"+jsonRPCPath)
 	if err != nil {
 		t.Fatalf("marshalDualCard: %v", err)
@@ -159,7 +151,7 @@ func TestMarshalDualCard(t *testing.T) {
 }
 
 func TestBuildCard_IdentityOverride(t *testing.T) {
-	a := New(WithAgentIdentity("acme-bot", "does acme things"))
+	a := New(nil, WithAgentIdentity("acme-bot", "does acme things"))
 	card := a.buildCard()
 	if card.Name != "acme-bot" || card.Description != "does acme things" {
 		t.Fatalf("override not applied: name=%q desc=%q", card.Name, card.Description)
@@ -497,12 +489,15 @@ func TestSessionExecutor_Cancel_ClosesRoot(t *testing.T) {
 	}
 }
 
-// TestRun_FailsClosedWithoutKey covers H2: Run refuses to serve an open /a2a
-// when no API key and no explicit WithAllowOpen.
+// testClient is a dummy hugen client for Run tests (never actually dialed —
+// Run fails closed / serves the card before touching it).
+func testClient() *hugenclient.Client { return hugenclient.New("http://127.0.0.1:1") }
+
+// TestRun_FailsClosedWithoutKey: Run refuses to serve an open /a2a when no API
+// key and no explicit WithAllowOpen.
 func TestRun_FailsClosedWithoutKey(t *testing.T) {
-	a := New(WithLogger(quietLogger()), WithSharedMux(http.NewServeMux())) // no key, no allowOpen
-	err := a.Run(context.Background(), stubHost{})
-	if err == nil {
+	a := New(testClient(), WithLogger(quietLogger())) // no key, no allowOpen
+	if err := a.Run(context.Background()); err == nil {
 		t.Fatal("Run served an open endpoint without a key or WithAllowOpen — want a fail-closed error")
 	}
 }
@@ -525,45 +520,13 @@ func getCard(t *testing.T, url string) *a2a.AgentCard {
 	return &card
 }
 
-func TestRun_SharedMux_ServesCardAtBothPaths(t *testing.T) {
-	mux := http.NewServeMux()
-	a := New(WithLogger(quietLogger()), WithBaseURL("http://x"), WithSharedMux(mux), WithAllowOpen(true))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- a.Run(ctx, stubHost{}) }()
-
-	// The mux is registered synchronously inside Run before it blocks on
-	// ctx; a tiny settle keeps the test robust without racing the goroutine.
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-	waitFor(t, func() bool { return cardReachable(srv.URL + a2asrv.WellKnownAgentCardPath) })
-
-	for _, p := range []string{a2asrv.WellKnownAgentCardPath, legacyCardPath} {
-		card := getCard(t, srv.URL+p)
-		if card.Name != defaultAgentName {
-			t.Errorf("card at %s: name = %q, want %q", p, card.Name, defaultAgentName)
-		}
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Run returned %v, want nil on ctx cancel", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return within 2s of ctx cancel")
-	}
-}
-
 func TestRun_DedicatedListener_Lifecycle(t *testing.T) {
 	port := freePort(t)
-	a := New(WithLogger(quietLogger()), WithListenPort(port), WithAllowOpen(true))
+	a := New(testClient(), WithLogger(quietLogger()), WithListenPort(port), WithAllowOpen(true))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- a.Run(ctx, stubHost{}) }()
+	go func() { done <- a.Run(ctx) }()
 
 	base := "http://127.0.0.1:" + itoa(port)
 	waitFor(t, func() bool { return cardReachable(base + a2asrv.WellKnownAgentCardPath) })
@@ -631,28 +594,3 @@ func itoa(n int) string {
 	return string(b[i:])
 }
 
-// stubHost is a no-op manager.AdapterHost. The A1 echo executor never calls
-// host methods (it sets its own logger), so every method returns zero values.
-type stubHost struct{}
-
-var _ manager.AdapterHost = stubHost{}
-
-func (stubHost) OpenSession(context.Context, session.OpenRequest) (*session.Session, time.Time, error) {
-	return nil, time.Time{}, nil
-}
-func (stubHost) ResumeSession(context.Context, string) (*session.Session, error) { return nil, nil }
-func (stubHost) Submit(context.Context, protocol.Frame) error                    { return nil }
-func (stubHost) Subscribe(context.Context, string) (<-chan protocol.Frame, error) {
-	return nil, nil
-}
-func (stubHost) CloseSession(context.Context, string, string) (time.Time, error) {
-	return time.Time{}, nil
-}
-func (stubHost) ListSessions(context.Context, string) ([]session.SessionSummary, error) {
-	return nil, nil
-}
-func (stubHost) SessionStats(context.Context, string) (int, error) { return 0, nil }
-func (stubHost) ListEvents(context.Context, string, store.ListEventsOpts) ([]store.EventRow, error) {
-	return nil, nil
-}
-func (stubHost) Logger() *slog.Logger { return quietLogger() }

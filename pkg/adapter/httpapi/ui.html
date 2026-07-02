@@ -1,0 +1,220 @@
+<!doctype html>
+<!--
+  hugen native HTTP API — minimal dev client (H9). Served at /ui in allow-open
+  (dev) mode only. It is NOT the production UI: it is the test-ladder seed that
+  proves the API is browser-usable and that MANY interfaces can drive ONE
+  session at once — open this page in two tabs on the same #session=... URL and
+  watch both stream. Uses EventSource (no auth header — dev/allow-open only) +
+  fetch. Vanilla JS, same-origin, no build step.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hugen · dev client</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+  header { padding: 8px 12px; border-bottom: 1px solid #8884; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  header b { font-weight: 600; }
+  #sid { font-family: ui-monospace, monospace; font-size: 12px; opacity: .8; }
+  #status { margin-left: auto; font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #8882; }
+  #log { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 70ch; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; }
+  .user { align-self: flex-end; background: #4a90d9; color: #fff; }
+  .agent { align-self: flex-start; background: #8882; }
+  .meta { align-self: flex-start; font-size: 12px; opacity: .6; font-family: ui-monospace, monospace; }
+  .reasoning { align-self: flex-start; max-width: 70ch; padding: 6px 12px; border-radius: 10px; background: #8881; opacity: .6; font-style: italic; font-size: 13px; white-space: pre-wrap; }
+  .inquiry { align-self: flex-start; background: #e0a03033; border: 1px solid #e0a030; padding: 10px; border-radius: 10px; }
+  .inquiry input { width: 100%; margin-top: 6px; }
+  .ibtns { display: flex; gap: 8px; margin-top: 8px; }
+  .ibtns button { padding: 6px 14px; }
+  form { display: flex; gap: 8px; padding: 10px; border-top: 1px solid #8884; }
+  #text { flex: 1; padding: 8px; }
+  button { padding: 8px 14px; cursor: pointer; }
+  a { color: inherit; }
+  .meta a { color: #4a90d9; text-decoration: underline; opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <b>hugen</b> <span id="sid">…</span>
+  <button id="copy" title="copy this session's URL for a second tab">copy 2-tab URL</button>
+  <span id="status">connecting…</span>
+</header>
+<div id="log"></div>
+<form id="form">
+  <input id="text" placeholder="Message the agent…  (open this URL in a 2nd tab to prove multi-interface)" autocomplete="off">
+  <button type="submit">Send</button>
+</form>
+
+<script>
+const $log = document.getElementById('log');
+const $status = document.getElementById('status');
+const $sid = document.getElementById('sid');
+let sessionId = new URLSearchParams(location.search).get('session') || location.hash.replace(/^#session=/, '');
+let curAgent = null;  // the in-progress assistant bubble
+let curReason = null; // the in-progress reasoning bubble
+
+function add(cls, text) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + cls;
+  el.textContent = text;
+  $log.appendChild(el);
+  $log.scrollTop = $log.scrollHeight;
+  return el;
+}
+
+async function ensureSession() {
+  if (sessionId) return sessionId;
+  const r = await fetch('/v1/sessions', { method: 'POST', headers: {'content-type':'application/json'}, body: '{"name":"dev-ui"}' });
+  sessionId = (await r.json()).session_id;
+  history.replaceState(null, '', '?session=' + encodeURIComponent(sessionId));
+  return sessionId;
+}
+
+function render(f) {
+  const p = f.payload || {};
+  switch (f.kind) {
+    case 'agent_message':
+      // Live: accumulate the streaming chunks (Consolidated=false). Replay:
+      // ONLY the Consolidated=true row is persisted (chunks are live-only,
+      // seq=0), so render its text when no chunks preceded it.
+      if (p.consolidated) {
+        if (!curAgent && (p.text || '').trim()) add('agent', p.text);
+        curAgent = null;
+        break;
+      }
+      if (!curAgent) { curAgent = add('agent', ''); curReason = null; }
+      curAgent.textContent += (p.text || '');
+      $log.scrollTop = $log.scrollHeight;
+      break;
+    case 'user_message':
+      // The runtime echoes the user turn on the stream (and replays it), so we
+      // render it from the frame — but NOT agent-authored synthetics (e.g. the
+      // async-summary prompt), only real user turns.
+      if ((f.auth || {}).kind === 'user') { add('user', p.text || ''); curAgent = null; curReason = null; }
+      break;
+    case 'reasoning':
+      // Reasoning frames use `final` (not `consolidated`): streaming chunks are
+      // final=false (live), the persisted consolidated is final=true (replay).
+      if (p.final) {
+        if (!curReason && (p.text || '').trim()) add('reasoning', '💭 ' + p.text);
+        curReason = null;
+        break;
+      }
+      if (!curReason) curReason = add('reasoning', '💭 ');
+      curReason.textContent += (p.text || '');
+      $log.scrollTop = $log.scrollHeight;
+      break;
+    case 'tool_call':   add('meta', '⚙ tool: ' + (p.tool_name || p.name || '?')); curAgent = null; curReason = null; break;
+    case 'session_status': $status.textContent = p.state || '—'; break;
+    case 'inquiry_request': showInquiry(f); break;
+    case 'extension_frame':
+      if (p.op === 'artifact_produced' && p.data) {
+        const el = document.createElement('div');
+        el.className = 'msg meta';
+        const a = document.createElement('a');
+        a.href = '/v1/sessions/' + sessionId + '/artifacts/' + encodeURIComponent(p.data.id);
+        a.textContent = '📎 ' + (p.data.name || p.data.id) + (p.data.size ? ' (' + p.data.size + ' B)' : '');
+        a.target = '_blank';       // open/render (html) or download (binary)
+        a.rel = 'noopener';
+        el.appendChild(a);
+        $log.appendChild(el);
+        $log.scrollTop = $log.scrollHeight;
+      }
+      break;
+    case 'error': add('meta', '⚠ ' + (p.message || 'error')); break;
+  }
+}
+
+function mkbtn(label, fn) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = label;
+  b.addEventListener('click', fn);
+  return b;
+}
+
+function showInquiry(f) {
+  const p = f.payload || {};
+  const box = document.createElement('div');
+  box.className = 'inquiry';
+  const q = document.createElement('div');
+  q.textContent = '❓ ' + (p.question || 'The agent is asking:');
+  box.appendChild(q);
+
+  const send = async (body) => {
+    box.querySelectorAll('button, input').forEach((el) => (el.disabled = true));
+    await fetch('/v1/sessions/' + sessionId + '/inquiry', {
+      method: 'POST', headers: {'content-type':'application/json'},
+      body: JSON.stringify(Object.assign({ request_id: p.request_id }, body)),
+    });
+  };
+
+  if (p.type === 'approval') {
+    // Approval MUST answer with `approved` (a bool) — a `response` string leaves
+    // the agent blocked. Buttons, not a text box.
+    const bar = document.createElement('div');
+    bar.className = 'ibtns';
+    bar.append(
+      mkbtn('✓ Approve', () => send({ approved: true })),
+      mkbtn('✗ Reject', () => send({ approved: false, reason: 'rejected via dev UI' })),
+    );
+    box.appendChild(bar);
+  } else if (Array.isArray(p.options) && p.options.length) {
+    const bar = document.createElement('div');
+    bar.className = 'ibtns';
+    p.options.forEach((opt) => bar.appendChild(mkbtn(opt, () => send({ response: opt }))));
+    box.appendChild(bar);
+  } else {
+    const inp = document.createElement('input');
+    inp.placeholder = 'Your answer, then Enter';
+    box.appendChild(inp);
+    setTimeout(() => inp.focus(), 0);
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') send({ response: inp.value }); });
+  }
+  $log.appendChild(box);
+  $log.scrollTop = $log.scrollHeight;
+}
+
+function connect() {
+  // Live-only would miss the backlog; a full stream replays history on connect
+  // (so a 2nd tab sees the conversation so far), then streams live.
+  const es = new EventSource('/v1/sessions/' + sessionId + '/stream');
+  es.onopen = () => { $status.textContent = 'live'; };
+  es.onerror = () => { $status.textContent = 'reconnecting…'; };
+  es.onmessage = (ev) => { try { render(JSON.parse(ev.data)); } catch (_) {} };
+}
+
+document.getElementById('form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const $t = document.getElementById('text');
+  const text = $t.value.trim();
+  if (!text) return;
+  $t.value = '';
+  // The user bubble is rendered from the runtime's echoed user_message frame
+  // (uniform with replay) — not added locally, to avoid a double on live.
+  curAgent = null;
+  curReason = null;
+  await fetch('/v1/sessions/' + sessionId + '/messages', {
+    method: 'POST', headers: {'content-type':'application/json'},
+    body: JSON.stringify({ text }),
+  });
+});
+
+document.getElementById('copy').addEventListener('click', () => {
+  navigator.clipboard.writeText(location.href);
+  const s = document.getElementById('status').textContent;
+  $status.textContent = 'URL copied';
+  setTimeout(() => { $status.textContent = s; }, 1200);
+});
+
+(async () => {
+  await ensureSession();
+  $sid.textContent = sessionId;
+  connect();
+})();
+</script>
+</body>
+</html>

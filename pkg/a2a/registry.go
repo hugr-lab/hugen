@@ -7,10 +7,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/hugr-lab/hugen/pkg/adapter"
+	"github.com/hugr-lab/hugen/pkg/hugenclient"
 	"github.com/hugr-lab/hugen/pkg/protocol"
-	"github.com/hugr-lab/hugen/pkg/session"
-	"github.com/hugr-lab/hugen/pkg/session/store"
 )
 
 // contextIDMetaKey is the session-metadata key under which the adapter
@@ -235,70 +233,37 @@ func (r *contextRegistry) forget(contextID string) {
 	delete(r.byContext, contextID)
 }
 
-// hostRootStore is the production rootStore: it drives the runtime via
-// adapter.Host, stamping the contextId binding into session metadata on open
-// and reading it back from session summaries on rebuild.
+// clientRootStore is the rootStore backed by the native HTTP API (hugenclient):
+// it opens/resumes durable roots over HTTP instead of an in-process AdapterHost.
+// The contextId binding is stamped into session metadata on open; the in-memory
+// registry cache is authoritative for this bridge process's lifetime — a
+// restart drops the bindings and opens fresh (acceptable, matching the dropped
+// durable TaskStore; the session DTO carries no metadata to rebuild from).
 //
-// lifecycleCtx is the adapter's long-lived Run ctx (the whole `hugen a2a`
-// process). It — NOT a per-request ctx — is what opens/resumes sessions, so a
-// durable root's Run loop outlives any single A2A request (manager.Open starts
-// the loop on the supplied ctx; a request ctx would kill the session on
-// return).
-type hostRootStore struct {
-	host         adapter.Host
-	owner        protocol.ParticipantInfo
-	lifecycleCtx context.Context
+// ctx is the bridge lifecycle ctx. Sessions live server-side (the HTTP API owns
+// their Run loop), so it is used only for the create/get calls themselves.
+type clientRootStore struct {
+	client *hugenclient.Client
+	ctx    context.Context
 }
 
-var _ rootStore = hostRootStore{}
+var _ rootStore = clientRootStore{}
 
-func (h hostRootStore) openRoot(contextID string) (string, error) {
-	sess, _, err := h.host.OpenSession(h.lifecycleCtx, session.OpenRequest{
-		OwnerID:      h.owner.ID,
-		Participants: []protocol.ParticipantInfo{h.owner},
-		Metadata:     map[string]any{contextIDMetaKey: contextID},
+func (s clientRootStore) openRoot(contextID string) (string, error) {
+	return s.client.CreateSession(s.ctx, hugenclient.CreateSessionOptions{
+		Metadata: map[string]any{contextIDMetaKey: contextID},
 	})
-	if err != nil {
-		return "", err
-	}
-	return sess.ID(), nil
 }
 
-func (h hostRootStore) resumeRoot(rootID string) error {
-	_, err := h.host.ResumeSession(h.lifecycleCtx, rootID)
+func (s clientRootStore) resumeRoot(rootID string) error {
+	_, err := s.client.GetSession(s.ctx, rootID)
 	return err
 }
 
-func (h hostRootStore) boundRoot(contextID string) (string, bool, error) {
-	// Only active sessions are resumable; a GC'd/terminated root must not be
-	// returned (the caller would fail to resume and open fresh anyway). The
-	// store lists newest-first, so the first metadata match is the freshest.
-	sums, err := h.host.ListSessions(h.lifecycleCtx, store.StatusActive)
-	if err != nil {
-		return "", false, err
-	}
-	for _, s := range sums {
-		if metaString(s.Metadata, contextIDMetaKey) == contextID {
-			return s.ID, true, nil
-		}
-	}
+func (s clientRootStore) boundRoot(string) (string, bool, error) {
+	// No store-side rebuild — the in-memory cache is authoritative for this
+	// process (see the type doc).
 	return "", false, nil
-}
-
-// metaString reads a string value out of a session-metadata map, tolerating
-// the any-typed value that survives JSON persistence + restore.
-func metaString(m map[string]any, key string) string {
-	if m == nil {
-		return ""
-	}
-	v, ok := m[key]
-	if !ok {
-		return ""
-	}
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return fmt.Sprint(v)
 }
 
 // serviceParticipant is the single service identity that owns A2A-opened

@@ -42,11 +42,11 @@ func (e *Extension) OnFrameEmit(ctx context.Context, state extension.SessionStat
 	case *protocol.ToolResult:
 		s.addTokens(estimateToolResultTokens(f.Payload.Result))
 	default:
-		// reasoning / tool_call / system_marker / heartbeat /
-		// extension_frame are either outbox-only or do not
-		// materially contribute to the model prompt budget.
-		// β refines this list once the per-Kind dispatch
-		// table lands in compactor.go.
+		// tool_call / system_marker / heartbeat / extension_frame — and the
+		// persisted Final=true reasoning row — either are outbox-only, are
+		// display/audit-only (reasoning is excluded from the history projection,
+		// so it never enters the model prompt), or do not materially contribute
+		// to the model prompt budget.
 	}
 
 	// η — project allow-listed frames into the owned history

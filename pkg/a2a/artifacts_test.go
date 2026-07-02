@@ -3,10 +3,10 @@ package a2a
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,16 +31,11 @@ func TestArtifactConstsMatchExtension(t *testing.T) {
 }
 
 func TestArtifactDownload_SignedRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	fpath := filepath.Join(dir, "report.html")
-	if err := os.WriteFile(fpath, []byte("<h1>hi</h1>"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	resolve := func(root, id string) (string, error) {
+	resolve := func(_ context.Context, root, id string) (io.ReadCloser, error) {
 		if root == "ses-1" && id == "art-1" {
-			return fpath, nil
+			return io.NopCloser(strings.NewReader("<h1>hi</h1>")), nil
 		}
-		return "", os.ErrNotExist
+		return nil, os.ErrNotExist
 	}
 	const secret = "sek"
 	h := artifactDownloadHandler(secret, resolve, quietLogger())

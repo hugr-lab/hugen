@@ -11,24 +11,36 @@ stream, trigger an `input-required` inquiry, receive a `FilePart` artifact.
 
 ### Run
 
+Since H8 the A2A surface is a STANDALONE bridge (`bin/a2a`) that drives hugen
+through the native HTTP API (`hugen serve`). Two processes:
+
 ```sh
 # 1. Build + run the inspector (host port 10081 → container 8080).
 docker compose -f docker/docker-compose.yml up -d --build
 
-# 2. Boot hugen so the card advertises a container-reachable URL.
-#    The endpoint is fail-closed: an open (un-keyed) run needs HUGEN_A2A_ALLOW_OPEN=1.
-HUGEN_A2A_ALLOW_OPEN=1 HUGEN_A2A_BASE_URL=http://host.docker.internal:10000 ./bin/hugen a2a
-#   (or gate it: HUGEN_A2A_API_KEY=<secret> — then supply the X-API-Key header
-#    in the inspector's request settings, and drop HUGEN_A2A_ALLOW_OPEN.)
+# 2. Boot the native HTTP API. auth listener stays on :10000 (the IdP redirect
+#    URI is pinned there); the API is on :10100. Dev = allow-open.
+HUGEN_API_PORT=10100 HUGEN_API_ALLOW_OPEN=1 ./bin/hugen serve
 
-# 3. Open the inspector and connect.
+# 3. Boot the A2A bridge, pointing it at the API. It serves A2A on :10010 and
+#    advertises a container-reachable card URL.
+HUGEN_API_URL=http://localhost:10100 \
+  HUGEN_A2A_PORT=10010 \
+  HUGEN_A2A_BASE_URL=http://host.docker.internal:10010 \
+  HUGEN_A2A_ALLOW_OPEN=1 ./bin/a2a
+#   (gate it: HUGEN_A2A_API_KEY=<secret>, drop HUGEN_A2A_ALLOW_OPEN;
+#    hub run: HUGEN_API_TOKEN=<user-token> so sessions are owned per-user.)
+
+# 4. Open the inspector and connect.
 open http://127.0.0.1:10081
-#   Agent URL: http://host.docker.internal:10000
+#   Agent URL: http://host.docker.internal:10010
 ```
 
-The inspector fetches `…/.well-known/agent-card.json`, then talks to the card's
-advertised interface URL (`http://host.docker.internal:10000/a2a`) — which is
-why hugen must boot with `HUGEN_A2A_BASE_URL` set to that host.
+The inspector fetches `…/.well-known/agent-card.json` from the bridge, then
+talks to the card's advertised interface URL
+(`http://host.docker.internal:10010/a2a`) — which is why the bridge must run
+with `HUGEN_A2A_BASE_URL` set to that host. The bridge in turn drives hugen at
+`HUGEN_API_URL`.
 
 ### Stop
 

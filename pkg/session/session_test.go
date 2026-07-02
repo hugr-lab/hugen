@@ -167,16 +167,16 @@ done:
 		t.Errorf("model.Generate calls = %d, want 1", mdl.callCount())
 	}
 	rec := testStore.RecordedKinds()
-	// Streaming chunks (Reasoning + AgentMessage with Consolidated=false)
-	// are outbox-only by design: live UX renders them, but only the
-	// per-iteration consolidated AgentMessage row lands in the store.
-	// So persistence rows are a SUBSET of outbox frames; we assert the
-	// non-streaming frames are all present.
+	// Streaming chunks (Reasoning + AgentMessage with Consolidated=false) are
+	// outbox-only by design: live UX renders them, but only the per-iteration
+	// consolidated rows land in the store — one consolidated AgentMessage AND
+	// one Reasoning{Final=true} (the iteration's display reasoning, persisted
+	// for audit/replay but not projected into model history).
 	if got, want := countKind(rec, string(protocol.KindAgentMessage)), 1; got != want {
 		t.Errorf("persisted agent_message rows = %d, want %d (consolidated only)", got, want)
 	}
-	if got := countKind(rec, string(protocol.KindReasoning)); got != 0 {
-		t.Errorf("persisted reasoning rows = %d, want 0 (chunks are outbox-only)", got)
+	if got, want := countKind(rec, string(protocol.KindReasoning)), 1; got != want {
+		t.Errorf("persisted reasoning rows = %d, want %d (consolidated final only)", got, want)
 	}
 	if !contains(rec, string(protocol.KindUserMessage)) {
 		t.Errorf("persisted rows missing user_message: %v", rec)
