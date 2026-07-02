@@ -29,7 +29,7 @@ func TestSkillsSDL_Compiles_And_RoundTrips(t *testing.T) {
 	// Insert a catalog skill + a member task skill.
 	for _, id := range []string{"skl-cat01", "skl-task01"} {
 		require.NoError(t, queries.RunMutation(ctx, svc,
-			`mutation ($data: hub_db_skills_mut_input_data!) {
+			`mutation ($data: hub_db_agent_skills_mut_input_data!) {
 				hub { db { agent { insert_skills(data: $data) { id } } } }
 			}`,
 			map[string]any{"data": map[string]any{
@@ -50,7 +50,7 @@ func TestSkillsSDL_Compiles_And_RoundTrips(t *testing.T) {
 
 	// Link catalog -> task via the junction table.
 	require.NoError(t, queries.RunMutation(ctx, svc,
-		`mutation ($data: hub_db_skill_links_mut_input_data!) {
+		`mutation ($data: hub_db_agent_skill_links_mut_input_data!) {
 			hub { db { agent { insert_skill_links(data: $data) { source_id } } } }
 		}`,
 		map[string]any{"data": map[string]any{
@@ -63,7 +63,7 @@ func TestSkillsSDL_Compiles_And_RoundTrips(t *testing.T) {
 
 	// Append a skill_log impression.
 	require.NoError(t, queries.RunMutation(ctx, svc,
-		`mutation ($data: hub_db_skill_log_mut_input_data!) {
+		`mutation ($data: hub_db_agent_skill_log_mut_input_data!) {
 			hub { db { agent { insert_skill_log(data: $data) { id } } } }
 		}`,
 		map[string]any{"data": map[string]any{

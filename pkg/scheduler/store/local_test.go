@@ -75,7 +75,7 @@ func newTestStore(t *testing.T) (*store.LocalTaskStore, string, func(ownerID str
 	openSession := func(sessionID string) {
 		t.Helper()
 		require.NoError(t, queries.RunMutation(ctx, svc,
-			`mutation ($data: hub_db_sessions_mut_input_data!) {
+			`mutation ($data: hub_db_agent_sessions_mut_input_data!) {
 				hub { db { agent {
 					insert_sessions(data: $data) { id }
 				}}}

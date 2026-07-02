@@ -181,7 +181,7 @@ func (s *LocalTaskStore) OpenTask(ctx context.Context, row TaskRow, initialPlann
 	}
 
 	if err := queries.RunMutation(ctx, s.querier,
-		`mutation ($data: hub_db_tasks_mut_input_data!) {
+		`mutation ($data: hub_db_agent_tasks_mut_input_data!) {
 			hub { db { agent {
 				insert_tasks(data: $data) { id }
 			}}}
@@ -245,7 +245,7 @@ func (s *LocalTaskStore) ListTasksBySession(ctx context.Context, sessionID strin
 		filter["status"] = map[string]any{"eq": opts.Status}
 	}
 	rows, err := queries.RunQuery[[]taskRowDB](ctx, s.querier,
-		`query ($filter: hub_db_tasks_filter, $limit: Int) {
+		`query ($filter: hub_db_agent_tasks_filter, $limit: Int) {
 			hub { db { agent {
 				tasks(
 					filter: $filter,
@@ -391,7 +391,7 @@ func (s *LocalTaskStore) UpdateTaskSpec(ctx context.Context, id string, spec Tas
 
 func (s *LocalTaskStore) updateTask(ctx context.Context, id string, patch map[string]any) error {
 	return queries.RunMutation(ctx, s.querier,
-		`mutation ($id: String!, $data: hub_db_tasks_mut_data!) {
+		`mutation ($id: String!, $data: hub_db_agent_tasks_mut_data!) {
 			hub { db { agent {
 				update_tasks(filter: {id: {eq: $id}}, data: $data) { affected_rows }
 			}}}
@@ -458,7 +458,7 @@ func (s *LocalTaskStore) AppendLog(ctx context.Context, entry TaskLogEntry) erro
 	}
 
 	return queries.RunMutation(ctx, s.querier,
-		`mutation ($data: hub_db_task_log_mut_input_data!) {
+		`mutation ($data: hub_db_agent_task_log_mut_input_data!) {
 			hub { db { agent {
 				insert_task_log(data: $data) { id }
 			}}}
@@ -483,7 +483,7 @@ func (s *LocalTaskStore) ListLogByTask(ctx context.Context, taskID string, opts 
 		filter["fire_seq"] = map[string]any{"gte": opts.SinceFireSeq}
 	}
 	rows, err := queries.RunQuery[[]taskLogRowDB](ctx, s.querier,
-		`query ($filter: hub_db_task_log_filter, $limit: Int) {
+		`query ($filter: hub_db_agent_task_log_filter, $limit: Int) {
 			hub { db { agent {
 				task_log(
 					filter: $filter,
@@ -571,7 +571,7 @@ func (s *LocalTaskStore) ListInFlightFires(ctx context.Context, agentID string, 
 		startedBefore = time.Now()
 	}
 	rows, err := queries.RunQuery[[]taskLogRowDB](ctx, s.querier,
-		`query ($filter: hub_db_task_log_filter) {
+		`query ($filter: hub_db_agent_task_log_filter) {
 			hub { db { agent {
 				task_log(
 					filter: $filter,

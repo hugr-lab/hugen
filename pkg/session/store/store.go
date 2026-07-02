@@ -309,7 +309,7 @@ func (s *RuntimeStoreLocal) OpenSession(ctx context.Context, row SessionRow) err
 		data["metadata"] = row.Metadata
 	}
 	return queries.RunMutation(ctx, s.querier,
-		`mutation ($data: hub_db_sessions_mut_input_data!) {
+		`mutation ($data: hub_db_agent_sessions_mut_input_data!) {
 			hub { db { agent {
 				insert_sessions(data: $data) { id }
 			}}}
@@ -348,7 +348,7 @@ func (s *RuntimeStoreLocal) UpdateSessionStatus(ctx context.Context, id, status 
 		return fmt.Errorf("%w: %q", ErrInvalidStatus, status)
 	}
 	return queries.RunMutation(ctx, s.querier,
-		`mutation ($id: String!, $data: hub_db_sessions_mut_data!) {
+		`mutation ($id: String!, $data: hub_db_agent_sessions_mut_data!) {
 			hub { db { agent {
 				update_sessions(filter: {id: {eq: $id}}, data: $data) { affected_rows }
 			}}}
@@ -437,7 +437,7 @@ func (s *RuntimeStoreLocal) AppendEvent(ctx context.Context, ev EventRow, summar
 	}
 	if summary == "" || !s.embedderEnabled {
 		return queries.RunMutation(ctx, s.querier,
-			`mutation ($data: hub_db_session_events_mut_input_data!) {
+			`mutation ($data: hub_db_agent_session_events_mut_input_data!) {
 				hub { db { agent {
 					insert_session_events(data: $data) { id }
 				}}}
@@ -446,7 +446,7 @@ func (s *RuntimeStoreLocal) AppendEvent(ctx context.Context, ev EventRow, summar
 		)
 	}
 	return queries.RunMutation(ctx, s.querier,
-		`mutation ($data: hub_db_session_events_mut_input_data!, $summary: String) {
+		`mutation ($data: hub_db_agent_session_events_mut_input_data!, $summary: String) {
 			hub { db { agent {
 				insert_session_events(data: $data, summary: $summary) { id }
 			}}}
@@ -488,7 +488,7 @@ func (s *RuntimeStoreLocal) ListEvents(ctx context.Context, sessionID string, op
 	// 1) filter, 2) similarity, 3) limit).
 	if opts.SemanticQuery != "" && s.embedderEnabled {
 		rows, err := queries.RunQuery[[]EventRow](ctx, s.querier,
-			`query ($filter: hub_db_session_events_filter, $semantic: SemanticSearchInput) {
+			`query ($filter: hub_db_agent_session_events_filter, $semantic: SemanticSearchInput) {
 				hub { db { agent {
 					session_events(filter: $filter, semantic: $semantic) {
 						id session_id agent_id seq event_type author content
@@ -511,7 +511,7 @@ func (s *RuntimeStoreLocal) ListEvents(ctx context.Context, sessionID string, op
 		return rows, nil
 	}
 	rows, err := queries.RunQuery[[]EventRow](ctx, s.querier,
-		`query ($filter: hub_db_session_events_filter, $limit: Int) {
+		`query ($filter: hub_db_agent_session_events_filter, $limit: Int) {
 			hub { db { agent {
 				session_events(
 					filter: $filter,
@@ -547,7 +547,7 @@ func (s *RuntimeStoreLocal) LatestEventOfKinds(ctx context.Context, sessionID st
 		"event_type": map[string]any{"in": kinds},
 	}
 	rows, err := queries.RunQuery[[]EventRow](ctx, s.querier,
-		`query ($filter: hub_db_session_events_filter) {
+		`query ($filter: hub_db_agent_session_events_filter) {
 			hub { db { agent {
 				session_events(
 					filter: $filter,
@@ -605,7 +605,7 @@ func (s *RuntimeStoreLocal) AppendNote(ctx context.Context, note NoteRow) error 
 	}
 	if !s.embedderEnabled {
 		return queries.RunMutation(ctx, s.querier,
-			`mutation ($data: hub_db_session_notes_mut_input_data!) {
+			`mutation ($data: hub_db_agent_session_notes_mut_input_data!) {
 				hub { db { agent {
 					insert_session_notes(data: $data) { id }
 				}}}
@@ -617,7 +617,7 @@ func (s *RuntimeStoreLocal) AppendNote(ctx context.Context, note NoteRow) error 
 	// @embeddings directive on session_notes. The note's content
 	// is short and self-contained — use it verbatim as the summary.
 	return queries.RunMutation(ctx, s.querier,
-		`mutation ($data: hub_db_session_notes_mut_input_data!, $summary: String) {
+		`mutation ($data: hub_db_agent_session_notes_mut_input_data!, $summary: String) {
 			hub { db { agent {
 				insert_session_notes(data: $data, summary: $summary) { id }
 			}}}
@@ -641,7 +641,7 @@ func (s *RuntimeStoreLocal) ListNotes(ctx context.Context, sessionID string, opt
 	}
 	filter := buildNotesFilter(sessionID, opts)
 	rows, err := queries.RunQuery[[]NoteRow](ctx, s.querier,
-		`query ($filter: hub_db_session_notes_filter, $limit: Int) {
+		`query ($filter: hub_db_agent_session_notes_filter, $limit: Int) {
 			hub { db { agent {
 				session_notes(
 					filter: $filter,
@@ -675,7 +675,7 @@ func (s *RuntimeStoreLocal) SearchNotes(ctx context.Context, sessionID, query st
 	}
 	filter := buildNotesFilter(sessionID, opts)
 	rows, err := queries.RunQuery[[]NoteRow](ctx, s.querier,
-		`query ($filter: hub_db_session_notes_filter, $semantic: SemanticSearchInput) {
+		`query ($filter: hub_db_agent_session_notes_filter, $semantic: SemanticSearchInput) {
 			hub { db { agent {
 				session_notes(filter: $filter, semantic: $semantic) {`+notesProjection+`}
 			}}}
@@ -707,7 +707,7 @@ func (s *RuntimeStoreLocal) SessionStats(ctx context.Context, sessionID string) 
 		RowsCount int `json:"_rows_count"`
 	}
 	res, err := queries.RunQuery[aggResp](ctx, s.querier,
-		`query ($filter: hub_db_session_events_filter) {
+		`query ($filter: hub_db_agent_session_events_filter) {
 			hub { db { agent {
 				session_events_aggregation(filter: $filter) {
 					_rows_count
@@ -745,7 +745,7 @@ func (s *RuntimeStoreLocal) CountNotesByCategory(ctx context.Context, sessionID 
 		} `json:"aggregations"`
 	}
 	rows, err := queries.RunQuery[[]bucketRow](ctx, s.querier,
-		`query ($filter: hub_db_session_notes_filter) {
+		`query ($filter: hub_db_agent_session_notes_filter) {
 			hub { db { agent {
 				session_notes_bucket_aggregation(filter: $filter) {
 					key { category }
@@ -772,7 +772,7 @@ func (s *RuntimeStoreLocal) CountNotesByCategory(ctx context.Context, sessionID 
 	return out, nil
 }
 
-// buildNotesFilter constructs the hub_db_session_notes_filter map
+// buildNotesFilter constructs the hub_db_agent_session_notes_filter map
 // shared by ListNotes and SearchNotes. Phase 4.2.3 — sessionID is
 // always the storage location (root after climb-to-root); the
 // optional Window applies a created_at cutoff and Category narrows
@@ -795,7 +795,7 @@ func (s *RuntimeStoreLocal) ListChildren(ctx context.Context, parentID string) (
 	}
 	filter := map[string]any{"parent_session_id": map[string]any{"eq": parentID}}
 	rows, err := queries.RunQuery[[]SessionRow](ctx, s.querier,
-		`query ($filter: hub_db_sessions_filter) {
+		`query ($filter: hub_db_agent_sessions_filter) {
 			hub { db { agent {
 				sessions(filter: $filter, order_by: [{field: "created_at", direction: ASC}]) {
 					id agent_id owner_id parent_session_id session_type spawned_from_event_id
@@ -821,7 +821,7 @@ func (s *RuntimeStoreLocal) ListSessions(ctx context.Context, agentID, status st
 		filter["status"] = map[string]any{"eq": status}
 	}
 	rows, err := queries.RunQuery[[]SessionRow](ctx, s.querier,
-		`query ($filter: hub_db_sessions_filter) {
+		`query ($filter: hub_db_agent_sessions_filter) {
 			hub { db { agent {
 				sessions(filter: $filter, order_by: [{field: "updated_at", direction: DESC}]) {
 					id agent_id owner_id parent_session_id session_type spawned_from_event_id
@@ -851,7 +851,7 @@ func (s *RuntimeStoreLocal) ListResumableRoots(ctx context.Context, agentID stri
 		"event_type": map[string]any{"eq": string(protocol.KindSessionStatus)},
 	}
 	rows, err := queries.RunQuery[[]ResumableRoot](ctx, s.querier,
-		`query ($filter: hub_db_sessions_filter, $events_filter: hub_db_session_events_filter) {
+		`query ($filter: hub_db_agent_sessions_filter, $events_filter: hub_db_agent_session_events_filter) {
 			hub { db { agent {
 				sessions(filter: $filter, order_by: [{field: "updated_at", direction: DESC}]) {
 					id agent_id owner_id parent_session_id session_type spawned_from_event_id

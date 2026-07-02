@@ -227,7 +227,7 @@ func (p *Policies) insert(ctx context.Context, in Input) error {
 		data["note"] = in.Note
 	}
 	return queries.RunMutation(ctx, p.q,
-		`mutation ($data: hub_db_tool_policies_mut_input_data!) {
+		`mutation ($data: hub_db_agent_tool_policies_mut_input_data!) {
 			hub { db { agent {
 				insert_tool_policies(data: $data) { agent_id }
 			}}}
@@ -247,7 +247,7 @@ func (p *Policies) update(ctx context.Context, in Input) (int, error) {
 	// annotation deliberately.
 	data["note"] = in.Note
 	out, err := queries.RunQuery[res](ctx, p.q,
-		`mutation ($agent: String!, $tool: String!, $scope: String!, $data: hub_db_tool_policies_mut_data!) {
+		`mutation ($agent: String!, $tool: String!, $scope: String!, $data: hub_db_agent_tool_policies_mut_data!) {
 			hub { db { agent {
 				update_tool_policies(filter: {
 					agent_id: {eq: $agent},

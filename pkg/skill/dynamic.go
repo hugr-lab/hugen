@@ -220,10 +220,10 @@ func (x *dynamicIndex) upsert(ctx context.Context, m Manifest, source, bundlePat
 
 	if existing.ID == "" {
 		vars := map[string]any{"data": data}
-		sig, call := "$data: hub_db_skills_mut_input_data!", "insert_skills(data: $data)"
+		sig, call := "$data: hub_db_agent_skills_mut_input_data!", "insert_skills(data: $data)"
 		if withSummary {
 			vars["summary"] = m.Description
-			sig = "$data: hub_db_skills_mut_input_data!, $summary: String"
+			sig = "$data: hub_db_agent_skills_mut_input_data!, $summary: String"
 			call = "insert_skills(data: $data, summary: $summary)"
 		}
 		mutation := fmt.Sprintf(`mutation (%s) { hub { db { agent { %s { id } } } } }`, sig, call)
@@ -239,11 +239,11 @@ func (x *dynamicIndex) upsert(ctx context.Context, m Manifest, source, bundlePat
 	delete(data, "agent_id")
 	delete(data, "source")
 	vars := map[string]any{"id": id, "data": data}
-	sig := "$id: String!, $data: hub_db_skills_mut_data!"
+	sig := "$id: String!, $data: hub_db_agent_skills_mut_data!"
 	call := "update_skills(filter: {id: {eq: $id}}, data: $data)"
 	if withSummary {
 		vars["summary"] = m.Description
-		sig = "$id: String!, $data: hub_db_skills_mut_data!, $summary: String"
+		sig = "$id: String!, $data: hub_db_agent_skills_mut_data!, $summary: String"
 		call = "update_skills(filter: {id: {eq: $id}}, data: $data, summary: $summary)"
 	}
 	mutation := fmt.Sprintf(`mutation (%s) { hub { db { agent { %s { affected_rows } } } } }`, sig, call)
@@ -259,7 +259,7 @@ func (x *dynamicIndex) upsert(ctx context.Context, m Manifest, source, bundlePat
 // the only writer.
 func (x *dynamicIndex) setPinAll(ctx context.Context, pin bool) error {
 	return queries.RunMutation(ctx, x.querier,
-		`mutation ($agent: String!, $data: hub_db_skills_mut_data!) {
+		`mutation ($agent: String!, $data: hub_db_agent_skills_mut_data!) {
 			hub { db { agent {
 				update_skills(filter: {agent_id: {eq: $agent}}, data: $data) { affected_rows }
 			}}}
@@ -276,7 +276,7 @@ func (x *dynamicIndex) setPinForNames(ctx context.Context, names []string, pin b
 		return nil
 	}
 	return queries.RunMutation(ctx, x.querier,
-		`mutation ($agent: String!, $names: [String!], $data: hub_db_skills_mut_data!) {
+		`mutation ($agent: String!, $names: [String!], $data: hub_db_agent_skills_mut_data!) {
 			hub { db { agent {
 				update_skills(filter: {agent_id: {eq: $agent}, name: {in: $names}}, data: $data) { affected_rows }
 			}}}
@@ -318,7 +318,7 @@ func (x *dynamicIndex) search(ctx context.Context, query string, taskEligible *b
 		filter["task_eligible"] = map[string]any{"eq": *taskEligible}
 	}
 	rows, err := queries.RunQuery[[]skillRow](ctx, x.querier,
-		`query ($filter: hub_db_skills_filter, $semantic: SemanticSearchInput) {
+		`query ($filter: hub_db_agent_skills_filter, $semantic: SemanticSearchInput) {
 			hub { db { agent {
 				skills(filter: $filter, semantic: $semantic) {`+skillRowProjection+`}
 			}}}
@@ -388,7 +388,7 @@ func (x *dynamicIndex) recallRanked(ctx context.Context, query string, limit int
 	// One query, two aliased selections — RunQuery scans a single path, so
 	// run it directly and ScanData each alias off the same response.
 	resp, err := x.querier.Query(ctx,
-		`query ($dyn: hub_db_skills_filter, $pin: hub_db_skills_filter, $semantic: SemanticSearchInput) {
+		`query ($dyn: hub_db_agent_skills_filter, $pin: hub_db_agent_skills_filter, $semantic: SemanticSearchInput) {
 			hub { db { agent {
 				dynamic: skills(filter: $dyn, semantic: $semantic) {`+recallProjection+`}
 				pinned: skills(filter: $pin) {`+recallProjection+`}
@@ -512,7 +512,7 @@ func (x *dynamicIndex) insertSkillLog(ctx context.Context, skillID, event, sessi
 		data["session_id"] = sessionID
 	}
 	if err := queries.RunMutation(ctx, x.querier,
-		`mutation ($data: hub_db_skill_log_mut_input_data!) {
+		`mutation ($data: hub_db_agent_skill_log_mut_input_data!) {
 			hub { db { agent { insert_skill_log(data: $data) { id } } } }
 		}`,
 		map[string]any{"data": data},
