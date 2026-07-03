@@ -50,7 +50,7 @@ func TestSDL_ContainsKeptTables_NoModule_NoRemoved(t *testing.T) {
 			t.Errorf("SDL still defines removed table/view %q", tbl)
 		}
 	}
-	// The store is a standalone source at hub.db.agent — no per-type @module.
+	// The store is a standalone source at hub.agent.db — no per-type @module.
 	for _, line := range strings.Split(sdl, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "#") {
 			continue // comment lines may mention @module in prose

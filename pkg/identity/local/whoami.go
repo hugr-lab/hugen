@@ -1,6 +1,6 @@
 // Package identity resolves the currently authenticated user from
 // the hugr server. Used at bootstrap time in remote mode to derive
-// the agent_id that keys hub.db.agents without requiring operator
+// the agent_id that keys hub.agent.db.agents without requiring operator
 // configuration.
 package local
 

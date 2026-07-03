@@ -181,10 +181,10 @@ func TestDynamicBackend(t *testing.T) {
 		}
 		logs, err := queries.RunQuery[[]logRow](ctx, q,
 			`query ($agent: String!) {
-				hub { db { agent { skill_log(filter: {agent_id: {eq: $agent}}) { skill_id event } } } }
+				hub { agent { db { skill_log(filter: {agent_id: {eq: $agent}}) { skill_id event } } } }
 			}`,
 			map[string]any{"agent": agentID},
-			"hub.db.agent.skill_log",
+			"hub.agent.db.skill_log",
 		)
 		require.NoError(t, err)
 		// Append-only: two rows (shown + used), both for the real id; the
@@ -214,14 +214,14 @@ func TestDynamicBackend(t *testing.T) {
 		}
 		withLog, err := queries.RunQuery[[]bucketRow](ctx, q,
 			`query ($agent: String!) {
-				hub { db { agent {
+				hub { agent { db {
 					skills(filter: {agent_id: {eq: $agent}, pin: {eq: false}}) {
 						id log_bucket_aggregation { key { event } aggregations { _rows_count } }
 					}
 				}}}
 			}`,
 			map[string]any{"agent": agentID},
-			"hub.db.agent.skills",
+			"hub.agent.db.skills",
 		)
 		require.NoError(t, err)
 		require.Len(t, withLog, 1)
@@ -233,9 +233,9 @@ func TestDynamicBackend(t *testing.T) {
 		assert.Equal(t, 1, counts[SkillLogUsed], "used count via log_bucket_aggregation")
 	})
 
-	t.Run("aliased dynamic+pinned query extracts both at hub.db.agent", func(t *testing.T) {
+	t.Run("aliased dynamic+pinned query extracts both at hub.agent.db", func(t *testing.T) {
 		// Validates the 2b data layer: two aliased skills() selections in
-		// one query, extracted at the "hub.db.agent" object path into a
+		// one query, extracted at the "hub.agent.db" object path into a
 		// struct. No semantic here (the test engine has no embedder), so
 		// `dynamic` is just the non-pinned set. change-report is not
 		// pinned → dynamic has it, pinned is empty.
@@ -244,7 +244,7 @@ func TestDynamicBackend(t *testing.T) {
 		// for BOTH aliases. (Same recallProjection recallRanked uses.)
 		resp, err := q.Query(ctx,
 			`query ($agent: String!) {
-				hub { db { agent {
+				hub { agent { db {
 					dynamic: skills(filter: {agent_id: {eq: $agent}, pin: {eq: false}}) {`+recallProjection+`}
 					pinned:  skills(filter: {agent_id: {eq: $agent}, pin: {eq: true}}) {`+recallProjection+`}
 				}}}
@@ -256,7 +256,7 @@ func TestDynamicBackend(t *testing.T) {
 		require.NoError(t, resp.Err())
 
 		var dyn []rankedSkillRow
-		require.NoError(t, resp.ScanDataJSON("hub.db.agent.dynamic", &dyn))
+		require.NoError(t, resp.ScanDataJSON("hub.agent.db.dynamic", &dyn))
 		require.Len(t, dyn, 1, "non-pinned change-report in dynamic alias")
 		assert.Equal(t, "change-report", dyn[0].Name)
 		counts := map[string]int{}
@@ -269,7 +269,7 @@ func TestDynamicBackend(t *testing.T) {
 		// pinned alias is empty here (no pinned skills) — ScanData may
 		// report no-data; either way it yields zero rows.
 		var pin []rankedSkillRow
-		_ = resp.ScanData("hub.db.agent.pinned", &pin)
+		_ = resp.ScanData("hub.agent.db.pinned", &pin)
 		assert.Empty(t, pin, "no pinned skills installed in this test")
 	})
 

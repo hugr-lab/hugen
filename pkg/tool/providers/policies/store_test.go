@@ -91,8 +91,8 @@ func (f *fakePolicyQuerier) list(vars map[string]any) (*types.Response, error) {
 	}
 	return &types.Response{Data: map[string]any{
 		"hub": map[string]any{
-			"db": map[string]any{
-				"agent": map[string]any{
+			"agent": map[string]any{
+				"db": map[string]any{
 					"tool_policies": rows,
 				},
 			},
@@ -133,8 +133,8 @@ func (f *fakePolicyQuerier) update(vars map[string]any) (*types.Response, error)
 	if !ok {
 		return &types.Response{Data: map[string]any{
 			"hub": map[string]any{
-				"db": map[string]any{
-					"agent": map[string]any{
+				"agent": map[string]any{
+					"db": map[string]any{
 						"update_tool_policies": map[string]any{"affected_rows": 0},
 					},
 				},
@@ -149,8 +149,8 @@ func (f *fakePolicyQuerier) update(vars map[string]any) (*types.Response, error)
 	}
 	return &types.Response{Data: map[string]any{
 		"hub": map[string]any{
-			"db": map[string]any{
-				"agent": map[string]any{
+			"agent": map[string]any{
+				"db": map[string]any{
 					"update_tool_policies": map[string]any{"affected_rows": 1},
 				},
 			},

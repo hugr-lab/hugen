@@ -14,7 +14,7 @@
 // platform schema (design 008 §1A / D11).
 //
 // The store is exposed as a standalone Hugr data source whose GraphQL path is
-// `hub.db.agent` (see pkg/store/local/source.go SourceName). The SDL carries
+// `hub.agent.db` (see pkg/store/local/source.go SourceName). The SDL carries
 // no @module directive — the source name provides the `.agent` nesting.
 package schema
 

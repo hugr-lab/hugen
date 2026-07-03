@@ -29,8 +29,8 @@ func TestSkillsSDL_Compiles_And_RoundTrips(t *testing.T) {
 	// Insert a catalog skill + a member task skill.
 	for _, id := range []string{"skl-cat01", "skl-task01"} {
 		require.NoError(t, queries.RunMutation(ctx, svc,
-			`mutation ($data: hub_db_agent_skills_mut_input_data!) {
-				hub { db { agent { insert_skills(data: $data) { id } } } }
+			`mutation ($data: hub_agent_db_skills_mut_input_data!) {
+				hub { agent { db { insert_skills(data: $data) { id } } } }
 			}`,
 			map[string]any{"data": map[string]any{
 				"id":                id,
@@ -50,8 +50,8 @@ func TestSkillsSDL_Compiles_And_RoundTrips(t *testing.T) {
 
 	// Link catalog -> task via the junction table.
 	require.NoError(t, queries.RunMutation(ctx, svc,
-		`mutation ($data: hub_db_agent_skill_links_mut_input_data!) {
-			hub { db { agent { insert_skill_links(data: $data) { source_id } } } }
+		`mutation ($data: hub_agent_db_skill_links_mut_input_data!) {
+			hub { agent { db { insert_skill_links(data: $data) { source_id } } } }
 		}`,
 		map[string]any{"data": map[string]any{
 			"agent_id":  agentID,
@@ -63,8 +63,8 @@ func TestSkillsSDL_Compiles_And_RoundTrips(t *testing.T) {
 
 	// Append a skill_log impression.
 	require.NoError(t, queries.RunMutation(ctx, svc,
-		`mutation ($data: hub_db_agent_skill_log_mut_input_data!) {
-			hub { db { agent { insert_skill_log(data: $data) { id } } } }
+		`mutation ($data: hub_agent_db_skill_log_mut_input_data!) {
+			hub { agent { db { insert_skill_log(data: $data) { id } } } }
 		}`,
 		map[string]any{"data": map[string]any{
 			"id": "slog-1", "skill_id": "skl-cat01", "agent_id": agentID, "event": "shown",
@@ -88,7 +88,7 @@ func TestSkillsSDL_Compiles_And_RoundTrips(t *testing.T) {
 	}
 	rows, err := queries.RunQuery[[]skillRow](ctx, svc,
 		`query ($id: String!) {
-			hub { db { agent {
+			hub { agent { db {
 				skills(filter: {id: {eq: $id}}) {
 					id name type source task_eligible
 					outgoing_links { target_id relation }
@@ -96,7 +96,7 @@ func TestSkillsSDL_Compiles_And_RoundTrips(t *testing.T) {
 			}}}
 		}`,
 		map[string]any{"id": "skl-cat01"},
-		"hub.db.agent.skills",
+		"hub.agent.db.skills",
 	)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)

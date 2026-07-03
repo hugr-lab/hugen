@@ -125,8 +125,8 @@ func phaseStorage(ctx context.Context, core *Core) error {
 	core.Store = store
 
 	// TaskStore shares the same Querier — it issues GraphQL
-	// mutations / queries against hub.db.agent.tasks +
-	// hub.db.agent.task_log just like the session store does for
+	// mutations / queries against hub.agent.db.tasks +
+	// hub.agent.db.task_log just like the session store does for
 	// sessions + session_events. ChooseStore picked the live
 	// querier (local engine preferred over remote hub); reuse it
 	// here so the two stores stay coherent.

@@ -26,7 +26,7 @@ func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 // pinTestEngine spins up the same engine shape as local.New but stops
 // short of verifyLocalEmbedding — we want to drive pinEmbedderModel
 // directly against a real hub.db + attached runtime source so the
-// `hub.db.agent.version` path resolves like in production.
+// `hub.agent.db.version` path resolves like in production.
 //
 // Returns the engine (satisfies types.Querier) and a cleanup.
 func pinTestEngine(t *testing.T, embedderModel string, vectorDim int) *hugr.Service {
@@ -186,13 +186,13 @@ func TestReadEmbedderPin_LegacyFallback(t *testing.T) {
 		Version string `json:"version"`
 	}
 	resp, err := svc.Query(ctx,
-		`query { hub { db { agent { version(filter: {name: {eq: "embedder_model"}}) { name version } } } } }`,
+		`query { hub { agent { db { version(filter: {name: {eq: "embedder_model"}}) { name version } } } } }`,
 		nil,
 	)
 	require.NoError(t, err)
 	defer resp.Close()
 	var rows []row
-	err = resp.ScanData("hub.db.agent.version", &rows)
+	err = resp.ScanData("hub.agent.db.version", &rows)
 	if err != nil {
 		assert.Contains(t, err.Error(), "wrong data path", "legacy DBs should report no rows")
 	} else {

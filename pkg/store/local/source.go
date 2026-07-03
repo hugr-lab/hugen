@@ -28,10 +28,10 @@ import (
 )
 
 // SourceName is the attached DB name and GraphQL path prefix.
-// Produces the GraphQL path `{ hub { db { agent { ... } } } }` — the
+// Produces the GraphQL path `{ hub { agent { db { ... } } } }` — the
 // dotted source name provides the `.agent` nesting, so the SDL carries
 // no @module directive.
-const SourceName = "hub.db.agent"
+const SourceName = "hub.agent.db"
 
 // SourceConfig configures the hub.db RuntimeSource.
 type SourceConfig struct {
@@ -135,10 +135,10 @@ func (s *Source) Catalog(ctx context.Context) (cs.Catalog, error) {
 	return cs.NewStringSource(s.Name(), s.engine, opts, rendered)
 }
 
-// graphQLPrefix maps a dotted catalog name (e.g. "hub.db.agent") to a
+// graphQLPrefix maps a dotted catalog name (e.g. "hub.agent.db") to a
 // valid GraphQL identifier by replacing "." with "_". Dots are illegal
 // in GraphQL type names and break variable declarations like
-// `$data: hub.db.agent_agents_mut_input_data!`.
+// `$data: hub_agent_db_agents_mut_input_data!`.
 func graphQLPrefix(name string) string {
 	return strings.ReplaceAll(name, ".", "_")
 }

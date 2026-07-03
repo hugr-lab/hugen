@@ -306,12 +306,12 @@ func readEmbedderPin(ctx context.Context, q types.Querier) (string, error) {
 	for _, name := range []string{"embedder_model", "embedding_model"} {
 		rows, err := queries.RunQuery[[]row](ctx, q,
 			`query ($name: String!) {
-				hub { db { agent {
+				hub { agent { db {
 					version(filter: {name: {eq: $name}}, limit: 1) { version }
 				}}}
 			}`,
 			map[string]any{"name": name},
-			"hub.db.agent.version",
+			"hub.agent.db.version",
 		)
 		if err != nil {
 			if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -328,8 +328,8 @@ func readEmbedderPin(ctx context.Context, q types.Querier) (string, error) {
 
 func writeEmbedderPin(ctx context.Context, q types.Querier, model string) error {
 	return queries.RunMutation(ctx, q,
-		`mutation ($data: hub_db_agent_version_mut_input_data!) {
-			hub { db { agent {
+		`mutation ($data: hub_agent_db_version_mut_input_data!) {
+			hub { agent { db {
 				insert_version(data: $data) { name }
 			}}}
 		}`,

@@ -181,8 +181,8 @@ func (s *LocalTaskStore) OpenTask(ctx context.Context, row TaskRow, initialPlann
 	}
 
 	if err := queries.RunMutation(ctx, s.querier,
-		`mutation ($data: hub_db_agent_tasks_mut_input_data!) {
-			hub { db { agent {
+		`mutation ($data: hub_agent_db_tasks_mut_input_data!) {
+			hub { agent { db {
 				insert_tasks(data: $data) { id }
 			}}}
 		}`,
@@ -213,12 +213,12 @@ func (s *LocalTaskStore) GetTask(ctx context.Context, id string) (TaskRow, error
 	}
 	rows, err := queries.RunQuery[[]taskRowDB](ctx, s.querier,
 		`query ($id: String!) {
-			hub { db { agent {
+			hub { agent { db {
 				tasks(filter: {id: {eq: $id}}, limit: 1) {`+taskRowProjection+`}
 			}}}
 		}`,
 		map[string]any{"id": id},
-		"hub.db.agent.tasks",
+		"hub.agent.db.tasks",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -245,8 +245,8 @@ func (s *LocalTaskStore) ListTasksBySession(ctx context.Context, sessionID strin
 		filter["status"] = map[string]any{"eq": opts.Status}
 	}
 	rows, err := queries.RunQuery[[]taskRowDB](ctx, s.querier,
-		`query ($filter: hub_db_agent_tasks_filter, $limit: Int) {
-			hub { db { agent {
+		`query ($filter: hub_agent_db_tasks_filter, $limit: Int) {
+			hub { agent { db {
 				tasks(
 					filter: $filter,
 					order_by: [{field: "created_at", direction: DESC}],
@@ -255,7 +255,7 @@ func (s *LocalTaskStore) ListTasksBySession(ctx context.Context, sessionID strin
 			}}}
 		}`,
 		map[string]any{"filter": filter, "limit": limit},
-		"hub.db.agent.tasks",
+		"hub.agent.db.tasks",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -286,7 +286,7 @@ func (s *LocalTaskStore) ListDue(ctx context.Context, agentID string, now time.T
 	}
 	rows, err := queries.RunQuery[[]taskRowDB](ctx, s.querier,
 		`query ($agent: String!, $limit: Int) {
-			hub { db { agent {
+			hub { agent { db {
 				tasks(
 					filter: {agent_id: {eq: $agent}, status: {eq: "active"}},
 					order_by: [{field: "created_at", direction: ASC}],
@@ -295,7 +295,7 @@ func (s *LocalTaskStore) ListDue(ctx context.Context, agentID string, now time.T
 			}}}
 		}`,
 		map[string]any{"agent": agentID, "limit": limit},
-		"hub.db.agent.tasks",
+		"hub.agent.db.tasks",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -334,7 +334,7 @@ func (s *LocalTaskStore) DeleteTask(ctx context.Context, id string) error {
 	}
 	return queries.RunMutation(ctx, s.querier,
 		`mutation ($id: String!) {
-			hub { db { agent {
+			hub { agent { db {
 				delete_tasks(filter: {id: {eq: $id}}) { affected_rows }
 			}}}
 		}`,
@@ -391,8 +391,8 @@ func (s *LocalTaskStore) UpdateTaskSpec(ctx context.Context, id string, spec Tas
 
 func (s *LocalTaskStore) updateTask(ctx context.Context, id string, patch map[string]any) error {
 	return queries.RunMutation(ctx, s.querier,
-		`mutation ($id: String!, $data: hub_db_agent_tasks_mut_data!) {
-			hub { db { agent {
+		`mutation ($id: String!, $data: hub_agent_db_tasks_mut_data!) {
+			hub { agent { db {
 				update_tasks(filter: {id: {eq: $id}}, data: $data) { affected_rows }
 			}}}
 		}`,
@@ -458,8 +458,8 @@ func (s *LocalTaskStore) AppendLog(ctx context.Context, entry TaskLogEntry) erro
 	}
 
 	return queries.RunMutation(ctx, s.querier,
-		`mutation ($data: hub_db_agent_task_log_mut_input_data!) {
-			hub { db { agent {
+		`mutation ($data: hub_agent_db_task_log_mut_input_data!) {
+			hub { agent { db {
 				insert_task_log(data: $data) { id }
 			}}}
 		}`,
@@ -483,8 +483,8 @@ func (s *LocalTaskStore) ListLogByTask(ctx context.Context, taskID string, opts 
 		filter["fire_seq"] = map[string]any{"gte": opts.SinceFireSeq}
 	}
 	rows, err := queries.RunQuery[[]taskLogRowDB](ctx, s.querier,
-		`query ($filter: hub_db_agent_task_log_filter, $limit: Int) {
-			hub { db { agent {
+		`query ($filter: hub_agent_db_task_log_filter, $limit: Int) {
+			hub { agent { db {
 				task_log(
 					filter: $filter,
 					order_by: [
@@ -496,7 +496,7 @@ func (s *LocalTaskStore) ListLogByTask(ctx context.Context, taskID string, opts 
 			}}}
 		}`,
 		map[string]any{"filter": filter, "limit": limit},
-		"hub.db.agent.task_log",
+		"hub.agent.db.task_log",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -521,7 +521,7 @@ func (s *LocalTaskStore) latestEntryByEvent(ctx context.Context, taskID, event s
 	}
 	rows, err := queries.RunQuery[[]taskLogRowDB](ctx, s.querier,
 		`query ($task: String!, $event: String!) {
-			hub { db { agent {
+			hub { agent { db {
 				task_log(
 					filter: {task_id: {eq: $task}, event_type: {eq: $event}},
 					order_by: [
@@ -533,7 +533,7 @@ func (s *LocalTaskStore) latestEntryByEvent(ctx context.Context, taskID, event s
 			}}}
 		}`,
 		map[string]any{"task": taskID, "event": event},
-		"hub.db.agent.task_log",
+		"hub.agent.db.task_log",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -571,8 +571,8 @@ func (s *LocalTaskStore) ListInFlightFires(ctx context.Context, agentID string, 
 		startedBefore = time.Now()
 	}
 	rows, err := queries.RunQuery[[]taskLogRowDB](ctx, s.querier,
-		`query ($filter: hub_db_agent_task_log_filter) {
-			hub { db { agent {
+		`query ($filter: hub_agent_db_task_log_filter) {
+			hub { agent { db {
 				task_log(
 					filter: $filter,
 					order_by: [{field: "planned_at", direction: ASC}]
@@ -584,7 +584,7 @@ func (s *LocalTaskStore) ListInFlightFires(ctx context.Context, agentID string, 
 			"event_type": map[string]any{"eq": LogEventStarted},
 			"planned_at": map[string]any{"lt": startedBefore.UTC().Format(time.RFC3339Nano)},
 		}},
-		"hub.db.agent.task_log",
+		"hub.agent.db.task_log",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -598,7 +598,7 @@ func (s *LocalTaskStore) ListInFlightFires(ctx context.Context, agentID string, 
 	for _, r := range rows {
 		terminal, err := queries.RunQuery[[]taskLogRowDB](ctx, s.querier,
 			`query ($task: String!, $seq: Int!, $events: [String!]!) {
-				hub { db { agent {
+				hub { agent { db {
 					task_log(
 						filter: {
 							task_id: {eq: $task},
@@ -610,7 +610,7 @@ func (s *LocalTaskStore) ListInFlightFires(ctx context.Context, agentID string, 
 				}}}
 			}`,
 			map[string]any{"task": r.TaskID, "seq": r.FireSeq, "events": terminals},
-			"hub.db.agent.task_log",
+			"hub.agent.db.task_log",
 		)
 		if err != nil && !errors.Is(err, types.ErrWrongDataPath) && !errors.Is(err, types.ErrNoData) {
 			return nil, err
