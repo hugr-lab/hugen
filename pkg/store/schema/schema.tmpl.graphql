@@ -1,10 +1,12 @@
 # Agent Storage — Hugr SDL (Go template)
 #
-# Template params:
-#   .VectorSize        int    — embedding dimension (0 = no embeddings)
-#   .EmbeddingsEnabled bool   — .VectorSize > 0
-#   .EmbedderModel     string — hugr data source name for embedder
-#   .IsTimescale       bool   — true if PostgreSQL with TimescaleDB
+# Template params (query-engine common convention — hugrapp.TemplateParams):
+#   .VectorSize   int    — embedding dimension (0 = no embeddings)
+#   .EmbedderName string — hugr data source name for the embedder
+#
+# Template functions (query-engine/pkg/db/sql_template.go):
+#   isPostgres() — PostgreSQL backend (⟹ TimescaleDB hypertables + pgvector)
+#   isDuckDB()   — DuckDB backend
 #
 # Data source: Name="hub.db.agent", AsModule=true
 # The source name provides the `.agent` nesting — there is NO @module
@@ -139,8 +141,8 @@ type sessions @table(name: "sessions") {
 
 """One event in a session: user message, agent response, tool call/result, sub-agent spawn/result, system event. Append-only — this IS the transcript for post-session review. Eligible event types carry a semantic embedding (populated server-side via Hugr's `summary:` mutation parameter)."""
 type session_events @table(name: "session_events")
-  {{ if gt .VectorSize 0 }}@embeddings(model: "{{ .EmbedderModel }}", vector: "embedding", distance: Cosine){{ end }}
-  {{ if .IsTimescale }}@hypertable{{ end }} {
+  {{ if gt .VectorSize 0 }}@embeddings(model: "{{ .EmbedderName }}", vector: "embedding", distance: Cosine){{ end }}
+  {{ if isPostgres }}@hypertable{{ end }} {
   """Synthetic sortable ID: evt_{agent}_{ts}_{rnd}"""
   id:          String! @pk
   """Session this event belongs to"""
@@ -171,7 +173,7 @@ type session_events @table(name: "session_events")
   """Flexible metadata: {channel, intent, tokens, model, duration_ms, child_session_id, reason, ...}"""
   metadata:    JSON
   """When this event occurred"""
-  created_at:  Timestamp {{ if .IsTimescale }}@pk @timescale_key{{ end }} @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+  created_at:  Timestamp {{ if isPostgres }}@pk @timescale_key{{ end }} @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
   {{ if gt .VectorSize 0 }}
   """Semantic embedding of content. NULL for lifecycle events / oversize / transient embedder failures. Populated atomically with insert via the `summary:` mutation parameter."""
   embedding:   Vector @dim(len: {{ .VectorSize }})
@@ -192,7 +194,7 @@ type session_events @table(name: "session_events")
 
 """Per-root-session working notepad — hypotheses recorded by the LLM mid-conversation. Append-only (no UPDATEs, no soft delete). Storage column session_id is always the root of the parent chain; author_session_id carries the actual writing session for audit. Eligible rows carry a semantic embedding populated server-side via Hugr's `summary:` mutation parameter."""
 type session_notes @table(name: "session_notes")
-  {{ if .EmbeddingsEnabled }}@embeddings(model: "{{ .EmbedderModel }}", vector: "embedding", distance: Cosine){{ end }} {
+  {{ if gt .VectorSize 0 }}@embeddings(model: "{{ .EmbedderName }}", vector: "embedding", distance: Cosine){{ end }} {
   """Synthetic sortable ID: note_{agent}_{ts}_{rnd}"""
   id:          String! @pk
   """Agent that saved this note"""
@@ -232,7 +234,7 @@ type session_notes @table(name: "session_notes")
   content:     String!
   """When this note was saved"""
   created_at:  Timestamp @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
-  {{ if .EmbeddingsEnabled }}
+  {{ if gt .VectorSize 0 }}
   """Semantic embedding of content. NULL for transient embedder failures. Populated atomically with insert via the `summary:` mutation parameter — the runtime passes the note content as the summary string."""
   embedding:   Vector @dim(len: {{ .VectorSize }})
   {{ end }}
@@ -337,9 +339,9 @@ type tasks @table(name: "tasks") {
 
 """Append-only event log: every scheduler fire emits >= 2 rows (planned -> completed|failed), plus optional started/log rows in between. NO UPDATEs ever. `fire_seq` + `planned_at` are denormalised onto every row so latest-by-fire queries skip joins. Symmetric with `session_events`."""
 type task_log @table(name: "task_log")
-  {{ if .IsTimescale }}@hypertable{{ end }} {
+  {{ if isPostgres }}@hypertable{{ end }} {
   """Synthetic sortable id: tlog_{task}_{ts}_{rnd}"""
-  id:           String! {{ if not .IsTimescale }}@pk{{ end }}
+  id:           String! {{ if not (isPostgres) }}@pk{{ end }}
   """Task this row belongs to"""
   task_id:      String! @field_references(
     references_name: "tasks"
@@ -376,7 +378,7 @@ type task_log @table(name: "task_log")
   """Free-form text body for event_type='log' (mid-fire progress note). NULL otherwise."""
   content:      String
   """When this row was written. Timescale time key. Combined with fire_seq DESC for latest-event queries."""
-  created_at:   Timestamp {{ if .IsTimescale }}@pk @timescale_key{{ end }} @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
+  created_at:   Timestamp {{ if isPostgres }}@pk @timescale_key{{ end }} @default(insert_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}", update_exp: "objects.created_at")
 }
 
 # ============================================================
@@ -391,7 +393,7 @@ type task_log @table(name: "task_log")
 
 """One index row per dynamic-skill bundle (task / recipe / catalog / …). DB = discovery/index, disk = content. `metadata` carries the full metadata.hugen projection so mission roles + task inputs_schema are served WITHOUT a SKILL.md read; the filter columns (type / task_eligible / task_kind / keywords / tier_compat / has_inputs_schema) are denormalised from it for cheap structural WHERE before the semantic rank. `source` is the reapability / provenance anchor; `pin` always-advertises (bypasses the discovery bandit). `description` is vectorised server-side into description_vec for semantic discovery."""
 type skills @table(name: "skills")
-  {{ if .EmbeddingsEnabled }}@embeddings(model: "{{ .EmbedderModel }}", vector: "description_vec", distance: Cosine){{ end }} {
+  {{ if gt .VectorSize 0 }}@embeddings(model: "{{ .EmbedderName }}", vector: "description_vec", distance: Cosine){{ end }} {
   """Stable synthetic id: skl-{hex}. Immutable across version updates and renames — every FK (skill_links.source/target_id, skill_log.skill_id) points here."""
   id:                String! @pk
   """Agent that owns this skill (scope slice)"""
@@ -441,7 +443,7 @@ type skills @table(name: "skills")
   updated_at:        Timestamp @default(update_exp: "{{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }}")
   """When this skill was installed (NULL for create-path authored skills until first install)"""
   installed_at:      Timestamp
-  {{ if .EmbeddingsEnabled }}
+  {{ if gt .VectorSize 0 }}
   """Vector embedding of `description` for semantic discovery. Populated atomically with insert/update via the `summary:` mutation parameter."""
   description_vec:   Vector @dim(len: {{ .VectorSize }})
   {{ end }}

@@ -48,42 +48,27 @@ var seedTmpl string
 //go:embed all:migrations
 var migrationsFS embed.FS
 
-// Params are the template variables shared by the SDL and DDL renderers.
-// EmbeddingsEnabled is derived (VectorSize > 0 && EmbedderModel != "").
+// Params are the template variables for the SDL and DDL renderers. They follow
+// the query-engine common convention (hugrapp.TemplateParams): the same field
+// names the app framework injects into an app data source's schema, so ONE
+// template renders identically for local mode (migrate.Ensure / source.go, via
+// SDL/InitDDL) and hub mode (query-engine's provisioner, via the Raw*
+// accessors). Embeddings are enabled iff VectorSize > 0; PostgreSQL always
+// implies TimescaleDB hypertables + pgvector — keyed on the isPostgres template
+// func, not a flag.
 type Params struct {
 	// VectorSize is the embedding dimension. 0 disables vector search.
 	VectorSize int
-	// EmbedderModel is the embedding data source name referenced by the
+	// EmbedderName is the embedding data source name referenced by the
 	// @embeddings directive. Only the SDL uses it; the DDL ignores it.
-	EmbedderModel string
-	// IsTimescale toggles TimescaleDB hypertable support. Postgres only.
-	IsTimescale bool
+	EmbedderName string
 }
 
-// sdlParams is the concrete template context for schema.tmpl.graphql.
-type sdlParams struct {
-	VectorSize        int
-	EmbeddingsEnabled bool
-	EmbedderModel     string
-	IsTimescale       bool
-}
-
-// ddlParams is the concrete template context for schema.tmpl.sql and the
-// migration scripts.
-type ddlParams struct {
-	VectorSize  int
-	IsTimescale bool
-}
-
-// SDL renders the GraphQL SDL for the given (attached) DB type. dbType is
-// typically db.SDBAttachedDuckDB or db.SDBAttachedPostgres.
+// SDL renders the GraphQL SDL for the given DB type. dbType is typically
+// db.SDBAttachedDuckDB / db.SDBAttachedPostgres (local ATTACH) or db.SDBPostgres
+// (native source). Local mode only — hub mode passes RawSDL() to the framework.
 func SDL(dbType db.ScriptDBType, p Params) (string, error) {
-	out, err := db.ParseSQLScriptTemplate(dbType, sdlTmpl, sdlParams{
-		VectorSize:        p.VectorSize,
-		EmbeddingsEnabled: p.VectorSize > 0 && p.EmbedderModel != "",
-		EmbedderModel:     p.EmbedderModel,
-		IsTimescale:       p.IsTimescale,
-	})
+	out, err := db.ParseSQLScriptTemplate(dbType, sdlTmpl, p)
 	if err != nil {
 		return "", fmt.Errorf("schema: render sdl: %w", err)
 	}
@@ -91,13 +76,10 @@ func SDL(dbType db.ScriptDBType, p Params) (string, error) {
 }
 
 // InitDDL renders the full physical schema for a fresh database. dbType is
-// typically db.SDBDuckDB or db.SDBPostgres (direct driver), or the attached
-// variants when rendering for the Hugr app framework.
+// typically db.SDBDuckDB or db.SDBPostgres (direct driver). Local mode only —
+// hub mode passes RawInitDDL() to the framework's InitDBSchemaTemplate hook.
 func InitDDL(dbType db.ScriptDBType, p Params) (string, error) {
-	out, err := db.ParseSQLScriptTemplate(dbType, initDDLTmpl, ddlParams{
-		VectorSize:  p.VectorSize,
-		IsTimescale: p.IsTimescale,
-	})
+	out, err := db.ParseSQLScriptTemplate(dbType, initDDLTmpl, p)
 	if err != nil {
 		return "", fmt.Errorf("schema: render init ddl: %w", err)
 	}
@@ -120,15 +102,46 @@ func MigrateDDL(dbType db.ScriptDBType, from string, p Params) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("schema: read %s: %w", s.Path, err)
 		}
-		rendered, err := db.ParseSQLScriptTemplate(dbType, string(body), ddlParams{
-			VectorSize:  p.VectorSize,
-			IsTimescale: p.IsTimescale,
-		})
+		rendered, err := db.ParseSQLScriptTemplate(dbType, string(body), p)
 		if err != nil {
 			return "", fmt.Errorf("schema: render %s: %w", s.Path, err)
 		}
 		b.WriteString(rendered)
 		if !strings.HasSuffix(rendered, "\n") {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String(), nil
+}
+
+// RawSDL returns the un-rendered GraphQL SDL template. The Hugr app framework
+// (query-engine's hugrapp provisioner) renders it — with the server's system
+// embedder (VectorSize + EmbedderName from core.embedder_settings) and the
+// isPostgres/isDuckDB funcs — when the hub registers the agent store as a data
+// source. So hugen never pre-renders for hub mode; local mode uses SDL().
+func RawSDL() string { return sdlTmpl }
+
+// RawInitDDL returns the un-rendered physical-schema template for the app
+// framework's InitDBSchemaTemplate hook. Rendered server-side (Postgres).
+func RawInitDDL() string { return initDDLTmpl }
+
+// RawMigrateDDL returns the concatenated un-rendered migration scripts that
+// upgrade a database from `from` (exclusive) to Version, for the app framework's
+// MigrateDBSchemaTemplate hook (rendered server-side). Empty when already at
+// Version or when the history has been squashed (pre-v1 baseline).
+func RawMigrateDDL(from string) (string, error) {
+	scripts, err := Migrations(from, Version)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, s := range scripts {
+		body, err := migrationsFS.ReadFile(s.Path)
+		if err != nil {
+			return "", fmt.Errorf("schema: read %s: %w", s.Path, err)
+		}
+		b.Write(body)
+		if len(body) == 0 || body[len(body)-1] != '\n' {
 			b.WriteByte('\n')
 		}
 	}

@@ -1,13 +1,12 @@
 -- Agent Storage Schema (Go template)
 --
--- Template params:
---   .VectorSize       int    — embedding dimension (0 = no embeddings)
---   .EmbedderModel    string — hugr data source name for embedder ("" = disabled)
---   .IsTimescale      bool   — true if PostgreSQL with TimescaleDB extension
+-- Template params (query-engine common convention — hugrapp.TemplateParams):
+--   .VectorSize   int    — embedding dimension (0 = no embeddings)
+--   .EmbedderName string — hugr data source name for the embedder (SDL only)
 --
 -- Template functions (from query-engine/pkg/db/sql_template.go):
---   isPostgres()  — true if PostgreSQL backend
---   isDuckDB()    — true if DuckDB backend
+--   isPostgres()  — PostgreSQL backend (⟹ TimescaleDB hypertables + pgvector)
+--   isDuckDB()    — DuckDB backend
 --
 -- Executed on a DIRECT connection to the DB file (not via ATTACH).
 -- No catalog qualification needed — all names resolve against the main
@@ -25,7 +24,7 @@ INSTALL json; LOAD json;
 
 {{ if isPostgres }}
 {{ if gt .VectorSize 0 }}CREATE EXTENSION IF NOT EXISTS vector;{{ end }}
-{{ if .IsTimescale }}CREATE EXTENSION IF NOT EXISTS timescaledb;{{ end }}
+{{ if isPostgres }}CREATE EXTENSION IF NOT EXISTS timescaledb;{{ end }}
 {{ end }}
 
 -- ============================================================
@@ -103,7 +102,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_type   ON sessions (agent_id, session_ty
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS session_events (
-    id          VARCHAR   {{ if not .IsTimescale }}PRIMARY KEY{{ end }},
+    id          VARCHAR   {{ if not (isPostgres) }}PRIMARY KEY{{ end }},
     session_id  VARCHAR   NOT NULL,
     agent_id    VARCHAR   NOT NULL,
     seq         INTEGER   NOT NULL,
@@ -122,10 +121,10 @@ CREATE TABLE IF NOT EXISTS session_events (
     {{ if gt .VectorSize 0 }}
     ,embedding  {{ if isPostgres }}vector({{ .VectorSize }}){{ else }}FLOAT[{{ .VectorSize }}]{{ end }}
     {{ end }}
-    {{ if .IsTimescale }}, PRIMARY KEY (created_at, id){{ end }}
+    {{ if isPostgres }}, PRIMARY KEY (created_at, id){{ end }}
 );
 
-{{ if .IsTimescale }}
+{{ if isPostgres }}
 SELECT create_hypertable('session_events', 'created_at', if_not_exists => TRUE);
 {{ end }}
 
@@ -240,7 +239,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 
 CREATE TABLE IF NOT EXISTS task_log (
-    id          VARCHAR   {{ if not .IsTimescale }}PRIMARY KEY{{ end }},
+    id          VARCHAR   {{ if not (isPostgres) }}PRIMARY KEY{{ end }},
     task_id     VARCHAR   NOT NULL,
     agent_id    VARCHAR   NOT NULL,
     fire_seq    INTEGER   NOT NULL,
@@ -250,10 +249,10 @@ CREATE TABLE IF NOT EXISTS task_log (
     outcome     {{ if isPostgres }}JSONB{{ else }}JSON{{ end }},
     content     VARCHAR,
     created_at  TIMESTAMPTZ DEFAULT {{ if isPostgres }}NOW(){{ else }}CURRENT_TIMESTAMP{{ end }} NOT NULL
-    {{ if .IsTimescale }}, PRIMARY KEY (created_at, id){{ end }}
+    {{ if isPostgres }}, PRIMARY KEY (created_at, id){{ end }}
 );
 
-{{ if .IsTimescale }}
+{{ if isPostgres }}
 SELECT create_hypertable('task_log', 'created_at', if_not_exists => TRUE);
 {{ end }}
 

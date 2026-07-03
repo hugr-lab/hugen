@@ -66,7 +66,7 @@ func TestSDL_EmbeddingsToggle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SDL off: %v", err)
 	}
-	on, err := SDL(db.SDBAttachedDuckDB, Params{VectorSize: 384, EmbedderModel: "embedder"})
+	on, err := SDL(db.SDBAttachedDuckDB, Params{VectorSize: 384, EmbedderName: "embedder"})
 	if err != nil {
 		t.Fatalf("SDL on: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestInitDDL_CreatesKept_NotRemoved(t *testing.T) {
 }
 
 func TestInitDDL_Postgres_Renders(t *testing.T) {
-	ddl, err := InitDDL(db.SDBPostgres, Params{VectorSize: 384, IsTimescale: true})
+	ddl, err := InitDDL(db.SDBPostgres, Params{VectorSize: 384})
 	if err != nil {
 		t.Fatalf("InitDDL postgres: %v", err)
 	}

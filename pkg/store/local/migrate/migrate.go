@@ -58,9 +58,6 @@ type Config struct {
 	// Empty means "vector search disabled".
 	EmbedderModel string
 
-	// IsTimescale toggles TimescaleDB hypertable creation. Postgres only.
-	IsTimescale bool
-
 	// Seed is the optional initial agent_type + agent. When nil, first-run
 	// provision creates only the schema.
 	Seed *SeedData
@@ -107,9 +104,8 @@ func Ensure(cfg Config) error {
 // schemaParams builds the schema render context from cfg.
 func schemaParams(cfg Config) schema.Params {
 	return schema.Params{
-		VectorSize:    cfg.VectorSize,
-		EmbedderModel: cfg.EmbedderModel,
-		IsTimescale:   cfg.IsTimescale,
+		VectorSize:   cfg.VectorSize,
+		EmbedderName: cfg.EmbedderModel,
 	}
 }
 

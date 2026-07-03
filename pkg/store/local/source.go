@@ -47,11 +47,8 @@ type SourceConfig struct {
 	VectorSize int
 
 	// EmbedderModel is the name of the embedding data source registered in
-	// the engine. Referenced by the @embeddings directive on memory_items.
+	// the engine. Referenced by the @embeddings directive.
 	EmbedderModel string
-
-	// IsTimescale toggles TimescaleDB hypertable support in SDL. Postgres only.
-	IsTimescale bool
 }
 
 // Source implements sources.RuntimeSource.
@@ -128,9 +125,8 @@ func (s *Source) Catalog(ctx context.Context) (cs.Catalog, error) {
 	}
 
 	rendered, err := schema.SDL(dbType, schema.Params{
-		VectorSize:    s.cfg.VectorSize,
-		EmbedderModel: s.cfg.EmbedderModel,
-		IsTimescale:   s.cfg.IsTimescale,
+		VectorSize:   s.cfg.VectorSize,
+		EmbedderName: s.cfg.EmbedderModel,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("hubdb: render sdl: %w", err)
