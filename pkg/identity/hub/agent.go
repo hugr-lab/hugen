@@ -13,18 +13,20 @@ import (
 func (c *Source) Agent(ctx context.Context) (identity.Agent, error) {
 	return queries.RunQuery[identity.Agent](ctx, c.qe,
 		`mutation {
-			hub {
-				agent_info {
-					id
-					agent_type_id
-					short_id
-					name
-					status
-					config
+			function{
+				hub {
+					agent_info {
+						id
+						agent_type_id
+						short_id
+						name
+						status
+						config
+					}
 				}
 			}
 		}`,
 		nil,
-		"hub.agent_info",
+		"function.hub.agent_info",
 	)
 }
