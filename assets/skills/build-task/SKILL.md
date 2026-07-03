@@ -1,13 +1,17 @@
 ---
 name: build-task
 description: >
-  Build a NEW reusable task from the user's intent — a self-contained,
-  parameterized task skill of ANY shape (a report, an automation
-  script, a step-procedure, or a set of scripts). One interactive
-  worker: it designs + AGREES the algorithm with the user, authors the
-  bundle, validates, confirms, and registers it. Use when no existing
-  task covers the request and the user wants a repeatable piece of
-  work. Creation only — scheduling is a separate step.
+  Create a NEW reusable task from the user's intent — a self-contained,
+  parameterized task skill of ANY shape, INCLUDING report tasks. For a
+  data / report task it designs, TESTS and BAKES the hugr queries into
+  the task so it is self-contained and needs no research at run time
+  (reusing the report-builder render method for report output). One
+  interactive worker: designs + AGREES the algorithm with the user,
+  authors the bundle, validates, smoke-tests, confirms, and registers
+  it. Use whenever the user wants a REPEATABLE piece of work (a report,
+  an automation, a procedure) and no existing task covers it — this
+  BUILDS the task; it is NOT the report renderer (that is `build-report`).
+  Creation only — scheduling is a separate step.
 license: Apache-2.0
 allowed-tools:
   - skill:validate
@@ -106,6 +110,32 @@ run is an `inputs_schema` property the worker substitutes at run time;
 the data a source returns while you are building is SAMPLE data for
 your test only — never bake it into the task.
 
+**If the task is data-related, its queries are baked, tested artifacts —
+not prose.** When the task fetches data at run time (one query or
+SEVERAL), each query is a CONCRETE artifact in the bundle — a
+`references/*.graphql` file, or a query embedded in a bundled script —
+that you DESIGN and TEST now, at build time, against live data. Never
+leave a query as a prose step for the run-time worker to re-derive: the
+run-time procedure EXECUTES the defined queries, it does not explore the
+schema or design a query on each run. The task you build should do
+**minimal-to-no research at run time** — all schema discovery and query
+design happens now and is baked; the only exception is a task whose
+ESSENCE is exploration ("investigate X"), where discovery is the point.
+**When a script processes Hugr data, it fetches that data ITSELF with the
+`hugr-client` python package, from INSIDE the script** — the GraphQL query
+is embedded in the script (or read from a bundled `references/*.graphql`)
+and executed via `hugr-client`; `HUGR_URL` / `HUGR_TOKEN` are injected into
+the run. Read `skill:ref(skill="python-runner", ref="hugr-client")` for the
+exact API. Prefer this over splitting the fetch out as a body step (an MCP
+`data-inline_graphql_result` call → a JSON file → a render-only script):
+that split leaves the live fetch — the hard part — OUTSIDE the reusable
+artifact and adds an implicit save-to-file step. **Inline the QUERY (its
+text is part of the script); NEVER inline the DATA it returns (that stays
+live each run).** Fetch and compute in ONE self-contained script. (A prose
+body may still ORCHESTRATE around it — resolve a param, run the script —
+but the data fetch itself belongs in the script, via `hugr-client`, not in
+an MCP query step the body narrates.)
+
 ## How you work — five moves, in order
 
 **Research → agree → build → test → register.**
@@ -198,9 +228,20 @@ for the agreement gate the moment you can describe the algorithm.
      `tier_compatibility: [worker]`, and the task block under
      `metadata.hugen.task` (`eligible: true`, `kind: worker`,
      `goal_summary`, `inputs_schema` with one property per per-run
-     input, `allowed_tools_default` = the EXACT `provider:tool` names
-     the task calls — look them up with `tool:providers` / `tool:tools`,
-     never invent). The body is the per-run procedure: substitute the
+     input, `allowed_tools_default` = **EVERY** `provider:tool` the run-time
+     procedure invokes, and ONLY those — this IS the task worker's COMPLETE
+     tool surface at run time; it gets nothing beyond this set plus its
+     `requires_skills` grants. Trace the procedure end to end and grant each
+     tool it calls: a tool the procedure uses but does NOT grant fails the
+     FIRST real run with "tool not available" — and the smoke test will NOT
+     catch it, because it runs in YOUR broad-toolset builder session, so you
+     must reason the set out yourself. Look each up with `tool:providers` /
+     `tool:tools`; use the EXACT name, never invent, never grant one you
+     don't use. A data task that fetches in-script via `hugr-client` grants
+     `python-mcp:run_script` (hugr-client rides the venv — do NOT grant a
+     separate Hugr-query MCP tool like `data-inline_graphql_result`); add the
+     `bash-mcp` file tools if it reads/writes files, `artifact:publish` if it
+     publishes). The body is the per-run procedure: substitute the
      `[Inputs]`, do the work, write / print the result to the target.
      Write the `description` + `goal_summary` for the task's whole
      PARAMETER RANGE, not the default run: a task parameterised by a
@@ -242,10 +283,18 @@ BEFORE saving. **A task you have never executed is not done.**
 1. **Run the real mechanics with default / sample inputs.** Use the same
    runner the task uses at run time — load the task's execution skill
    (the one in its `requires_skills`) and invoke its runner on the
-   authored artifact (e.g. run the script with its default arguments;
-   execute the query; or, for a prose-orchestration task, walk its steps
-   once). Point any side effect (a file write, an export) at a SAFE,
-   throwaway target — never the user's real destination.
+   authored artifact (e.g. run the bundled script with its default
+   arguments; execute the task's OWN bundled query/queries — the
+   `references/*.graphql` or in-script query that will ship, NOT an
+   ad-hoc query you compose here; or, for a prose-orchestration task,
+   walk its steps once). Testing the BAKED artifact is the point — a
+   query that only ran ad-hoc during the build never got proven. For a
+   fetch+compute script, run the WHOLE script end to end — its in-script
+   `hugr-client` fetch INCLUDED — do not fetch the data separately and
+   test only the render: that leaves the script's fetch path unproven and
+   is exactly what tempts the fetch/render split. Point any side effect (a
+   file write, an export) at a SAFE, throwaway target — never the user's
+   real destination.
 2. **Verify it produced a valid result** — the run exits cleanly AND the
    output has the expected shape (a non-empty file, the right columns,
    the rows you expect). An exit-0 that wrote nothing is a FAILURE.
@@ -292,6 +341,17 @@ Pick the smallest that fits. The script(s) take parameters and produce
 the result; the body wires the data flow (a step produces data →
 persists it to a file → the script reads that path), never an embedded
 copy.
+
+**For a data task, the query/queries ARE bundled artifacts, and the script
+that consumes them FETCHES via `hugr-client` in-script** — a
+`references/*.graphql` per query, or the query embedded in the script.
+Write ONE fetch+compute script (query via `hugr-client` → transform →
+produce). Do NOT make the body run the query with an MCP tool
+(`data-inline_graphql_result`) → save a JSON file → feed a render-only
+script: that split leaves the live fetch outside the artifact and needs an
+implicit save-to-file step. A task with several queries bundles several
+defined, tested query artifacts — all fetched in-script, none re-designed
+at run time. Inline the QUERY, never the DATA.
 
 ## What you do NOT do
 

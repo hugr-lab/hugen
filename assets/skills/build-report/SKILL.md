@@ -2,13 +2,16 @@
 name: build-report
 license: Apache-2.0
 description: >
-  Build a user-facing report / document (HTML, Markdown, PDF) from
-  KNOWN data in one shot. Sources: inline values, data files, and/or
-  GraphQL queries fetched in-script via hugr-client. Threads reusable
-  `params` into the queries and the report. Reuses the report-builder
-  render method (python-first, charts, publication tables). Use when
-  you can name the data / the query AND the report shape; for
-  open-ended analysis use the `analyst` mission instead.
+  Render a finished report / document (HTML, Markdown, PDF) from
+  ALREADY-PREPARED data — inline values, data files, or READY hugr
+  GraphQL queries GIVEN to it (fetched in-script via hugr-client). It
+  RUNS the queries it is given and renders; it does NOT design queries,
+  explore the schema, or create/register a task. Threads reusable
+  `params` into the queries and the report; reuses the report-builder
+  render method (python-first, charts, publication tables). Use when the
+  data / the query AND the report shape are already known. To CREATE a
+  repeatable report task, use `build-task`; for open-ended analysis use
+  the `analyst` mission.
 allowed-tools:
   - provider: python-mcp
     tools:
