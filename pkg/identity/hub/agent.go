@@ -15,18 +15,20 @@ func (c *Source) Agent(ctx context.Context) (identity.Agent, error) {
 		`mutation {
 			function{
 				hub {
-					agent_info {
-						id
-						agent_type_id
-						short_id
-						name
-						status
-						config
+					agent {
+						info {
+							id
+							agent_type_id
+							short_id
+							name
+							status
+							config
+						}
 					}
 				}
 			}
 		}`,
 		nil,
-		"function.hub.agent_info",
+		"function.hub.agent.info",
 	)
 }
