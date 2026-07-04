@@ -425,6 +425,10 @@ func (s *LocalTaskStore) AppendLog(ctx context.Context, entry TaskLogEntry) erro
 		entry.ID = newTaskLogID(entry.TaskID, entry.FireSeq)
 	}
 
+	createdAt := entry.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
 	data := map[string]any{
 		"id":         entry.ID,
 		"task_id":    entry.TaskID,
@@ -432,6 +436,10 @@ func (s *LocalTaskStore) AppendLog(ctx context.Context, entry TaskLogEntry) erro
 		"fire_seq":   entry.FireSeq,
 		"event_type": entry.EventType,
 		"planned_at": entry.PlannedAt.UTC().Format(time.RFC3339Nano),
+		// created_at provided explicitly: task_log is a Timescale hypertable in
+		// Postgres (created_at is part of the composite PK) → Hugr requires it on
+		// insert. DuckDB accepts it too. (Backdating still goes via planned_at.)
+		"created_at": createdAt.Format(time.RFC3339Nano),
 	}
 	if entry.SessionID != "" {
 		data["session_id"] = entry.SessionID

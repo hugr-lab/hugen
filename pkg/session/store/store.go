@@ -412,6 +412,14 @@ func (s *RuntimeStoreLocal) AppendEvent(ctx context.Context, ev EventRow, summar
 	if ev.Author == "" {
 		ev.Author = ev.AgentID
 	}
+	// created_at is provided explicitly: in Postgres the store is a TimescaleDB
+	// hypertable whose partition column created_at is part of the composite PK,
+	// so Hugr requires it on insert (the server-side @default insert_exp does not
+	// satisfy a PK field). DuckDB accepts it identically.
+	createdAt := ev.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
 	data := map[string]any{
 		"id":         ev.ID,
 		"session_id": ev.SessionID,
@@ -419,6 +427,7 @@ func (s *RuntimeStoreLocal) AppendEvent(ctx context.Context, ev EventRow, summar
 		"seq":        ev.Seq,
 		"event_type": ev.EventType,
 		"author":     ev.Author,
+		"created_at": createdAt.Format(time.RFC3339Nano),
 	}
 	if ev.Content != "" {
 		data["content"] = ev.Content
