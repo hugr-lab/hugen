@@ -12,6 +12,7 @@ package skill
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 
@@ -579,7 +580,9 @@ func (h *SessionSkill) emitOp(ctx context.Context, op, name string) {
 	if err != nil {
 		return
 	}
-	_ = state.Emit(ctx, frame)
+	if err := state.Emit(ctx, frame); err != nil {
+		slog.Warn("skill: persist skill load/unload frame failed", "session", h.sessionID, "err", err)
+	}
 }
 
 // Manager returns the shared *SkillManager.

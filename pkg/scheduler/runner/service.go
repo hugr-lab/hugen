@@ -357,13 +357,15 @@ func (s *Service) runFire(parent context.Context, r *registration, seq int, plan
 	defer r.markIdle()
 
 	started := s.nowFn()
-	_ = s.runLog.Append(context.Background(), RunLogEntry{
+	if err := s.runLog.Append(context.Background(), RunLogEntry{
 		Name:      r.name,
 		FireSeq:   seq,
 		PlannedAt: planned,
 		StartedAt: started,
 		Status:    RunLogInFlight,
-	})
+	}); err != nil {
+		s.log.Warn("runner: append run-log (in-flight) failed", "task", r.name, "seq", seq, "err", err)
+	}
 
 	ctx := parent
 	var cancel context.CancelFunc
