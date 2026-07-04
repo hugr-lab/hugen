@@ -95,7 +95,7 @@ func (p *Policies) Revoke(ctx context.Context, id string) error {
 	}
 	return queries.RunMutation(ctx, p.q,
 		`mutation ($agent: String!, $tool: String!, $scope: String!) {
-			hub { db { agent {
+			hub { agent { db {
 				delete_tool_policies(filter: {
 					agent_id: {eq: $agent},
 					tool_name: {eq: $tool},
@@ -197,14 +197,14 @@ func reasonOf(r policyRow) string {
 func (p *Policies) list(ctx context.Context, agentID string) ([]policyRow, error) {
 	rows, err := queries.RunQuery[[]policyRow](ctx, p.q,
 		`query ($agent: String!) {
-			hub { db { agent {
+			hub { agent { db {
 				tool_policies(filter: {agent_id: {eq: $agent}}) {
 					agent_id tool_name scope policy note
 				}
 			}}}
 		}`,
 		map[string]any{"agent": agentID},
-		"hub.db.agent.tool_policies",
+		"hub.agent.db.tool_policies",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -227,8 +227,8 @@ func (p *Policies) insert(ctx context.Context, in Input) error {
 		data["note"] = in.Note
 	}
 	return queries.RunMutation(ctx, p.q,
-		`mutation ($data: hub_db_tool_policies_mut_input_data!) {
-			hub { db { agent {
+		`mutation ($data: hub_agent_db_tool_policies_mut_input_data!) {
+			hub { agent { db {
 				insert_tool_policies(data: $data) { agent_id }
 			}}}
 		}`,
@@ -247,8 +247,8 @@ func (p *Policies) update(ctx context.Context, in Input) (int, error) {
 	// annotation deliberately.
 	data["note"] = in.Note
 	out, err := queries.RunQuery[res](ctx, p.q,
-		`mutation ($agent: String!, $tool: String!, $scope: String!, $data: hub_db_tool_policies_mut_data!) {
-			hub { db { agent {
+		`mutation ($agent: String!, $tool: String!, $scope: String!, $data: hub_agent_db_tool_policies_mut_data!) {
+			hub { agent { db {
 				update_tool_policies(filter: {
 					agent_id: {eq: $agent},
 					tool_name: {eq: $tool},
@@ -262,7 +262,7 @@ func (p *Policies) update(ctx context.Context, in Input) (int, error) {
 			"scope": in.Scope,
 			"data":  data,
 		},
-		"hub.db.agent.update_tool_policies",
+		"hub.agent.db.update_tool_policies",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {

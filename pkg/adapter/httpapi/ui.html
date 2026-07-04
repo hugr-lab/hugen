@@ -93,7 +93,7 @@ function render(f) {
       // The runtime echoes the user turn on the stream (and replays it), so we
       // render it from the frame — but NOT agent-authored synthetics (e.g. the
       // async-summary prompt), only real user turns.
-      if ((f.auth || {}).kind === 'user') { add('user', p.text || ''); curAgent = null; curReason = null; }
+      if ((f.author || {}).kind === 'user') { add('user', p.text || ''); curAgent = null; curReason = null; }
       break;
     case 'reasoning':
       // Reasoning frames use `final` (not `consolidated`): streaming chunks are

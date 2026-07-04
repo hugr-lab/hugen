@@ -1,5 +1,5 @@
 // Package store is the persistence facade for the Phase 6 cron +
-// scheduler subsystem. It owns two tables under `hub.db.agent`:
+// scheduler subsystem. It owns two tables under `hub.agent.db`:
 //
 //   - `tasks` — one row per user-defined schedule entry. Lifecycle
 //     UPDATEs only (pause / resume / cancel / spec edit) — 0-2
@@ -82,7 +82,7 @@ const (
 	PauseOwnerTerminated  = "owner_terminated"
 )
 
-// TaskRow mirrors the hub.db.agent.tasks row layout. The free-form
+// TaskRow mirrors the hub.agent.db.tasks row layout. The free-form
 // `spec` JSON column projects onto [TaskSpec]; the other columns are
 // either filter / index columns or narrow lifecycle state.
 //
@@ -141,7 +141,7 @@ type TaskHashes struct {
 	Inputs       string `json:"inputs,omitempty"`
 }
 
-// TaskLogEntry mirrors one hub.db.agent.task_log row. Append-only —
+// TaskLogEntry mirrors one hub.agent.db.task_log row. Append-only —
 // the store never UPDATEs an entry. `FireSeq` + `PlannedAt` are
 // denormalised on every row of the fire so latest-by-fire reads
 // skip joins.

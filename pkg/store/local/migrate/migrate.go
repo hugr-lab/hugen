@@ -1,15 +1,15 @@
-// Package migrate provisions and upgrades the agent memory database.
+// Package migrate provisions and upgrades the agent store database.
 //
 // Runs on a DIRECT driver connection (duckdb-go or pgx), not through the hugr
 // query-engine. This keeps DDL statements unqualified and lets us support
 // Postgres' native CREATE DATABASE semantics that aren't expressible through
 // the engine's attached-catalog view.
 //
-// Layout (embedded):
-//
-//	schema.tmpl.sql         — initial schema, applied when the DB is created
-//	seed.tmpl.sql           — optional initial rows (agent_type + agent)
-//	migrations/<version>/   — upgrade scripts, sorted by numeric filename prefix
+// The schema itself (DDL, seed, migrations) lives in
+// github.com/hugr-lab/hugen/pkg/store/schema — the single source of truth
+// shared with the (future) hub provisioning path. This package owns only the
+// PROVISIONING logic: connection management, the version-table bookkeeping,
+// and the embedder-pin verification.
 //
 // Call Ensure(ctx, Config) once at agent startup before the engine is
 // initialised. Idempotent: subsequent calls are no-ops when the schema is
@@ -18,14 +18,9 @@ package migrate
 
 import (
 	"database/sql"
-	"embed"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
-	"path"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -34,19 +29,20 @@ import (
 	"github.com/hugr-lab/query-engine/pkg/db"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib" // register "pgx" driver
+
+	"github.com/hugr-lab/hugen/pkg/store/schema"
 )
 
-// SchemaVersion is the version that Ensure targets.
-const SchemaVersion = "0.0.8"
+// SchemaVersion is the version that Ensure targets. Owned by pkg/store/schema.
+const SchemaVersion = schema.Version
 
-//go:embed schema.tmpl.sql
-var initSchemaTmpl string
-
-//go:embed seed.tmpl.sql
-var seedTmpl string
-
-//go:embed all:migrations
-var migrationsFS embed.FS
+// SeedData / SeedAgentType / SeedAgent are re-exported from pkg/store/schema
+// so existing callers keep referencing migrate.SeedData.
+type (
+	SeedData      = schema.SeedData
+	SeedAgentType = schema.SeedAgentType
+	SeedAgent     = schema.SeedAgent
+)
 
 // Config controls Ensure.
 type Config struct {
@@ -62,9 +58,6 @@ type Config struct {
 	// Empty means "vector search disabled".
 	EmbedderModel string
 
-	// IsTimescale toggles TimescaleDB hypertable creation. Postgres only.
-	IsTimescale bool
-
 	// Seed is the optional initial agent_type + agent. When nil, first-run
 	// provision creates only the schema.
 	Seed *SeedData
@@ -74,35 +67,17 @@ type Config struct {
 	TargetVersion string
 }
 
-// SeedData is written to agent_types + agents on first-run provisioning.
-type SeedData struct {
-	AgentType SeedAgentType
-	Agent     SeedAgent
-}
-
-type SeedAgentType struct {
-	ID          string
-	Name        string
-	Description string
-	Config      any // marshalled to JSON at render time
-}
-
-type SeedAgent struct {
-	ID      string
-	ShortID string
-	Name    string
-}
-
-// Ensure provisions or migrates the memory DB at cfg.Path.
+// Ensure provisions or migrates the store DB at cfg.Path.
 //
 // First run:
 //  1. open direct connection (creating the file if needed for DuckDB; CREATE
 //     DATABASE for Postgres)
-//  2. run schema.tmpl.sql
+//  2. apply schema.InitDDL
 //  3. write version row
-//  4. run seed.tmpl.sql when cfg.Seed is non-nil
+//  4. apply schema.SeedSQL when cfg.Seed is non-nil
 //
-// Subsequent runs: walk migrations/ and apply scripts up to TargetVersion.
+// Subsequent runs: apply schema.MigrateDDL up to TargetVersion, then bump the
+// version row.
 func Ensure(cfg Config) error {
 	if cfg.Path == "" {
 		return errors.New("migrate: Path required")
@@ -126,6 +101,14 @@ func Ensure(cfg Config) error {
 	return upgrade(dbType, cfg, target)
 }
 
+// schemaParams builds the schema render context from cfg.
+func schemaParams(cfg Config) schema.Params {
+	return schema.Params{
+		VectorSize:   cfg.VectorSize,
+		EmbedderName: cfg.EmbedderModel,
+	}
+}
+
 // ── first-run provisioning ─────────────────────────────────────
 
 func provision(dbType db.ScriptDBType, cfg Config, target string) error {
@@ -135,10 +118,7 @@ func provision(dbType db.ScriptDBType, cfg Config, target string) error {
 	}
 	defer func() { _ = conn.Close() }()
 
-	rendered, err := db.ParseSQLScriptTemplate(dbType, initSchemaTmpl, SchemaParams{
-		VectorSize:  cfg.VectorSize,
-		IsTimescale: cfg.IsTimescale,
-	})
+	rendered, err := schema.InitDDL(dbType, schemaParams(cfg))
 	if err != nil {
 		return fmt.Errorf("migrate: render schema: %w", err)
 	}
@@ -161,11 +141,7 @@ func provision(dbType db.ScriptDBType, cfg Config, target string) error {
 	}
 
 	if cfg.Seed != nil {
-		data, err := seedData(cfg.Seed)
-		if err != nil {
-			return err
-		}
-		rendered, err := db.ParseSQLScriptTemplate(dbType, seedTmpl, data)
+		rendered, err := schema.SeedSQL(dbType, *cfg.Seed)
 		if err != nil {
 			return fmt.Errorf("migrate: render seed: %w", err)
 		}
@@ -196,35 +172,20 @@ func upgrade(dbType db.ScriptDBType, cfg Config, target string) error {
 		return err
 	}
 
-	if compareVersions(version, target) == 0 {
+	if schema.CompareVersions(version, target) == 0 {
 		return nil
 	}
-	if compareVersions(version, target) > 0 {
+	if schema.CompareVersions(version, target) > 0 {
 		return fmt.Errorf("migrate: db version %s is newer than target %s", version, target)
 	}
 
-	scripts, err := collectMigrations(version, target)
+	blob, err := schema.MigrateDDL(dbType, version, schemaParams(cfg))
 	if err != nil {
 		return err
 	}
-	if len(scripts) == 0 {
-		return fmt.Errorf("migrate: no migration scripts from %s to %s", version, target)
-	}
-
-	for _, script := range scripts {
-		body, err := migrationsFS.ReadFile(script.path)
-		if err != nil {
-			return fmt.Errorf("migrate: read %s: %w", script.path, err)
-		}
-		rendered, err := db.ParseSQLScriptTemplate(dbType, string(body), SchemaParams{
-			VectorSize:  cfg.VectorSize,
-			IsTimescale: cfg.IsTimescale,
-		})
-		if err != nil {
-			return fmt.Errorf("migrate: render %s: %w", script.path, err)
-		}
-		if _, err := conn.Exec(rendered); err != nil {
-			return fmt.Errorf("migrate: apply %s: %w", script.path, err)
+	if strings.TrimSpace(blob) != "" {
+		if _, err := conn.Exec(blob); err != nil {
+			return fmt.Errorf("migrate: apply migrations %s -> %s: %w", version, target, err)
 		}
 	}
 
@@ -237,10 +198,10 @@ func upgrade(dbType db.ScriptDBType, cfg Config, target string) error {
 }
 
 // verifyEmbedding compares the configured embedding model+dim to what was
-// stored at provision time. A mismatch is fatal: existing vectors in
-// memory_items are not re-computable and the agent must be recreated.
-// Rows may be missing for DBs provisioned before embedding version tracking —
-// in that case we write them from the current config (one-time backfill).
+// stored at provision time. A mismatch is fatal: existing vectors are not
+// re-computable and the agent must be recreated. Rows may be missing for DBs
+// provisioned before embedding version tracking — in that case we write them
+// from the current config (one-time backfill).
 func verifyEmbedding(conn *sql.DB, cfg Config) error {
 	var storedModel, storedDim sql.NullString
 	_ = conn.QueryRow(
@@ -351,143 +312,6 @@ func openExisting(dbType db.ScriptDBType, path string) (*sql.DB, error) {
 	default:
 		return nil, fmt.Errorf("migrate: unsupported db type %q", dbType)
 	}
-}
-
-// ── migration discovery ─────────────────────────────────────────
-
-type migrationScript struct {
-	path     string
-	version  string
-	filename string
-}
-
-// collectMigrations walks the embedded migrations/ FS and returns scripts
-// whose folder version > `from` and <= `to`, sorted by (version, filename).
-// Uses the same layout as hugr cmd/migrate: migrations/<version>/<N-name>.sql
-func collectMigrations(from, to string) ([]migrationScript, error) {
-	var scripts []migrationScript
-
-	err := fs.WalkDir(migrationsFS, "migrations", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(p, ".sql") {
-			return nil
-		}
-		rel := strings.TrimPrefix(p, "migrations"+string(os.PathSeparator))
-		rel = strings.TrimPrefix(rel, "migrations/")
-		parts := strings.SplitN(rel, "/", 2)
-		if len(parts) < 2 {
-			return nil // scripts must live under a version directory
-		}
-		ver := parts[0]
-		if compareVersions(ver, from) <= 0 || compareVersions(ver, to) > 0 {
-			return nil
-		}
-		scripts = append(scripts, migrationScript{
-			path:     p,
-			version:  ver,
-			filename: path.Base(p),
-		})
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("migrate: walk migrations: %w", err)
-	}
-
-	slices.SortFunc(scripts, func(a, b migrationScript) int {
-		if c := compareVersions(a.version, b.version); c != 0 {
-			return c
-		}
-		return strings.Compare(a.filename, b.filename)
-	})
-	return scripts, nil
-}
-
-// compareVersions compares dot-separated version strings numerically.
-// Adapted from hugr cmd/migrate/main.go.
-func compareVersions(a, b string) int {
-	ap := strings.Split(a, ".")
-	bp := strings.Split(b, ".")
-	n := len(ap)
-	if len(bp) > n {
-		n = len(bp)
-	}
-	for i := 0; i < n; i++ {
-		var ai, bi int
-		if i < len(ap) {
-			ai, _ = strconv.Atoi(ap[i])
-		}
-		if i < len(bp) {
-			bi, _ = strconv.Atoi(bp[i])
-		}
-		if ai < bi {
-			return -1
-		}
-		if ai > bi {
-			return 1
-		}
-	}
-	return 0
-}
-
-// ── template params ─────────────────────────────────────────────
-
-// SchemaParams is passed to schema.tmpl.sql and migration templates.
-type SchemaParams struct {
-	VectorSize  int
-	IsTimescale bool
-}
-
-// SeedParams is the rendered template context for seed.tmpl.sql. Config is
-// SQL-escaped JSON ready to inline between single quotes.
-type SeedParams struct {
-	AgentType seedAgentType
-	Agent     seedAgent
-}
-
-type seedAgentType struct {
-	ID          string
-	Name        string
-	Description string
-	Config      string
-}
-
-type seedAgent struct {
-	ID      string
-	ShortID string
-	Name    string
-}
-
-func seedData(in *SeedData) (SeedParams, error) {
-	var out SeedParams
-	out.AgentType.ID = escapeSQL(in.AgentType.ID)
-	out.AgentType.Name = escapeSQL(in.AgentType.Name)
-	out.AgentType.Description = escapeSQL(in.AgentType.Description)
-
-	switch v := in.AgentType.Config.(type) {
-	case nil:
-		out.AgentType.Config = "{}"
-	case string:
-		out.AgentType.Config = escapeSQL(v)
-	case []byte:
-		out.AgentType.Config = escapeSQL(string(v))
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return out, fmt.Errorf("migrate: marshal seed config: %w", err)
-		}
-		out.AgentType.Config = escapeSQL(string(b))
-	}
-
-	out.Agent.ID = escapeSQL(in.Agent.ID)
-	out.Agent.ShortID = escapeSQL(in.Agent.ShortID)
-	out.Agent.Name = escapeSQL(in.Agent.Name)
-	return out, nil
-}
-
-func escapeSQL(s string) string {
-	return strings.ReplaceAll(s, "'", "''")
 }
 
 // ── misc ────────────────────────────────────────────────────────

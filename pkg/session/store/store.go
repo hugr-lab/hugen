@@ -13,7 +13,7 @@ import (
 	"github.com/hugr-lab/hugen/pkg/store/queries"
 )
 
-// NoteRow mirrors hub.db.agent.session_notes — the persistence
+// NoteRow mirrors hub.agent.db.session_notes — the persistence
 // shape RuntimeStore implementations work with. JSON tags match
 // queries.RunQuery decoding. The notepad extension owns the
 // in-memory Note type and the higher-level wrapper around this
@@ -115,7 +115,7 @@ type ResumableRoot struct {
 	Lifecycle []EventRow `json:"events,omitempty"`
 }
 
-// SessionRow mirrors the hub.db.agent.sessions row layout.
+// SessionRow mirrors the hub.agent.db.sessions row layout.
 type SessionRow struct {
 	ID                 string         `json:"id"`
 	AgentID            string         `json:"agent_id"`
@@ -130,7 +130,7 @@ type SessionRow struct {
 	UpdatedAt          time.Time      `json:"updated_at"`
 }
 
-// EventRow mirrors hub.db.agent.session_events. Frame envelope fields
+// EventRow mirrors hub.agent.db.session_events. Frame envelope fields
 // are reconstructed from the columns on read; the variant payload is
 // JSON-encoded into Content + ToolArgs + ToolResult + Metadata as
 // dictated by the Frame kind.
@@ -309,8 +309,8 @@ func (s *RuntimeStoreLocal) OpenSession(ctx context.Context, row SessionRow) err
 		data["metadata"] = row.Metadata
 	}
 	return queries.RunMutation(ctx, s.querier,
-		`mutation ($data: hub_db_sessions_mut_input_data!) {
-			hub { db { agent {
+		`mutation ($data: hub_agent_db_sessions_mut_input_data!) {
+			hub { agent { db {
 				insert_sessions(data: $data) { id }
 			}}}
 		}`,
@@ -321,7 +321,7 @@ func (s *RuntimeStoreLocal) OpenSession(ctx context.Context, row SessionRow) err
 func (s *RuntimeStoreLocal) LoadSession(ctx context.Context, id string) (SessionRow, error) {
 	rows, err := queries.RunQuery[[]SessionRow](ctx, s.querier,
 		`query ($id: String!) {
-			hub { db { agent {
+			hub { agent { db {
 				sessions(filter: {id: {eq: $id}}, limit: 1) {
 					id agent_id owner_id parent_session_id session_type spawned_from_event_id
 					status mission metadata created_at updated_at
@@ -329,7 +329,7 @@ func (s *RuntimeStoreLocal) LoadSession(ctx context.Context, id string) (Session
 			}}}
 		}`,
 		map[string]any{"id": id},
-		"hub.db.agent.sessions",
+		"hub.agent.db.sessions",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -348,8 +348,8 @@ func (s *RuntimeStoreLocal) UpdateSessionStatus(ctx context.Context, id, status 
 		return fmt.Errorf("%w: %q", ErrInvalidStatus, status)
 	}
 	return queries.RunMutation(ctx, s.querier,
-		`mutation ($id: String!, $data: hub_db_sessions_mut_data!) {
-			hub { db { agent {
+		`mutation ($id: String!, $data: hub_agent_db_sessions_mut_data!) {
+			hub { agent { db {
 				update_sessions(filter: {id: {eq: $id}}, data: $data) { affected_rows }
 			}}}
 		}`,
@@ -366,7 +366,7 @@ func (s *RuntimeStoreLocal) NextSeq(ctx context.Context, sessionID string) (int,
 	}
 	rows, err := queries.RunQuery[[]row](ctx, s.querier,
 		`query ($sid: String!) {
-			hub { db { agent {
+			hub { agent { db {
 				session_events(
 					filter: {session_id: {eq: $sid}},
 					order_by: [{field: "seq", direction: DESC}],
@@ -375,7 +375,7 @@ func (s *RuntimeStoreLocal) NextSeq(ctx context.Context, sessionID string) (int,
 			}}}
 		}`,
 		map[string]any{"sid": sessionID},
-		"hub.db.agent.session_events",
+		"hub.agent.db.session_events",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -412,6 +412,14 @@ func (s *RuntimeStoreLocal) AppendEvent(ctx context.Context, ev EventRow, summar
 	if ev.Author == "" {
 		ev.Author = ev.AgentID
 	}
+	// created_at is provided explicitly: in Postgres the store is a TimescaleDB
+	// hypertable whose partition column created_at is part of the composite PK,
+	// so Hugr requires it on insert (the server-side @default insert_exp does not
+	// satisfy a PK field). DuckDB accepts it identically.
+	createdAt := ev.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
 	data := map[string]any{
 		"id":         ev.ID,
 		"session_id": ev.SessionID,
@@ -419,6 +427,7 @@ func (s *RuntimeStoreLocal) AppendEvent(ctx context.Context, ev EventRow, summar
 		"seq":        ev.Seq,
 		"event_type": ev.EventType,
 		"author":     ev.Author,
+		"created_at": createdAt.Format(time.RFC3339Nano),
 	}
 	if ev.Content != "" {
 		data["content"] = ev.Content
@@ -437,8 +446,8 @@ func (s *RuntimeStoreLocal) AppendEvent(ctx context.Context, ev EventRow, summar
 	}
 	if summary == "" || !s.embedderEnabled {
 		return queries.RunMutation(ctx, s.querier,
-			`mutation ($data: hub_db_session_events_mut_input_data!) {
-				hub { db { agent {
+			`mutation ($data: hub_agent_db_session_events_mut_input_data!) {
+				hub { agent { db {
 					insert_session_events(data: $data) { id }
 				}}}
 			}`,
@@ -446,8 +455,8 @@ func (s *RuntimeStoreLocal) AppendEvent(ctx context.Context, ev EventRow, summar
 		)
 	}
 	return queries.RunMutation(ctx, s.querier,
-		`mutation ($data: hub_db_session_events_mut_input_data!, $summary: String) {
-			hub { db { agent {
+		`mutation ($data: hub_agent_db_session_events_mut_input_data!, $summary: String) {
+			hub { agent { db {
 				insert_session_events(data: $data, summary: $summary) { id }
 			}}}
 		}`,
@@ -488,8 +497,8 @@ func (s *RuntimeStoreLocal) ListEvents(ctx context.Context, sessionID string, op
 	// 1) filter, 2) similarity, 3) limit).
 	if opts.SemanticQuery != "" && s.embedderEnabled {
 		rows, err := queries.RunQuery[[]EventRow](ctx, s.querier,
-			`query ($filter: hub_db_session_events_filter, $semantic: SemanticSearchInput) {
-				hub { db { agent {
+			`query ($filter: hub_agent_db_session_events_filter, $semantic: SemanticSearchInput) {
+				hub { agent { db {
 					session_events(filter: $filter, semantic: $semantic) {
 						id session_id agent_id seq event_type author content
 						tool_name tool_args tool_result metadata created_at
@@ -500,7 +509,7 @@ func (s *RuntimeStoreLocal) ListEvents(ctx context.Context, sessionID string, op
 				"filter":   filter,
 				"semantic": map[string]any{"query": opts.SemanticQuery, "limit": opts.Limit},
 			},
-			"hub.db.agent.session_events",
+			"hub.agent.db.session_events",
 		)
 		if err != nil {
 			if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -511,8 +520,8 @@ func (s *RuntimeStoreLocal) ListEvents(ctx context.Context, sessionID string, op
 		return rows, nil
 	}
 	rows, err := queries.RunQuery[[]EventRow](ctx, s.querier,
-		`query ($filter: hub_db_session_events_filter, $limit: Int) {
-			hub { db { agent {
+		`query ($filter: hub_agent_db_session_events_filter, $limit: Int) {
+			hub { agent { db {
 				session_events(
 					filter: $filter,
 					order_by: [{field: "seq", direction: ASC}],
@@ -524,7 +533,7 @@ func (s *RuntimeStoreLocal) ListEvents(ctx context.Context, sessionID string, op
 			}}}
 		}`,
 		map[string]any{"filter": filter, "limit": opts.Limit},
-		"hub.db.agent.session_events",
+		"hub.agent.db.session_events",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -547,8 +556,8 @@ func (s *RuntimeStoreLocal) LatestEventOfKinds(ctx context.Context, sessionID st
 		"event_type": map[string]any{"in": kinds},
 	}
 	rows, err := queries.RunQuery[[]EventRow](ctx, s.querier,
-		`query ($filter: hub_db_session_events_filter) {
-			hub { db { agent {
+		`query ($filter: hub_agent_db_session_events_filter) {
+			hub { agent { db {
 				session_events(
 					filter: $filter,
 					order_by: [{field: "seq", direction: DESC}],
@@ -560,7 +569,7 @@ func (s *RuntimeStoreLocal) LatestEventOfKinds(ctx context.Context, sessionID st
 			}}}
 		}`,
 		map[string]any{"filter": filter},
-		"hub.db.agent.session_events",
+		"hub.agent.db.session_events",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -605,8 +614,8 @@ func (s *RuntimeStoreLocal) AppendNote(ctx context.Context, note NoteRow) error 
 	}
 	if !s.embedderEnabled {
 		return queries.RunMutation(ctx, s.querier,
-			`mutation ($data: hub_db_session_notes_mut_input_data!) {
-				hub { db { agent {
+			`mutation ($data: hub_agent_db_session_notes_mut_input_data!) {
+				hub { agent { db {
 					insert_session_notes(data: $data) { id }
 				}}}
 			}`,
@@ -617,8 +626,8 @@ func (s *RuntimeStoreLocal) AppendNote(ctx context.Context, note NoteRow) error 
 	// @embeddings directive on session_notes. The note's content
 	// is short and self-contained — use it verbatim as the summary.
 	return queries.RunMutation(ctx, s.querier,
-		`mutation ($data: hub_db_session_notes_mut_input_data!, $summary: String) {
-			hub { db { agent {
+		`mutation ($data: hub_agent_db_session_notes_mut_input_data!, $summary: String) {
+			hub { agent { db {
 				insert_session_notes(data: $data, summary: $summary) { id }
 			}}}
 		}`,
@@ -641,8 +650,8 @@ func (s *RuntimeStoreLocal) ListNotes(ctx context.Context, sessionID string, opt
 	}
 	filter := buildNotesFilter(sessionID, opts)
 	rows, err := queries.RunQuery[[]NoteRow](ctx, s.querier,
-		`query ($filter: hub_db_session_notes_filter, $limit: Int) {
-			hub { db { agent {
+		`query ($filter: hub_agent_db_session_notes_filter, $limit: Int) {
+			hub { agent { db {
 				session_notes(
 					filter: $filter,
 					order_by: [{field: "created_at", direction: DESC}],
@@ -651,7 +660,7 @@ func (s *RuntimeStoreLocal) ListNotes(ctx context.Context, sessionID string, opt
 			}}}
 		}`,
 		map[string]any{"filter": filter, "limit": limit},
-		"hub.db.agent.session_notes",
+		"hub.agent.db.session_notes",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -675,8 +684,8 @@ func (s *RuntimeStoreLocal) SearchNotes(ctx context.Context, sessionID, query st
 	}
 	filter := buildNotesFilter(sessionID, opts)
 	rows, err := queries.RunQuery[[]NoteRow](ctx, s.querier,
-		`query ($filter: hub_db_session_notes_filter, $semantic: SemanticSearchInput) {
-			hub { db { agent {
+		`query ($filter: hub_agent_db_session_notes_filter, $semantic: SemanticSearchInput) {
+			hub { agent { db {
 				session_notes(filter: $filter, semantic: $semantic) {`+notesProjection+`}
 			}}}
 		}`,
@@ -684,7 +693,7 @@ func (s *RuntimeStoreLocal) SearchNotes(ctx context.Context, sessionID, query st
 			"filter":   filter,
 			"semantic": map[string]any{"query": query, "limit": limit},
 		},
-		"hub.db.agent.session_notes",
+		"hub.agent.db.session_notes",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -707,8 +716,8 @@ func (s *RuntimeStoreLocal) SessionStats(ctx context.Context, sessionID string) 
 		RowsCount int `json:"_rows_count"`
 	}
 	res, err := queries.RunQuery[aggResp](ctx, s.querier,
-		`query ($filter: hub_db_session_events_filter) {
-			hub { db { agent {
+		`query ($filter: hub_agent_db_session_events_filter) {
+			hub { agent { db {
 				session_events_aggregation(filter: $filter) {
 					_rows_count
 				}
@@ -717,7 +726,7 @@ func (s *RuntimeStoreLocal) SessionStats(ctx context.Context, sessionID string) 
 		map[string]any{
 			"filter": map[string]any{"session_id": map[string]any{"eq": sessionID}},
 		},
-		"hub.db.agent.session_events_aggregation",
+		"hub.agent.db.session_events_aggregation",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -745,8 +754,8 @@ func (s *RuntimeStoreLocal) CountNotesByCategory(ctx context.Context, sessionID 
 		} `json:"aggregations"`
 	}
 	rows, err := queries.RunQuery[[]bucketRow](ctx, s.querier,
-		`query ($filter: hub_db_session_notes_filter) {
-			hub { db { agent {
+		`query ($filter: hub_agent_db_session_notes_filter) {
+			hub { agent { db {
 				session_notes_bucket_aggregation(filter: $filter) {
 					key { category }
 					aggregations { _rows_count }
@@ -754,7 +763,7 @@ func (s *RuntimeStoreLocal) CountNotesByCategory(ctx context.Context, sessionID 
 			}}}
 		}`,
 		map[string]any{"filter": filter},
-		"hub.db.agent.session_notes_bucket_aggregation",
+		"hub.agent.db.session_notes_bucket_aggregation",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -772,7 +781,7 @@ func (s *RuntimeStoreLocal) CountNotesByCategory(ctx context.Context, sessionID 
 	return out, nil
 }
 
-// buildNotesFilter constructs the hub_db_session_notes_filter map
+// buildNotesFilter constructs the hub_agent_db_session_notes_filter map
 // shared by ListNotes and SearchNotes. Phase 4.2.3 — sessionID is
 // always the storage location (root after climb-to-root); the
 // optional Window applies a created_at cutoff and Category narrows
@@ -795,8 +804,8 @@ func (s *RuntimeStoreLocal) ListChildren(ctx context.Context, parentID string) (
 	}
 	filter := map[string]any{"parent_session_id": map[string]any{"eq": parentID}}
 	rows, err := queries.RunQuery[[]SessionRow](ctx, s.querier,
-		`query ($filter: hub_db_sessions_filter) {
-			hub { db { agent {
+		`query ($filter: hub_agent_db_sessions_filter) {
+			hub { agent { db {
 				sessions(filter: $filter, order_by: [{field: "created_at", direction: ASC}]) {
 					id agent_id owner_id parent_session_id session_type spawned_from_event_id
 					status mission metadata created_at updated_at
@@ -804,7 +813,7 @@ func (s *RuntimeStoreLocal) ListChildren(ctx context.Context, parentID string) (
 			}}}
 		}`,
 		map[string]any{"filter": filter},
-		"hub.db.agent.sessions",
+		"hub.agent.db.sessions",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -821,8 +830,8 @@ func (s *RuntimeStoreLocal) ListSessions(ctx context.Context, agentID, status st
 		filter["status"] = map[string]any{"eq": status}
 	}
 	rows, err := queries.RunQuery[[]SessionRow](ctx, s.querier,
-		`query ($filter: hub_db_sessions_filter) {
-			hub { db { agent {
+		`query ($filter: hub_agent_db_sessions_filter) {
+			hub { agent { db {
 				sessions(filter: $filter, order_by: [{field: "updated_at", direction: DESC}]) {
 					id agent_id owner_id parent_session_id session_type spawned_from_event_id
 					status mission metadata created_at updated_at
@@ -830,7 +839,7 @@ func (s *RuntimeStoreLocal) ListSessions(ctx context.Context, agentID, status st
 			}}}
 		}`,
 		map[string]any{"filter": filter},
-		"hub.db.agent.sessions",
+		"hub.agent.db.sessions",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
@@ -851,8 +860,8 @@ func (s *RuntimeStoreLocal) ListResumableRoots(ctx context.Context, agentID stri
 		"event_type": map[string]any{"eq": string(protocol.KindSessionStatus)},
 	}
 	rows, err := queries.RunQuery[[]ResumableRoot](ctx, s.querier,
-		`query ($filter: hub_db_sessions_filter, $events_filter: hub_db_session_events_filter) {
-			hub { db { agent {
+		`query ($filter: hub_agent_db_sessions_filter, $events_filter: hub_agent_db_session_events_filter) {
+			hub { agent { db {
 				sessions(filter: $filter, order_by: [{field: "updated_at", direction: DESC}]) {
 					id agent_id owner_id parent_session_id session_type spawned_from_event_id
 					status mission metadata created_at updated_at
@@ -866,7 +875,7 @@ func (s *RuntimeStoreLocal) ListResumableRoots(ctx context.Context, agentID stri
 			"filter":        filter,
 			"events_filter": eventFilter,
 		},
-		"hub.db.agent.sessions",
+		"hub.agent.db.sessions",
 	)
 	if err != nil {
 		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {

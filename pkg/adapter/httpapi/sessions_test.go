@@ -31,6 +31,12 @@ func (f *fakeHost) Subscribe(_ context.Context, _ string) (<-chan protocol.Frame
 	return f.sub, nil
 }
 
+// ResumeSession is a no-op for the fake: the stream handler resumes on
+// attach (best-effort) but the tests drive Subscribe/ListEvents directly.
+func (f *fakeHost) ResumeSession(_ context.Context, _ string) (*session.Session, error) {
+	return nil, nil
+}
+
 func (f *fakeHost) ListEvents(_ context.Context, _ string, _ store.ListEventsOpts) ([]store.EventRow, error) {
 	return f.events, nil
 }

@@ -168,6 +168,29 @@ func (s *Source) tokenWithTTL(ctx context.Context) (string, int, error) {
 	return tok, ttlSeconds(s.expiresAt), nil
 }
 
+// ForceRefresh unconditionally runs the refresh_token grant and returns the
+// freshly-minted access token plus its TTL in seconds — regardless of whether
+// the current token is still valid. Blocks on the ready channel like Token.
+//
+// cmd/hugen-test-token's token-exchange endpoint uses this so every exchange
+// returns a NEW token: the consuming RemoteStore treats an unchanged token as
+// "provider not ready yet" and, after a bounded backoff, errors out. Forcing a
+// refresh guarantees the returned token differs from the caller's expired one.
+func (s *Source) ForceRefresh(ctx context.Context) (string, int, error) {
+	select {
+	case <-s.ready:
+	case <-ctx.Done():
+		return "", 0, ctx.Err()
+	}
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
+	tok, err := s.refresh(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+	return tok, ttlSeconds(s.expiresAt), nil
+}
+
 // Tokens returns the current access + refresh tokens and the
 // announced expiry. Returns ErrNoTokens when no successful login
 // has completed yet (accessToken still empty). Read under tokenMu.

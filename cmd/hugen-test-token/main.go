@@ -22,6 +22,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -71,6 +72,15 @@ func run(args []string, errOut *os.File) int {
 	port := fs.Int("port", 10000,
 		"local port to bind for the OIDC callback. Must match the "+
 			"redirect_uri registered for this OIDC client.")
+	serve := fs.Bool("serve", false,
+		"after capturing the token, keep running and expose a token-exchange "+
+			"endpoint (HUGR_TOKEN_URL) so a remote-mode hugen agent can refresh "+
+			"through this process. Frees the login port and blocks until Ctrl-C.")
+	tokenPort := fs.Int("token-port", 10001,
+		"port for the --serve token-exchange endpoint. Must differ from the "+
+			"agent's own port (HUGEN_PORT, default 10000).")
+	tokenPath := fs.String("token-path", "/token",
+		"path for the --serve token-exchange endpoint.")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK
@@ -200,6 +210,12 @@ func run(args []string, errOut *os.File) int {
 		"HUGR_REFRESH_TOKEN":     refresh,
 		"HUGR_TOKEN_EXPIRES_AT":  expiresAt.UTC().Format(time.RFC3339),
 	}
+	tokenURL := fmt.Sprintf("http://localhost:%d%s", *tokenPort, *tokenPath)
+	if *serve {
+		// The agent's RemoteStore refreshes through this URL; record it so a
+		// remote-mode hugen picks up HUGR_ACCESS_TOKEN + HUGR_TOKEN_URL together.
+		updates["HUGR_TOKEN_URL"] = tokenURL
+	}
 	if err := writeDotEnv(envPath, updates); err != nil {
 		fmt.Fprintf(errOut, "write %s: %v\n", envPath, err)
 		return exitErr
@@ -209,6 +225,57 @@ func run(args []string, errOut *os.File) int {
 	fmt.Fprintf(errOut, "✓ Token captured (expires in %s)\n", ttl)
 	fmt.Fprintf(errOut, "✓ %s updated with HUGR_ACCESS_TOKEN, HUGR_REFRESH_TOKEN, HUGR_TOKEN_EXPIRES_AT\n",
 		envPath)
+
+	if !*serve {
+		return exitOK
+	}
+
+	// Serve mode: free the login port (the agent's default HUGEN_PORT is the
+	// same 10000) and expose the token-exchange endpoint. The RemoteStore in a
+	// remote-mode hugen POSTs {"token": <old>} here; we force an OIDC refresh so
+	// the returned token is always fresh (an unchanged token makes RemoteStore
+	// retry then error) and hand back {access_token, expires_in}.
+	shutCtx, cancelShut := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = srv.Shutdown(shutCtx)
+	cancelShut()
+
+	bmux := http.NewServeMux()
+	bmux.HandleFunc(*tokenPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		tok, ttlSec, err := store.ForceRefresh(r.Context())
+		if err != nil {
+			logger.Error("token exchange: refresh failed", "err", err)
+			http.Error(w, "refresh failed", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": tok,
+			"expires_in":   ttlSec,
+		})
+	})
+	bsrv := &http.Server{
+		Addr:              fmt.Sprintf("127.0.0.1:%d", *tokenPort),
+		Handler:           bmux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		if err := bsrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("token-exchange server", "err", err)
+		}
+	}()
+
+	fmt.Fprintf(errOut, "\n✓ Token-exchange endpoint: %s\n", tokenURL)
+	fmt.Fprintf(errOut, "  Set on the agent:  HUGR_URL=%s  HUGR_ACCESS_TOKEN=<captured>  HUGR_TOKEN_URL=%s\n", *discoverURL, tokenURL)
+	fmt.Fprintf(errOut, "  Serving until Ctrl-C…\n")
+
+	<-ctx.Done()
+	shutCtx2, cancelShut2 := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = bsrv.Shutdown(shutCtx2)
+	cancelShut2()
 	return exitOK
 }
 

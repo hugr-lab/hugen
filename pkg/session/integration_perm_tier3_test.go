@@ -88,7 +88,7 @@ func (f *fakeUS3Querier) Query(_ context.Context, query string, vars map[string]
 			affected = 1
 		}
 		return &types.Response{Data: map[string]any{
-			"hub": map[string]any{"db": map[string]any{"agent": map[string]any{
+			"hub": map[string]any{"agent": map[string]any{"db": map[string]any{
 				"update_tool_policies": map[string]any{"affected_rows": affected},
 			}}},
 		}}, nil
@@ -114,7 +114,7 @@ func (f *fakeUS3Querier) Query(_ context.Context, query string, vars map[string]
 			})
 		}
 		return &types.Response{Data: map[string]any{
-			"hub": map[string]any{"db": map[string]any{"agent": map[string]any{
+			"hub": map[string]any{"agent": map[string]any{"db": map[string]any{
 				"tool_policies": out,
 			}}},
 		}}, nil

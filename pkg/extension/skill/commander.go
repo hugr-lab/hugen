@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -188,7 +189,9 @@ func (e *Extension) handleSkillLoad(ctx context.Context, state extension.Session
 	// Persistence — same ExtensionFrame the tool path emits, so
 	// Recovery sees slash-driven loads after restart.
 	if frame, err := newLoadFrame(state.SessionID(), env.AgentAuthor, name); err == nil {
-		_ = state.Emit(ctx, frame)
+		if eerr := state.Emit(ctx, frame); eerr != nil {
+			slog.Warn("skill: persist slash skill-load frame failed", "session", state.SessionID(), "err", eerr)
+		}
 	}
 
 	return []protocol.Frame{
@@ -219,7 +222,9 @@ func (e *Extension) handleSkillUnload(ctx context.Context, state extension.Sessi
 		}, nil
 	}
 	if frame, err := newUnloadFrame(state.SessionID(), env.AgentAuthor, name); err == nil {
-		_ = state.Emit(ctx, frame)
+		if eerr := state.Emit(ctx, frame); eerr != nil {
+			slog.Warn("skill: persist slash skill-unload frame failed", "session", state.SessionID(), "err", eerr)
+		}
 	}
 	return []protocol.Frame{
 		protocol.NewSystemMarker(state.SessionID(), env.AgentAuthor, protocol.SubjectSkillUnloaded,

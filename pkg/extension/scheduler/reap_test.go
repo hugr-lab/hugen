@@ -59,8 +59,8 @@ func reapTestEnv(t *testing.T) (schedstore.TaskStore, string) {
 	t.Cleanup(func() { _ = svc.Close() })
 
 	require.NoError(t, queries.RunMutation(ctx, svc,
-		`mutation ($data: hub_db_sessions_mut_input_data!) {
-			hub { db { agent {
+		`mutation ($data: hub_agent_db_sessions_mut_input_data!) {
+			hub { agent { db {
 				insert_sessions(data: $data) { id }
 			}}}
 		}`,

@@ -57,6 +57,15 @@ type Runtime struct {
 
 	subMu       sync.Mutex
 	subscribers map[string][]chan protocol.Frame
+	// pumping guards against starting a second Outbox pump for a
+	// session instance that already has one. ResumeSession is called
+	// on every adapter attach (e.g. httpapi stream open) and returns
+	// the SAME live instance when the session is already live — without
+	// this guard a second startSessionPump would race the first draining
+	// the one Outbox, delivering frames to subscribers out of order
+	// (pairwise-swapped streaming deltas). Keyed by instance pointer so
+	// a genuinely resumed-from-dormant instance still gets its own pump.
+	pumping map[*session.Session]bool
 
 	// ctx is captured at Start() entry and cancelled when the
 	// errgroup unwinds (adapter exit or external shutdown). The
@@ -83,6 +92,7 @@ func NewRuntime(manager *Manager, adapters []Adapter, logger *slog.Logger) *Runt
 		adapters:    adapters,
 		logger:      logger,
 		subscribers: make(map[string][]chan protocol.Frame),
+		pumping:     make(map[*session.Session]bool),
 		ctx:         context.Background(),
 	}
 }
@@ -226,10 +236,22 @@ func (r *Runtime) fanoutSend(c chan protocol.Frame, f protocol.Frame) {
 // subscriber list. One goroutine per live session; exits when the
 // session goroutine closes its Outbox.
 func (r *Runtime) startSessionPump(s *session.Session) {
+	r.subMu.Lock()
+	if r.pumping[s] {
+		// Already draining this instance's Outbox — a second pump would
+		// race the first and reorder frames on the wire. Skip.
+		r.subMu.Unlock()
+		return
+	}
+	r.pumping[s] = true
+	r.subMu.Unlock()
 	go func() {
 		for f := range s.Outbox() {
 			r.fanout(f)
 		}
+		r.subMu.Lock()
+		delete(r.pumping, s)
+		r.subMu.Unlock()
 	}()
 }
 

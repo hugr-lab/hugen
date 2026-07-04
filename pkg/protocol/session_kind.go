@@ -3,7 +3,7 @@ package protocol
 import "time"
 
 // SessionKind classifies a session by its origin / lifecycle shape.
-// Stored on the hub.db.agent.sessions row's `session_type` column.
+// Stored on the hub.agent.db.sessions row's `session_type` column.
 // Values:
 //
 //   - [SessionKindRoot]     — user-initiated conversation. Default.

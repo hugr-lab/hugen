@@ -133,6 +133,17 @@ reference instead of retrying.
 
 ## Critical rules (never forget)
 
+- **Python runs ONLY through python-mcp (`run_code` / `run_script`) — NEVER
+  through bash.** There is no `python` / `python3` / `pip` via `bash.shell` /
+  `bash.run`, and no `hugr` / `hugr-query` CLI either: **bash has no venv**, so
+  the entire data stack (`hugr-client`, `pandas`, `pyarrow`, `plotly`,
+  `folium`, `great_tables`, …) is absent and any `import` raises
+  `ModuleNotFoundError`. `python-mcp` IS the venv. bash-mcp is for FILES only
+  (`write_file` / `read_file` / `list_dir`). To query Hugr, do it **in-script
+  via `hugr-client`** and run that script with `python-mcp:run_script` — see
+  the `hugr-client` ref. If you catch yourself reaching for `python …`,
+  `hugr-query …`, or `hugr …` through bash because a command "isn't found in
+  `$PATH`", STOP — that path does not exist; use `python-mcp:run_script`.
 - **Relative paths only.** Absolute paths and `..` escapes are rejected by
   `run_script`. Stay inside `${SESSION_DIR}`.
 - **Re-read `HUGR_TOKEN` every call.** Don't stash it in a module-level

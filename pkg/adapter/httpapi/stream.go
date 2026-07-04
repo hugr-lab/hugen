@@ -45,6 +45,20 @@ func (a *Adapter) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Revive a dormant session on attach. Opening the stream IS the attach
+	// point, so resume the (root) session from the store if it isn't live —
+	// otherwise a session that went dormant (process restart, idle GC) would
+	// only replay a frozen backlog and silently swallow new messages (Submit
+	// has no live session to route to). Reviving here restores live delivery
+	// AND makes subsequent writes work. Idempotent: a live session returns
+	// as-is. Uses the adapter's lifecycle ctx, NOT r.Context(), so the revived
+	// session outlives this HTTP request. Best-effort: a non-root or closed
+	// session can't be revived but can still be replayed read-only, so log and
+	// continue rather than fail the stream.
+	if _, rerr := a.host.ResumeSession(a.lifecycleCtx, id); rerr != nil {
+		a.logger.Debug("httpapi: stream attach resume skipped", "id", id, "err", rerr)
+	}
+
 	// Subscribe before replay so nothing emitted during the replay window is
 	// lost. The subscription lives for the request; client disconnect cancels
 	// r.Context() → the runtime deregisters + the channel drains.

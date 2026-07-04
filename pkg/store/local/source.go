@@ -14,7 +14,6 @@ package local
 
 import (
 	"context"
-	_ "embed"
 	"fmt"
 	"strings"
 
@@ -24,14 +23,15 @@ import (
 	"github.com/hugr-lab/query-engine/pkg/db"
 	"github.com/hugr-lab/query-engine/pkg/engines"
 	"github.com/hugr-lab/query-engine/types"
+
+	"github.com/hugr-lab/hugen/pkg/store/schema"
 )
 
 // SourceName is the attached DB name and GraphQL path prefix.
-// Produces the GraphQL path `{ hub { db { ... } } }`.
-const SourceName = "hub.db"
-
-//go:embed schema.tmpl.graphql
-var schemaGraphQLTmpl string
+// Produces the GraphQL path `{ hub { agent { db { ... } } } }` — the
+// dotted source name provides the `.agent` nesting, so the SDL carries
+// no @module directive.
+const SourceName = "hub.agent.db"
 
 // SourceConfig configures the hub.db RuntimeSource.
 type SourceConfig struct {
@@ -47,11 +47,8 @@ type SourceConfig struct {
 	VectorSize int
 
 	// EmbedderModel is the name of the embedding data source registered in
-	// the engine. Referenced by the @embeddings directive on memory_items.
+	// the engine. Referenced by the @embeddings directive.
 	EmbedderModel string
-
-	// IsTimescale toggles TimescaleDB hypertable support in SDL. Postgres only.
-	IsTimescale bool
 }
 
 // Source implements sources.RuntimeSource.
@@ -127,11 +124,9 @@ func (s *Source) Catalog(ctx context.Context) (cs.Catalog, error) {
 		dbType = db.SDBAttachedPostgres
 	}
 
-	rendered, err := db.ParseSQLScriptTemplate(dbType, schemaGraphQLTmpl, SDLParams{
-		VectorSize:        s.cfg.VectorSize,
-		EmbeddingsEnabled: s.cfg.VectorSize > 0 && s.cfg.EmbedderModel != "",
-		EmbedderModel:     s.cfg.EmbedderModel,
-		IsTimescale:       s.cfg.IsTimescale,
+	rendered, err := schema.SDL(dbType, schema.Params{
+		VectorSize:   s.cfg.VectorSize,
+		EmbedderName: s.cfg.EmbedderModel,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("hubdb: render sdl: %w", err)
@@ -140,18 +135,10 @@ func (s *Source) Catalog(ctx context.Context) (cs.Catalog, error) {
 	return cs.NewStringSource(s.Name(), s.engine, opts, rendered)
 }
 
-// SDLParams are the template variables used by schema.tmpl.graphql.
-type SDLParams struct {
-	VectorSize        int
-	EmbeddingsEnabled bool
-	EmbedderModel     string
-	IsTimescale       bool
-}
-
-// graphQLPrefix maps a dotted catalog name (e.g. "hub.db") to a valid
-// GraphQL identifier by replacing "." with "_". Dots are illegal in
-// GraphQL type names and break variable declarations like
-// `$data: hub.db_agents_mut_input_data!`.
+// graphQLPrefix maps a dotted catalog name (e.g. "hub.agent.db") to a
+// valid GraphQL identifier by replacing "." with "_". Dots are illegal
+// in GraphQL type names and break variable declarations like
+// `$data: hub_agent_db_agents_mut_input_data!`.
 func graphQLPrefix(name string) string {
 	return strings.ReplaceAll(name, ".", "_")
 }

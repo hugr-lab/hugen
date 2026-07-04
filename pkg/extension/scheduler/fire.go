@@ -139,7 +139,7 @@ func dispatchWakeFire(ctx context.Context, task schedstore.TaskRow, fire runner.
 	if _, alive := deps.host.Get(task.OwnerSessionID); !alive {
 		// Owner session terminated since the task was created —
 		// pause the task; a subsequent reattach can resume / cancel.
-		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseOwnerTerminated)
+		deps.pauseTaskLogged(task.ID, schedstore.PauseOwnerTerminated)
 		if deps.pauseFn != nil {
 			_ = deps.pauseFn(task.ID)
 		}
@@ -180,7 +180,7 @@ func dispatchWakeFire(ctx context.Context, task schedstore.TaskRow, fire runner.
 		// Render failure auto-pauses the task in the store AND the
 		// runner — without the runner pause the broken template
 		// would keep re-firing on every tick.
-		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+		deps.pauseTaskLogged(task.ID, schedstore.PauseRenderFailed)
 		if deps.pauseFn != nil {
 			_ = deps.pauseFn(task.ID)
 		}
@@ -240,7 +240,7 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 		return runner.Outcome{ErrorMessage: err.Error()}, err
 	} else if drift != "" {
 		// Skill removed / renamed since task-create. Pause + skip.
-		_ = deps.store.PauseTask(context.Background(), task.ID, drift)
+		deps.pauseTaskLogged(task.ID, drift)
 		if deps.pauseFn != nil {
 			_ = deps.pauseFn(task.ID)
 		}
@@ -253,7 +253,7 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 
 	owner, alive := deps.host.Get(task.OwnerSessionID)
 	if !alive || owner == nil {
-		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseOwnerTerminated)
+		deps.pauseTaskLogged(task.ID, schedstore.PauseOwnerTerminated)
 		if deps.pauseFn != nil {
 			_ = deps.pauseFn(task.ID)
 		}
@@ -296,7 +296,7 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 	rc := tplpkg.NewFireRenderContext(fireCtx)
 	spawnInputs, ierr := tplpkg.RenderInputs(task.Spec.Inputs, rc)
 	if ierr != nil {
-		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+		deps.pauseTaskLogged(task.ID, schedstore.PauseRenderFailed)
 		if deps.pauseFn != nil {
 			_ = deps.pauseFn(task.ID)
 		}
@@ -343,7 +343,7 @@ func dispatchSpawnFire(ctx context.Context, task schedstore.TaskRow, fire runner
 	// re-resolves it.
 	sk, serr := deps.skills.Get(ctx, task.SkillRef)
 	if serr != nil {
-		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseSkillChanged)
+		deps.pauseTaskLogged(task.ID, schedstore.PauseSkillChanged)
 		if deps.pauseFn != nil {
 			_ = deps.pauseFn(task.ID)
 		}
@@ -612,7 +612,7 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 		if err != nil || d <= 0 {
 			deps.logger.Warn("scheduler: invalid interval; pausing task",
 				"task_id", task.ID, "spec", task.Spec.ScheduleSpec, "err", err)
-			_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+			deps.pauseTaskLogged(task.ID, schedstore.PauseRenderFailed)
 			if deps.pauseFn != nil {
 				_ = deps.pauseFn(task.ID)
 			}
@@ -644,7 +644,7 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 		if err != nil {
 			deps.logger.Warn("scheduler: invalid cron timezone; pausing task",
 				"task_id", task.ID, "timezone", task.Spec.Timezone, "err", err)
-			_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+			deps.pauseTaskLogged(task.ID, schedstore.PauseRenderFailed)
 			if deps.pauseFn != nil {
 				_ = deps.pauseFn(task.ID)
 			}
@@ -654,7 +654,7 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 		if err != nil {
 			deps.logger.Warn("scheduler: invalid cron expression; pausing task",
 				"task_id", task.ID, "spec", task.Spec.ScheduleSpec, "err", err)
-			_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+			deps.pauseTaskLogged(task.ID, schedstore.PauseRenderFailed)
 			if deps.pauseFn != nil {
 				_ = deps.pauseFn(task.ID)
 			}
@@ -692,7 +692,7 @@ func maybeScheduleNext(ctx context.Context, task schedstore.TaskRow, fire runner
 	default:
 		deps.logger.Warn("scheduler: unknown schedule_kind; pausing",
 			"task_id", task.ID, "schedule_kind", task.ScheduleKind)
-		_ = deps.store.PauseTask(context.Background(), task.ID, schedstore.PauseRenderFailed)
+		deps.pauseTaskLogged(task.ID, schedstore.PauseRenderFailed)
 		if deps.pauseFn != nil {
 			_ = deps.pauseFn(task.ID)
 		}
@@ -749,5 +749,13 @@ func appendLogSafely(_ context.Context, deps fireDeps, entry schedstore.TaskLogE
 			"event_type", entry.EventType,
 			"fire_seq", entry.FireSeq,
 			"err", err)
+	}
+}
+
+// pauseTaskLogged pauses a task, logging a store failure at WARN instead of
+// swallowing it — a silent PauseTask leaves the task un-paused with no trace.
+func (d fireDeps) pauseTaskLogged(taskID string, reason string) {
+	if err := d.store.PauseTask(context.Background(), taskID, reason); err != nil && d.logger != nil {
+		d.logger.Warn("scheduler: pause task failed", "task", taskID, "reason", reason, "err", err)
 	}
 }

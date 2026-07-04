@@ -75,143 +75,12 @@ func TestEnsure_MatchingConfigOK(t *testing.T) {
 	require.NoError(t, migrate.Ensure(cfg))
 }
 
-// TestEnsure_v007_UpgradePath provisions a DB pinned at 0.0.6
-// (the prior schema version) then re-runs Ensure to upgrade it to
-// 0.0.7. Verifies that the migration script lands the new tasks +
-// task_log tables on an existing deployment — not just on a fresh
-// provision. Critical for production where users' DBs were created
-// before the Phase 6 schema landed.
-func TestEnsure_v007_UpgradePath(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "memory.db")
-	baseCfg := migrate.Config{
-		Path: path, VectorSize: 384, EmbedderModel: "gemma-embedding",
-		Seed: &migrate.SeedData{
-			AgentType: migrate.SeedAgentType{ID: "hugr-data", Name: "X", Config: map[string]any{}},
-			Agent:     migrate.SeedAgent{ID: "agt_ag01", ShortID: "ag01", Name: "x"},
-		},
-	}
-
-	// Step 1: provision at 0.0.6.
-	pin := baseCfg
-	pin.TargetVersion = "0.0.6"
-	require.NoError(t, migrate.Ensure(pin))
-
-	conn, err := sql.Open("duckdb", path)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
-
-	// schema.tmpl.sql always ships the latest table set, so a
-	// provision pinned to 0.0.6 still creates tasks + task_log
-	// here — only the version row tracks "0.0.6". To exercise the
-	// real upgrade path we DROP the 0.0.7 tables so the migration
-	// script has to recreate them on the bump below. CREATE TABLE
-	// IF NOT EXISTS in the migration script keeps it idempotent
-	// for users on already-upgraded DBs.
-	for _, table := range []string{"task_log", "tasks"} {
-		_, err := conn.Exec(`DROP TABLE IF EXISTS ` + table)
-		require.NoError(t, err)
-	}
-	for _, table := range []string{"tasks", "task_log"} {
-		var n int
-		require.NoError(t, conn.QueryRow(
-			`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`, table,
-		).Scan(&n))
-		require.Equalf(t, 0, n, "drop should remove %s", table)
-	}
-
-	// Step 2: upgrade to 0.0.7 (pinned — the default target has since
-	// advanced past 0.0.7).
-	bump := baseCfg
-	bump.Seed = nil // seed already present
-	bump.TargetVersion = "0.0.7"
-	require.NoError(t, migrate.Ensure(bump))
-
-	// Verify version row + tables.
-	var ver string
-	require.NoError(t, conn.QueryRow(
-		`SELECT version FROM version WHERE name = 'schema'`,
-	).Scan(&ver))
-	assert.Equal(t, "0.0.7", ver)
-
-	for _, table := range []string{"tasks", "task_log"} {
-		var n int
-		require.NoError(t, conn.QueryRow(
-			`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`, table,
-		).Scan(&n))
-		assert.Equalf(t, 1, n, "table %s must exist after 0.0.7 upgrade", table)
-	}
-}
-
-// TestEnsure_v008_UpgradePath provisions a DB pinned at 0.0.7 then
-// upgrades it to 0.0.8, verifying that the migration script lands the
-// dynamic-skills tables (skills + skill_log + skill_links) on an
-// existing deployment. Mirrors the v007 upgrade-path test: drop the
-// tables that schema.tmpl.sql ships unconditionally, then let the
-// migration recreate them on the version bump.
-func TestEnsure_v008_UpgradePath(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "memory.db")
-	baseCfg := migrate.Config{
-		Path: path, VectorSize: 384, EmbedderModel: "gemma-embedding",
-		Seed: &migrate.SeedData{
-			AgentType: migrate.SeedAgentType{ID: "hugr-data", Name: "X", Config: map[string]any{}},
-			Agent:     migrate.SeedAgent{ID: "agt_ag01", ShortID: "ag01", Name: "x"},
-		},
-	}
-
-	// Step 1: provision at 0.0.7.
-	pin := baseCfg
-	pin.TargetVersion = "0.0.7"
-	require.NoError(t, migrate.Ensure(pin))
-
-	conn, err := sql.Open("duckdb", path)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
-
-	// Drop the 0.0.8 tables so the migration must recreate them.
-	for _, table := range []string{"skill_links", "skill_log", "skills"} {
-		_, err := conn.Exec(`DROP TABLE IF EXISTS ` + table)
-		require.NoError(t, err)
-	}
-
-	// Step 2: upgrade to 0.0.8 (default target).
-	bump := baseCfg
-	bump.Seed = nil
-	require.NoError(t, migrate.Ensure(bump))
-
-	var ver string
-	require.NoError(t, conn.QueryRow(
-		`SELECT version FROM version WHERE name = 'schema'`,
-	).Scan(&ver))
-	assert.Equal(t, "0.0.8", ver)
-
-	for _, table := range []string{"skills", "skill_log", "skill_links"} {
-		var n int
-		require.NoError(t, conn.QueryRow(
-			`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`, table,
-		).Scan(&n))
-		assert.Equalf(t, 1, n, "table %s must exist after 0.0.8 upgrade", table)
-	}
-
-	// Spot-check a representative column from each table.
-	for _, c := range []struct{ table, col string }{
-		{"skills", "description_vec"},
-		{"skills", "metadata"},
-		{"skills", "source"},
-		{"skill_log", "event"},
-		{"skill_links", "relation"},
-	} {
-		var n int
-		require.NoError(t, conn.QueryRow(
-			`SELECT count(*) FROM information_schema.columns WHERE table_name = ? AND column_name = ?`,
-			c.table, c.col,
-		).Scan(&n))
-		assert.Equalf(t, 1, n, "expected %s.%s after 0.0.8 upgrade", c.table, c.col)
-	}
-}
-
-// TestEnsure_v002_AdditiveColumns verifies the spec-006 (schema 0.0.2)
-// additive columns + indices land correctly on a fresh provision.
-func TestEnsure_v002_AdditiveColumns(t *testing.T) {
+// TestEnsure_FreshSchema verifies the full pruned table set + additive
+// columns + index discipline land correctly on a fresh provision. The
+// schema is squashed to a single 0.0.8 baseline (pre-v1), so there is
+// no upgrade-through-scripts path to exercise — schema.tmpl.sql is the
+// only source of truth.
+func TestEnsure_FreshSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory.db")
 	require.NoError(t, migrate.Ensure(migrate.Config{
 		Path:          path,
@@ -281,53 +150,52 @@ func TestEnsure_v002_AdditiveColumns(t *testing.T) {
 	).Scan(&ver))
 	assert.Equal(t, "0.0.8", ver)
 
-	// spec 008 / migration 0.0.3 — artifacts + artifact_grants tables
-	// land additively. Both must exist on a fresh DuckDB provision.
-	for _, table := range []string{"artifacts", "artifact_grants"} {
-		t.Run("artifacts/"+table, func(t *testing.T) {
+	// Pruned tables (Phase-7 memory + dormant artifacts/approvals set)
+	// must NOT be provisioned — the schema is trimmed to hugen's working
+	// set. Asserted so a future edit re-adding them fails loudly.
+	for _, table := range []string{
+		"memory_items", "memory_log", "memory_tags", "memory_links",
+		"hypotheses", "session_reviews", "session_participants",
+		"approvals", "artifacts", "artifact_grants",
+	} {
+		t.Run("pruned/"+table, func(t *testing.T) {
 			var n int
 			err := conn.QueryRow(
 				`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`,
 				table,
 			).Scan(&n)
 			require.NoError(t, err)
-			assert.Equalf(t, 1, n, "expected table %s to exist", table)
+			assert.Equalf(t, 0, n, "pruned table %s must not exist", table)
 		})
 	}
 
-	// Project rule: indexes only on Postgres. DuckDB stays index-free
-	// for the artifact tables — verify zero secondary indexes after
-	// the 0.0.3 migration.
-	var artIdxCount int
+	// tool_policies (spec 009 / phase 4) is KEPT and lands on a fresh
+	// provision, index-free on DuckDB.
+	var toolPolN int
 	require.NoError(t, conn.QueryRow(
-		`SELECT count(*) FROM duckdb_indexes
-         WHERE table_name IN ('artifacts','artifact_grants')`,
-	).Scan(&artIdxCount))
-	assert.Equal(t, 0, artIdxCount, "DuckDB must have zero indexes on artifacts / artifact_grants")
+		`SELECT count(*) FROM information_schema.tables WHERE table_name = 'tool_policies'`,
+	).Scan(&toolPolN))
+	assert.Equal(t, 1, toolPolN, "expected tool_policies table to exist")
 
-	// spec 009 / migration 0.0.5 — approvals + tool_policies tables
-	// land additively. Both must exist on a fresh DuckDB provision.
-	for _, table := range []string{"approvals", "tool_policies"} {
-		t.Run("phase4/"+table, func(t *testing.T) {
-			var n int
-			err := conn.QueryRow(
-				`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`,
-				table,
-			).Scan(&n)
-			require.NoError(t, err)
-			assert.Equalf(t, 1, n, "expected table %s to exist", table)
-		})
-	}
-
-	// Project rule: indexes only on Postgres. DuckDB stays index-free
-	// for the phase-4 tables too. Asserted here so a future edit
-	// dropping `{{ if isPostgres }}` fails loudly on the CI DuckDB pass.
 	var phase4IdxCount int
 	require.NoError(t, conn.QueryRow(
-		`SELECT count(*) FROM duckdb_indexes
-         WHERE table_name IN ('approvals','tool_policies')`,
+		`SELECT count(*) FROM duckdb_indexes WHERE table_name = 'tool_policies'`,
 	).Scan(&phase4IdxCount))
-	assert.Equal(t, 0, phase4IdxCount, "DuckDB must have zero indexes on approvals / tool_policies")
+	assert.Equal(t, 0, phase4IdxCount, "DuckDB must have zero indexes on tool_policies")
+
+	// Dynamic-skills tables (Phase 6.2.db) are KEPT and land on a fresh
+	// provision.
+	for _, table := range []string{"skills", "skill_log", "skill_links"} {
+		t.Run("skills/"+table, func(t *testing.T) {
+			var n int
+			err := conn.QueryRow(
+				`SELECT count(*) FROM information_schema.tables WHERE table_name = ?`,
+				table,
+			).Scan(&n)
+			require.NoError(t, err)
+			assert.Equalf(t, 1, n, "expected table %s to exist", table)
+		})
+	}
 
 	// Phase 4.2.3 / migration 0.0.6 — session_notes gets four new
 	// columns (category, author_role, mission, embedding). Verified
