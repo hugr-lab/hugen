@@ -61,6 +61,10 @@ CREATE TABLE IF NOT EXISTS agents (
     short_id        VARCHAR NOT NULL,
     name            VARCHAR NOT NULL,
     status          VARCHAR DEFAULT 'active',
+    -- Hugr auth role stamped into the agent's JWT by the hub token issuer
+    -- (spec-hub-side §1.3, D10): admin-assigned at agent creation, e.g.
+    -- 'agent' (default, RLS-scoped) | 'agent_template' | an admin role.
+    role            VARCHAR DEFAULT 'agent',
     config_override {{ if isPostgres }}JSONB{{ else }}JSON{{ end }},
     created_at      {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }},
     last_active     {{ if isPostgres }}TIMESTAMPTZ DEFAULT NOW(){{ else }}TIMESTAMP DEFAULT CURRENT_TIMESTAMP{{ end }},

@@ -72,6 +72,8 @@ type agents @table(name: "agents") {
   name:            String!
   """Lifecycle: active | paused | archived"""
   status:          String  @default(value: "active")
+  """Hugr auth role the hub token issuer stamps into the agent's JWT (D10, admin-assigned at creation): agent | agent_template | an admin role"""
+  role:            String  @default(value: "agent")
   """Per-instance config overrides (merged on top of agent_type.config)"""
   config_override: JSON
   """When this agent was registered"""

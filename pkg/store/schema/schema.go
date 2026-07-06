@@ -34,7 +34,7 @@ import (
 
 // Version is the schema version this package targets. Bumped whenever a new
 // migrations/<version>/ directory is added. Owned by hugen (D11).
-const Version = "0.0.8"
+const Version = "0.0.9"
 
 //go:embed schema.tmpl.graphql
 var sdlTmpl string

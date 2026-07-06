@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -27,6 +29,13 @@ type RemoteStore struct {
 	name     string
 	tokenURL string
 	client   *http.Client
+
+	// persistPath, when set, is where the CURRENT token is cached on disk
+	// (0600) after every successful exchange — the persisted-token fast
+	// path (spec-hub-side §1.5): a restarted container whose one-shot
+	// bootstrap secret is already consumed still refreshes, because a
+	// signature-valid (even expired) JWT is itself the exchange credential.
+	persistPath string
 
 	mu        sync.Mutex
 	token     string
@@ -62,6 +71,53 @@ func NewRemoteStoreBootstrap(name, bootstrap, tokenURL string) *RemoteStore {
 		// expiresAt zero (= epoch) → first Token() falls through to refresh.
 		client: &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// WithTokenCache enables the persisted-token fast path: the current token is
+// written to path after every successful exchange, and read back here. A
+// cached token — even one whose expiry has passed — replaces the initial
+// credential, so the env bootstrap secret is only ever needed on the very
+// first boot. Failures are silent by design: the cache is an optimization,
+// the constructor-supplied credential still works without it.
+func (s *RemoteStore) WithTokenCache(path string) *RemoteStore {
+	s.persistPath = path
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return s
+	}
+	var cached tokenCacheFile
+	if json.Unmarshal(b, &cached) != nil || cached.Token == "" {
+		return s
+	}
+	s.token = cached.Token
+	s.expiresAt = cached.ExpiresAt
+	return s
+}
+
+// tokenCacheFile is the JSON shape persisted at persistPath.
+type tokenCacheFile struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// persistLocked writes the current token to persistPath (0600, atomic via
+// temp+rename so a crash never leaves a torn file). Caller holds s.mu.
+// Best-effort: an unwritable cache must not fail the refresh that produced
+// a perfectly good token.
+func (s *RemoteStore) persistLocked() {
+	if s.persistPath == "" {
+		return
+	}
+	b, err := json.Marshal(tokenCacheFile{Token: s.token, ExpiresAt: s.expiresAt})
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(s.persistPath), 0o700)
+	tmp := s.persistPath + ".tmp"
+	if os.WriteFile(tmp, b, 0o600) != nil {
+		return
+	}
+	_ = os.Rename(tmp, s.persistPath)
 }
 
 // Name implements Source.
@@ -136,6 +192,7 @@ func (s *RemoteStore) refresh(ctx context.Context) (string, error) {
 		if newToken != oldToken {
 			s.token = newToken
 			s.expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second)
+			s.persistLocked()
 			return s.token, nil
 		}
 
