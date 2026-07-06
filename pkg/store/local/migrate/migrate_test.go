@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hugr-lab/hugen/pkg/store/local/migrate"
+	"github.com/hugr-lab/hugen/pkg/store/schema"
 )
 
 func TestEnsure_Fresh(t *testing.T) {
@@ -143,12 +144,12 @@ func TestEnsure_FreshSchema(t *testing.T) {
 		})
 	}
 
-	// Schema version bumped.
+	// Schema version stamped at the package's current Version.
 	var ver string
 	require.NoError(t, conn.QueryRow(
 		`SELECT version FROM version WHERE name = 'schema'`,
 	).Scan(&ver))
-	assert.Equal(t, "0.0.8", ver)
+	assert.Equal(t, schema.Version, ver)
 
 	// Pruned tables (Phase-7 memory + dormant artifacts/approvals set)
 	// must NOT be provisioned — the schema is trimmed to hugen's working

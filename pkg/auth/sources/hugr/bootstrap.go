@@ -48,9 +48,13 @@ func BuildHugrSource(ctx context.Context, config Config, logger *slog.Logger) (s
 		if config.TokenCacheFile != "" {
 			store = store.WithTokenCache(config.TokenCacheFile)
 		}
+		tokenSource := "env"
+		if store.CacheLoaded() {
+			tokenSource = "cache"
+		}
 		logger.Info("auth source built",
 			"name", "hugr", "type", "hugr", "mode", "token",
-			"token_url", config.TokenURL, "token_cache", config.TokenCacheFile != "")
+			"token_url", config.TokenURL, "token_source", tokenSource)
 		return store, nil
 	}
 
