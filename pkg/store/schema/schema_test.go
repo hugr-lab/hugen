@@ -108,21 +108,23 @@ func TestInitDDL_Postgres_Renders(t *testing.T) {
 	}
 }
 
-func TestMigrateDDL_SquashedIsEmpty(t *testing.T) {
-	// Migrations were squashed pre-v1 — no version-to-version deltas exist.
-	out, err := MigrateDDL(db.SDBDuckDB, "0.0.1", Params{})
+func TestMigrateDDL_Stream(t *testing.T) {
+	// The pre-v1 squash left 0.0.8 as the baseline; the stream restarts at
+	// 0.0.9 (agents.role). Upgrading from the baseline applies it…
+	out, err := MigrateDDL(db.SDBDuckDB, "0.0.8", Params{})
 	if err != nil {
 		t.Fatalf("MigrateDDL: %v", err)
 	}
-	if strings.TrimSpace(out) != "" {
-		t.Errorf("MigrateDDL should be empty after squash, got %q", out)
+	if !strings.Contains(out, "ALTER TABLE agents ADD COLUMN IF NOT EXISTS role") {
+		t.Errorf("MigrateDDL from 0.0.8 missing agents.role migration, got %q", out)
 	}
-	scripts, err := Migrations("0.0.1", Version)
+	// …and a database already at Version gets nothing.
+	out, err = MigrateDDL(db.SDBDuckDB, Version, Params{})
 	if err != nil {
-		t.Fatalf("Migrations: %v", err)
+		t.Fatalf("MigrateDDL at Version: %v", err)
 	}
-	if len(scripts) != 0 {
-		t.Errorf("Migrations should be empty after squash, got %d", len(scripts))
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("MigrateDDL at Version should be empty, got %q", out)
 	}
 }
 

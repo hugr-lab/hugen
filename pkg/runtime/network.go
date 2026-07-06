@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth"
@@ -58,13 +59,14 @@ func BuildAuthService(ctx context.Context, cfg Config, mux *http.ServeMux, logge
 		return as, nil
 	}
 	hugrAuth, err := hugr.BuildHugrSource(ctx, hugr.Config{
-		BaseURI:     cfg.HTTP.BaseURI,
-		RedirectURI: cfg.Hugr.RedirectURI,
-		DiscoverURL: cfg.Hugr.URL,
-		AccessToken: cfg.Hugr.AccessToken,
-		TokenURL:    cfg.Hugr.TokenURL,
-		Issuer:      cfg.Hugr.Issuer,
-		ClientID:    cfg.Hugr.ClientID,
+		BaseURI:        cfg.HTTP.BaseURI,
+		RedirectURI:    cfg.Hugr.RedirectURI,
+		DiscoverURL:    cfg.Hugr.URL,
+		AccessToken:    cfg.Hugr.AccessToken,
+		TokenURL:       cfg.Hugr.TokenURL,
+		Issuer:         cfg.Hugr.Issuer,
+		ClientID:       cfg.Hugr.ClientID,
+		TokenCacheFile: tokenCachePath(cfg),
 	}, logger)
 	if err != nil {
 		return nil, err
@@ -73,6 +75,16 @@ func BuildAuthService(ctx context.Context, cfg Config, mux *http.ServeMux, logge
 		return nil, err
 	}
 	return as, nil
+}
+
+// tokenCachePath is where the token-mode auth source persists the current
+// agent JWT (spec-hub-side §1.5 fast path). Under the state dir so it
+// survives a container restart; empty (= caching off) without a state dir.
+func tokenCachePath(cfg Config) string {
+	if cfg.StateDir == "" {
+		return ""
+	}
+	return filepath.Join(cfg.StateDir, "hugr-token.json")
 }
 
 // phaseHTTPAuth runs phase 2: starts the HTTP listener and builds

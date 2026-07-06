@@ -17,6 +17,12 @@ type Config struct {
 	AccessToken string `json:"access_token,omitempty"`
 	TokenURL    string `json:"token_url,omitempty"`
 
+	// TokenCacheFile enables the persisted-token fast path in token mode
+	// (spec-hub-side §1.5): the current agent JWT is cached here (0600)
+	// after every exchange and read back on boot, so a restarted container
+	// whose one-shot bootstrap secret is already consumed still refreshes.
+	TokenCacheFile string `json:"token_cache_file,omitempty"`
+
 	RedirectURI string `json:"redirect_uri,omitempty"` // for OIDC mode; if empty, set to {BaseURL}/auth/callback
 	BaseURI     string `json:"base_url,omitempty"`     // for OIDC redirect URL derivation
 }
@@ -33,9 +39,23 @@ func BuildHugrSource(ctx context.Context, config Config, logger *slog.Logger) (s
 		logger = slog.Default()
 	}
 	if config.AccessToken != "" && config.TokenURL != "" {
+		// Bootstrap semantics: HUGR_ACCESS_TOKEN may be a one-shot secret
+		// rather than a usable bearer, so the first Token() call exchanges
+		// immediately instead of serving the env value for a grace window.
+		// A cached token from a previous run (WithTokenCache) takes
+		// precedence over the env credential — see spec-hub-side §1.5.
+		store := NewRemoteStoreBootstrap("hugr", config.AccessToken, config.TokenURL)
+		if config.TokenCacheFile != "" {
+			store = store.WithTokenCache(config.TokenCacheFile)
+		}
+		tokenSource := "env"
+		if store.CacheLoaded() {
+			tokenSource = "cache"
+		}
 		logger.Info("auth source built",
-			"name", "hugr", "type", "hugr", "mode", "token", "token_url", config.TokenURL)
-		return NewRemoteStore("hugr", config.AccessToken, config.TokenURL), nil
+			"name", "hugr", "type", "hugr", "mode", "token",
+			"token_url", config.TokenURL, "token_source", tokenSource)
+		return store, nil
 	}
 
 	issuer := config.Issuer
