@@ -10,6 +10,7 @@ bin/
 
 # Environment
 .env
+.remote.env
 
 # IDE
 .vscode/
