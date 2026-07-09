@@ -93,7 +93,7 @@ func redirectStderrToFile(relPath string) (string, func()) {
 		fmt.Fprintf(os.Stderr, "tui: cannot dup stderr: %v\n", dupErr)
 		return "", noop
 	}
-	if err := syscall.Dup2(int(f.Fd()), int(os.Stderr.Fd())); err != nil {
+	if err := dupFd2(int(f.Fd()), int(os.Stderr.Fd())); err != nil {
 		_ = syscall.Close(origFd)
 		_ = f.Close()
 		fmt.Fprintf(os.Stderr, "tui: cannot redirect stderr: %v\n", err)
@@ -104,7 +104,7 @@ func redirectStderrToFile(relPath string) (string, func()) {
 		// Best-effort: put fd 2 back to the terminal so post-TUI
 		// output (panic dumps, fmt.Fprintln to os.Stderr in caller
 		// defers) reaches the user.
-		_ = syscall.Dup2(origFd, int(os.Stderr.Fd()))
+		_ = dupFd2(origFd, int(os.Stderr.Fd()))
 		_ = syscall.Close(origFd)
 		_ = f.Close()
 	}

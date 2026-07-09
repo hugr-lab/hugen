@@ -1,0 +1,29 @@
+# Keep the build context lean. The image needs: cmd/ pkg/ mcp/ assets/
+# go.mod go.sum + vendor/mcp-server-motherduck (runtime submodule). Everything
+# below is dev-only, secret, or rebuilt inside the image.
+.git
+.gitignore
+bin/
+.hugen
+.hugen-remote
+.env
+.remote.env
+*.env
+.env.*
+**/*.duckdb
+.duckdb/
+data/
+design/
+specs/
+docker/
+Dockerfile
+.dockerignore
+.vscode/
+.idea/
+**/__debug_bin*
+node_modules/
+tests/scenarios/.test.env
+scratchpad/
+# go.work is a dev overlay — the image builds standalone from go.mod.
+go.work
+go.work.sum

@@ -60,13 +60,18 @@ func run(args []string, errOut io.Writer) int {
 	}
 
 	switch sub {
+	case "healthcheck":
+		// Cheap liveness probe (container HEALTHCHECK). Never boots the
+		// runtime — returns before bootRuntime.
+		return runHealthcheck(errOut)
 	case "serve", "", "tui":
 		// OK — fall through to bootstrap.
 	default:
 		fmt.Fprintf(errOut, "unknown subcommand %q\n\n", sub)
-		fmt.Fprintln(errOut, "usage: hugen [tui|serve]")
-		fmt.Fprintln(errOut, "  tui    start the Bubble Tea TUI adapter (default)")
-		fmt.Fprintln(errOut, "  serve  start the native HTTP API (headless; gateway / hub UI / a2a bridge)")
+		fmt.Fprintln(errOut, "usage: hugen [tui|serve|healthcheck]")
+		fmt.Fprintln(errOut, "  tui          start the Bubble Tea TUI adapter (default)")
+		fmt.Fprintln(errOut, "  serve        start the native HTTP API (headless; gateway / hub UI / a2a bridge)")
+		fmt.Fprintln(errOut, "  healthcheck  probe GET /healthz on HUGEN_API_PORT (exit 0/1); for container HEALTHCHECK")
 		return exitUsage
 	}
 
