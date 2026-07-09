@@ -95,10 +95,16 @@ func AgentPermissions() []RolePermission {
 		stamp(t, doUpdate, agentIDData())
 	}
 
-	// agents: readable/updatable only as the own row (PK == principal). Identity
-	// rows are provisioned by the hub under its own principal, never by the agent.
+	// agents: readable ONLY as the own row (PK == principal). Identity rows are
+	// provisioned by the hub under its own principal, never by the agent — so
+	// insert/update/delete are all denied. Update is security-critical: the `role`
+	// column stamps the agent's JWT, and data-object perms are table-level (can't
+	// spare just `role`), so a self-update would let an agent set role=admin and
+	// self-escalate past this whole floor on its next token. hugen never issues
+	// update_agents; the hub owns all agents writes under its admin principal.
 	query("agents", selfIDFilter())
 	deny("agents", doInsert)
+	deny("agents", doUpdate)
 	deny("agents", doDelete)
 
 	// agent_types (shared template) + version (infra pins): readable by default,

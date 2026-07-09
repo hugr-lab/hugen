@@ -92,11 +92,13 @@ func TestAgentPermissions_RowSet(t *testing.T) {
 		}
 	}
 
-	// agents: scoped by PK; insert/delete denied.
+	// agents: scoped by PK; insert/UPDATE/delete denied. update is the load-
+	// bearing one — allowing it lets an agent set its own role=admin (role stamps
+	// the JWT) and self-escalate past the whole floor.
 	if a, ok := seen[doQuery+"/"+tablePrefix+"agents"]; !ok || a.Filter["id"] == nil {
 		t.Errorf("agents must be data-object:query scoped on id (PK == agent), got %v", a.Filter)
 	}
-	for _, op := range []string{doInsert, doDelete} {
+	for _, op := range []string{doInsert, doUpdate, doDelete} {
 		if r, ok := seen[op+"/"+tablePrefix+"agents"]; !ok || !r.Disabled {
 			t.Errorf("agents %s must be denied", op)
 		}
