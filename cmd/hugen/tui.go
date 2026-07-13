@@ -43,6 +43,10 @@ func runTUI(ctx context.Context, core *runtime.Core) int {
 		_ = rt.Shutdown(shutdownCtx)
 	}()
 
+	// SK2: start the background skills reconciler (no-op without a hub
+	// marketplace configured). Async first pass — never blocks the TUI.
+	core.StartSkillReconciler(ctx)
+
 	if err := rt.Start(ctx); err != nil {
 		if ctx.Err() != nil {
 			core.Logger.Info("shutdown complete")

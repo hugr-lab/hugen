@@ -172,7 +172,7 @@ func NewSkillStore(opts Options) *Store {
 	}
 	if opts.LocalRoot != "" {
 		if dynamicWired {
-			s.dynamic = newDynamicBackend(opts.LocalRoot, opts.DynamicQuerier, opts.AgentID, opts.EmbedderEnabled, opts.Logger)
+			s.dynamic = newDynamicBackend(opts.LocalRoot, opts.HubRoot, opts.DynamicQuerier, opts.AgentID, opts.EmbedderEnabled, opts.Logger)
 			s.backends = append(s.backends, s.dynamic)
 		} else {
 			s.backends = append(s.backends, &dirBackend{origin: OriginLocal, root: opts.LocalRoot, writable: true})
@@ -364,6 +364,24 @@ func (s *Store) SyncDynamic(ctx context.Context, hubDir string, installSet []str
 	}
 	installed, ierr := s.dynamic.installFromDir(ctx, hubDir, "hub", installSet, declared)
 	indexed, rerr := s.dynamic.Reconcile(ctx) // authored + relink (sees hub catalogs)
+	s.Refresh()
+	return installed + indexed, errors.Join(ierr, rerr)
+}
+
+// IndexHubBundles indexes the named hub-tier bundles from `hubDir` into the
+// DB index (source "hub", bundle_path = hubDir/<name>), then reconciles the
+// writable (authored) dir + refreshes the List cache. `names` is the install
+// ledger's key set (seed ∪ desired ∪ self) — the authoritative installed set,
+// so a self-installed bundle is always indexed regardless of the operator's
+// download policy (spec-skills-distribution §3). No-op without a dynamic
+// backend. This is the reconciler's index-resync primitive; the boot path
+// still uses [Store.SyncDynamic].
+func (s *Store) IndexHubBundles(ctx context.Context, hubDir string, names []string) (int, error) {
+	if s.dynamic == nil {
+		return 0, nil
+	}
+	installed, ierr := s.dynamic.installFromDir(ctx, hubDir, "hub", names, true)
+	indexed, rerr := s.dynamic.Reconcile(ctx) // authored + relink
 	s.Refresh()
 	return installed + indexed, errors.Join(ierr, rerr)
 }

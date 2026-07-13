@@ -54,6 +54,10 @@ func runServe(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) in
 		_ = rt.Shutdown(shutdownCtx)
 	}()
 
+	// SK2: start the background skills reconciler (no-op without a hub
+	// marketplace configured). Async first pass — never blocks serving.
+	core.StartSkillReconciler(ctx)
+
 	if err := rt.Start(ctx); err != nil {
 		if ctx.Err() != nil {
 			core.Logger.Info("shutdown complete")

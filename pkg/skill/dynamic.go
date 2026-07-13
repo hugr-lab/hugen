@@ -3,7 +3,6 @@ package skill
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -134,15 +133,37 @@ func (x *dynamicIndex) getRowByName(ctx context.Context, source, name string) (s
 	return rows[0], nil
 }
 
-// getByName resolves the full index row for (agent_id, name), any
-// source. Returns a zero row + nil when absent. Used by Get (resolve
-// bundle_path) + IndexBundle (hash-skip check) where source isn't
-// known up front.
+// sourcePrecedence orders same-name rows across sources for resolution: a
+// lower rank wins. `authored` (the agent's own skill:save) shadows the
+// admin-delivered `hub` bundle — mirroring local-shadows-hub in the tier
+// model (spec-skills-distribution §1). Unknown sources sort last.
+var sourcePrecedence = map[string]int{
+	"authored":  0,
+	"local":     1,
+	"hub":       2,
+	"catalogue": 3,
+	"memory":    4,
+	"file":      5,
+}
+
+func sourceRank(source string) int {
+	if r, ok := sourcePrecedence[source]; ok {
+		return r
+	}
+	return 100
+}
+
+// getByName resolves the full index row for (agent_id, name), any source.
+// When the same name exists under multiple sources it resolves
+// deterministically by [sourcePrecedence] (authored > hub), not by an
+// arbitrary limit-1 pick. Returns a zero row + nil when absent. Used by Get
+// (resolve bundle_path) + IndexBundle (hash-skip check) where the source
+// isn't known up front.
 func (x *dynamicIndex) getByName(ctx context.Context, name string) (skillRow, error) {
 	rows, err := queries.RunQuery[[]skillRow](ctx, x.querier,
 		`query ($agent: String!, $name: String!) {
 			hub { agent { db {
-				skills(filter: {agent_id: {eq: $agent}, name: {eq: $name}}, limit: 1) {`+skillRowProjection+`}
+				skills(filter: {agent_id: {eq: $agent}, name: {eq: $name}}) {`+skillRowProjection+`}
 			}}}
 		}`,
 		map[string]any{"agent": x.agentID, "name": name},
@@ -157,7 +178,13 @@ func (x *dynamicIndex) getByName(ctx context.Context, name string) (skillRow, er
 	if len(rows) == 0 {
 		return skillRow{}, nil
 	}
-	return rows[0], nil
+	best := rows[0]
+	for _, r := range rows[1:] {
+		if sourceRank(r.Source) < sourceRank(best.Source) {
+			best = r
+		}
+	}
+	return best, nil
 }
 
 // upsert indexes a manifest given the PRE-FETCHED existing row for
@@ -285,8 +312,8 @@ func (x *dynamicIndex) setPinForNames(ctx context.Context, names []string, pin b
 	)
 }
 
-// deleteByName removes the index row for (agent_id, name). Uninstall
-// pairs this with the on-disk bundle removal. No-op when absent.
+// deleteByName removes the index row for (agent_id, name), source-blind.
+// No-op when absent.
 func (x *dynamicIndex) deleteByName(ctx context.Context, name string) error {
 	return queries.RunMutation(ctx, x.querier,
 		`mutation ($agent: String!, $name: String!) {
@@ -295,6 +322,20 @@ func (x *dynamicIndex) deleteByName(ctx context.Context, name string) error {
 			}}}
 		}`,
 		map[string]any{"agent": x.agentID, "name": name},
+	)
+}
+
+// deleteBySourceName removes the index row for the exact identity tuple
+// (agent_id, source, name) — the tier-aware delete used by Uninstall so a
+// removal of the `hub` copy never also drops an `authored` same-name row.
+func (x *dynamicIndex) deleteBySourceName(ctx context.Context, source, name string) error {
+	return queries.RunMutation(ctx, x.querier,
+		`mutation ($agent: String!, $source: String!, $name: String!) {
+			hub { agent { db {
+				delete_skills(filter: {agent_id: {eq: $agent}, source: {eq: $source}, name: {eq: $name}}) { affected_rows }
+			}}}
+		}`,
+		map[string]any{"agent": x.agentID, "source": source, "name": name},
 	)
 }
 
@@ -607,16 +648,20 @@ func newSkillID() string {
 	return "skl-" + hex.EncodeToString(b[:])
 }
 
-// bundleHash returns the sha256 of the bundle's SKILL.md — the
-// update-at-start change signal. Cheap and sufficient for db-1; a
-// whole-tree hash can replace it later without changing the column.
+// bundleHash returns the canonical whole-bundle hash (BundleHash: sha256
+// over every non-dotfile in the dir, sorted by relpath). It is the single
+// drift signal shared by the seed sentinel, the ledger, the catalog
+// compare, and the `skills.content_hash` column (spec-skills-distribution
+// §2). Replaces the former SKILL.md-only hash, which was blind to script
+// changes. Returns "" on a read error (callers treat "" as "unknown, do
+// not skip"). One-time cost on the first boot after this lands: every
+// indexed bundle re-hashes to a whole-tree value and re-indexes once.
 func bundleHash(dir string) string {
-	content, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
+	h, err := BundleHash(os.DirFS(dir))
 	if err != nil {
 		return ""
 	}
-	sum := sha256.Sum256(content)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return h
 }
 
 // --- dynamic backend (dir content + DB index) ---
@@ -628,20 +673,26 @@ func bundleHash(dir string) string {
 // disk (full manifest incl. body) — the load path needs the prose.
 // Publish writes both. Consolidates OriginLocal.
 type dynamicBackend struct {
-	dir   *dirBackend
-	index *dynamicIndex
-	log   *slog.Logger
+	dir *dirBackend
+	// hubRoot is the hub-tier install dir (${state}/skills/hub). Held so a
+	// tier-aware Uninstall of a hub bundle can reach its ledger + on-disk dir
+	// (the writable `dir.root` is the authored/local tier). Empty when no hub
+	// tier is configured.
+	hubRoot string
+	index   *dynamicIndex
+	log     *slog.Logger
 }
 
 // newDynamicBackend wires the on-disk bundle root + the DB index.
-func newDynamicBackend(root string, q types.Querier, agentID string, embedderEnabled bool, log *slog.Logger) *dynamicBackend {
+func newDynamicBackend(root, hubRoot string, q types.Querier, agentID string, embedderEnabled bool, log *slog.Logger) *dynamicBackend {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &dynamicBackend{
-		dir:   &dirBackend{origin: OriginDynamic, root: root, writable: true},
-		index: &dynamicIndex{querier: q, agentID: agentID, embedderEnabled: embedderEnabled},
-		log:   log,
+		dir:     &dirBackend{origin: OriginDynamic, root: root, writable: true},
+		hubRoot: hubRoot,
+		index:   &dynamicIndex{querier: q, agentID: agentID, embedderEnabled: embedderEnabled},
+		log:     log,
 	}
 }
 
@@ -777,16 +828,63 @@ func (b *dynamicBackend) applyPins(ctx context.Context, pinNames []string) error
 	return nil
 }
 
-// Uninstall removes both the on-disk bundle and the index row. This
-// is the only explicit removal path on the dynamic backend (bandit
-// hygiene demotes but never deletes; reconcile only adds/updates).
+// Uninstall is the tier-aware triple-delete (spec-skills-distribution §3):
+// it resolves the skill's index row (authored > hub precedence), then removes
+// the DB row by the exact (agent_id, source, name) tuple, the bundle dir at
+// the row's own bundle_path (hub or authored root — NOT assumed to be the
+// writable root), and, for a hub-tier install, its `.installed.json` ledger
+// entry. A `desired`-origin hub install is refused — it is managed by the
+// admin desired-set and would be re-installed next reconcile; drop it from
+// the set instead. This is the only explicit removal path (bandit hygiene
+// demotes but never deletes; reconcile only adds/updates).
+//
+// Ledger note: Uninstall load-modify-saves the hub ledger, which the
+// background reconciler also writes. The window is small (remove is a
+// user-initiated one-shot) and both converge on the next pass; serialising
+// the two writers is a follow-up.
 func (b *dynamicBackend) Uninstall(ctx context.Context, name string) error {
-	if err := b.index.deleteByName(ctx, name); err != nil {
-		return fmt.Errorf("skill: uninstall index %q: %w", name, err)
+	row, err := b.index.getByName(ctx, name)
+	if err != nil {
+		return fmt.Errorf("skill: uninstall lookup %q: %w", name, err)
 	}
-	dir := filepath.Join(b.dir.root, name)
+	if row.ID == "" {
+		return ErrSkillNotFound
+	}
+	source := row.Source
+
+	// Load the hub ledger once for hub-tier installs (desired-refusal + the
+	// entry delete below).
+	var ledger *Ledger
+	if source == "hub" && b.hubRoot != "" {
+		if l, lerr := LoadLedger(b.hubRoot); lerr == nil {
+			ledger = l
+			if entry, ok := ledger.Get(name); ok && entry.Origin == InstallDesired {
+				return fmt.Errorf("skill %q is managed by the admin desired-set; drop it from the set instead of removing it", name)
+			}
+		} else {
+			b.log.Warn("skill: uninstall ledger read", "name", name, "err", lerr)
+		}
+	}
+
+	if err := b.index.deleteBySourceName(ctx, source, name); err != nil {
+		return fmt.Errorf("skill: uninstall index %q (%s): %w", name, source, err)
+	}
+
+	// Remove the bundle at its own path (falls back to the writable root by
+	// name when the row carries no bundle_path — an in-memory/legacy row).
+	dir := row.BundlePath
+	if dir == "" {
+		dir = filepath.Join(b.dir.root, name)
+	}
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("skill: uninstall bundle %q: %w", name, err)
+	}
+
+	if ledger != nil {
+		ledger.Delete(name)
+		if err := ledger.Save(); err != nil {
+			b.log.Warn("skill: uninstall ledger save", "name", name, "err", err)
+		}
 	}
 	return nil
 }

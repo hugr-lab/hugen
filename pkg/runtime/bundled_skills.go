@@ -1,8 +1,6 @@
 package runtime
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,8 +9,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/hugr-lab/hugen/assets"
+	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
 // hubSkillsSubdir is the on-disk directory under StateDir where
@@ -39,20 +39,28 @@ const legacySystemSkillsSubdir = "skills/system"
 // embed-only via the SkillStore's system backend — they never
 // touch disk.
 //
-// Idempotency: each skill directory writes a sentinel
-// `.hugen-checksum` file containing a sha-256 over its embedded
-// contents. Re-running the installer is a no-op when the checksum
-// matches; a mismatch (binary upgraded, payload changed) replaces
-// the existing tree.
+// Idempotency + ledger-awareness (spec-skills-distribution §3): the
+// install decision is driven by the installed-tier ledger
+// (`${target}/.installed.json`), NOT a blind checksum compare. A skill
+// dir is (re)written from the embed only when there is no ledger entry
+// OR the entry is `seed` AND its recorded hash equals the embed hash.
+// A `desired`/`self` entry (a marketplace/self install) is never
+// clobbered, and a `seed` entry whose hash has diverged from the embed
+// (a marketplace upgrade landed in place) is left alone — this is what
+// stops the restart flip-flop of downgrade-then-reupgrade. Each written
+// dir also carries a `.hugen-checksum` sentinel = the canonical
+// [skill.BundleHash] (§2's fourth hash point; human-facing marker).
 //
-// Reconcile: subdirectories present in the target tree but absent
-// from the current embed (skills retired across a version bump)
-// are removed at the end of the pass. Local skills under
-// `skills/local/` live in a sibling root and are untouched.
+// Reconcile: `seed`-origin subdirectories present on disk but absent
+// from the current embed (skills retired across a version bump) are
+// removed at the end of the pass together with their ledger entry;
+// `desired`/`self` dirs are the reconciler's to retire, never the
+// seed's. Local skills under `skills/local/` live in a sibling root and
+// are untouched.
 //
-// Future: when the Hub becomes a real remote source, this
-// function is replaced by a Hugr-function-driven sync that fills
-// the same on-disk cache.
+// The embed is a seed/fallback, never a live source (SD5): the
+// reconciler fills upgrades from the marketplace; this function only
+// guarantees a non-empty offline baseline.
 func InstallBundledHubSkills(stateDir string, log *slog.Logger) error {
 	if stateDir == "" {
 		return fmt.Errorf("install bundled hub skills: empty state dir")
@@ -66,6 +74,17 @@ func InstallBundledHubSkills(stateDir string, log *slog.Logger) error {
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		return fmt.Errorf("install bundled hub skills: %w", err)
 	}
+
+	ledger, err := skill.LoadLedger(target)
+	if err != nil {
+		// A corrupt ledger must not brick boot. Log loudly and continue with
+		// an empty ledger: the worst case is a one-time re-seed, and the
+		// reconciler re-establishes marketplace state on its first pass.
+		log.Warn("install bundled hub skills: ledger unreadable — treating as empty", "err", err)
+		ledger, _ = skill.LoadLedger(filepath.Join(target, "___nonexistent___"))
+	}
+	adoptPreLedgerDirs(target, ledger, log)
+
 	entries, err := fs.ReadDir(assets.SkillsFS, "skills")
 	if err != nil {
 		return fmt.Errorf("install bundled hub skills: read embed: %w", err)
@@ -77,11 +96,45 @@ func InstallBundledHubSkills(stateDir string, log *slog.Logger) error {
 		}
 		name := e.Name()
 		want[name] = struct{}{}
-		if err := installOneSkill(name, target, log); err != nil {
+		if err := installOneSkill(name, target, ledger, log); err != nil {
 			return err
 		}
 	}
-	return reconcileStaleSkills(target, want, log)
+	if err := reconcileStaleSkills(target, want, ledger, log); err != nil {
+		return err
+	}
+	if err := ledger.Save(); err != nil {
+		return fmt.Errorf("install bundled hub skills: save ledger: %w", err)
+	}
+	return nil
+}
+
+// adoptPreLedgerDirs handles the first-boot-on-an-old-state-dir case (§3):
+// when a hub-tier bundle dir exists on disk but has no ledger entry, adopt it
+// as `seed` at its current on-disk hash. This covers a state dir written by a
+// pre-ledger binary. (A pre-ledger self-install would be misclassified as
+// seed — an accepted one-time cost; none exist in the field today.) Entries
+// already in the ledger are left untouched.
+func adoptPreLedgerDirs(target string, ledger *skill.Ledger, log *slog.Logger) {
+	dir, err := os.ReadDir(target)
+	if err != nil {
+		return // missing target → nothing to adopt
+	}
+	for _, e := range dir {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if _, ok := ledger.Get(name); ok {
+			continue
+		}
+		hash := onDiskBundleHash(filepath.Join(target, name))
+		if hash == "" {
+			continue // not a readable bundle
+		}
+		ledger.Set(name, skill.LedgerEntry{Hash: hash, Origin: skill.InstallSeed, InstalledAt: nowStamp()})
+		log.Info("bundled skill: adopted pre-ledger dir as seed", "name", name, "hash", hash)
+	}
 }
 
 // cleanupLegacySystemSkillsDir removes `${stateDir}/skills/system/`
@@ -113,13 +166,19 @@ func cleanupLegacySystemSkillsDir(stateDir string, log *slog.Logger) error {
 	return nil
 }
 
-// reconcileStaleSkills removes any subdirectory under target
-// whose name is not in `want` — i.e. a skill that the previous
-// binary version installed but the current one no longer ships.
-// Errors are logged warn-not-fatal: a stale directory we cannot
-// remove (filesystem permission, file open elsewhere) should not
-// block the bootstrap.
-func reconcileStaleSkills(target string, want map[string]struct{}, log *slog.Logger) error {
+// reconcileStaleSkills removes a subdirectory under target whose name is
+// not in `want` (the current embed set) ONLY when its ledger entry is
+// `seed` (or it has no entry — a seed-ish orphan). A `desired`/`self`
+// dir is a marketplace/self install that the embed set knows nothing
+// about; retiring it is the reconciler's job, so it is left. Removing a
+// retired seed also drops its ledger entry. Errors are warn-not-fatal.
+//
+// Simplification (§3 folds "absent from the catalog" into retirement):
+// the seed phase cannot read the catalog, so it retires a
+// no-longer-embedded seed unconditionally; if the marketplace still
+// offers that skill the reconciler re-installs it (as desired/self) on
+// its next pass. A brief gap on a version bump is acceptable.
+func reconcileStaleSkills(target string, want map[string]struct{}, ledger *skill.Ledger, log *slog.Logger) error {
 	dir, err := os.ReadDir(target)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -135,18 +194,30 @@ func reconcileStaleSkills(target string, want map[string]struct{}, log *slog.Log
 		if _, keep := want[name]; keep {
 			continue
 		}
+		if entry, ok := ledger.Get(name); ok && entry.Origin != skill.InstallSeed {
+			log.Debug("bundled skill: keep non-seed dir retired from embed",
+				"name", name, "origin", entry.Origin)
+			continue // marketplace/self install — reconciler's to retire
+		}
 		path := filepath.Join(target, name)
 		if err := os.RemoveAll(path); err != nil {
 			log.Warn("bundled skill: failed to remove stale dir",
 				"name", name, "path", path, "err", err)
 			continue
 		}
-		log.Info("bundled skill: removed stale dir", "name", name, "path", path)
+		ledger.Delete(name)
+		log.Info("bundled skill: removed stale seed dir", "name", name, "path", path)
 	}
 	return nil
 }
 
-func installOneSkill(name, target string, log *slog.Logger) error {
+// installOneSkill materialises one embedded bundle onto disk when the
+// ledger says it should be (see [InstallBundledHubSkills] for the rule),
+// then records/updates its `seed` ledger entry. The install decision
+// keys on the canonical whole-bundle hash of the embed sub-tree, which
+// equals the on-disk BundleHash for identical content (dotfiles — the
+// sentinel + ledger — excluded on both sides).
+func installOneSkill(name, target string, ledger *skill.Ledger, log *slog.Logger) error {
 	embedRoot := "skills/" + name
 	files, err := collectEmbedFiles(embedRoot)
 	if err != nil {
@@ -157,13 +228,49 @@ func installOneSkill(name, target string, log *slog.Logger) error {
 		// skip until it has content.
 		return nil
 	}
-	sum := embedChecksum(files)
-	dst := filepath.Join(target, name)
-	checksumPath := filepath.Join(dst, ".hugen-checksum")
-	if existing, err := os.ReadFile(checksumPath); err == nil && strings.TrimSpace(string(existing)) == sum {
-		log.Debug("bundled skill up-to-date", "name", name, "sha256", sum)
-		return nil
+	sub, err := fs.Sub(assets.SkillsFS, embedRoot)
+	if err != nil {
+		return fmt.Errorf("install %s: sub-fs: %w", name, err)
 	}
+	embedHash, err := skill.BundleHash(sub)
+	if err != nil {
+		return fmt.Errorf("install %s: hash embed: %w", name, err)
+	}
+
+	// Decide whether the on-disk bundle SHOULD be the embed (§3): write when
+	// there is no ledger entry (fresh) OR the entry is `seed` at exactly the
+	// embed hash (the embed is the intended content — re-materialise if the
+	// dir was deleted/corrupted out of band). Skip otherwise:
+	//   - a `desired`/`self` entry: a marketplace/self install owns the name;
+	//   - a `seed` entry whose hash diverged from the embed: a marketplace
+	//     upgrade landed in place, so leaving the embed out kills the restart
+	//     flip-flop of downgrade-then-reupgrade.
+	// Known limitation: a genuine embed-content bump of an already-seeded
+	// skill is indistinguishable from a marketplace upgrade by (origin, hash)
+	// alone, so it is also skipped — binary-embed upgrades flow through the
+	// hub re-seed → catalog → reconciler path (SD5), not in place. A pure
+	// local (no-marketplace) agent must clear the ledger entry to force one.
+	if entry, ok := ledger.Get(name); ok {
+		if entry.Origin != skill.InstallSeed {
+			log.Debug("bundled skill: skip (owned by reconciler/self)", "name", name, "origin", entry.Origin)
+			return nil
+		}
+		if entry.Hash != embedHash {
+			log.Debug("bundled skill: skip (seed hash diverged — marketplace-owned upgrade)",
+				"name", name, "ledger_hash", entry.Hash, "embed_hash", embedHash)
+			return nil
+		}
+		// seed @ embed hash → ensure it is materialised. If the on-disk
+		// content already matches, this is a no-op (mtime preserved).
+		if onDiskBundleHash(filepath.Join(target, name)) == embedHash {
+			log.Debug("bundled skill up-to-date", "name", name, "hash", embedHash)
+			return nil
+		}
+	}
+
+	// Fresh install, or a seed@embed whose on-disk content drifted (deleted
+	// dir / stray file) → (re)write from the embed.
+	dst := filepath.Join(target, name)
 	if err := os.RemoveAll(dst); err != nil {
 		return fmt.Errorf("install %s: clean: %w", name, err)
 	}
@@ -177,12 +284,27 @@ func installOneSkill(name, target string, log *slog.Logger) error {
 			return fmt.Errorf("install %s: write %s: %w", name, out, err)
 		}
 	}
-	if err := os.WriteFile(checksumPath, []byte(sum+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dst, ".hugen-checksum"), []byte(embedHash+"\n"), 0o644); err != nil {
 		return fmt.Errorf("install %s: write checksum: %w", name, err)
 	}
-	log.Info("bundled skill installed", "name", name, "files", len(files), "sha256", sum)
+	ledger.Set(name, skill.LedgerEntry{Hash: embedHash, Origin: skill.InstallSeed, InstalledAt: nowStamp()})
+	log.Info("bundled skill installed", "name", name, "files", len(files), "hash", embedHash)
 	return nil
 }
+
+// onDiskBundleHash returns the canonical [skill.BundleHash] of an on-disk
+// bundle dir, or "" on any read error (caller treats "" as "unknown").
+func onDiskBundleHash(dir string) string {
+	h, err := skill.BundleHash(os.DirFS(dir))
+	if err != nil {
+		return ""
+	}
+	return h
+}
+
+// nowStamp returns an RFC3339 UTC timestamp for a ledger InstalledAt field
+// (provenance only — never load-bearing, so it need not be monotonic).
+func nowStamp() string { return time.Now().UTC().Format(time.RFC3339) }
 
 type embeddedFile struct {
 	path string
@@ -222,17 +344,6 @@ func collectEmbedFilesFS(efs fs.FS, root string) ([]embeddedFile, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
 	return out, nil
-}
-
-func embedChecksum(files []embeddedFile) string {
-	h := sha256.New()
-	for _, f := range files {
-		_, _ = h.Write([]byte(f.path))
-		_, _ = h.Write([]byte{0})
-		_, _ = h.Write(f.data)
-		_, _ = h.Write([]byte{0})
-	}
-	return hex.EncodeToString(h.Sum(nil))
 }
 
 // phaseBundledSkills runs the bundled-skill installer (phase 1).
