@@ -52,6 +52,10 @@ const (
 	maxBundleFiles = 4096
 )
 
+// Compile-time assertion: the reconciler is the marketplace client the skill
+// extension's on-demand tools drive.
+var _ skill.Marketplace = (*skillReconciler)(nil)
+
 // skillReconciler holds the reconcile loop's dependencies.
 type skillReconciler struct {
 	hubURL  string
@@ -74,28 +78,29 @@ type loggerIface interface {
 	Debug(msg string, args ...any)
 }
 
-// StartSkillReconciler starts the background skills reconciler when a
-// marketplace is configured (Cfg.Hugr.HubURL set) and a dynamic skill store
-// is wired. It is a no-op otherwise — the embedded seed remains the baseline.
-// Registers a cleanup that stops the goroutine on Shutdown. Safe to call once
-// per long-running adapter path (serve / tui).
-func (c *Core) StartSkillReconciler(ctx context.Context) {
+// newSkillReconciler builds the marketplace reconciler/client when a
+// marketplace is configured (Cfg.Hugr.HubURL set), a dynamic skill store is
+// wired, and a hugr token store exists. Returns nil otherwise — the embedded
+// seed remains the baseline and skill:install/refresh answer "not configured".
+// Built during Build (phaseExtensions) so it can back the skill extension's
+// on-demand tools; the cadence loop is started separately by
+// StartSkillReconciler on the serve/tui path.
+func newSkillReconciler(c *Core) *skillReconciler {
 	if c.Cfg.Hugr.HubURL == "" {
-		c.Logger.Debug("skill reconciler: disabled (no HubURL)")
-		return
+		return nil
 	}
 	store, ok := c.SkillStore.(*skill.Store)
 	if !ok || !store.HasDynamic() {
-		c.Logger.Debug("skill reconciler: disabled (no dynamic store)")
-		return
+		return nil
+	}
+	if c.Auth == nil {
+		return nil
 	}
 	tokenStore, ok := c.Auth.TokenStore("hugr")
 	if !ok {
-		c.Logger.Warn("skill reconciler: disabled (no hugr token store)")
-		return
+		return nil
 	}
-
-	r := &skillReconciler{
+	return &skillReconciler{
 		hubURL:  strings.TrimRight(c.Cfg.Hugr.HubURL, "/"),
 		hubDir:  filepath.Join(c.Cfg.StateDir, "skills/hub"),
 		client:  &http.Client{Timeout: 60 * time.Second, Transport: auth.Transport(tokenStore, nil)},
@@ -105,7 +110,18 @@ func (c *Core) StartSkillReconciler(ctx context.Context) {
 		log:     c.Logger,
 		trigger: make(chan struct{}, 1),
 	}
+}
 
+// StartSkillReconciler starts the background cadence loop over the reconciler
+// built at Build time (c.skillRec). A no-op when no marketplace is configured.
+// Registers a cleanup that stops the goroutine on Shutdown. Safe to call once
+// per long-running adapter path (serve / tui).
+func (c *Core) StartSkillReconciler(ctx context.Context) {
+	r := c.skillRec
+	if r == nil {
+		c.Logger.Debug("skill reconciler: disabled (no marketplace configured)")
+		return
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	c.addCleanup(cancel)
 	go r.run(runCtx)
@@ -142,21 +158,30 @@ func (r *skillReconciler) Trigger() {
 func (r *skillReconciler) passWithTimeout(parent context.Context) {
 	ctx, cancel := context.WithTimeout(parent, perPassTimeout)
 	defer cancel()
-	if err := r.reconcileOnce(ctx); err != nil {
+	if _, err := r.reconcileOnce(ctx); err != nil {
 		r.log.Warn("skill reconciler: pass had errors", "err", err)
 	}
 }
 
+// Refresh runs one reconcile pass on demand (the skill:refresh tool). It also
+// nudges the cadence loop so the background schedule stays aligned. Implements
+// [skill.Marketplace].
+func (r *skillReconciler) Refresh(ctx context.Context) (skill.RefreshOutcome, error) {
+	r.Trigger()
+	return r.reconcileOnce(ctx)
+}
+
 // reconcileOnce runs one full pass: fetch catalog → download the desired set
-// → index the ledger keys → save the ledger. Best-effort per skill.
-func (r *skillReconciler) reconcileOnce(ctx context.Context) error {
+// → index the ledger keys → save the ledger. Best-effort per skill. Returns
+// the per-pass counts.
+func (r *skillReconciler) reconcileOnce(ctx context.Context) (skill.RefreshOutcome, error) {
 	catalog, err := r.fetchCatalog(ctx)
 	if err != nil {
-		return fmt.Errorf("fetch catalog: %w", err)
+		return skill.RefreshOutcome{}, fmt.Errorf("fetch catalog: %w", err)
 	}
 	ledger, err := skill.LoadLedger(r.hubDir)
 	if err != nil {
-		return fmt.Errorf("load ledger: %w", err)
+		return skill.RefreshOutcome{}, fmt.Errorf("load ledger: %w", err)
 	}
 
 	declared := r.skills.InstallSetDeclared()
@@ -167,7 +192,7 @@ func (r *skillReconciler) reconcileOnce(ctx context.Context) error {
 		}
 	}
 
-	var downloaded, upgraded, failed int
+	var out skill.RefreshOutcome
 	for _, entry := range catalog {
 		origin, want := decideFetch(entry.Name, ledger, declared, wantInstall)
 		if !want {
@@ -182,19 +207,19 @@ func (r *skillReconciler) reconcileOnce(ctx context.Context) error {
 		newHash, err := r.installBundle(ctx, entry.Name, entry.ContentHash)
 		if err != nil {
 			r.log.Warn("skill reconciler: install failed", "skill", entry.Name, "err", err)
-			failed++
+			out.Failed++
 			continue
 		}
 		if _, existed := ledger.Get(entry.Name); existed {
-			upgraded++
+			out.Upgraded++
 		} else {
-			downloaded++
+			out.Downloaded++
 		}
 		ledger.Set(entry.Name, skill.LedgerEntry{Hash: newHash, Origin: origin, InstalledAt: nowStamp()})
 	}
 
 	if err := ledger.Save(); err != nil {
-		return fmt.Errorf("save ledger: %w", err)
+		return out, fmt.Errorf("save ledger: %w", err)
 	}
 
 	// Re-index the authoritative installed set (ledger keys) and refresh so
@@ -204,8 +229,56 @@ func (r *skillReconciler) reconcileOnce(ctx context.Context) error {
 		r.log.Warn("skill reconciler: index re-sync had errors", "indexed", n, "err", ierr)
 	}
 	r.log.Info("skill reconciler: pass complete",
-		"downloaded", downloaded, "upgraded", upgraded, "failed", failed, "indexed", n)
-	return nil
+		"downloaded", out.Downloaded, "upgraded", out.Upgraded, "failed", out.Failed, "indexed", n)
+	return out, nil
+}
+
+// Install pulls one named skill from the catalog into the installed tier on
+// demand (the skill:install tool). A new name lands as origin=self; an
+// existing install keeps its origin (a seed stays a seed) and is upgraded to
+// the catalog's content. Implements [skill.Marketplace].
+func (r *skillReconciler) Install(ctx context.Context, name string) (skill.InstallOutcome, error) {
+	catalog, err := r.fetchCatalog(ctx)
+	if err != nil {
+		return skill.InstallOutcome{}, fmt.Errorf("fetch catalog: %w", err)
+	}
+	var entry *catalogEntry
+	for i := range catalog {
+		if catalog[i].Name == name {
+			entry = &catalog[i]
+			break
+		}
+	}
+	if entry == nil {
+		return skill.InstallOutcome{}, fmt.Errorf("skill %q is not in the marketplace catalog (or you lack the capability to see it)", name)
+	}
+
+	ledger, err := skill.LoadLedger(r.hubDir)
+	if err != nil {
+		return skill.InstallOutcome{}, fmt.Errorf("load ledger: %w", err)
+	}
+	origin := skill.InstallSelf
+	if existing, ok := ledger.Get(name); ok {
+		origin = existing.Origin // upgrade in place, preserve origin
+		if existing.Hash == entry.ContentHash {
+			if _, statErr := os.Stat(filepath.Join(r.hubDir, name)); statErr == nil {
+				return skill.InstallOutcome{Name: name, Version: entry.Version, ContentHash: entry.ContentHash, AlreadyCurrent: true}, nil
+			}
+		}
+	}
+
+	newHash, err := r.installBundle(ctx, name, entry.ContentHash)
+	if err != nil {
+		return skill.InstallOutcome{}, err
+	}
+	ledger.Set(name, skill.LedgerEntry{Hash: newHash, Origin: origin, InstalledAt: nowStamp()})
+	if err := ledger.Save(); err != nil {
+		return skill.InstallOutcome{}, fmt.Errorf("save ledger: %w", err)
+	}
+	if _, ierr := r.store.IndexHubBundles(ctx, r.hubDir, ledger.Names()); ierr != nil {
+		return skill.InstallOutcome{}, fmt.Errorf("index: %w", ierr)
+	}
+	return skill.InstallOutcome{Name: name, Version: entry.Version, ContentHash: newHash}, nil
 }
 
 // decideFetch decides whether a catalog entry should be fetched and, if so,

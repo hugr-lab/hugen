@@ -97,6 +97,12 @@ type Core struct {
 	// Store().Path (download). Constructed in phaseExtensions.
 	Artifacts *artifactext.Extension
 
+	// skillRec is the marketplace reconciler/client (SK2/SK4), built in
+	// phaseExtensions when a marketplace is configured (nil otherwise). It
+	// backs the skill extension's on-demand skill:install/refresh tools and
+	// is driven on a cadence by StartSkillReconciler (serve/tui only).
+	skillRec *skillReconciler
+
 	// Phase 9 (session_manager).
 	Manager *manager.Manager
 

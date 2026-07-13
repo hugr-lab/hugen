@@ -140,3 +140,40 @@ func (h *SessionSkill) callPublish(ctx context.Context, args json.RawMessage) (j
 	}
 	return json.Marshal(res)
 }
+
+// callInstall installs one skill from the marketplace by name (SK4). The
+// marketplace client downloads + extracts + ledgers + indexes; the tool
+// returns the compact outcome.
+func (h *SessionSkill) callInstall(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
+	if h.market == nil {
+		return nil, fmt.Errorf("%w: skill:install: no marketplace configured (HUGEN_HUB_URL is unset)", tool.ErrSystemUnavailable)
+	}
+	var in struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil {
+		return nil, fmt.Errorf("%w: skill:install: %v", tool.ErrArgValidation, err)
+	}
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		return nil, fmt.Errorf("%w: skill:install: name required", tool.ErrArgValidation)
+	}
+	out, err := h.market.Install(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("skill:install: %w", err)
+	}
+	return json.Marshal(out)
+}
+
+// callRefresh runs a full marketplace reconcile pass on demand (SK4): pull the
+// catalog, upgrade installed skills, re-index. Returns the pass counts.
+func (h *SessionSkill) callRefresh(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+	if h.market == nil {
+		return nil, fmt.Errorf("%w: skill:refresh: no marketplace configured (HUGEN_HUB_URL is unset)", tool.ErrSystemUnavailable)
+	}
+	out, err := h.market.Refresh(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("skill:refresh: %w", err)
+	}
+	return json.Marshal(out)
+}

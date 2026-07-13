@@ -136,7 +136,7 @@ func TestReconcileOnce_DownloadsExtractsAndLedgers(t *testing.T) {
 	}
 	r := newTestReconciler(srv, hubDir, stubSkillsView{install: []string{"demo"}, declared: true})
 
-	if err := r.reconcileOnce(context.Background()); err != nil {
+	if _, err := r.reconcileOnce(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(hubDir, "demo", "SKILL.md")); err != nil {
@@ -172,7 +172,7 @@ func TestReconcileOnce_UpgradePreservesSeedOrigin(t *testing.T) {
 	// Not declared: the upgrade must still happen because the skill is already
 	// in the ledger (existing installs upgrade in place).
 	r := newTestReconciler(srv, hubDir, stubSkillsView{declared: false})
-	if err := r.reconcileOnce(context.Background()); err != nil {
+	if _, err := r.reconcileOnce(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	after, _ := skill.LoadLedger(hubDir)
@@ -200,7 +200,7 @@ func TestReconcileOnce_RejectsHashMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := newTestReconciler(srv, hubDir, stubSkillsView{install: []string{"demo"}, declared: true})
-	if err := r.reconcileOnce(context.Background()); err != nil {
+	if _, err := r.reconcileOnce(context.Background()); err != nil {
 		t.Fatalf("reconcile returned error (should be per-skill best-effort): %v", err)
 	}
 	// The mismatched bundle must NOT be installed or ledgered.
@@ -210,6 +210,76 @@ func TestReconcileOnce_RejectsHashMismatch(t *testing.T) {
 	ledger, _ := skill.LoadLedger(hubDir)
 	if _, ok := ledger.Get("demo"); ok {
 		t.Error("mismatched bundle was ledgered")
+	}
+}
+
+// --- Install / Refresh: the SK4 on-demand marketplace ops ---
+
+func TestReconciler_Install(t *testing.T) {
+	files := map[string]string{"SKILL.md": "name: demo\n", "scripts/run.py": "print(1)\n"}
+	hash := bundleHashOf(t, files)
+	srv := marketplaceServer(t, map[string]bundleFixture{"demo": {files: files, hash: hash}})
+	defer srv.Close()
+
+	state := t.TempDir()
+	hubDir := filepath.Join(state, "skills/hub")
+	if err := os.MkdirAll(hubDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Not declared in any install-set: skill:install is an explicit user pull,
+	// independent of the download policy.
+	r := newTestReconciler(srv, hubDir, stubSkillsView{declared: false})
+
+	out, err := r.Install(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if out.Name != "demo" || out.ContentHash != hash || out.AlreadyCurrent {
+		t.Errorf("outcome = %+v, want demo @ %s (not already-current)", out, hash)
+	}
+	if _, err := os.Stat(filepath.Join(hubDir, "demo", "SKILL.md")); err != nil {
+		t.Errorf("bundle not materialised: %v", err)
+	}
+	// A user-initiated install lands as origin=self.
+	ledger, _ := skill.LoadLedger(hubDir)
+	if e, ok := ledger.Get("demo"); !ok || e.Origin != skill.InstallSelf {
+		t.Errorf("ledger origin = %+v ok=%v, want self", e, ok)
+	}
+
+	// Re-installing the same content is a no-op (AlreadyCurrent).
+	out2, err := r.Install(context.Background(), "demo")
+	if err != nil {
+		t.Fatalf("re-install: %v", err)
+	}
+	if !out2.AlreadyCurrent {
+		t.Errorf("re-install not reported already-current: %+v", out2)
+	}
+
+	// An unknown name is a clear error, not a silent no-op.
+	if _, err := r.Install(context.Background(), "nope"); err == nil {
+		t.Error("install of an uncatalogued skill returned no error")
+	}
+}
+
+func TestReconciler_Refresh(t *testing.T) {
+	files := map[string]string{"SKILL.md": "name: demo\n"}
+	hash := bundleHashOf(t, files)
+	srv := marketplaceServer(t, map[string]bundleFixture{"demo": {files: files, hash: hash}})
+	defer srv.Close()
+
+	state := t.TempDir()
+	hubDir := filepath.Join(state, "skills/hub")
+	if err := os.MkdirAll(hubDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := newTestReconciler(srv, hubDir, stubSkillsView{install: []string{"demo"}, declared: true})
+
+	out, err := r.Refresh(context.Background())
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if out.Downloaded != 1 || out.Failed != 0 {
+		t.Errorf("refresh outcome = %+v, want 1 downloaded / 0 failed", out)
 	}
 }
 

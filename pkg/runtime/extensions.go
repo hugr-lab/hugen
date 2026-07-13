@@ -23,6 +23,7 @@ import (
 	wsext "github.com/hugr-lab/hugen/pkg/extension/workspace"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/session"
+	"github.com/hugr-lab/hugen/pkg/skill"
 	"github.com/hugr-lab/hugen/pkg/tool"
 )
 
@@ -104,6 +105,18 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		}
 	}
 
+	// Marketplace reconciler/client (SK2 cadence loop + SK4 on-demand tools).
+	// Built here so the skill extension's skill:install/refresh can drive it;
+	// the cadence loop is started later by StartSkillReconciler (serve/tui).
+	// nil when no marketplace is configured. skill.Marketplace is an interface,
+	// so pass a typed nil through a nil-normalising helper to avoid a non-nil
+	// interface wrapping a nil pointer.
+	core.skillRec = newSkillReconciler(core)
+	var skillMarket skill.Marketplace
+	if core.skillRec != nil {
+		skillMarket = core.skillRec
+	}
+
 	exts := []extension.Extension{
 		wsext.NewExtension(core.Cfg.Workspace.Dir, core.Logger),
 		// Artifact ext registered right after workspace: its InitState
@@ -113,7 +126,9 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		compactorExt,
 		planext.NewExtension(core.Agent.ID()),
 		wbext.NewExtension(core.Agent.ID()),
-		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()).WithPublisher(skillPublisher),
+		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()).
+			WithPublisher(skillPublisher).
+			WithMarketplace(skillMarket),
 		// Notepad registered AFTER skillext (B31): both contribute a
 		// ModelInTurnAdvisor.TurnPreamble joined in deps.Extensions
 		// order, and the deliberate reading order is skill catalogue +

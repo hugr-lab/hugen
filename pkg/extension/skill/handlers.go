@@ -40,6 +40,12 @@ const (
 	// hugen:tool:system object so it is grantable on its own (a publishing
 	// skill / role grants it; no grant, no dispatch).
 	permObjectPublish = "hugen:skill"
+	// permObjectInstall / permObjectRefresh gate the marketplace pull tools
+	// (SK4) under the general system-tool object — installing/refreshing from
+	// the deployment's own marketplace is a routine, non-outward-facing action
+	// (unlike publish, which crosses the trust boundary).
+	permObjectInstall = "hugen:tool:system"
+	permObjectRefresh = "hugen:tool:system"
 )
 
 // skillFilesMaxEntries caps the listing per the contract (SC-010).
@@ -142,6 +148,19 @@ const (
   },
   "required": ["name"]
 }`
+
+	installSchema = `{
+  "type": "object",
+  "properties": {
+    "name": {"type": "string", "description": "Name of a skill in the hub marketplace catalogue to install into this agent. The bundle is downloaded, verified against its content hash, and indexed so it becomes loadable. Use the catalogue (skill:catalog_list is your local set; the marketplace is the deployment-wide set) to find installable names."}
+  },
+  "required": ["name"]
+}`
+
+	refreshSchema = `{
+  "type": "object",
+  "properties": {}
+}`
 )
 
 // List implements [tool.ToolProvider].
@@ -199,6 +218,20 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 			RequiresApproval: true,
 		},
 		{
+			Name:             providerName + ":install",
+			Description:      "Install a skill from the hub marketplace into this agent by name. Downloads + verifies + indexes the bundle (tool code fetches it — bytes never pass through the conversation) so the skill becomes loadable. Installing an already-current skill is a no-op; installing a newer catalogue version upgrades it.",
+			Provider:         providerName,
+			PermissionObject: permObjectInstall,
+			ArgSchema:        json.RawMessage(installSchema),
+		},
+		{
+			Name:             providerName + ":refresh",
+			Description:      "Pull the latest from the hub marketplace now: re-fetch the catalogue and upgrade already-installed marketplace skills to their current versions, then re-index. Returns how many were downloaded / upgraded / failed. Normally this happens automatically in the background; use it to force an immediate sync.",
+			Provider:         providerName,
+			PermissionObject: permObjectRefresh,
+			ArgSchema:        json.RawMessage(refreshSchema),
+		},
+		{
 			Name:             providerName + ":files",
 			Description:      "List on-disk files of a loaded skill with relative + absolute paths so other tools (bash.read_file, python.run_script) can read them. Optional subdir narrows the listing; optional glob filters by path pattern.",
 			Provider:         providerName,
@@ -252,6 +285,10 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 		return h.callSave(ctx, args)
 	case "publish":
 		return h.callPublish(ctx, args)
+	case "install":
+		return h.callInstall(ctx, args)
+	case "refresh":
+		return h.callRefresh(ctx, args)
 	case "files":
 		return h.callFiles(ctx, args)
 	case "ref":
