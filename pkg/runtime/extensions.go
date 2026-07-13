@@ -94,6 +94,16 @@ func phaseExtensions(_ context.Context, core *Core) error {
 	// the same store and adapters can reach Ingest / Path (download).
 	core.Artifacts = artifactExt
 
+	// Marketplace publisher for skill:publish (SK3): the agent JWT / user token
+	// via the "hugr" token store + HUGEN_HUB_URL. Nil when no marketplace is
+	// configured — skill:publish then answers a clear "not configured" error.
+	var skillPublisher *skillext.Publisher
+	if core.Auth != nil {
+		if ts, ok := core.Auth.TokenStore("hugr"); ok {
+			skillPublisher = skillext.NewPublisher(core.Cfg.Hugr.HubURL, ts)
+		}
+	}
+
 	exts := []extension.Extension{
 		wsext.NewExtension(core.Cfg.Workspace.Dir, core.Logger),
 		// Artifact ext registered right after workspace: its InitState
@@ -103,7 +113,7 @@ func phaseExtensions(_ context.Context, core *Core) error {
 		compactorExt,
 		planext.NewExtension(core.Agent.ID()),
 		wbext.NewExtension(core.Agent.ID()),
-		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()),
+		skillext.NewExtension(core.Skills, core.Permissions, core.Agent.ID()).WithPublisher(skillPublisher),
 		// Notepad registered AFTER skillext (B31): both contribute a
 		// ModelInTurnAdvisor.TurnPreamble joined in deps.Extensions
 		// order, and the deliberate reading order is skill catalogue +

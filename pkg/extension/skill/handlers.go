@@ -35,6 +35,11 @@ const (
 	permObjectFiles         = "hugen:tool:system"
 	permObjectRef           = "hugen:tool:system"
 	permObjectFilesPerSkill = "hugen:command:skill_files"
+	// permObjectPublish resolves as (type_name="hugen:skill", field="publish")
+	// — the §4 agent-side publish gate, distinct from the broad
+	// hugen:tool:system object so it is grantable on its own (a publishing
+	// skill / role grants it; no grant, no dispatch).
+	permObjectPublish = "hugen:skill"
 )
 
 // skillFilesMaxEntries caps the listing per the contract (SC-010).
@@ -129,6 +134,14 @@ const (
   },
   "required": ["skill", "ref"]
 }`
+
+	publishSchema = `{
+  "type": "object",
+  "properties": {
+    "name": {"type": "string", "description": "Name of a registered skill to publish to the hub marketplace so other agents can install it. The whole bundle (SKILL.md + references / scripts / assets) is uploaded; the hub verifies your publish permission, checks the name is not reserved or owned by another publisher, and requires your role to hold any capabilities the skill declares."}
+  },
+  "required": ["name"]
+}`
 )
 
 // List implements [tool.ToolProvider].
@@ -176,6 +189,14 @@ func (e *Extension) List(_ context.Context) ([]tool.Tool, error) {
 			Provider:         providerName,
 			PermissionObject: permObjectSave,
 			ArgSchema:        json.RawMessage(saveSchema),
+		},
+		{
+			Name:             providerName + ":publish",
+			Description:      "Publish a registered skill's bundle to the hub marketplace so other agents can install it. Uploads the whole bundle (tool code POSTs it — bytes never pass through the conversation). Requires the hugen:skill.publish permission (granted by a publishing skill) AND passes the hub's checks (reserved-name / first-publisher / declared-capabilities). Outward-facing + approval-gated; user-initiated only — do NOT propose it.",
+			Provider:         providerName,
+			PermissionObject: permObjectPublish,
+			ArgSchema:        json.RawMessage(publishSchema),
+			RequiresApproval: true,
 		},
 		{
 			Name:             providerName + ":files",
@@ -229,6 +250,8 @@ func (e *Extension) Call(ctx context.Context, name string, args json.RawMessage)
 		return h.callValidate(ctx, args)
 	case "save":
 		return h.callSave(ctx, args)
+	case "publish":
+		return h.callPublish(ctx, args)
 	case "files":
 		return h.callFiles(ctx, args)
 	case "ref":

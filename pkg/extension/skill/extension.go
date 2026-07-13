@@ -59,9 +59,20 @@ const providerName = "skill"
 // session under one Manager; per-session state lives in
 // [extension.SessionState] under [StateKey].
 type Extension struct {
-	manager *skillpkg.SkillManager
-	perms   perm.Service
-	agentID string
+	manager   *skillpkg.SkillManager
+	perms     perm.Service
+	agentID   string
+	publisher *Publisher // nil = no marketplace configured; skill:publish then errors clearly
+}
+
+// WithPublisher attaches the marketplace publisher used by skill:publish
+// (spec-skills-distribution SK3). Chainable so the runtime can wire it after
+// NewExtension without changing that constructor's 67 call sites. A nil
+// publisher leaves skill:publish available but returning a "not configured"
+// error.
+func (e *Extension) WithPublisher(p *Publisher) *Extension {
+	e.publisher = p
+	return e
 }
 
 // agentParticipant returns the ParticipantInfo skill ext stamps on
@@ -107,6 +118,7 @@ func (e *Extension) InitState(ctx context.Context, state extension.SessionState)
 	h := &SessionSkill{
 		manager:   e.manager,
 		perms:     e.perms,
+		publisher: e.publisher,
 		sessionID: state.SessionID(),
 		author:    e.agentParticipant(),
 		loaded:    map[string]skillpkg.Skill{},
@@ -149,6 +161,7 @@ func (h *SessionSkill) autoload(ctx context.Context) {
 type SessionSkill struct {
 	manager   *skillpkg.SkillManager
 	perms     perm.Service
+	publisher *Publisher // marketplace publisher for skill:publish (nil = unconfigured)
 	sessionID string
 	author    protocol.ParticipantInfo
 	tier      string // skill.TierRoot / skill.TierMission / skill.TierWorker
