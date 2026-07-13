@@ -35,6 +35,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/auth"
 	"github.com/hugr-lab/hugen/pkg/config"
+	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
@@ -66,7 +67,20 @@ type skillReconciler struct {
 	refresh time.Duration
 	log     loggerIface
 
+	// identity re-fetches agent_info each pass (SK6 admin push) so an admin's
+	// agent_type.config edit is picked up on cadence; nil falls back to the
+	// boot-frozen `skills` view. isLocal only tunes config default resolution.
+	identity agentInfoSource
+	isLocal  bool
+
 	trigger chan struct{}
+}
+
+// agentInfoSource is the narrow slice of identity.Source the reconciler needs:
+// re-fetch the merged agent config each pass. identity.Source satisfies it; a
+// test substitutes a fake.
+type agentInfoSource interface {
+	Agent(ctx context.Context) (identity.Agent, error)
 }
 
 // loggerIface is the slice of *slog.Logger the reconciler uses (kept as an
@@ -101,14 +115,16 @@ func newSkillReconciler(c *Core) *skillReconciler {
 		return nil
 	}
 	return &skillReconciler{
-		hubURL:  strings.TrimRight(c.Cfg.Hugr.HubURL, "/"),
-		hubDir:  filepath.Join(c.Cfg.StateDir, "skills/hub"),
-		client:  &http.Client{Timeout: 60 * time.Second, Transport: auth.Transport(tokenStore, nil)},
-		store:   store,
-		skills:  c.Config.Skills(),
-		refresh: defaultSkillRefresh,
-		log:     c.Logger,
-		trigger: make(chan struct{}, 1),
+		hubURL:   strings.TrimRight(c.Cfg.Hugr.HubURL, "/"),
+		hubDir:   filepath.Join(c.Cfg.StateDir, "skills/hub"),
+		client:   &http.Client{Timeout: 60 * time.Second, Transport: auth.Transport(tokenStore, nil)},
+		store:    store,
+		skills:   c.Config.Skills(),
+		refresh:  defaultSkillRefresh,
+		log:      c.Logger,
+		identity: c.Identity,
+		isLocal:  c.Cfg.Mode == "local",
+		trigger:  make(chan struct{}, 1),
 	}
 }
 
@@ -184,13 +200,10 @@ func (r *skillReconciler) reconcileOnce(ctx context.Context) (skill.RefreshOutco
 		return skill.RefreshOutcome{}, fmt.Errorf("load ledger: %w", err)
 	}
 
-	declared := r.skills.InstallSetDeclared()
-	wantInstall := map[string]struct{}{}
-	if declared {
-		for _, n := range r.skills.InstallSet() {
-			wantInstall[n] = struct{}{}
-		}
-	}
+	// SK6: re-fetch the desired set from agent_info so an admin's
+	// agent_type.config edit is picked up on cadence (falls back to the
+	// boot-frozen view on a hub blip).
+	declared, wantInstall := r.currentDesiredSet(ctx)
 
 	var out skill.RefreshOutcome
 	for _, entry := range catalog {
@@ -218,6 +231,30 @@ func (r *skillReconciler) reconcileOnce(ctx context.Context) (skill.RefreshOutco
 		ledger.Set(entry.Name, skill.LedgerEntry{Hash: newHash, Origin: origin, InstalledAt: nowStamp()})
 	}
 
+	// SK6 removal-on-drop: retire any desired-origin install the operator
+	// dropped from skills.install. Only when the set is declared (an undeclared
+	// set means "install all bundled" — no desired-set semantics, nothing to
+	// retire). Seed and self origins are never auto-removed.
+	if declared {
+		for _, name := range ledger.Names() {
+			led, ok := ledger.Get(name)
+			if !ok || led.Origin != skill.InstallDesired {
+				continue
+			}
+			if _, stillWanted := wantInstall[name]; stillWanted {
+				continue
+			}
+			if err := r.store.RetireHubBundle(ctx, r.hubDir, name); err != nil {
+				r.log.Warn("skill reconciler: retire failed", "skill", name, "err", err)
+				out.Failed++
+				continue
+			}
+			ledger.Delete(name)
+			out.Removed++
+			r.log.Info("skill reconciler: retired dropped desired skill", "skill", name)
+		}
+	}
+
 	if err := ledger.Save(); err != nil {
 		return out, fmt.Errorf("save ledger: %w", err)
 	}
@@ -229,8 +266,57 @@ func (r *skillReconciler) reconcileOnce(ctx context.Context) (skill.RefreshOutco
 		r.log.Warn("skill reconciler: index re-sync had errors", "indexed", n, "err", ierr)
 	}
 	r.log.Info("skill reconciler: pass complete",
-		"downloaded", out.Downloaded, "upgraded", out.Upgraded, "failed", out.Failed, "indexed", n)
+		"downloaded", out.Downloaded, "upgraded", out.Upgraded,
+		"removed", out.Removed, "failed", out.Failed, "indexed", n)
 	return out, nil
+}
+
+// currentDesiredSet returns the operator's desired install set for this pass.
+// SK6: it re-fetches agent_info (the merged agent_type + agent config) so an
+// admin editing skills.install is reflected without an agent restart. On any
+// fetch/parse error — or when no identity source is wired (tests) — it falls
+// back to the boot-frozen config view so a transient hub failure never wipes
+// the desired set. `declared` false means the set is absent (install all
+// bundled — no desired-set semantics); a non-nil set is authoritative.
+func (r *skillReconciler) currentDesiredSet(ctx context.Context) (declared bool, want map[string]struct{}) {
+	if r.identity != nil {
+		if d, w, ok := r.fetchDesiredSet(ctx); ok {
+			return d, w
+		}
+	}
+	if r.skills != nil && r.skills.InstallSetDeclared() {
+		return true, sliceToSet(r.skills.InstallSet())
+	}
+	return false, nil
+}
+
+// fetchDesiredSet re-fetches + parses the agent config, returning the fresh
+// desired set. ok=false signals a fetch/parse failure so the caller falls back
+// to the boot view.
+func (r *skillReconciler) fetchDesiredSet(ctx context.Context) (declared bool, want map[string]struct{}, ok bool) {
+	agent, err := r.identity.Agent(ctx)
+	if err != nil {
+		r.log.Warn("skill reconciler: agent_info re-fetch failed; using boot config", "err", err)
+		return false, nil, false
+	}
+	in, err := config.LoadStaticInput(agent.Config, r.isLocal)
+	if err != nil {
+		r.log.Warn("skill reconciler: agent config parse failed; using boot config", "err", err)
+		return false, nil, false
+	}
+	if in.Skills.Install == nil {
+		return false, nil, true // absent → install-all, no desired-set
+	}
+	return true, sliceToSet(*in.Skills.Install), true
+}
+
+// sliceToSet builds a lookup set from a name slice.
+func sliceToSet(names []string) map[string]struct{} {
+	m := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		m[n] = struct{}{}
+	}
+	return m
 }
 
 // Install pulls one named skill from the catalog into the installed tier on

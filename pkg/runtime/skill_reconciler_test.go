@@ -15,6 +15,7 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/skill"
 )
 
@@ -283,6 +284,127 @@ func TestReconciler_Refresh(t *testing.T) {
 	}
 }
 
+// --- SK6: re-fetch agent_info each pass + removal-on-drop ---
+
+// fakeAgentInfo is a stub agentInfoSource returning a fixed merged config (or
+// an error) so the reconciler's per-pass re-fetch can be exercised offline.
+type fakeAgentInfo struct {
+	config map[string]any
+	err    error
+}
+
+func (f fakeAgentInfo) Agent(context.Context) (identity.Agent, error) {
+	if f.err != nil {
+		return identity.Agent{}, f.err
+	}
+	return identity.Agent{Config: f.config}, nil
+}
+
+func TestCurrentDesiredSet_ReFetchOverridesBoot(t *testing.T) {
+	// Boot config said ["stale"]; the admin has since edited agent_type.config
+	// to ["fresh"] — the re-fetch must win.
+	r := &skillReconciler{
+		log:      discardLogger(),
+		skills:   stubSkillsView{install: []string{"stale"}, declared: true},
+		identity: fakeAgentInfo{config: map[string]any{"skills": map[string]any{"install": []any{"fresh"}}}},
+	}
+	declared, want := r.currentDesiredSet(context.Background())
+	if !declared {
+		t.Fatal("declared=false, want true")
+	}
+	if _, ok := want["fresh"]; !ok || len(want) != 1 {
+		t.Errorf("want set = %v, want {fresh}", want)
+	}
+}
+
+func TestCurrentDesiredSet_FetchUndeclaredWinsOverBoot(t *testing.T) {
+	// A successful re-fetch with skills.install ABSENT means install-all — it
+	// overrides a boot view that declared a set (the admin removed the key).
+	r := &skillReconciler{
+		log:      discardLogger(),
+		skills:   stubSkillsView{install: []string{"stale"}, declared: true},
+		identity: fakeAgentInfo{config: map[string]any{"models": map[string]any{"model": "x"}}},
+	}
+	declared, want := r.currentDesiredSet(context.Background())
+	if declared || want != nil {
+		t.Errorf("got (declared=%v, want=%v), want (false, nil) for absent install", declared, want)
+	}
+}
+
+func TestCurrentDesiredSet_FallsBackToBootOnError(t *testing.T) {
+	r := &skillReconciler{
+		log:      discardLogger(),
+		skills:   stubSkillsView{install: []string{"boot"}, declared: true},
+		identity: fakeAgentInfo{err: fmt.Errorf("hub unreachable")},
+	}
+	declared, want := r.currentDesiredSet(context.Background())
+	if !declared {
+		t.Fatal("declared=false, want true (boot fallback)")
+	}
+	if _, ok := want["boot"]; !ok || len(want) != 1 {
+		t.Errorf("want set = %v, want {boot} from boot fallback", want)
+	}
+}
+
+func TestCurrentDesiredSet_NoIdentityUsesBoot(t *testing.T) {
+	r := &skillReconciler{log: discardLogger(), skills: stubSkillsView{install: []string{"boot"}, declared: true}}
+	declared, want := r.currentDesiredSet(context.Background())
+	if !declared || len(want) != 1 {
+		t.Errorf("got (declared=%v, want=%v), want ({boot}) from boot view", declared, want)
+	}
+}
+
+func TestReconcileOnce_RemovesDroppedDesiredSkill(t *testing.T) {
+	// Empty catalog: nothing to install. Two desired-origin installs on disk;
+	// the operator now declares only "kept" → "gone" must be retired, "kept"
+	// left, and a seed/self install untouched.
+	srv := marketplaceServer(t, map[string]bundleFixture{})
+	defer srv.Close()
+
+	state := t.TempDir()
+	hubDir := filepath.Join(state, "skills/hub")
+	for _, name := range []string{"kept", "gone", "seeded"} {
+		if err := os.MkdirAll(filepath.Join(hubDir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ledger, _ := skill.LoadLedger(hubDir)
+	ledger.Set("kept", skill.LedgerEntry{Hash: "sha256:k", Origin: skill.InstallDesired})
+	ledger.Set("gone", skill.LedgerEntry{Hash: "sha256:g", Origin: skill.InstallDesired})
+	ledger.Set("seeded", skill.LedgerEntry{Hash: "sha256:s", Origin: skill.InstallSeed})
+	if err := ledger.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// "seeded" is NOT in the declared set — proving a seed-origin install is
+	// skipped by ORIGIN, not merely by membership.
+	r := newTestReconciler(srv, hubDir, stubSkillsView{install: []string{"kept"}, declared: true})
+	out, err := r.reconcileOnce(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if out.Removed != 1 {
+		t.Errorf("Removed = %d, want 1", out.Removed)
+	}
+	if _, err := os.Stat(filepath.Join(hubDir, "gone")); !os.IsNotExist(err) {
+		t.Error("dropped desired skill 'gone' bundle not removed")
+	}
+	if _, err := os.Stat(filepath.Join(hubDir, "kept")); err != nil {
+		t.Error("still-declared 'kept' bundle was removed")
+	}
+	after, _ := skill.LoadLedger(hubDir)
+	if _, ok := after.Get("gone"); ok {
+		t.Error("ledger still has 'gone' after retire")
+	}
+	if _, ok := after.Get("kept"); !ok {
+		t.Error("ledger dropped 'kept'")
+	}
+	// A seed-origin install NOT in the declared set is never auto-retired.
+	if _, ok := after.Get("seeded"); !ok {
+		t.Error("seed-origin 'seeded' was wrongly retired")
+	}
+}
+
 // --- test helpers ---
 
 func newTestReconciler(srv *httptest.Server, hubDir string, view stubSkillsView) *skillReconciler {
@@ -372,8 +494,8 @@ type stubSkillsView struct {
 	declared bool
 }
 
-func (s stubSkillsView) InstallSet() []string         { return s.install }
-func (s stubSkillsView) InstallSetDeclared() bool     { return s.declared }
-func (s stubSkillsView) PinSet() []string             { return nil }
-func (s stubSkillsView) PinSetDeclared() bool         { return false }
+func (s stubSkillsView) InstallSet() []string            { return s.install }
+func (s stubSkillsView) InstallSetDeclared() bool        { return s.declared }
+func (s stubSkillsView) PinSet() []string                { return nil }
+func (s stubSkillsView) PinSetDeclared() bool            { return false }
 func (s stubSkillsView) OnUpdate(func()) (cancel func()) { return func() {} }

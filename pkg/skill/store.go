@@ -386,6 +386,29 @@ func (s *Store) IndexHubBundles(ctx context.Context, hubDir string, names []stri
 	return installed + indexed, errors.Join(ierr, rerr)
 }
 
+// RetireHubBundle removes a hub-tier installed skill the reconciler dropped
+// from the operator's desired set (SK6 removal-on-drop): it deletes the
+// dynamic-index row (source "hub") and the on-disk bundle at hubDir/<name>.
+// Unlike [dynamicBackend.Uninstall] it carries NO desired-origin refusal — the
+// reconciler IS the desired-set authority, whereas Uninstall guards against a
+// user hand-removing an admin-managed skill. The caller owns the ledger entry
+// and the follow-up re-index (IndexHubBundles). No-op without a dynamic
+// backend. installFromDir only adds/updates, so the index row must be dropped
+// explicitly here — a re-index alone would leave it stale. The on-disk bundle
+// is always removed; the index delete is skipped only when no dynamic backend
+// exists (nothing to prune).
+func (s *Store) RetireHubBundle(ctx context.Context, hubDir, name string) error {
+	if s.dynamic != nil {
+		if err := s.dynamic.index.deleteBySourceName(ctx, "hub", name); err != nil {
+			return fmt.Errorf("skill: retire index %q: %w", name, err)
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(hubDir, name)); err != nil {
+		return fmt.Errorf("skill: retire bundle %q: %w", name, err)
+	}
+	return nil
+}
+
 // ApplyPins reconciles the advertise-pin flag across the dynamic index
 // against the authoritative pin set (listed → pin=true, others →
 // pin=false). No-op when no dynamic backend is wired. Invalidates the

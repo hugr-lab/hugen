@@ -22,7 +22,10 @@ type InstallOutcome struct {
 type RefreshOutcome struct {
 	Downloaded int `json:"downloaded"`
 	Upgraded   int `json:"upgraded"`
-	Failed     int `json:"failed"`
+	// Removed counts desired-origin installs retired because the operator
+	// dropped them from skills.install (SK6 removal-on-drop).
+	Removed int `json:"removed"`
+	Failed  int `json:"failed"`
 }
 
 // Marketplace is the on-demand side-band the skill extension drives. Install
