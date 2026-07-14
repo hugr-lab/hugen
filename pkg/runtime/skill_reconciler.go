@@ -25,12 +25,14 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth"
@@ -38,6 +40,11 @@ import (
 	"github.com/hugr-lab/hugen/pkg/identity"
 	"github.com/hugr-lab/hugen/pkg/skill"
 )
+
+// ErrNoMarketplace is returned by Core.RefreshSkills when no hub marketplace is
+// configured (HUGEN_HUB_URL unset or no dynamic store) — the manual refresh
+// path has nothing to reconcile against.
+var ErrNoMarketplace = errors.New("no skills marketplace configured")
 
 const (
 	// defaultSkillRefresh is the reconcile cadence (SD4: boot + every 30m +
@@ -73,6 +80,10 @@ type skillReconciler struct {
 	identity agentInfoSource
 	isLocal  bool
 
+	// passMu serialises reconcileOnce: three triggers now drive a pass (the
+	// cadence tick, the model's skill:refresh tool, and the manual HTTP poke),
+	// and two overlapping passes would race on a skill's tmp dir + the ledger.
+	passMu  sync.Mutex
 	trigger chan struct{}
 }
 
@@ -144,6 +155,22 @@ func (c *Core) StartSkillReconciler(ctx context.Context) {
 	c.Logger.Info("skill reconciler: started", "hub", r.hubURL, "refresh", r.refresh)
 }
 
+// HasMarketplace reports whether a hub skills marketplace is configured (so the
+// manual refresh path / the on-demand tools have something to reconcile).
+func (c *Core) HasMarketplace() bool { return c.skillRec != nil }
+
+// RefreshSkills runs one marketplace reconcile pass now: re-read the agent
+// config and reconcile the installed hub-tier skills against the catalog. This
+// is the manual "re-read config" path an operator/hub drives out-of-band (e.g.
+// POST /v1/skills/refresh) — distinct from the model's skill:refresh tool and
+// the background cadence. Returns ErrNoMarketplace when none is configured.
+func (c *Core) RefreshSkills(ctx context.Context) (skill.RefreshOutcome, error) {
+	if c.skillRec == nil {
+		return skill.RefreshOutcome{}, ErrNoMarketplace
+	}
+	return c.skillRec.Refresh(ctx)
+}
+
 // run is the reconcile loop: an immediate async first pass, then on the
 // refresh ticker or an on-demand trigger, until ctx is cancelled.
 func (r *skillReconciler) run(ctx context.Context) {
@@ -191,6 +218,9 @@ func (r *skillReconciler) Refresh(ctx context.Context) (skill.RefreshOutcome, er
 // → index the ledger keys → save the ledger. Best-effort per skill. Returns
 // the per-pass counts.
 func (r *skillReconciler) reconcileOnce(ctx context.Context) (skill.RefreshOutcome, error) {
+	r.passMu.Lock()
+	defer r.passMu.Unlock()
+
 	catalog, err := r.fetchCatalog(ctx)
 	if err != nil {
 		return skill.RefreshOutcome{}, fmt.Errorf("fetch catalog: %w", err)

@@ -78,6 +78,11 @@ type Adapter struct {
 	// return 501. Wired from core.Artifacts in the cmd layer.
 	artifacts ArtifactStore
 
+	// refreshSkills backs POST /v1/skills/refresh (SK6 manual reconcile). nil ⇒
+	// 501. Wired from core.RefreshSkills in the cmd layer when a marketplace is
+	// configured.
+	refreshSkills SkillsRefresher
+
 	host adapter.Host
 	// lifecycleCtx is the adapter's Run ctx (process lifetime). Sessions are
 	// opened/closed on it, NOT a per-request ctx — a session's Run loop must
@@ -240,6 +245,9 @@ func (a *Adapter) mount(mux *http.ServeMux, health bool) error {
 	mux.Handle("GET /v1/sessions/{id}/artifacts", a.authMiddleware(http.HandlerFunc(a.handleListArtifacts)))
 	mux.Handle("GET /v1/sessions/{id}/artifacts/{aid}", a.authMiddleware(http.HandlerFunc(a.handleGetArtifact)))
 	mux.Handle("POST /v1/sessions/{id}/artifacts", a.authMiddleware(http.HandlerFunc(a.handleIngestArtifact)))
+
+	// SK6: manual skills reconcile poke.
+	mux.Handle("POST /v1/skills/refresh", a.authMiddleware(http.HandlerFunc(a.handleRefreshSkills)))
 	if health {
 		mux.HandleFunc(healthzPath, healthHandler)
 		mux.HandleFunc(readyzPath, healthHandler)
