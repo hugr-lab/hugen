@@ -12,9 +12,9 @@ require (
 	github.com/duckdb/duckdb-go/v2 v2.10504.0
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/hugr-lab/query-engine v0.3.40
-	github.com/hugr-lab/query-engine/client v0.3.40
-	github.com/hugr-lab/query-engine/types v0.3.40
+	github.com/hugr-lab/query-engine v0.3.41
+	github.com/hugr-lab/query-engine/client v0.3.41
+	github.com/hugr-lab/query-engine/types v0.3.41
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/mark3labs/mcp-go v0.54.1
 	github.com/muesli/reflow v0.3.0
