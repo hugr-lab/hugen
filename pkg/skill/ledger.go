@@ -72,9 +72,11 @@ type Ledger struct {
 
 // LoadLedger reads the ledger at `${hubDir}/.installed.json`. A missing file
 // yields an empty (not-yet-persisted) ledger — the first-boot case. A present
-// but corrupt file is a hard error: silently discarding it would re-seed over
-// marketplace state (the exact flip-flop §3 guards against), so the caller
-// must decide (today: log + treat as empty is the caller's call, not ours).
+// but corrupt file returns a non-nil error AND a usable, correctly-pathed
+// empty ledger: silently discarding it would re-seed over marketplace state
+// (the flip-flop §3 guards against), so the caller decides — the reconciler
+// treats the error as fatal (skips the pass), while the boot seed logs +
+// overwrites in place using the returned empty ledger.
 func LoadLedger(hubDir string) (*Ledger, error) {
 	l := &Ledger{
 		path:    filepath.Join(hubDir, ledgerFileName),
@@ -91,7 +93,14 @@ func LoadLedger(hubDir string) (*Ledger, error) {
 		return l, nil
 	}
 	if err := json.Unmarshal(b, &l.entries); err != nil {
-		return nil, fmt.Errorf("parse ledger %s: %w", l.path, err)
+		// Return a USABLE empty ledger (correctly pathed) alongside the error so
+		// a caller that chooses to recover (the boot seed) can log + overwrite
+		// the corrupt file in place. Returning nil here made the seed rebuild an
+		// empty ledger at a bogus path, never repairing the real file — bricking
+		// the marketplace on every subsequent pass. Callers that treat corrupt
+		// as fatal (the reconciler) still just check err and ignore the ledger.
+		l.entries = map[string]LedgerEntry{}
+		return l, fmt.Errorf("parse ledger %s: %w", l.path, err)
 	}
 	if l.entries == nil {
 		l.entries = map[string]LedgerEntry{}

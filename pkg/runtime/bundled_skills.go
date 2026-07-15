@@ -76,12 +76,16 @@ func InstallBundledHubSkills(stateDir string, log *slog.Logger) error {
 	}
 
 	ledger, err := skill.LoadLedger(target)
-	if err != nil {
-		// A corrupt ledger must not brick boot. Log loudly and continue with
-		// an empty ledger: the worst case is a one-time re-seed, and the
-		// reconciler re-establishes marketplace state on its first pass.
-		log.Warn("install bundled hub skills: ledger unreadable — treating as empty", "err", err)
-		ledger, _ = skill.LoadLedger(filepath.Join(target, "___nonexistent___"))
+	corrupt := err != nil
+	if corrupt {
+		// A corrupt ledger must not brick boot. LoadLedger still returns a
+		// usable, correctly-pathed empty ledger, so we adopt what's on disk,
+		// (re)install the embed, and overwrite the corrupt file via Save below.
+		// We deliberately SKIP the stale-retire pass here: with origins lost,
+		// every on-disk bundle is adopted as `seed`, so retiring "seeds not in
+		// the embed" would delete a self/desired marketplace install the
+		// reconciler cannot restore. Retiring resumes once the ledger is healthy.
+		log.Warn("install bundled hub skills: ledger unreadable — treating as empty (retire pass skipped)", "err", err)
 	}
 	adoptPreLedgerDirs(target, ledger, log)
 
@@ -100,8 +104,10 @@ func InstallBundledHubSkills(stateDir string, log *slog.Logger) error {
 			return err
 		}
 	}
-	if err := reconcileStaleSkills(target, want, ledger, log); err != nil {
-		return err
+	if !corrupt {
+		if err := reconcileStaleSkills(target, want, ledger, log); err != nil {
+			return err
+		}
 	}
 	if err := ledger.Save(); err != nil {
 		return fmt.Errorf("install bundled hub skills: save ledger: %w", err)
@@ -175,9 +181,12 @@ func cleanupLegacySystemSkillsDir(stateDir string, log *slog.Logger) error {
 //
 // Simplification (§3 folds "absent from the catalog" into retirement):
 // the seed phase cannot read the catalog, so it retires a
-// no-longer-embedded seed unconditionally; if the marketplace still
-// offers that skill the reconciler re-installs it (as desired/self) on
-// its next pass. A brief gap on a version bump is acceptable.
+// no-longer-embedded seed unconditionally. The reconciler re-installs it
+// only if it is in the operator's declared desired-set (decideFetch does
+// NOT pull an undeclared catalog-only name), so a seed that was
+// marketplace-upgraded but is NOT in `skills.install` is dropped for good
+// on an embed removal — an accepted edge for a skill the operator never
+// explicitly requested; declare it in `skills.install` to keep it.
 func reconcileStaleSkills(target string, want map[string]struct{}, ledger *skill.Ledger, log *slog.Logger) error {
 	dir, err := os.ReadDir(target)
 	if err != nil {

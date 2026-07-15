@@ -32,7 +32,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/hugr-lab/hugen/pkg/auth"
@@ -80,10 +79,14 @@ type skillReconciler struct {
 	identity agentInfoSource
 	isLocal  bool
 
-	// passMu serialises reconcileOnce: three triggers now drive a pass (the
-	// cadence tick, the model's skill:refresh tool, and the manual HTTP poke),
-	// and two overlapping passes would race on a skill's tmp dir + the ledger.
-	passMu  sync.Mutex
+	// passSem serialises every reconcile pass: four callers now drive one (the
+	// cadence tick, the model's skill:refresh tool, the manual HTTP poke, and
+	// the skill:install tool), and two overlapping passes would race on a
+	// skill's tmp dir + the ledger's read-modify-write. It is a ctx-aware
+	// 1-slot semaphore (not a sync.Mutex) so a caller blocked waiting for an
+	// in-flight pass still honours its own context deadline / cancellation
+	// (e.g. the HTTP endpoint's request timeout).
+	passSem chan struct{}
 	trigger chan struct{}
 }
 
@@ -135,7 +138,24 @@ func newSkillReconciler(c *Core) *skillReconciler {
 		log:      c.Logger,
 		identity: c.Identity,
 		isLocal:  c.Cfg.Mode == "local",
+		passSem:  make(chan struct{}, 1),
 		trigger:  make(chan struct{}, 1),
+	}
+}
+
+// acquirePass takes the single reconcile slot, honouring ctx: it returns a
+// release func on success, or ctx.Err() if the context is cancelled while
+// another pass holds the slot. A nil passSem (bare test literals) means
+// unserialised — those tests are single-threaded, so it is a safe no-op.
+func (r *skillReconciler) acquirePass(ctx context.Context) (func(), error) {
+	if r.passSem == nil {
+		return func() {}, nil
+	}
+	select {
+	case r.passSem <- struct{}{}:
+		return func() { <-r.passSem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
@@ -225,8 +245,11 @@ func (r *skillReconciler) Refresh(ctx context.Context) (skill.RefreshOutcome, er
 // → index the ledger keys → save the ledger. Best-effort per skill. Returns
 // the per-pass counts.
 func (r *skillReconciler) reconcileOnce(ctx context.Context) (skill.RefreshOutcome, error) {
-	r.passMu.Lock()
-	defer r.passMu.Unlock()
+	release, err := r.acquirePass(ctx)
+	if err != nil {
+		return skill.RefreshOutcome{}, err
+	}
+	defer release()
 
 	catalog, err := r.fetchCatalog(ctx)
 	if err != nil {
@@ -361,6 +384,15 @@ func sliceToSet(names []string) map[string]struct{} {
 // existing install keeps its origin (a seed stays a seed) and is upgraded to
 // the catalog's content. Implements [skill.Marketplace].
 func (r *skillReconciler) Install(ctx context.Context, name string) (skill.InstallOutcome, error) {
+	// Serialise with the background pass + the other on-demand callers: Install
+	// does its own ledger read-modify-write + tmp-dir extraction, which would
+	// race a concurrent reconcileOnce (lost ledger updates, .tmp-<name> clashes).
+	release, err := r.acquirePass(ctx)
+	if err != nil {
+		return skill.InstallOutcome{}, err
+	}
+	defer release()
+
 	catalog, err := r.fetchCatalog(ctx)
 	if err != nil {
 		return skill.InstallOutcome{}, fmt.Errorf("fetch catalog: %w", err)

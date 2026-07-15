@@ -858,8 +858,17 @@ func (b *dynamicBackend) Uninstall(ctx context.Context, name string) error {
 	if source == "hub" && b.hubRoot != "" {
 		if l, lerr := LoadLedger(b.hubRoot); lerr == nil {
 			ledger = l
-			if entry, ok := ledger.Get(name); ok && entry.Origin == InstallDesired {
-				return fmt.Errorf("skill %q is managed by the admin desired-set; drop it from the set instead of removing it", name)
+			if entry, ok := ledger.Get(name); ok {
+				switch entry.Origin {
+				case InstallDesired:
+					return fmt.Errorf("skill %q is managed by the admin desired-set; drop it from the set instead of removing it", name)
+				case InstallSeed:
+					// A seed bundle is re-materialised from the binary embed on
+					// every boot, so an uninstall would "succeed" and then
+					// silently reappear on the next restart. Refuse it instead of
+					// lying about the outcome.
+					return fmt.Errorf("skill %q is a bundled (embedded) skill and is re-installed on every start; it cannot be uninstalled", name)
+				}
 			}
 		} else {
 			b.log.Warn("skill: uninstall ledger read", "name", name, "err", lerr)

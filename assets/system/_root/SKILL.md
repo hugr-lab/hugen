@@ -57,6 +57,15 @@ allowed-tools:
       - search
       - describe
       - execute_task
+  # Marketplace management (SK4): the root chat tier can install a skill from
+  # the hub catalog on demand and force a reconcile. Runtime-owned tools — the
+  # bytes never pass through model context; the model sees only the compact
+  # outcome. skill:publish is intentionally NOT granted here: publishing to the
+  # shared catalog is a trust-boundary op that a dedicated skill/role grants.
+  - provider: skill
+    tools:
+      - install
+      - refresh
 metadata:
   hugen:
     requires_skills: []

@@ -416,6 +416,7 @@ func newTestReconciler(srv *httptest.Server, hubDir string, view stubSkillsView)
 		skills:  view,
 		refresh: 0,
 		log:     discardLogger(),
+		passSem: make(chan struct{}, 1),
 		trigger: make(chan struct{}, 1),
 	}
 }

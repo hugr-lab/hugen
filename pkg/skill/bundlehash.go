@@ -2,6 +2,7 @@ package skill
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io/fs"
@@ -10,8 +11,13 @@ import (
 )
 
 // BundleHash computes the canonical content hash of a skill bundle: sha256
-// over every non-dotfile in fsys, files ordered by relative path, feeding
-// "<relpath>\x00<content>\x00" per file. Dotfiles — any path segment
+// over every non-dotfile in fsys, files ordered by relative path, feeding a
+// length-prefixed "<len(relpath)><relpath><len(content)><content>" per file
+// (big-endian uint64 lengths). The length prefixes make the concatenation
+// injective: a bare "<relpath>\x00<content>\x00" delimiter framing collides
+// when a file's CONTENT contains a NUL byte (a single file whose body embeds
+// the delimiter could mimic two files and forge an identical hash), which is
+// unacceptable for a content-integrity anchor. Dotfiles — any path segment
 // beginning with "." — are excluded so sentinels like ".hugen-checksum" and
 // the install ledger (".installed.json") never fold into the hash.
 //
@@ -55,15 +61,19 @@ func BundleHash(fsys fs.FS) (string, error) {
 	sort.Strings(paths)
 
 	h := sha256.New()
+	var lb [8]byte
+	writeField := func(v []byte) {
+		binary.BigEndian.PutUint64(lb[:], uint64(len(v)))
+		_, _ = h.Write(lb[:])
+		_, _ = h.Write(v)
+	}
 	for _, p := range paths {
 		b, err := fs.ReadFile(fsys, p)
 		if err != nil {
 			return "", fmt.Errorf("read bundle file %s: %w", p, err)
 		}
-		_, _ = h.Write([]byte(p))
-		_, _ = h.Write([]byte{0})
-		_, _ = h.Write(b)
-		_, _ = h.Write([]byte{0})
+		writeField([]byte(p))
+		writeField(b)
 	}
 	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }

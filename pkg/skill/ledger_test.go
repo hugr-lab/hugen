@@ -90,3 +90,36 @@ func TestLedger_CorruptFileErrors(t *testing.T) {
 		t.Fatal("corrupt ledger loaded without error — would silently re-seed over marketplace state")
 	}
 }
+
+// TestLoadLedger_CorruptReturnsUsableEmptyLedger guards the corrupt-recovery
+// path: a corrupt file must return an error AND a usable empty ledger pathed at
+// the REAL file, so the boot seed can overwrite it in place. Returning nil made
+// the seed repair a bogus path and brick the marketplace on every pass.
+func TestLoadLedger_CorruptReturnsUsableEmptyLedger(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ledgerFileName), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l, err := LoadLedger(dir)
+	if err == nil {
+		t.Fatal("expected an error on a corrupt ledger")
+	}
+	if l == nil {
+		t.Fatal("corrupt ledger returned nil — caller cannot recover in place")
+	}
+	if got := l.Names(); len(got) != 0 {
+		t.Errorf("expected an empty ledger, got %v", got)
+	}
+	// Saving the recovered ledger must repair the REAL file (not a bogus path).
+	l.Set("x", LedgerEntry{Hash: "sha256:a", Origin: InstallSeed})
+	if err := l.Save(); err != nil {
+		t.Fatalf("save recovered ledger: %v", err)
+	}
+	l2, err := LoadLedger(dir)
+	if err != nil {
+		t.Fatalf("reload after repair (corrupt file not overwritten?): %v", err)
+	}
+	if _, ok := l2.Get("x"); !ok {
+		t.Error("repair did not persist to the real ledger path")
+	}
+}

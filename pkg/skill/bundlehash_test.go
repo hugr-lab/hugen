@@ -40,11 +40,11 @@ func TestBundleHash_DotfilesExcluded(t *testing.T) {
 		"scripts/run.py": {Data: []byte("code")},
 	}
 	withDots := fstest.MapFS{
-		"SKILL.md":          {Data: []byte("prose")},
-		"scripts/run.py":    {Data: []byte("code")},
-		".hugen-checksum":   {Data: []byte("sha256:whatever")},
-		".installed.json":   {Data: []byte(`{"x":1}`)},
-		".git/config":       {Data: []byte("[core]")},
+		"SKILL.md":           {Data: []byte("prose")},
+		"scripts/run.py":     {Data: []byte("code")},
+		".hugen-checksum":    {Data: []byte("sha256:whatever")},
+		".installed.json":    {Data: []byte(`{"x":1}`)},
+		".git/config":        {Data: []byte("[core]")},
 		".hidden/secret.txt": {Data: []byte("s")},
 	}
 	if mustHash(t, base) != mustHash(t, withDots) {
@@ -83,5 +83,22 @@ func TestBundleHash_Empty(t *testing.T) {
 	got := mustHash(t, fstest.MapFS{})
 	if !strings.HasPrefix(got, "sha256:") {
 		t.Fatalf("empty bundle: %q", got)
+	}
+}
+
+// TestBundleHash_NulContentIsInjective guards the length-prefixed framing: a
+// bare "<path>\x00<content>\x00" delimiter framing collided when a file's
+// CONTENT embedded the delimiter — two files {a:"x", b:"y"} produced the same
+// byte stream as one file {a:"x\x00b\x00y"}. Length prefixes must separate them.
+func TestBundleHash_NulContentIsInjective(t *testing.T) {
+	twoFiles := fstest.MapFS{
+		"a": {Data: []byte("x")},
+		"b": {Data: []byte("y")},
+	}
+	oneFile := fstest.MapFS{
+		"a": {Data: []byte("x\x00b\x00y")},
+	}
+	if mustHash(t, twoFiles) == mustHash(t, oneFile) {
+		t.Fatal("bundles collided — BundleHash framing is not injective over NUL-containing content")
 	}
 }
