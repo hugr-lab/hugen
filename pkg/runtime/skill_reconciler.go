@@ -206,11 +206,18 @@ func (r *skillReconciler) passWithTimeout(parent context.Context) {
 	}
 }
 
-// Refresh runs one reconcile pass on demand (the skill:refresh tool). It also
-// nudges the cadence loop so the background schedule stays aligned. Implements
-// [skill.Marketplace].
+// Refresh runs one reconcile pass on demand (the skill:refresh tool + the
+// manual POST /v1/skills/refresh endpoint) and returns THAT pass's counts.
+// Implements [skill.Marketplace].
+//
+// It deliberately does NOT Trigger() the background loop: doing so kicks a
+// second, concurrent pass that — now that reconcileOnce is mutex-serialised —
+// can grab the lock and do the work first, leaving this direct pass to observe
+// "nothing to do" and return misleading zero counts to the caller (observed in
+// SK6 live validation: a deleted bundle was re-fetched by the triggered pass,
+// upgraded=1, but the endpoint returned 0/0/0/0). The 30m ticker keeps its own
+// schedule independently.
 func (r *skillReconciler) Refresh(ctx context.Context) (skill.RefreshOutcome, error) {
-	r.Trigger()
 	return r.reconcileOnce(ctx)
 }
 
