@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,6 +82,12 @@ type HugrConfig struct {
 	Issuer      string
 	ClientID    string
 	Timeout     time.Duration
+	// HubURL is the base URL of the hub Skills marketplace
+	// (spec-skills-distribution SD7). Env HUGEN_HUB_URL; a transport knob,
+	// not agent config. In remote mode it defaults to scheme+host of
+	// TokenURL (the same hub-service that mints agent tokens). Empty
+	// disables the skill reconciler (embed seed remains the baseline).
+	HubURL string
 }
 
 func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
@@ -153,6 +160,7 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 			Issuer:      v.GetString("HUGR_ISSUER"),
 			ClientID:    v.GetString("HUGR_CLIENT_ID"),
 			Timeout:     v.GetDuration("HUGR_TIMEOUT"),
+			HubURL:      v.GetString("HUGEN_HUB_URL"),
 		},
 	}
 	if config.BaseURI == "" {
@@ -192,8 +200,28 @@ func loadBootstrapConfig(envPath string) (*BootstrapConfig, error) {
 			config.Mode = "local"
 		}
 	}
+	// Marketplace default (SD7): in remote mode the hub-service that mints
+	// agent tokens IS the marketplace, so derive HUGEN_HUB_URL from the
+	// scheme+host of HUGR_TOKEN_URL when the operator did not set it. Local
+	// mode must set it explicitly (no token-URL to derive from).
+	if config.Hugr.HubURL == "" && config.Mode == "remote" && config.Hugr.TokenURL != "" {
+		if base := schemeHost(config.Hugr.TokenURL); base != "" {
+			config.Hugr.HubURL = base
+		}
+	}
 
 	return config, nil
+}
+
+// schemeHost returns "scheme://host[:port]" of rawURL, or "" if it does not
+// parse as an absolute URL. Used to derive the marketplace base from the
+// agent token URL.
+func schemeHost(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // IsRemoteMode reports whether the agent is configured as a hub user
@@ -274,6 +302,7 @@ func projectRuntimeConfig(boot *BootstrapConfig, logger *slog.Logger) runtime.Co
 			Issuer:      boot.Hugr.Issuer,
 			ClientID:    boot.Hugr.ClientID,
 			Timeout:     boot.Hugr.Timeout,
+			HubURL:      boot.Hugr.HubURL,
 		},
 	}
 }

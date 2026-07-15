@@ -172,7 +172,7 @@ func NewSkillStore(opts Options) *Store {
 	}
 	if opts.LocalRoot != "" {
 		if dynamicWired {
-			s.dynamic = newDynamicBackend(opts.LocalRoot, opts.DynamicQuerier, opts.AgentID, opts.EmbedderEnabled, opts.Logger)
+			s.dynamic = newDynamicBackend(opts.LocalRoot, opts.HubRoot, opts.DynamicQuerier, opts.AgentID, opts.EmbedderEnabled, opts.Logger)
 			s.backends = append(s.backends, s.dynamic)
 		} else {
 			s.backends = append(s.backends, &dirBackend{origin: OriginLocal, root: opts.LocalRoot, writable: true})
@@ -366,6 +366,47 @@ func (s *Store) SyncDynamic(ctx context.Context, hubDir string, installSet []str
 	indexed, rerr := s.dynamic.Reconcile(ctx) // authored + relink (sees hub catalogs)
 	s.Refresh()
 	return installed + indexed, errors.Join(ierr, rerr)
+}
+
+// IndexHubBundles indexes the named hub-tier bundles from `hubDir` into the
+// DB index (source "hub", bundle_path = hubDir/<name>), then reconciles the
+// writable (authored) dir + refreshes the List cache. `names` is the install
+// ledger's key set (seed ∪ desired ∪ self) — the authoritative installed set,
+// so a self-installed bundle is always indexed regardless of the operator's
+// download policy (spec-skills-distribution §3). No-op without a dynamic
+// backend. This is the reconciler's index-resync primitive; the boot path
+// still uses [Store.SyncDynamic].
+func (s *Store) IndexHubBundles(ctx context.Context, hubDir string, names []string) (int, error) {
+	if s.dynamic == nil {
+		return 0, nil
+	}
+	installed, ierr := s.dynamic.installFromDir(ctx, hubDir, "hub", names, true)
+	indexed, rerr := s.dynamic.Reconcile(ctx) // authored + relink
+	s.Refresh()
+	return installed + indexed, errors.Join(ierr, rerr)
+}
+
+// RetireHubBundle removes a hub-tier installed skill the reconciler dropped
+// from the operator's desired set (SK6 removal-on-drop): it deletes the
+// dynamic-index row (source "hub") and the on-disk bundle at hubDir/<name>.
+// Unlike [dynamicBackend.Uninstall] it carries NO desired-origin refusal — the
+// reconciler IS the desired-set authority, whereas Uninstall guards against a
+// user hand-removing an admin-managed skill. The caller owns the ledger entry
+// and the follow-up re-index (IndexHubBundles). No-op without a dynamic
+// backend. installFromDir only adds/updates, so the index row must be dropped
+// explicitly here — a re-index alone would leave it stale. The on-disk bundle
+// is always removed; the index delete is skipped only when no dynamic backend
+// exists (nothing to prune).
+func (s *Store) RetireHubBundle(ctx context.Context, hubDir, name string) error {
+	if s.dynamic != nil {
+		if err := s.dynamic.index.deleteBySourceName(ctx, "hub", name); err != nil {
+			return fmt.Errorf("skill: retire index %q: %w", name, err)
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(hubDir, name)); err != nil {
+		return fmt.Errorf("skill: retire bundle %q: %w", name, err)
+	}
+	return nil
 }
 
 // ApplyPins reconciles the advertise-pin flag across the dynamic index

@@ -59,9 +59,30 @@ const providerName = "skill"
 // session under one Manager; per-session state lives in
 // [extension.SessionState] under [StateKey].
 type Extension struct {
-	manager *skillpkg.SkillManager
-	perms   perm.Service
-	agentID string
+	manager   *skillpkg.SkillManager
+	perms     perm.Service
+	agentID   string
+	publisher *Publisher           // nil = no marketplace configured; skill:publish then errors clearly
+	market    skillpkg.Marketplace // nil = no marketplace; skill:install/refresh then error clearly
+}
+
+// WithPublisher attaches the marketplace publisher used by skill:publish
+// (spec-skills-distribution SK3). Chainable so the runtime can wire it after
+// NewExtension without changing that constructor's 67 call sites. A nil
+// publisher leaves skill:publish available but returning a "not configured"
+// error.
+func (e *Extension) WithPublisher(p *Publisher) *Extension {
+	e.publisher = p
+	return e
+}
+
+// WithMarketplace attaches the marketplace client that backs skill:install /
+// skill:refresh (SK4). Chainable, same rationale as WithPublisher. A nil
+// marketplace leaves the tools available but returning a "not configured"
+// error.
+func (e *Extension) WithMarketplace(m skillpkg.Marketplace) *Extension {
+	e.market = m
+	return e
 }
 
 // agentParticipant returns the ParticipantInfo skill ext stamps on
@@ -107,6 +128,8 @@ func (e *Extension) InitState(ctx context.Context, state extension.SessionState)
 	h := &SessionSkill{
 		manager:   e.manager,
 		perms:     e.perms,
+		publisher: e.publisher,
+		market:    e.market,
 		sessionID: state.SessionID(),
 		author:    e.agentParticipant(),
 		loaded:    map[string]skillpkg.Skill{},
@@ -149,6 +172,8 @@ func (h *SessionSkill) autoload(ctx context.Context) {
 type SessionSkill struct {
 	manager   *skillpkg.SkillManager
 	perms     perm.Service
+	publisher *Publisher           // marketplace publisher for skill:publish (nil = unconfigured)
+	market    skillpkg.Marketplace // marketplace client for skill:install/refresh (nil = unconfigured)
 	sessionID string
 	author    protocol.ParticipantInfo
 	tier      string // skill.TierRoot / skill.TierMission / skill.TierWorker

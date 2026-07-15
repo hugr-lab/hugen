@@ -39,6 +39,12 @@ func runServe(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) in
 	if core.Artifacts != nil {
 		opts = append(opts, httpapi.WithArtifactStore(artifactShim{core.Artifacts}))
 	}
+	// SK6: manual skills-reconcile poke, backed by the marketplace reconciler.
+	if core.HasMarketplace() {
+		opts = append(opts, httpapi.WithSkillsRefresher(func(ctx context.Context) (any, error) {
+			return core.RefreshSkills(ctx)
+		}))
+	}
 	if boot.APIPort > 0 {
 		opts = append(opts, httpapi.WithListenPort(boot.APIPort))
 		core.Logger.Info("httpapi: dedicated listener mode", "port", boot.APIPort)
@@ -53,6 +59,10 @@ func runServe(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) in
 		defer cancel()
 		_ = rt.Shutdown(shutdownCtx)
 	}()
+
+	// SK2: start the background skills reconciler (no-op without a hub
+	// marketplace configured). Async first pass — never blocks serving.
+	core.StartSkillReconciler(ctx)
 
 	if err := rt.Start(ctx); err != nil {
 		if ctx.Err() != nil {

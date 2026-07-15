@@ -72,6 +72,9 @@ type HugrConfig struct {
 	Issuer      string
 	ClientID    string
 	Timeout     time.Duration
+	// HubURL is the hub Skills-marketplace base URL (SD7). Empty disables
+	// the skill reconciler; the embedded seed remains the offline baseline.
+	HubURL string
 }
 
 // Validate enforces minimum invariants Build relies on. Called at

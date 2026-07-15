@@ -98,6 +98,125 @@ func TestInstallBundledHubSkills_EmptyStateDir(t *testing.T) {
 	}
 }
 
+// TestInstallBundledHubSkills_WritesLedger proves the seed persists a
+// `.installed.json` recording the seeded skill as origin=seed at its
+// canonical embed hash — the record the reconciler coordinates on.
+func TestInstallBundledHubSkills_WritesLedger(t *testing.T) {
+	state := t.TempDir()
+	if err := InstallBundledHubSkills(state, discardLogger()); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	hubRoot := filepath.Join(state, "skills/hub")
+	ledger, err := skill.LoadLedger(hubRoot)
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	entry, ok := ledger.Get(hubTestSkill)
+	if !ok {
+		t.Fatalf("ledger missing %q", hubTestSkill)
+	}
+	if entry.Origin != skill.InstallSeed {
+		t.Errorf("origin = %q, want seed", entry.Origin)
+	}
+	// The ledger hash must equal the canonical hash of the materialised dir.
+	onDisk := onDiskBundleHash(filepath.Join(hubRoot, hubTestSkill))
+	if entry.Hash != onDisk || onDisk == "" {
+		t.Errorf("ledger hash %q != on-disk hash %q", entry.Hash, onDisk)
+	}
+}
+
+// TestInstallBundledHubSkills_DoesNotClobberDesired proves the flip-flop
+// fix: a marketplace (desired) install recorded in the ledger is never
+// overwritten by the embed seed, even when a same-named embed exists.
+func TestInstallBundledHubSkills_DoesNotClobberDesired(t *testing.T) {
+	state := t.TempDir()
+	hubRoot := filepath.Join(state, "skills/hub")
+	if err := os.MkdirAll(hubRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-seed a desired install of hubTestSkill with sentinel content + a
+	// ledger entry claiming a marketplace-delivered version.
+	dst := filepath.Join(hubRoot, hubTestSkill)
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dst, "MARKETPLACE_VERSION")
+	if err := os.WriteFile(marker, []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "SKILL.md"), []byte("name: "+hubTestSkill+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ledger, _ := skill.LoadLedger(hubRoot)
+	ledger.Set(hubTestSkill, skill.LedgerEntry{Hash: "sha256:marketplace", Origin: skill.InstallDesired})
+	if err := ledger.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := InstallBundledHubSkills(state, discardLogger()); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	// The marketplace marker must survive — the embed did not clobber it.
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("desired install was clobbered by the seed: %v", err)
+	}
+	// And the ledger still records it as desired.
+	after, _ := skill.LoadLedger(hubRoot)
+	if e, ok := after.Get(hubTestSkill); !ok || e.Origin != skill.InstallDesired {
+		t.Errorf("ledger origin flipped: %+v ok=%v", e, ok)
+	}
+}
+
+// TestInstallBundledHubSkills_SeedDivergedHashNotOverwritten proves that a
+// `seed` entry whose recorded hash has diverged from the embed (a
+// marketplace upgrade landed in place) is left alone on a restart.
+func TestInstallBundledHubSkills_SeedDivergedHashNotOverwritten(t *testing.T) {
+	state := t.TempDir()
+	hubRoot := filepath.Join(state, "skills/hub")
+	if err := os.MkdirAll(filepath.Join(hubRoot, hubTestSkill), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	upgraded := filepath.Join(hubRoot, hubTestSkill, "UPGRADED_BODY")
+	if err := os.WriteFile(upgraded, []byte("catalog"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hubRoot, hubTestSkill, "SKILL.md"), []byte("name: "+hubTestSkill+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ledger, _ := skill.LoadLedger(hubRoot)
+	// origin=seed but hash != any embed hash → records a marketplace upgrade.
+	ledger.Set(hubTestSkill, skill.LedgerEntry{Hash: "sha256:catalogupgrade", Origin: skill.InstallSeed})
+	if err := ledger.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallBundledHubSkills(state, discardLogger()); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if _, err := os.Stat(upgraded); err != nil {
+		t.Errorf("marketplace-upgraded seed body was clobbered back to embed: %v", err)
+	}
+}
+
+// TestInstallBundledHubSkills_RematerialisesDeletedSeed proves that a
+// seed@embed skill whose dir is deleted out of band (ledger entry intact)
+// is re-materialised on the next seed pass.
+func TestInstallBundledHubSkills_RematerialisesDeletedSeed(t *testing.T) {
+	state := t.TempDir()
+	if err := InstallBundledHubSkills(state, discardLogger()); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+	dst := filepath.Join(state, "skills/hub", hubTestSkill)
+	if err := os.RemoveAll(dst); err != nil { // out-of-band delete, ledger untouched
+		t.Fatal(err)
+	}
+	if err := InstallBundledHubSkills(state, discardLogger()); err != nil {
+		t.Fatalf("second install: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "SKILL.md")); err != nil {
+		t.Errorf("deleted seed not re-materialised: %v", err)
+	}
+}
+
 // TestInstallBundledHubSkills_AddsBundleSkillOnExistingInstall
 // proves the additive path: an existing install that already has
 // one bundled skill installed gets a fresh sibling on the next
