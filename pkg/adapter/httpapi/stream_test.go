@@ -56,7 +56,7 @@ func TestWriteSSEFrame_Format(t *testing.T) {
 	f := protocol.NewUserMessage("ses-1", protocol.ParticipantInfo{ID: "u1", Kind: protocol.ParticipantUser}, "hello")
 	var sb strings.Builder
 	rc := http.NewResponseController(httptest.NewRecorder())
-	if err := writeSSEFrame(&sb, rc, 7, f); err != nil {
+	if err := writeSSEFrame(&sb, rc, nil, 7, f); err != nil {
 		t.Fatalf("writeSSEFrame: %v", err)
 	}
 	out := sb.String()
@@ -71,7 +71,7 @@ func TestWriteSSEFrame_Format(t *testing.T) {
 	}
 	// seq 0 (streaming chunk) → no id line.
 	sb.Reset()
-	if err := writeSSEFrame(&sb, rc, 0, f); err != nil {
+	if err := writeSSEFrame(&sb, rc, nil, 0, f); err != nil {
 		t.Fatalf("writeSSEFrame(seq0): %v", err)
 	}
 	if strings.Contains(sb.String(), "id:") {
