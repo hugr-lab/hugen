@@ -62,6 +62,12 @@ func runServe(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) in
 	if core.Skills != nil {
 		opts = append(opts, httpapi.WithSkillManager(core.Skills))
 	}
+	// Tool-provider panel: list managed MCP providers + reconcile on the hub's
+	// config-change push (per_agent providers become live in all sessions).
+	opts = append(opts,
+		httpapi.WithToolProviderLister(func(ctx context.Context) (any, error) { return core.ListToolProviders(ctx) }),
+		httpapi.WithToolProviderReloader(func(ctx context.Context) (any, error) { return core.ReloadToolProviders(ctx) }),
+	)
 	if boot.APIPort > 0 {
 		opts = append(opts, httpapi.WithListenPort(boot.APIPort))
 		core.Logger.Info("httpapi: dedicated listener mode", "port", boot.APIPort)

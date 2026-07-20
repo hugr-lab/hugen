@@ -85,6 +85,12 @@ type Core struct {
 	Tools    *tool.ToolManager
 	Policies *policies.Policies
 
+	// managedToolProviders tracks the console-managed (per_agent HTTP/SSE MCP)
+	// providers currently applied to the root Tools, keyed by name. Seeded at
+	// boot (seedManagedToolProviders) and reconciled by ReloadToolProviders.
+	toolProvidersMu      sync.Mutex
+	managedToolProviders map[string]config.ToolProviderSpec
+
 	// Phase 8.5 (extensions). Built by phaseExtensions; consumed by
 	// phaseSessionManager via session.WithExtensions. Each extension
 	// implementing tool.ToolProvider is also registered on Tools so

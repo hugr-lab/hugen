@@ -406,12 +406,33 @@ func (m *ToolManager) Snapshot(ctx context.Context, sessionID string) (Snapshot,
 // ToolGen exposes the current tool generation. Bumped on
 // AddProvider / RemoveProvider; used by per-session snapshot
 // caches in pkg/session to detect when a rebuild is needed.
-func (m *ToolManager) ToolGen() int64 { return m.toolGen.Load() }
+//
+// A child folds in its parent's generation so a session (which runs on a
+// child Manager) observes agent-level (root) provider changes too: when a
+// per_agent provider is added/removed on the root, root.toolGen bumps and the
+// child's exposed gen rises with it, invalidating the session's cached tool
+// snapshot on its next turn. Without this fold a root-level add would be
+// invisible to every already-live session (the snapshot walks to parent for
+// the data, but the cache key never moved).
+func (m *ToolManager) ToolGen() int64 {
+	g := m.toolGen.Load()
+	if m.parent != nil {
+		g += m.parent.ToolGen()
+	}
+	return g
+}
 
 // PolicyGen exposes the current policy generation. Bumped on
 // SetPolicies / BumpPolicyGen; same role as ToolGen for the
-// caller's cache invalidation logic.
-func (m *ToolManager) PolicyGen() int64 { return m.policyGen.Load() }
+// caller's cache invalidation logic. Folds in the parent's generation for the
+// same reason ToolGen does (Tier-3 policies resolve up the parent chain).
+func (m *ToolManager) PolicyGen() int64 {
+	g := m.policyGen.Load()
+	if m.parent != nil {
+		g += m.parent.PolicyGen()
+	}
+	return g
+}
 
 func (m *ToolManager) currentGenerations(_ context.Context, _ string) (Generations, error) {
 	return Generations{
