@@ -195,6 +195,26 @@ func dispatchInquiryResponse(s *Session, ctx context.Context, f protocol.Frame) 
 		return
 	}
 	rid := resp.Payload.RequestID
+	// Persist a replayable answered-marker on THIS session's log. The live
+	// pending-inquiry clear is outbox-only (never replayed) and no liveview
+	// status is emitted once the session goes idle after the answer — so a
+	// client that reconnects or switches back would otherwise re-derive the
+	// already-answered approval from the stale liveview snapshot. A persisted
+	// inquiry_response lets replay mark the request_id answered (and preserves
+	// the actual answer for audit). We build a fresh marker anchored on s.id —
+	// the forwarded frame keeps the root's SessionID as it cascades down, so
+	// copying it would stamp a foreign SessionID onto a child's log. Every
+	// session that raised OR forwarded the inquiry records its own marker, since
+	// a client may be attached at any tier. persistOnly (no outbox push) keeps
+	// live clients — which already closed their modal on the answer — from
+	// double-processing; only replay sees it.
+	if !s.IsClosed() {
+		marker := protocol.NewInquiryResponse(s.id, resp.Author(), resp.Payload)
+		if err := s.persistOnly(ctx, marker); err != nil {
+			s.logger.Warn("session: persist inquiry answered-marker",
+				"session", s.id, "request_id", rid, "err", err)
+		}
+	}
 	// Local pending for this RequestID? Deliver to the blocked tool body.
 	if s.deliverPending(resp) {
 		s.clearResponseRoute(rid)

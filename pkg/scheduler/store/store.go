@@ -172,11 +172,14 @@ type TaskOutcome struct {
 }
 
 // ListTasksOpts narrows the result set returned by
-// [TaskStore.ListTasksBySession]. Empty Status returns rows of every
-// status. Limit <= 0 means "use the implementation default".
+// [TaskStore.ListTasksBySession]. Empty Status/Statuses returns rows of
+// every status. Statuses (an `IN (…)` set) takes precedence over the
+// single-value Status when both are set. Limit <= 0 means "use the
+// implementation default".
 type ListTasksOpts struct {
-	Status string
-	Limit  int
+	Status   string
+	Statuses []string
+	Limit    int
 }
 
 // ListLogOpts narrows the result set returned by
@@ -204,6 +207,12 @@ type TaskStore interface {
 
 	GetTask(ctx context.Context, id string) (TaskRow, error)
 	ListTasksBySession(ctx context.Context, sessionID string, opts ListTasksOpts) ([]TaskRow, error)
+
+	// CountTasksBySession returns the count of a session's tasks grouped by
+	// status. Backed by one `tasks_bucket_aggregation` — cheap even when a
+	// session has a long cancelled/completed history a UI wants a badge for
+	// without listing the rows. Missing statuses are simply absent from the map.
+	CountTasksBySession(ctx context.Context, sessionID string) (map[string]int, error)
 
 	// ListDue returns active tasks for agentID whose latest
 	// `task_log` `planned` row has `planned_at <= now`. Limit caps

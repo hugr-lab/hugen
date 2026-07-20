@@ -57,6 +57,13 @@ type Runtime struct {
 
 	subMu       sync.Mutex
 	subscribers map[string][]chan protocol.Frame
+	// lastStatus caches the most recent liveview status frame per session
+	// (guarded by subMu). The liveview status is outbox-only (never persisted /
+	// replayed), so a fresh subscriber would see a blank sidebar until the next
+	// live emit — which, for an idle session, may never come. On Subscribe we
+	// replay the cached status to the new channel so a UI shows the current
+	// state immediately. Server-side analog of the console's sticky cache.
+	lastStatus map[string]protocol.Frame
 	// pumping guards against starting a second Outbox pump for a
 	// session instance that already has one. ResumeSession is called
 	// on every adapter attach (e.g. httpapi stream open) and returns
@@ -92,6 +99,7 @@ func NewRuntime(manager *Manager, adapters []Adapter, logger *slog.Logger) *Runt
 		adapters:    adapters,
 		logger:      logger,
 		subscribers: make(map[string][]chan protocol.Frame),
+		lastStatus:  make(map[string]protocol.Frame),
 		pumping:     make(map[*session.Session]bool),
 		ctx:         context.Background(),
 	}
@@ -152,10 +160,22 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 func (r *Runtime) fanout(f protocol.Frame) {
 	r.subMu.Lock()
 	chans := append([]chan protocol.Frame(nil), r.subscribers[f.SessionID()]...)
+	if isLiveviewStatus(f) {
+		r.lastStatus[f.SessionID()] = f
+	}
 	r.subMu.Unlock()
 	for _, c := range chans {
 		r.fanoutSend(c, f)
 	}
+}
+
+// isLiveviewStatus reports whether f is a liveview status emit — the outbox-only
+// sidebar snapshot the manager caches for replay on a fresh Subscribe. Matched
+// on the wire values (extension "liveview", op "status") to avoid importing the
+// extension package into the manager.
+func isLiveviewStatus(f protocol.Frame) bool {
+	ef, ok := f.(*protocol.ExtensionFrame)
+	return ok && ef.Payload.Extension == "liveview" && ef.Payload.Op == "status"
 }
 
 // fanoutWarnAfter is the soft deadline before a slow subscriber
@@ -315,7 +335,18 @@ func (h *adapterHost) Subscribe(ctx context.Context, sessionID string) (<-chan p
 	c := make(chan protocol.Frame, 256)
 	h.rt.subMu.Lock()
 	h.rt.subscribers[sessionID] = append(h.rt.subscribers[sessionID], c)
+	cached := h.rt.lastStatus[sessionID]
 	h.rt.subMu.Unlock()
+	// Prime the new subscriber with the last known liveview status so a UI
+	// renders the current sidebar immediately — the status is outbox-only and
+	// otherwise wouldn't arrive until the next live emit (never, if idle).
+	// Non-blocking: the freshly-made buffer (256) always has room here.
+	if cached != nil {
+		select {
+		case c <- cached:
+		default:
+		}
+	}
 	go func() {
 		<-ctx.Done()
 		h.rt.subMu.Lock()

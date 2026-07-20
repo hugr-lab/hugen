@@ -83,6 +83,16 @@ type Adapter struct {
 	// configured.
 	refreshSkills SkillsRefresher
 
+	// taskStore backs GET /v1/sessions/{id}/tasks — the per-session scheduled-
+	// task list a UI renders in its live view. nil ⇒ the endpoint returns an
+	// empty list (scheduler not wired on this runtime). Wired from core.TaskStore.
+	taskStore taskReader
+
+	// taskCtl backs the task-lifecycle writes (cancel / delete). nil ⇒ those
+	// endpoints return 501. Wired from the scheduler Extension (coordinates
+	// store + runner) so a cancel actually stops the in-memory fire index.
+	taskCtl taskController
+
 	host adapter.Host
 	// lifecycleCtx is the adapter's Run ctx (process lifetime). Sessions are
 	// opened/closed on it, NOT a per-request ctx — a session's Run loop must
@@ -140,6 +150,14 @@ func WithVerifier(f VerifyFunc) Option { return func(a *Adapter) { a.verify = f 
 // WithArtifactStore enables the H6 artifact endpoints (list / download /
 // ingest). nil leaves them returning 501.
 func WithArtifactStore(s ArtifactStore) Option { return func(a *Adapter) { a.artifacts = s } }
+
+// WithTaskStore enables GET /v1/sessions/{id}/tasks — the per-session scheduled-
+// task list. nil leaves the endpoint returning an empty list.
+func WithTaskStore(s taskReader) Option { return func(a *Adapter) { a.taskStore = s } }
+
+// WithTaskController enables the task-lifecycle write endpoints (cancel /
+// delete). nil leaves them returning 501.
+func WithTaskController(c taskController) Option { return func(a *Adapter) { a.taskCtl = c } }
 
 // New constructs the HTTP API adapter. Callers select a listener mode via
 // WithSharedMux or WithListenPort; New defaults neither (the cmd layer decides
@@ -242,6 +260,11 @@ func (a *Adapter) mount(mux *http.ServeMux, health bool) error {
 	mux.Handle("GET /v1/sessions/{id}/stream", a.authMiddleware(http.HandlerFunc(a.handleStream)))
 	// H6: history + artifacts.
 	mux.Handle("GET /v1/sessions/{id}/events", a.authMiddleware(http.HandlerFunc(a.handleListEvents)))
+	mux.Handle("GET /v1/sessions/{id}/tasks", a.authMiddleware(http.HandlerFunc(a.handleListSessionTasks)))
+	mux.Handle("POST /v1/sessions/{id}/tasks/{taskId}/cancel", a.authMiddleware(http.HandlerFunc(a.handleCancelSessionTask)))
+	mux.Handle("POST /v1/sessions/{id}/tasks/{taskId}/pause", a.authMiddleware(http.HandlerFunc(a.handlePauseSessionTask)))
+	mux.Handle("POST /v1/sessions/{id}/tasks/{taskId}/resume", a.authMiddleware(http.HandlerFunc(a.handleResumeSessionTask)))
+	mux.Handle("DELETE /v1/sessions/{id}/tasks/{taskId}", a.authMiddleware(http.HandlerFunc(a.handleDeleteSessionTask)))
 	mux.Handle("GET /v1/sessions/{id}/artifacts", a.authMiddleware(http.HandlerFunc(a.handleListArtifacts)))
 	mux.Handle("GET /v1/sessions/{id}/artifacts/{aid}", a.authMiddleware(http.HandlerFunc(a.handleGetArtifact)))
 	mux.Handle("POST /v1/sessions/{id}/artifacts", a.authMiddleware(http.HandlerFunc(a.handleIngestArtifact)))

@@ -22,6 +22,10 @@ type SessionSummary struct {
 	OpenedAt  time.Time
 	UpdatedAt time.Time
 	Metadata  map[string]any
+	// LastSeq is the session's highest event seq (0 when it has no events).
+	// Populated by ListSessions; lets a UI compute unread counts against a
+	// per-chat last-read cursor. Zero on paths that don't request it.
+	LastSeq int
 }
 
 // OpenRequest carries the parameters for the Manager's Open path.

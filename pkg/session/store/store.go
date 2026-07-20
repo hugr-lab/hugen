@@ -128,6 +128,24 @@ type SessionRow struct {
 	Metadata           map[string]any `json:"metadata,omitempty"`
 	CreatedAt          time.Time      `json:"created_at"`
 	UpdatedAt          time.Time      `json:"updated_at"`
+
+	// MaxSeqEvent is populated ONLY by ListSessions' nested subquery (the single
+	// highest-seq event). It is not a persisted column and has no mapping in
+	// FrameToEventRow — it exists so a UI can compute unread counts against a
+	// per-chat last-read cursor without a second round-trip. Read via LastSeq().
+	MaxSeqEvent []struct {
+		Seq int `json:"seq"`
+	} `json:"events,omitempty"`
+}
+
+// LastSeq returns the session's highest event seq, or 0 when it has no events.
+// Only meaningful on rows returned by ListSessions (which requests the nested
+// max-seq event); other read paths leave it zero.
+func (r SessionRow) LastSeq() int {
+	if len(r.MaxSeqEvent) > 0 {
+		return r.MaxSeqEvent[0].Seq
+	}
+	return 0
 }
 
 // EventRow mirrors hub.agent.db.session_events. Frame envelope fields
@@ -835,6 +853,7 @@ func (s *RuntimeStoreLocal) ListSessions(ctx context.Context, agentID, status st
 				sessions(filter: $filter, order_by: [{field: "updated_at", direction: DESC}]) {
 					id agent_id owner_id parent_session_id session_type spawned_from_event_id
 					status mission metadata created_at updated_at
+					events(nested_order_by: [{field: "seq", direction: DESC}], nested_limit: 1) { seq }
 				}
 			}}}
 		}`,
