@@ -58,6 +58,10 @@ func runServe(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) in
 			return core.RefreshSkills(ctx)
 		}))
 	}
+	// Skills panel: list installed / export bundle / install-from-bundle.
+	if core.Skills != nil {
+		opts = append(opts, httpapi.WithSkillManager(core.Skills))
+	}
 	if boot.APIPort > 0 {
 		opts = append(opts, httpapi.WithListenPort(boot.APIPort))
 		core.Logger.Info("httpapi: dedicated listener mode", "port", boot.APIPort)

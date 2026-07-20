@@ -83,6 +83,10 @@ type Adapter struct {
 	// configured.
 	refreshSkills SkillsRefresher
 
+	// skills backs the skills-panel endpoints (list / export / install). nil ⇒
+	// those endpoints return 501. Wired from core.Skills in the cmd layer.
+	skills skillManager
+
 	// taskStore backs GET /v1/sessions/{id}/tasks — the per-session scheduled-
 	// task list a UI renders in its live view. nil ⇒ the endpoint returns an
 	// empty list (scheduler not wired on this runtime). Wired from core.TaskStore.
@@ -271,6 +275,12 @@ func (a *Adapter) mount(mux *http.ServeMux, health bool) error {
 
 	// SK6: manual skills reconcile poke.
 	mux.Handle("POST /v1/skills/refresh", a.authMiddleware(http.HandlerFunc(a.handleRefreshSkills)))
+	// Skills panel: list installed / export bundle / install-from-bundle. The
+	// owner/admin gate on export + install is enforced at the hub proxy; hugen
+	// authenticates the forwarded user only.
+	mux.Handle("GET /v1/skills", a.authMiddleware(http.HandlerFunc(a.handleListSkills)))
+	mux.Handle("GET /v1/skills/{name}/export", a.authMiddleware(http.HandlerFunc(a.handleExportSkill)))
+	mux.Handle("POST /v1/skills/install", a.authMiddleware(http.HandlerFunc(a.handleInstallSkill)))
 	if health {
 		mux.HandleFunc(healthzPath, healthHandler)
 		mux.HandleFunc(readyzPath, healthHandler)
