@@ -421,7 +421,12 @@ func (v *sessionView) emitStatus() {
 	}
 	frame := protocol.NewExtensionFrame(
 		v.sessionID,
-		protocol.ParticipantInfo{},
+		// A valid author is REQUIRED: the SSE codec's Validate rejects an empty
+		// author, and writeSSEFrame silently skips an unencodable frame — so an
+		// empty author here makes the whole live view invisible to every HTTP/SSE
+		// client (the in-process TUI never encodes, so it was unaffected). This is
+		// a system-emitted projection, so a stable synthetic author suffices.
+		protocol.ParticipantInfo{ID: providerName, Kind: protocol.ParticipantSystem, Name: providerName},
 		providerName, protocol.CategoryMarker, opStatus, data,
 	)
 	if err := state.OutboxOnly(context.Background(), frame); err != nil && v.logger != nil {

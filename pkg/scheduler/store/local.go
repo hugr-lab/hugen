@@ -241,7 +241,10 @@ func (s *LocalTaskStore) ListTasksBySession(ctx context.Context, sessionID strin
 		limit = 100
 	}
 	filter := map[string]any{"owner_session_id": map[string]any{"eq": sessionID}}
-	if opts.Status != "" {
+	switch {
+	case len(opts.Statuses) > 0:
+		filter["status"] = map[string]any{"in": opts.Statuses}
+	case opts.Status != "":
 		filter["status"] = map[string]any{"eq": opts.Status}
 	}
 	rows, err := queries.RunQuery[[]taskRowDB](ctx, s.querier,
@@ -277,6 +280,43 @@ func (s *LocalTaskStore) ListTasksBySession(ctx context.Context, sessionID strin
 // non-issue. When scale changes, the Postgres path can switch to a
 // custom view; the index `idx_task_log_latest` already supports the
 // O(log n) per-task probe.
+func (s *LocalTaskStore) CountTasksBySession(ctx context.Context, sessionID string) (map[string]int, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("scheduler/store: CountTasksBySession requires sessionID")
+	}
+	type bucketRow struct {
+		Key struct {
+			Status string `json:"status"`
+		} `json:"key"`
+		Aggregations struct {
+			RowsCount int `json:"_rows_count"`
+		} `json:"aggregations"`
+	}
+	rows, err := queries.RunQuery[[]bucketRow](ctx, s.querier,
+		`query ($filter: hub_agent_db_tasks_filter) {
+			hub { agent { db {
+				tasks_bucket_aggregation(filter: $filter) {
+					key { status }
+					aggregations { _rows_count }
+				}
+			}}}
+		}`,
+		map[string]any{"filter": map[string]any{"owner_session_id": map[string]any{"eq": sessionID}}},
+		"hub.agent.db.tasks_bucket_aggregation",
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrWrongDataPath) || errors.Is(err, types.ErrNoData) {
+			return map[string]int{}, nil
+		}
+		return nil, err
+	}
+	out := make(map[string]int, len(rows))
+	for _, r := range rows {
+		out[r.Key.Status] = r.Aggregations.RowsCount
+	}
+	return out, nil
+}
+
 func (s *LocalTaskStore) ListDue(ctx context.Context, agentID string, now time.Time, limit int) ([]TaskRow, error) {
 	if agentID == "" {
 		return nil, fmt.Errorf("scheduler/store: ListDue requires agentID")

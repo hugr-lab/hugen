@@ -513,6 +513,7 @@ func rowsToSummaries(rows []store.SessionRow) []session.SessionSummary {
 			OpenedAt:  r.CreatedAt,
 			UpdatedAt: r.UpdatedAt,
 			Metadata:  r.Metadata,
+			LastSeq:   r.LastSeq(),
 		})
 	}
 	return out

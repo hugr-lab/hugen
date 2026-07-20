@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/hugr-lab/hugen/pkg/internal/fixture"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 )
 
@@ -22,7 +23,7 @@ func TestDispatchInquiryResponse_DeliverToOriginator(t *testing.T) {
 	// delivery so a late re-emit does not double-forward.
 	parent.recordResponseRoute(requestID, "ses-stale-child")
 
-	resp := protocol.NewInquiryResponse(parent.id, protocol.ParticipantInfo{},
+	resp := protocol.NewInquiryResponse(parent.id, protocol.ParticipantInfo{ID: "alice", Kind: protocol.ParticipantUser, Name: "alice"},
 		protocol.InquiryResponsePayload{
 			RequestID:       requestID,
 			CallerSessionID: parent.id,
@@ -43,6 +44,42 @@ func TestDispatchInquiryResponse_DeliverToOriginator(t *testing.T) {
 	}
 }
 
+// TestDispatchInquiryResponse_PersistsAnsweredMarker verifies the dispatcher
+// records a replayable inquiry_response marker on the session's event log. The
+// live pending-inquiry clear is outbox-only (never replayed), so without this a
+// reconnecting/switching client re-derives an already-answered approval from the
+// stale liveview snapshot.
+func TestDispatchInquiryResponse_PersistsAnsweredMarker(t *testing.T) {
+	testStore := fixture.NewTestStore()
+	parent, cleanup := newTestParent(t, withTestStore(testStore))
+	defer cleanup()
+
+	const requestID = "req-marker-1"
+	parent.recordPending(requestID, nil)
+	defer parent.clearPending(requestID)
+
+	resp := protocol.NewInquiryResponse(parent.id,
+		protocol.ParticipantInfo{ID: "alice", Kind: protocol.ParticipantUser, Name: "alice"},
+		protocol.InquiryResponsePayload{RequestID: requestID, Response: "ok"})
+	dispatchInquiryResponse(parent, context.Background(), resp)
+
+	events, err := testStore.ListEvents(context.Background(), parent.id, ListEventsOpts{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var found bool
+	for _, ev := range events {
+		if ev.EventType == string(protocol.KindInquiryResponse) {
+			if rid, _ := ev.Metadata["request_id"].(string); rid == requestID {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no persisted inquiry_response marker for %q; got %d events", requestID, len(events))
+	}
+}
+
 // TestDispatchInquiryResponse_NoRouteDrops covers the case where
 // the response cascaded into a hop with no matching route
 // (chain previously cleared by timeout / sibling teardown). The
@@ -51,7 +88,7 @@ func TestDispatchInquiryResponse_NoRouteDrops(t *testing.T) {
 	parent, cleanup := newTestParent(t)
 	defer cleanup()
 
-	resp := protocol.NewInquiryResponse(parent.id, protocol.ParticipantInfo{},
+	resp := protocol.NewInquiryResponse(parent.id, protocol.ParticipantInfo{ID: "alice", Kind: protocol.ParticipantUser, Name: "alice"},
 		protocol.InquiryResponsePayload{
 			RequestID:       "req-orphan-1",
 			CallerSessionID: "ses-some-other-originator",
@@ -88,7 +125,7 @@ func TestDispatchInquiryResponse_ChildGoneClearsRoute(t *testing.T) {
 	delete(parent.children, childID)
 	parent.childMu.Unlock()
 
-	resp := protocol.NewInquiryResponse(parent.id, protocol.ParticipantInfo{},
+	resp := protocol.NewInquiryResponse(parent.id, protocol.ParticipantInfo{ID: "alice", Kind: protocol.ParticipantUser, Name: "alice"},
 		protocol.InquiryResponsePayload{
 			RequestID:       requestID,
 			CallerSessionID: "ses-deep-originator",
@@ -136,7 +173,7 @@ func TestDeliverPending_BufferedSecondDelivery(t *testing.T) {
 	ch := parent.recordPending(requestID, nil)
 	defer parent.clearPending(requestID)
 
-	resp := protocol.NewInquiryResponse(parent.id, protocol.ParticipantInfo{},
+	resp := protocol.NewInquiryResponse(parent.id, protocol.ParticipantInfo{ID: "alice", Kind: protocol.ParticipantUser, Name: "alice"},
 		protocol.InquiryResponsePayload{RequestID: requestID, CallerSessionID: parent.id, Response: "first"})
 
 	if !parent.deliverPending(resp) {

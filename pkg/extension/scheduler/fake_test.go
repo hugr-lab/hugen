@@ -85,6 +85,18 @@ func (s *fakeStore) ListTasksBySession(_ context.Context, sessionID string, opts
 	return out, nil
 }
 
+func (s *fakeStore) CountTasksBySession(_ context.Context, sessionID string) (map[string]int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]int{}
+	for _, row := range s.tasks {
+		if row.OwnerSessionID == sessionID {
+			out[row.Status]++
+		}
+	}
+	return out, nil
+}
+
 func (s *fakeStore) ListDue(_ context.Context, _ string, _ time.Time, _ int) ([]schedstore.TaskRow, error) {
 	return nil, errors.New("fakeStore: ListDue not implemented for these tests")
 }

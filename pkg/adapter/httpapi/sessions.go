@@ -46,6 +46,9 @@ type sessionDTO struct {
 	Status    string    `json:"status"`
 	OpenedAt  time.Time `json:"opened_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// LastSeq is the highest event seq — a UI computes unread against a per-chat
+	// last-read cursor. 0 when the session has no events.
+	LastSeq int `json:"last_seq"`
 }
 
 // handleCreateSession opens a root session owned by the verified caller. Opened
@@ -171,7 +174,7 @@ func participantFor(u VerifiedUser) protocol.ParticipantInfo {
 }
 
 func toDTO(s session.SessionSummary) sessionDTO {
-	return sessionDTO{ID: s.ID, Status: s.Status, OpenedAt: s.OpenedAt, UpdatedAt: s.UpdatedAt}
+	return sessionDTO{ID: s.ID, Status: s.Status, OpenedAt: s.OpenedAt, UpdatedAt: s.UpdatedAt, LastSeq: s.LastSeq}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

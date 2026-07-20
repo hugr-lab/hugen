@@ -3,6 +3,7 @@ package httpapi
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -93,7 +94,7 @@ func (a *Adapter) handleStream(w http.ResponseWriter, r *http.Request) {
 				if ferr != nil {
 					continue
 				}
-				if writeErr := writeSSEFrame(w, rc, ev.Seq, frame); writeErr != nil {
+				if writeErr := writeSSEFrame(w, rc, a.logger, ev.Seq, frame); writeErr != nil {
 					return
 				}
 				if ev.Seq > maxReplayed {
@@ -120,7 +121,7 @@ func (a *Adapter) handleStream(w http.ResponseWriter, r *http.Request) {
 			if alreadyReplayed(f.Seq(), maxReplayed) {
 				continue // persisted frame already in the replay
 			}
-			if err := writeSSEFrame(w, rc, f.Seq(), f); err != nil {
+			if err := writeSSEFrame(w, rc, a.logger, f.Seq(), f); err != nil {
 				return
 			}
 			if f.Seq() > maxReplayed {
@@ -161,10 +162,16 @@ func parseLastEventID(r *http.Request) int {
 // writeSSEFrame writes one frame as an SSE event: `id: <seq>` (persisted frames
 // only) + `data: <wire-json>`. json.Marshal never emits raw newlines, so the
 // payload is a single data line. Bounded by a write deadline (slow-client guard).
-func writeSSEFrame(w io.Writer, rc *http.ResponseController, seq int, f protocol.Frame) error {
+func writeSSEFrame(w io.Writer, rc *http.ResponseController, logger *slog.Logger, seq int, f protocol.Frame) error {
 	data, err := sseCodec.EncodeFrame(f)
 	if err != nil {
-		return nil // skip an unencodable frame rather than kill the stream
+		// Skip an unencodable frame rather than kill the stream — but WARN, not
+		// silently: a swallowed encode error here once hid the whole live view
+		// (liveview frames built with an empty author failed Validate).
+		if logger != nil {
+			logger.Warn("httpapi: skipping unencodable SSE frame", "kind", f.Kind(), "err", err)
+		}
+		return nil
 	}
 	var b strings.Builder
 	if seq > 0 {

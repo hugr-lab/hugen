@@ -173,6 +173,15 @@ func (s *Session) projectChildFrame(child *Session, f protocol.Frame, st *childP
 			Payload:   v.Payload,
 		}
 		bubbled.BaseFrame.Session = s.id
+		// The bubbled copy is emitted OUTBOX-ONLY on this hop (never persisted
+		// here), so it must not carry the child's seq. On an SSE stream that seq
+		// is read in THIS session's namespace, where a fresh child's low seq is
+		// <= root's already-high replay cursor, so the stream's replay-dedup
+		// (alreadyReplayed) would silently drop the live frame — the HITL modal
+		// never reaches an HTTP client and the mission hangs in wait_approval.
+		// Seq 0 marks it live-only (like every other outbox-only projection) so
+		// no client dedups it; the child's original frame keeps its real seq.
+		bubbled.SetSeq(0)
 		_ = s.outboxOnly(s.ctx, bubbled)
 	case *protocol.SessionTerminated:
 		if !st.projected {

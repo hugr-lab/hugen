@@ -7,6 +7,7 @@ import (
 
 	"github.com/hugr-lab/hugen/pkg/adapter/httpapi"
 	artifactext "github.com/hugr-lab/hugen/pkg/extension/artifact"
+	schedext "github.com/hugr-lab/hugen/pkg/extension/scheduler"
 	"github.com/hugr-lab/hugen/pkg/protocol"
 	"github.com/hugr-lab/hugen/pkg/runtime"
 	"github.com/hugr-lab/hugen/pkg/session/manager"
@@ -38,6 +39,18 @@ func runServe(ctx context.Context, core *runtime.Core, boot *BootstrapConfig) in
 	// H6: artifact endpoints, backed by the artifact extension.
 	if core.Artifacts != nil {
 		opts = append(opts, httpapi.WithArtifactStore(artifactShim{core.Artifacts}))
+	}
+	// Per-session scheduled-task list, backed by the scheduler store.
+	if core.TaskStore != nil {
+		opts = append(opts, httpapi.WithTaskStore(core.TaskStore))
+	}
+	// Task-lifecycle writes (cancel/delete) go through the scheduler extension
+	// so store + in-memory runner index stay in sync.
+	for _, ext := range core.Extensions {
+		if sched, ok := ext.(*schedext.Extension); ok {
+			opts = append(opts, httpapi.WithTaskController(sched))
+			break
+		}
 	}
 	// SK6: manual skills-reconcile poke, backed by the marketplace reconciler.
 	if core.HasMarketplace() {

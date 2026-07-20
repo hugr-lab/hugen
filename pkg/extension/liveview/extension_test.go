@@ -78,6 +78,13 @@ func TestExtension_OnFrameEmit_ForceEmitOnInquiry(t *testing.T) {
 		t.Errorf("frame metadata: extension=%q op=%q, want %q/%q",
 			ef.Payload.Extension, ef.Payload.Op, providerName, opStatus)
 	}
+	// Regression: the frame MUST carry a valid author, else the SSE codec's
+	// Validate rejects it and writeSSEFrame silently drops it — making the whole
+	// live view invisible to every HTTP/SSE client (only the in-process TUI,
+	// which never encodes, was unaffected).
+	if err := protocol.Validate(ef); err != nil {
+		t.Fatalf("emitted liveview frame fails Validate (empty author?): %v", err)
+	}
 	var body map[string]any
 	if err := json.Unmarshal(ef.Payload.Data, &body); err != nil {
 		t.Fatalf("payload unmarshal: %v", err)
