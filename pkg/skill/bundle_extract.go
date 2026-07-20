@@ -13,11 +13,12 @@ import (
 // ExtractTarGz extracts a gzip-compressed tar (the wire form [TarGzBundle]
 // produces) into dst, rejecting any entry that would escape dst — an absolute
 // path, a "..", or a symlink/hardlink/device — and enforcing a cumulative byte
-// cap and a file-count cap. Only regular files and directories are
-// materialised, so a malicious bundle cannot plant a link that writes outside
-// the tree. It is the inverse of [TarGzBundle] and the canonical safe-extract
-// used by the skills-install path; the byte/file caps are the caller's policy
-// (the marketplace uses 32 MiB / 4096 files).
+// cap and an entry-count cap (directories counted too, so a dir-only archive
+// can't slip past the byte cap and exhaust inodes). Only regular files and
+// directories are materialised, so a malicious bundle cannot plant a link that
+// writes outside the tree. It is the inverse of [TarGzBundle] and the canonical
+// safe-extract used by the skills-install path; the byte/entry caps are the
+// caller's policy (the marketplace uses 32 MiB / 4096 entries).
 func ExtractTarGz(r io.Reader, dst string, maxBytes int64, maxFiles int) error {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
@@ -35,7 +36,7 @@ func ExtractTarGz(r io.Reader, dst string, maxBytes int64, maxFiles int) error {
 	}
 
 	var total int64
-	var files int
+	var entries int
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -46,6 +47,13 @@ func ExtractTarGz(r io.Reader, dst string, maxBytes int64, maxFiles int) error {
 		}
 		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeDir {
 			return fmt.Errorf("unsafe entry type %d in %q", hdr.Typeflag, hdr.Name)
+		}
+		// Count EVERY entry — directories included — toward the cap. Directory
+		// headers carry no content bytes, so the byte cap can't bound them; an
+		// archive of millions of empty dirs would otherwise exhaust inodes.
+		entries++
+		if entries > maxFiles {
+			return fmt.Errorf("too many entries (> %d)", maxFiles)
 		}
 		clean := filepath.Clean(hdr.Name)
 		if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
@@ -62,10 +70,6 @@ func ExtractTarGz(r io.Reader, dst string, maxBytes int64, maxFiles int) error {
 				return fmt.Errorf("mkdir %q: %w", target, err)
 			}
 			continue
-		}
-		files++
-		if files > maxFiles {
-			return fmt.Errorf("too many files (> %d)", maxFiles)
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return fmt.Errorf("mkdir parent %q: %w", target, err)

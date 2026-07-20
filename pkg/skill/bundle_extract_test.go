@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"testing/fstest"
 )
@@ -62,6 +63,31 @@ func TestExtractTarGz_RejectsTraversal(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(parent, "escape.txt")); !os.IsNotExist(err) {
 		t.Fatal("traversal wrote a file outside dst")
+	}
+}
+
+// TestExtractTarGz_DirBomb: directory entries count toward the entry cap, so a
+// dir-only archive (which carries no content bytes) can't slip past the byte cap.
+func TestExtractTarGz_DirBomb(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for i := 0; i < 20; i++ {
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     "d" + strconv.Itoa(i) + "/",
+			Mode:     0o755,
+			Typeflag: tar.TypeDir,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = tw.Close()
+	_ = gz.Close()
+
+	// 20 dir entries with maxFiles=5 → rejected (byte cap is generous; only the
+	// entry cap can stop this).
+	if err := ExtractTarGz(bytes.NewReader(buf.Bytes()), t.TempDir(), 1<<20, 5); err == nil {
+		t.Fatal("expected dir-entry flood to be rejected by the entry cap")
 	}
 }
 
