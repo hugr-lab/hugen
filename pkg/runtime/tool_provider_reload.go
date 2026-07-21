@@ -114,41 +114,75 @@ func (c *Core) ListToolProviders(ctx context.Context) ([]ToolProviderInfo, error
 // live agent config: add new, remove dropped, replace changed (by spec). Only
 // console-managed (per_agent HTTP/SSE MCP) providers are touched.
 func (c *Core) ReloadToolProviders(ctx context.Context) (ToolProviderReloadResult, error) {
+	// Serialize whole passes: two concurrent reloads could both try to add the
+	// same provider (the second failing "already registered") and desync the
+	// tracking map. toolReloadMu is dedicated (not toolProvidersMu, which stays
+	// short so ListToolProviders never blocks on a reconcile's network I/O).
+	c.toolReloadMu.Lock()
+	defer c.toolReloadMu.Unlock()
+
 	desired, err := c.desiredManaged(ctx)
 	if err != nil {
 		return ToolProviderReloadResult{}, err
 	}
+	if c.Tools == nil {
+		return ToolProviderReloadResult{}, nil
+	}
+
 	c.toolProvidersMu.Lock()
 	applied := c.managedToolProviders
 	c.toolProvidersMu.Unlock()
 	if applied == nil {
 		applied = map[string]config.ToolProviderSpec{}
 	}
+	// What is actually on the root right now — a provider can be tracked but not
+	// live (its connect failed at boot / a prior reload), so "unchanged" alone
+	// isn't enough to skip; it must also be live.
+	live := map[string]bool{}
+	for _, n := range c.Tools.Providers() {
+		live[n] = true
+	}
 
 	var res ToolProviderReloadResult
 	next := map[string]config.ToolProviderSpec{}
 
-	// add / replace
 	for name, spec := range desired {
-		if prev, ok := applied[name]; ok && specsEqual(prev, spec) {
-			next[name] = spec // unchanged — no churn
+		prev, existed := applied[name]
+		unchanged := existed && specsEqual(prev, spec)
+		if unchanged && live[name] {
+			next[name] = spec // unchanged AND live — nothing to do
 			continue
 		}
-		if _, ok := applied[name]; ok {
-			_ = c.Tools.RemoveProvider(ctx, name) // replace to apply edits
+		// (re)apply: the spec changed, OR it isn't live yet (boot-failed / retry).
+		removedOld := false
+		if live[name] {
+			_ = c.Tools.RemoveProvider(ctx, name)
+			removedOld = true
 		}
 		if err := c.Tools.AddBySpec(ctx, tool.SpecFromConfig(spec)); err != nil {
 			c.Logger.Warn("tool-provider reload: add failed", "name", name, "err", err)
 			res.Failed = append(res.Failed, name)
+			// If we removed a live provider to apply a CHANGED spec and the new one
+			// failed to connect, restore the old so the tool isn't black-holed.
+			if removedOld && existed && !unchanged {
+				if rerr := c.Tools.AddBySpec(ctx, tool.SpecFromConfig(prev)); rerr == nil {
+					next[name] = prev // still live on the OLD spec; retried next reload
+					continue
+				}
+			}
+			next[name] = spec // tracked as desired-but-not-live → retried next reload
 			continue
 		}
 		next[name] = spec
 		res.Added = append(res.Added, name)
 	}
-	// remove dropped
+	// remove dropped (only those actually live need a RemoveProvider call)
 	for name := range applied {
 		if _, ok := desired[name]; ok {
 			continue
+		}
+		if !live[name] {
+			continue // tracked-but-not-live and no longer desired → just drop it
 		}
 		if err := c.Tools.RemoveProvider(ctx, name); err != nil {
 			c.Logger.Warn("tool-provider reload: remove failed", "name", name, "err", err)

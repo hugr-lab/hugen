@@ -88,7 +88,11 @@ type Core struct {
 	// managedToolProviders tracks the console-managed (per_agent HTTP/SSE MCP)
 	// providers currently applied to the root Tools, keyed by name. Seeded at
 	// boot (seedManagedToolProviders) and reconciled by ReloadToolProviders.
+	// toolProvidersMu guards the map (short, uncontended for ListToolProviders);
+	// toolReloadMu serializes whole reconcile passes (which do network I/O) so two
+	// concurrent reloads can't corrupt the tracking map.
 	toolProvidersMu      sync.Mutex
+	toolReloadMu         sync.Mutex
 	managedToolProviders map[string]config.ToolProviderSpec
 
 	// Phase 8.5 (extensions). Built by phaseExtensions; consumed by
