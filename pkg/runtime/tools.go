@@ -88,5 +88,8 @@ func phaseTools(ctx context.Context, core *Core) error {
 	if err := tm.Init(initCtx); err != nil {
 		return fmt.Errorf("tool manager init: %w", err)
 	}
+	// Record the boot-time console-managed (per_agent HTTP/SSE MCP) providers so
+	// ReloadToolProviders can reconcile deltas against it.
+	core.seedManagedToolProviders()
 	return nil
 }

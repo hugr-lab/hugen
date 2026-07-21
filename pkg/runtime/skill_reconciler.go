@@ -21,8 +21,6 @@ package runtime
 // Local mode is best-effort: no ready token → skip + retry (SD7).
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -551,80 +549,10 @@ func (r *skillReconciler) downloadBundle(ctx context.Context, name string) (io.R
 	return resp.Body, nil
 }
 
-// safeExtractTarGz extracts a gzip-compressed tar into dst, rejecting any
-// entry that would escape dst (absolute path, "..", or a symlink/hardlink),
-// enforcing a cumulative byte cap and a file-count cap. Only regular files
-// and directories are materialised — link/device/fifo entries are refused so
-// a malicious bundle cannot plant a symlink or write outside the tree.
+// safeExtractTarGz delegates to skill.ExtractTarGz — the canonical safe-extract
+// (path-traversal / link rejection + cumulative byte cap + entry cap that counts
+// directories too, so a dir-only bundle can't slip past the byte cap). Kept as a
+// thin local alias so the reconciler's call site + its maxBundle* policy stay put.
 func safeExtractTarGz(r io.Reader, dst string, maxBytes int64, maxFiles int) error {
-	gz, err := gzip.NewReader(r)
-	if err != nil {
-		return fmt.Errorf("gzip: %w", err)
-	}
-	defer func() { _ = gz.Close() }()
-	tr := tar.NewReader(gz)
-
-	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return fmt.Errorf("mkdir dst: %w", err)
-	}
-	root, err := filepath.Abs(dst)
-	if err != nil {
-		return err
-	}
-
-	var total int64
-	var files int
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("tar next: %w", err)
-		}
-		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeDir {
-			return fmt.Errorf("unsafe entry type %d in %q", hdr.Typeflag, hdr.Name)
-		}
-		clean := filepath.Clean(hdr.Name)
-		if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("unsafe path %q", hdr.Name)
-		}
-		target := filepath.Join(root, clean)
-		// Defense in depth: the joined target must stay within root.
-		if target != root && !strings.HasPrefix(target, root+string(filepath.Separator)) {
-			return fmt.Errorf("path escapes bundle root: %q", hdr.Name)
-		}
-
-		if hdr.Typeflag == tar.TypeDir {
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return fmt.Errorf("mkdir %q: %w", target, err)
-			}
-			continue
-		}
-		files++
-		if files > maxFiles {
-			return fmt.Errorf("too many files (> %d)", maxFiles)
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return fmt.Errorf("mkdir parent %q: %w", target, err)
-		}
-		remaining := maxBytes - total
-		if remaining <= 0 {
-			return fmt.Errorf("bundle exceeds size cap (%d bytes)", maxBytes)
-		}
-		f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-		if err != nil {
-			return fmt.Errorf("create %q: %w", target, err)
-		}
-		n, err := io.Copy(f, io.LimitReader(tr, remaining+1))
-		_ = f.Close()
-		if err != nil {
-			return fmt.Errorf("write %q: %w", target, err)
-		}
-		total += n
-		if total > maxBytes {
-			return fmt.Errorf("bundle exceeds size cap (%d bytes)", maxBytes)
-		}
-	}
-	return nil
+	return skill.ExtractTarGz(r, dst, maxBytes, maxFiles)
 }

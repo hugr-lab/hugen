@@ -19,8 +19,8 @@ type fakeProvider struct {
 	callFunc func(name string, args json.RawMessage) (json.RawMessage, error)
 }
 
-func (f *fakeProvider) Name() string                     { return f.name }
-func (f *fakeProvider) Lifetime() Lifetime               { return LifetimePerAgent }
+func (f *fakeProvider) Name() string       { return f.name }
+func (f *fakeProvider) Lifetime() Lifetime { return LifetimePerAgent }
 func (f *fakeProvider) List(ctx context.Context) ([]Tool, error) {
 	out := make([]Tool, len(f.tools))
 	copy(out, f.tools)
@@ -56,8 +56,30 @@ func (f *fakePerms) Resolve(ctx context.Context, object, field string) (perm.Per
 	}
 	return perm.Permission{}, nil
 }
-func (f *fakePerms) Refresh(ctx context.Context) error                            { return nil }
+func (f *fakePerms) Refresh(ctx context.Context) error                               { return nil }
 func (f *fakePerms) Subscribe(ctx context.Context) (<-chan perm.RefreshEvent, error) { return nil, nil }
+
+// TestToolManager_ChildGenFoldsParent: a per_agent provider added on the ROOT
+// moves the CHILD's exposed generations, so a live session (which runs on a
+// child Manager) invalidates its cached tool snapshot and picks up the change.
+func TestToolManager_ChildGenFoldsParent(t *testing.T) {
+	root := NewToolManager(&fakePerms{}, nil, nil)
+	child := root.NewChild()
+
+	beforeTool := child.ToolGen()
+	if err := root.AddProvider(&fakeProvider{name: "remote-mcp"}); err != nil {
+		t.Fatalf("AddProvider on root: %v", err)
+	}
+	if got := child.ToolGen(); got <= beforeTool {
+		t.Errorf("child ToolGen did not fold the root bump: before=%d after=%d", beforeTool, got)
+	}
+
+	beforePol := child.PolicyGen()
+	root.BumpPolicyGen()
+	if got := child.PolicyGen(); got <= beforePol {
+		t.Errorf("child PolicyGen did not fold the root bump: before=%d after=%d", beforePol, got)
+	}
+}
 
 func TestToolManager_AddRemoveProvider(t *testing.T) {
 	m := NewToolManager(&fakePerms{}, nil, nil)

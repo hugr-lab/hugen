@@ -87,6 +87,11 @@ type Adapter struct {
 	// those endpoints return 501. Wired from core.Skills in the cmd layer.
 	skills skillManager
 
+	// tool-provider panel (list + reconcile-on-config-change). nil ⇒ 501.
+	// Wired from core.ListToolProviders / core.ReloadToolProviders.
+	listToolProviders   ToolProviderLister
+	reloadToolProviders ToolProviderReloader
+
 	// taskStore backs GET /v1/sessions/{id}/tasks — the per-session scheduled-
 	// task list a UI renders in its live view. nil ⇒ the endpoint returns an
 	// empty list (scheduler not wired on this runtime). Wired from core.TaskStore.
@@ -281,6 +286,9 @@ func (a *Adapter) mount(mux *http.ServeMux, health bool) error {
 	mux.Handle("GET /v1/skills", a.authMiddleware(http.HandlerFunc(a.handleListSkills)))
 	mux.Handle("GET /v1/skills/{name}/export", a.authMiddleware(http.HandlerFunc(a.handleExportSkill)))
 	mux.Handle("POST /v1/skills/install", a.authMiddleware(http.HandlerFunc(a.handleInstallSkill)))
+	// Tool-provider panel: list + reconcile (owner/admin gate enforced hub-side).
+	mux.Handle("GET /v1/tool-providers", a.authMiddleware(http.HandlerFunc(a.handleListToolProviders)))
+	mux.Handle("POST /v1/tool-providers/reload", a.authMiddleware(http.HandlerFunc(a.handleReloadToolProviders)))
 	if health {
 		mux.HandleFunc(healthzPath, healthHandler)
 		mux.HandleFunc(readyzPath, healthHandler)
